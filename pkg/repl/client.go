@@ -87,6 +87,7 @@ type Client struct {
 	periodicFlushEnabled bool
 
 	cancelFunc func()
+	isClosed   atomic.Bool
 	logger     loggers.Advanced
 }
 
@@ -230,6 +231,8 @@ func (c *Client) getCurrentBinlogPosition() (mysql.Position, error) {
 	}, nil
 }
 
+// Run initializes the binlog syncer and starts the binlog reader.
+// It returns an error if the initialization fails.
 func (c *Client) Run(ctx context.Context) (err error) {
 	c.Lock()
 	defer c.Unlock()
@@ -287,17 +290,25 @@ func (c *Client) Run(ctx context.Context) (err error) {
 }
 
 // readStream continuously reads the binlog stream. It is usually called in a go routine.
-// It will read the stream until the context is closed, or an error occurs.
+// It will read the stream until the context is closed
+// *and* it continues on any errors
 func (c *Client) readStream(ctx context.Context) {
 	c.Lock()
 	currentLogName := c.flushedPos.Name
 	c.Unlock()
 	for {
-		// Read the next event from the stream.
-		// if we get an error, return. it is probably a context cancel.
+		// Read the next event from the stream
 		ev, err := c.streamer.GetEvent(ctx)
 		if err != nil {
-			return // stopping reader
+			// We only stop processing for context cancelled errors.
+			// For other errors we just continue, because we want the readStream
+			// to continually retry.
+			if errors.Is(err, context.Canceled) || c.isClosed.Load() {
+				return // stop processing
+			}
+			c.logger.Errorf("error reading binlog stream: %v, current position: %v",
+				err, c.getBufferedPos())
+			continue
 		}
 		if ev == nil {
 			continue
@@ -428,6 +439,7 @@ func (c *Client) binlogPositionIsImpossible() bool {
 }
 
 func (c *Client) Close() {
+	c.isClosed.Store(true)
 	if c.syncer != nil {
 		c.syncer.Close()
 	}
