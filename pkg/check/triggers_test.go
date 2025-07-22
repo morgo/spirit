@@ -1,7 +1,6 @@
 package check
 
 import (
-	"context"
 	"database/sql"
 
 	"testing"
@@ -35,16 +34,16 @@ func TestHasTriggers(t *testing.T) {
 	assert.NoError(t, err)
 
 	r := Resources{
-		DB:    db,
-		Table: &table.TableInfo{SchemaName: "test", TableName: "account"},
+		DB:        db,
+		Table:     &table.TableInfo{SchemaName: "test", TableName: "account"},
 		Statement: statement.MustNew("ALTER TABLE account Engine=innodb"),
 	}
 
-	err = hasTriggersCheck(context.Background(), r, logrus.New())
+	err = hasTriggersCheck(t.Context(), r, logrus.New())
 	assert.ErrorContains(t, err, "tables with triggers associated are not supported") // already has a trigger associated.
 
 	_, err = db.Exec(`drop trigger if exists ins_sum`)
 	assert.NoError(t, err)
-	err = hasTriggersCheck(context.Background(), r, logrus.New())
+	err = hasTriggersCheck(t.Context(), r, logrus.New())
 	assert.NoError(t, err) // no longer said to have trigger associated.
 }
