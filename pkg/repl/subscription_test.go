@@ -314,10 +314,10 @@ func TestKeyChangedOverwrite(t *testing.T) {
 	}
 
 	// Test overwriting the same key multiple times
-	sub.keyHasChanged([]any{1}, false) // Insert
-	sub.keyHasChanged([]any{1}, true)  // Delete
-	sub.keyHasChanged([]any{1}, false) // Insert again
-	assert.Equal(t, 1, sub.getDeltaLen())      // Should only count once in the map
+	sub.keyHasChanged([]any{1}, false)    // Insert
+	sub.keyHasChanged([]any{1}, true)     // Delete
+	sub.keyHasChanged([]any{1}, false)    // Insert again
+	assert.Equal(t, 1, sub.getDeltaLen()) // Should only count once in the map
 
 	// Test with deltaQueue
 	subQueue := &subscription{
