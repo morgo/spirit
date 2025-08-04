@@ -31,7 +31,7 @@ type subscription struct {
 	deltaQueue      []queuedChange  // used when disableDeltaMap is true
 
 	enableKeyAboveWatermark bool
-	keyAboveCopierCallback  func(interface{}) bool
+	keyAboveCopierCallback  func(any) bool
 }
 
 func (s *subscription) getDeltaLen() int {
@@ -44,7 +44,7 @@ func (s *subscription) getDeltaLen() int {
 	return len(s.deltaMap)
 }
 
-func (s *subscription) keyHasChanged(key []interface{}, deleted bool) {
+func (s *subscription) keyHasChanged(key []any, deleted bool) {
 	s.Lock()
 	defer s.Unlock()
 

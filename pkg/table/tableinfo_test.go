@@ -299,7 +299,7 @@ func TestKeyColumnsValuesExtraction(t *testing.T) {
 	err = db.QueryRow("SELECT * FROM `test`.`colvaluest1` ORDER BY id DESC LIMIT 1").Scan(&id, &name, &age)
 	assert.NoError(t, err)
 
-	row := []interface{}{id, name, age}
+	row := []any{id, name, age}
 	pkVals, err := t1.PrimaryKeyValues(row)
 	assert.Equal(t, id, pkVals[0])
 	assert.Equal(t, age, pkVals[1])
