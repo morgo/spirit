@@ -180,7 +180,7 @@ func backoff(i int) {
 // This makes it a little bit easier to use in error handling.
 // It accepts args which are escaped client side using the TiDB escape library.
 // i.e. %n is an identifier, %? is automatic type conversion on a variable.
-func Exec(ctx context.Context, db *sql.DB, stmt string, args ...interface{}) error {
+func Exec(ctx context.Context, db *sql.DB, stmt string, args ...any) error {
 	stmt, err := sqlescape.EscapeSQL(stmt, args...)
 	if err != nil {
 		return err

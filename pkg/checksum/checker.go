@@ -35,7 +35,7 @@ type Checker struct {
 	chunker          table.Chunker
 	startTime        time.Time
 	ExecTime         time.Duration
-	recentValue      interface{} // used for status
+	recentValue      any // used for status
 	dbConfig         *dbconn.DBConfig
 	logger           loggers.Advanced
 	fixDifferences   bool

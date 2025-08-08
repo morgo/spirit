@@ -411,7 +411,7 @@ func (t *chunkerOptimistic) calculateNewTargetChunkSize() uint64 {
 // KeyAboveHighWatermark returns true if the key is above the high watermark.
 // TRUE means that the row will be discarded so if there is any ambiguity,
 // it's important to return FALSE.
-func (t *chunkerOptimistic) KeyAboveHighWatermark(key interface{}) bool {
+func (t *chunkerOptimistic) KeyAboveHighWatermark(key any) bool {
 	t.Lock()
 	defer t.Unlock()
 	if t.chunkPtr.IsNil() && t.checkpointHighPtr.IsNil() {

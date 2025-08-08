@@ -574,7 +574,7 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
-	sub.keyHasChanged([]interface{}{1}, false)
+	sub.keyHasChanged([]any{1}, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with pending changes")
 
 	// Test 4: Test with buffered position ahead
@@ -591,7 +591,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		deltaQueue: nil,
 	}
 	client.subscriptions["test2"] = sub2
-	sub2.keyHasChanged([]interface{}{2}, false)
+	sub2.keyHasChanged([]any{2}, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
 	// Test 6: Clear changes but keep positions different - should still be considered flushed
@@ -616,6 +616,6 @@ func TestAllChangesFlushed(t *testing.T) {
 	client.subscriptions["test3"] = subQueue
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty queue")
 
-	subQueue.keyHasChanged([]interface{}{3}, false)
+	subQueue.keyHasChanged([]any{3}, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }

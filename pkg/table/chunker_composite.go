@@ -144,7 +144,7 @@ func (t *chunkerComposite) nextQueryToDatums(query string) ([]Datum, error) {
 		return nil, err
 	}
 	columns := make([]sql.RawBytes, len(columnNames))
-	columnPointers := make([]interface{}, len(columnNames))
+	columnPointers := make([]any, len(columnNames))
 	for i := range columnNames {
 		columnPointers[i] = &columns[i]
 	}
@@ -392,7 +392,7 @@ func (t *chunkerComposite) calculateNewTargetChunkSize() uint64 {
 	return uint64(newTargetRows)
 }
 
-func (t *chunkerComposite) KeyAboveHighWatermark(key interface{}) bool {
+func (t *chunkerComposite) KeyAboveHighWatermark(key any) bool {
 	return false
 }
 

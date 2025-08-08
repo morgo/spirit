@@ -136,7 +136,7 @@ func NewClientDefaultConfig() *ClientConfig {
 
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
-func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAboveCopierCallback func(interface{}) bool) error {
+func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAboveCopierCallback func(any) bool) error {
 	c.Lock()
 	defer c.Unlock()
 
