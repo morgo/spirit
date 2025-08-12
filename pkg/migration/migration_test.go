@@ -489,6 +489,19 @@ func TestUnparsableStatements(t *testing.T) {
 	err = migration.Run()
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "could not parse SQL statement")
+
+	//https://github.com/pingcap/tidb/pull/61498
+	migration = &Migration{
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  1,
+		Checksum: true,
+		Table:    "t1parse",
+		Alter:    `ADD COLUMN src_col timestamp NULL DEFAULT NULL, add column new_col timestamp NULL DEFAULT(src_col)`}
+	err = migration.Run()
+	assert.NoError(t, err)
 }
 
 func TestCreateIndexIsRewritten(t *testing.T) {
