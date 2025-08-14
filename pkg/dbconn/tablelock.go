@@ -27,11 +27,11 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	var lockTxn *sql.Tx
 	var lockStmt = "LOCK TABLES "
 	// Build the LOCK TABLES statement
-	for idx, table := range tables {
+	for idx, tbl := range tables {
 		if idx > 0 {
 			lockStmt += ", "
 		}
-		lockStmt += table.QuotedName + " WRITE"
+		lockStmt += tbl.QuotedName + " WRITE"
 	}
 	for i := range config.MaxRetries {
 		func() {
@@ -66,6 +66,16 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 				lockTxn: lockTxn,
 				logger:  logger,
 			}, nil
+		}
+		if config.ForceKill {
+			// If we are using hostile MDL, we can try to acquire the lock again
+			// without rolling back the transaction.
+			logger.Warnf("failed to get lock (%v); trying to kill long running transactions", err)
+			err := KillLongRunningTransactions(ctx, db, tables, config, logger)
+			if err != nil {
+				logger.Errorf("failed to kill long-running transactions: %v", err)
+				return nil, err
+			}
 		}
 	}
 	// retries exhausted, return the last error

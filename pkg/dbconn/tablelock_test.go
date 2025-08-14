@@ -2,6 +2,7 @@ package dbconn
 
 import (
 	"testing"
+	"time"
 
 	"github.com/cashapp/spirit/pkg/table"
 	"github.com/cashapp/spirit/pkg/testutils"
@@ -142,8 +143,16 @@ func TestTableLockFail(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Try to get a table lock - this should fail since we already have an exclusive lock
-	tbl := &table.TableInfo{SchemaName: "test", TableName: "testlockfail"}
-	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), logrus.New())
+	tbl := table.NewTableInfo(db, "test", "testlockfail")
+	cfg := testConfig()
+	cfg.ForceKill = false
+	cfg.MaxRetries = 3 // Set max retries to 3 for this test
+	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, logrus.New())
 	assert.Error(t, err) // failed to acquire lock
-	require.NoError(t, trx.Rollback())
+
+	cfg.ForceKill = true                                   // Enable force killing to allow retrying with query killing
+	LongRunningEventThreshold = 2 * 1000 * time.Nanosecond // Set a short threshold for testing purposes
+	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, logrus.New())
+	assert.NoError(t, err)                                         // acquired the lock after killing the long-running transaction
+	require.ErrorContains(t, trx.Rollback(), "invalid connection") // Rollback should fail because the connection was killed
 }
