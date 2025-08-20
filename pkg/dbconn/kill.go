@@ -40,7 +40,7 @@ var (
 	// heavy transaction can cause a huge impact on the database.
 	TransactionWeightThreshold int64 = 10_000_000
 
-	TableLockError = errors.New("explicit table lock found! spirit cannot proceed")
+	ErrTableLockFound = errors.New("explicit table lock found! spirit cannot proceed")
 )
 
 const (
@@ -90,7 +90,7 @@ WHERE
 	etc.TIMER_WAIT > ? `
 
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s)"
-	rdsKillStatement = "CALL mysql.rds_kill(%d)"
+	rdsKillStatement = "CALL mysql.rds_kill(%d)" // not needed in MySQL 8.0 with the CONNECTION_ADMIN privilege
 	killStatement    = "KILL %d"
 )
 
@@ -123,7 +123,7 @@ func KillLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*tabl
 		for _, lock := range locks {
 			logger.Errorf("Found explicit table lock: %#v", lock)
 		}
-		return TableLockError
+		return ErrTableLockFound
 	}
 	pids, err := GetLongRunningTransactions(ctx, db, tables, config, logger)
 	if err != nil {
@@ -174,13 +174,6 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 		query += fmt.Sprintf(queryTableClause, inList)
 		params = append(params, inParams...)
 	}
-
-	var id int
-	err := db.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id)
-	if err != nil {
-		logger.Errorf("failed to get connection ID: %v", err)
-	}
-	logger.Infof("Got connection ID: %v", id)
 
 	logger.Infof("query: %s", query)
 	rows, err := db.QueryContext(ctx, query, params...)
@@ -306,17 +299,6 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, c
 }
 
 func KillTransaction(ctx context.Context, db *sql.DB, config *DBConfig, logger loggers.Advanced, pid int) error {
-	if _, err := db.ExecContext(ctx, fmt.Sprintf(rdsKillStatement, pid)); err != nil {
-		var myErr *mysql.MySQLError
-		if errors.As(err, &myErr) && myErr.Number == 1305 { // ER_SP_DOES_NOT_EXIST
-			// We first try to use the RDS procedure to kill the transaction, but if it doesn't exist,
-			// we fall back to the standard KILL statement.
-			logger.Warnf("Killing transaction %d using RDS procedure failed, will fall back to standard KILL statement: %v", pid, err)
-		} else {
-			return fmt.Errorf("killing transaction %d using RDS procedure failed: %w", pid, err)
-		}
-	}
-
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(killStatement, pid)); err != nil {
 		return fmt.Errorf("failed to kill transaction %d: %w", pid, err)
 	}
@@ -344,4 +326,15 @@ func tablesToInList(tables []*table.TableInfo, logger loggers.Advanced) (inList 
 		}
 	}
 	return inList, params
+}
+
+func mySQLErrorNumber(err error) int {
+	if err == nil {
+		return 0
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return int(mysqlErr.Number)
+	}
+	return 0
 }

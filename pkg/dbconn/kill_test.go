@@ -57,12 +57,8 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	txIDs := make([]int, n)
 	txs := make([]*sql.Tx, n)
 	for i := range n {
-		db, err := db.Conn(t.Context())
-		require.NoError(t, err)
-		defer db.Close()
 		tx, err := db.BeginTx(t.Context(), nil)
 		require.NoError(t, err)
-		defer tx.Rollback()
 		err = tx.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&txIDs[i])
 		require.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "use "+schema)
@@ -131,5 +127,4 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		err = tx.Rollback()
 		require.Error(t, err, "expected rollback to fail because transaction was killed")
 	}
-
 }

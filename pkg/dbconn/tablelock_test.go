@@ -155,5 +155,5 @@ func TestTableLockFail(t *testing.T) {
 	cfg.ForceKill = true
 	longRunningEventThreshold = Picoseconds(2 * time.Second) // Set a short threshold for testing purposes
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, logrus.New())
-	assert.ErrorIs(t, err, TableLockError) // should return TableLockError because we cannot kill a connection with an explicit table lock
+	assert.ErrorIs(t, err, ErrTableLockFound) // should return ErrTableLockFound because we cannot kill a connection with an explicit table lock
 }
