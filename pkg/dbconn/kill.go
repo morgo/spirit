@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/cashapp/spirit/pkg/table"
 	"github.com/siddontang/loggers"
@@ -81,15 +82,12 @@ FROM
     JOIN performance_schema.threads t
         ON ml.owner_thread_id = t.thread_id
     LEFT JOIN performance_schema.events_transactions_current etc
-        ON etc.event_id = ml.owner_event_id
+        ON etc.thread_id = ml.owner_thread_id
     LEFT JOIN information_schema.innodb_trx trx
 		ON t.processlist_id = trx.trx_mysql_thread_id
-	/* left join performance_schema.events_statements_history esh on eth.nesting_event_id = esh.event_id and eth.nesting_event_type='statement' */
 WHERE
-    /* trx.end_event_id IS NULL AND  */
-    ( etc.STATE IS NULL OR  etc.STATE = 'ACTIVE' ) AND
     processlist_id <> CONNECTION_ID() AND 
-	( etc.TIMER_WAIT > ? or 1 ) `
+	etc.TIMER_WAIT > ? `
 
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s)"
 	rdsKillStatement = "CALL mysql.rds_kill(%d)"
@@ -308,16 +306,21 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, c
 }
 
 func KillTransaction(ctx context.Context, db *sql.DB, config *DBConfig, logger loggers.Advanced, pid int) error {
-	var stmt string
-	// If MYSQL_DSN is empty, we assume we are running on RDS and use the RDS-specific kill statement.
-	if os.Getenv("MYSQL_DSN") == "" {
-		stmt = rdsKillStatement
-	} else {
-		stmt = killStatement
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(rdsKillStatement, pid)); err != nil {
+		var myErr *mysql.MySQLError
+		if errors.As(err, &myErr) && myErr.Number == 1305 { // ER_SP_DOES_NOT_EXIST
+			// We first try to use the RDS procedure to kill the transaction, but if it doesn't exist,
+			// we fall back to the standard KILL statement.
+			logger.Warnf("Killing transaction %d using RDS procedure failed, will fall back to standard KILL statement: %v", pid, err)
+		} else {
+			return fmt.Errorf("killing transaction %d using RDS procedure failed: %w", pid, err)
+		}
 	}
-	if _, err := db.ExecContext(ctx, fmt.Sprintf(stmt, pid)); err != nil {
-		logger.Errorf("failed to kill transaction %d: %v", pid, err)
+
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(killStatement, pid)); err != nil {
+		return fmt.Errorf("failed to kill transaction %d: %w", pid, err)
 	}
+
 	return nil
 }
 

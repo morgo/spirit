@@ -31,6 +31,9 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	defer db.Close()
 
 	longRunningEventThreshold = 1 // Picoseconds(time.Second) // Set a short threshold for testing purposes
+	defer func() {
+		longRunningEventThreshold = 0 // Reset to default
+	}()
 
 	n := 2
 
