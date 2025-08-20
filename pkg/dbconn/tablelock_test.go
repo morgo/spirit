@@ -9,7 +9,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func testConfig() *DBConfig {
@@ -138,6 +137,7 @@ func TestTableLockFail(t *testing.T) {
 	// We acquire an exclusive lock first, so the tablelock should fail.
 	trx, err := db.Begin()
 	assert.NoError(t, err)
+	defer trx.Rollback()
 
 	_, err = trx.Exec("LOCK TABLES test.testlockfail WRITE")
 	assert.NoError(t, err)
@@ -150,9 +150,10 @@ func TestTableLockFail(t *testing.T) {
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, logrus.New())
 	assert.Error(t, err) // failed to acquire lock
 
-	cfg.ForceKill = true                                   // Enable force killing to allow retrying with query killing
-	LongRunningEventThreshold = 2 * 1000 * time.Nanosecond // Set a short threshold for testing purposes
+	// Enable force killing to allow retrying with query killing. This will FAIL because we do not kill
+	// connections with explicit table locks.
+	cfg.ForceKill = true
+	longRunningEventThreshold = Picoseconds(2 * time.Second) // Set a short threshold for testing purposes
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, logrus.New())
-	assert.NoError(t, err)                                         // acquired the lock after killing the long-running transaction
-	require.ErrorContains(t, trx.Rollback(), "invalid connection") // Rollback should fail because the connection was killed
+	assert.ErrorIs(t, err, TableLockError) // should return TableLockError because we cannot kill a connection with an explicit table lock
 }

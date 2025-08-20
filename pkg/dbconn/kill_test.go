@@ -3,6 +3,7 @@ package dbconn
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,16 +18,19 @@ var (
 )
 
 func TestKillLongRunningTransactions(t *testing.T) {
-	// This test is a placeholder. The actual implementation would require a
-	// database connection and a setup to create long-running transactions.
-	// Here we just check that the function can be called without error.
-	db, err := New(testutils.DSN(), NewDBConfig())
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+	logger.ReportCaller = true
+
+	dbConfig := NewDBConfig()
+	dbConfig.InterpolateParams = true
+	db, err := New(testutils.DSN(), dbConfig)
 	if err != nil {
 		t.Fatalf("Failed to create DB connection: %v", err)
 	}
 	defer db.Close()
 
-	LongRunningEventThreshold = 1 // Set a short threshold for testing purposes
+	longRunningEventThreshold = 1 // Picoseconds(time.Second) // Set a short threshold for testing purposes
 
 	n := 2
 
@@ -35,8 +39,10 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, schema)
 
-	tables := make([]*table.TableInfo, n)
-	for i := range n {
+	// Create multiple tables for testing, each with a unique name
+	// including an extra one for a non-transactional test
+	tables := make([]*table.TableInfo, n+1)
+	for i := range n + 1 {
 		tbl := fmt.Sprintf("%s%d", TestKillLongRunningTransactionsTableBaseName, i)
 		tables[i] = table.NewTableInfo(db, schema, tbl)
 		err = Exec(t.Context(), db, "DROP TABLE IF EXISTS "+tables[i].QuotedName)
@@ -48,8 +54,12 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	txIDs := make([]int, n)
 	txs := make([]*sql.Tx, n)
 	for i := range n {
+		db, err := db.Conn(t.Context())
+		require.NoError(t, err)
+		defer db.Close()
 		tx, err := db.BeginTx(t.Context(), nil)
 		require.NoError(t, err)
+		defer tx.Rollback()
 		err = tx.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&txIDs[i])
 		require.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "use "+schema)
@@ -59,17 +69,59 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		txs[i] = tx
 	}
 
+	nonTrx, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+
+	// Explicitly lock the table in a non-transactional way
+	_, err = nonTrx.ExecContext(t.Context(), fmt.Sprintf("LOCK TABLES %s WRITE", tables[n].QuotedName))
+	require.NoError(t, err)
+	var nonTrxID int
+	err = nonTrx.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&nonTrxID)
+	require.NoError(t, err)
+
+	// Insert a lot of rows in the 1st transaction to give it a higher "weight"
+	for i := 0; i < 16; i++ {
+		_, err = txs[0].ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) SELECT %d FROM %s", tables[0].QuotedName, i, tables[0].QuotedName))
+		require.NoError(t, err)
+	}
+
 	// Sleep to ensure the transactions are long-running
 	time.Sleep(time.Second)
 
-	ids, err := GetLongRunningTransactions(t.Context(), db, tables, nil, logrus.New())
+	tableLocks, err := GetTableLocks(t.Context(), db, tables, nil, logger)
 	require.NoError(t, err)
+	require.Len(t, tableLocks, 1)
+	require.True(t, tableLocks[0].ObjectName.Valid)
+	require.Equal(t, strings.ToLower(tables[n].TableName), strings.ToLower(tableLocks[0].ObjectName.String))
+	require.Equal(t, nonTrxID, tableLocks[0].PID)
+
+	_, err = nonTrx.ExecContext(t.Context(), "UNLOCK TABLES")
+	require.NoError(t, err)
+	err = nonTrx.Rollback()
+	require.NoError(t, err)
+
+	TransactionWeightThreshold = 1000 // Set a low threshold for testing purposes
+	ids, err := GetLongRunningTransactions(t.Context(), db, tables, nil, logger)
+	require.NoError(t, err)
+
+	// We expect only the second transaction to be considered
+	// long-running for our purposes, because the first transaction has a high weight due to
+	// the large number of rows inserted.
+	require.Len(t, ids, 1)
+	for _, id := range ids {
+		require.Contains(t, txIDs, id)
+	}
+
+	TransactionWeightThreshold = 1e7 // Reset the threshold to a high value
+	ids, err = GetLongRunningTransactions(t.Context(), db, tables, nil, logger)
+	require.NoError(t, err)
+	// Now we expect both transactions to be considered long-running, because the weight threshold is higher.
 	require.Len(t, ids, 2)
 	for _, id := range ids {
 		require.Contains(t, txIDs, id)
 	}
 
-	err = KillLongRunningTransactions(t.Context(), db, tables, nil, logrus.New())
+	err = KillLongRunningTransactions(t.Context(), db, tables, nil, logger)
 	require.NoError(t, err)
 
 	for _, tx := range txs {
