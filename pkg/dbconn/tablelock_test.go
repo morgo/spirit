@@ -137,7 +137,10 @@ func TestTableLockFail(t *testing.T) {
 	// We acquire an exclusive lock first, so the tablelock should fail.
 	trx, err := db.Begin()
 	assert.NoError(t, err)
-	defer trx.Rollback()
+	defer func() {
+		err := trx.Rollback()
+		assert.NoError(t, err, "Failed to rollback transaction")
+	}()
 
 	_, err = trx.Exec("LOCK TABLES test.testlockfail WRITE")
 	assert.NoError(t, err)

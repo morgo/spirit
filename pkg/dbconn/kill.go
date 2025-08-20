@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
-
 	"github.com/cashapp/spirit/pkg/table"
 	"github.com/siddontang/loggers"
 )
@@ -326,15 +324,4 @@ func tablesToInList(tables []*table.TableInfo, logger loggers.Advanced) (inList 
 		}
 	}
 	return inList, params
-}
-
-func mySQLErrorNumber(err error) int {
-	if err == nil {
-		return 0
-	}
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
-		return int(mysqlErr.Number)
-	}
-	return 0
 }

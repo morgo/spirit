@@ -83,10 +83,10 @@ func privilegesCheck(ctx context.Context, r Resources, logger loggers.Advanced) 
 		if _, err := dbconn.GetLongRunningTransactions(ctx, r.DB, []*table.TableInfo{r.Table}, nil, logger); err != nil {
 			errs = append(errs, err)
 		}
-		if !(foundConnectionAdmin || foundSuper || foundAll) {
+		if !foundConnectionAdmin && !foundSuper && !foundAll {
 			errs = append(errs, errors.New("missing CONNECTION_ADMIN privilege"))
 		}
-		if !(foundProcess || foundAll) {
+		if !foundProcess && !foundAll {
 			errs = append(errs, errors.New("missing PROCESS privilege"))
 		}
 		if len(errs) > 0 {
