@@ -4,7 +4,6 @@ run:
 linters:
   default: all
   disable:
-    - wsl_v5
     - cyclop
     - depguard
     - dupl
