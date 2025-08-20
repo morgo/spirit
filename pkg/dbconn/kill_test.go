@@ -79,7 +79,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Insert a lot of rows in the 1st transaction to give it a higher "weight"
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		_, err = txs[0].ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) SELECT %d FROM %s", tables[0].QuotedName, i, tables[0].QuotedName))
 		require.NoError(t, err)
 	}
