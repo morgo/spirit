@@ -71,7 +71,7 @@ Even when force-inplace is `FALSE`, Spirit automatically detects "safe" operatio
 - Type: Boolean
 - Default value: FALSE
 
-When set to TRUE, Spirit will find other connections that hold open locks that block Spirit from acquiring a table lock during checksum and cutover. If any other connection holds an explicit table lock (LOCK TABLES) on a table Spirit needs to lock, Spirit will abort, because tools that acquire this kind of lock will probably not handle a killed connection very well. If another connection holds a transactional lock on a table Spirit needs to lock, Spirit will kill the connection only if the lock has been held for longer than our value of `lock-wait-timeout` _and_ the transaction's "weight" (the number of rows modified) is less than 1 million.
+When set to TRUE, Spirit will find other connections that hold open locks that block Spirit from acquiring a table lock during checksum and cutover. If any other connection holds an explicit table lock (LOCK TABLES) on a table Spirit needs to lock, Spirit will abort, because tools that acquire this kind of lock will probably not handle a killed connection very well. If another connection holds a transactional lock on a table Spirit needs to lock, Spirit will kill the connection only if the lock has been held for longer than 90% of our value of `lock-wait-timeout` (for example, 27 seconds if `lock-wait-timeout` is set to 30 seconds) _and_ the transaction's "weight" (the number of rows modified) is less than 1 million.
 
 ### host
 
@@ -189,4 +189,3 @@ Note that Spirit does not support dynamically adjusting the number of threads wh
 - Default value: `msandbox`
 
 The username to use when connecting to MySQL.
-
