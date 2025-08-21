@@ -25,13 +25,16 @@ func Picoseconds(d time.Duration) int {
 	return int(d.Nanoseconds() * 1e3) // 1 nanosecond = 1000 picoseconds
 }
 
-const defaultLongRunningEventThreshold = 30 * time.Second // Default threshold for long-running events
-
 var (
+	defaultLongRunningEventThreshold = 30 * time.Second
+
 	// longRunningEventThreshold is the threshold for a long-running event in picoseconds.
-	// This is a variable so that it can be set in tests. When set to 0, it defaults to the
-	// LockWaitTimeout from the DBConfig, or 30 seconds if not set.
+	// This is a variable so that it can be set in tests. When set to 0, it defaults to a percentage of
+	// LockWaitTimeout from the DBConfig, or defaultLongRunningEventThreshold if not set.
 	longRunningEventThreshold = 0
+
+	// lockWaitTimeoutForceKillMultiplier is a percentage of LockWaitTimeout to use as a threshold for killing long-running transactions
+	lockWaitTimeoutForceKillMultiplier = 0.9 // 90% of LockWaitTimeout
 
 	// TransactionWeightThreshold is the maximum information_schema.innodb_trx.trx_weight
 	// over which we consider a transaction too big to be safely killed. Rolling back a
@@ -159,7 +162,7 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 	if threshold <= 0 {
 		if config != nil && config.LockWaitTimeout > 0 {
 			// If a custom lock wait timeout is set, use it as the threshold.
-			threshold = Picoseconds(time.Duration(config.LockWaitTimeout) * time.Second)
+			threshold = Picoseconds(time.Duration(float64(config.LockWaitTimeout)/lockWaitTimeoutForceKillMultiplier) * time.Second)
 		} else {
 			// If the threshold is not set, use the default value.
 			threshold = Picoseconds(defaultLongRunningEventThreshold) // Default to 30 seconds
