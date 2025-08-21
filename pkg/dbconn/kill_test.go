@@ -87,7 +87,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	// Sleep to ensure the transactions are long-running
 	time.Sleep(time.Second)
 
-	tableLocks, err := GetTableLocks(t.Context(), db, tables, nil, logger)
+	tableLocks, err := GetTableLocks(t.Context(), db, tables, logger)
 	require.NoError(t, err)
 	require.Len(t, tableLocks, 1)
 	require.True(t, tableLocks[0].ObjectName.Valid)

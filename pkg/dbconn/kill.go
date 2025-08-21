@@ -110,7 +110,7 @@ type LockDetail struct {
 
 func KillLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced) error {
 	// First, check if there are explicit table locks that would prevent us from acquiring the metadata lock.
-	locks, err := GetTableLocks(ctx, db, tables, config, logger)
+	locks, err := GetTableLocks(ctx, db, tables, logger)
 	if err != nil {
 		return fmt.Errorf("failed to get table locks: %w", err)
 	}
@@ -131,7 +131,7 @@ func KillLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*tabl
 	var errs []error
 	for _, pid := range pids {
 		logger.Warnf("Killing long-running transaction %d", pid)
-		err = KillTransaction(ctx, db, config, logger, pid)
+		err = KillTransaction(ctx, db, pid)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to kill transaction %d: %w", pid, err))
 		}
@@ -240,7 +240,7 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 	return uniquePids, nil
 }
 
-func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced) ([]*LockDetail, error) {
+func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger loggers.Advanced) ([]*LockDetail, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		logger.Errorf("failed to begin transaction: %v", err)
@@ -296,7 +296,7 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, c
 	return locks, nil
 }
 
-func KillTransaction(ctx context.Context, db *sql.DB, config *DBConfig, logger loggers.Advanced, pid int) error {
+func KillTransaction(ctx context.Context, db *sql.DB, pid int) error {
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(killStatement, pid)); err != nil {
 		return fmt.Errorf("failed to kill transaction %d: %w", pid, err)
 	}
