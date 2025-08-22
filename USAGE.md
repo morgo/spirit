@@ -71,7 +71,18 @@ Even when force-inplace is `FALSE`, Spirit automatically detects "safe" operatio
 - Type: Boolean
 - Default value: FALSE
 
-When set to TRUE, Spirit will find other connections that hold open locks that block Spirit from acquiring a table lock during checksum and cutover. If any other connection holds an explicit table lock (LOCK TABLES) on a table Spirit needs to lock, Spirit will abort, because tools that acquire this kind of lock will probably not handle a killed connection very well. If another connection holds a transactional lock on a table Spirit needs to lock, Spirit will kill the connection only if the lock has been held for longer than 90% of our value of `lock-wait-timeout` (for example, 27 seconds if `lock-wait-timeout` is set to 30 seconds) _and_ the transaction's "weight" (the number of rows modified) is less than 1 million.
+When set to TRUE, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
+
+- It will read `performance_schema` to find only connections that are blocking a meta data lock being acquired on the migrating table.
+- It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
+- It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
+- It only starts killing transactions as it approaches the `lock-wait-timeout`. For example, if the `lock-wait-timeout` is 30 seconds, it will start killing transactions after 27 seconds.
+
+Enabling the `force-kill` option requires spirit to be granted additional privileges:
+
+GRANT XX ON performance_schema.* TO spirituser;
+GRANT CONNECTION_ADMIN, PROCESS ON *.* TO spirituser;
+
 
 ### host
 
