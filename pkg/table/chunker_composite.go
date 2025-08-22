@@ -41,7 +41,8 @@ type chunkerComposite struct {
 	// Progress tracking is up to the chunker implementation
 	// For the composite chunker, we use the actual copied
 	// rows as returned from Feedback()
-	rowsCopied uint64
+	rowsCopied   uint64
+	chunksCopied uint64
 
 	logger loggers.Advanced
 }
@@ -233,6 +234,7 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 
 	// Update progress tracking - add the actual rows processed
 	atomic.AddUint64(&t.rowsCopied, actualRows)
+	atomic.AddUint64(&t.chunksCopied, 1)
 
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
@@ -418,8 +420,8 @@ func (t *chunkerComposite) calculateNewTargetChunkSize() uint64 {
 // wants to do that. For the composite chunker we use
 // the actualRows copied (from feedback) over the estimated
 // rows (from table statistics)
-func (t *chunkerComposite) Progress() (uint64, uint64) {
-	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.Ti.EstimatedRows)
+func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
+	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), atomic.LoadUint64(&t.Ti.EstimatedRows)
 }
 
 func (t *chunkerComposite) KeyAboveHighWatermark(key any) bool {

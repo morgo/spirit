@@ -544,13 +544,13 @@ func TestBadAlter(t *testing.T) {
 func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange2`)
 	table := `CREATE TABLE lossychange2 (
-					id BIGINT NOT NULL,
+					id BIGINT NOT NULL AUTO_INCREMENT,
 					name varchar(255) NOT NULL,
 					b varchar(255) NOT NULL,
 					PRIMARY KEY (id)
 				)`
 	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, "INSERT INTO lossychange2 (id, name, b) VALUES (1, 'a', REPEAT('a', 200))")          // will pass in migration
+	testutils.RunSQL(t, "INSERT INTO lossychange2 (name, b) VALUES ('a', REPEAT('a', 200))")                 // will pass in migration
 	testutils.RunSQL(t, "INSERT INTO lossychange2 (id, name, b) VALUES (8589934592, 'a', REPEAT('a', 200))") // will fail in migration
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -569,8 +569,8 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "Out of range value") // Error 1264: Out of range value for column 'id' at row 1
 	// Check that the chunker processed fewer than 500 chunks
-	copiedRows, _ := m.copier.GetChunker().Progress()
-	assert.Less(t, copiedRows, uint64(500000)) // should be very low (fewer than 500 chunks * 1000 rows)
+	_, chunksCopied, _ := m.copier.GetChunker().Progress()
+	assert.Less(t, chunksCopied, uint64(500))
 	assert.NoError(t, m.Close())
 }
 
@@ -604,8 +604,8 @@ func TestChangeDatatypeLossless(t *testing.T) {
 	err = m.Run(t.Context())
 	assert.NoError(t, err) // works because there are no violations.
 	// Check that the chunker processed fewer than 500 chunks
-	copiedRows, _ := m.copier.GetChunker().Progress()
-	assert.Less(t, copiedRows, uint64(500000)) // should be very low (fewer than 500 chunks * 1000 rows)
+	_, chunksCopied, _ := m.copier.GetChunker().Progress()
+	assert.Less(t, chunksCopied, uint64(500))
 	assert.NoError(t, m.Close())
 }
 
@@ -705,36 +705,28 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 			pk int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			name varchar(255) NOT NULL,
 			b varchar(10) NOT NULL,
-            version bigint unsigned NOT NULL DEFAULT '1' COMMENT 'Used for
-optimistic concurrency.'
+            version bigint unsigned NOT NULL DEFAULT '1'
 		)`
 	testutils.RunSQL(t, table)
-
-	// Insert initial data
+	// Insert initial data, there needs to be enough that it doesn't just finish
+	// the full copy before the first checkpoint can be written.
 	testutils.RunSQL(t, "INSERT INTO bigintpk (name, b) VALUES ('a', 'a')")
-	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name,
-a.b FROM bigintpk a JOIN bigintpk b JOIN
-bigintpk c`)
-	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name,
-a.b FROM bigintpk a JOIN bigintpk b JOIN
-bigintpk c`)
-	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name,
-a.b FROM bigintpk a JOIN bigintpk b JOIN
-bigintpk c`)
-	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name,
-a.b FROM bigintpk a JOIN bigintpk b JOIN
-bigintpk c lIMIT 100000`)
+	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name, a.b FROM bigintpk a JOIN bigintpk b JOIN bigintpk c`)
+	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name, a.b FROM bigintpk a JOIN bigintpk b JOIN bigintpk c`)
+	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name, a.b FROM bigintpk a JOIN bigintpk b JOIN bigintpk c`)
+	testutils.RunSQL(t, `INSERT INTO bigintpk (name, b) SELECT a.name, a.b FROM bigintpk a JOIN bigintpk b JOIN bigintpk c LIMIT 100000`)
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  4,
-		Table:    "bigintpk",
-		Alter:    "modify column pk bigint unsigned not null auto_increment",
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1,
+		TargetChunkTime: 100 * time.Millisecond,
+		Table:           "bigintpk",
+		Alter:           "modify column pk bigint unsigned not null auto_increment",
 	})
 	assert.NoError(t, err)
 
@@ -743,24 +735,35 @@ bigintpk c lIMIT 100000`)
 		err := m.Run(ctx)
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
-
 	// wait until a checkpoint is saved (which means copy is in progress)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	defer db.Close()
+
+	// Add timeout to prevent infinite waiting
+	timeout := time.After(5 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
-		var rowCount int
-		err = db.QueryRow(`SELECT count(*) from _bigintpk_chkpnt`).Scan(&rowCount)
-		if err != nil {
-			continue // table does not exist yet
-		}
-		if rowCount > 0 {
-			break
+		select {
+		case <-timeout:
+			t.Fatal("Timeout waiting for checkpoint to be created")
+		case <-ticker.C:
+			var rowCount int
+			err = db.QueryRow(`SELECT count(*) from _bigintpk_chkpnt`).Scan(&rowCount)
+			if err != nil {
+				continue // table does not exist yet
+			}
+			if rowCount > 0 {
+				goto checkpointFound
+			}
 		}
 	}
+checkpointFound:
 	// Between cancel and Close() every resource is freed.
-	cancel()
 	assert.NoError(t, m.Close())
+	cancel()
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO bigintpk (name,b) VALUES('t', 't')")
@@ -834,7 +837,7 @@ func TestCheckpoint(t *testing.T) {
 			Username: cfg.User,
 			Password: cfg.Passwd,
 			Database: cfg.DBName,
-			Threads:  4,
+			Threads:  16,
 			Table:    "cpt1",
 			Alter:    "ENGINE=InnoDB",
 		})

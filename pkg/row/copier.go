@@ -193,7 +193,7 @@ func (c *Copier) SetThrottler(throttler throttler.Throttler) {
 
 func (c *Copier) getCopyStats() (uint64, uint64, float64) {
 	// Get progress from the chunker instead of calculating it ourselves
-	rowsProcessed, totalRows := c.chunker.Progress()
+	rowsProcessed, _, totalRows := c.chunker.Progress()
 
 	// Calculate percentage
 	pct := float64(0)
@@ -240,7 +240,7 @@ func (c *Copier) GetETA() string {
 func (c *Copier) estimateRowsPerSecondLoop(ctx context.Context) {
 	// We take >10 second averages because with parallel copy it bounces around a lot.
 	// Get progress from chunker since we no longer track rows locally
-	prevRowsCount, _ := c.chunker.Progress()
+	prevRowsCount, _, _ := c.chunker.Progress()
 	ticker := time.NewTicker(copyEstimateInterval)
 	defer ticker.Stop()
 	for {
@@ -251,7 +251,7 @@ func (c *Copier) estimateRowsPerSecondLoop(ctx context.Context) {
 			if !c.isHealthy(ctx) {
 				return
 			}
-			newRowsCount, _ := c.chunker.Progress()
+			newRowsCount, _, _ := c.chunker.Progress()
 			rowsPerInterval := float64(newRowsCount - prevRowsCount)
 			intervalsDivisor := float64(copyEstimateInterval / time.Second) // should be something like 10 for 10 seconds
 			rowsPerSecond := uint64(rowsPerInterval / intervalsDivisor)

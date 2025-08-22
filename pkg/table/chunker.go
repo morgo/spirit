@@ -37,7 +37,7 @@ type Chunker interface {
 	Feedback(chunk *Chunk, duration time.Duration, actualRows uint64)
 	GetLowWatermark() (string, error)
 	KeyAboveHighWatermark(key any) bool
-	Progress() (uint64, uint64) // Returns (rowsRead, totalRowsExpected)
+	Progress() (uint64, uint64, uint64) // Returns (rowsRead, chunksCopied, totalRowsExpected)
 }
 
 func newChunker(t *TableInfo, chunkerTarget time.Duration, logger loggers.Advanced) (Chunker, error) {

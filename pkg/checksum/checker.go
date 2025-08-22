@@ -157,7 +157,7 @@ func (c *Checker) DifferencesFound() uint64 {
 
 func (c *Checker) getStats() (uint64, uint64, float64) {
 	// Get progress from the chunker instead of calculating it ourselves
-	rowsProcessed, totalRows := c.chunker.Progress()
+	rowsProcessed, _, totalRows := c.chunker.Progress()
 
 	// Calculate percentage
 	pct := float64(0)

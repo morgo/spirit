@@ -42,7 +42,8 @@ type chunkerOptimistic struct {
 	// Progress tracking: the implementation here is up to the chunker,
 	// and for the optimistic chunker it is based on the progress
 	// through the auto_increment counter.
-	rowsCopied uint64 // The sum of chunkSize
+	rowsCopied   uint64 // The sum of chunkSize
+	chunksCopied uint64
 
 	logger loggers.Advanced
 }
@@ -236,6 +237,7 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 	// auto_inc max so it takes the table estimate and compares it to the actual
 	// rows copied.
 	atomic.AddUint64(&t.rowsCopied, chunk.ChunkSize)
+	atomic.AddUint64(&t.chunksCopied, 1)
 
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
@@ -441,8 +443,8 @@ func (t *chunkerOptimistic) calculateNewTargetChunkSize() uint64 {
 // Progress returns the current progress of the chunker as (rowsCopied, totalRows)
 // It is up to the chunker implementation to select the formula. The optimistic
 // chunker is based on the progress of the auto_increment column.
-func (t *chunkerOptimistic) Progress() (uint64, uint64) {
-	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.Ti.AutoIncMax)
+func (t *chunkerOptimistic) Progress() (uint64, uint64, uint64) {
+	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), atomic.LoadUint64(&t.Ti.AutoIncMax)
 }
 
 // KeyAboveHighWatermark returns true if the key is above the high watermark.

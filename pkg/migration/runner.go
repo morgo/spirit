@@ -276,7 +276,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	if r.checker != nil {
 		checksumTime = r.checker.ExecTime
 	}
-	copiedRows, _ := r.copier.GetChunker().Progress()
+	copiedRows, _, _ := r.copier.GetChunker().Progress()
 	r.logger.Infof("apply complete: instant-ddl=%v inplace-ddl=%v total-rows-copied=%v copy-rows-time=%s checksum-time=%s total-time=%s conns-in-use=%d",
 		r.usedInstantDDL,
 		r.usedInplaceDDL,
@@ -930,7 +930,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 			}
 		}
 	}
-	copyRows, _ := r.copier.GetChunker().Progress()
+	copyRows, _, _ := r.copier.GetChunker().Progress()
 
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
 	// when using the composite chunker are based on actual user-data.
