@@ -57,7 +57,6 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 			if config.ForceKill {
 				// If ForceKill is true, we will wait for 90% of the configured LockWaitTimeout
 				threshold := time.Duration(float64(config.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
-				threshold = time.Second
 				timer := time.AfterFunc(threshold, func() {
 					logger.Warnf("waited for %v; trying to kill locking transactions", threshold)
 					err := KillLockingTransactions(ctx, db, tables, config, logger, []int{pid})
