@@ -27,7 +27,8 @@ var (
 type TableInfo struct {
 	sync.Mutex
 	db                          *sql.DB
-	EstimatedRows               uint64
+	EstimatedRows               uint64 // used by the composite chunker for Max
+	AutoIncMax                  uint64 // used by the optimistic chunker for Max
 	SchemaName                  string
 	TableName                   string
 	QuotedName                  string
@@ -91,6 +92,11 @@ func (t *TableInfo) SetInfo(ctx context.Context) error {
 	if err := t.setIndexes(ctx); err != nil {
 		return err
 	}
+	if t.KeyIsAutoInc {
+		if err := t.setAutoIncMax(ctx); err != nil {
+			return err
+		}
+	}
 	return t.setMinMax(ctx)
 }
 
@@ -109,6 +115,10 @@ func (t *TableInfo) setRowEstimate(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (t *TableInfo) setAutoIncMax(ctx context.Context) error {
+	return t.db.QueryRowContext(ctx, "SELECT IFNULL(MAX(`"+t.KeyColumns[0]+"`), 0) FROM "+t.QuotedName).Scan(&t.AutoIncMax)
 }
 
 func (t *TableInfo) setIndexes(ctx context.Context) error {
@@ -318,6 +328,11 @@ func (t *TableInfo) updateTableStatistics(ctx context.Context) error {
 	err = t.setRowEstimate(ctx)
 	if err != nil {
 		return err
+	}
+	if t.KeyIsAutoInc {
+		if err = t.setAutoIncMax(ctx); err != nil {
+			return err
+		}
 	}
 	t.statisticsLastUpdated = time.Now()
 	return nil

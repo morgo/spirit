@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/siddontang/loggers"
@@ -16,6 +17,7 @@ import (
 type chunkerComposite struct {
 	sync.Mutex
 	Ti             *TableInfo
+	NewTi          *TableInfo // Destination table info
 	chunkSize      uint64
 	chunkPtrs      []Datum  // a list of Ptrs for each of the keys.
 	chunkKeys      []string // all the keys to chunk on (usually all the col names of the PK)
@@ -35,6 +37,11 @@ type chunkerComposite struct {
 	// Used to update the watermark by applying stored chunks,
 	// by comparing their lowerBound with current watermark upperBound.
 	lowerBoundWatermarkMap map[string]*Chunk
+
+	// Progress tracking is up to the chunker implementation
+	// For the composite chunker, we use the actual copied
+	// rows as returned from Feedback()
+	rowsCopied uint64
 
 	logger loggers.Advanced
 }
@@ -101,6 +108,8 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 				ChunkSize:            t.chunkSize,
 				Key:                  t.chunkKeys,
 				AdditionalConditions: t.where,
+				Table:                t.Ti,
+				NewTable:             t.NewTi,
 			}, nil
 		}
 		// Else, it's just the last chunk.
@@ -109,6 +118,8 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 			Key:                  t.chunkKeys,
 			LowerBound:           &Boundary{t.chunkPtrs, true},
 			AdditionalConditions: t.where,
+			Table:                t.Ti,
+			NewTable:             t.NewTi,
 		}, nil
 	}
 	// Else, there were rows found.
@@ -124,6 +135,8 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 		LowerBound:           lowerBoundary,
 		UpperBound:           &Boundary{upperDatums, false},
 		AdditionalConditions: t.where,
+		Table:                t.Ti,
+		NewTable:             t.NewTi,
 	}, nil
 }
 
@@ -186,7 +199,7 @@ func (t *chunkerComposite) Open() (err error) {
 // This will set the chunkPtr to a known safe value that is contained within
 // the checkpoint. Because the composite chunker *does not support* the
 // KeyAboveWatermark optimization, the second argument is ignored.
-func (t *chunkerComposite) OpenAtWatermark(checkpnt string, _ Datum) error {
+func (t *chunkerComposite) OpenAtWatermark(checkpnt string, _ Datum, rowsCopied uint64) error {
 	t.Lock()
 	defer t.Unlock()
 
@@ -202,6 +215,7 @@ func (t *chunkerComposite) OpenAtWatermark(checkpnt string, _ Datum) error {
 	// from the chunk.LowerBound.
 	t.watermark = chunk
 	t.chunkPtrs = chunk.LowerBound.Value
+	t.rowsCopied = rowsCopied
 	return nil
 }
 
@@ -212,10 +226,13 @@ func (t *chunkerComposite) Close() error {
 // Feedback is a way for consumers of chunks to give feedback on how long
 // processing the chunk took. It is incorporated into the calculation of future
 // chunk sizes.
-func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration) {
+func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows uint64) {
 	t.Lock()
 	defer t.Unlock()
 	t.bumpWatermark(chunk)
+
+	// Update progress tracking - add the actual rows processed
+	atomic.AddUint64(&t.rowsCopied, actualRows)
 
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
@@ -349,6 +366,10 @@ func (t *chunkerComposite) open() (err error) {
 	}
 	t.finalChunkSent = false
 	t.chunkSize = StartingChunkSize
+
+	// Initialize progress tracking
+	atomic.StoreUint64(&t.rowsCopied, 0)
+
 	return nil
 }
 
@@ -390,6 +411,15 @@ func (t *chunkerComposite) calculateNewTargetChunkSize() uint64 {
 	targetTime := float64(t.ChunkerTarget)
 	newTargetRows := float64(t.chunkSize) * (targetTime / p90)
 	return uint64(newTargetRows)
+}
+
+// Progress returns the current progress of the chunker
+// It is up the implementation to determine how it
+// wants to do that. For the composite chunker we use
+// the actualRows copied (from feedback) over the estimated
+// rows (from table statistics)
+func (t *chunkerComposite) Progress() (uint64, uint64) {
+	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.Ti.EstimatedRows)
 }
 
 func (t *chunkerComposite) KeyAboveHighWatermark(key any) bool {

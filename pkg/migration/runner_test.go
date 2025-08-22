@@ -567,8 +567,10 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "Out of range value")    // Error 1264: Out of range value for column 'id' at row 1
-	assert.Less(t, m.copier.CopyChunksCount, uint64(500)) // should be very low
+	assert.ErrorContains(t, err, "Out of range value") // Error 1264: Out of range value for column 'id' at row 1
+	// Check that the chunker processed fewer than 500 chunks
+	copiedRows, _ := m.copier.GetChunker().Progress()
+	assert.Less(t, copiedRows, uint64(500000)) // should be very low (fewer than 500 chunks * 1000 rows)
 	assert.NoError(t, m.Close())
 }
 
@@ -577,13 +579,13 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 func TestChangeDatatypeLossless(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange3`)
 	table := `CREATE TABLE lossychange3 (
-				id BIGINT NOT NULL AUTO_INCREMENT,
+				id BIGINT NOT NULL,
 				name varchar(255) NOT NULL,
 				b varchar(255) NULL,
 				PRIMARY KEY (id)
 			)`
 	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, "INSERT INTO lossychange3 (name, b) VALUES ('a', REPEAT('a', 200))")
+	testutils.RunSQL(t, "INSERT INTO lossychange3 (id, name, b) VALUES (1, 'a', REPEAT('a', 200))")
 	testutils.RunSQL(t, "INSERT INTO lossychange3 (id, name, b) VALUES (8589934592, 'a', REPEAT('a', 200))")
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -600,8 +602,10 @@ func TestChangeDatatypeLossless(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
-	assert.NoError(t, err)                                // works because there are no violations.
-	assert.Less(t, m.copier.CopyChunksCount, uint64(500)) // prefetch makes it copy fast.
+	assert.NoError(t, err) // works because there are no violations.
+	// Check that the chunker processed fewer than 500 chunks
+	copiedRows, _ := m.copier.GetChunker().Progress()
+	assert.Less(t, copiedRows, uint64(500000)) // should be very low (fewer than 500 chunks * 1000 rows)
 	assert.NoError(t, m.Close())
 }
 
@@ -728,7 +732,7 @@ bigintpk c lIMIT 100000`)
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  4,
 		Table:    "bigintpk",
 		Alter:    "modify column pk bigint unsigned not null auto_increment",
 	})
@@ -830,7 +834,7 @@ func TestCheckpoint(t *testing.T) {
 			Username: cfg.User,
 			Password: cfg.Passwd,
 			Database: cfg.DBName,
-			Threads:  16,
+			Threads:  4,
 			Table:    "cpt1",
 			Alter:    "ENGINE=InnoDB",
 		})
@@ -869,7 +873,11 @@ func TestCheckpoint(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	assert.NoError(t, r.replClient.AddSubscription(r.table, r.newTable, nil))
-	r.copier, err = row.NewCopier(r.db, r.table, r.newTable, row.NewCopierDefaultConfig())
+
+	chunker, err := table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	assert.NoError(t, r.replClient.Run(t.Context()))
 
@@ -885,9 +893,6 @@ func TestCheckpoint(t *testing.T) {
 	testLogger.Lock()
 	assert.Contains(t, testLogger.lastInfof, `migration status: state=copyRows copy-progress=0/101040 0.00% binlog-deltas=0`)
 	testLogger.Unlock()
-
-	// because we are not calling copier.Run() we need to manually open.
-	assert.NoError(t, r.copier.Open4Test())
 
 	// first chunk.
 	chunk1, err := r.copier.Next4Test()
@@ -1012,7 +1017,9 @@ func TestCheckpointRestore(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	assert.NoError(t, r.replClient.AddSubscription(r.table, r.newTable, nil))
-	r.copier, err = row.NewCopier(r.db, r.table, r.newTable, row.NewCopierDefaultConfig())
+	chunker, err := table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+	require.NoError(t, err)
+	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = r.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -1022,16 +1029,15 @@ func TestCheckpointRestore(t *testing.T) {
 	watermark := "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"53926425\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"53926425\"],\"Inclusive\":false}}"
 	binlog := r.replClient.GetBinlogApplyPosition()
 	err = dbconn.Exec(t.Context(), r.db, `INSERT INTO %n.%n
-	(copier_watermark, checksum_watermark, binlog_name, binlog_pos, rows_copied, rows_copied_logical, alter_statement)
+	(copier_watermark, checksum_watermark, binlog_name, binlog_pos, rows_copied, alter_statement)
 	VALUES
-	(%?, %?, %?, %?, %?, %?, %?)`,
+	(%?,  %?, %?, %?, %?, %?)`,
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		watermark,
 		"",
 		binlog.Name,
 		binlog.Pos,
-		0,
 		0,
 		r.migration.Alter,
 	)
@@ -1107,13 +1113,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	assert.NoError(t, r.replClient.AddSubscription(r.table, r.newTable, nil))
-	r.copier, err = row.NewCopier(r.db, r.table, r.newTable, row.NewCopierDefaultConfig())
+	chunker, err := table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = r.replClient.Run(t.Context())
 	assert.NoError(t, err)
 
-	// copy a few batches and then dump a checkpoint.
-	assert.NoError(t, r.copier.Open4Test())
 	for range 3 {
 		chunk, err := r.copier.Next4Test()
 		assert.NoError(t, err)
@@ -1274,7 +1281,10 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	assert.NoError(t, m.replClient.AddSubscription(m.table, m.newTable, nil))
-	m.copier, err = row.NewCopier(m.db, m.table, m.newTable, row.NewCopierDefaultConfig())
+	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	assert.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	m.copier, err = row.NewCopier(m.db, chunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = m.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -1286,8 +1296,6 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	// m.copier.StartTime = time.Now()
 	m.setCurrentState(stateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
-
-	assert.NoError(t, m.copier.Open4Test())
 
 	// first chunk.
 	chunk1, err := m.copier.Next4Test()
@@ -1473,7 +1481,10 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 		TargetBatchTime: m.migration.TargetChunkTime,
 		ServerID:        repl.NewServerID(),
 	})
-	m.copier, err = row.NewCopier(m.db, m.table, m.newTable, &row.CopierConfig{
+	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -1496,7 +1507,6 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// We expect 2 chunks to be copied.
-	assert.NoError(t, m.copier.Open4Test())
 
 	// first chunk.
 	chunk, err := m.copier.Next4Test()
@@ -1604,7 +1614,10 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 		TargetBatchTime: m.migration.TargetChunkTime,
 		ServerID:        repl.NewServerID(),
 	})
-	m.copier, err = row.NewCopier(m.db, m.table, m.newTable, &row.CopierConfig{
+	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -1629,7 +1642,6 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 
 	// We expect 3 chunks to be copied.
 	// The special first and last case and middle case.
-	assert.NoError(t, m.copier.Open4Test())
 
 	// first chunk.
 	chunk, err := m.copier.Next4Test()
@@ -2316,7 +2328,10 @@ func TestE2ERogueValues(t *testing.T) {
 		TargetBatchTime: m.migration.TargetChunkTime,
 		ServerID:        repl.NewServerID(),
 	})
-	m.copier, err = row.NewCopier(m.db, m.table, m.newTable, &row.CopierConfig{
+	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -2339,7 +2354,6 @@ func TestE2ERogueValues(t *testing.T) {
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// We expect 2 chunks to be copied.
-	assert.NoError(t, m.copier.Open4Test())
 
 	// first chunk.
 	chunk, err := m.copier.Next4Test()
@@ -2481,7 +2495,10 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		TargetBatchTime: m.migration.TargetChunkTime,
 		ServerID:        repl.NewServerID(),
 	})
-	m.copier, err = row.NewCopier(m.db, m.table, m.newTable, &row.CopierConfig{
+	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -2502,9 +2519,6 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	// m.copier.StartTime = time.Now()
 	m.setCurrentState(stateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
-
-	// Open
-	assert.NoError(t, m.copier.Open4Test())
 
 	// first chunk.
 	chunk, err := m.copier.Next4Test()
