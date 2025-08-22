@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -444,7 +445,11 @@ func (t *chunkerOptimistic) calculateNewTargetChunkSize() uint64 {
 // It is up to the chunker implementation to select the formula. The optimistic
 // chunker is based on the progress of the auto_increment column.
 func (t *chunkerOptimistic) Progress() (uint64, uint64, uint64) {
-	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), atomic.LoadUint64(&t.Ti.AutoIncMax)
+	maxValue, err := strconv.ParseUint(t.Ti.MaxValue().String(), 10, 64) // autoInc max
+	if err != nil {
+		maxValue = t.Ti.EstimatedRows // should not be needed.
+	}
+	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), maxValue
 }
 
 // KeyAboveHighWatermark returns true if the key is above the high watermark.

@@ -544,13 +544,13 @@ func TestBadAlter(t *testing.T) {
 func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange2`)
 	table := `CREATE TABLE lossychange2 (
-					id BIGINT NOT NULL AUTO_INCREMENT,
+					id BIGINT NOT NULL,
 					name varchar(255) NOT NULL,
 					b varchar(255) NOT NULL,
 					PRIMARY KEY (id)
 				)`
 	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, "INSERT INTO lossychange2 (name, b) VALUES ('a', REPEAT('a', 200))")                 // will pass in migration
+	testutils.RunSQL(t, "INSERT INTO lossychange2 (id, name, b) VALUES (1, 'a', REPEAT('a', 200))")          // will pass in migration
 	testutils.RunSQL(t, "INSERT INTO lossychange2 (id, name, b) VALUES (8589934592, 'a', REPEAT('a', 200))") // will fail in migration
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -579,13 +579,13 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 func TestChangeDatatypeLossless(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange3`)
 	table := `CREATE TABLE lossychange3 (
-				id BIGINT NOT NULL,
+				id BIGINT NOT NULL AUTO_INCREMENT,
 				name varchar(255) NOT NULL,
 				b varchar(255) NULL,
 				PRIMARY KEY (id)
 			)`
 	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, "INSERT INTO lossychange3 (id, name, b) VALUES (1, 'a', REPEAT('a', 200))")
+	testutils.RunSQL(t, "INSERT INTO lossychange3 (name, b) VALUES ('a', REPEAT('a', 200))")
 	testutils.RunSQL(t, "INSERT INTO lossychange3 (id, name, b) VALUES (8589934592, 'a', REPEAT('a', 200))")
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -705,7 +705,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 			pk int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			name varchar(255) NOT NULL,
 			b varchar(10) NOT NULL,
-            version bigint unsigned NOT NULL DEFAULT '1'
+            version bigint unsigned NOT NULL DEFAULT '1' COMMENT 'Used for optimistic concurrency.'
 		)`
 	testutils.RunSQL(t, table)
 	// Insert initial data, there needs to be enough that it doesn't just finish

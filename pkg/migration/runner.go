@@ -276,11 +276,11 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	if r.checker != nil {
 		checksumTime = r.checker.ExecTime
 	}
-	copiedRows, _, _ := r.copier.GetChunker().Progress()
-	r.logger.Infof("apply complete: instant-ddl=%v inplace-ddl=%v total-rows-copied=%v copy-rows-time=%s checksum-time=%s total-time=%s conns-in-use=%d",
+	_, copiedChunks, _ := r.copier.GetChunker().Progress()
+	r.logger.Infof("apply complete: instant-ddl=%v inplace-ddl=%v total-chunks=%v copy-rows-time=%s checksum-time=%s total-time=%s conns-in-use=%d",
 		r.usedInstantDDL,
 		r.usedInplaceDDL,
-		copiedRows,
+		copiedChunks,
 		r.copier.ExecTime.Round(time.Second),
 		checksumTime.Round(time.Second),
 		time.Since(r.startTime).Round(time.Second),
@@ -782,9 +782,6 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	if err := chunker.OpenAtWatermark(copierWatermark, highPtr, rowsCopied); err != nil {
 		return err
 	}
-
-	// TODO: we need to anonymously send rowsCopied and rowsCopiedLogical
-	// to the chunker to init the values.
 
 	// Create copier with the prepared chunker
 	r.copier, err = row.NewCopier(r.db, chunker, &row.CopierConfig{
