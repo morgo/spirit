@@ -5,41 +5,25 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/cashapp/spirit/pkg/table"
 	"github.com/siddontang/loggers"
 )
 
-// We want to be able to kill long-running queries that prevent us from acquiring locks
+// We want to be able to kill locking transactions that prevent us from acquiring locks
 
 // There are a couple of different kinds of locks in MySQL that can block us:
 // - Table locks (LOCK TABLES)
 // - Row locks (e.g. SELECT ... FOR UPDATE, INSERT, UPDATE, DELETE)
 
-// Picoseconds converts a time.Duration to picoseconds.
-// This is needed because MySQL performance_schema uses picoseconds for its time values.
-// 1 second = 1,000,000,000 nanoseconds = 1,000,000,000,000 picoseconds
-func Picoseconds(d time.Duration) int {
-	// Convert duration to picoseconds
-	return int(d.Nanoseconds() * 1e3) // 1 nanosecond = 1000 picoseconds
-}
-
 var (
-	defaultLongRunningEventThreshold = 30 * time.Second
-
-	// longRunningEventThreshold is the threshold for a long-running event in picoseconds.
-	// This is a variable so that it can be set in tests. When set to 0, it defaults to a percentage of
-	// LockWaitTimeout from the DBConfig, or defaultLongRunningEventThreshold if not set.
-	longRunningEventThreshold = 0
-
 	// lockWaitTimeoutForceKillMultiplier is a percentage of LockWaitTimeout to use as a threshold for killing long-running transactions
 	lockWaitTimeoutForceKillMultiplier = 0.9 // 90% of LockWaitTimeout
 
 	// TransactionWeightThreshold is the maximum information_schema.innodb_trx.trx_weight
 	// over which we consider a transaction too big to be safely killed. Rolling back a
 	// heavy transaction can cause a huge impact on the database.
-	TransactionWeightThreshold int64 = 10_000_000
+	TransactionWeightThreshold int64 = 1_000_000
 
 	ErrTableLockFound = errors.New("explicit table lock found! spirit cannot proceed")
 )
@@ -86,11 +70,10 @@ FROM
         ON etc.thread_id = ml.owner_thread_id
     LEFT JOIN information_schema.innodb_trx trx
 		ON t.processlist_id = trx.trx_mysql_thread_id
-WHERE
-    processlist_id <> CONNECTION_ID() AND 
-	etc.TIMER_WAIT > ? `
+WHERE 1 `
 
-	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s)"
+	processIDClause  = " AND t.processlist_id NOT IN (CONNECTION_ID() %s) "
+	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s) "
 	rdsKillStatement = "CALL mysql.rds_kill(%d)" // not needed in MySQL 8.0 with the CONNECTION_ADMIN privilege
 	killStatement    = "KILL %d"
 )
@@ -111,9 +94,9 @@ type LockDetail struct {
 	TrxWeight    sql.NullInt64  // Rows modified by the transaction
 }
 
-func KillLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced) error {
+func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced, ignorePIDs []int) error {
 	// First, check if there are explicit table locks that would prevent us from acquiring the metadata lock.
-	locks, err := GetTableLocks(ctx, db, tables, logger)
+	locks, err := GetTableLocks(ctx, db, tables, logger, ignorePIDs)
 	if err != nil {
 		return fmt.Errorf("failed to get table locks: %w", err)
 	}
@@ -126,50 +109,46 @@ func KillLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*tabl
 		}
 		return ErrTableLockFound
 	}
-	pids, err := GetLongRunningTransactions(ctx, db, tables, config, logger)
+	pids, err := GetLockingTransactions(ctx, db, tables, config, logger, ignorePIDs)
 	if err != nil {
-		return fmt.Errorf("failed to get long-running transactions: %w", err)
+		return fmt.Errorf("failed to get locking transactions: %w", err)
 	}
 	// Now we can kill these transactions
 	var errs []error
 	for _, pid := range pids {
-		logger.Warnf("Killing long-running transaction %d", pid)
+		logger.Warnf("Killing locking transaction %d", pid)
 		err = KillTransaction(ctx, db, pid)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to kill transaction %d: %w", pid, err))
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("errors occurred while killing long-running transactions: %v", errs)
+		return fmt.Errorf("errors occurred while killing locking transactions: %w", errors.Join(errs...))
 	}
 	return nil
 }
 
-// GetLongRunningTransactions queries the performance schema to find long-running transactions
+// GetLockingTransactions queries the performance schema to find locking transactions
 // that are holding locks on the specified tables. It returns a list of PIDs of these transactions.
 // If no tables are specified, it will return all long-running transactions.
 // If a transaction's weight exceeds the TransactionWeightThreshold, it will be skipped.
 // If no long-running transactions are found, it returns nil.
-func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced) ([]int, error) {
+func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced, ignorePIDs []int) ([]int, error) {
 	// This function should query the performance schema to find long-running transactions
 	// that are holding locks on the specified tables.
 
 	query := LongRunningEventQuery
 
-	// Tests may override longRunningEventThreshold
-	threshold := longRunningEventThreshold
-	// If the threshold is not set, we use the LockWaitTimeout from the config or default to 30 seconds.
-	if threshold <= 0 {
-		if config != nil && config.LockWaitTimeout > 0 {
-			// If a custom lock wait timeout is set, use it as the threshold.
-			threshold = Picoseconds(time.Duration(float64(config.LockWaitTimeout)/lockWaitTimeoutForceKillMultiplier) * time.Second)
-		} else {
-			// If the threshold is not set, use the default value.
-			threshold = Picoseconds(defaultLongRunningEventThreshold) // Default to 30 seconds
+	params := []any{}
+	if len(ignorePIDs) > 0 {
+		// If there are PIDs to ignore, we need to add them to the query
+		inList, inParams := sliceToInList(ignorePIDs)
+		if len(inList) > 0 {
+			inList = ", " + inList // Add a comma for formatting
 		}
+		query += fmt.Sprintf(processIDClause, inList)
+		params = append(params, inParams...)
 	}
-
-	params := []any{threshold}
 	if len(tables) > 0 {
 		inList, inParams := tablesToInList(tables, logger)
 		query += fmt.Sprintf(queryTableClause, inList)
@@ -179,7 +158,7 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 	logger.Infof("query: %s", query)
 	rows, err := db.QueryContext(ctx, query, params...)
 	if err != nil {
-		logger.Errorf("failed to query long-running transactions: %v", err)
+		logger.Errorf("failed to query locking transactions: %v", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -206,7 +185,7 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 			return nil, err
 		}
 
-		logger.Infof("Found long-running transaction: %#v", &lock)
+		logger.Infof("Found locking transaction: %#v", &lock)
 		locks = append(locks, lock)
 	}
 	if err := rows.Err(); err != nil {
@@ -215,7 +194,7 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 	}
 
 	if len(locks) == 0 {
-		logger.Infof("No long-running transactions found.")
+		logger.Infof("No locking transactions found.")
 		return nil, nil
 	}
 
@@ -238,18 +217,27 @@ func GetLongRunningTransactions(ctx context.Context, db *sql.DB, tables []*table
 		}
 	}
 
-	logger.Infof("Found %d long-running transactions: %v", len(uniquePids), uniquePids)
+	logger.Infof("Found %d locking transactions: %v", len(uniquePids), uniquePids)
 
 	return uniquePids, nil
 }
 
-func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger loggers.Advanced) ([]*LockDetail, error) {
+func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger loggers.Advanced, ignorePIDs []int) ([]*LockDetail, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		logger.Errorf("failed to begin transaction: %v", err)
 	}
 	query := TableLockQuery
 	params := make([]any, 0, len(tables)*2)
+	if len(ignorePIDs) > 0 {
+		// If there are PIDs to ignore, we need to add them to the query
+		inList, inParams := sliceToInList(ignorePIDs)
+		if len(inList) > 0 {
+			inList = ", " + inList // Add a comma for formatting
+		}
+		query += fmt.Sprintf(processIDClause, inList)
+		params = append(params, inParams...)
+	}
 	if len(tables) > 0 {
 		if len(tables) > 0 {
 			inList, inParams := tablesToInList(tables, logger)
@@ -327,4 +315,21 @@ func tablesToInList(tables []*table.TableInfo, logger loggers.Advanced) (inList 
 		}
 	}
 	return inList, params
+}
+
+// slicesToInList is useful when you have a slice of items and you want to create an IN clause for a SQL query.
+// You have to give as many placeholders as there are items in the slice, and this function will return a string
+// with the correct number of placeholders, separated by commas. We also return the items as []any so that they can be used as parameters in the query.
+func sliceToInList[S ~[]E, E any](items S) (inList string, inParams []any) {
+	if len(items) == 0 {
+		return "", nil
+	}
+	for i := range items {
+		inList += "?"
+		inParams = append(inParams, items[i])
+		if i < len(items)-1 {
+			inList += ","
+		}
+	}
+	return inList, inParams
 }

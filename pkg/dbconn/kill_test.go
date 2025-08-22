@@ -30,11 +30,6 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	}
 	defer db.Close()
 
-	longRunningEventThreshold = 1 // Picoseconds(time.Second) // Set a short threshold for testing purposes
-	defer func() {
-		longRunningEventThreshold = 0 // Reset to default
-	}()
-
 	n := 2
 
 	var schema string
@@ -87,7 +82,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	// Sleep to ensure the transactions are long-running
 	time.Sleep(time.Second)
 
-	tableLocks, err := GetTableLocks(t.Context(), db, tables, logger)
+	tableLocks, err := GetTableLocks(t.Context(), db, tables, logger, nil)
 	require.NoError(t, err)
 	require.Len(t, tableLocks, 1)
 	require.True(t, tableLocks[0].ObjectName.Valid)
@@ -100,7 +95,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	require.NoError(t, err)
 
 	TransactionWeightThreshold = 1000 // Set a low threshold for testing purposes
-	ids, err := GetLongRunningTransactions(t.Context(), db, tables, nil, logger)
+	ids, err := GetLockingTransactions(t.Context(), db, tables, nil, logger, nil)
 	require.NoError(t, err)
 
 	// We expect only the second transaction to be considered
@@ -112,7 +107,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	}
 
 	TransactionWeightThreshold = 1e7 // Reset the threshold to a high value
-	ids, err = GetLongRunningTransactions(t.Context(), db, tables, nil, logger)
+	ids, err = GetLockingTransactions(t.Context(), db, tables, nil, logger, nil)
 	require.NoError(t, err)
 	// Now we expect both transactions to be considered long-running, because the weight threshold is higher.
 	require.Len(t, ids, 2)
@@ -120,7 +115,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		require.Contains(t, txIDs, id)
 	}
 
-	err = KillLongRunningTransactions(t.Context(), db, tables, nil, logger)
+	err = KillLockingTransactions(t.Context(), db, tables, nil, logger, nil)
 	require.NoError(t, err)
 
 	for _, tx := range txs {

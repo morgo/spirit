@@ -2,7 +2,6 @@ package dbconn
 
 import (
 	"testing"
-	"time"
 
 	"github.com/cashapp/spirit/pkg/table"
 	"github.com/cashapp/spirit/pkg/testutils"
@@ -156,7 +155,6 @@ func TestTableLockFail(t *testing.T) {
 	// Enable force killing to allow retrying with query killing. This will FAIL because we do not kill
 	// connections with explicit table locks.
 	cfg.ForceKill = true
-	longRunningEventThreshold = Picoseconds(2 * time.Second) // Set a short threshold for testing purposes
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, logrus.New())
-	assert.ErrorIs(t, err, ErrTableLockFound) // should return ErrTableLockFound because we cannot kill a connection with an explicit table lock
+	assert.Error(t, err) // We won't kill a connection with an explicit table lock, so this should fail after exhausting retries
 }

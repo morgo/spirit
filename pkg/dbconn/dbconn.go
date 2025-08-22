@@ -31,7 +31,7 @@ type DBConfig struct {
 	MaxOpenConnections       int
 	RangeOptimizerMaxMemSize int64
 	InterpolateParams        bool
-	ForceKill                bool // If true, kill long-running queries to acquire metadata locks
+	ForceKill                bool // If true, kill locking transactions to acquire metadata locks
 }
 
 func NewDBConfig() *DBConfig {
