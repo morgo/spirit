@@ -62,7 +62,6 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 					err := KillLockingTransactions(ctx, db, tables, config, logger, []int{pid})
 					if err != nil {
 						logger.Errorf("failed to kill locking transactions: %v", err)
-						isFatal = false
 					}
 				})
 				defer timer.Stop()
