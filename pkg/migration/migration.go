@@ -36,8 +36,10 @@ type Migration struct {
 	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
 	ForceKill            bool          `name:"force-kill" help:"Kill long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
 	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected" optional:"" default:"false"`
-	InterpolateParams    bool          `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
 	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
+	// Hidden options for now.
+	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
+	Multi             bool `name:"multi" help:"Use multi chunker (for testing)" optional:"" default:"false" hidden:""`
 }
 
 func (m *Migration) Run() error {

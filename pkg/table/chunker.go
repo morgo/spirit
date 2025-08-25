@@ -30,14 +30,15 @@ const (
 
 type Chunker interface {
 	Open() error
-	OpenAtWatermark(watermark string, datum Datum, rowsCopied uint64) error
 	IsRead() bool
 	Close() error
 	Next() (*Chunk, error)
 	Feedback(chunk *Chunk, duration time.Duration, actualRows uint64)
-	GetLowWatermark() (string, error)
 	KeyAboveHighWatermark(key any) bool
 	Progress() (uint64, uint64, uint64) // Returns (rowsRead, chunksCopied, totalRowsExpected)
+	OpenAtWatermark(watermark string, datum Datum, rowsCopied uint64) error
+	GetLowWatermark() (string, error)
+	Tables() []*TableInfo // return a list of table names
 }
 
 func newChunker(t *TableInfo, chunkerTarget time.Duration, logger loggers.Advanced) (Chunker, error) {

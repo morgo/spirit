@@ -9,14 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/block/spirit/pkg/metrics"
-	"github.com/block/spirit/pkg/statement"
-
 	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/row"
+	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -49,6 +48,9 @@ type Runner struct {
 	throttler    throttler.Throttler
 	checker      *checksum.Checker
 	checkerLock  sync.Mutex
+
+	copyChunker     table.Chunker // the chunker for copying
+	checksumChunker table.Chunker // the chunker for checksum
 
 	// used to recover direct to checksum.
 	checksumWatermark string
@@ -277,7 +279,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	if r.checker != nil {
 		checksumTime = r.checker.ExecTime
 	}
-	_, copiedChunks, _ := r.copier.GetChunker().Progress()
+	_, copiedChunks, _ := r.copyChunker.Progress()
 	r.logger.Infof("apply complete: instant-ddl=%v inplace-ddl=%v total-chunks=%v copy-rows-time=%s checksum-time=%s total-time=%s conns-in-use=%d",
 		r.usedInstantDDL,
 		r.usedInplaceDDL,
@@ -444,15 +446,21 @@ func (r *Runner) setup(ctx context.Context) error {
 		}
 
 		// Create chunker first with destination table info, then create copier with it
-		chunker, err := table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+		r.copyChunker, err = table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
 		// For now we always "open" the chunker, but that might become obsolete later.
-		if err := chunker.Open(); err != nil {
+		if err := r.copyChunker.Open(); err != nil {
 			return err
 		}
-		r.copier, err = row.NewCopier(r.db, chunker, &row.CopierConfig{
+
+		if r.migration.Multi {
+			// Wrap the chunker in a multi-chunker
+			r.copyChunker = table.NewMultiChunker(r.copyChunker)
+		}
+
+		r.copier, err = row.NewCopier(r.db, r.copyChunker, &row.CopierConfig{
 			Concurrency:     r.migration.Threads,
 			TargetChunkTime: r.migration.TargetChunkTime,
 			FinalChecksum:   r.migration.Checksum,
@@ -783,8 +791,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
+	r.copyChunker = table.NewMultiChunker(chunker)
+	if r.migration.Multi {
+		// Wrap the copy chunker in a multi chunker.
+		r.copyChunker = table.NewMultiChunker(chunker)
+	}
+
 	// Create copier with the prepared chunker
-	r.copier, err = row.NewCopier(r.db, chunker, &row.CopierConfig{
+	r.copier, err = row.NewCopier(r.db, r.copyChunker, &row.CopierConfig{
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: r.migration.TargetChunkTime,
 		FinalChecksum:   r.migration.Checksum,
@@ -848,13 +862,30 @@ func (r *Runner) checksum(ctx context.Context) error {
 			r.checksumWatermark = "" // reset the watermark if we are retrying.
 		}
 		r.checkerLock.Lock()
-		r.checker, err = checksum.NewChecker(r.db, r.table, r.newTable, r.replClient, &checksum.CheckerConfig{
+
+		// Create a chunker
+		r.checksumChunker, err = table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		if r.checksumWatermark != "" {
+			if err := r.checksumChunker.OpenAtWatermark(r.checksumWatermark, r.newTable.MaxValue(), 0); err != nil {
+				return err
+			}
+		} else {
+			if err := r.checksumChunker.Open(); err != nil {
+				return err
+			}
+		}
+		if r.migration.Multi {
+			r.checksumChunker = table.NewMultiChunker(r.checksumChunker)
+		}
+		r.checker, err = checksum.NewChecker(r.db, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
 			Concurrency:     r.migration.Threads,
 			TargetChunkTime: r.migration.TargetChunkTime,
 			DBConfig:        r.dbConfig,
 			Logger:          r.logger,
 			FixDifferences:  true, // we want to repair the differences.
-			Watermark:       r.checksumWatermark,
 		})
 		r.checkerLock.Unlock()
 		if err != nil {
@@ -909,7 +940,7 @@ func (r *Runner) setCurrentState(s migrationState) {
 func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
-	copierWatermark, err := r.copier.GetLowWatermark()
+	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
 		return err // it might not be ready, we can try again.
 	}
@@ -921,29 +952,33 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		r.checkerLock.Lock()
 		defer r.checkerLock.Unlock()
 		if r.checker != nil {
-			checksumWatermark, err = r.checker.GetLowWatermark()
+			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
 			if err != nil {
 				return err
 			}
 		}
 	}
-	copyRows, _, _ := r.copier.GetChunker().Progress()
+	copyRows, _, _ := r.copyChunker.Progress()
 
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
 	// when using the composite chunker are based on actual user-data.
 	// We believe this is OK but may change it in the future. Please do not
 	// add any other fields to this log line.
 	r.logger.Infof("checkpoint: low-watermark=%s log-file=%s log-pos=%d rows-copied=%d", copierWatermark, binlog.Name, binlog.Pos, copyRows)
-	return dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, rows_copied, alter_statement) VALUES (%?, %?, %?, %?, %?, %?)",
-		r.checkpointTable.SchemaName,
-		r.checkpointTable.TableName,
+	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, rows_copied, alter_statement) VALUES (%?, %?, %?, %?, %?, %?)",
+		r.checkpointTable.SchemaName, //TODO: fixme
+		r.checkpointTable.TableName,  //TODO: fixme
 		copierWatermark,
 		checksumWatermark,
 		binlog.Name,
 		binlog.Pos,
 		copyRows,
-		r.stmt.Alter,
+		r.stmt.Alter, //TODO: fixme
 	)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
