@@ -15,7 +15,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
-  "github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/siddontang/go-log/loggers"
