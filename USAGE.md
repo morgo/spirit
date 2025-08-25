@@ -104,7 +104,7 @@ If you are seeing cutover or checksum lock requests failing, you may consider in
 ### password
 
 - Type: String
-- Default value: `msandbox`
+- Default value: `spirit`
 
 The password to use when connecting to MySQL.
 
@@ -197,6 +197,6 @@ Note that Spirit does not support dynamically adjusting the number of threads wh
 ### username
 
 - Type: String
-- Default value: `msandbox`
+- Default value: `spirit`
 
 The username to use when connecting to MySQL.

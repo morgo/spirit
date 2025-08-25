@@ -20,8 +20,8 @@ var (
 
 type Migration struct {
 	Host                 string        `name:"host" help:"Hostname" optional:"" default:"127.0.0.1:3306"`
-	Username             string        `name:"username" help:"User" optional:"" default:"msandbox"`
-	Password             string        `name:"password" help:"Password" optional:"" default:"msandbox"`
+	Username             string        `name:"username" help:"User" optional:"" default:"spirit"`
+	Password             string        `name:"password" help:"Password" optional:"" default:"spirit"`
 	Database             string        `name:"database" help:"Database" optional:"" default:"test"`
 	Table                string        `name:"table" help:"Table" optional:""`
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
