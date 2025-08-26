@@ -965,20 +965,16 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	// We believe this is OK but may change it in the future. Please do not
 	// add any other fields to this log line.
 	r.logger.Infof("checkpoint: low-watermark=%s log-file=%s log-pos=%d rows-copied=%d", copierWatermark, binlog.Name, binlog.Pos, copyRows)
-	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, rows_copied, alter_statement) VALUES (%?, %?, %?, %?, %?, %?)",
-		r.checkpointTable.SchemaName, //TODO: fixme
-		r.checkpointTable.TableName,  //TODO: fixme
+	return dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, rows_copied, alter_statement) VALUES (%?, %?, %?, %?, %?, %?)",
+		r.checkpointTable.SchemaName,
+		r.checkpointTable.TableName,
 		copierWatermark,
 		checksumWatermark,
 		binlog.Name,
 		binlog.Pos,
 		copyRows,
-		r.stmt.Alter, //TODO: fixme
+		r.stmt.Alter,
 	)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {

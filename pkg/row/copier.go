@@ -263,7 +263,6 @@ func (c *Copier) estimateRowsPerSecondLoop(ctx context.Context) {
 
 // The following funcs proxy to the chunker.
 // This is done, so we don't need to export the chunker,
-// TODO: remove this func
 // KeyAboveHighWatermark returns true if the key is above where the chunker is currently at.
 func (c *Copier) KeyAboveHighWatermark(key any) bool {
 	return c.chunker.KeyAboveHighWatermark(key)
