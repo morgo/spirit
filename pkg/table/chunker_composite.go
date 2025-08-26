@@ -456,3 +456,10 @@ func (t *chunkerComposite) SetKey(keyName string, where string) error {
 	t.where = where
 	return nil
 }
+
+func (t *chunkerComposite) Tables() []*TableInfo {
+	if t.NewTi != nil {
+		return []*TableInfo{t.Ti, t.NewTi}
+	}
+	return []*TableInfo{t.Ti}
+}

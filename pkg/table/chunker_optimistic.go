@@ -476,3 +476,10 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key any) bool {
 	// Finally we check the chunkPtr.
 	return keyDatum.GreaterThanOrEqual(t.chunkPtr)
 }
+
+func (t *chunkerOptimistic) Tables() []*TableInfo {
+	if t.NewTi != nil {
+		return []*TableInfo{t.Ti, t.NewTi}
+	}
+	return []*TableInfo{t.Ti}
+}

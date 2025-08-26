@@ -878,10 +878,10 @@ func TestCheckpoint(t *testing.T) {
 	})
 	assert.NoError(t, r.replClient.AddSubscription(r.table, r.newTable, nil))
 
-	chunker, err := table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+	r.copyChunker, err = table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
 	require.NoError(t, err)
-	require.NoError(t, chunker.Open())
-	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
+	require.NoError(t, r.copyChunker.Open())
+	r.copier, err = row.NewCopier(r.db, r.copyChunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	assert.NoError(t, r.replClient.Run(t.Context()))
 
@@ -1117,10 +1117,10 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	assert.NoError(t, r.replClient.AddSubscription(r.table, r.newTable, nil))
-	chunker, err := table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
+	r.copyChunker, err = table.NewChunker(r.table, r.newTable, r.migration.TargetChunkTime, r.logger)
 	require.NoError(t, err)
-	require.NoError(t, chunker.Open())
-	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
+	require.NoError(t, r.copyChunker.Open())
+	r.copier, err = row.NewCopier(r.db, r.copyChunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = r.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -1285,10 +1285,10 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	assert.NoError(t, m.replClient.AddSubscription(m.table, m.newTable, nil))
-	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	m.copyChunker, err = table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
 	assert.NoError(t, err)
-	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, row.NewCopierDefaultConfig())
+	require.NoError(t, m.copyChunker.Open())
+	m.copier, err = row.NewCopier(m.db, m.copyChunker, row.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = m.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -2499,10 +2499,10 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		TargetBatchTime: m.migration.TargetChunkTime,
 		ServerID:        repl.NewServerID(),
 	})
-	chunker, err := table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
+	m.copyChunker, err = table.NewChunker(m.table, m.newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
-	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	require.NoError(t, m.copyChunker.Open())
+	m.copier, err = row.NewCopier(m.db, m.copyChunker, &row.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
