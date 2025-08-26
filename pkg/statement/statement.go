@@ -20,6 +20,8 @@ type AbstractStatement struct {
 	Alter     string // may be empty.
 	Statement string
 	StmtNode  *ast.StmtNode
+
+	// TODO: Add table and newTable here?
 }
 
 var (
@@ -27,7 +29,7 @@ var (
 	ErrNotAlterTable         = errors.New("not an ALTER TABLE statement")
 )
 
-func New(statement string) (*AbstractStatement, error) {
+func New(statement string) ([]*AbstractStatement, error) {
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(statement, "", "")
 	if err != nil {
@@ -55,12 +57,14 @@ func New(statement string) (*AbstractStatement, error) {
 		if len(alterStmt.Table.Schema.String()) > 0 {
 			trimLen += len(alterStmt.Table.Schema.String()) + 3 // len schema + quotes and dot.
 		}
-		return &AbstractStatement{
-			Schema:    alterStmt.Table.Schema.String(),
-			Table:     alterStmt.Table.Name.String(),
-			Alter:     normalizedStmt[trimLen:],
-			Statement: statement,
-			StmtNode:  &stmtNodes[0],
+		return []*AbstractStatement{
+			{
+				Schema:    alterStmt.Table.Schema.String(),
+				Table:     alterStmt.Table.Name.String(),
+				Alter:     normalizedStmt[trimLen:],
+				Statement: statement,
+				StmtNode:  &stmtNodes[0],
+			},
 		}, nil
 	case *ast.CreateIndexStmt:
 		// Need to rewrite to a corresponding ALTER TABLE statement
@@ -69,11 +73,13 @@ func New(statement string) (*AbstractStatement, error) {
 	// but it's not a spirit migration. But the table should be specified.
 	case *ast.CreateTableStmt:
 		stmt := stmtNodes[0].(*ast.CreateTableStmt)
-		return &AbstractStatement{
-			Schema:    stmt.Table.Schema.String(),
-			Table:     stmt.Table.Name.String(),
-			Statement: statement,
-			StmtNode:  &stmtNodes[0],
+		return []*AbstractStatement{
+			{
+				Schema:    stmt.Table.Schema.String(),
+				Table:     stmt.Table.Name.String(),
+				Statement: statement,
+				StmtNode:  &stmtNodes[0],
+			},
 		}, err
 	case *ast.DropTableStmt:
 		stmt := stmtNodes[0].(*ast.DropTableStmt)
@@ -84,11 +90,13 @@ func New(statement string) (*AbstractStatement, error) {
 		if len(distinctSchemas) > 1 {
 			return nil, errors.New("statement attempts to drop tables from multiple schemas")
 		}
-		return &AbstractStatement{
-			Schema:    stmt.Tables[0].Schema.String(),
-			Table:     stmt.Tables[0].Name.String(), // TODO: this is just used in log lines, but there could be more than one!
-			Statement: statement,
-			StmtNode:  &stmtNodes[0],
+		return []*AbstractStatement{
+			{
+				Schema:    stmt.Tables[0].Schema.String(),
+				Table:     stmt.Tables[0].Name.String(), // TODO: this is just used in log lines, but there could be more than one!
+				Statement: statement,
+				StmtNode:  &stmtNodes[0],
+			},
 		}, err
 	case *ast.RenameTableStmt:
 		stmt := stmtNodes[0].(*ast.RenameTableStmt)
@@ -102,11 +110,13 @@ func New(statement string) (*AbstractStatement, error) {
 		if len(distinctSchemas) > 1 {
 			return nil, errors.New("statement attempts to rename tables in multiple schemas")
 		}
-		return &AbstractStatement{
-			Schema:    stmt.TableToTables[0].OldTable.Schema.String(),
-			Table:     stmt.TableToTables[0].OldTable.Name.String(), // TODO: this is just used in log lines, but there could be more than one!
-			Statement: statement,
-			StmtNode:  &stmtNodes[0],
+		return []*AbstractStatement{
+			{
+				Schema:    stmt.TableToTables[0].OldTable.Schema.String(),
+				Table:     stmt.TableToTables[0].OldTable.Name.String(), // TODO: this is just used in log lines, but there could be more than one!
+				Statement: statement,
+				StmtNode:  &stmtNodes[0],
+			},
 		}, err
 	}
 	// default:
@@ -115,7 +125,7 @@ func New(statement string) (*AbstractStatement, error) {
 
 // MustNew is like New but panics if the statement cannot be parsed.
 // It is used by tests.
-func MustNew(statement string) *AbstractStatement {
+func MustNew(statement string) []*AbstractStatement {
 	stmt, err := New(statement)
 	if err != nil {
 		panic(err)
@@ -235,7 +245,7 @@ func (a *AbstractStatement) TrimAlter() string {
 	return strings.TrimSuffix(strings.TrimSpace(a.Alter), ";")
 }
 
-func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, error) {
+func convertCreateIndexToAlterTable(stmt ast.StmtNode) ([]*AbstractStatement, error) {
 	ciStmt, isCreateIndexStmt := stmt.(*ast.CreateIndexStmt)
 	if !isCreateIndexStmt {
 		return nil, errors.New("not a CREATE INDEX statement")
@@ -268,11 +278,13 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	if len(stmtNodes) != 1 {
 		return nil, errors.New("only one statement may be specified at once")
 	}
-	return &AbstractStatement{
-		Schema:    ciStmt.Table.Schema.String(),
-		Table:     ciStmt.Table.Name.String(),
-		Alter:     alterStmt,
-		Statement: statement,
-		StmtNode:  &stmtNodes[0],
+	return []*AbstractStatement{
+		{
+			Schema:    ciStmt.Table.Schema.String(),
+			Table:     ciStmt.Table.Name.String(),
+			Alter:     alterStmt,
+			Statement: statement,
+			StmtNode:  &stmtNodes[0],
+		},
 	}, err
 }
