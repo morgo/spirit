@@ -80,9 +80,10 @@ When set to TRUE, Spirit will aggressively try to kill connections that are bloc
 
 Enabling the `force-kill` option requires spirit to be granted additional privileges:
 
+```
 GRANT SELECT ON performance_schema.* TO spirituser;
 GRANT CONNECTION_ADMIN, PROCESS ON *.* TO spirituser;
-
+```
 
 ### host
 
