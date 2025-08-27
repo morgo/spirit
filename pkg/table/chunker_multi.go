@@ -88,9 +88,9 @@ func (m *multiChunker) Next() (*Chunk, error) {
 
 	// Find the chunker with the least progress (lowest percentage)
 	var selectedChunker Chunker
-	var minProgressPercent float64 = 2.0 // Start higher than 100% so any real progress is selected
+	var minProgressPercent = 2.0 // Start higher than 100% so any real progress is selected
 	var maxTotalRows uint64 = 0
-	var hasActiveChunkers bool = false
+	var hasActiveChunkers = false
 
 	for _, chunker := range m.chunkers {
 		if chunker.IsRead() {

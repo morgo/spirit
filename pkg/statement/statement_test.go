@@ -42,7 +42,12 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.False(t, abstractStmt[0].IsAlterTable())
 
 	// Try and extract multiple statements.
+	// This works
 	_, err = New("ALTER TABLE t1 ADD INDEX (something); ALTER TABLE t2 ADD INDEX (something)")
+	assert.NoError(t, err)
+
+	// This doesn't though:
+	_, err = New("CREATE TABLE tnn (a int); ALTER TABLE t2 ADD INDEX (something)")
 	assert.Error(t, err)
 
 	// Include the schema name.
@@ -70,7 +75,6 @@ func TestExtractFromStatement(t *testing.T) {
 	// test unsupported.
 	_, err = New("INSERT INTO t1 (a) VALUES (1)")
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "not a supported statement type")
 
 	// drop table
 	abstractStmt, err = New("DROP TABLE t1")

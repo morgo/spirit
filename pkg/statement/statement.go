@@ -35,12 +35,12 @@ func New(statement string) ([]*AbstractStatement, error) {
 	}
 	stmts := make([]*AbstractStatement, 0, len(stmtNodes))
 	var mustBeOnlyStatement bool
-	for _, node := range stmtNodes {
-		switch node.(type) {
+	for i, node := range stmtNodes {
+		switch node := node.(type) {
 		case *ast.AlterTableStmt:
 			// type assert node as an AlterTableStmt and then
 			// extract the table and alter from it.
-			alterStmt := node.(*ast.AlterTableStmt)
+			alterStmt := node
 			// if the schema name is included it could be different from the --database
 			// specified, which causes all sorts of problems. The easiest way to handle this
 			// it just to not permit it.
@@ -60,7 +60,7 @@ func New(statement string) ([]*AbstractStatement, error) {
 				Table:     alterStmt.Table.Name.String(),
 				Alter:     normalizedStmt[trimLen:],
 				Statement: statement,
-				StmtNode:  &node,
+				StmtNode:  &stmtNodes[i],
 			})
 		case *ast.CreateIndexStmt:
 			// Need to rewrite to a corresponding ALTER TABLE statement
@@ -73,36 +73,30 @@ func New(statement string) ([]*AbstractStatement, error) {
 		// but it's not a spirit migration. But the table should be specified.
 		case *ast.CreateTableStmt:
 			mustBeOnlyStatement = true
-			stmt := node.(*ast.CreateTableStmt)
-			return []*AbstractStatement{
-				{
-					Schema:    stmt.Table.Schema.String(),
-					Table:     stmt.Table.Name.String(),
-					Statement: statement,
-					StmtNode:  &node,
-				},
-			}, err
+			stmts = append(stmts, &AbstractStatement{
+				Schema:    node.Table.Schema.String(),
+				Table:     node.Table.Name.String(),
+				Statement: statement,
+				StmtNode:  &stmtNodes[i],
+			})
 		case *ast.DropTableStmt:
 			mustBeOnlyStatement = true
-			stmt := node.(*ast.DropTableStmt)
 			distinctSchemas := make(map[string]struct{})
-			for _, table := range stmt.Tables {
+			for _, table := range node.Tables {
 				distinctSchemas[table.Schema.String()] = struct{}{}
 			}
 			if len(distinctSchemas) > 1 {
 				return nil, errors.New("statement attempts to drop tables from multiple schemas")
 			}
-			return []*AbstractStatement{
-				{
-					Schema:    stmt.Tables[0].Schema.String(),
-					Table:     stmt.Tables[0].Name.String(),
-					Statement: statement,
-					StmtNode:  &node,
-				},
-			}, err
+			stmts = append(stmts, &AbstractStatement{
+				Schema:    node.Tables[0].Schema.String(),
+				Table:     node.Tables[0].Name.String(),
+				Statement: statement,
+				StmtNode:  &stmtNodes[i],
+			})
 		case *ast.RenameTableStmt:
 			mustBeOnlyStatement = true
-			stmt := node.(*ast.RenameTableStmt)
+			stmt := node
 			distinctSchemas := make(map[string]struct{})
 			for _, clause := range stmt.TableToTables {
 				if clause.OldTable.Schema.String() != clause.NewTable.Schema.String() {
@@ -113,14 +107,12 @@ func New(statement string) ([]*AbstractStatement, error) {
 			if len(distinctSchemas) > 1 {
 				return nil, errors.New("statement attempts to rename tables in multiple schemas")
 			}
-			return []*AbstractStatement{
-				{
-					Schema:    stmt.TableToTables[0].OldTable.Schema.String(),
-					Table:     stmt.TableToTables[0].OldTable.Name.String(),
-					Statement: statement,
-					StmtNode:  &node,
-				},
-			}, err
+			stmts = append(stmts, &AbstractStatement{
+				Schema:    stmt.TableToTables[0].OldTable.Schema.String(),
+				Table:     stmt.TableToTables[0].OldTable.Name.String(),
+				Statement: statement,
+				StmtNode:  &stmtNodes[i],
+			})
 		}
 	}
 
