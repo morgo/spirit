@@ -477,8 +477,8 @@ func (r *Runner) setup(ctx context.Context) error {
 		}
 
 		if r.migration.Multi {
-			// Wrap the chunker in a multi-chunker
-			r.copyChunker = table.NewMultiChunker(chunkers[0]) // TODO: support variable chunkers
+			r.copyChunker = table.NewMultiChunker(chunkers...)
+			_ = r.copyChunker.Open() // redundant, but required for now.
 		} else {
 			r.copyChunker = chunkers[0]
 		}
