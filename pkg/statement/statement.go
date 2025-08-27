@@ -20,8 +20,6 @@ type AbstractStatement struct {
 	Alter     string // may be empty.
 	Statement string
 	StmtNode  *ast.StmtNode
-
-	// TODO: Add table and newTable here?
 }
 
 var (
@@ -93,7 +91,7 @@ func New(statement string) ([]*AbstractStatement, error) {
 		return []*AbstractStatement{
 			{
 				Schema:    stmt.Tables[0].Schema.String(),
-				Table:     stmt.Tables[0].Name.String(), // TODO: this is just used in log lines, but there could be more than one!
+				Table:     stmt.Tables[0].Name.String(),
 				Statement: statement,
 				StmtNode:  &stmtNodes[0],
 			},
@@ -113,7 +111,7 @@ func New(statement string) ([]*AbstractStatement, error) {
 		return []*AbstractStatement{
 			{
 				Schema:    stmt.TableToTables[0].OldTable.Schema.String(),
-				Table:     stmt.TableToTables[0].OldTable.Name.String(), // TODO: this is just used in log lines, but there could be more than one!
+				Table:     stmt.TableToTables[0].OldTable.Name.String(),
 				Statement: statement,
 				StmtNode:  &stmtNodes[0],
 			},
