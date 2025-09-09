@@ -243,6 +243,9 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	var columns []string
 	var keyType string
 	for _, part := range ciStmt.IndexPartSpecifications {
+		if part.Column == nil {
+			return nil, errors.New("cannot convert functional index to ALTER TABLE statement; please use ALTER TABLE ADD INDEX … instead")
+		}
 		columns = append(columns, part.Column.Name.String())
 	}
 	switch ciStmt.KeyType {
