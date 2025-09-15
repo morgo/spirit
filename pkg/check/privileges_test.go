@@ -16,6 +16,7 @@ func TestPrivileges(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	config.User = "root" // needs grant privilege
+	config.Passwd = ""
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
 

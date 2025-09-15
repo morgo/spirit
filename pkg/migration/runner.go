@@ -29,6 +29,7 @@ var (
 	statusInterval          = 30 * time.Second
 	sentinelCheckInterval   = 1 * time.Second
 	sentinelWaitLimit       = 48 * time.Hour
+	sentinelTableName       = "_spirit_sentinel" // this is now a const.
 )
 
 type Runner struct {
@@ -136,12 +137,6 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	// means that the replication applier can always make progress immediately,
 	// and does not need to wait for free slots from the copier *until* it needs
 	// copy in more than 1 thread.
-	// A MySQL 5.7 cutover also requires a minimum of 3 connections:
-	// - The LOCK TABLES connection
-	// - The Flush() connection(s)
-	// - The blocking rename connection
-	// We could extend the +1 to +2, but instead we increase the pool size
-	// during the cutover procedure.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -650,15 +645,11 @@ func (r *Runner) GetProgress() Progress {
 	}
 }
 
-func (r *Runner) sentinelTableName() string {
-	return fmt.Sprintf(check.NameFormatSentinel, r.changes[0].table.TableName)
-}
-
 func (r *Runner) createSentinelTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.changes[0].table.SchemaName, r.sentinelTableName()); err != nil {
+	if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.changes[0].table.SchemaName, sentinelTableName); err != nil {
 		return err
 	}
-	if err := dbconn.Exec(ctx, r.db, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.changes[0].table.SchemaName, r.sentinelTableName()); err != nil {
+	if err := dbconn.Exec(ctx, r.db, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.changes[0].table.SchemaName, sentinelTableName); err != nil {
 		return err
 	}
 	return nil
@@ -813,31 +804,16 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	return nil
 }
 
-// checksum creates the checksum which opens the read view.
-func (r *Runner) checksum(ctx context.Context) error {
-	r.setCurrentState(stateChecksum)
-	if r.migration.Multi {
-		return nil // not yet supported.
-	}
-
-	// The checksum keeps the pool threads open, so we need to extend
-	// by more than +1 on threads as we did previously. We have:
-	// - background flushing
-	// - checkpoint thread
-	// - checksum "replaceChunk" DB connections
-	// Handle a case just in the tests not having a dbConfig
-	if r.dbConfig == nil {
-		r.dbConfig = dbconn.NewDBConfig()
-	}
-	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
+// initChecksumChunker initializes the checksum chunker.
+// There are two code-paths for now: the single-table and multi-table case.
+// The main requirement for this is that multi-table is currently non resumable.
+func (r *Runner) initChecksumChunker() error {
+	r.checkerLock.Lock()
+	defer r.checkerLock.Unlock()
 	var err error
-	for i := range 3 { // try the checksum up to 3 times.
-		if i > 0 {
-			r.checksumWatermark = "" // reset the watermark if we are retrying.
-		}
-		r.checkerLock.Lock()
 
-		// Create a chunker
+	// Handle the single table case first.
+	if !r.migration.Multi {
 		r.checksumChunker, err = table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
@@ -851,8 +827,47 @@ func (r *Runner) checksum(ctx context.Context) error {
 				return err
 			}
 		}
-		if r.migration.Multi {
-			r.checksumChunker = table.NewMultiChunker(r.checksumChunker)
+		return nil
+	}
+	// We are in multi-table mode.
+	// This currently does not support resuming from checkpoint.
+	chunkers := make([]table.Chunker, 0, len(r.changes))
+	for _, change := range r.changes {
+		// Create chunker first with destination table info, then create copier with it
+		chunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		// For now we always "open" each chunker,
+		// but that might be obsolete later as we can imply
+		// this from the multi-chunker's Open().
+		if err := chunker.Open(); err != nil {
+			return err
+		}
+		chunkers = append(chunkers, chunker)
+	}
+	r.checksumChunker = table.NewMultiChunker(chunkers...)
+	return r.checksumChunker.Open()
+}
+
+// checksum creates the checksum which opens the read view
+func (r *Runner) checksum(ctx context.Context) error {
+	r.setCurrentState(stateChecksum)
+
+	// The checksum keeps the pool threads open, so we need to extend
+	// by more than +1 on threads as we did previously. We have:
+	// - background flushing
+	// - checkpoint thread
+	// - checksum "replaceChunk" DB connections
+	// Handle a case just in the tests not having a dbConfig
+	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
+	var err error
+	for i := range 3 { // try the checksum up to 3 times.
+		if i > 0 {
+			r.checksumWatermark = "" // reset the watermark if we are retrying.
+		}
+		if err := r.initChecksumChunker(); err != nil {
+			return err // could not init checksum.
 		}
 		r.checker, err = checksum.NewChecker(r.db, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
 			Concurrency:     r.migration.Threads,
@@ -861,7 +876,6 @@ func (r *Runner) checksum(ctx context.Context) error {
 			Logger:          r.logger,
 			FixDifferences:  true, // we want to repair the differences.
 		})
-		r.checkerLock.Unlock()
 		if err != nil {
 			return err
 		}
@@ -882,8 +896,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 			// then the checksum will fail. This is entirely expected, and not considered a bug. We should
 			// do our best-case to differentiate that we believe this ALTER statement is lossy, and
 			// customize the returned error based on it.
-			// TODO: fix me.
-			if err := r.changes[0].stmt.AlterContainsAddUnique(); err != nil {
+			if r.containsUniqueIndexChange() {
 				return errors.New("checksum failed after 3 attempts. Check that the ALTER statement is not adding a UNIQUE INDEX to non-unique data")
 			}
 			return errors.New("checksum failed after 3 attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit")
@@ -897,6 +910,15 @@ func (r *Runner) checksum(ctx context.Context) error {
 	// of applying the binlog deltas.
 	r.setCurrentState(statePostChecksum)
 	return r.replClient.Flush(ctx)
+}
+
+func (r *Runner) containsUniqueIndexChange() bool {
+	for _, change := range r.changes {
+		if err := change.stmt.AlterContainsAddUnique(); err != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) getCurrentState() migrationState {
@@ -1006,7 +1028,7 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 				r.logger.Infof("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s conns-in-use=%d",
 					r.getCurrentState().String(),
 					r.changes[0].table.SchemaName,
-					r.sentinelTableName(),
+					sentinelTableName,
 					time.Since(r.startTime).Round(time.Second),
 					time.Since(r.sentinelWaitStartTime).Round(time.Second),
 					sentinelWaitLimit,
@@ -1044,7 +1066,7 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 	sql := "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
 	var sentinelTableExists int
-	err := r.db.QueryRowContext(ctx, sql, r.changes[0].table.SchemaName, r.sentinelTableName()).Scan(&sentinelTableExists)
+	err := r.db.QueryRowContext(ctx, sql, r.changes[0].table.SchemaName, sentinelTableName).Scan(&sentinelTableExists)
 	if err != nil {
 		return false, err
 	}
@@ -1064,7 +1086,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 		return nil
 	}
 
-	r.logger.Warnf("cutover deferred while sentinel table %s.%s exists; will wait %s", r.changes[0].table.SchemaName, r.sentinelTableName(), sentinelWaitLimit)
+	r.logger.Warnf("cutover deferred while sentinel table %s exists; will wait %s", sentinelTableName, sentinelWaitLimit)
 
 	timer := time.NewTimer(sentinelWaitLimit)
 
