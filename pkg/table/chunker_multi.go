@@ -68,11 +68,9 @@ func (m *multiChunker) Close() error {
 			errs = append(errs, fmt.Errorf("failed to close chunker %d: %w", i, err))
 		}
 	}
-
 	m.isOpen = false
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing chunkers: %v", errs)
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 	return nil
 }

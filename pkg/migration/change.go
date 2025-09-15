@@ -22,7 +22,7 @@ type change struct {
 
 func (c *change) createNewTable(ctx context.Context) error {
 	newName := fmt.Sprintf(check.NameFormatNew, c.table.TableName)
-	// drop both if we've decided to call this func.
+	// drop the newName if we've decided to call this func.
 	if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.table.SchemaName, newName); err != nil {
 		return err
 	}
