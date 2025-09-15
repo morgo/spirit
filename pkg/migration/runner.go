@@ -866,9 +866,11 @@ func (r *Runner) checksum(ctx context.Context) error {
 		if i > 0 {
 			r.checksumWatermark = "" // reset the watermark if we are retrying.
 		}
-		if err := r.initChecksumChunker(); err != nil {
+		if err = r.initChecksumChunker(); err != nil {
 			return err // could not init checksum.
 		}
+		// Protect the assignment of r.checker with the lock to prevent races with dumpStatus()
+		r.checkerLock.Lock()
 		r.checker, err = checksum.NewChecker(r.db, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
 			Concurrency:     r.migration.Threads,
 			TargetChunkTime: r.migration.TargetChunkTime,
@@ -876,6 +878,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 			Logger:          r.logger,
 			FixDifferences:  true, // we want to repair the differences.
 		})
+		r.checkerLock.Unlock()
 		if err != nil {
 			return err
 		}
@@ -1046,14 +1049,25 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 			case stateChecksum:
 				// This could take a while if it's a large table.
 				r.checkerLock.Lock()
-				r.logger.Infof("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d",
-					r.getCurrentState().String(),
-					r.checker.GetProgress(),
-					r.replClient.GetDeltaLen(),
-					time.Since(r.startTime).Round(time.Second),
-					time.Since(r.checker.StartTime()).Round(time.Second),
-					r.db.Stats().InUse,
-				)
+				if r.checker != nil {
+					checkerProgress := r.checker.GetProgress()
+					checkerStartTime := r.checker.StartTime()
+					r.logger.Infof("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d",
+						r.getCurrentState().String(),
+						checkerProgress,
+						r.replClient.GetDeltaLen(),
+						time.Since(r.startTime).Round(time.Second),
+						time.Since(checkerStartTime).Round(time.Second),
+						r.db.Stats().InUse,
+					)
+				} else {
+					r.logger.Infof("migration status: state=%s checksum-progress=initializing binlog-deltas=%v total-time=%s conns-in-use=%d",
+						r.getCurrentState().String(),
+						r.replClient.GetDeltaLen(),
+						time.Since(r.startTime).Round(time.Second),
+						r.db.Stats().InUse,
+					)
+				}
 				r.checkerLock.Unlock()
 			default:
 				// For the linter:
