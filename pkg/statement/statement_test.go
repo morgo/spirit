@@ -72,6 +72,10 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Equal(t, "ADD INDEX idx (a)", abstractStmt[0].Alter)
 	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX idx (a)", abstractStmt[0].Statement)
 
+	_, err = New("CREATE INDEX idx ON t1 ((`a` IS NULL))")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "cannot convert functional index to ALTER TABLE statement")
+
 	// test unsupported.
 	_, err = New("INSERT INTO t1 (a) VALUES (1)")
 	assert.Error(t, err)
