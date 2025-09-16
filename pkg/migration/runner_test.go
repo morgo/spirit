@@ -860,27 +860,9 @@ func TestCheckpoint(t *testing.T) {
 	// migrationRunner.Run usually calls r.Setup() here.
 	// Which first checks if the table can be restored from checkpoint.
 	// Because this is the first run, it can't.
-
 	assert.Error(t, r.resumeFromCheckpoint(t.Context()))
-
 	// So we proceed with the initial steps.
-	assert.NoError(t, r.changes[0].createNewTable(t.Context()))
-	assert.NoError(t, r.changes[0].alterNewTable(t.Context()))
-	assert.NoError(t, r.createCheckpointTable(t.Context()))
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, r.migration.Password, &repl.ClientConfig{
-		Logger:          logrus.New(), // don't use the logger for migration since we feed status to it.
-		Concurrency:     4,
-		TargetBatchTime: r.migration.TargetChunkTime,
-		ServerID:        repl.NewServerID(),
-	})
-	assert.NoError(t, r.replClient.AddSubscription(r.changes[0].table, r.changes[0].newTable, nil))
-
-	r.copyChunker, err = table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
-	require.NoError(t, err)
-	require.NoError(t, r.copyChunker.Open())
-	r.copier, err = row.NewCopier(r.db, r.copyChunker, row.NewCopierDefaultConfig())
-	assert.NoError(t, err)
-	assert.NoError(t, r.replClient.Run(t.Context()))
+	assert.NoError(t, r.newMigration(t.Context()))
 
 	// Now we are ready to start copying rows.
 	// Instead of calling r.copyRows() we will step through it manually.
@@ -1000,30 +982,15 @@ func TestCheckpointRestore(t *testing.T) {
 	// the migration process manually.
 	r.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
+	r.dbConfig = dbconn.NewDBConfig()
 	// Get Table Info
 	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.migration.Table)
 	err = r.changes[0].table.SetInfo(t.Context())
 	assert.NoError(t, err)
 	assert.NoError(t, r.changes[0].dropOldTable(t.Context()))
 
-	// So we proceed with the initial steps.
-	assert.NoError(t, r.changes[0].createNewTable(t.Context()))
-	assert.NoError(t, r.changes[0].alterNewTable(t.Context()))
-	assert.NoError(t, r.createCheckpointTable(t.Context()))
-
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, r.migration.Password, &repl.ClientConfig{
-		Logger:          logrus.New(),
-		Concurrency:     4,
-		TargetBatchTime: r.migration.TargetChunkTime,
-		ServerID:        repl.NewServerID(),
-	})
-	assert.NoError(t, r.replClient.AddSubscription(r.changes[0].table, r.changes[0].newTable, nil))
-	chunker, err := table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
-	require.NoError(t, err)
-	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
-	assert.NoError(t, err)
-	err = r.replClient.Run(t.Context())
-	assert.NoError(t, err)
+	// Proceed with the initial steps.
+	assert.NoError(t, r.newMigration(t.Context()))
 
 	// Now insert a fake checkpoint, this uses a known bad value
 	// from issue #125
@@ -1096,31 +1063,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	// the migration process manually.
 	r.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
+	r.dbConfig = dbconn.NewDBConfig()
 	// Get Table Info
 	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.migration.Table)
 	err = r.changes[0].table.SetInfo(ctx)
 	assert.NoError(t, err)
 	assert.NoError(t, r.changes[0].dropOldTable(ctx))
 
-	// So we proceed with the initial steps.
-	assert.NoError(t, r.changes[0].createNewTable(ctx))
-	assert.NoError(t, r.changes[0].alterNewTable(ctx))
-	assert.NoError(t, r.createCheckpointTable(ctx))
-
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, r.migration.Password, &repl.ClientConfig{
-		Logger:          logrus.New(),
-		Concurrency:     4,
-		TargetBatchTime: r.migration.TargetChunkTime,
-		ServerID:        repl.NewServerID(),
-	})
-	assert.NoError(t, r.replClient.AddSubscription(r.changes[0].table, r.changes[0].newTable, nil))
-	r.copyChunker, err = table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
-	require.NoError(t, err)
-	require.NoError(t, r.copyChunker.Open())
-	r.copier, err = row.NewCopier(r.db, r.copyChunker, row.NewCopierDefaultConfig())
-	assert.NoError(t, err)
-	err = r.replClient.Run(t.Context())
-	assert.NoError(t, err)
+	assert.NoError(t, r.newMigration(t.Context()))
 
 	for range 3 {
 		chunk, err := r.copier.Next4Test()
@@ -1255,6 +1205,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 		// the migration process manually.
 		m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 		assert.NoError(t, err)
+		m.dbConfig = dbconn.NewDBConfig()
 		// Get Table Info
 		m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
 		err = m.changes[0].table.SetInfo(t.Context())
@@ -1270,25 +1221,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 
 	assert.Error(t, m.resumeFromCheckpoint(t.Context()))
 
-	// So we proceed with the initial steps.
-	assert.NoError(t, m.changes[0].createNewTable(t.Context()))
-	assert.NoError(t, m.changes[0].alterNewTable(t.Context()))
-	assert.NoError(t, m.createCheckpointTable(t.Context()))
-	logger := logrus.New()
-	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, m.migration.Password, &repl.ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: m.migration.TargetChunkTime,
-		ServerID:        repl.NewServerID(),
-	})
-	assert.NoError(t, m.replClient.AddSubscription(m.changes[0].table, m.changes[0].newTable, nil))
-	m.copyChunker, err = table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
-	assert.NoError(t, err)
-	require.NoError(t, m.copyChunker.Open())
-	m.copier, err = row.NewCopier(m.db, m.copyChunker, row.NewCopierDefaultConfig())
-	assert.NoError(t, err)
-	err = m.replClient.Run(t.Context())
-	assert.NoError(t, err)
+	assert.NoError(t, m.newMigration(t.Context()))
 
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
@@ -2489,32 +2422,8 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	m.dbConfig = dbconn.NewDBConfig()
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
 	assert.NoError(t, m.changes[0].table.SetInfo(ctx))
-	assert.NoError(t, m.changes[0].createNewTable(ctx))
-	assert.NoError(t, m.changes[0].alterNewTable(ctx))
-	assert.NoError(t, m.createCheckpointTable(ctx))
-	logger := logrus.New()
-	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, m.migration.Password, &repl.ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: m.migration.TargetChunkTime,
-		ServerID:        repl.NewServerID(),
-	})
-	m.copyChunker, err = table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
-	require.NoError(t, err)
-	require.NoError(t, m.copyChunker.Open())
-	m.copier, err = row.NewCopier(m.db, m.copyChunker, &row.CopierConfig{
-		Concurrency:     m.migration.Threads,
-		TargetChunkTime: m.migration.TargetChunkTime,
-		FinalChecksum:   m.migration.Checksum,
-		Throttler:       &throttler.Noop{},
-		Logger:          m.logger,
-		MetricsSink:     &metrics.NoopSink{},
-		DBConfig:        dbconn.NewDBConfig(),
-	})
-	assert.NoError(t, err)
-	assert.NoError(t, m.replClient.AddSubscription(m.changes[0].table, m.changes[0].newTable, m.copier.KeyAboveHighWatermark))
-	err = m.replClient.Run(t.Context())
-	assert.NoError(t, err)
+
+	assert.NoError(t, m.newMigration(t.Context()))
 
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
