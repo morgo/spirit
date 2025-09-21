@@ -61,7 +61,7 @@ type Client struct {
 	// subscriptions is a map of tables that are actively
 	// watching for changes on. The key is schemaName.tableName.
 	// each subscription has its own set of changes.
-	subscriptions map[string]*subscription
+	subscriptions map[string]Subscription
 
 	// onDDL is a channel that is used to notify of
 	// any schema changes. It will send any changes,
@@ -103,7 +103,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		targetBatchTime: config.TargetBatchTime,
 		targetBatchSize: DefaultBatchSize, // initial starting value.
 		concurrency:     config.Concurrency,
-		subscriptions:   make(map[string]*subscription),
+		subscriptions:   make(map[string]Subscription),
 		onDDL:           config.OnDDL,
 		serverID:        config.ServerID,
 	}
@@ -145,10 +145,23 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAbo
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
 
-	c.subscriptions[subKey] = &subscription{
+	// Decide which subscription type to use. We always prefer deltaMap
+	// But will fall back to deltaQueue if the PK is not memory comparable.
+	if err := currentTable.PrimaryKeyIsMemoryComparable(); err == nil { // note: checking err is nil!
+		c.subscriptions[subKey] = &deltaMap{
+			table:                  currentTable,
+			newTable:               newTable,
+			changes:                make(map[string]bool),
+			c:                      c,
+			keyAboveCopierCallback: keyAboveCopierCallback,
+		}
+		return nil
+	}
+	// Else, fallback to queue
+	c.subscriptions[subKey] = &deltaQueue{
 		table:                  currentTable,
 		newTable:               newTable,
-		deltaMap:               make(map[string]bool),
+		changes:                make([]queuedChange, 0),
 		c:                      c,
 		keyAboveCopierCallback: keyAboveCopierCallback,
 	}
@@ -188,7 +201,7 @@ func (c *Client) AllChangesFlushed() bool {
 	}
 	// We check if all subscriptions have flushed their changes.
 	for _, subscription := range c.subscriptions {
-		if subscription.getDeltaLen() > 0 {
+		if subscription.Length() > 0 {
 			return false
 		}
 	}
@@ -209,7 +222,7 @@ func (c *Client) GetDeltaLen() int {
 	defer c.Unlock()
 	deltaLen := 0
 	for _, subscription := range c.subscriptions {
-		deltaLen += subscription.getDeltaLen()
+		deltaLen += subscription.Length()
 	}
 	return deltaLen
 }
@@ -397,7 +410,7 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			afterRow := e.Rows[i+1]
 
 			// Always process the before image (guaranteed to have PK in minimal mode)
-			beforeKey, err := sub.table.PrimaryKeyValues(beforeRow)
+			beforeKey, err := sub.Table().PrimaryKeyValues(beforeRow)
 			if err != nil {
 				return err
 			}
@@ -414,9 +427,9 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			isPKUpdate := false
 			afterRowSlice := afterRow
 
-			for pkIdx, pkCol := range sub.table.KeyColumns {
+			for pkIdx, pkCol := range sub.Table().KeyColumns {
 				// Find the position of this PK column in the table columns
-				for colIdx, col := range sub.table.Columns {
+				for colIdx, col := range sub.Table().Columns {
 					if col == pkCol {
 						// If this column exists in the after image and is not nil, use it
 						if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
@@ -432,17 +445,17 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 
 			if isPKUpdate {
 				// This is a primary key update - track both delete and insert
-				sub.keyHasChanged(beforeKey, true) // delete old key
-				sub.keyHasChanged(afterKey, false) // insert new key
+				sub.KeyHasChanged(beforeKey, true) // delete old key
+				sub.KeyHasChanged(afterKey, false) // insert new key
 			} else {
 				// Same PK, just a regular update
-				sub.keyHasChanged(beforeKey, false)
+				sub.KeyHasChanged(beforeKey, false)
 			}
 		}
 	} else {
 		// For INSERT and DELETE events, process each row normally
 		for _, row := range e.Rows {
-			key, err := sub.table.PrimaryKeyValues(row)
+			key, err := sub.Table().PrimaryKeyValues(row)
 			if err != nil {
 				return err
 			}
@@ -452,9 +465,9 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			}
 			switch eventType {
 			case eventTypeInsert:
-				sub.keyHasChanged(key, false)
+				sub.KeyHasChanged(key, false)
 			case eventTypeDelete:
-				sub.keyHasChanged(key, true)
+				sub.KeyHasChanged(key, true)
 			default:
 				c.logger.Errorf("unknown event type: %v", ev.Header.EventType)
 			}
@@ -528,7 +541,7 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	c.Unlock()
 
 	for _, subscription := range c.subscriptions {
-		if err := subscription.flush(ctx, underLock, lock); err != nil {
+		if err := subscription.Flush(ctx, underLock, lock); err != nil {
 			return err
 		}
 	}
@@ -691,7 +704,7 @@ func (c *Client) SetKeyAboveWatermarkOptimization(newVal bool) {
 	defer c.Unlock()
 
 	for _, sub := range c.subscriptions {
-		sub.setKeyAboveWatermarkOptimization(newVal)
+		sub.SetKeyAboveWatermarkOptimization(newVal)
 	}
 }
 
