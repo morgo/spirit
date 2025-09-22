@@ -21,6 +21,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	chunkletSize      = 1000 // Number of rows per chunklet
+	defaultBufferSize = 128  // Size of the shared buffer channel for chunklets
+)
+
 type buffered struct {
 	sync.Mutex
 	db               *sql.DB
@@ -37,10 +42,18 @@ type buffered struct {
 	copierEtaHistory *copierEtaHistory
 
 	// Aurora algorithm specific fields - Producer/Consumer pattern
-	sharedBuffer    chan bufferedChunk // Channel for buffering chunks between read and write pools
-	bufferSize      int                // Size of the shared buffer
-	readersFinished int32              // Atomic counter for finished readers
-	workerIDCounter int32              // Atomic counter for assigning worker IDs
+	sharedBuffer      chan chunklet // Channel for buffering chunklets between read and write pools
+	bufferSize        int           // Size of the shared buffer (1024 for chunklets)
+	readersFinished   int32         // Atomic counter for finished readers
+	chunksFinished    int32         // Atomic counter for chunks finished
+	chunkletsFinished int32         // Atomic counter for chunklets finished
+	workerIDCounter   int32         // Atomic counter for assigning worker IDs
+
+	// Chunklet-based processing
+	chunkletCompletions chan chunkletCompletion // Channel for completed chunklets
+	pendingChunks       map[int64]*pendingChunk // Map of chunks being processed
+	pendingMutex        sync.Mutex              // Protects pendingChunks map
+	nextChunkID         int64                   // Atomic counter for chunk ordering
 }
 
 // rowData represents a single row with all its column values
@@ -48,11 +61,28 @@ type rowData struct {
 	values []any
 }
 
-// bufferedChunk represents a chunk with its data moving through the pipeline
-type bufferedChunk struct {
-	chunk    *table.Chunk  // Original chunk for Feedback()
-	rows     []rowData     // The actual row data
-	readTime time.Duration // How long the read operation took
+// chunklet represents a small piece of a chunk (up to 1000 rows)
+type chunklet struct {
+	chunkID  int64         // ID of the parent chunk
+	chunk    *table.Chunk  // Original chunk for column info
+	rows     []rowData     // Up to 1000 rows of data
+	readTime time.Duration // How long the read operation took (for the entire chunk)
+}
+
+// chunkletCompletion represents a completed chunklet
+type chunkletCompletion struct {
+	chunkID      int64 // ID of the parent chunk
+	affectedRows int64 // Rows affected by this chunklet
+	err          error // Error if any
+}
+
+// pendingChunk tracks chunks that are being processed via chunklets
+type pendingChunk struct {
+	chunk              *table.Chunk
+	readTime           time.Duration
+	totalChunklets     int   // Total number of chunklets for this chunk
+	completedChunklets int   // Number of completed chunklets
+	totalAffectedRows  int64 // Sum of affected rows from all chunklets
 }
 
 // Assert that buffered implements the Copier interface
@@ -112,93 +142,6 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([]row
 	return rowDataList, nil
 }
 
-// writeBufferedRows writes the buffered rows to the destination table using INSERT statements
-func (c *buffered) writeBufferedRows(ctx context.Context, chunk *table.Chunk, rows []rowData) (int64, error) {
-	if len(rows) == 0 {
-		return 0, nil
-	}
-
-	// Get the column list for the INSERT statement
-	columnList := utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable)
-
-	// Split rows into batches for parallel writing
-	batchSize := 1000 // Configurable batch size
-	var totalAffectedRows int64
-
-	// Use higher parallelism for writes (5-10x more threads)
-	writeWorkers := c.concurrency * 8 // 8x more write workers than read workers
-	if writeWorkers > 50 {
-		writeWorkers = 50 // Cap at reasonable limit
-	}
-
-	g, errGrpCtx := errgroup.WithContext(ctx)
-	g.SetLimit(writeWorkers)
-
-	var affectedRowsMutex sync.Mutex
-
-	// Process rows in batches
-	for i := 0; i < len(rows); i += batchSize {
-		end := i + batchSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-
-		batch := rows[i:end]
-		g.Go(func() error {
-			affectedRows, err := c.writeBatch(errGrpCtx, chunk, columnList, batch)
-			if err != nil {
-				return err
-			}
-
-			affectedRowsMutex.Lock()
-			totalAffectedRows += affectedRows
-			affectedRowsMutex.Unlock()
-
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		return 0, err
-	}
-
-	return totalAffectedRows, nil
-}
-
-// writeBatch writes a batch of rows using INSERT IGNORE with VALUES
-func (c *buffered) writeBatch(ctx context.Context, chunk *table.Chunk, columnList string, batch []rowData) (int64, error) {
-	if len(batch) == 0 {
-		return 0, nil
-	}
-
-	// Build VALUES clauses
-	var valuesClauses []string
-	for _, row := range batch {
-		var values []string
-		for _, value := range row.values {
-			values = append(values, c.formatSQLValue(value))
-		}
-		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
-	}
-
-	// Build the INSERT statement
-	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunk.NewTable.QuotedName,
-		columnList,
-		strings.Join(valuesClauses, ", "),
-	)
-
-	c.logger.Debugf("writing batch of %d rows to %s", len(batch), chunk.NewTable.QuotedName)
-
-	// Execute the batch insert
-	result, err := dbconn.RetryableTransaction(ctx, c.db, c.finalChecksum, c.dbConfig, query)
-	if err != nil {
-		return 0, fmt.Errorf("failed to execute batch insert: %w", err)
-	}
-
-	return result, nil
-}
-
 func (c *buffered) isHealthy(ctx context.Context) bool {
 	c.Lock()
 	defer c.Unlock()
@@ -218,61 +161,74 @@ func (c *buffered) Run(ctx context.Context) error {
 	c.startTime = time.Now()
 	go c.estimateRowsPerSecondLoop(ctx) // estimate rows while copying
 
-	// Initialize producer-consumer pipeline
-	c.bufferSize = c.concurrency // Buffer up to threads chunks between read and write pools
-	c.sharedBuffer = make(chan bufferedChunk, c.bufferSize)
+	// Initialize chunklet-based pipeline
+	c.bufferSize = defaultBufferSize // Large buffer for chunklets
+	c.sharedBuffer = make(chan chunklet, c.bufferSize)
+	c.chunkletCompletions = make(chan chunkletCompletion, c.bufferSize)
+	c.pendingChunks = make(map[int64]*pendingChunk)
+
+	// Start buffer monitoring goroutine
+	go c.monitorBuffers(ctx)
 
 	g, errGrpCtx := errgroup.WithContext(ctx)
-	g2, errGrpCtx2 := errgroup.WithContext(ctx)
 
-	// Start read workers (producers)
-	g.SetLimit(c.concurrency)
-	for range c.concurrency {
+	// Start read workers (producers that break chunks into chunklets)
+	c.logger.Infof("starting %d read workers", c.concurrency)
+	for i := 0; i < c.concurrency; i++ {
 		g.Go(func() error {
 			return c.readWorker(errGrpCtx)
 		})
 	}
 
-	// Start single write coordinator that fans out to parallel inserts
-	// We want it to be a go-routine too.
-	g2.Go(func() error {
-		return c.writeCoordinator(errGrpCtx2)
+	// Start write workers that process chunklets
+	writeWorkers := 40 // More write workers than read workers
+	c.logger.Infof("starting %d write workers", writeWorkers)
+	for i := 0; i < writeWorkers; i++ {
+		g.Go(func() error {
+			return c.writeWorker(errGrpCtx)
+		})
+	}
+
+	// Start feedback coordinator that tracks chunklet completions
+	g.Go(func() error {
+		return c.feedbackCoordinator(errGrpCtx)
 	})
 
-	// We wait for reads to finish, then we wait for writes to finish.
 	err := g.Wait()
 	if err != nil {
 		return err
 	}
-	return g2.Wait()
+
+	return nil
 }
 
-// readWorker is a producer that reads chunks and puts them in the shared buffer
+// readWorker reads chunks and breaks them into chunklets of 1000 rows
 func (c *buffered) readWorker(ctx context.Context) error {
-	// Get a unique worker ID
 	workerID := atomic.AddInt32(&c.workerIDCounter, 1)
-	c.logger.Infof("readWorker %d started", workerID)
 
 	defer func() {
-		// Atomically increment the finished readers counter
 		finishedCount := atomic.AddInt32(&c.readersFinished, 1)
-		c.logger.Infof("readWorker %d finished, total finished: %d/%d", workerID, finishedCount, c.concurrency)
+		c.logger.Debugf("readWorker %d finished, total finished: %d/%d", workerID, finishedCount, c.concurrency)
 		if finishedCount == int32(c.concurrency) {
-			// Last reader to finish closes the channel
-			c.logger.Infof("readWorker %d: closing shared buffer channel", workerID)
+			c.logger.Debugf("readWorker %d: closing shared buffer channel", workerID)
 			close(c.sharedBuffer)
+			// Also close completions channel after a delay to let final completions flow through
+			go func() {
+				time.Sleep(5 * time.Second) // Give time for final chunklets to complete
+				c.logger.Debugf("readWorker %d: closing completions channel after delay", workerID)
+				close(c.chunkletCompletions)
+			}()
 		}
 	}()
 
 	for !c.chunker.IsRead() && c.isHealthy(ctx) {
 		c.throttler.BlockWait()
 
-		c.logger.Debugf("readWorker %d: getting next chunk", workerID)
 		chunk, err := c.chunker.Next()
 		if err != nil {
 			if err == table.ErrTableIsRead {
 				c.logger.Infof("readWorker %d: table is read, exiting", workerID)
-				return nil // Normal completion
+				return nil
 			}
 			c.setInvalid(true)
 			return err
@@ -286,56 +242,209 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		}
 		readTime := time.Since(readStart)
 
-		bufferedChunk := bufferedChunk{
-			chunk:    chunk,
-			rows:     rows,
-			readTime: readTime,
+		chunkID := atomic.AddInt64(&c.nextChunkID, 1)
+
+		// Handle empty chunks immediately - no need to go through chunklet pipeline
+		if len(rows) == 0 {
+			c.logger.Infof("readWorker %d: chunk %d (%s) is empty, sending immediate feedback",
+				workerID, chunkID, chunk.String())
+			
+			// Send feedback immediately for empty chunks
+			c.chunker.Feedback(chunk, readTime, 0)
+			
+			// Send metrics for empty chunk
+			err := c.sendMetrics(ctx, readTime, chunk.ChunkSize, 0)
+			if err != nil {
+				c.logger.Errorf("error sending metrics for empty chunk: %v", err)
+			}
+			
+			continue // Skip to next chunk
 		}
 
-		// Send to shared buffer (blocks if buffer is full)
-		c.logger.Debugf("readWorker %d: sending chunk %s to buffer", workerID, chunk.String())
+		// Break chunk into chunklets of 1000 rows each
+		totalChunklets := (len(rows) + chunkletSize - 1) / chunkletSize // Ceiling division
+
+		if chunkID%20 == 0 {
+			c.logger.Infof("readWorker %d: breaking chunk %d (%s) with %d rows into %d chunklets",
+				workerID, chunkID, chunk.String(), len(rows), totalChunklets)
+		}
+		// Register the chunk with its expected chunklet count
+		c.pendingMutex.Lock()
+		c.pendingChunks[chunkID] = &pendingChunk{
+			chunk:              chunk,
+			readTime:           readTime,
+			totalChunklets:     totalChunklets,
+			completedChunklets: 0,
+			totalAffectedRows:  0,
+		}
+		c.pendingMutex.Unlock()
+
+		// Send chunklets to shared buffer
+		for i := 0; i < len(rows); i += chunkletSize {
+			end := i + chunkletSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+
+			chunkletRows := rows[i:end]
+			chunkletData := chunklet{
+				chunkID:  chunkID,
+				chunk:    chunk,
+				rows:     chunkletRows,
+				readTime: readTime,
+			}
+
+			c.logger.Debugf("readWorker %d: sending chunklet %d/%d for chunk %d with %d rows",
+				workerID, (i/chunkletSize)+1, totalChunklets, chunkID, len(chunkletRows))
+
+			select {
+			case c.sharedBuffer <- chunkletData:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
+	c.logger.Infof("readWorker %d: exiting main loop", workerID)
+	return nil
+}
+
+// writeWorker processes chunklets from the shared buffer
+func (c *buffered) writeWorker(ctx context.Context) error {
+	workerID := atomic.AddInt32(&c.workerIDCounter, 1)
+
+	for {
 		select {
-		case c.sharedBuffer <- bufferedChunk:
-			c.logger.Debugf("readWorker %d: buffered chunk %s with %d rows", workerID, chunk.String(), len(rows))
+		case chunkletData, ok := <-c.sharedBuffer:
+			if !ok {
+				c.logger.Debugf("writeWorker %d: channel closed, exiting", workerID)
+				return nil
+			}
+
+			c.logger.Debugf("writeWorker %d: processing chunklet for chunk %d with %d rows",
+				workerID, chunkletData.chunkID, len(chunkletData.rows))
+
+			// Write chunklet directly (no need for writeBufferedRows since it's already a small batch)
+			affectedRows, err := c.writeChunklet(ctx, chunkletData)
+
+			// Send completion to feedback coordinator
+			completion := chunkletCompletion{
+				chunkID:      chunkletData.chunkID,
+				affectedRows: affectedRows,
+				err:          err,
+			}
+
+			c.logger.Debugf("writeWorker %d: attempting to send completion for chunklet of chunk %d (affected: %d)",
+				workerID, chunkletData.chunkID, affectedRows)
+
+			select {
+			case c.chunkletCompletions <- completion:
+				c.logger.Debugf("writeWorker %d: successfully sent completion for chunklet of chunk %d",
+					workerID, chunkletData.chunkID)
+			case <-ctx.Done():
+				c.logger.Warnf("writeWorker %d: context cancelled while sending completion for chunk %d",
+					workerID, chunkletData.chunkID)
+				return ctx.Err()
+			}
+
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-
-	c.logger.Infof("readWorker %d: exiting main loop (IsRead: %v, isHealthy: %v)", workerID, c.chunker.IsRead(), c.isHealthy(ctx))
-	return nil
 }
 
-// writeCoordinator is a consumer that processes chunks from the shared buffer
-func (c *buffered) writeCoordinator(ctx context.Context) error {
+// writeChunklet writes a single chunklet (up to 1000 rows)
+func (c *buffered) writeChunklet(ctx context.Context, chunkletData chunklet) (int64, error) {
+	if len(chunkletData.rows) == 0 {
+		return 0, nil
+	}
+
+	// Get the column list for the INSERT statement
+	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
+
+	// Build VALUES clauses for all rows in the chunklet
+	var valuesClauses []string
+	for _, row := range chunkletData.rows {
+		var values []string
+		for _, value := range row.values {
+			values = append(values, c.formatSQLValue(value))
+		}
+		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
+	}
+
+	// Build the INSERT statement
+	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
+		chunkletData.chunk.NewTable.QuotedName,
+		columnList,
+		strings.Join(valuesClauses, ", "),
+	)
+
+	c.logger.Debugf("writing chunklet of %d rows to %s", len(chunkletData.rows), chunkletData.chunk.NewTable.QuotedName)
+
+	// Execute the batch insert
+	result, err := dbconn.RetryableTransaction(ctx, c.db, c.finalChecksum, c.dbConfig, query)
+	if err != nil {
+		return 0, fmt.Errorf("failed to execute chunklet insert: %w", err)
+	}
+
+	return result, nil
+}
+
+// feedbackCoordinator tracks chunklet completions and sends feedback when all chunklets for a chunk are done
+func (c *buffered) feedbackCoordinator(ctx context.Context) error {
+	c.logger.Infof("feedbackCoordinator started")
+
 	for {
-		c.logger.Debugf("writeCoordinator: waiting for next chunk from buffer (buffer size: %d)", c.bufferSize)
 		select {
-		case bufferedChunk, ok := <-c.sharedBuffer:
+		case completion, ok := <-c.chunkletCompletions:
 			if !ok {
-				// Channel closed, no more chunks to process
-				c.logger.Infof("writeCoordinator: channel closed, exiting")
+				c.logger.Debugf("feedbackCoordinator: chunklet completions channel closed, exiting")
 				return nil
 			}
-			// Process the chunk
-			affectedRows, err := c.writeBufferedRows(ctx, bufferedChunk.chunk, bufferedChunk.rows)
-			if err != nil {
+
+			if completion.err != nil {
 				c.setInvalid(true)
-				return fmt.Errorf("failed to write buffered rows: %w", err)
+				return fmt.Errorf("chunklet for chunk %d failed: %w", completion.chunkID, completion.err)
 			}
 
-			// Send feedback with read time only (as requested)
-			c.chunker.Feedback(bufferedChunk.chunk, bufferedChunk.readTime, uint64(affectedRows))
+			c.logger.Debugf("feedbackCoordinator: received chunklet completion for chunk %d", completion.chunkID)
 
-			// Send metrics with read time
-			err = c.sendMetrics(ctx, bufferedChunk.readTime, bufferedChunk.chunk.ChunkSize, uint64(affectedRows))
-			if err != nil {
-				// we don't want to stop processing if metrics sending fails, log and continue
-				c.logger.Errorf("error sending metrics from copier: %v", err)
+			// Update chunk completion status
+			c.pendingMutex.Lock()
+			pending, exists := c.pendingChunks[completion.chunkID]
+			if !exists {
+				c.pendingMutex.Unlock()
+				c.logger.Errorf("feedbackCoordinator: received completion for unknown chunk %d", completion.chunkID)
+				continue
 			}
 
-			c.logger.Debugf("completed chunk %s with %d affected rows (read time: %v)",
-				bufferedChunk.chunk.String(), affectedRows, bufferedChunk.readTime)
+			// Update completion count and affected rows
+			pending.completedChunklets++
+			pending.totalAffectedRows += completion.affectedRows
+
+			c.logger.Debugf("feedbackCoordinator: chunk %d now has %d/%d chunklets completed",
+				completion.chunkID, pending.completedChunklets, pending.totalChunklets)
+
+			// Check if all chunklets for this chunk are complete
+			if pending.completedChunklets == pending.totalChunklets {
+				c.logger.Debugf("feedbackCoordinator: all chunklets complete for chunk %d, sending feedback", completion.chunkID)
+
+				// Send feedback for the complete chunk
+				c.chunker.Feedback(pending.chunk, pending.readTime, uint64(pending.totalAffectedRows))
+
+				// Send metrics
+				err := c.sendMetrics(ctx, pending.readTime, pending.chunk.ChunkSize, uint64(pending.totalAffectedRows))
+				if err != nil {
+					c.logger.Errorf("error sending metrics from copier: %v", err)
+				}
+
+				c.logger.Debugf("feedbackCoordinator: completed feedback for chunk %d (%s) with %d total affected rows",
+					completion.chunkID, pending.chunk.String(), pending.totalAffectedRows)
+
+				// Remove completed chunk from pending map
+				delete(c.pendingChunks, completion.chunkID)
+			}
+			c.pendingMutex.Unlock()
 
 		case <-ctx.Done():
 			return ctx.Err()
@@ -421,6 +530,53 @@ func (c *buffered) estimateRowsPerSecondLoop(ctx context.Context) {
 			rowsPerSecond := uint64(rowsPerInterval / intervalsDivisor)
 			atomic.StoreUint64(&c.rowsPerSecond, rowsPerSecond)
 			prevRowsCount = newRowsCount
+		}
+	}
+}
+
+// monitorBuffers prints buffer status every 10 seconds to help diagnose producer/consumer issues
+func (c *buffered) monitorBuffers(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !c.isHealthy(ctx) {
+				return
+			}
+
+			// Get buffer lengths
+			sharedBufferLen := len(c.sharedBuffer)
+
+			// Get pending chunks count and details
+			c.pendingMutex.Lock()
+			pendingChunksCount := len(c.pendingChunks)
+
+			// Find the oldest and newest chunk IDs
+			var oldestChunkID, newestChunkID int64 = -1, -1
+			var partiallyCompleted int
+			for chunkID, pending := range c.pendingChunks {
+				if oldestChunkID == -1 || chunkID < oldestChunkID {
+					oldestChunkID = chunkID
+				}
+				if newestChunkID == -1 || chunkID > newestChunkID {
+					newestChunkID = chunkID
+				}
+				if pending.completedChunklets > 0 && pending.completedChunklets < pending.totalChunklets {
+					partiallyCompleted++
+				}
+			}
+			c.pendingMutex.Unlock()
+
+			// Get the current chunk ID that's being processed
+			currentChunkID := atomic.LoadInt64(&c.nextChunkID)
+			
+			c.logger.Infof("BUFFER MONITOR: sharedBuffer=%d/%d, pendingChunks=%d (oldest=%d, newest=%d, current=%d, partial=%d)", 
+				sharedBufferLen, c.bufferSize, 
+				pendingChunksCount, oldestChunkID, newestChunkID, currentChunkID, partiallyCompleted)
 		}
 	}
 }
