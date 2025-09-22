@@ -147,21 +147,20 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAbo
 
 	// Decide which subscription type to use. We always prefer deltaMap
 	// But will fall back to deltaQueue if the PK is not memory comparable.
-	if err := currentTable.PrimaryKeyIsMemoryComparable(); err == nil { // note: checking err is nil!
-		c.subscriptions[subKey] = &deltaMap{
+	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
+		c.subscriptions[subKey] = &deltaQueue{
 			table:                  currentTable,
 			newTable:               newTable,
-			changes:                make(map[string]bool),
+			changes:                make([]queuedChange, 0),
 			c:                      c,
 			keyAboveCopierCallback: keyAboveCopierCallback,
 		}
 		return nil
 	}
-	// Else, fallback to queue
-	c.subscriptions[subKey] = &deltaQueue{
+	c.subscriptions[subKey] = &deltaMap{
 		table:                  currentTable,
 		newTable:               newTable,
-		changes:                make([]queuedChange, 0),
+		changes:                make(map[string]bool),
 		c:                      c,
 		keyAboveCopierCallback: keyAboveCopierCallback,
 	}
