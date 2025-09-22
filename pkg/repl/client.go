@@ -89,32 +89,36 @@ type Client struct {
 	cancelFunc func()
 	isClosed   atomic.Bool
 	logger     loggers.Advanced
+
+	useExperimentalBufferedMap bool // for testing new subscription type
 }
 
 // NewClient creates a new Client instance.
 func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
 	return &Client{
-		db:              db,
-		dbConfig:        dbconn.NewDBConfig(),
-		host:            host,
-		username:        username,
-		password:        password,
-		logger:          config.Logger,
-		targetBatchTime: config.TargetBatchTime,
-		targetBatchSize: DefaultBatchSize, // initial starting value.
-		concurrency:     config.Concurrency,
-		subscriptions:   make(map[string]Subscription),
-		onDDL:           config.OnDDL,
-		serverID:        config.ServerID,
+		db:                         db,
+		dbConfig:                   dbconn.NewDBConfig(),
+		host:                       host,
+		username:                   username,
+		password:                   password,
+		logger:                     config.Logger,
+		targetBatchTime:            config.TargetBatchTime,
+		targetBatchSize:            DefaultBatchSize, // initial starting value.
+		concurrency:                config.Concurrency,
+		subscriptions:              make(map[string]Subscription),
+		onDDL:                      config.OnDDL,
+		serverID:                   config.ServerID,
+		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
 	}
 }
 
 type ClientConfig struct {
-	TargetBatchTime time.Duration
-	Concurrency     int
-	Logger          loggers.Advanced
-	OnDDL           chan string
-	ServerID        uint32
+	TargetBatchTime            time.Duration
+	Concurrency                int
+	Logger                     loggers.Advanced
+	OnDDL                      chan string
+	ServerID                   uint32
+	UseExperimentalBufferedMap bool
 }
 
 // NewServerID randomizes the server ID to avoid conflicts with other binlog readers.
@@ -148,12 +152,23 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAbo
 	// Decide which subscription type to use. We always prefer deltaMap
 	// But will fall back to deltaQueue if the PK is not memory comparable.
 	if err := currentTable.PrimaryKeyIsMemoryComparable(); err == nil { // note: checking err is nil!
-		c.subscriptions[subKey] = &deltaMap{
-			table:                  currentTable,
-			newTable:               newTable,
-			changes:                make(map[string]bool),
-			c:                      c,
-			keyAboveCopierCallback: keyAboveCopierCallback,
+		if c.useExperimentalBufferedMap {
+			c.logger.Infof("Using experimental buffered map for table %s.%s", currentTable.SchemaName, currentTable.TableName)
+			c.subscriptions[subKey] = &bufferedMap{
+				table:                  currentTable,
+				newTable:               newTable,
+				changes:                make(map[string]logicalRow),
+				c:                      c,
+				keyAboveCopierCallback: keyAboveCopierCallback,
+			}
+		} else {
+			c.subscriptions[subKey] = &deltaMap{
+				table:                  currentTable,
+				newTable:               newTable,
+				changes:                make(map[string]bool),
+				c:                      c,
+				keyAboveCopierCallback: keyAboveCopierCallback,
+			}
 		}
 		return nil
 	}
@@ -445,11 +460,11 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 
 			if isPKUpdate {
 				// This is a primary key update - track both delete and insert
-				sub.KeyHasChanged(beforeKey, true) // delete old key
-				sub.KeyHasChanged(afterKey, false) // insert new key
+				sub.HasChanged(beforeKey, nil, true)      // delete old key
+				sub.HasChanged(afterKey, afterRow, false) // insert new key
 			} else {
 				// Same PK, just a regular update
-				sub.KeyHasChanged(beforeKey, false)
+				sub.HasChanged(beforeKey, afterRow, false)
 			}
 		}
 	} else {
@@ -465,9 +480,9 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			}
 			switch eventType {
 			case eventTypeInsert:
-				sub.KeyHasChanged(key, false)
+				sub.HasChanged(key, row, false)
 			case eventTypeDelete:
-				sub.KeyHasChanged(key, true)
+				sub.HasChanged(key, nil, true)
 			default:
 				c.logger.Errorf("unknown event type: %v", ev.Header.EventType)
 			}
