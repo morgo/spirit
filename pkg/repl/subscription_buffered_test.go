@@ -36,7 +36,7 @@ func TestBufferedMap(t *testing.T) {
 	assert.NoError(t, client.BlockWait(t.Context()))
 
 	// It should show up in the subscription.
-	assert.Equal(t, client.GetDeltaLen(), 1)
+	assert.Equal(t, 1, client.GetDeltaLen())
 
 	// Inspect the subscription directly.
 	sub, ok := client.subscriptions["test.subscription_test"].(*bufferedMap)
@@ -55,7 +55,7 @@ func TestBufferedMap(t *testing.T) {
 	assert.NoError(t, client.BlockWait(t.Context()))
 
 	assert.True(t, sub.changes["1"].isDeleted)
-	assert.Equal(t, []any([]any(nil)), sub.changes["1"].rowImage)
+	assert.Equal(t, []any(nil), sub.changes["1"].rowImage)
 
 	// Now insert 2 more rows:
 	testutils.RunSQL(t, "INSERT INTO subscription_test (id, name) VALUES (2, 'test2'), (3, 'test3')")

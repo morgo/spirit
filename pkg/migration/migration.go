@@ -40,6 +40,7 @@ type Migration struct {
 	// Hidden options for now.
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
 	Multi             bool `name:"multi" help:"Use multi chunker (for testing)" optional:"" default:"false" hidden:""`
+	Buffered          bool `name:"buffered" help:"Use the experimental buffered copier/repl applier" optional:"" default:"false" hidden:""`
 }
 
 func (m *Migration) Run() error {
