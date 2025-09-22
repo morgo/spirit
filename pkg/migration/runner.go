@@ -11,10 +11,10 @@ import (
 
 	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
+	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/repl"
-	"github.com/block/spirit/pkg/row"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -46,7 +46,7 @@ type Runner struct {
 
 	currentState migrationState // must use atomic to get/set
 	replClient   *repl.Client   // feed contains all binlog subscription activity.
-	copier       *row.Copier
+	copier       copier.Copier
 	throttler    throttler.Throttler
 	checker      *checksum.Checker
 	checkerLock  sync.Mutex
@@ -304,7 +304,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		r.usedInstantDDL,
 		r.usedInplaceDDL,
 		copiedChunks,
-		r.copier.ExecTime.Round(time.Second),
+		time.Since(r.copier.StartTime()).Round(time.Second),
 		checksumTime.Round(time.Second),
 		time.Since(r.startTime).Round(time.Second),
 		r.db.Stats().InUse,
@@ -422,7 +422,7 @@ func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
 	var err error
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 	// Create copier with the prepared chunker
-	r.copier, err = row.NewCopier(r.db, r.copyChunker, &row.CopierConfig{
+	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: r.migration.TargetChunkTime,
 		FinalChecksum:   r.migration.Checksum,
@@ -1037,7 +1037,7 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 					time.Since(r.startTime).Round(time.Second),
 					time.Since(r.copier.StartTime()).Round(time.Second),
 					r.copier.GetETA(),
-					r.copier.Throttler.IsThrottled(),
+					r.copier.GetThrottler().IsThrottled(),
 					r.db.Stats().InUse,
 				)
 			case stateWaitingOnSentinelTable:

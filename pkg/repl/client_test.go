@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/row"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	mysql2 "github.com/go-sql-driver/mysql"
@@ -97,7 +97,7 @@ func TestReplClientComplex(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	copier, err := row.NewCopier(db, chunker, row.NewCopierDefaultConfig())
+	copier, err := copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
 	assert.NoError(t, client.AddSubscription(t1, t2, copier.KeyAboveHighWatermark))
@@ -298,7 +298,7 @@ func TestReplClientQueue(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	copier, err := row.NewCopier(db, chunker, row.NewCopierDefaultConfig())
+	copier, err := copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
 	assert.NoError(t, client.AddSubscription(t1, t2, copier.KeyAboveHighWatermark))
@@ -669,25 +669,24 @@ func TestAllChangesFlushed(t *testing.T) {
 		concurrency:     2,
 		targetBatchSize: 1000,
 		dbConfig:        dbconn.NewDBConfig(),
-		subscriptions:   make(map[string]*subscription),
+		subscriptions:   make(map[string]Subscription),
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with no changes")
 
 	// Test 2: Add a subscription and verify initial state
-	sub := &subscription{
-		c:          client,
-		table:      srcTable,
-		newTable:   dstTable,
-		deltaMap:   make(map[string]bool),
-		deltaQueue: nil,
+	sub := &deltaMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]bool),
 	}
 	client.subscriptions[EncodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
-	sub.keyHasChanged([]any{1}, false)
+	sub.KeyHasChanged([]any{1}, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with pending changes")
 
 	// Test 4: Test with buffered position ahead
@@ -696,20 +695,19 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with buffered position ahead")
 
 	// Test 5: Test with multiple subscriptions
-	sub2 := &subscription{
-		c:          client,
-		table:      srcTable,
-		newTable:   dstTable,
-		deltaMap:   make(map[string]bool),
-		deltaQueue: nil,
+	sub2 := &deltaMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]bool),
 	}
 	client.subscriptions["test2"] = sub2
-	sub2.keyHasChanged([]any{2}, false)
+	sub2.KeyHasChanged([]any{2}, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
 	// Test 6: Clear changes but keep positions different - should still be considered flushed
-	sub.deltaMap = make(map[string]bool)
-	sub2.deltaMap = make(map[string]bool)
+	sub.changes = make(map[string]bool)
+	sub2.changes = make(map[string]bool)
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed when no pending changes, even with positions different")
 
 	// Test 7: Align positions and verify still flushed
@@ -718,17 +716,15 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with aligned positions and no changes")
 
 	// Test 8: Test with queue-based subscription
-	subQueue := &subscription{
-		c:               client,
-		table:           srcTable,
-		newTable:        dstTable,
-		deltaMap:        nil,
-		deltaQueue:      make([]queuedChange, 0),
-		disableDeltaMap: true,
+	subQueue := &deltaQueue{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make([]queuedChange, 0),
 	}
 	client.subscriptions["test3"] = subQueue
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty queue")
 
-	subQueue.keyHasChanged([]any{3}, false)
+	subQueue.KeyHasChanged([]any{3}, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }

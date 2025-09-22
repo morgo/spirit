@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/check"
+	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/repl"
-	"github.com/block/spirit/pkg/row"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/throttler"
@@ -1418,7 +1418,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -1552,7 +1552,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -2267,7 +2267,7 @@ func TestE2ERogueValues(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
