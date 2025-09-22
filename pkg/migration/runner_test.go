@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/check"
+	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/repl"
-	"github.com/block/spirit/pkg/row"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/throttler"
@@ -878,7 +878,7 @@ func TestCheckpoint(t *testing.T) {
 	r.copyChunker, err = table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
 	require.NoError(t, err)
 	require.NoError(t, r.copyChunker.Open())
-	r.copier, err = row.NewCopier(r.db, r.copyChunker, row.NewCopierDefaultConfig())
+	r.copier, err = copier.NewCopier(r.db, r.copyChunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	assert.NoError(t, r.replClient.Run(t.Context()))
 
@@ -1020,7 +1020,7 @@ func TestCheckpointRestore(t *testing.T) {
 	assert.NoError(t, r.replClient.AddSubscription(r.changes[0].table, r.changes[0].newTable, nil))
 	chunker, err := table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
 	require.NoError(t, err)
-	r.copier, err = row.NewCopier(r.db, chunker, row.NewCopierDefaultConfig())
+	r.copier, err = copier.NewCopier(r.db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = r.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -1117,7 +1117,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	r.copyChunker, err = table.NewChunker(r.changes[0].table, r.changes[0].newTable, r.migration.TargetChunkTime, r.logger)
 	require.NoError(t, err)
 	require.NoError(t, r.copyChunker.Open())
-	r.copier, err = row.NewCopier(r.db, r.copyChunker, row.NewCopierDefaultConfig())
+	r.copier, err = copier.NewCopier(r.db, r.copyChunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = r.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -1285,7 +1285,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	m.copyChunker, err = table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	assert.NoError(t, err)
 	require.NoError(t, m.copyChunker.Open())
-	m.copier, err = row.NewCopier(m.db, m.copyChunker, row.NewCopierDefaultConfig())
+	m.copier, err = copier.NewCopier(m.db, m.copyChunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	err = m.replClient.Run(t.Context())
 	assert.NoError(t, err)
@@ -1485,7 +1485,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -1618,7 +1618,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -2332,7 +2332,7 @@ func TestE2ERogueValues(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
-	m.copier, err = row.NewCopier(m.db, chunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
@@ -2499,7 +2499,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	m.copyChunker, err = table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, m.copyChunker.Open())
-	m.copier, err = row.NewCopier(m.db, m.copyChunker, &row.CopierConfig{
+	m.copier, err = copier.NewCopier(m.db, m.copyChunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
 		FinalChecksum:   m.migration.Checksum,
