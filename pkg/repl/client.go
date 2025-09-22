@@ -151,32 +151,32 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAbo
 
 	// Decide which subscription type to use. We always prefer deltaMap
 	// But will fall back to deltaQueue if the PK is not memory comparable.
-	if err := currentTable.PrimaryKeyIsMemoryComparable(); err == nil { // note: checking err is nil!
-		if c.useExperimentalBufferedMap {
-			c.logger.Infof("Using experimental buffered map for table %s.%s", currentTable.SchemaName, currentTable.TableName)
-			c.subscriptions[subKey] = &bufferedMap{
-				table:                  currentTable,
-				newTable:               newTable,
-				changes:                make(map[string]logicalRow),
-				c:                      c,
-				keyAboveCopierCallback: keyAboveCopierCallback,
-			}
-		} else {
-			c.subscriptions[subKey] = &deltaMap{
-				table:                  currentTable,
-				newTable:               newTable,
-				changes:                make(map[string]bool),
-				c:                      c,
-				keyAboveCopierCallback: keyAboveCopierCallback,
-			}
+	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
+		c.subscriptions[subKey] = &deltaQueue{
+			table:                  currentTable,
+			newTable:               newTable,
+			changes:                make([]queuedChange, 0),
+			c:                      c,
+			keyAboveCopierCallback: keyAboveCopierCallback,
 		}
 		return nil
 	}
-	// Else, fallback to queue
-	c.subscriptions[subKey] = &deltaQueue{
+	if c.useExperimentalBufferedMap {
+		c.logger.Infof("Using experimental buffered map for table %s.%s", currentTable.SchemaName, currentTable.TableName)
+		c.subscriptions[subKey] = &bufferedMap{
+			table:                  currentTable,
+			newTable:               newTable,
+			changes:                make(map[string]logicalRow),
+			c:                      c,
+			keyAboveCopierCallback: keyAboveCopierCallback,
+		}
+		return nil
+	}
+	// Default case is delta map
+	c.subscriptions[subKey] = &deltaMap{
 		table:                  currentTable,
 		newTable:               newTable,
-		changes:                make([]queuedChange, 0),
+		changes:                make(map[string]bool),
 		c:                      c,
 		keyAboveCopierCallback: keyAboveCopierCallback,
 	}

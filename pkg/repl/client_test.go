@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/row"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	mysql2 "github.com/go-sql-driver/mysql"
@@ -97,7 +97,7 @@ func TestReplClientComplex(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	copier, err := row.NewCopier(db, chunker, row.NewCopierDefaultConfig())
+	copier, err := copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
 	assert.NoError(t, client.AddSubscription(t1, t2, copier.KeyAboveHighWatermark))
@@ -298,7 +298,7 @@ func TestReplClientQueue(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	copier, err := row.NewCopier(db, chunker, row.NewCopierDefaultConfig())
+	copier, err := copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
 	assert.NoError(t, client.AddSubscription(t1, t2, copier.KeyAboveHighWatermark))
