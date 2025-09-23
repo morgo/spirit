@@ -145,8 +145,8 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
 	if r.migration.Buffered {
 		// Buffered has many more connections because it fans out x8 more write threads
-		// Plus it has read threads
-		r.dbConfig.MaxOpenConnections = r.migration.Threads + (r.migration.Threads * 8) + 1
+		// Plus it has read threads. Set this high and figure it out later.
+		r.dbConfig.MaxOpenConnections = 100
 	}
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
