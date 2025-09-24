@@ -17,7 +17,7 @@ import (
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
-	"github.com/go-mysql-org/go-mysql/mysql"
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/siddontang/go-log/loggers"
 	"github.com/sirupsen/logrus"
 )
@@ -131,6 +131,9 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	r.dbConfig.LockWaitTimeout = int(r.migration.LockWaitTimeout.Seconds())
 	r.dbConfig.InterpolateParams = r.migration.InterpolateParams
 	r.dbConfig.ForceKill = r.migration.ForceKill
+	// Map TLS configuration from migration to dbConfig
+	r.dbConfig.TLSMode = r.migration.TLSMode
+	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
 	// The copier and checker will use Threads to limit N tasks concurrently,
 	// but we also set it at the DB pool level with +1. Because the copier and
 	// the replication applier use the same pool, it allows for some natural throttling
@@ -166,7 +169,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		// We release the lock when this function finishes executing.
 		// We need to call this after r.table is ready - otherwise we'd move this to
 		// the start of the execution.
-		metadataLock, err := dbconn.NewMetadataLock(ctx, r.dsn(), r.changes[0].table, r.logger)
+		metadataLock, err := dbconn.NewMetadataLock(ctx, r.dsn(), r.changes[0].table, r.dbConfig, r.logger)
 		if err != nil {
 			return err
 		}
@@ -395,6 +398,8 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			Host:                 r.migration.Host,
 			Username:             r.migration.Username,
 			Password:             r.migration.Password,
+			TLSMode:              r.migration.TLSMode,
+			TLSCertificatePath:   r.migration.TLSCertificatePath,
 			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
 		}, r.logger, scope); err != nil {
 			return err
@@ -509,7 +514,16 @@ func (r *Runner) setupReplicationThrottler() error {
 	}
 
 	var err error
-	r.replica, err = dbconn.New(r.migration.ReplicaDSN, r.dbConfig)
+	// Create a separate DB config for replica connection without TLS overrides
+	// The replica DSN should contain its own TLS configuration
+	replicaDBConfig := dbconn.NewDBConfig()
+	replicaDBConfig.LockWaitTimeout = r.dbConfig.LockWaitTimeout
+	replicaDBConfig.InterpolateParams = r.dbConfig.InterpolateParams
+	replicaDBConfig.ForceKill = r.dbConfig.ForceKill
+	replicaDBConfig.MaxOpenConnections = r.dbConfig.MaxOpenConnections
+	// Note: Deliberately NOT copying TLS settings (TLSMode, TLSCertificatePath)
+	// Replica TLS configuration will be handled in a separate PR
+	r.replica, err = dbconn.New(r.migration.ReplicaDSN, replicaDBConfig)
 	if err != nil {
 		return err
 	}
@@ -795,7 +809,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	r.replClient.SetFlushedPos(mysql.Position{
+	r.replClient.SetFlushedPos(gomysql.Position{
 		Name: binlogName,
 		Pos:  uint32(binlogPos),
 	})
