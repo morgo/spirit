@@ -1497,6 +1497,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
+	m.copyChunker = chunker
 	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
@@ -1632,6 +1633,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
+	m.copyChunker = chunker
 	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
@@ -2347,6 +2349,7 @@ func TestE2ERogueValues(t *testing.T) {
 	})
 	chunker, err := table.NewChunker(m.changes[0].table, m.changes[0].newTable, m.migration.TargetChunkTime, m.logger)
 	require.NoError(t, err)
+	m.copyChunker = chunker
 	require.NoError(t, chunker.Open())
 	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
