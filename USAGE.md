@@ -1,5 +1,36 @@
 # How to use Spirit
 
+## Table of Contents
+
+- [How to use Spirit](#how-to-use-spirit)
+  - [Table of Contents](#table-of-contents)
+  - [Getting Started](#getting-started)
+  - [Configuration](#configuration)
+    - [alter](#alter)
+    - [checksum](#checksum)
+    - [database](#database)
+    - [defer-cutover](#defer-cutover)
+    - [force-inplace](#force-inplace)
+    - [force-kill](#force-kill)
+    - [host](#host)
+    - [lock-wait-timeout](#lock-wait-timeout)
+    - [password](#password)
+    - [replica-dsn](#replica-dsn)
+    - [replica-max-lag](#replica-max-lag)
+    - [statement](#statement)
+    - [strict](#strict)
+    - [table](#table)
+    - [target-chunk-time](#target-chunk-time)
+    - [threads](#threads)
+    - [username](#username)
+    - [tls](#tls)
+      - [PREFERRED](#preferred)
+      - [REQUIRED](#required)
+      - [VERIFY\_CA](#verify_ca)
+      - [VERIFY\_IDENTITY](#verify_identity)
+
+## Getting Started
+
 To create a binary:
 
 ```
@@ -224,7 +255,8 @@ Configuration Flags:
 **\* Optional but recommended**: These modes can use the embedded RDS certificate bundle as a fallback, but providing `--tls-ca` gives you full control over which Certificate Authorities are trusted.
 
 **Examples:**
-#### PREFERRED Mode - Default Behavior
+#### PREFERRED
+NOTE: This mode is the default behavior
 ```bash
 # Add a column with automatic TLS detection (default mode)
 spirit --tls-mode PREFERRED \
@@ -239,7 +271,8 @@ spirit --tls-mode PREFERRED \
 ```
 **Result**: Automatically uses TLS for RDS hosts with embedded certificates, optional for others.
 
-#### REQUIRED Mode - Force TLS Without Certificate Verification
+#### REQUIRED
+Force TLS Without Certificate Verification
 ```bash
 # Add a column requiring TLS but not verifying certificates
 spirit --tls-mode REQUIRED \
@@ -254,7 +287,8 @@ spirit --tls-mode REQUIRED \
 ```
 **Result**: TLS encryption required, but accepts self-signed or invalid certificates.
 
-#### VERIFY_CA Mode - Certificate Verification Without Hostname Check
+#### VERIFY_CA
+Certificate Verification Without Hostname Check
 ```bash
 # Add a column with CA verification using custom certificate
 spirit --tls-mode VERIFY_CA \
@@ -284,7 +318,8 @@ spirit --tls-mode VERIFY_CA \
 ```
 **Result**: Uses embedded RDS certificate bundle as fallback for certificate verification.
 
-#### VERIFY_IDENTITY Mode - Full Certificate and Hostname Verification
+#### VERIFY_IDENTITY
+Full Certificate and Hostname Verification
 ```bash
 # Add a column with maximum security verification
 spirit --tls-mode VERIFY_IDENTITY \
