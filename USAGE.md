@@ -28,6 +28,7 @@
       - [REQUIRED](#required)
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
+  - [Experimental Features](#experimental-features)
 
 ## Getting Started
 
@@ -348,3 +349,17 @@ spirit --tls-mode VERIFY_IDENTITY \
        --chunk-size 3000
 ```
 **Result**: Uses embedded RDS certificate with full verification for RDS hostname.
+
+## Experimental Features
+
+### enable-experimental-multi-table-support
+
+**Feature Description**
+
+This feature allows Spirit to apply multiple schema changes at once, and cut them over atomically. The intended use-case is for complicated scenarios where there are collation mismatches between tables. If you change the collation of one table, it could result in performance issues with joins. For satefy, you really need to change all collation settings at once, which has not historically been easy.
+
+**Current Status**
+
+This feature is not feature complete. See Issue [#388](https://github.com/block/spirit/issues/388) for details.
+
+The main issues are that multi-table migrations are not currently resumable, and there is a lack of a lock to prevent concurrent migrations. This feature also lacks sufficient testing.

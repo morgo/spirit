@@ -147,7 +147,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		return err
 	}
 
-	if !r.migration.Multi {
+	if !r.migration.EnableExperimentalMultiTableSupport {
 		// If it's not an alter table, that means it is a CREATE TABLE, DROP TABLE, or RENAME table.
 		// We should execute it immediately before acquiring TableInfo.
 		if !r.changes[0].stmt.IsAlterTable() {
@@ -191,6 +191,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		// We don't (yet) support a lot of features in multi-schema changes, and
 		// we never attempt instant/inplace DDL. So for now all we need to do
 		// is setup and call SetInfo on each of the tables.
+		r.logger.Warn("Enabling the experimental option: enable-experimental-multi-table-support")
 		for _, change := range r.changes {
 			change.table = table.NewTableInfo(r.db, change.stmt.Schema, change.stmt.Table)
 			if err := change.table.SetInfo(ctx); err != nil {
@@ -416,7 +417,7 @@ func (r *Runner) checkpointTableName() string {
 	// We also call the create functions for the sentinel
 	// and checkpoint tables.
 	cpName := fmt.Sprintf(check.NameFormatCheckpoint, r.changes[0].table.TableName)
-	if r.migration.Multi {
+	if r.migration.EnableExperimentalMultiTableSupport {
 		// In multi-mode we always use a centralized checkpoint table.
 		cpName = checkpointTableName
 	}
@@ -741,7 +742,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	newName := fmt.Sprintf(check.NameFormatNew, r.changes[0].table.TableName)
 	cpName := r.checkpointTableName()
 
-	if r.migration.Multi {
+	if r.migration.EnableExperimentalMultiTableSupport {
 		// TODO: Fix this.
 		return errors.New("resume-from-checkpoint is not yet supported in multi-statement migrations")
 	}
@@ -839,7 +840,7 @@ func (r *Runner) initCopierChunker() error {
 		}
 		chunkers = append(chunkers, chunker)
 	}
-	if !r.migration.Multi {
+	if !r.migration.EnableExperimentalMultiTableSupport {
 		r.copyChunker = chunkers[0]
 	} else {
 		r.copyChunker = table.NewMultiChunker(chunkers...)
@@ -867,7 +868,7 @@ func (r *Runner) initChecksumChunker() error {
 
 	// Handle the single table case first, it is the only one
 	// which can resume right now.
-	if !r.migration.Multi {
+	if !r.migration.EnableExperimentalMultiTableSupport {
 		r.checksumChunker = chunkers[0]
 		if r.checksumWatermark != "" {
 			return r.checksumChunker.OpenAtWatermark(r.checksumWatermark, r.changes[0].newTable.MaxValue(), 0)
@@ -1116,7 +1117,7 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 
 // Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped
 func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
-	if r.migration.Multi {
+	if r.migration.EnableExperimentalMultiTableSupport {
 		// For now we only support sentinels in non-atomic migrations
 		return nil
 	}
