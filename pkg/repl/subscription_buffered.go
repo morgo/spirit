@@ -149,7 +149,7 @@ func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
 				if !isPrimaryKey {
 					// Check if this column exists in both tables (intersected columns)
 					if s.columnExistsInBothTables(col) {
-						updateClauses = append(updateClauses, fmt.Sprintf("`%s` = NEW.`%s`", col, col))
+						updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
 					}
 				}
 			}
