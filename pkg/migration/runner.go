@@ -143,7 +143,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	// We could extend the +1 to +2, but instead we increase the pool size
 	// during the cutover procedure.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
-	if r.migration.Buffered {
+	if r.migration.EnableExperimentalBufferedCopy {
 		// Buffered has many more connections because it fans out x8 more write threads
 		// Plus it has read threads. Set this high and figure it out later.
 		r.dbConfig.MaxOpenConnections = 100
@@ -498,7 +498,7 @@ func (r *Runner) setup(ctx context.Context) error {
 			Logger:                        r.logger,
 			MetricsSink:                   r.metricsSink,
 			DBConfig:                      r.dbConfig,
-			UseExperimentalBufferedCopier: r.migration.Buffered,
+			UseExperimentalBufferedCopier: r.migration.EnableExperimentalBufferedCopy,
 		})
 		if err != nil {
 			return err
@@ -509,7 +509,7 @@ func (r *Runner) setup(ctx context.Context) error {
 			TargetBatchTime:            r.migration.TargetChunkTime,
 			OnDDL:                      r.ddlNotification,
 			ServerID:                   repl.NewServerID(),
-			UseExperimentalBufferedMap: r.migration.Buffered,
+			UseExperimentalBufferedMap: r.migration.EnableExperimentalBufferedCopy,
 		})
 
 		for _, change := range r.changes {
@@ -795,7 +795,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		Logger:                        r.logger,
 		MetricsSink:                   r.metricsSink,
 		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: r.migration.Buffered,
+		UseExperimentalBufferedCopier: r.migration.EnableExperimentalBufferedCopy,
 	})
 	if err != nil {
 		return err
@@ -809,7 +809,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		TargetBatchTime:            r.migration.TargetChunkTime,
 		OnDDL:                      r.ddlNotification,
 		ServerID:                   repl.NewServerID(),
-		UseExperimentalBufferedMap: r.migration.Buffered,
+		UseExperimentalBufferedMap: r.migration.EnableExperimentalBufferedCopy,
 	})
 	if err := r.replClient.AddSubscription(r.changes[0].table, r.changes[0].newTable, r.copier.KeyAboveHighWatermark); err != nil {
 		return err

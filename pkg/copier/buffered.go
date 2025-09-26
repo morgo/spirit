@@ -26,6 +26,17 @@ const (
 	defaultBufferSize = 128  // Size of the shared buffer channel for chunklets
 )
 
+// The buffered copier implements a producer/consumer pattern
+// where multiple reader goroutines read chunks from the source table,
+// break them into chunklets of 1000 rows, and send them to a shared buffer channel.
+// It closely matches the DBLog algorithm:
+// https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b
+//
+// The main difference being that we currently only support a High watermark,
+// and have not yet implemented support for Low watermark. This means that it can
+// technically cause consistency issues that will be caught by the checksum.
+// We will fix this before the feature is considered stable.
+
 type buffered struct {
 	sync.Mutex
 	db               *sql.DB
@@ -42,12 +53,10 @@ type buffered struct {
 	copierEtaHistory *copierEtaHistory
 
 	// Aurora algorithm specific fields - Producer/Consumer pattern
-	sharedBuffer      chan chunklet // Channel for buffering chunklets between read and write pools
-	bufferSize        int           // Size of the shared buffer (1024 for chunklets)
-	readersFinished   int32         // Atomic counter for finished readers
-	chunksFinished    int32         // Atomic counter for chunks finished
-	chunkletsFinished int32         // Atomic counter for chunklets finished
-	workerIDCounter   int32         // Atomic counter for assigning worker IDs
+	sharedBuffer    chan chunklet // Channel for buffering chunklets between read and write pools
+	bufferSize      int           // Size of the shared buffer (1024 for chunklets)
+	readersFinished int32         // Atomic counter for finished readers
+	workerIDCounter int32         // Atomic counter for assigning worker IDs
 
 	// Chunklet-based processing
 	chunkletCompletions chan chunkletCompletion // Channel for completed chunklets
@@ -174,7 +183,7 @@ func (c *buffered) Run(ctx context.Context) error {
 
 	// Start read workers (producers that break chunks into chunklets)
 	c.logger.Infof("starting %d read workers", c.concurrency)
-	for i := 0; i < c.concurrency; i++ {
+	for range c.concurrency {
 		g.Go(func() error {
 			return c.readWorker(errGrpCtx)
 		})
@@ -183,7 +192,7 @@ func (c *buffered) Run(ctx context.Context) error {
 	// Start write workers that process chunklets
 	writeWorkers := 40 // More write workers than read workers
 	c.logger.Infof("starting %d write workers", writeWorkers)
-	for i := 0; i < writeWorkers; i++ {
+	for range writeWorkers {
 		g.Go(func() error {
 			return c.writeWorker(errGrpCtx)
 		})
@@ -248,16 +257,16 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		if len(rows) == 0 {
 			c.logger.Infof("readWorker %d: chunk %d (%s) is empty, sending immediate feedback",
 				workerID, chunkID, chunk.String())
-			
+
 			// Send feedback immediately for empty chunks
 			c.chunker.Feedback(chunk, readTime, 0)
-			
+
 			// Send metrics for empty chunk
 			err := c.sendMetrics(ctx, readTime, chunk.ChunkSize, 0)
 			if err != nil {
 				c.logger.Errorf("error sending metrics for empty chunk: %v", err)
 			}
-			
+
 			continue // Skip to next chunk
 		}
 
@@ -573,9 +582,9 @@ func (c *buffered) monitorBuffers(ctx context.Context) {
 
 			// Get the current chunk ID that's being processed
 			currentChunkID := atomic.LoadInt64(&c.nextChunkID)
-			
-			c.logger.Infof("BUFFER MONITOR: sharedBuffer=%d/%d, pendingChunks=%d (oldest=%d, newest=%d, current=%d, partial=%d)", 
-				sharedBufferLen, c.bufferSize, 
+
+			c.logger.Infof("BUFFER MONITOR: sharedBuffer=%d/%d, pendingChunks=%d (oldest=%d, newest=%d, current=%d, partial=%d)",
+				sharedBufferLen, c.bufferSize,
 				pendingChunksCount, oldestChunkID, newestChunkID, currentChunkID, partiallyCompleted)
 		}
 	}
