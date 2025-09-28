@@ -131,6 +131,9 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	r.dbConfig.LockWaitTimeout = int(r.migration.LockWaitTimeout.Seconds())
 	r.dbConfig.InterpolateParams = r.migration.InterpolateParams
 	r.dbConfig.ForceKill = r.migration.ForceKill
+	// Map TLS configuration from migration to dbConfig
+	r.dbConfig.TLSMode = r.migration.TLSMode
+	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
 	// The copier and checker will use Threads to limit N tasks concurrently,
 	// but we also set it at the DB pool level with +1. Because the copier and
 	// the replication applier use the same pool, it allows for some natural throttling
