@@ -46,12 +46,14 @@ type Runner struct {
 
 	currentState migrationState // must use atomic to get/set
 	replClient   *repl.Client   // feed contains all binlog subscription activity.
-	copier       copier.Copier
 	throttler    throttler.Throttler
-	checker      *checksum.Checker
-	checkerLock  sync.Mutex
 
-	copyChunker     table.Chunker // the chunker for copying
+	copier       copier.Copier
+	copyChunker  table.Chunker // the chunker for copying
+	copyDuration time.Duration // how long the copy took
+
+	checker         *checksum.Checker
+	checkerLock     sync.Mutex
 	checksumChunker table.Chunker // the chunker for checksum
 
 	// used to recover direct to checksum.
@@ -142,6 +144,11 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	// and does not need to wait for free slots from the copier *until* it needs
 	// copy in more than 1 thread.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
+	if r.migration.EnableExperimentalBufferedCopy {
+		// Buffered has many more connections because it fans out x8 more write threads
+		// Plus it has read threads. Set this high and figure it out later.
+		r.dbConfig.MaxOpenConnections = 100
+	}
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return err
@@ -236,6 +243,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		return err
 	}
 	r.logger.Info("copy rows complete")
+	r.copyDuration = time.Since(r.copier.StartTime())
 	r.replClient.SetKeyAboveWatermarkOptimization(false) // should no longer be used.
 
 	// r.waitOnSentinel may return an error if there is
@@ -308,7 +316,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		r.usedInstantDDL,
 		r.usedInplaceDDL,
 		copiedChunks,
-		time.Since(r.copier.StartTime()).Round(time.Second),
+		r.copyDuration.Round(time.Second),
 		checksumTime.Round(time.Second),
 		time.Since(r.startTime).Round(time.Second),
 		r.db.Stats().InUse,
@@ -429,13 +437,14 @@ func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 	// Create copier with the prepared chunker
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
-		Concurrency:     r.migration.Threads,
-		TargetChunkTime: r.migration.TargetChunkTime,
-		FinalChecksum:   r.migration.Checksum,
-		Throttler:       &throttler.Noop{},
-		Logger:          r.logger,
-		MetricsSink:     r.metricsSink,
-		DBConfig:        r.dbConfig,
+		Concurrency:                   r.migration.Threads,
+		TargetChunkTime:               r.migration.TargetChunkTime,
+		FinalChecksum:                 r.migration.Checksum,
+		Throttler:                     &throttler.Noop{},
+		Logger:                        r.logger,
+		MetricsSink:                   r.metricsSink,
+		DBConfig:                      r.dbConfig,
+		UseExperimentalBufferedCopier: r.migration.EnableExperimentalBufferedCopy,
 	})
 	if err != nil {
 		return err
@@ -456,7 +465,7 @@ func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
 		if err := change.newTable.SetInfo(ctx); err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(change.table, change.newTable, r.copier.KeyAboveHighWatermark); err != nil {
+		if err := r.replClient.AddSubscription(change.table, change.newTable, r.copyChunker.KeyAboveHighWatermark); err != nil {
 			return err
 		}
 	}
@@ -1131,6 +1140,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	r.logger.Warnf("cutover deferred while sentinel table %s exists; will wait %s", sentinelTableName, sentinelWaitLimit)
 
 	timer := time.NewTimer(sentinelWaitLimit)
+	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
 
 	ticker := time.NewTicker(sentinelCheckInterval)
 	defer ticker.Stop()

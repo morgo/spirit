@@ -89,32 +89,36 @@ type Client struct {
 	cancelFunc func()
 	isClosed   atomic.Bool
 	logger     loggers.Advanced
+
+	useExperimentalBufferedMap bool // for testing new subscription type
 }
 
 // NewClient creates a new Client instance.
 func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
 	return &Client{
-		db:              db,
-		dbConfig:        dbconn.NewDBConfig(),
-		host:            host,
-		username:        username,
-		password:        password,
-		logger:          config.Logger,
-		targetBatchTime: config.TargetBatchTime,
-		targetBatchSize: DefaultBatchSize, // initial starting value.
-		concurrency:     config.Concurrency,
-		subscriptions:   make(map[string]Subscription),
-		onDDL:           config.OnDDL,
-		serverID:        config.ServerID,
+		db:                         db,
+		dbConfig:                   dbconn.NewDBConfig(),
+		host:                       host,
+		username:                   username,
+		password:                   password,
+		logger:                     config.Logger,
+		targetBatchTime:            config.TargetBatchTime,
+		targetBatchSize:            DefaultBatchSize, // initial starting value.
+		concurrency:                config.Concurrency,
+		subscriptions:              make(map[string]Subscription),
+		onDDL:                      config.OnDDL,
+		serverID:                   config.ServerID,
+		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
 	}
 }
 
 type ClientConfig struct {
-	TargetBatchTime time.Duration
-	Concurrency     int
-	Logger          loggers.Advanced
-	OnDDL           chan string
-	ServerID        uint32
+	TargetBatchTime            time.Duration
+	Concurrency                int
+	Logger                     loggers.Advanced
+	OnDDL                      chan string
+	ServerID                   uint32
+	UseExperimentalBufferedMap bool
 }
 
 // NewServerID randomizes the server ID to avoid conflicts with other binlog readers.
@@ -157,6 +161,18 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAbo
 		}
 		return nil
 	}
+	if c.useExperimentalBufferedMap {
+		c.logger.Infof("Using experimental buffered map for table %s.%s", currentTable.SchemaName, currentTable.TableName)
+		c.subscriptions[subKey] = &bufferedMap{
+			table:                  currentTable,
+			newTable:               newTable,
+			changes:                make(map[string]logicalRow),
+			c:                      c,
+			keyAboveCopierCallback: keyAboveCopierCallback,
+		}
+		return nil
+	}
+	// Default case is delta map
 	c.subscriptions[subKey] = &deltaMap{
 		table:                  currentTable,
 		newTable:               newTable,
@@ -451,11 +467,11 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 
 			if isPKUpdate {
 				// This is a primary key update - track both delete and insert
-				sub.KeyHasChanged(beforeKey, true) // delete old key
-				sub.KeyHasChanged(afterKey, false) // insert new key
+				sub.HasChanged(beforeKey, nil, true)      // delete old key
+				sub.HasChanged(afterKey, afterRow, false) // insert new key
 			} else {
 				// Same PK, just a regular update
-				sub.KeyHasChanged(beforeKey, false)
+				sub.HasChanged(beforeKey, afterRow, false)
 			}
 		}
 	} else {
@@ -471,9 +487,9 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			}
 			switch eventType {
 			case eventTypeInsert:
-				sub.KeyHasChanged(key, false)
+				sub.HasChanged(key, row, false)
 			case eventTypeDelete:
-				sub.KeyHasChanged(key, true)
+				sub.HasChanged(key, nil, true)
 			default:
 				c.logger.Errorf("unknown event type: %v", ev.Header.EventType)
 			}
@@ -571,6 +587,10 @@ func (c *Client) Flush(ctx context.Context) error {
 		// actually a lot to do!
 		if err := c.BlockWait(ctx); err != nil {
 			c.logger.Warnf("error waiting for binlog reader to catch up: %v", err)
+			// Check if the error is due to context cancellation
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				return ctx.Err()
+			}
 			continue
 		}
 		//  If it doesn't timeout, we ensure the deltas
@@ -643,13 +663,14 @@ func (c *Client) BlockWait(ctx context.Context) error {
 	}
 	c.logger.Infof("waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 	timer := time.NewTimer(DefaultTimeout)
+	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
 	for {
 		select {
 		case <-timer.C:
 			return fmt.Errorf("timed out waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 		default:
 			if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
-				break // error flushing binary logs
+				return err // it could be context cancelled, return it
 			}
 			if c.getBufferedPos().Compare(targetPos) >= 0 {
 				return nil // we are up to date!

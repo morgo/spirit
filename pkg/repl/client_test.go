@@ -97,10 +97,10 @@ func TestReplClientComplex(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	copier, err := copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
+	_, err = copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
-	assert.NoError(t, client.AddSubscription(t1, t2, copier.KeyAboveHighWatermark))
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker.KeyAboveHighWatermark))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 	client.SetKeyAboveWatermarkOptimization(true)
@@ -111,11 +111,11 @@ func TestReplClientComplex(t *testing.T) {
 	assert.Equal(t, 0, client.GetDeltaLen())
 
 	// Read from the copier so that the key is below the watermark
-	chk, err := copier.Next4Test()
+	chk, err := chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`a` < 1", chk.String())
 	// read again
-	chk, err = copier.Next4Test()
+	chk, err = chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`a` >= 1 AND `a` < 1001", chk.String())
 
@@ -298,10 +298,10 @@ func TestReplClientQueue(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	copier, err := copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
+	_, err = copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
-	// Attach copier's keyabovewatermark to the repl client
-	assert.NoError(t, client.AddSubscription(t1, t2, copier.KeyAboveHighWatermark))
+	// Attach chunker's keyabovewatermark to the repl client
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker.KeyAboveHighWatermark))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -312,12 +312,12 @@ func TestReplClientQueue(t *testing.T) {
 	assert.Equal(t, 1000, client.GetDeltaLen())
 
 	// Read from the copier
-	chk, err := copier.Next4Test()
+	chk, err := chunker.Next()
 	assert.NoError(t, err)
 	prevUpperBound := chk.UpperBound.Value[0].String()
 	assert.Equal(t, "`a` < "+prevUpperBound, chk.String())
 	// read again
-	chk, err = copier.Next4Test()
+	chk, err = chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("`a` >= %s AND `a` < %s", prevUpperBound, chk.UpperBound.Value[0].String()), chk.String())
 
@@ -686,7 +686,7 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
-	sub.KeyHasChanged([]any{1}, false)
+	sub.HasChanged([]any{1}, nil, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with pending changes")
 
 	// Test 4: Test with buffered position ahead
@@ -702,7 +702,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:  make(map[string]bool),
 	}
 	client.subscriptions["test2"] = sub2
-	sub2.KeyHasChanged([]any{2}, false)
+	sub2.HasChanged([]any{2}, nil, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
 	// Test 6: Clear changes but keep positions different - should still be considered flushed
@@ -725,6 +725,6 @@ func TestAllChangesFlushed(t *testing.T) {
 	client.subscriptions["test3"] = subQueue
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty queue")
 
-	subQueue.KeyHasChanged([]any{3}, false)
+	subQueue.HasChanged([]any{3}, nil, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }
