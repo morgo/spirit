@@ -27,10 +27,7 @@ const (
 // INSERT .. SELECT without any intermediate buffering in spirit.
 // In future we may have another implementation, see:
 // https://github.com/block/spirit/issues/451
-//
-// Yes, this interface is a bit bloated. We will have to remove the
-// deprecated methods, but that's for the future.
-type Copier interface { //nolint: interfacebloat
+type Copier interface {
 	Run(ctx context.Context) error
 	GetETA() string
 	GetChunker() table.Chunker
@@ -38,15 +35,6 @@ type Copier interface { //nolint: interfacebloat
 	GetThrottler() throttler.Throttler
 	StartTime() time.Time
 	GetProgress() string
-
-	// The following are for testing purposes only
-	CopyChunk(ctx context.Context, chunk *table.Chunk) error
-	Next4Test() (*table.Chunk, error)
-
-	// These are deprecated, they should be a feature of the chunker
-	// and *not the copier*.
-	KeyAboveHighWatermark(key any) bool
-	GetLowWatermark() (string, error)
 }
 
 type CopierConfig struct {
@@ -97,7 +85,7 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 			copierEtaHistory: newcopierEtaHistory(),
 		}, nil
 	}
-	return &unbuffered{
+	return &Unbuffered{
 		db:               db,
 		concurrency:      config.Concurrency,
 		finalChecksum:    config.FinalChecksum,
