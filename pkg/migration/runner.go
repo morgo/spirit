@@ -221,7 +221,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 
 	// Force enable the checksum if it's an ADD UNIQUE INDEX operation
 	// https://github.com/block/spirit/issues/266
-	if !r.migration.Checksum && r.containsUniqueIndexChange() {
+	if !r.migration.Checksum && r.addsUniqueIndex() {
 		r.logger.Warn("force enabling checksum")
 		r.migration.Checksum = true
 	}
@@ -472,7 +472,7 @@ func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
 	return nil
 }
 
-// newMigration is called with resumeFromCheckpoint has failed.
+// newMigration is called when resumeFromCheckpoint has failed.
 // It performs all the initial steps to prepare for a fresh migration.
 func (r *Runner) newMigration(ctx context.Context) error {
 	// This is the non-resume path, so we need to create each of the new tables
@@ -532,7 +532,8 @@ func (r *Runner) setupReplicationThrottler() error {
 	replicaDBConfig.ForceKill = r.dbConfig.ForceKill
 	replicaDBConfig.MaxOpenConnections = r.dbConfig.MaxOpenConnections
 	// Note: Deliberately NOT copying TLS settings (TLSMode, TLSCertificatePath)
-	// Replica TLS configuration will be handled in a separate PR
+	// TODO: Replica TLS configuration will be handled in a separate PR
+	// See https://github.com/block/spirit/issues/175
 	r.replica, err = dbconn.New(r.migration.ReplicaDSN, replicaDBConfig)
 	if err != nil {
 		return err
@@ -937,7 +938,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 			// then the checksum will fail. This is entirely expected, and not considered a bug. We should
 			// do our best-case to differentiate that we believe this ALTER statement is lossy, and
 			// customize the returned error based on it.
-			if r.containsUniqueIndexChange() {
+			if r.addsUniqueIndex() {
 				return errors.New("checksum failed after 3 attempts. Check that the ALTER statement is not adding a UNIQUE INDEX to non-unique data")
 			}
 			return errors.New("checksum failed after 3 attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit")
@@ -953,7 +954,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 	return r.replClient.Flush(ctx)
 }
 
-func (r *Runner) containsUniqueIndexChange() bool {
+func (r *Runner) addsUniqueIndex() bool {
 	for _, change := range r.changes {
 		if err := change.stmt.AlterContainsAddUnique(); err != nil {
 			return true

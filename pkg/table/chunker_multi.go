@@ -185,6 +185,8 @@ func (m *multiChunker) GetLowWatermark() (string, error) {
 			return "", err
 		}
 		tbl := chunker.Tables()[0]
+		// TODO: This code is temporary. It is creating a watermark that
+		// combines other watermarks, but is not in a format that is restorable yet.
 		watermarks = append(watermarks, fmt.Sprintf("tbl=%s watermark=%q", tbl.TableName, watermark))
 	}
 
