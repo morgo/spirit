@@ -32,7 +32,7 @@ func TestBasicMove(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO source.t2 (id, val) VALUES (4, 'four'), (5, 'five'), (6, 'six')`)
 
 	// reset the target database.
-	db, err := sql.Open("mysql", targetDSN)
+	db, err := sql.Open("mysql", cfg.FormatDSN())
 	assert.NoError(t, err)
 	_, err = db.Exec("DROP DATABASE IF EXISTS dest")
 	assert.NoError(t, err)
