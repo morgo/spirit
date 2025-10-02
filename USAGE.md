@@ -5,12 +5,16 @@
 - [How to use Spirit](#how-to-use-spirit)
   - [Table of Contents](#table-of-contents)
   - [Getting Started](#getting-started)
+  - [Automatic DDL Algorithm Detection](#automatic-ddl-algorithm-detection)
+    - [How it Works](#how-it-works)
+    - [Safe INPLACE Operations](#safe-inplace-operations)
+    - [Enhanced Index Visibility Support](#enhanced-index-visibility-support)
+    - [Safety Guarantees](#safety-guarantees)
   - [Configuration](#configuration)
     - [alter](#alter)
     - [checksum](#checksum)
     - [database](#database)
     - [defer-cutover](#defer-cutover)
-    - [force-inplace](#force-inplace)
     - [force-kill](#force-kill)
     - [host](#host)
     - [lock-wait-timeout](#lock-wait-timeout)
@@ -89,14 +93,42 @@ If you start a migration and realize that you forgot to set defer-cutover, worry
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
 
-### force-inplace
+## Automatic DDL Algorithm Detection
 
-- Type: Boolean
-- Default value: FALSE
+Spirit automatically detects and uses the most appropriate DDL algorithm for your schema changes without requiring manual configuration. This intelligent detection system prioritizes safety while maximizing performance.
 
-When set to `TRUE`, Spirit will attempt to perform the schema change using MySQL's `INPLACE` algorithm, before falling back to performing its usual copy process. `INPLACE` is non-blocking on the system where the DDL is initiated, but it will block on binary-log based read replicas. This means it's typically only safe to enable if you have no read replicas, or your read replicas are based on physical log shipping (i.e. Aurora).
+### How it Works
 
-Even when force-inplace is `FALSE`, Spirit automatically detects "safe" operations that use the `INPLACE` algorithm. These include operations that modify only metadata, specifically `ALTER INDEX .. VISIBLE/INVISIBLE`, `DROP KEY/INDEX` and `RENAME KEY/INDEX`. Consult <https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html> for more details.
+Spirit analyzes your ALTER statement and automatically chooses between three approaches:
+
+1. **INSTANT DDL**: For operations that can be completed instantly (e.g., adding columns with default values in MySQL 8.0+)
+2. **INPLACE DDL**: For metadata-only operations that are safe and non-blocking
+3. **Copy Process**: For complex operations that require data migration
+
+### Safe INPLACE Operations
+
+Spirit automatically uses MySQL's `INPLACE` algorithm for these operations:
+
+- **Index Management**: `ALTER INDEX .. VISIBLE/INVISIBLE`, `DROP KEY/INDEX`, `RENAME KEY/INDEX`
+- **Partition Operations**: `DROP PARTITION`, `TRUNCATE PARTITION`, `ADD PARTITION`
+- **VARCHAR Expansion**: `MODIFY COLUMN col VARCHAR(N)` (increasing length only)
+
+### Enhanced Index Visibility Support
+
+Spirit intelligently handles `ALTER INDEX .. VISIBLE/INVISIBLE` operations:
+
+- **Pure index visibility changes**: Executed using INPLACE algorithm
+- **Mixed with metadata operations**: Allowed when combined with other safe operations (e.g., dropping indexes, partition changes, VARCHAR expansions)
+- **Mixed with table-rebuilding operations**: Rejected to prevent semantic issues during experiments
+
+### Safety Guarantees
+
+- **No Manual Override Required**: The system is designed to be safe by default
+- **Automatic Fallback**: Operations that can't be safely executed with INPLACE automatically use the copy process
+- **Replica Safety**: INPLACE operations may block binary-log based read replicas, but Spirit only uses them for operations that are genuinely safe
+- **Semantic Consistency**: Index visibility changes are never mixed with table-rebuilding operations to maintain experiment integrity
+
+For more details on MySQL's DDL algorithms, consult the [MySQL documentation](https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html).
 
 ### force-kill
 
