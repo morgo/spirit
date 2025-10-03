@@ -5,11 +5,6 @@
 - [How to use Spirit](#how-to-use-spirit)
   - [Table of Contents](#table-of-contents)
   - [Getting Started](#getting-started)
-  - [Automatic DDL Algorithm Detection](#automatic-ddl-algorithm-detection)
-    - [How it Works](#how-it-works)
-    - [Safe INPLACE Operations](#safe-inplace-operations)
-    - [Enhanced Index Visibility Support](#enhanced-index-visibility-support)
-    - [Safety Guarantees](#safety-guarantees)
   - [Configuration](#configuration)
     - [alter](#alter)
     - [checksum](#checksum)
@@ -33,6 +28,8 @@
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
   - [Experimental Features](#experimental-features)
+    - [enable-experimental-multi-table-support](#enable-experimental-multi-table-support)
+    - [enable-experimental-buffered-copy](#enable-experimental-buffered-copy)
 
 ## Getting Started
 
@@ -92,43 +89,6 @@ You can resume a migration from checkpoint and Spirit will start waiting again f
 If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table `_spirit_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
-
-## Automatic DDL Algorithm Detection
-
-Spirit automatically detects and uses the most appropriate DDL algorithm for your schema changes without requiring manual configuration. This intelligent detection system prioritizes safety while maximizing performance.
-
-### How it Works
-
-Spirit analyzes your ALTER statement and automatically chooses between three approaches:
-
-1. **INSTANT DDL**: For operations that can be completed instantly (e.g., adding columns with default values in MySQL 8.0+)
-2. **INPLACE DDL**: For metadata-only operations that are safe and non-blocking
-3. **Copy Process**: For complex operations that require data migration
-
-### Safe INPLACE Operations
-
-Spirit automatically uses MySQL's `INPLACE` algorithm for these operations:
-
-- **Index Management**: `ALTER INDEX .. VISIBLE/INVISIBLE`, `DROP KEY/INDEX`, `RENAME KEY/INDEX`
-- **Partition Operations**: `DROP PARTITION`, `TRUNCATE PARTITION`, `ADD PARTITION`
-- **VARCHAR Expansion**: `MODIFY COLUMN col VARCHAR(N)` (increasing length only)
-
-### Enhanced Index Visibility Support
-
-Spirit intelligently handles `ALTER INDEX .. VISIBLE/INVISIBLE` operations:
-
-- **Pure index visibility changes**: Executed using INPLACE algorithm
-- **Mixed with metadata operations**: Allowed when combined with other safe operations (e.g., dropping indexes, partition changes, VARCHAR expansions)
-- **Mixed with table-rebuilding operations**: Rejected to prevent semantic issues during experiments
-
-### Safety Guarantees
-
-- **No Manual Override Required**: The system is designed to be safe by default
-- **Automatic Fallback**: Operations that can't be safely executed with INPLACE automatically use the copy process
-- **Replica Safety**: INPLACE operations may block binary-log based read replicas, but Spirit only uses them for operations that are genuinely safe
-- **Semantic Consistency**: Index visibility changes are never mixed with table-rebuilding operations to maintain experiment integrity
-
-For more details on MySQL's DDL algorithms, consult the [MySQL documentation](https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html).
 
 ### force-kill
 
