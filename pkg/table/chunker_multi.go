@@ -191,6 +191,14 @@ func (m *multiChunker) OpenAtWatermark(watermark string) error {
 	if err := json.Unmarshal([]byte(watermark), &watermarks); err != nil {
 		return fmt.Errorf("could not parse multi-chunker watermark: %w", err)
 	}
+
+	// First, check that all chunkers have a corresponding watermark
+	for tableName := range m.chunkers {
+		if _, ok := watermarks[tableName]; !ok {
+			return fmt.Errorf("could not find chunker for table %q in watermark", tableName)
+		}
+	}
+
 	// Now we have to call OpenAtWatermark on each child chunker
 	// The children are in m.chunkers and keyed by their table name
 	for tbl, watermark := range watermarks {
