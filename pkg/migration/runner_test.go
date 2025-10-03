@@ -252,7 +252,7 @@ func TestOnline(t *testing.T) {
 	err = m.Run(t.Context())
 	assert.NoError(t, err)
 	assert.False(t, m.usedInstantDDL) // not possible
-	assert.False(t, m.usedInplaceDDL) // ADD INDEX operations now use copy process for replica safety
+	assert.False(t, m.usedInplaceDDL) // ADD INDEX operations now always require copy
 	assert.NoError(t, m.Close())
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS testonline4`)
