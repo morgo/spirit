@@ -278,7 +278,7 @@ func TestOnline(t *testing.T) {
 	err = m.Run(t.Context())
 	assert.NoError(t, err)
 	assert.False(t, m.usedInstantDDL) // unfortunately false in 8.0, see https://bugs.mysql.com/bug.php?id=113355
-	assert.True(t, m.usedInplaceDDL)  // DROP INDEX operations now use copy process for replica safety
+	assert.True(t, m.usedInplaceDDL)
 	assert.NoError(t, m.Close())
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS testonline5`)
@@ -3272,7 +3272,7 @@ func TestTrailingSemicolon(t *testing.T) {
 	err = m.Run(t.Context())
 	require.NoError(t, err)
 
-	require.True(t, m.usedInplaceDDL) // DROP INDEX operations now use copy process for enhanced safety
+	require.True(t, m.usedInplaceDDL)
 	require.NoError(t, m.Close())
 }
 func TestAlterExtendVarcharE2E(t *testing.T) {
