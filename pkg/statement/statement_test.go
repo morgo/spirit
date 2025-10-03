@@ -106,10 +106,10 @@ func TestAlgorithmInplaceConsideredSafe(t *testing.T) {
 	}
 
 	// Safe metadata-only operations
-	assert.Error(t, test("drop index `a`")) // DROP INDEX now uses copy process for replica safety
+	assert.NoError(t, test("drop index `a`")) // DROP INDEX now uses INPLACE for better performance
 	assert.NoError(t, test("rename index `a` to `b`"))
-	assert.Error(t, test("drop index `a`, drop index `b`"))        // DROP INDEX now unsafe
-	assert.Error(t, test("drop index `a`, rename index `b` to c")) // Mixed with unsafe DROP INDEX
+	assert.NoError(t, test("drop index `a`, drop index `b`"))        // Multiple DROP INDEX operations are safe
+	assert.NoError(t, test("drop index `a`, rename index `b` to c")) // Mixed safe operations
 	assert.NoError(t, test("ALTER INDEX b INVISIBLE"))
 	assert.NoError(t, test("ALTER INDEX b VISIBLE"))
 	assert.NoError(t, test("drop partition `p1`, `p2`"))

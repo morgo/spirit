@@ -162,7 +162,8 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 			ast.AlterTableIndexInvisible,
 			ast.AlterTableDropPartition,
 			ast.AlterTableTruncatePartition,
-			ast.AlterTableAddPartitions:
+			ast.AlterTableAddPartitions,
+			ast.AlterTableDropIndex:
 			continue
 		case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
 			// Only safe if changing length of a VARCHAR column. We don't know the type of the column
