@@ -325,13 +325,20 @@ func (c *Client) readStream(ctx context.Context) {
 	currentLogName := c.flushedPos.Name
 	c.Unlock()
 	for {
+		// Check if context is done before processing
+		select {
+		case <-ctx.Done():
+			return // stop processing
+		default:
+		}
+
 		// Read the next event from the stream
 		ev, err := c.streamer.GetEvent(ctx)
 		if err != nil {
 			// We only stop processing for context cancelled errors.
 			// For other errors we just continue, because we want the readStream
 			// to continually retry.
-			if errors.Is(err, context.Canceled) || c.isClosed.Load() {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil || c.isClosed.Load() {
 				return // stop processing
 			}
 			c.logger.Errorf("error reading binlog stream: %v, current position: %v",

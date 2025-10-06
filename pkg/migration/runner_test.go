@@ -240,20 +240,19 @@ func TestOnline(t *testing.T) {
 	)`
 	testutils.RunSQL(t, table)
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      16,
-		Table:        "testonline3",
-		Alter:        "ADD INDEX(b)",
-		ForceInplace: true,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  16,
+		Table:    "testonline3",
+		Alter:    "ADD INDEX(b)",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
 	assert.NoError(t, err)
 	assert.False(t, m.usedInstantDDL) // not possible
-	assert.True(t, m.usedInplaceDDL)  // as
+	assert.False(t, m.usedInplaceDDL) // ADD INDEX operations now always require copy
 	assert.NoError(t, m.Close())
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS testonline4`)
@@ -267,14 +266,13 @@ func TestOnline(t *testing.T) {
 	)`
 	testutils.RunSQL(t, table)
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      16,
-		Table:        "testonline4",
-		Alter:        "drop index name, drop index b",
-		ForceInplace: false,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  16,
+		Table:    "testonline4",
+		Alter:    "drop index name, drop index b",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -294,14 +292,13 @@ func TestOnline(t *testing.T) {
 	)`
 	testutils.RunSQL(t, table)
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      16,
-		Table:        "testonline5",
-		Alter:        "drop index name, add column c int",
-		ForceInplace: false,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  16,
+		Table:    "testonline5",
+		Alter:    "drop index name, add column c int",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -320,14 +317,13 @@ func TestOnline(t *testing.T) {
 	`
 	testutils.RunSQL(t, table)
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      16,
-		Table:        "testonline6",
-		Alter:        "add partition partitions 4",
-		ForceInplace: false,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  16,
+		Table:    "testonline6",
+		Alter:    "add partition partitions 4",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -348,14 +344,13 @@ func TestOnline(t *testing.T) {
 	`
 	testutils.RunSQL(t, table)
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      16,
-		Table:        "testonline7",
-		Alter:        "add partition (partition p2 values less than (300000))",
-		ForceInplace: false,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  16,
+		Table:    "testonline7",
+		Alter:    "add partition (partition p2 values less than (300000))",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -1133,6 +1128,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 		Table:           "cptresume",
 		Alter:           "ENGINE=InnoDB",
 		Checksum:        true,
+		RespectSentinel: true,
 	})
 	assert.NoError(t, err)
 
@@ -2666,6 +2662,7 @@ func TestDeferCutOver(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	wg := sync.WaitGroup{}
@@ -2719,6 +2716,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	go func() {
@@ -2764,6 +2762,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	// This is very similar to TestDeferCutOverE2E but it checks that the migration
 	// stage has changed rather than that the sentinel table has been created,
 	// and it also checks that the binlog position has advanced.
+	statusInterval = 500 * time.Millisecond
 	sentinelWaitLimit = 1 * time.Minute
 	defer func() {
 		sentinelWaitLimit = 10 * time.Second
@@ -2794,6 +2793,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	go func() {
@@ -2876,6 +2876,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	migration.Alter = alterSQL
 	migration.TargetChunkTime = 100 * time.Millisecond
 	migration.DeferCutOver = false
+	migration.RespectSentinel = true
 
 	runner, err := NewRunner(migration)
 	assert.NoError(t, err)
@@ -2932,6 +2933,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	newmigration.Alter = alterSQL
 	newmigration.TargetChunkTime = 5 * time.Second
 	newmigration.DeferCutOver = false
+	newmigration.RespectSentinel = true
 
 	m, err := NewRunner(newmigration)
 	assert.NoError(t, err)
@@ -3100,34 +3102,20 @@ func TestIndexVisibility(t *testing.T) {
 	assert.Error(t, err)
 	assert.NoError(t, m.Close()) // it's errored, we don't need to try again. We can close.
 
-	// But we will allow the above when force inplace is set.
-	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      1,
-		Table:        "indexvisibility",
-		Alter:        "ALTER INDEX b VISIBLE, ADD INDEX (c)",
-		ForceInplace: true,
-	})
-	assert.NoError(t, err)
-	err = m.Run(t.Context())
-	assert.NoError(t, err)
-	assert.NoError(t, m.Close())
+	// The above should now fail with enhanced automatic detection.
+	// Index visibility mixed with table-rebuilding operations should be rejected.
 
-	// But even when force inplace is set, we won't be able to do an operation
-	// that requires a full copy. This is important because invisible should
-	// never be mixed with copy (the semantics are weird since it's for experiments).
+	// Index visibility mixed with table-rebuilding operations should fail.
+	// This is important because invisible should never be mixed with copy
+	// (the semantics are weird since it's for experiments).
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      1,
-		Table:        "indexvisibility",
-		Alter:        "ALTER INDEX b VISIBLE, CHANGE c cc BIGINT NOT NULL",
-		ForceInplace: true,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  1,
+		Table:    "indexvisibility",
+		Alter:    "ALTER INDEX b VISIBLE, CHANGE c cc BIGINT NOT NULL",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -3190,6 +3178,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		Table:                tableName,
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	err = m2.Run(t.Context())
@@ -3257,23 +3246,22 @@ func TestTrailingSemicolon(t *testing.T) {
 	err = m.Run(t.Context())
 	require.NoError(t, err)
 
-	assert.True(t, m.usedInplaceDDL) // must be inplace
+	assert.True(t, m.usedInplaceDDL) // DROP INDEX operations now use INPLACE for better performance
 	assert.NoError(t, m.Close())
 
 	m, err = NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     cfg.Passwd,
-		Database:     cfg.DBName,
-		Statement:    "alter table multiSecondary add index idx1(v), add index idx2(v), add index idx3(v), add index idx4(v);",
-		ForceInplace: true,
-		Threads:      1,
+		Host:      cfg.Addr,
+		Username:  cfg.User,
+		Password:  cfg.Passwd,
+		Database:  cfg.DBName,
+		Statement: "alter table multiSecondary add index idx1(v), add index idx2(v), add index idx3(v), add index idx4(v);",
+		Threads:   1,
 	})
 	require.NoError(t, err)
 	err = m.Run(t.Context())
 	require.NoError(t, err)
 
-	require.True(t, m.usedInplaceDDL) // must be inplace
+	require.False(t, m.usedInplaceDDL) // ADD INDEX operations now use copy process for replica safety
 	require.NoError(t, m.Close())
 
 	m, err = NewRunner(&Migration{
@@ -3290,7 +3278,7 @@ func TestTrailingSemicolon(t *testing.T) {
 	err = m.Run(t.Context())
 	require.NoError(t, err)
 
-	require.True(t, m.usedInplaceDDL) // must be inplace
+	require.True(t, m.usedInplaceDDL)
 	require.NoError(t, m.Close())
 }
 func TestAlterExtendVarcharE2E(t *testing.T) {

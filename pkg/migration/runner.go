@@ -252,12 +252,13 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	// This function is invoked even if DeferCutOver is false
 	// because it's possible that the sentinel table was created
 	// manually after the migration started.
-	r.sentinelWaitStartTime = time.Now()
-	r.setCurrentState(stateWaitingOnSentinelTable)
-	if err := r.waitOnSentinelTable(ctx); err != nil {
-		return err
+	if r.migration.RespectSentinel {
+		r.sentinelWaitStartTime = time.Now()
+		r.setCurrentState(stateWaitingOnSentinelTable)
+		if err := r.waitOnSentinelTable(ctx); err != nil {
+			return err
+		}
 	}
-
 	// Perform steps to prepare for final cutover.
 	// This includes computing an optional checksum,
 	// catching up on replClient apply, running ANALYZE TABLE so
