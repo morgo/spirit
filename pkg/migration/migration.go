@@ -27,7 +27,6 @@ type Migration struct {
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
-	ForceInplace         bool          `name:"force-inplace" help:"Force attempt to use inplace (only safe without replicas or with Aurora Global)" optional:"" default:"false"`
 	Checksum             bool          `name:"checksum" help:"Checksum new table before final cut-over" optional:"" default:"true"`
 	ReplicaDSN           string        `name:"replica-dsn" help:"A DSN for a replica which (if specified) will be used for lag checking." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
@@ -40,12 +39,11 @@ type Migration struct {
 	// TLS Configuration
 	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:"" default:"PREFERRED"`
 	TLSCertificatePath string `name:"tls-ca" help:"Path to custom TLS CA certificate file" optional:""`
-	// Hidden options for now.
-	Multi bool `name:"multi" help:"Use multi chunker (for testing)" optional:"" default:"false" hidden:""`
 
 	// Experimental features
 	// These are no longer hidden, we document them.
-	EnableExperimentalBufferedCopy bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
+	EnableExperimentalMultiTableSupport bool `name:"enable-experimental-multi-table-support" help:"Allow multiple alter statements to run concurrently and cutover together" optional:"" default:"false"`
+	EnableExperimentalBufferedCopy      bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
 
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
@@ -130,6 +128,10 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 			Statement: fullStatement,
 			StmtNode:  &stmtNodes[0],
 		})
+	}
+
+	if len(stmts) > 1 && !m.EnableExperimentalMultiTableSupport {
+		return nil, errors.New("multiple statements detected. To enable this experimental feature, please specify --enable-experimental-multi-table-support")
 	}
 	return stmts, err
 }

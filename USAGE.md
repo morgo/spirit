@@ -10,7 +10,6 @@
     - [checksum](#checksum)
     - [database](#database)
     - [defer-cutover](#defer-cutover)
-    - [force-inplace](#force-inplace)
     - [force-kill](#force-kill)
     - [host](#host)
     - [lock-wait-timeout](#lock-wait-timeout)
@@ -29,6 +28,8 @@
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
   - [Experimental Features](#experimental-features)
+    - [enable-experimental-multi-table-support](#enable-experimental-multi-table-support)
+    - [enable-experimental-buffered-copy](#enable-experimental-buffered-copy)
 
 ## Getting Started
 
@@ -77,26 +78,17 @@ The database that the schema change will be performed in.
 
 ### defer-cutover
 
-The "defer cutover" feature makes spirit wait to perform the final cutover until a "sentinel" table has been dropped. This is similar to the --postpone-cut-over-flag-file feature of gh-ost.
+The "defer cutover" feature makes spirit wait to perform the final cutover until the "sentinel" table has been dropped. This is similar to the `--postpone-cut-over-flag-file` feature of gh-ost.
 
-The defer cutover feature will not be used and the sentinel table will not be created if the schema migration can be successfully executed using ALGORITHM=INSTANT (see "Attempt Instant DDL" in README.md).
+The defer cutover feature will not be used and the sentinel table will not be created if the schema migration can be successfully executed using `ALGORITHM=INSTANT` (see "Attempt Instant DDL" in README.md).
 
-If defer-cutover is true, Spirit will create a "sentinel" table in the same schema as the table being altered; the name of the sentinel table will use the pattern `_<table>_sentinel`. Spirit will block before the cutover, waiting for the operator to manually drop the sentinel table, which triggers Spirit to proceed with the cutover. Spirit will never delete the sentinel table on its own. It will block for 48 hours waiting for the sentinel table to be dropped by the operator, after which it will exit with an error.
+If defer-cutover is true, Spirit will create the "sentinel" table in the same schema as the table being altered; the name of the sentinel table will always be `_spirit_sentinel`. Spirit will block before the cutover, waiting for the operator to manually drop the sentinel table, which triggers Spirit to proceed with the cutover. Spirit will never delete the sentinel table on its own. It will block for 48 hours waiting for the sentinel table to be dropped by the operator, after which it will exit with an error.
 
-You can resume a migration from checkpoint and Spirit will start waiting again for you to drop the sentinel table. You can also choose to delete the sentinel table before restarting Spirit, which will cause it to resume from checkpoint and complete the cutover without waiting, even if you have again enabled defer-cutover for the migration.
+You can resume a migration from checkpoint and Spirit will start waiting again for you to drop the sentinel table. You can also choose to delete the sentinel table before restarting Spirit, which will cause it to resume from checkpoint and complete the cutover without waiting, even if you have again enabled `defer-cutover` for the migration.
 
-If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table using the pattern `_<table>_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
+If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table `_spirit_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
-
-### force-inplace
-
-- Type: Boolean
-- Default value: FALSE
-
-When set to `TRUE`, Spirit will attempt to perform the schema change using MySQL's `INPLACE` algorithm, before falling back to performing its usual copy process. `INPLACE` is non-blocking on the system where the DDL is initiated, but it will block on binary-log based read replicas. This means it's typically only safe to enable if you have no read replicas, or your read replicas are based on physical log shipping (i.e. Aurora).
-
-Even when force-inplace is `FALSE`, Spirit automatically detects "safe" operations that use the `INPLACE` algorithm. These include operations that modify only metadata, specifically `ALTER INDEX .. VISIBLE/INVISIBLE`, `DROP KEY/INDEX` and `RENAME KEY/INDEX`. Consult <https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html> for more details.
 
 ### force-kill
 
@@ -352,6 +344,18 @@ spirit --tls-mode VERIFY_IDENTITY \
 
 ## Experimental Features
 
+### enable-experimental-multi-table-support
+
+**Feature Description**
+
+This feature allows Spirit to apply multiple schema changes at once, and cut them over atomically. The intended use-case is for complicated scenarios where there are collation mismatches between tables. If you change the collation of one table, it could result in performance issues with joins. For satefy, you really need to change all collation settings at once, which has not historically been easy.
+
+**Current Status**
+
+This feature is not feature complete. See Issue [#388](https://github.com/block/spirit/issues/388) for details.
+
+The main issues are that multi-table migrations are not currently resumable, and there is a lack of a lock to prevent concurrent migrations. This feature also lacks sufficient testing.
+
 ### enable-experimental-buffered-copy
 
 **Feature Description**
@@ -364,7 +368,7 @@ This algorithm is the same as [Netflix's DBLog](https://netflixtechblog.com/dblo
 
 This feature is not feature complete. Getting in the business of reading rows and re-inserting them (vs `INSERT.. SELECT`) means that we need to add a lot of tests to handle edge cases, such as character set and datetime mangling.
 
-We also haven't technically imlemented the low-watermark requirement for replication apply, which means that there is a brief race where inconsistencies can occur during copy. Thankfully, this will be detected from the final checksum, but we would rather not rely on that.
+We also haven't technically implemented the low-watermark requirement for replication apply, which means that there is a brief race where inconsistencies can occur during copy. Thankfully, this will be detected from the final checksum, but we would rather not rely on that.
 
 Buffered changes also puts a lot more stress on the `spirit` binary in terms of CPU use and memory. Ideally we can get a good understanding on this, and ensure that there is some protection in place to prevent out of memory cases etc.
 
