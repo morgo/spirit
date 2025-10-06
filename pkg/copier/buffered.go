@@ -202,7 +202,12 @@ func (c *buffered) Run(ctx context.Context) error {
 	g.Go(func() error {
 		return c.feedbackCoordinator(errGrpCtx)
 	})
-	return g.Wait()
+	err := g.Wait()
+
+	// Close the completions channel after all workers have finished
+	close(c.chunkletCompletions)
+
+	return err
 }
 
 // readWorker reads chunks and breaks them into chunklets of 1000 rows
@@ -215,12 +220,6 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		if finishedCount == int32(c.concurrency) {
 			c.logger.Debugf("readWorker %d: closing shared buffer channel", workerID)
 			close(c.sharedBuffer)
-			// Also close completions channel after a delay to let final completions flow through
-			go func() {
-				time.Sleep(5 * time.Second) // Give time for final chunklets to complete
-				c.logger.Debugf("readWorker %d: closing completions channel after delay", workerID)
-				close(c.chunkletCompletions)
-			}()
 		}
 	}()
 

@@ -2764,7 +2764,6 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	// This is very similar to TestDeferCutOverE2E but it checks that the migration
 	// stage has changed rather than that the sentinel table has been created,
 	// and it also checks that the binlog position has advanced.
-	statusInterval = 500 * time.Millisecond
 	sentinelWaitLimit = 1 * time.Minute
 	defer func() {
 		sentinelWaitLimit = 10 * time.Second
@@ -2843,7 +2842,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	// The migration itself runs with DeferCutOver=false
 	// so we test to make sure a sentinel table created manually by the operator
 	// blocks cutover.
-	statusInterval = 500 * time.Millisecond
 
 	tableName := `resume_checkpoint_e2e_w_sentinel`
 	tableInfo := table.TableInfo{SchemaName: "test", TableName: tableName}
