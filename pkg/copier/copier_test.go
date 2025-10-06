@@ -125,9 +125,12 @@ func TestCopierUniqueDestination(t *testing.T) {
 	cfg.FinalChecksum = false
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
+	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, cfg)
 	assert.NoError(t, err)
-	assert.Error(t, copier.Run(t.Context())) // fails
+	err = copier.Run(t.Context())
+	assert.Error(t, err) // fails
+	assert.ErrorContains(t, err, "Duplicate entry")
 
 	// however, if the checksum is TRUE, the unique violation will be ignored.
 	// This is because it's not possible to differentiate between a resume from checkpoint

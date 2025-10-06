@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
@@ -167,6 +166,8 @@ func (c *buffered) StartTime() time.Time {
 }
 
 func (c *buffered) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	c.startTime = time.Now()
 	go c.estimateRowsPerSecondLoop(ctx) // estimate rows while copying
 
@@ -179,9 +180,8 @@ func (c *buffered) Run(ctx context.Context) error {
 	// Start buffer monitoring goroutine
 	go c.monitorBuffers(ctx)
 
-	g, errGrpCtx := errgroup.WithContext(ctx)
-
 	// Start read workers (producers that break chunks into chunklets)
+	g, errGrpCtx := errgroup.WithContext(ctx)
 	c.logger.Infof("starting %d read workers", c.concurrency)
 	for range c.concurrency {
 		g.Go(func() error {
@@ -202,13 +202,7 @@ func (c *buffered) Run(ctx context.Context) error {
 	g.Go(func() error {
 		return c.feedbackCoordinator(errGrpCtx)
 	})
-
-	err := g.Wait()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return g.Wait()
 }
 
 // readWorker reads chunks and breaks them into chunklets of 1000 rows
@@ -255,7 +249,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 		// Handle empty chunks immediately - no need to go through chunklet pipeline
 		if len(rows) == 0 {
-			c.logger.Infof("readWorker %d: chunk %d (%s) is empty, sending immediate feedback",
+			c.logger.Debugf("readWorker %d: chunk %d (%s) is empty, sending immediate feedback",
 				workerID, chunkID, chunk.String())
 
 			// Send feedback immediately for empty chunks
@@ -368,15 +362,26 @@ func (c *buffered) writeChunklet(ctx context.Context, chunkletData chunklet) (in
 		return 0, nil
 	}
 
-	// Get the column list for the INSERT statement
+	// Get the intersected column names to match with the values
+	// We can't cache this unfortunately because the chunk.Table and chunk.NewTable
+	// might be different with each chunk (due to multi-chunker).
+	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
 	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
 
 	// Build VALUES clauses for all rows in the chunklet
 	var valuesClauses []string
 	for _, row := range chunkletData.rows {
+		if len(columnNames) != len(row.values) {
+			return 0, fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
+				chunkletData.chunk.String(), len(columnNames), len(chunkletData.rows[0].values))
+		}
 		var values []string
-		for _, value := range row.values {
-			values = append(values, c.formatSQLValue(value))
+		for i, value := range row.values {
+			columnType, ok := chunkletData.chunk.NewTable.GetColumnMySQLType(columnNames[i])
+			if !ok {
+				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+			}
+			values = append(values, utils.EscapeMySQLType(columnType, value))
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -590,19 +595,6 @@ func (c *buffered) monitorBuffers(ctx context.Context) {
 	}
 }
 
-// The following funcs proxy to the chunker.
-// This is done, so we don't need to export the chunker,
-// KeyAboveHighWatermark returns true if the key is above where the chunker is currently at.
-func (c *buffered) KeyAboveHighWatermark(key any) bool {
-	return c.chunker.KeyAboveHighWatermark(key)
-}
-
-// GetLowWatermark returns the low watermark of the chunker, i.e. the lowest key that has been
-// guaranteed to be written to the new table.
-func (c *buffered) GetLowWatermark() (string, error) {
-	return c.chunker.GetLowWatermark()
-}
-
 func (c *buffered) sendMetrics(ctx context.Context, processingTime time.Duration, logicalRowsCount uint64, affectedRowsCount uint64) error {
 	m := &metrics.Metrics{
 		Values: []metrics.MetricValue{
@@ -630,12 +622,6 @@ func (c *buffered) sendMetrics(ctx context.Context, processingTime time.Duration
 	return c.metricsSink.Send(contextWithTimeout, m)
 }
 
-// Next4Test is typically only used in integration tests that don't want to actually migrate data,
-// but need to advance the chunker.
-func (c *buffered) Next4Test() (*table.Chunk, error) {
-	return c.chunker.Next()
-}
-
 // GetChunker returns the chunker for accessing progress information
 func (c *buffered) GetChunker() table.Chunker {
 	return c.chunker
@@ -645,16 +631,4 @@ func (c *buffered) GetThrottler() throttler.Throttler {
 	c.Lock()
 	defer c.Unlock()
 	return c.throttler
-}
-
-// formatSQLValue formats a Go value for use in SQL VALUES clause using proper SQL escaping
-func (c *buffered) formatSQLValue(value any) string {
-	// Use the proper SQL escaping library to handle all data types correctly
-	escaped, err := sqlescape.EscapeSQL("%?", value)
-	if err != nil {
-		// Fallback to NULL if escaping fails
-		c.logger.Warnf("failed to escape SQL value %v: %v, using NULL", value, err)
-		return "NULL"
-	}
-	return escaped
 }

@@ -404,12 +404,14 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			ForceKill:       r.migration.ForceKill,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
-			Host:                 r.migration.Host,
-			Username:             r.migration.Username,
-			Password:             r.migration.Password,
-			TLSMode:              r.migration.TLSMode,
-			TLSCertificatePath:   r.migration.TLSCertificatePath,
-			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
+			Host:                     r.migration.Host,
+			Username:                 r.migration.Username,
+			Password:                 r.migration.Password,
+			TLSMode:                  r.migration.TLSMode,
+			TLSCertificatePath:       r.migration.TLSCertificatePath,
+			SkipDropAfterCutover:     r.migration.SkipDropAfterCutover,
+			ExperimentalBufferedCopy: r.migration.EnableExperimentalBufferedCopy,
+			Checksum:                 r.migration.Checksum,
 		}, r.logger, scope); err != nil {
 			return err
 		}

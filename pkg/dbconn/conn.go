@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -313,7 +312,7 @@ func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
 				// TLS connection successful
 				return db, nil
 			}
-			utils.ErrInErr(db.Close())
+			_ = db.Close()
 		}
 
 		// TLS failed, try without TLS by creating a DISABLED mode DSN
@@ -329,7 +328,7 @@ func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
 			return nil, err
 		}
 		if err := db.Ping(); err != nil {
-			utils.ErrInErr(db.Close())
+			_ = db.Close()
 			return nil, err
 		}
 		return db, nil
@@ -341,7 +340,7 @@ func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
-		utils.ErrInErr(db.Close())
+		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
