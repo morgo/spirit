@@ -3154,6 +3154,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	defer m.Close()
@@ -3178,7 +3179,6 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		Table:                tableName,
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
-		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	err = m2.Run(t.Context())

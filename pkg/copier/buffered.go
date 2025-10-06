@@ -3,7 +3,6 @@ package copier
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -58,10 +57,12 @@ type buffered struct {
 	workerIDCounter int32         // Atomic counter for assigning worker IDs
 
 	// Chunklet-based processing
-	chunkletCompletions chan chunkletCompletion // Channel for completed chunklets
-	pendingChunks       map[int64]*pendingChunk // Map of chunks being processed
-	pendingMutex        sync.Mutex              // Protects pendingChunks map
-	nextChunkID         int64                   // Atomic counter for chunk ordering
+	chunkletCompletions  chan chunkletCompletion // Channel for completed chunklets
+	pendingChunks        map[int64]*pendingChunk // Map of chunks being processed
+	pendingMutex         sync.Mutex              // Protects pendingChunks map
+	nextChunkID          int64                   // Atomic counter for chunk ordering
+	writeWorkersCount    int32                   // Number of write workers
+	writeWorkersFinished int32                   // Atomic counter for finished write workers
 }
 
 // rowData represents a single row with all its column values
@@ -95,11 +96,6 @@ type pendingChunk struct {
 
 // Assert that buffered implements the Copier interface
 var _ Copier = (*buffered)(nil)
-
-// CopyChunk is maintained for interface compatibility but not used in producer-consumer pattern
-func (c *buffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
-	return errors.New("not implemented in buffered copier, use Run()")
-}
 
 // readChunkData reads all rows from a chunk into memory
 func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([]rowData, error) {
@@ -191,6 +187,7 @@ func (c *buffered) Run(ctx context.Context) error {
 
 	// Start write workers that process chunklets
 	writeWorkers := 40 // More write workers than read workers
+	c.writeWorkersCount = int32(writeWorkers)
 	c.logger.Infof("starting %d write workers", writeWorkers)
 	for range writeWorkers {
 		g.Go(func() error {
@@ -204,8 +201,8 @@ func (c *buffered) Run(ctx context.Context) error {
 	})
 	err := g.Wait()
 
-	// Close the completions channel after all workers have finished
-	close(c.chunkletCompletions)
+	// The completions channel is now closed by the last writeWorker to finish
+	// so we don't need to close it here anymore
 
 	return err
 }
@@ -314,6 +311,18 @@ func (c *buffered) readWorker(ctx context.Context) error {
 // writeWorker processes chunklets from the shared buffer
 func (c *buffered) writeWorker(ctx context.Context) error {
 	workerID := atomic.AddInt32(&c.workerIDCounter, 1)
+
+	defer func() {
+		finishedCount := atomic.AddInt32(&c.writeWorkersFinished, 1)
+		c.logger.Debugf("writeWorker %d finished, total finished: %d/%d", workerID, finishedCount, c.writeWorkersCount)
+
+		// If all write workers are finished, close the completions channel
+		// This signals the feedbackCoordinator that no more completions will come
+		if finishedCount == c.writeWorkersCount {
+			c.logger.Debugf("writeWorker %d: all write workers finished, closing completions channel", workerID)
+			close(c.chunkletCompletions)
+		}
+	}()
 
 	for {
 		select {
