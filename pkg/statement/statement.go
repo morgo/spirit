@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-
+	"github.com/block/spirit/pkg/validation"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
@@ -244,42 +244,7 @@ func (a *AbstractStatement) AlterContainsIndexVisibility() error {
 	if !ok {
 		return ErrNotAlterTable
 	}
-
-	hasIndexVisibility := false
-	hasNonMetadataOperation := false
-
-	for _, spec := range alterStmt.Specs {
-		switch spec.Tp {
-		case ast.AlterTableIndexInvisible:
-			hasIndexVisibility = true
-		case ast.AlterTableDropIndex,
-			ast.AlterTableRenameIndex,
-			ast.AlterTableDropPartition,
-			ast.AlterTableTruncatePartition,
-			ast.AlterTableAddPartitions,
-			ast.AlterTableAlterColumn:
-			// These are metadata-only operations - safe to mix with index visibility
-			continue
-		case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-			// Only safe if changing length of a VARCHAR column
-			if spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar {
-				continue
-			}
-			hasNonMetadataOperation = true
-		case ast.AlterTableAddConstraint: // ADD INDEX operations are table-rebuilding
-			hasNonMetadataOperation = true
-		default:
-			// All other operations are considered non-metadata (table rebuilding)
-			hasNonMetadataOperation = true
-		}
-	}
-
-	// Only fail if index visibility is mixed with non-metadata operations
-	if hasIndexVisibility && hasNonMetadataOperation {
-		return ErrVisibilityMixedWithOtherChanges
-	}
-
-	return nil
+	return validation.AlterContainsIndexVisibilityLogic(alterStmt)
 }
 
 func (a *AbstractStatement) TrimAlter() string {

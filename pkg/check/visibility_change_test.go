@@ -1,29 +1,66 @@
 package check
 
 import (
+	"context"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
+	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestVisibilityChange(t *testing.T) {
-	r := Resources{
-		Statement: statement.MustNew("ALTER TABLE t1 DROP COLUMN foo")[0],
+	testCheck := func(stmt string, shouldError bool, expectedError string) {
+		r := Resources{Statement: statement.MustNew("ALTER TABLE t1 " + stmt)[0]}
+		err := VisibilityCheck(context.Background(), r, nil)
+		if shouldError {
+			require.ErrorContains(t, err, expectedError)
+		} else {
+			require.NoError(t, err)
+		}
 	}
-	err := visibilityCheck(t.Context(), r, nil)
-	require.NoError(t, err) // regular DDL
 
-	r.Statement = statement.MustNew("ALTER TABLE t1 ALTER INDEX idx1 VISIBLE")[0]
-	err = visibilityCheck(t.Context(), r, nil)
-	require.NoError(t, err) // pure index visibility changes are now allowed
+	testDirect := func(stmt string, shouldError bool, expectedError string) {
+		err := AlterContainsIndexVisibility(statement.MustNew("ALTER TABLE t1 " + stmt)[0])
+		if shouldError {
+			require.ErrorContains(t, err, expectedError)
+		} else {
+			require.NoError(t, err)
+		}
+	}
 
-	r.Statement = statement.MustNew("ALTER TABLE t1 ALTER INDEX idx1 INVISIBLE")[0]
-	err = visibilityCheck(t.Context(), r, nil)
-	require.NoError(t, err) // pure index visibility changes are now allowed
+	// Test both check function and direct function with same data
+	tests := []struct {
+		stmt        string
+		shouldError bool
+		errorMsg    string
+		desc        string
+	}{
+		// Safe operations (original logic was more permissive)
+		{"DROP COLUMN foo", false, "", "regular DDL"},
+		{"ALTER INDEX idx1 VISIBLE", false, "", "pure visibility change"},
+		{"ALTER INDEX idx1 INVISIBLE", false, "", "pure visibility change"},
+		{"ALTER INDEX idx1 VISIBLE, drop index old", false, "", "visibility + metadata"},
+		{"drop index a", false, "", "drop index"},
+		{"modify a varchar(100)", false, "", "varchar modification"},
 
-	// But mixed with table-rebuilding operations should still fail
-	r.Statement = statement.MustNew("ALTER TABLE t1 ALTER INDEX idx1 VISIBLE, ADD COLUMN col INT")[0]
-	err = visibilityCheck(t.Context(), r, nil)
-	require.ErrorContains(t, err, "the ALTER operation contains a change to index visibility mixed with table-rebuilding operations")
+		// Unsafe operations (blocks visibility mixed with table-rebuilding)
+		{"ALTER INDEX idx1 VISIBLE, ADD COLUMN col INT", true, "mixed with table-rebuilding operations", "visibility + add column"},
+		{"ALTER INDEX b INVISIBLE, add unique(e)", true, "mixed with table-rebuilding operations", "visibility + unique"},
+		{"ALTER INDEX b INVISIBLE, modify a int", true, "mixed with table-rebuilding operations", "visibility + non-varchar"},
+	}
+
+	for _, tt := range tests {
+		t.Run("check_"+tt.desc, func(t *testing.T) {
+			testCheck(tt.stmt, tt.shouldError, tt.errorMsg)
+		})
+		t.Run("direct_"+tt.desc, func(t *testing.T) {
+			testDirect(tt.stmt, tt.shouldError, tt.errorMsg)
+		})
+	}
+
+	// Test non-ALTER statements (only for direct function)
+	assert.Equal(t, statement.ErrNotAlterTable,
+		AlterContainsIndexVisibility(statement.MustNew("CREATE TABLE t1 (id INT)")[0]))
 }
