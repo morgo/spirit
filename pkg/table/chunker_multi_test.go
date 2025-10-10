@@ -320,7 +320,7 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 	})
 
 	t.Run("NextError", func(t *testing.T) {
-		mock1 := NewMockChunker("table1", 1000)
+		mock1 := NewMockChunker("table1", 2000) // Make this chunker larger so it gets selected
 		mock2 := NewMockChunker("table2", 1000)
 		mock1.SetNextError(errors.New("next failed"))
 		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
@@ -333,7 +333,7 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 	})
 
 	t.Run("WatermarkError", func(t *testing.T) {
-		mock1 := NewMockChunker("table1", 1000)
+		mock1 := NewMockChunker("table1", 2000)
 		mock2 := NewMockChunker("table2", 1000)
 		mock1.SetWatermarkError(errors.New("watermark failed"))
 		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
