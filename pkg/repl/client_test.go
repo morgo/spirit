@@ -474,7 +474,26 @@ func TestDDLNotification(t *testing.T) {
 	// check that we get notification of it.
 	testutils.RunSQL(t, "CREATE TABLE ddl_t3 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
-	tableModified := <-ddlNotifications
+	// Because tests across packages are run in parallel, this test
+	// is actually racey because another notification may be received instead.
+	// To counteract this we just expect *this* notification within 2 seconds
+	var tableModified string
+	timeout := time.After(2 * time.Second)
+
+	for {
+		select {
+		case notification := <-ddlNotifications:
+			if notification == "test.ddl_t3" {
+				tableModified = notification
+				goto found
+			}
+			// Log unexpected notifications for debugging
+			t.Logf("Received unexpected DDL notification: %s", notification)
+		case <-timeout:
+			t.Fatal("Timeout waiting for DDL notification for test.ddl_t3")
+		}
+	}
+found:
 	assert.Equal(t, "test.ddl_t3", tableModified)
 }
 
@@ -661,8 +680,17 @@ func TestCompositePKUpdate(t *testing.T) {
 }
 
 func TestAllChangesFlushed(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
-
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 	client := &Client{
 		db:              nil,
 		logger:          logrus.New(),

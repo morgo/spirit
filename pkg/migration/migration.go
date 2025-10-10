@@ -47,6 +47,10 @@ type Migration struct {
 
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
+	// Used for tests so we can concurrently execute without issues even though
+	// the sentinel name is shared. Basically it will be true here, but false
+	// in the tests unless we set it explicitly true.
+	RespectSentinel bool `name:"respect-sentinel" help:"Look for sentinel table to exist and block if it does" optional:"" default:"true" hidden:""`
 }
 
 func (m *Migration) Run() error {

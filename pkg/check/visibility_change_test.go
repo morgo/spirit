@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestVisbilityChange(t *testing.T) {
+func TestVisibilityChange(t *testing.T) {
 	r := Resources{
 		Statement: statement.MustNew("ALTER TABLE t1 DROP COLUMN foo")[0],
 	}

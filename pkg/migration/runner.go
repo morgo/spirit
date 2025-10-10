@@ -260,12 +260,13 @@ func (r *Runner) Run(originalCtx context.Context) error {
 	// This function is invoked even if DeferCutOver is false
 	// because it's possible that the sentinel table was created
 	// manually after the migration started.
-	r.sentinelWaitStartTime = time.Now()
-	r.setCurrentState(stateWaitingOnSentinelTable)
-	if err := r.waitOnSentinelTable(ctx); err != nil {
-		return err
+	if r.migration.RespectSentinel {
+		r.sentinelWaitStartTime = time.Now()
+		r.setCurrentState(stateWaitingOnSentinelTable)
+		if err := r.waitOnSentinelTable(ctx); err != nil {
+			return err
+		}
 	}
-
 	// Perform steps to prepare for final cutover.
 	// This includes computing an optional checksum,
 	// catching up on replClient apply, running ANALYZE TABLE so
@@ -412,12 +413,14 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			ForceKill:       r.migration.ForceKill,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
-			Host:                 r.migration.Host,
-			Username:             r.migration.Username,
-			Password:             r.migration.Password,
-			TLSMode:              r.migration.TLSMode,
-			TLSCertificatePath:   r.migration.TLSCertificatePath,
-			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
+			Host:                     r.migration.Host,
+			Username:                 r.migration.Username,
+			Password:                 r.migration.Password,
+			TLSMode:                  r.migration.TLSMode,
+			TLSCertificatePath:       r.migration.TLSCertificatePath,
+			SkipDropAfterCutover:     r.migration.SkipDropAfterCutover,
+			ExperimentalBufferedCopy: r.migration.EnableExperimentalBufferedCopy,
+			Checksum:                 r.migration.Checksum,
 		}, r.logger, scope); err != nil {
 			return err
 		}

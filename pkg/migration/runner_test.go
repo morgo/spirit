@@ -1127,6 +1127,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 		Table:           "cptresume",
 		Alter:           "ENGINE=InnoDB",
 		Checksum:        true,
+		RespectSentinel: true,
 	})
 	assert.NoError(t, err)
 
@@ -2661,6 +2662,7 @@ func TestDeferCutOver(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	wg := sync.WaitGroup{}
@@ -2714,6 +2716,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	go func() {
@@ -2790,6 +2793,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	go func() {
@@ -2838,7 +2842,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	// The migration itself runs with DeferCutOver=false
 	// so we test to make sure a sentinel table created manually by the operator
 	// blocks cutover.
-	statusInterval = 500 * time.Millisecond
 
 	tableName := `resume_checkpoint_e2e_w_sentinel`
 	tableInfo := table.TableInfo{SchemaName: "test", TableName: tableName}
@@ -2873,6 +2876,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	migration.Alter = alterSQL
 	migration.TargetChunkTime = 100 * time.Millisecond
 	migration.DeferCutOver = false
+	migration.RespectSentinel = true
 
 	runner, err := NewRunner(migration)
 	assert.NoError(t, err)
@@ -2929,6 +2933,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	newmigration.Alter = alterSQL
 	newmigration.TargetChunkTime = 5 * time.Second
 	newmigration.DeferCutOver = false
+	newmigration.RespectSentinel = true
 
 	m, err := NewRunner(newmigration)
 	assert.NoError(t, err)
@@ -3149,6 +3154,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: false,
 		DeferCutOver:         true,
+		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
 	defer m.Close()
