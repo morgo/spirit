@@ -101,24 +101,19 @@ func (s *deltaQueue) createReplaceStmt(replaceKeys []string) statement {
 // that if there are operations: REPLACE<1>, REPLACE<2>, DELETE<3>, REPLACE<4>
 // we merge it to REPLACE<1,2>, DELETE<3>, REPLACE<4>.
 func (s *deltaQueue) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
-	// Pop the changes into changesToFlush
-	// and then reset the delta queue. This allows concurrent
-	// inserts back into the queue to increase parallelism.
 	s.Lock()
-	changesToFlush := s.changes
-	s.changes = nil
-	s.Unlock()
+	defer s.Unlock()
 
 	// Early return if there is nothing to flush.
-	if len(changesToFlush) == 0 {
+	if len(s.changes) == 0 {
 		return nil
 	}
 	// Otherwise, flush the changes.
 	var stmts []statement
 	var buffer []string
-	prevKey := changesToFlush[0] // for initialization
+	prevKey := s.changes[0] // for initialization
 	target := int(atomic.LoadInt64(&s.c.targetBatchSize))
-	for _, change := range changesToFlush {
+	for _, change := range s.changes {
 		// We are changing from DELETE to REPLACE
 		// or vice versa, *or* the buffer is getting very large.
 		if change.isDelete != prevKey.isDelete || len(buffer) > target {
@@ -152,6 +147,10 @@ func (s *deltaQueue) Flush(ctx context.Context, underLock bool, lock *dbconn.Tab
 			return err
 		}
 	}
+	// If it's successful, we can clear the queue
+	// and return to release the mutex for new changes
+	// to start accumulating again.
+	s.changes = nil
 	return nil
 }
 
