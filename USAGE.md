@@ -10,7 +10,6 @@
     - [checksum](#checksum)
     - [database](#database)
     - [defer-cutover](#defer-cutover)
-    - [force-inplace](#force-inplace)
     - [force-kill](#force-kill)
     - [host](#host)
     - [lock-wait-timeout](#lock-wait-timeout)
@@ -29,6 +28,8 @@
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
   - [Experimental Features](#experimental-features)
+    - [enable-experimental-multi-table-support](#enable-experimental-multi-table-support)
+    - [enable-experimental-buffered-copy](#enable-experimental-buffered-copy)
 
 ## Getting Started
 
@@ -88,15 +89,6 @@ You can resume a migration from checkpoint and Spirit will start waiting again f
 If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table `_spirit_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
-
-### force-inplace
-
-- Type: Boolean
-- Default value: FALSE
-
-When set to `TRUE`, Spirit will attempt to perform the schema change using MySQL's `INPLACE` algorithm, before falling back to performing its usual copy process. `INPLACE` is non-blocking on the system where the DDL is initiated, but it will block on binary-log based read replicas. This means it's typically only safe to enable if you have no read replicas, or your read replicas are based on physical log shipping (i.e. Aurora).
-
-Even when force-inplace is `FALSE`, Spirit automatically detects "safe" operations that use the `INPLACE` algorithm. These include operations that modify only metadata, specifically `ALTER INDEX .. VISIBLE/INVISIBLE`, `DROP KEY/INDEX` and `RENAME KEY/INDEX`. Consult <https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html> for more details.
 
 ### force-kill
 
@@ -360,9 +352,7 @@ This feature allows Spirit to apply multiple schema changes at once, and cut the
 
 **Current Status**
 
-This feature is not feature complete. See Issue [#388](https://github.com/block/spirit/issues/388) for details.
-
-The main issues are that multi-table migrations are not currently resumable, and there is a lack of a lock to prevent concurrent migrations. This feature also lacks sufficient testing.
+This feature is feature complete. The main issue is that there is insufficient test coverage. See issue [#388](https://github.com/block/spirit/issues/388) for details.
 
 ### enable-experimental-buffered-copy
 

@@ -13,7 +13,17 @@ import (
 )
 
 func TestSubscriptionDeltaQueue(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	client := &Client{
 		db:              nil,
@@ -49,7 +59,17 @@ func TestSubscriptionDeltaQueue(t *testing.T) {
 }
 
 func TestFlushDeltaQueue(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	dbConfig := dbconn.NewDBConfig()
 	dbConfig.MaxOpenConnections = 32

@@ -89,22 +89,20 @@ func (s *deltaMap) createReplaceStmt(replaceKeys []string) statement {
 	}
 }
 
+// Flush writes changes to the new table.
+// If underLock is true, then it uses the provided lock to execute
+// the statements under a table lock. This is used for the final flush
+// to ensure no changes are missed.
 func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
-	// Pop the changes into changesToFlush
-	// and then reset the delta map. This allows concurrent
-	// inserts back into the map to increase parallelism.
 	s.Lock()
-	changesToFlush := s.changes
-	s.changes = make(map[string]bool)
-	s.Unlock()
+	defer s.Unlock()
 
-	// We must now apply the changeset setToFlush to the new table.
 	var deleteKeys []string
 	var replaceKeys []string
 	var stmts []statement
 	var i int64
 	target := atomic.LoadInt64(&s.c.targetBatchSize)
-	for key, isDelete := range changesToFlush {
+	for key, isDelete := range s.changes {
 		i++
 		if isDelete {
 			deleteKeys = append(deleteKeys, key)
@@ -149,6 +147,10 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 			return err
 		}
 	}
+	// If it's successful, we can clear the map
+	// and return to release the mutex for new changes
+	// to start accumulating again.
+	s.changes = make(map[string]bool)
 	return nil
 }
 

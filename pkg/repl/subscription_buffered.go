@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
@@ -82,7 +81,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	s.changes[hashedKey] = logicalRow{rowImage: row}
 }
 
-func (s *bufferedMap) createDeleteStmt(deleteKeys []string) statement {
+func (s *bufferedMap) createDeleteStmt(deleteKeys []string) (statement, error) {
 	var deleteStmt string
 	if len(deleteKeys) > 0 {
 		deleteStmt = fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
@@ -94,19 +93,17 @@ func (s *bufferedMap) createDeleteStmt(deleteKeys []string) statement {
 	return statement{
 		numKeys: len(deleteKeys),
 		stmt:    deleteStmt,
-	}
+	}, nil
 }
 
 // createUpsertStmt creates an Upsert (aka INSERT.. ON DUPLICATE KEY UPDATE).
 // to insert each of the logicalRows in this buffer.
-func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
+func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) (statement, error) {
 	var insertStmt string
 	if len(insertRows) > 0 {
 		// Get the columns that exist in both source and destination tables
 		columnList := utils.IntersectNonGeneratedColumns(s.table, s.newTable)
-
-		// Get the intersected column indices to map rowImage to the correct columns
-		intersectedColumns := s.getIntersectedColumns()
+		columnNames := utils.IntersectNonGeneratedColumnsAsSlice(s.table, s.newTable)
 
 		// Build the VALUES clause from the row images
 		var valuesClauses []string
@@ -116,19 +113,27 @@ func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
 			}
 
 			// Convert the row image to a VALUES clause, but only for intersected columns
+			// The row image may contain more columns than we want to copy
 			var values []string
-			for _, colIndex := range intersectedColumns {
-				if colIndex < len(logicalRow.rowImage) {
-					value := logicalRow.rowImage[colIndex]
-					if value == nil {
-						values = append(values, "NULL")
-					} else {
-						// Use proper SQL escaping
-						values = append(values, s.formatSQLValue(value))
-					}
-				} else {
-					// Column doesn't exist in row image, use NULL
+			intersectedColumns := s.getIntersectedColumns()
+
+			for i, colIndex := range intersectedColumns {
+				if colIndex >= len(logicalRow.rowImage) {
+					return statement{}, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.rowImage))
+				}
+				value := logicalRow.rowImage[colIndex]
+				if value == nil {
 					values = append(values, "NULL")
+				} else {
+					// Get the column type for proper escaping
+					if i >= len(columnNames) {
+						return statement{}, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
+					}
+					columnType, ok := s.table.GetColumnMySQLType(columnNames[i])
+					if !ok {
+						return statement{}, fmt.Errorf("column %s not found in table info", columnNames[i])
+					}
+					values = append(values, utils.EscapeMySQLType(columnType, value))
 				}
 			}
 			valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
@@ -166,17 +171,16 @@ func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
 	return statement{
 		numKeys: len(insertRows),
 		stmt:    insertStmt,
-	}
+	}, nil
 }
 
+// Flush writes changes to the new table.
+// If underLock is true, then it uses the provided lock to execute
+// the statements under a table lock. This is used for the final flush
+// to ensure no changes are missed.
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
-	// Pop the changes into changesToFlush
-	// and then reset the delta map. This allows concurrent
-	// inserts back into the map to increase parallelism.
 	s.Lock()
-	changesToFlush := s.changes
-	s.changes = make(map[string]logicalRow)
-	s.Unlock()
+	defer s.Unlock()
 
 	// We must now apply the changeset setToFlush to the new table.
 	var deleteKeys []string
@@ -184,7 +188,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 	var stmts []statement
 	var i int64
 	target := atomic.LoadInt64(&s.c.targetBatchSize)
-	for key, logicalRow := range changesToFlush {
+	for key, logicalRow := range s.changes {
 		i++
 		if logicalRow.isDeleted {
 			deleteKeys = append(deleteKeys, key)
@@ -192,14 +196,30 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 			upsertRows = append(upsertRows, logicalRow)
 		}
 		if (i % target) == 0 {
-			stmts = append(stmts, s.createDeleteStmt(deleteKeys))
-			stmts = append(stmts, s.createUpsertStmt(upsertRows))
+			deleteStmts, err := s.createDeleteStmt(deleteKeys)
+			if err != nil {
+				return err
+			}
+			upsertStmts, err := s.createUpsertStmt(upsertRows)
+			if err != nil {
+				return err
+			}
+			stmts = append(stmts, deleteStmts)
+			stmts = append(stmts, upsertStmts)
 			deleteKeys = nil
 			upsertRows = nil
 		}
 	}
-	stmts = append(stmts, s.createDeleteStmt(deleteKeys))
-	stmts = append(stmts, s.createUpsertStmt(upsertRows))
+	deleteStmts, err := s.createDeleteStmt(deleteKeys)
+	if err != nil {
+		return err
+	}
+	upsertStmts, err := s.createUpsertStmt(upsertRows)
+	if err != nil {
+		return err
+	}
+	stmts = append(stmts, deleteStmts)
+	stmts = append(stmts, upsertStmts)
 
 	if underLock {
 		// Execute under lock means it is a final flush
@@ -229,6 +249,10 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 			return err
 		}
 	}
+	// If it's successful, we can clear the map
+	// and return to release the mutex for new changes
+	// to start accumulating again.
+	s.changes = make(map[string]logicalRow)
 	return nil
 }
 
@@ -280,16 +304,4 @@ func (s *bufferedMap) columnExistsInBothTables(columnName string) bool {
 	}
 
 	return sourceExists && destExists
-}
-
-// formatSQLValue formats a Go value for use in SQL VALUES clause using proper SQL escaping
-func (s *bufferedMap) formatSQLValue(value any) string {
-	// Use the proper SQL escaping library to handle all data types correctly
-	escaped, err := sqlescape.EscapeSQL("%?", value)
-	if err != nil {
-		// Fallback to NULL if escaping fails
-		s.c.logger.Warnf("failed to escape SQL value %v: %v, using NULL", value, err)
-		return "NULL"
-	}
-	return escaped
 }

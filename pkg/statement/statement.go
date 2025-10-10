@@ -158,12 +158,12 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 	unsafeClauses := 0
 	for _, spec := range alterStmt.Specs {
 		switch spec.Tp {
-		case ast.AlterTableDropIndex,
-			ast.AlterTableRenameIndex,
+		case ast.AlterTableRenameIndex,
 			ast.AlterTableIndexInvisible,
 			ast.AlterTableDropPartition,
 			ast.AlterTableTruncatePartition,
-			ast.AlterTableAddPartitions:
+			ast.AlterTableAddPartitions,
+			ast.AlterTableDropIndex:
 			continue
 		case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
 			// Only safe if changing length of a VARCHAR column. We don't know the type of the column
@@ -172,15 +172,16 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 			if spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar {
 				continue
 			}
+			unsafeClauses++
 		default:
 			unsafeClauses++
 		}
 	}
 	if unsafeClauses > 0 {
 		if len(alterStmt.Specs) > 1 {
-			return errors.New("ALTER contains multiple clauses. Combinations of INSTANT and INPLACE operations cannot be detected safely. Consider executing these as separate ALTER statements. Use --force-inplace to override this safety check")
+			return errors.New("ALTER contains multiple clauses. Combinations of INSTANT and INPLACE operations cannot be detected safely. Consider executing these as separate ALTER statements")
 		}
-		return errors.New("ALTER either does not support INPLACE or when performed as INPLACE could take considerable time. Use --force-inplace to override this safety check")
+		return errors.New("ALTER statement contains operations that are not safe for INPLACE algorithm")
 	}
 	return nil
 }
@@ -227,20 +228,48 @@ func (a *AbstractStatement) AlterContainsAddUnique() error {
 }
 
 // AlterContainsIndexVisibility checks to see if there are any clauses of an ALTER to change index visibility.
-// It really does not make sense for visibility changes to be anything except metadata only changes,
-// because they are used for experiments. An experiment is not rebuilding the table. If you are experimenting
-// setting an index to invisible and plan to switch it back to visible quickly if required, going through
-// a full table rebuild does not make sense.
+// It now allows index visibility changes when mixed with other metadata-only operations,
+// but blocks them when mixed with table-rebuilding operations to avoid semantic issues.
 func (a *AbstractStatement) AlterContainsIndexVisibility() error {
 	alterStmt, ok := (*a.StmtNode).(*ast.AlterTableStmt)
 	if !ok {
 		return ErrNotAlterTable
 	}
+
+	hasIndexVisibility := false
+	hasNonMetadataOperation := false
+
 	for _, spec := range alterStmt.Specs {
-		if spec.Tp == ast.AlterTableIndexInvisible {
-			return errors.New("the ALTER operation contains a change to index visibility and could not be completed as a meta-data only operation. This is a safety check! Please split the ALTER statement into separate statements for changing the invisible index and other operations")
+		switch spec.Tp {
+		case ast.AlterTableIndexInvisible:
+			hasIndexVisibility = true
+		case ast.AlterTableDropIndex,
+			ast.AlterTableRenameIndex,
+			ast.AlterTableDropPartition,
+			ast.AlterTableTruncatePartition,
+			ast.AlterTableAddPartitions,
+			ast.AlterTableAlterColumn:
+			// These are metadata-only operations - safe to mix with index visibility
+			continue
+		case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
+			// Only safe if changing length of a VARCHAR column
+			if spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar {
+				continue
+			}
+			hasNonMetadataOperation = true
+		case ast.AlterTableAddConstraint: // ADD INDEX operations are table-rebuilding
+			hasNonMetadataOperation = true
+		default:
+			// All other operations are considered non-metadata (table rebuilding)
+			hasNonMetadataOperation = true
 		}
 	}
+
+	// Only fail if index visibility is mixed with non-metadata operations
+	if hasIndexVisibility && hasNonMetadataOperation {
+		return errors.New("the ALTER operation contains a change to index visibility mixed with table-rebuilding operations. This creates semantic issues for experiments. Please split the ALTER statement into separate statements for changing the invisible index and other operations")
+	}
+
 	return nil
 }
 

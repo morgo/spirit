@@ -27,7 +27,6 @@ type Migration struct {
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
-	ForceInplace         bool          `name:"force-inplace" help:"Force attempt to use inplace (only safe without replicas or with Aurora Global)" optional:"" default:"false"`
 	Checksum             bool          `name:"checksum" help:"Checksum new table before final cut-over" optional:"" default:"true"`
 	ReplicaDSN           string        `name:"replica-dsn" help:"A DSN for a replica which (if specified) will be used for lag checking." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
@@ -48,6 +47,10 @@ type Migration struct {
 
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
+	// Used for tests so we can concurrently execute without issues even though
+	// the sentinel name is shared. Basically it will be true here, but false
+	// in the tests unless we set it explicitly true.
+	RespectSentinel bool `name:"respect-sentinel" help:"Look for sentinel table to exist and block if it does" optional:"" default:"true" hidden:""`
 }
 
 func (m *Migration) Run() error {
@@ -66,7 +69,10 @@ func (m *Migration) Run() error {
 }
 
 // normalizeOptions does some validation and sets defaults.
-// for example, it validates that only --statement or --table and --alter are specified.
+// for example, it validates that only --statement or --table and --alter are specified,
+// and when --statement is not specified, it generates it
+// so the rest of the code can use --statement as the canonical
+// source of truth for what's happening.
 func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, err error) {
 	if m.TargetChunkTime == 0 {
 		m.TargetChunkTime = table.ChunkerDefaultTarget
@@ -104,9 +110,7 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 			}
 			stmt.Schema = m.Database
 		}
-	} else {
-		// Parse table + alter into statement.
-		// So that in various contexts we can start moving to using the AbstractStatement.
+	} else { // --alter and --table are specified
 		if m.Table == "" {
 			return nil, errors.New("table name is required")
 		}
@@ -117,6 +121,7 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 		m.Alter = strings.TrimSpace(m.Alter)
 		m.Alter = strings.TrimSuffix(m.Alter, ";")
 		fullStatement := fmt.Sprintf("ALTER TABLE `%s` %s", m.Table, m.Alter)
+		m.Statement = fullStatement // used in resume from checkpoint
 		p := parser.New()
 		stmtNodes, _, err := p.Parse(fullStatement, "", "")
 		if err != nil {
