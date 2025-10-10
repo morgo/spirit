@@ -11,7 +11,17 @@ import (
 )
 
 func TestSubscriptionDeltaMap(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	client := &Client{
 		db:              nil,
@@ -51,7 +61,17 @@ func TestSubscriptionDeltaMap(t *testing.T) {
 }
 
 func TestFlushWithLock(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
@@ -97,7 +117,17 @@ func TestFlushWithLock(t *testing.T) {
 }
 
 func TestFlushWithoutLock(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
@@ -140,7 +170,17 @@ func TestFlushWithoutLock(t *testing.T) {
 }
 
 func TestConcurrentKeyChanges(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	client := &Client{
 		db:              nil,
@@ -181,7 +221,17 @@ func TestConcurrentKeyChanges(t *testing.T) {
 }
 
 func TestKeyChangedOverwrite(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	client := &Client{
 		db:              nil,
@@ -221,7 +271,17 @@ func TestKeyChangedOverwrite(t *testing.T) {
 }
 
 func TestKeyChangedEdgeCases(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	client := &Client{
 		db:              nil,
@@ -275,8 +335,17 @@ func TestKeyChangedEdgeCases(t *testing.T) {
 }
 
 func TestKeyChangedNilAndEmpty(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
-
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 	client := &Client{
 		db:              nil,
 		logger:          logrus.New(),
@@ -306,7 +375,17 @@ func TestKeyChangedNilAndEmpty(t *testing.T) {
 }
 
 func TestKeyAboveWatermark(t *testing.T) {
-	srcTable, dstTable := setupTestTables(t)
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	client := &Client{
 		db:              nil,

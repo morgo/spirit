@@ -81,7 +81,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	s.changes[hashedKey] = logicalRow{rowImage: row}
 }
 
-func (s *bufferedMap) createDeleteStmt(deleteKeys []string) statement {
+func (s *bufferedMap) createDeleteStmt(deleteKeys []string) (statement, error) {
 	var deleteStmt string
 	if len(deleteKeys) > 0 {
 		deleteStmt = fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
@@ -93,19 +93,17 @@ func (s *bufferedMap) createDeleteStmt(deleteKeys []string) statement {
 	return statement{
 		numKeys: len(deleteKeys),
 		stmt:    deleteStmt,
-	}
+	}, nil
 }
 
 // createUpsertStmt creates an Upsert (aka INSERT.. ON DUPLICATE KEY UPDATE).
 // to insert each of the logicalRows in this buffer.
-func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
+func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) (statement, error) {
 	var insertStmt string
 	if len(insertRows) > 0 {
 		// Get the columns that exist in both source and destination tables
 		columnList := utils.IntersectNonGeneratedColumns(s.table, s.newTable)
-
-		// Get the intersected column indices to map rowImage to the correct columns
-		intersectedColumns := s.getIntersectedColumns()
+		columnNames := utils.IntersectNonGeneratedColumnsAsSlice(s.table, s.newTable)
 
 		// Build the VALUES clause from the row images
 		var valuesClauses []string
@@ -115,19 +113,27 @@ func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
 			}
 
 			// Convert the row image to a VALUES clause, but only for intersected columns
+			// The row image may contain more columns than we want to copy
 			var values []string
-			for _, colIndex := range intersectedColumns {
-				if colIndex < len(logicalRow.rowImage) {
-					value := logicalRow.rowImage[colIndex]
-					if value == nil {
-						values = append(values, "NULL")
-					} else {
-						// Quote the value for SQL safety
-						values = append(values, fmt.Sprintf("'%v'", value))
-					}
-				} else {
-					// Column doesn't exist in row image, use NULL
+			intersectedColumns := s.getIntersectedColumns()
+
+			for i, colIndex := range intersectedColumns {
+				if colIndex >= len(logicalRow.rowImage) {
+					return statement{}, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.rowImage))
+				}
+				value := logicalRow.rowImage[colIndex]
+				if value == nil {
 					values = append(values, "NULL")
+				} else {
+					// Get the column type for proper escaping
+					if i >= len(columnNames) {
+						return statement{}, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
+					}
+					columnType, ok := s.table.GetColumnMySQLType(columnNames[i])
+					if !ok {
+						return statement{}, fmt.Errorf("column %s not found in table info", columnNames[i])
+					}
+					values = append(values, utils.EscapeMySQLType(columnType, value))
 				}
 			}
 			valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
@@ -165,7 +171,7 @@ func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) statement {
 	return statement{
 		numKeys: len(insertRows),
 		stmt:    insertStmt,
-	}
+	}, nil
 }
 
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
@@ -191,14 +197,30 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 			upsertRows = append(upsertRows, logicalRow)
 		}
 		if (i % target) == 0 {
-			stmts = append(stmts, s.createDeleteStmt(deleteKeys))
-			stmts = append(stmts, s.createUpsertStmt(upsertRows))
+			deleteStmts, err := s.createDeleteStmt(deleteKeys)
+			if err != nil {
+				return err
+			}
+			upsertStmts, err := s.createUpsertStmt(upsertRows)
+			if err != nil {
+				return err
+			}
+			stmts = append(stmts, deleteStmts)
+			stmts = append(stmts, upsertStmts)
 			deleteKeys = nil
 			upsertRows = nil
 		}
 	}
-	stmts = append(stmts, s.createDeleteStmt(deleteKeys))
-	stmts = append(stmts, s.createUpsertStmt(upsertRows))
+	deleteStmts, err := s.createDeleteStmt(deleteKeys)
+	if err != nil {
+		return err
+	}
+	upsertStmts, err := s.createUpsertStmt(upsertRows)
+	if err != nil {
+		return err
+	}
+	stmts = append(stmts, deleteStmts)
+	stmts = append(stmts, upsertStmts)
 
 	if underLock {
 		// Execute under lock means it is a final flush
