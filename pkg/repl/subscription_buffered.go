@@ -174,14 +174,13 @@ func (s *bufferedMap) createUpsertStmt(insertRows []logicalRow) (statement, erro
 	}, nil
 }
 
+// Flush writes changes to the new table.
+// If underLock is true, then it uses the provided lock to execute
+// the statements under a table lock. This is used for the final flush
+// to ensure no changes are missed.
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
-	// Pop the changes into changesToFlush
-	// and then reset the delta map. This allows concurrent
-	// inserts back into the map to increase parallelism.
 	s.Lock()
-	changesToFlush := s.changes
-	s.changes = make(map[string]logicalRow)
-	s.Unlock()
+	defer s.Unlock()
 
 	// We must now apply the changeset setToFlush to the new table.
 	var deleteKeys []string
@@ -189,7 +188,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 	var stmts []statement
 	var i int64
 	target := atomic.LoadInt64(&s.c.targetBatchSize)
-	for key, logicalRow := range changesToFlush {
+	for key, logicalRow := range s.changes {
 		i++
 		if logicalRow.isDeleted {
 			deleteKeys = append(deleteKeys, key)
@@ -250,6 +249,10 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 			return err
 		}
 	}
+	// If it's successful, we can clear the map
+	// and return to release the mutex for new changes
+	// to start accumulating again.
+	s.changes = make(map[string]logicalRow)
 	return nil
 }
 
