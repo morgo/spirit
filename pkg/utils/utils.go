@@ -97,19 +97,11 @@ func EscapeMySQLType(columnType string, value any) string {
 		// These should use _binary prefix for proper binary handling
 		if b, ok := value.([]byte); ok {
 			// Use the default escaping which will add _binary prefix for []byte
-			escaped, err := sqlescape.EscapeSQL("%?", b)
-			if err != nil {
-				return "NULL"
-			}
-			return escaped
+			return sqlescape.MustEscapeSQL("%?", b)
 		}
 		// If not []byte, convert to string and then to binary
 		str := fmt.Sprintf("%v", value)
-		escaped, err := sqlescape.EscapeSQL("%?", []byte(str))
-		if err != nil {
-			return "NULL"
-		}
-		return escaped
+		return sqlescape.MustEscapeSQL("%?", []byte(str))
 
 	case "VARCHAR", "CHAR", "TEXT", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT":
 		// Text types should be quoted strings, not binary
@@ -124,12 +116,7 @@ func EscapeMySQLType(columnType string, value any) string {
 			return "'" + sqlescape.EscapeString(string(b)) + "'"
 		}
 		// Use default escaping for time.Time values
-		escaped, err := sqlescape.EscapeSQL("%?", value)
-		if err != nil {
-			return "NULL"
-		}
-		return escaped
-
+		return sqlescape.MustEscapeSQL("%?", value)
 	case "INT", "BIGINT", "TINYINT", "SMALLINT", "MEDIUMINT", "FLOAT", "DOUBLE", "DECIMAL":
 		// Numeric types - convert []byte to string without quotes
 		if b, ok := value.([]byte); ok {
@@ -143,10 +130,6 @@ func EscapeMySQLType(columnType string, value any) string {
 			// Convert to string first, then escape
 			return "'" + sqlescape.EscapeString(string(b)) + "'"
 		}
-		escaped, err := sqlescape.EscapeSQL("%?", value)
-		if err != nil {
-			return "NULL"
-		}
-		return escaped
+		return sqlescape.MustEscapeSQL("%?", value)
 	}
 }
