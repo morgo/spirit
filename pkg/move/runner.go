@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
@@ -25,9 +26,10 @@ type Runner struct {
 
 	sourceTables []*table.TableInfo
 
-	replClient *repl.Client
-	chunker    table.Chunker
-	copier     copier.Copier
+	replClient      *repl.Client
+	copyChunker     table.Chunker
+	checksumChunker table.Chunker
+	copier          copier.Copier
 
 	logger   *logrus.Logger
 	dbConfig *dbconn.DBConfig
@@ -153,7 +155,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		WriteDB:                    r.target,
 	})
 
-	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 
 	// For each table create a chunker and add a subscription to the replication client.
 	for _, src := range r.sourceTables {
@@ -161,27 +164,33 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := dest.SetInfo(ctx); err != nil {
 			return err
 		}
-		chunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(src, dest, chunker.KeyAboveHighWatermark); err != nil {
+		if err := r.replClient.AddSubscription(src, dest, copyChunker.KeyAboveHighWatermark); err != nil {
 			return err
 		}
-		chunkers = append(chunkers, chunker)
+		checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		copyChunkers = append(copyChunkers, copyChunker)
+		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 
 	// Then create a multi chunker of all chunkers.
-	r.chunker = table.NewMultiChunker(chunkers...)
+	r.copyChunker = table.NewMultiChunker(copyChunkers...)
+	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
 	// Then open the multi chunker.
-	if err := r.chunker.Open(); err != nil {
+	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
-	defer r.chunker.Close()
+	defer r.copyChunker.Close()
 
 	// Create a copier that reads from the multi chunker and writes to the target.
-	r.copier, err = copier.NewCopier(r.source, r.chunker, &copier.CopierConfig{
+	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
 		Logger:                        r.logger,
@@ -205,12 +214,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// When the copier has finished, catch up the replication client.
+	// When the copier has finished, catch up the replication client
+	// This is in a non-blocking way first.
 	if err := r.replClient.Flush(ctx); err != nil {
 		return err
 	}
 
 	r.logger.Infof("All tables copied successfully.")
+
+	// Perform a checksum operation + ANALYZE TABLEs
+	// To make sure they are all in a ready state.
+	if err := r.prepareForCutover(ctx); err != nil {
+		return err
+	}
 
 	// In here, what we ideally do is a pluggable "cutover" step.
 	// The steps to update metadata are going to vary by deployment.
@@ -221,4 +237,44 @@ func (r *Runner) Run(ctx context.Context) error {
 	// - Rename the tables on the source to be unreachable.
 	// - UNLOCK TABLES on the source.
 	return nil
+}
+
+func (r *Runner) prepareForCutover(ctx context.Context) error {
+	// Disable the periodic flush and flush all pending events.
+	// We want it disabled for ANALYZE TABLE and acquiring a table lock
+	// *but* it will be started again briefly inside of the checksum
+	// runner to ensure that the lag does not grow too long.
+	r.replClient.StopPeriodicFlush()
+	if err := r.replClient.Flush(ctx); err != nil {
+		return err
+	}
+
+	// Run ANALYZE TABLE to update the statistics on the new table.
+	// This is required so on cutover plans don't go sideways, which
+	// is at elevated risk because the batch loading can cause statistics
+	// to be out of date.
+	r.logger.Infof("Running ANALYZE TABLE")
+	for _, tbl := range r.sourceTables {
+		if err := dbconn.Exec(ctx, r.target, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
+			return err
+		}
+	}
+
+	if err := r.checksumChunker.Open(); err != nil {
+		return err
+	}
+	defer r.checksumChunker.Close()
+
+	// Perform a checksum operation
+	checker, err := checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+		Concurrency:     r.move.Threads,
+		TargetChunkTime: r.move.TargetChunkTime,
+		DBConfig:        r.dbConfig,
+		Logger:          r.logger,
+		WriteDB:         r.target,
+	})
+	if err != nil {
+		return err
+	}
+	return checker.Run(ctx)
 }
