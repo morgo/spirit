@@ -72,7 +72,8 @@ type Runner struct {
 	usedResumeFromCheckpoint bool
 
 	// Attached logger
-	logger loggers.Advanced
+	logger     loggers.Advanced
+	cancelFunc context.CancelFunc
 
 	// MetricsSink
 	metricsSink metrics.Sink
@@ -124,9 +125,9 @@ func (r *Runner) attemptMySQLDDL(ctx context.Context) error {
 	return r.changes[0].attemptMySQLDDL(ctx)
 }
 
-func (r *Runner) Run(originalCtx context.Context) error {
-	ctx, cancel := context.WithCancel(originalCtx)
-	defer cancel()
+func (r *Runner) Run(ctx context.Context) error {
+	ctx, r.cancelFunc = context.WithCancel(ctx)
+	defer r.cancelFunc()
 	r.startTime = time.Now()
 	r.logger.Infof("Starting spirit migration: concurrency=%d target-chunk-size=%s",
 		r.migration.Threads,
@@ -627,8 +628,8 @@ func (r *Runner) setup(ctx context.Context) error {
 }
 
 // tableChangeNotification is called as a goroutine.
-// any schema changes will be sent here, and we need to determine
-// if they are acceptable or not.
+// Any schema changes to the source or new table will be sent to a channel
+// that this function reads from.
 func (r *Runner) tableChangeNotification(ctx context.Context) {
 	defer r.replClient.SetDDLNotificationChannel(nil)
 	for {
@@ -642,25 +643,21 @@ func (r *Runner) tableChangeNotification(ctx context.Context) {
 			if r.getCurrentState() >= stateCutOver {
 				return
 			}
-			// This is probably a little bit expensive,
-			// but DDLs should be infrequent. We loop through each of the tables
-			// (current and new) to see if it matches.
-			for _, watchTbl := range r.copyChunker.Tables() {
-				if tbl == repl.EncodeSchemaTable(watchTbl.SchemaName, watchTbl.TableName) {
-					// This is a change to one of the tables we care about.
-					r.setCurrentState(stateErrCleanup)
-					// Write this to the logger, so it can be captured by the initiator.
-					r.logger.Errorf("table definition of %s changed during migration", tbl)
-					// Invalidate the checkpoint, so we don't try to resume.
-					// If we don't do this, the migration will permanently be blocked from proceeding.
-					// Letting it start again is the better choice.
-					if err := r.dropCheckpoint(ctx); err != nil {
-						r.logger.Errorf("could not remove checkpoint. err: %v", err)
-					}
-					// We can't do anything about it, just panic
-					panic(fmt.Sprintf("table definition of %s changed during migration", tbl))
-				}
+
+			// The table names are filtered from the replication stream
+			// Before they are sent here, so we know it's one of our tables.
+			// Because there has been an external change,
+			// we now have to cancel our work :(
+			r.setCurrentState(stateErrCleanup)
+			// Write this to the logger, so it can be captured by the initiator.
+			r.logger.Errorf("table definition of %s changed during migration", tbl)
+			// Invalidate the checkpoint, so we don't try to resume.
+			// If we don't do this, the migration will permanently be blocked from proceeding.
+			// Letting it start again is the better choice.
+			if err := r.dropCheckpoint(ctx); err != nil {
+				r.logger.Errorf("could not remove checkpoint. err: %v", err)
 			}
+			r.cancelFunc() // cancel the migration context
 		}
 	}
 }
@@ -1035,6 +1032,7 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 			}
 			if err := r.dumpCheckpoint(ctx); err != nil {
 				r.logger.Errorf("error writing checkpoint: %v", err)
+				r.cancelFunc() // cancel the migration context
 			}
 		}
 	}
