@@ -1894,10 +1894,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	runner, err := NewRunner(migration)
 	assert.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(t.Context())
-
 	go func() {
-		err := runner.Run(ctx)
+		err := runner.Run(t.Context())
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
@@ -1915,8 +1913,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 			break
 		}
 	}
-	// Between cancel and Close() every resource is freed.
-	cancel()
+	// Between cancelFunc() and Close() every resource is freed.
+	runner.cancelFunc()
 	assert.NoError(t, runner.Close())
 
 	// Insert some more dummy data

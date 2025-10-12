@@ -982,7 +982,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
-		return err // it might not be ready, we can try again.
+		return ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
 	// We only dump the checksumWatermark if we are in >= checksum state.
 	// We require a mutex because the checker can be replaced during
@@ -994,7 +994,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		if r.checker != nil {
 			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
 			if err != nil {
-				return err
+				return ErrWatermarkNotReady
 			}
 		}
 	}
@@ -1013,7 +1013,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		r.migration.Statement,
 	)
 	if err != nil {
-		return err
+		return ErrCouldNotWriteCheckpoint
 	}
 	return nil
 }
@@ -1031,8 +1031,19 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 				return
 			}
 			if err := r.dumpCheckpoint(ctx); err != nil {
+				if errors.Is(err, ErrWatermarkNotReady) {
+					// This is non fatail, we can try again later.
+					r.logger.Warnf("could not write checkpoint yet, watermark not ready")
+					continue
+				}
+				// Other errors such as not being able to write to the checkpoint
+				// table are considered fatal. This is because if we can't record
+				// our progress, we don't want to continue doing work.
+				// We could get 10 days into a migration, and then fail, and then
+				// discover this. It's better to fast fail now.
 				r.logger.Errorf("error writing checkpoint: %v", err)
-				r.cancelFunc() // cancel the migration context
+				r.cancelFunc()
+				return
 			}
 		}
 	}
