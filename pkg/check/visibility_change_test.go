@@ -1,7 +1,6 @@
 package check
 
 import (
-	"context"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -13,7 +12,7 @@ import (
 func TestVisibilityChange(t *testing.T) {
 	testCheck := func(stmt string, shouldError bool, expectedError string) {
 		r := Resources{Statement: statement.MustNew("ALTER TABLE t1 " + stmt)[0]}
-		err := VisibilityCheck(context.Background(), r, nil)
+		err := VisibilityCheck(t.Context(), r, nil)
 		if shouldError {
 			require.ErrorContains(t, err, expectedError)
 		} else {
