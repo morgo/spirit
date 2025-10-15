@@ -1032,7 +1032,7 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 			}
 			if err := r.dumpCheckpoint(ctx); err != nil {
 				if errors.Is(err, ErrWatermarkNotReady) {
-					// This is non fatail, we can try again later.
+					// This is non fatal, we can try again later.
 					r.logger.Warnf("could not write checkpoint yet, watermark not ready")
 					continue
 				}
