@@ -17,6 +17,6 @@ type Subscription interface {
 	HasChanged(key, row []any, deleted bool)
 	Length() int
 	Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error
-	Table() *table.TableInfo
+	Tables() []*table.TableInfo // returns the tables related to the subscription in currentTable, newTable order
 	SetKeyAboveWatermarkOptimization(enabled bool)
 }

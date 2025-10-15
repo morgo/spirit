@@ -1894,10 +1894,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	runner, err := NewRunner(migration)
 	assert.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(t.Context())
-
 	go func() {
-		err := runner.Run(ctx)
+		err := runner.Run(t.Context())
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
@@ -1915,8 +1913,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 			break
 		}
 	}
-	// Between cancel and Close() every resource is freed.
-	cancel()
+	// Between cancelFunc() and Close() every resource is freed.
+	runner.cancelFunc()
 	assert.NoError(t, runner.Close())
 
 	// Insert some more dummy data
@@ -3325,4 +3323,60 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 		err = m.Close()
 		assert.NoError(t, err)
 	}
+}
+
+func TestMigrationCancelledFromTableModification(t *testing.T) {
+	// This test covers the case where a migration is running
+	// and the user modifies the table (e.g. with another ALTER).
+	// The migration should detect this and cancel itself.
+	// We use a long-running copy phase to give us time to do the modification.
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1modification, _t1modification_new`)
+	table := `CREATE TABLE t1modification (
+		id int not null primary key auto_increment,
+		col1 varbinary(1024),
+		col2 varbinary(1024)
+	) character set utf8mb4`
+	testutils.RunSQL(t, table)
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM dual ")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1,
+		TargetChunkTime: 100 * time.Millisecond, // weak performance at copying.
+		Statement:       "ALTER TABLE t1modification ENGINE=InnoDB",
+	})
+	require.NoError(t, err)
+
+	// Start the migration in a goroutine
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	var gErr error
+	go func() {
+		defer wg.Done()
+		gErr = m.Run(t.Context())
+	}()
+
+	// Wait until the copy phase has started.
+	for m.getCurrentState() != stateCopyRows {
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// Now modify the table
+	// instant DDL (applies quickly and will cause the migration to cancel)
+	testutils.RunSQL(t, "ALTER TABLE t1modification ADD col3 INT")
+
+	wg.Wait() // wait for the error to occur.
+
+	require.Error(t, gErr)
+	require.NoError(t, m.Close())
 }

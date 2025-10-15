@@ -40,8 +40,8 @@ func (s *deltaQueue) Length() int {
 	return len(s.changes)
 }
 
-func (s *deltaQueue) Table() *table.TableInfo {
-	return s.table
+func (s *deltaQueue) Tables() []*table.TableInfo {
+	return []*table.TableInfo{s.table, s.newTable}
 }
 
 func (s *deltaQueue) HasChanged(key, _ []any, deleted bool) {

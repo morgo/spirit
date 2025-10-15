@@ -470,31 +470,21 @@ func TestDDLNotification(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
-	// Create a new table.
-	// check that we get notification of it.
-	testutils.RunSQL(t, "CREATE TABLE ddl_t3 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	// Alter the existing table ddl_t2, check that we get notification of it.
+	testutils.RunSQL(t, "ALTER TABLE ddl_t2 ADD COLUMN d INT")
 
-	// Because tests across packages are run in parallel, this test
-	// is actually racey because another notification may be received instead.
-	// To counteract this we just expect *this* notification within 2 seconds
-	var tableModified string
-	timeout := time.After(2 * time.Second)
+	tableModified := <-ddlNotifications
+	assert.Equal(t, "test.ddl_t2", tableModified)
 
-	for {
-		select {
-		case notification := <-ddlNotifications:
-			if notification == "test.ddl_t3" {
-				tableModified = notification
-				goto found
-			}
-			// Log unexpected notifications for debugging
-			t.Logf("Received unexpected DDL notification: %s", notification)
-		case <-timeout:
-			t.Fatal("Timeout waiting for DDL notification for test.ddl_t3")
-		}
-	}
-found:
-	assert.Equal(t, "test.ddl_t3", tableModified)
+	// Set the channel to a new channel.
+	ddlNotifications2 := make(chan string, 1)
+	client.SetDDLNotificationChannel(ddlNotifications2)
+
+	// Alter the existing table ddl_t1, check that we get notification of it on the new channel.
+	testutils.RunSQL(t, "ALTER TABLE ddl_t1 ADD COLUMN d INT")
+
+	tableModified = <-ddlNotifications2
+	assert.Equal(t, "test.ddl_t1", tableModified)
 }
 
 func TestSetDDLNotificationChannel(t *testing.T) {
