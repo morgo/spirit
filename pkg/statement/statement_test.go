@@ -208,6 +208,6 @@ func TestMixedOperationsLogic(t *testing.T) {
 	assert.NoError(t, testInplace("change column `a` `a` varchar(50), change column `b` `b` varchar(75)"))
 
 	// Mixed VARCHAR and non-VARCHAR should be unsafe
-	assert.Error(t, testInplace("modify `a` varchar(100), modify `b` int"))
-	assert.Error(t, testInplace("change column `a` `a` varchar(50), change column `b` `b` text"))
+	assert.ErrorIs(t, testInplace("modify `a` varchar(100), modify `b` int"), ErrMultipleAlterClauses)
+	assert.ErrorIs(t, testInplace("change column `a` `a` varchar(50), change column `b` `b` text"), ErrMultipleAlterClauses)
 }

@@ -1,7 +1,6 @@
 package check
 
 import (
-	"context"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -13,7 +12,7 @@ import (
 func TestVisibilityChange(t *testing.T) {
 	testCheck := func(stmt string, shouldError bool, expectedError error) {
 		r := Resources{Statement: statement.MustNew("ALTER TABLE t1 " + stmt)[0]}
-		err := RunChecks(context.Background(), r, nil, ScopePostSetup)
+		err := RunChecks(t.Context(), r, nil, ScopePostSetup)
 		if shouldError {
 			require.Error(t, err)
 			if expectedError != nil {

@@ -22,15 +22,14 @@ type AbstractStatement struct {
 }
 
 var (
-	ErrNotSupportedStatement           = errors.New("not a supported statement type")
-	ErrNotAlterTable                   = errors.New("not an ALTER TABLE statement")
-	ErrMultipleSchemas                 = errors.New("statement attempts to modify tables across multiple schemas")
-	ErrNoStatements                    = errors.New("could not find any compatible statements to execute")
-	ErrMixMatchMultiStatements         = errors.New("when performing atomic schema changes, all statements must be of type ALTER TABLE")
-	ErrUnsafeForInplace                = errors.New("statement contains operations that are not safe for INPLACE algorithm")
-	ErrMultipleAlterClauses            = errors.New("ALTER contains multiple clauses. Combinations of INSTANT and INPLACE operations cannot be detected safely. Consider executing these as separate ALTER statements")
-	ErrAlterContainsUnique             = errors.New("ALTER contains adding a unique index")
-	ErrVisibilityMixedWithOtherChanges = errors.New("the ALTER operation contains a change to index visibility mixed with table-rebuilding operations. This creates semantic issues for experiments. Please split the ALTER statement into separate statements for changing the invisible index and other operations")
+	ErrNotSupportedStatement   = errors.New("not a supported statement type")
+	ErrNotAlterTable           = errors.New("not an ALTER TABLE statement")
+	ErrMultipleSchemas         = errors.New("statement attempts to modify tables across multiple schemas")
+	ErrNoStatements            = errors.New("could not find any compatible statements to execute")
+	ErrMixMatchMultiStatements = errors.New("when performing atomic schema changes, all statements must be of type ALTER TABLE")
+	ErrUnsafeForInplace        = errors.New("statement contains operations that are not safe for INPLACE algorithm")
+	ErrMultipleAlterClauses    = errors.New("ALTER contains multiple clauses. Combinations of INSTANT and INPLACE operations cannot be detected safely. Consider executing these as separate ALTER statements")
+	ErrAlterContainsUnique     = errors.New("ALTER contains adding a unique index")
 )
 
 func New(statement string) ([]*AbstractStatement, error) {
