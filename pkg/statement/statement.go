@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/block/spirit/pkg/validation"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
@@ -234,17 +233,6 @@ func (a *AbstractStatement) AlterContainsAddUnique() error {
 		}
 	}
 	return nil
-}
-
-// AlterContainsIndexVisibility checks to see if there are any clauses of an ALTER to change index visibility.
-// It now allows index visibility changes when mixed with other metadata-only operations,
-// but blocks them when mixed with table-rebuilding operations to avoid semantic issues.
-func (a *AbstractStatement) AlterContainsIndexVisibility() error {
-	alterStmt, ok := (*a.StmtNode).(*ast.AlterTableStmt)
-	if !ok {
-		return ErrNotAlterTable
-	}
-	return validation.AlterContainsIndexVisibilityLogic(alterStmt)
 }
 
 func (a *AbstractStatement) TrimAlter() string {

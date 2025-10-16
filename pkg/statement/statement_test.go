@@ -169,25 +169,6 @@ func TestAlterIsAddUnique(t *testing.T) {
 	assert.ErrorIs(t, test("add unique(b)"), ErrAlterContainsUnique) // this is potentially lossy.
 }
 
-func TestAlterContainsIndexVisibility(t *testing.T) {
-	var test = func(stmt string) error {
-		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlterContainsIndexVisibility()
-	}
-
-	// Test basic API integration - detailed logic is tested in pkg/validation/alter_test.go
-	assert.NoError(t, test("drop index `a`"))                            // Safe operation, no visibility change
-	assert.NoError(t, test("ALTER INDEX b INVISIBLE"))                   // Safe pure visibility change
-	assert.NoError(t, test("ALTER INDEX b INVISIBLE, drop index `c`"))   // Safe mixed with metadata-only
-	assert.Error(t, test("ALTER INDEX b INVISIBLE, ADD COLUMN `c` INT")) // Unsafe mixed with table-rebuilding
-
-	// Test error handling for non-ALTER statements
-	// Create a proper statement with a non-ALTER StmtNode
-	createStmt := MustNew("CREATE TABLE t1 (a int)")[0]
-	err := createStmt.AlterContainsIndexVisibility()
-	assert.Error(t, err)
-	assert.Equal(t, ErrNotAlterTable, err)
-}
-
 func TestAlterContainsUnsupportedClause(t *testing.T) {
 	var test = func(stmt string) error {
 		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlterContainsUnsupportedClause()
