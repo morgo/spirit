@@ -10,17 +10,20 @@ import (
 	"github.com/siddontang/loggers"
 )
 
+// ErrVisibilityMixedWithOtherChanges is returned when index visibility changes are mixed with table-rebuilding operations
+var ErrVisibilityMixedWithOtherChanges = errors.New("the ALTER operation contains a change to index visibility mixed with table-rebuilding operations. This creates semantic issues for experiments. Please split the ALTER statement into separate statements for changing the invisible index and other operations")
+
 func init() {
-	registerCheck("visibility", VisibilityCheck, ScopePostSetup)
+	registerCheck("visibility", visibilityCheck, ScopePostSetup)
 }
 
-// VisibilityCheck validates index visibility changes in ALTER statements.
+// visibilityCheck validates index visibility changes in ALTER statements.
 // It allows index visibility changes when mixed with other metadata-only operations,
 // but blocks them when mixed with table-rebuilding operations to avoid semantic issues.
 // It likely means the user is combining this operation with other unsafe operations,
 // which is not a good idea. We need to protect them by not allowing it.
 // https://github.com/block/spirit/issues/283
-func VisibilityCheck(ctx context.Context, r Resources, logger loggers.Advanced) error {
+func visibilityCheck(ctx context.Context, r Resources, logger loggers.Advanced) error {
 	return AlterContainsIndexVisibility(r.Statement)
 }
 
@@ -62,7 +65,7 @@ func AlterContainsIndexVisibility(stmt *statement.AbstractStatement) error {
 
 	// Block index visibility if mixed with any table-rebuilding operations
 	if hasIndexVisibility && hasNonMetadataOperation {
-		return errors.New("the ALTER operation contains a change to index visibility mixed with table-rebuilding operations. This creates semantic issues for experiments. Please split the ALTER statement into separate statements for changing the invisible index and other operations")
+		return ErrVisibilityMixedWithOtherChanges
 	}
 
 	return nil
