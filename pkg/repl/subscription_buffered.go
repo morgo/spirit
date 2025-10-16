@@ -53,8 +53,8 @@ func (s *bufferedMap) Length() int {
 	return len(s.changes)
 }
 
-func (s *bufferedMap) Table() *table.TableInfo {
-	return s.table
+func (s *bufferedMap) Tables() []*table.TableInfo {
+	return []*table.TableInfo{s.table, s.newTable}
 }
 
 func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {

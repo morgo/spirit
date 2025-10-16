@@ -72,7 +72,8 @@ type Runner struct {
 	usedResumeFromCheckpoint bool
 
 	// Attached logger
-	logger loggers.Advanced
+	logger     loggers.Advanced
+	cancelFunc context.CancelFunc
 
 	// MetricsSink
 	metricsSink metrics.Sink
@@ -124,9 +125,9 @@ func (r *Runner) attemptMySQLDDL(ctx context.Context) error {
 	return r.changes[0].attemptMySQLDDL(ctx)
 }
 
-func (r *Runner) Run(originalCtx context.Context) error {
-	ctx, cancel := context.WithCancel(originalCtx)
-	defer cancel()
+func (r *Runner) Run(ctx context.Context) error {
+	ctx, r.cancelFunc = context.WithCancel(ctx)
+	defer r.cancelFunc()
 	r.startTime = time.Now()
 	r.logger.Infof("Starting spirit migration: concurrency=%d target-chunk-size=%s",
 		r.migration.Threads,
@@ -227,13 +228,6 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		return err
 	}
 
-	// Force enable the checksum if it's an ADD UNIQUE INDEX operation
-	// https://github.com/block/spirit/issues/266
-	if !r.migration.Checksum && r.addsUniqueIndex() {
-		r.logger.Warn("force enabling checksum")
-		r.migration.Checksum = true
-	}
-
 	// Run post-setup checks
 	if err := r.runChecks(ctx, check.ScopePostSetup); err != nil {
 		return err
@@ -268,7 +262,7 @@ func (r *Runner) Run(originalCtx context.Context) error {
 		}
 	}
 	// Perform steps to prepare for final cutover.
-	// This includes computing an optional checksum,
+	// This includes computing a checksum,
 	// catching up on replClient apply, running ANALYZE TABLE so
 	// that the statistics will be up-to-date on cutover.
 	if err := r.prepareForCutover(ctx); err != nil {
@@ -384,18 +378,10 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 		change.table.DisableAutoUpdateStatistics.Store(true)
 	}
 
-	// The checksum is (usually) optional, but it is ONLINE after an initial lock
+	// The checksum is ONLINE after an initial lock
 	// for consistency. It is the main way that we determine that
-	// this program is safe to use even when immature. In the event that it is
-	// a resume-from-checkpoint operation, the checksum is NOT optional.
-	// This is because adding a unique index can not be differentiated from a
-	// duplicate key error caused by retrying partial work.
-	if r.migration.Checksum {
-		if err := r.checksum(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
+	// this program is safe to use even when immature.
+	return r.checksum(ctx)
 }
 
 // runChecks wraps around check.RunChecks and adds the context of this migration
@@ -420,7 +406,6 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			TLSCertificatePath:       r.migration.TLSCertificatePath,
 			SkipDropAfterCutover:     r.migration.SkipDropAfterCutover,
 			ExperimentalBufferedCopy: r.migration.EnableExperimentalBufferedCopy,
-			Checksum:                 r.migration.Checksum,
 		}, r.logger, scope); err != nil {
 			return err
 		}
@@ -450,7 +435,6 @@ func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.migration.Threads,
 		TargetChunkTime:               r.migration.TargetChunkTime,
-		FinalChecksum:                 r.migration.Checksum,
 		Throttler:                     &throttler.Noop{},
 		Logger:                        r.logger,
 		MetricsSink:                   r.metricsSink,
@@ -627,8 +611,8 @@ func (r *Runner) setup(ctx context.Context) error {
 }
 
 // tableChangeNotification is called as a goroutine.
-// any schema changes will be sent here, and we need to determine
-// if they are acceptable or not.
+// Any schema changes to the source or new table will be sent to a channel
+// that this function reads from.
 func (r *Runner) tableChangeNotification(ctx context.Context) {
 	defer r.replClient.SetDDLNotificationChannel(nil)
 	for {
@@ -642,25 +626,21 @@ func (r *Runner) tableChangeNotification(ctx context.Context) {
 			if r.getCurrentState() >= stateCutOver {
 				return
 			}
-			// This is probably a little bit expensive,
-			// but DDLs should be infrequent. We loop through each of the tables
-			// (current and new) to see if it matches.
-			for _, watchTbl := range r.copyChunker.Tables() {
-				if tbl == repl.EncodeSchemaTable(watchTbl.SchemaName, watchTbl.TableName) {
-					// This is a change to one of the tables we care about.
-					r.setCurrentState(stateErrCleanup)
-					// Write this to the logger, so it can be captured by the initiator.
-					r.logger.Errorf("table definition of %s changed during migration", tbl)
-					// Invalidate the checkpoint, so we don't try to resume.
-					// If we don't do this, the migration will permanently be blocked from proceeding.
-					// Letting it start again is the better choice.
-					if err := r.dropCheckpoint(ctx); err != nil {
-						r.logger.Errorf("could not remove checkpoint. err: %v", err)
-					}
-					// We can't do anything about it, just panic
-					panic(fmt.Sprintf("table definition of %s changed during migration", tbl))
-				}
+
+			// The table names are filtered from the replication stream
+			// Before they are sent here, so we know it's one of our tables.
+			// Because there has been an external change,
+			// we now have to cancel our work :(
+			r.setCurrentState(stateErrCleanup)
+			// Write this to the logger, so it can be captured by the initiator.
+			r.logger.Errorf("table definition of %s changed during migration", tbl)
+			// Invalidate the checkpoint, so we don't try to resume.
+			// If we don't do this, the migration will permanently be blocked from proceeding.
+			// Letting it start again is the better choice.
+			if err := r.dropCheckpoint(ctx); err != nil {
+				r.logger.Errorf("could not remove checkpoint. err: %v", err)
 			}
+			r.cancelFunc() // cancel the migration context
 		}
 	}
 }
@@ -797,15 +777,6 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 			return err
 		}
 	}
-
-	// In resume-from-checkpoint we need to ignore duplicate key errors when
-	// applying copy-rows because we will partially re-apply some rows.
-	// The problem with this is, we can't tell if it's not a re-apply but a new
-	// row that's a duplicate and violating a new UNIQUE constraint we are trying
-	// to add. The only way we can reconcile this fact is to make sure that
-	// we checksum the table at the end. Thus, resume-from-checkpoint MUST
-	// have the checksum enabled to apply all changes safely.
-	r.migration.Checksum = true
 
 	// Initialize the chunker now that we have the new table info
 	if err := r.initCopierChunker(); err != nil {
@@ -985,7 +956,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
-		return err // it might not be ready, we can try again.
+		return ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
 	// We only dump the checksumWatermark if we are in >= checksum state.
 	// We require a mutex because the checker can be replaced during
@@ -997,7 +968,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		if r.checker != nil {
 			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
 			if err != nil {
-				return err
+				return ErrWatermarkNotReady
 			}
 		}
 	}
@@ -1016,7 +987,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		r.migration.Statement,
 	)
 	if err != nil {
-		return err
+		return ErrCouldNotWriteCheckpoint
 	}
 	return nil
 }
@@ -1034,7 +1005,19 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 				return
 			}
 			if err := r.dumpCheckpoint(ctx); err != nil {
+				if errors.Is(err, ErrWatermarkNotReady) {
+					// This is non fatal, we can try again later.
+					r.logger.Warnf("could not write checkpoint yet, watermark not ready")
+					continue
+				}
+				// Other errors such as not being able to write to the checkpoint
+				// table are considered fatal. This is because if we can't record
+				// our progress, we don't want to continue doing work.
+				// We could get 10 days into a migration, and then fail, and then
+				// discover this. It's better to fast fail now.
 				r.logger.Errorf("error writing checkpoint: %v", err)
+				r.cancelFunc()
+				return
 			}
 		}
 	}

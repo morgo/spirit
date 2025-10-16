@@ -40,7 +40,6 @@ type Copier interface {
 type CopierConfig struct {
 	Concurrency                   int
 	TargetChunkTime               time.Duration
-	FinalChecksum                 bool
 	Throttler                     throttler.Throttler
 	Logger                        loggers.Advanced
 	MetricsSink                   metrics.Sink
@@ -54,7 +53,6 @@ func NewCopierDefaultConfig() *CopierConfig {
 	return &CopierConfig{
 		Concurrency:     4,
 		TargetChunkTime: 1000 * time.Millisecond,
-		FinalChecksum:   true,
 		Throttler:       &throttler.Noop{},
 		Logger:          logrus.New(),
 		MetricsSink:     &metrics.NoopSink{},
@@ -80,7 +78,6 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 		return &buffered{
 			db:               db,
 			concurrency:      config.Concurrency,
-			finalChecksum:    config.FinalChecksum,
 			throttler:        config.Throttler,
 			chunker:          chunker,
 			logger:           config.Logger,
@@ -93,7 +90,6 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 	return &Unbuffered{
 		db:               db,
 		concurrency:      config.Concurrency,
-		finalChecksum:    config.FinalChecksum,
 		throttler:        config.Throttler,
 		chunker:          chunker,
 		logger:           config.Logger,

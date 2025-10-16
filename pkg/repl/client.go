@@ -402,15 +402,33 @@ func (c *Client) readStream(ctx context.Context) {
 	}
 }
 
-func (c *Client) processDDLNotification(table string) {
+// processDDLNotification sends a notification to the onDDL channel if the table matches
+// The table is encoded with EncodeSchemaTable() and should include the schema name.
+func (c *Client) processDDLNotification(encodedTable string) {
 	c.Lock()
 	defer c.Unlock()
 	if c.onDDL == nil {
 		return // no one is listening for DDL events
 	}
+	// Check if the encodedTable matches any of our subscriptions.
+	matchFound := false
+	for _, sub := range c.subscriptions {
+		for _, tsub := range sub.Tables() { // currentTable, newTable
+			tName := EncodeSchemaTable(tsub.SchemaName, tsub.TableName)
+			if encodedTable == tName {
+				matchFound = true
+				break
+			}
+		}
+	}
+	// If there is no matchFound, we don't send the notification.
+	if !matchFound {
+		return
+	}
+
 	// Use non-blocking send to prevent deadlock
 	select {
-	case c.onDDL <- table:
+	case c.onDDL <- encodedTable:
 		// Successfully sent notification
 	default:
 		// Channel is full or blocked, skip notification to prevent deadlock
@@ -447,7 +465,7 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			afterRow := e.Rows[i+1]
 
 			// Always process the before image (guaranteed to have PK in minimal mode)
-			beforeKey, err := sub.Table().PrimaryKeyValues(beforeRow)
+			beforeKey, err := sub.Tables()[0].PrimaryKeyValues(beforeRow)
 			if err != nil {
 				return err
 			}
@@ -464,9 +482,9 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			isPKUpdate := false
 			afterRowSlice := afterRow
 
-			for pkIdx, pkCol := range sub.Table().KeyColumns {
+			for pkIdx, pkCol := range sub.Tables()[0].KeyColumns {
 				// Find the position of this PK column in the table columns
-				for colIdx, col := range sub.Table().Columns {
+				for colIdx, col := range sub.Tables()[0].Columns {
 					if col == pkCol {
 						// If this column exists in the after image and is not nil, use it
 						if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
@@ -492,7 +510,7 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	} else {
 		// For INSERT and DELETE events, process each row normally
 		for _, row := range e.Rows {
-			key, err := sub.Table().PrimaryKeyValues(row)
+			key, err := sub.Tables()[0].PrimaryKeyValues(row)
 			if err != nil {
 				return err
 			}

@@ -15,7 +15,9 @@ import (
 )
 
 var (
-	ErrMismatchedAlter = errors.New("alter statement in checkpoint table does not match the alter statement specified here")
+	ErrMismatchedAlter         = errors.New("alter statement in checkpoint table does not match the alter statement specified here")
+	ErrCouldNotWriteCheckpoint = errors.New("could not write checkpoint")
+	ErrWatermarkNotReady       = errors.New("watermark not ready")
 )
 
 type Migration struct {
@@ -27,7 +29,6 @@ type Migration struct {
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
-	Checksum             bool          `name:"checksum" help:"Checksum new table before final cut-over" optional:"" default:"true"`
 	ReplicaDSN           string        `name:"replica-dsn" help:"A DSN for a replica which (if specified) will be used for lag checking." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
 	LockWaitTimeout      time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
@@ -101,8 +102,9 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 		// This also returns the StmtNode.
 		stmts, err = statement.New(m.Statement)
 		if err != nil {
-			// Omit the parser error messages, just show the statement.
-			return nil, errors.New("could not parse SQL statement: " + m.Statement)
+			// The error could be a parser error, or it might be something
+			// specific like mixed ALTER + non alter statements.
+			return nil, err
 		}
 		for _, stmt := range stmts {
 			if stmt.Schema != "" && stmt.Schema != m.Database {

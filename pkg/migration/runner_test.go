@@ -591,7 +591,6 @@ func TestChangeDatatypeLossless(t *testing.T) {
 		Threads:  16,
 		Table:    "lossychange3",
 		Alter:    "CHANGE COLUMN b b varchar(200) NOT NULL", //nolint: dupword
-		Checksum: false,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -639,9 +638,7 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 // TestAddUniqueIndex is a really interesting test *because* resuming from checkpoint
 // will cause duplicate key errors. It's not straight-forward to differentiate between
 // duplicate errors from a resume, and a constraint violation. So what we do is:
-// 0) *FORCE* checksum to be enabled if ALTER contains add unique index.
-// 1) *FORCE* checksum to be enabled on resume from checkpoint
-// 2) If checksum is not enabled, duplicate key errors are elevated to errors.
+// 0) *FORCE* checksum to be enabled (regardless now, its always on)
 func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniqmytable`)
 	table := `CREATE TABLE uniqmytable (
@@ -666,14 +663,11 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 		Threads:  16,
 		Table:    "uniqmytable",
 		Alter:    "ADD UNIQUE INDEX b (b)",
-		Checksum: false,
 	})
 	assert.NoError(t, err)
-	assert.False(t, m.migration.Checksum)
 	err = m.Run(t.Context())
-	assert.Error(t, err)                 // not unique
-	assert.NoError(t, m.Close())         // need to close now otherwise we'll get an error on re-opening it.
-	assert.True(t, m.migration.Checksum) // it force enables a checksum
+	assert.Error(t, err)         // not unique
+	assert.NoError(t, m.Close()) // need to close now otherwise we'll get an error on re-opening it.
 
 	testutils.RunSQL(t, "DELETE FROM uniqmytable WHERE b = REPEAT('a', 200) LIMIT 1") // make unique
 	m, err = NewRunner(&Migration{
@@ -1093,7 +1087,6 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		Threads:  16,
 		Table:    "binarypk",
 		Alter:    "ENGINE=InnoDB",
-		Checksum: true,
 	})
 	assert.NoError(t, err)
 	err = r2.Run(t.Context())
@@ -1126,7 +1119,6 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 		TargetChunkTime: 100 * time.Millisecond,
 		Table:           "cptresume",
 		Alter:           "ENGINE=InnoDB",
-		Checksum:        true,
 		RespectSentinel: true,
 	})
 	assert.NoError(t, err)
@@ -1167,7 +1159,6 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 		TargetChunkTime: 100 * time.Millisecond,
 		Table:           "cptresume",
 		Alter:           "ENGINE=InnoDB",
-		Checksum:        true,
 	})
 	assert.NoError(t, err)
 	err = r2.Run(t.Context())
@@ -1429,7 +1420,6 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
-		FinalChecksum:   m.migration.Checksum,
 		Throttler:       &throttler.Noop{},
 		Logger:          m.logger,
 		MetricsSink:     &metrics.NoopSink{},
@@ -1566,7 +1556,6 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
-		FinalChecksum:   m.migration.Checksum,
 		Throttler:       &throttler.Noop{},
 		Logger:          m.logger,
 		MetricsSink:     &metrics.NoopSink{},
@@ -1886,7 +1875,6 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
-	migration.Checksum = true
 	migration.Table = "chkpresumetest"
 	migration.Alter = alterSQL
 	migration.TargetChunkTime = 100 * time.Millisecond
@@ -1894,10 +1882,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	runner, err := NewRunner(migration)
 	assert.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(t.Context())
-
 	go func() {
-		err := runner.Run(ctx)
+		err := runner.Run(t.Context())
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
@@ -1915,8 +1901,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 			break
 		}
 	}
-	// Between cancel and Close() every resource is freed.
-	cancel()
+	// Between cancelFunc() and Close() every resource is freed.
+	runner.cancelFunc()
 	assert.NoError(t, runner.Close())
 
 	// Insert some more dummy data
@@ -1929,7 +1915,6 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	newmigration.Password = cfg.Passwd
 	newmigration.Database = cfg.DBName
 	newmigration.Threads = 4
-	newmigration.Checksum = true
 	newmigration.Table = "chkpresumetest"
 	newmigration.Alter = alterSQL
 	newmigration.TargetChunkTime = 5 * time.Second
@@ -1983,7 +1968,6 @@ FROM compositevarcharpk a WHERE version='1'`)
 		Threads:         1,
 		Table:           "compositevarcharpk",
 		Alter:           "ENGINE=InnoDB",
-		Checksum:        true,
 		TargetChunkTime: 100 * time.Millisecond,
 	}
 	runner, err := NewRunner(migration)
@@ -2020,7 +2004,6 @@ FROM compositevarcharpk a WHERE version='1'`)
 		Threads:         2,
 		Table:           "compositevarcharpk",
 		Alter:           "ENGINE=InnoDB",
-		Checksum:        true,
 		TargetChunkTime: 5 * time.Second,
 	}
 	m2, err := NewRunner(newmigration)
@@ -2060,7 +2043,6 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 		Password:        cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         1,
-		Checksum:        true,
 		Table:           "resumestricttest",
 		Alter:           alterSQL,
 		TargetChunkTime: 100 * time.Millisecond,
@@ -2109,7 +2091,6 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 		Password:        migration.Password,
 		Database:        migration.Database,
 		Threads:         migration.Threads,
-		Checksum:        migration.Checksum,
 		Table:           migration.Table,
 		Alter:           "ENGINE=INNODB",
 		TargetChunkTime: migration.TargetChunkTime,
@@ -2285,7 +2266,6 @@ func TestE2ERogueValues(t *testing.T) {
 	m.copier, err = copier.NewCopier(m.db, chunker, &copier.CopierConfig{
 		Concurrency:     m.migration.Threads,
 		TargetChunkTime: m.migration.TargetChunkTime,
-		FinalChecksum:   m.migration.Checksum,
 		Throttler:       &throttler.Noop{},
 		Logger:          m.logger,
 		MetricsSink:     &metrics.NoopSink{},
@@ -2500,7 +2480,6 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Table:           "phantomtest",
 		Alter:           "ENGINE=InnoDB",
 		TargetChunkTime: 100 * time.Millisecond,
-		Checksum:        true,
 	})
 	assert.NoError(t, err)
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -2871,7 +2850,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
-	migration.Checksum = true
 	migration.Table = tableName
 	migration.Alter = alterSQL
 	migration.TargetChunkTime = 100 * time.Millisecond
@@ -2928,7 +2906,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	newmigration.Password = cfg.Passwd
 	newmigration.Database = cfg.DBName
 	newmigration.Threads = 4
-	newmigration.Checksum = true
 	newmigration.Table = tableName
 	newmigration.Alter = alterSQL
 	newmigration.TargetChunkTime = 5 * time.Second
@@ -3313,7 +3290,6 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 			Password:  cfg.Passwd,
 			Database:  cfg.DBName,
 			Threads:   1,
-			Checksum:  true,
 			Statement: attempt.Statement,
 		})
 		require.NoError(t, err)
@@ -3325,4 +3301,60 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 		err = m.Close()
 		assert.NoError(t, err)
 	}
+}
+
+func TestMigrationCancelledFromTableModification(t *testing.T) {
+	// This test covers the case where a migration is running
+	// and the user modifies the table (e.g. with another ALTER).
+	// The migration should detect this and cancel itself.
+	// We use a long-running copy phase to give us time to do the modification.
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1modification, _t1modification_new`)
+	table := `CREATE TABLE t1modification (
+		id int not null primary key auto_increment,
+		col1 varbinary(1024),
+		col2 varbinary(1024)
+	) character set utf8mb4`
+	testutils.RunSQL(t, table)
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM dual ")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO t1modification (col1, col2) SELECT RANDOM_BYTES(1024), RANDOM_BYTES(1024) FROM t1modification a, t1modification b, t1modification c LIMIT 100000")
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1,
+		TargetChunkTime: 100 * time.Millisecond, // weak performance at copying.
+		Statement:       "ALTER TABLE t1modification ENGINE=InnoDB",
+	})
+	require.NoError(t, err)
+
+	// Start the migration in a goroutine
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	var gErr error
+	go func() {
+		defer wg.Done()
+		gErr = m.Run(t.Context())
+	}()
+
+	// Wait until the copy phase has started.
+	for m.getCurrentState() != stateCopyRows {
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// Now modify the table
+	// instant DDL (applies quickly and will cause the migration to cancel)
+	testutils.RunSQL(t, "ALTER TABLE t1modification ADD col3 INT")
+
+	wg.Wait() // wait for the error to occur.
+
+	require.Error(t, gErr)
+	require.NoError(t, m.Close())
 }

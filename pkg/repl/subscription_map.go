@@ -37,8 +37,8 @@ func (s *deltaMap) Length() int {
 	return len(s.changes)
 }
 
-func (s *deltaMap) Table() *table.TableInfo {
-	return s.table
+func (s *deltaMap) Tables() []*table.TableInfo {
+	return []*table.TableInfo{s.table, s.newTable}
 }
 
 func (s *deltaMap) HasChanged(key, _ []any, deleted bool) {
