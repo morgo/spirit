@@ -197,7 +197,7 @@ func TestTrimAlter(t *testing.T) {
 
 func TestMixedOperationsLogic(t *testing.T) {
 	// Test complex scenarios for the AlgorithmInplaceConsideredSafe logic
-	// (Visibility logic complexity is tested in pkg/validation/alter_test.go)
+	// (Visibility logic complexity is tested in pkg/check/visibility_change_test.go)
 
 	var testInplace = func(stmt string) error {
 		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlgorithmInplaceConsideredSafe()
@@ -210,4 +210,10 @@ func TestMixedOperationsLogic(t *testing.T) {
 	// Mixed VARCHAR and non-VARCHAR should be unsafe
 	assert.ErrorIs(t, testInplace("modify `a` varchar(100), modify `b` int"), ErrMultipleAlterClauses)
 	assert.ErrorIs(t, testInplace("change column `a` `a` varchar(50), change column `b` `b` text"), ErrMultipleAlterClauses)
+
+	// Complex mixed operations that should be safe (all metadata-only)
+	assert.NoError(t, testInplace("ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` varchar(100)"))
+
+	// Complex mixed operations that should be unsafe (contains table-rebuilding)
+	assert.ErrorIs(t, testInplace("ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` int"), ErrMultipleAlterClauses)
 }

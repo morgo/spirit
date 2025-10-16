@@ -73,6 +73,10 @@ func TestVisibilityChange(t *testing.T) {
 		{"ALTER INDEX b VISIBLE, modify `a` varchar(100)", false, nil, "visibility + varchar modify"},
 		{"ALTER INDEX b INVISIBLE, change column `a` `a` varchar(150)", false, nil, "visibility + varchar change"},
 
+		// Complex mixed operations - multiple metadata operations with visibility
+		{"ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` varchar(100)", false, nil, "visibility + rename + varchar modify"},
+		{"ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` int", true, ErrVisibilityMixedWithOtherChanges, "visibility + rename + non-varchar modify"},
+
 		// Index visibility mixed with table-rebuilding operations should fail
 		{"ALTER INDEX b INVISIBLE, ADD COLUMN `c` INT", true, ErrVisibilityMixedWithOtherChanges, "visibility + add column"},
 		{"ALTER INDEX b VISIBLE, ADD index (d)", true, ErrVisibilityMixedWithOtherChanges, "visibility + add index"},
