@@ -1,16 +1,15 @@
-package linters
+package lint
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 )
 
 func init() {
-	lint.Register(&PrimaryKeyTypeLinter{})
+	Register(&PrimaryKeyTypeLinter{})
 }
 
 // PrimaryKeyTypeLinter checks that primary keys use appropriate data types.
@@ -34,8 +33,8 @@ func (l *PrimaryKeyTypeLinter) Description() string {
 	return "Ensures primary keys use BIGINT (preferably UNSIGNED) or BINARY/VARBINARY types"
 }
 
-func (l *PrimaryKeyTypeLinter) Lint(createTables []*statement.CreateTable, _ []*statement.AbstractStatement) []lint.Violation {
-	var violations []lint.Violation
+func (l *PrimaryKeyTypeLinter) Lint(createTables []*statement.CreateTable, _ []*statement.AbstractStatement) []Violation {
+	var violations []Violation
 
 	for _, ct := range createTables {
 		tableName := ct.GetTableName()
@@ -80,7 +79,7 @@ func (l *PrimaryKeyTypeLinter) getPrimaryKeyColumnsFromIndexes(ct *statement.Cre
 }
 
 // checkColumnType checks if a primary key column has an appropriate type
-func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *statement.Column) *lint.Violation {
+func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *statement.Column) *Violation {
 	columnType := strings.ToUpper(column.Type)
 
 	// Check for BIGINT
@@ -99,11 +98,11 @@ func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *stateme
 		// BIGINT without UNSIGNED is a warning
 		suggestion := fmt.Sprintf("Consider using BIGINT UNSIGNED for column '%s' to avoid negative values and increase range", column.Name)
 
-		return &lint.Violation{
+		return &Violation{
 			Linter:   l,
-			Severity: lint.SeverityWarning,
+			Severity: SeverityWarning,
 			Message:  fmt.Sprintf("Primary key column '%s' uses signed BIGINT; UNSIGNED is preferred", column.Name),
-			Location: &lint.Location{
+			Location: &Location{
 				Table:  tableName,
 				Column: &column.Name,
 			},
@@ -122,11 +121,11 @@ func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *stateme
 	// Any other type is an error
 	suggestion := fmt.Sprintf("Change column '%s' to BIGINT UNSIGNED or BINARY/VARBINARY", column.Name)
 
-	return &lint.Violation{
+	return &Violation{
 		Linter:   l,
-		Severity: lint.SeverityError,
+		Severity: SeverityError,
 		Message:  fmt.Sprintf("Primary key column '%s' has type '%s'; must be BIGINT or BINARY/VARBINARY", column.Name, column.Type),
-		Location: &lint.Location{
+		Location: &Location{
 			Table:  tableName,
 			Column: &column.Name,
 		},

@@ -1,9 +1,8 @@
-package linters
+package lint
 
 import (
 	"testing"
 
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +19,7 @@ func TestInvisibleIndexBeforeDropLinter_DropWithoutInvisible(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
-	assert.Equal(t, lint.SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "should be made invisible before dropping")
 	assert.Equal(t, "users", violations[0].Location.Table)
 	assert.NotNil(t, violations[0].Location.Index)
@@ -107,7 +106,7 @@ func TestInvisibleIndexBeforeDropLinter_MultipleDrops(t *testing.T) {
 
 	for _, v := range violations {
 		assert.Equal(t, "invisible_index_before_drop", v.Linter.Name())
-		assert.Equal(t, lint.SeverityWarning, v.Severity)
+		assert.Equal(t, SeverityWarning, v.Severity)
 
 		if v.Location.Index != nil {
 			indexNames[*v.Location.Index] = true
@@ -146,14 +145,14 @@ func TestInvisibleIndexBeforeDropLinter_AlterWithoutDrop(t *testing.T) {
 
 func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
 	// Reset registry and register linter
-	lint.Reset()
-	lint.Register(&InvisibleIndexBeforeDropLinter{})
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
-	violations := lint.RunLinters(nil, stmts, lint.Config{})
+	violations := RunLinters(nil, stmts, Config{})
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
@@ -161,15 +160,15 @@ func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationDisabled(t *testing.T) {
 	// Reset registry and register linter
-	lint.Reset()
-	lint.Register(&InvisibleIndexBeforeDropLinter{})
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	// Disable the linter
-	violations := lint.RunLinters(nil, stmts, lint.Config{
+	violations := RunLinters(nil, stmts, Config{
 		Enabled: map[string]bool{
 			"invisible_index_before_drop": false,
 		},

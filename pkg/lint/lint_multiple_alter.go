@@ -1,15 +1,14 @@
-package linters
+package lint
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
 )
 
 func init() {
-	lint.Register(&MultipleAlterTableLinter{})
+	Register(&MultipleAlterTableLinter{})
 }
 
 // MultipleAlterTableLinter checks for multiple ALTER TABLE statements affecting the same table.
@@ -33,8 +32,8 @@ func (l *MultipleAlterTableLinter) Description() string {
 	return "Detects multiple ALTER TABLE statements on the same table that could be combined"
 }
 
-func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements []*statement.AbstractStatement) []lint.Violation {
-	var violations []lint.Violation
+func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements []*statement.AbstractStatement) []Violation {
+	var violations []Violation
 
 	// Count ALTER TABLE statements per table
 	tableAlterCounts := make(map[string][]int) // table name -> statement indices
@@ -78,11 +77,11 @@ func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements [
 			tableName,
 			len(indices))
 
-		violation := lint.Violation{
+		violation := Violation{
 			Linter:   l,
-			Severity: lint.SeverityInfo,
+			Severity: SeverityInfo,
 			Message:  message,
-			Location: &lint.Location{
+			Location: &Location{
 				Table: tableName,
 			},
 			Context: map[string]any{

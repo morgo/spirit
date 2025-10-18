@@ -1,9 +1,8 @@
-package linters
+package lint
 
 import (
 	"testing"
 
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +32,7 @@ func TestMultipleAlterTableLinter_TwoAltersOnSameTable(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "multiple_alter_table", violations[0].Linter.Name())
-	assert.Equal(t, lint.SeverityInfo, violations[0].Severity)
+	assert.Equal(t, SeverityInfo, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "2 separate ALTER TABLE statements")
 	assert.Equal(t, "users", violations[0].Location.Table)
 	assert.NotNil(t, violations[0].Suggestion)
@@ -195,30 +194,30 @@ func TestMultipleAlterTableLinter_EmptyStatements(t *testing.T) {
 }
 
 func TestMultipleAlterTableLinter_Integration(t *testing.T) {
-	lint.Reset()
-	lint.Register(&MultipleAlterTableLinter{})
+	Reset()
+	Register(&MultipleAlterTableLinter{})
 
 	sql := `ALTER TABLE users ADD COLUMN age INT;
 			ALTER TABLE users ADD INDEX idx_age (age)`
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
-	violations := lint.RunLinters(nil, stmts, lint.Config{})
+	violations := RunLinters(nil, stmts, Config{})
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "multiple_alter_table", violations[0].Linter.Name())
 }
 
 func TestMultipleAlterTableLinter_IntegrationDisabled(t *testing.T) {
-	lint.Reset()
-	lint.Register(&MultipleAlterTableLinter{})
+	Reset()
+	Register(&MultipleAlterTableLinter{})
 
 	sql := `ALTER TABLE users ADD COLUMN age INT;
 			ALTER TABLE users ADD INDEX idx_age (age)`
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
-	violations := lint.RunLinters(nil, stmts, lint.Config{
+	violations := RunLinters(nil, stmts, Config{
 		Enabled: map[string]bool{
 			"multiple_alter_table": false,
 		},
@@ -267,5 +266,5 @@ func TestMultipleAlterTableLinter_SeverityIsInfo(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	// This is INFO level because it's an optimization suggestion, not an error
-	assert.Equal(t, lint.SeverityInfo, violations[0].Severity)
+	assert.Equal(t, SeverityInfo, violations[0].Severity)
 }

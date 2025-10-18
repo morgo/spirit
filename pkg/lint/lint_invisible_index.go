@@ -1,15 +1,14 @@
-package linters
+package lint
 
 import (
 	"fmt"
 
-	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
-	lint.Register(&InvisibleIndexBeforeDropLinter{})
+	Register(&InvisibleIndexBeforeDropLinter{})
 }
 
 // InvisibleIndexBeforeDropLinter checks that indexes are made invisible before dropping.
@@ -32,8 +31,8 @@ func (l *InvisibleIndexBeforeDropLinter) Description() string {
 	return "Requires indexes to be made invisible before dropping them as a safety measure"
 }
 
-func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTable, statements []*statement.AbstractStatement) []lint.Violation {
-	var violations []lint.Violation
+func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTable, statements []*statement.AbstractStatement) []Violation {
+	var violations []Violation
 
 	for _, stmt := range statements {
 		// Only check ALTER TABLE statements
@@ -73,11 +72,11 @@ func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTa
 
 			if !madeInvisible {
 				suggestion := fmt.Sprintf("First make the index invisible: ALTER TABLE %s ALTER INDEX %s INVISIBLE", tableName, indexName)
-				violations = append(violations, lint.Violation{
+				violations = append(violations, Violation{
 					Linter:   l,
-					Severity: lint.SeverityWarning,
+					Severity: SeverityWarning,
 					Message:  fmt.Sprintf("Index '%s' should be made invisible before dropping to ensure it's not needed", indexName),
-					Location: &lint.Location{
+					Location: &Location{
 						Table: tableName,
 						Index: &indexName,
 					},
