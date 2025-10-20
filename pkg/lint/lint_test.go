@@ -11,7 +11,6 @@ import (
 // Mock linter for testing
 type mockLinter struct {
 	name        string
-	category    string
 	description string
 	violations  []Violation
 }
@@ -22,7 +21,6 @@ func (m *mockLinter) String() string {
 }
 
 func (m *mockLinter) Name() string        { return m.name }
-func (m *mockLinter) Category() string    { return m.category }
 func (m *mockLinter) Description() string { return m.description }
 func (m *mockLinter) Lint(createTables []*statement.CreateTable, statements []*statement.AbstractStatement) []Violation {
 	return m.violations
@@ -58,7 +56,6 @@ func TestRegister(t *testing.T) {
 
 	linter := &mockLinter{
 		name:        "test_linter",
-		category:    "test",
 		description: "A test linter",
 	}
 
@@ -77,9 +74,9 @@ func TestRegister(t *testing.T) {
 func TestRegisterMultiple(t *testing.T) {
 	Reset()
 
-	linter1 := &mockLinter{name: "linter1", category: "cat1"}
-	linter2 := &mockLinter{name: "linter2", category: "cat2"}
-	linter3 := &mockLinter{name: "linter3", category: "cat1"}
+	linter1 := &mockLinter{name: "linter1"}
+	linter2 := &mockLinter{name: "linter2"}
+	linter3 := &mockLinter{name: "linter3"}
 
 	Register(linter1)
 	Register(linter2)
@@ -92,34 +89,10 @@ func TestRegisterMultiple(t *testing.T) {
 	assert.Contains(t, names, "linter3")
 }
 
-func TestListByCategory(t *testing.T) {
-	Reset()
-
-	linter1 := &mockLinter{name: "linter1", category: "naming"}
-	linter2 := &mockLinter{name: "linter2", category: "performance"}
-	linter3 := &mockLinter{name: "linter3", category: "naming"}
-
-	Register(linter1)
-	Register(linter2)
-	Register(linter3)
-
-	namingLinters := ListByCategory("naming")
-	assert.Len(t, namingLinters, 2)
-	assert.Contains(t, namingLinters, "linter1")
-	assert.Contains(t, namingLinters, "linter3")
-
-	perfLinters := ListByCategory("performance")
-	assert.Len(t, perfLinters, 1)
-	assert.Contains(t, perfLinters, "linter2")
-
-	emptyLinters := ListByCategory("nonexistent")
-	assert.Empty(t, emptyLinters)
-}
-
 func TestEnableDisable(t *testing.T) {
 	Reset()
 
-	linter := &mockLinter{name: "test_linter", category: "test"}
+	linter := &mockLinter{name: "test_linter"}
 	Register(linter)
 
 	// Linters are enabled by default
@@ -153,7 +126,6 @@ func TestGet(t *testing.T) {
 
 	linter := &mockLinter{
 		name:        "test_linter",
-		category:    "test",
 		description: "A test linter",
 	}
 	Register(linter)
@@ -161,7 +133,6 @@ func TestGet(t *testing.T) {
 	retrieved, err := Get("test_linter")
 	require.NoError(t, err)
 	assert.Equal(t, "test_linter", retrieved.Name())
-	assert.Equal(t, "test", retrieved.Category())
 	assert.Equal(t, "A test linter", retrieved.Description())
 }
 
@@ -184,8 +155,7 @@ func TestRunLinters_SingleLinter(t *testing.T) {
 	Reset()
 
 	linter := &mockLinter{
-		name:     "test_linter",
-		category: "test",
+		name: "test_linter",
 	}
 
 	expectedViolations := []Violation{
@@ -210,16 +180,14 @@ func TestRunLinters_MultipleLinters(t *testing.T) {
 	Reset()
 
 	linter1 := &mockLinter{
-		name:     "linter1",
-		category: "test",
+		name: "linter1",
 	}
 	linter1.violations = []Violation{
 		{Linter: linter1, Severity: SeverityError, Message: "Error 1"},
 	}
 
 	linter2 := &mockLinter{
-		name:     "linter2",
-		category: "test",
+		name: "linter2",
 	}
 	linter2.violations = []Violation{
 		{Linter: linter2, Severity: SeverityWarning, Message: "Warning 1"},
@@ -237,8 +205,7 @@ func TestRunLinters_WithConfig_Disabled(t *testing.T) {
 	Reset()
 
 	linter := &mockLinter{
-		name:     "test_linter",
-		category: "test",
+		name: "test_linter",
 	}
 	linter.violations = []Violation{
 		{Linter: linter, Severity: SeverityError, Message: "Should not see this"},
@@ -259,8 +226,7 @@ func TestRunLinters_WithConfig_Enabled(t *testing.T) {
 	Reset()
 
 	linter := &mockLinter{
-		name:     "test_linter",
-		category: "test",
+		name: "test_linter",
 	}
 	linter.violations = []Violation{
 		{Linter: linter, Severity: SeverityError, Message: "Should see this"},
@@ -286,7 +252,6 @@ func TestRunLinters_ConfigurableLinter(t *testing.T) {
 
 	linter := &mockConfigurableLinter{}
 	linter.name = "configurable_linter"
-	linter.category = "test"
 	linter.violations = []Violation{
 		{Linter: linter, Severity: SeverityError, Message: "Test"},
 	}
@@ -309,7 +274,6 @@ func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
 
 	linter := &mockConfigurableLinter{}
 	linter.name = "configurable_linter"
-	linter.category = "test"
 	linter.violations = []Violation{
 		{Linter: linter, Severity: SeverityError, Message: "Test"},
 	}
@@ -366,8 +330,8 @@ func TestFilterBySeverity(t *testing.T) {
 }
 
 func TestFilterByLinter(t *testing.T) {
-	linter1 := &mockLinter{name: "linter1", category: "test"}
-	linter2 := &mockLinter{name: "linter2", category: "test"}
+	linter1 := &mockLinter{name: "linter1"}
+	linter2 := &mockLinter{name: "linter2"}
 
 	violations := []Violation{
 		{Linter: linter1, Message: "Message 1"},
@@ -392,32 +356,19 @@ func TestListSorted(t *testing.T) {
 	Reset()
 
 	// Register in non-alphabetical order
-	Register(&mockLinter{name: "zebra", category: "test"})
-	Register(&mockLinter{name: "alpha", category: "test"})
-	Register(&mockLinter{name: "beta", category: "test"})
+	Register(&mockLinter{name: "zebra"})
+	Register(&mockLinter{name: "alpha"})
+	Register(&mockLinter{name: "beta"})
 
 	names := List()
 	assert.Equal(t, []string{"alpha", "beta", "zebra"}, names)
 }
 
-func TestListByCategorySorted(t *testing.T) {
-	Reset()
-
-	// Register in non-alphabetical order
-	Register(&mockLinter{name: "zebra", category: "cat1"})
-	Register(&mockLinter{name: "alpha", category: "cat1"})
-	Register(&mockLinter{name: "beta", category: "cat2"})
-	Register(&mockLinter{name: "gamma", category: "cat1"})
-
-	names := ListByCategory("cat1")
-	assert.Equal(t, []string{"alpha", "gamma", "zebra"}, names)
-}
-
 func TestReset(t *testing.T) {
 	Reset()
 
-	Register(&mockLinter{name: "linter1", category: "test"})
-	Register(&mockLinter{name: "linter2", category: "test"})
+	Register(&mockLinter{name: "linter1"})
+	Register(&mockLinter{name: "linter2"})
 
 	assert.Len(t, List(), 2)
 
@@ -430,7 +381,7 @@ func TestViolationWithLocation(t *testing.T) {
 	column := "test_column"
 	index := "test_index"
 	constraint := "test_constraint"
-	linter := &mockLinter{name: "test_linter", category: "test"}
+	linter := &mockLinter{name: "test_linter"}
 
 	violation := Violation{
 		Linter:   linter,
@@ -452,7 +403,7 @@ func TestViolationWithLocation(t *testing.T) {
 
 func TestViolationWithSuggestion(t *testing.T) {
 	suggestion := "Try this instead"
-	linter := &mockLinter{name: "test_linter", category: "test"}
+	linter := &mockLinter{name: "test_linter"}
 
 	violation := Violation{
 		Linter:     linter,
@@ -466,7 +417,7 @@ func TestViolationWithSuggestion(t *testing.T) {
 }
 
 func TestViolationWithContext(t *testing.T) {
-	linter := &mockLinter{name: "test_linter", category: "test"}
+	linter := &mockLinter{name: "test_linter"}
 
 	violation := Violation{
 		Linter:   linter,

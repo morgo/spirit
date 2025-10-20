@@ -9,10 +9,6 @@ type Linter interface {
 	// Name returns the unique name of this linter
 	Name() string
 
-	// Category returns the category this linter belongs to
-	// (e.g., "naming", "performance", "security", "schema")
-	Category() string
-
 	// Description returns a human-readable description of what this linter checks
 	Description() string
 

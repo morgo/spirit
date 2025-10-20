@@ -24,10 +24,6 @@ func (l *MultipleAlterTableLinter) Name() string {
 	return "multiple_alter_table"
 }
 
-func (l *MultipleAlterTableLinter) Category() string {
-	return "schema"
-}
-
 func (l *MultipleAlterTableLinter) Description() string {
 	return "Detects multiple ALTER TABLE statements on the same table that could be combined"
 }

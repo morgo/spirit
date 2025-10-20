@@ -230,7 +230,6 @@ func TestMultipleAlterTableLinter_Metadata(t *testing.T) {
 	linter := &MultipleAlterTableLinter{}
 
 	assert.Equal(t, "multiple_alter_table", linter.Name())
-	assert.Equal(t, "schema", linter.Category())
 	assert.NotEmpty(t, linter.Description())
 }
 

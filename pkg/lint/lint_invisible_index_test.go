@@ -182,6 +182,5 @@ func TestInvisibleIndexBeforeDropLinter_Metadata(t *testing.T) {
 	linter := &InvisibleIndexBeforeDropLinter{}
 
 	assert.Equal(t, "invisible_index_before_drop", linter.Name())
-	assert.Equal(t, "schema", linter.Category())
 	assert.NotEmpty(t, linter.Description())
 }

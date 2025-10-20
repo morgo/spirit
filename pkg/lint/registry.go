@@ -8,9 +8,8 @@ import (
 
 // linter represents a registered linter with metadata
 type linter struct {
-	impl     Linter
-	category string
-	enabled  bool
+	impl    Linter
+	enabled bool
 }
 
 var (
@@ -30,9 +29,8 @@ func Register(l Linter) {
 	}
 
 	linters[l.Name()] = linter{
-		impl:     l,
-		category: l.Category(),
-		enabled:  true,
+		impl:    l,
+		enabled: true,
 	}
 }
 
@@ -82,24 +80,6 @@ func List() []string {
 	names := make([]string, 0, len(linters))
 	for name := range linters {
 		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return names
-}
-
-// ListByCategory returns the names of all linters in a specific category in sorted order.
-func ListByCategory(category string) []string {
-	lock.RLock()
-	defer lock.RUnlock()
-
-	var names []string
-
-	for name, linter := range linters {
-		if linter.category == category {
-			names = append(names, name)
-		}
 	}
 
 	sort.Strings(names)

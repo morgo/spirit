@@ -40,9 +40,9 @@ func TestTableNameLengthLinter_TooLong(t *testing.T) {
 }
 
 func TestTableNameLengthLinter_ExactlyAtLimit(t *testing.T) {
-	// Create a table name that's exactly 64 characters
-	exactName := "abcdefghij_abcdefghij_abcdefghij_abcdefghij_abcdefghij_abcdefghi"
-	require.Len(t, exactName, 64, "Test setup: name should be exactly 64 chars")
+	// Create a table name that's exactly 58 characters
+	exactName := "abcdefghij_abcdefghij_abcdefghij_abcdefghij_abcdefghij_abc"
+	require.Len(t, exactName, 58, "Test setup: name should be exactly 58 chars")
 
 	sql := "CREATE TABLE " + exactName + " (id INT PRIMARY KEY)"
 	ct, err := statement.ParseCreateTable(sql)
@@ -51,7 +51,7 @@ func TestTableNameLengthLinter_ExactlyAtLimit(t *testing.T) {
 	linter := NewTableNameLengthLinter()
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Empty(t, violations, "64 character name should be allowed")
+	assert.Empty(t, violations, "58 character name should be allowed")
 }
 
 func TestTableNameLengthLinter_Configure(t *testing.T) {

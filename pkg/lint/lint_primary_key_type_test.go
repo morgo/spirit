@@ -310,7 +310,6 @@ func TestPrimaryKeyTypeLinter_Metadata(t *testing.T) {
 	linter := &PrimaryKeyTypeLinter{}
 
 	assert.Equal(t, "primary_key_type", linter.Name())
-	assert.Equal(t, "schema", linter.Category())
 	assert.NotEmpty(t, linter.Description())
 }
 

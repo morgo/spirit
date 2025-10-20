@@ -25,10 +25,6 @@ func (l *PrimaryKeyTypeLinter) Name() string {
 	return "primary_key_type"
 }
 
-func (l *PrimaryKeyTypeLinter) Category() string {
-	return "schema"
-}
-
 func (l *PrimaryKeyTypeLinter) Description() string {
 	return "Ensures primary keys use BIGINT (preferably UNSIGNED) or BINARY/VARBINARY types"
 }

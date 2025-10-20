@@ -23,10 +23,6 @@ func (l *InvisibleIndexBeforeDropLinter) Name() string {
 	return "invisible_index_before_drop"
 }
 
-func (l *InvisibleIndexBeforeDropLinter) Category() string {
-	return "schema"
-}
-
 func (l *InvisibleIndexBeforeDropLinter) Description() string {
 	return "Requires indexes to be made invisible before dropping them as a safety measure"
 }
