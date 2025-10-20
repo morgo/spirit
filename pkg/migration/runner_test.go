@@ -858,7 +858,7 @@ func TestCheckpoint(t *testing.T) {
 	// Since we want to checkpoint after a few chunks.
 
 	// r.copier.StartTime = time.Now()
-	r.setCurrentState(stateCopyRows)
+	r.setCurrentState(StateCopyRows)
 	assert.Equal(t, "copyRows", r.getCurrentState().String())
 
 	time.Sleep(time.Second) // wait for status to be updated.
@@ -1132,7 +1132,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 		err := r.Run(ctx)
 		assert.Error(t, err) // context cancelled
 	}()
-	for r.getCurrentState() < stateWaitingOnSentinelTable {
+	for r.getCurrentState() < StateWaitingOnSentinelTable {
 		// Wait for the sentinel table.
 		time.Sleep(time.Millisecond)
 	}
@@ -1223,7 +1223,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	// Since we want to checkpoint after a few chunks.
 
 	// m.copier.StartTime = time.Now()
-	m.setCurrentState(stateCopyRows)
+	m.setCurrentState(StateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// first chunk.
@@ -1435,7 +1435,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	// Since we want to checkpoint after a few chunks.
 
 	// m.copier.StartTime = time.Now()
-	m.setCurrentState(stateCopyRows)
+	m.setCurrentState(StateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// We expect 2 chunks to be copied.
@@ -1448,7 +1448,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.NotNil(t, chunk)
 	assert.Equal(t, "((`id1` < 1001)\n OR (`id1` = 1001 AND `id2` < 1))", chunk.String())
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	assert.Equal(t, Progress{CurrentState: stateCopyRows.String(), Summary: "1000/1200 83.33% copyRows ETA TBD"}, m.GetProgress())
+	assert.Equal(t, Progress{CurrentState: StateCopyRows.String(), Summary: "1000/1200 83.33% copyRows ETA TBD"}, m.GetProgress())
 
 	// Now insert some data.
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (1002, 2)`)
@@ -1463,7 +1463,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "((`id1` > 1001)\n OR (`id1` = 1001 AND `id2` >= 1))", chunk.String())
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	assert.Equal(t, Progress{CurrentState: stateCopyRows.String(), Summary: "1201/1200 100.08% copyRows ETA DUE"}, m.GetProgress())
+	assert.Equal(t, Progress{CurrentState: StateCopyRows.String(), Summary: "1201/1200 100.08% copyRows ETA DUE"}, m.GetProgress())
 
 	// Now insert some data.
 	// This should be picked up by the binlog subscription
@@ -1485,13 +1485,13 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	// Now that copy rows is done, we flush the changeset until trivial.
 	// and perform the optional checksum.
 	assert.NoError(t, m.replClient.Flush(t.Context()))
-	m.setCurrentState(stateApplyChangeset)
+	m.setCurrentState(StateApplyChangeset)
 	assert.Equal(t, "applyChangeset", m.getCurrentState().String())
-	m.setCurrentState(stateChecksum)
+	m.setCurrentState(StateChecksum)
 	m.dbConfig = dbconn.NewDBConfig()
 	assert.NoError(t, m.checksum(t.Context()))
 	assert.Equal(t, "postChecksum", m.getCurrentState().String())
-	assert.Equal(t, Progress{CurrentState: statePostChecksum.String(), Summary: "Applying Changeset Deltas=0"}, m.GetProgress())
+	assert.Equal(t, Progress{CurrentState: StatePostChecksum.String(), Summary: "Applying Changeset Deltas=0"}, m.GetProgress())
 
 	// All done!
 
@@ -1572,7 +1572,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	// Since we want to checkpoint after a few chunks.
 
 	// m.copier.StartTime = time.Now()
-	m.setCurrentState(stateCopyRows)
+	m.setCurrentState(StateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// We expect 3 chunks to be copied.
@@ -1634,9 +1634,9 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	// Now that copy rows is done, we flush the changeset until trivial.
 	// and perform the optional checksum.
 	assert.NoError(t, m.replClient.Flush(t.Context()))
-	m.setCurrentState(stateApplyChangeset)
+	m.setCurrentState(StateApplyChangeset)
 	assert.Equal(t, "applyChangeset", m.getCurrentState().String())
-	m.setCurrentState(stateChecksum)
+	m.setCurrentState(StateChecksum)
 	m.dbConfig = dbconn.NewDBConfig()
 	assert.NoError(t, m.checksum(t.Context()))
 	assert.Equal(t, "postChecksum", m.getCurrentState().String())
@@ -2281,7 +2281,7 @@ func TestE2ERogueValues(t *testing.T) {
 	// Since we want to checkpoint after a few chunks.
 
 	// m.copier.StartTime = time.Now()
-	m.setCurrentState(stateCopyRows)
+	m.setCurrentState(StateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// We expect 2 chunks to be copied.
@@ -2320,9 +2320,9 @@ func TestE2ERogueValues(t *testing.T) {
 	// Now that copy rows is done, we flush the changeset until trivial.
 	// and perform the optional checksum.
 	assert.NoError(t, m.replClient.Flush(t.Context()))
-	m.setCurrentState(stateApplyChangeset)
+	m.setCurrentState(StateApplyChangeset)
 	assert.Equal(t, "applyChangeset", m.getCurrentState().String())
-	m.setCurrentState(stateChecksum)
+	m.setCurrentState(StateChecksum)
 	m.dbConfig = dbconn.NewDBConfig()
 	assert.NoError(t, m.checksum(t.Context()))
 	assert.Equal(t, "postChecksum", m.getCurrentState().String())
@@ -2429,7 +2429,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	copier, ok := m.copier.(*copier.Unbuffered)
 	assert.True(t, ok)
 
-	m.setCurrentState(stateCopyRows)
+	m.setCurrentState(StateCopyRows)
 	assert.Equal(t, "copyRows", m.getCurrentState().String())
 
 	// first chunk.
@@ -2785,7 +2785,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	defer db.Close()
-	for m.getCurrentState() != stateWaitingOnSentinelTable {
+	for m.getCurrentState() != StateWaitingOnSentinelTable {
 	}
 	assert.NoError(t, err)
 
@@ -3345,7 +3345,7 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	}()
 
 	// Wait until the copy phase has started.
-	for m.getCurrentState() != stateCopyRows {
+	for m.getCurrentState() != StateCopyRows {
 		time.Sleep(1 * time.Millisecond)
 	}
 

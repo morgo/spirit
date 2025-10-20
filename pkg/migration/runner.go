@@ -44,8 +44,8 @@ type Runner struct {
 	// With a stmt, alter, table, newTable.
 	changes []*change
 
-	currentState migrationState // must use atomic to get/set
-	replClient   *repl.Client   // feed contains all binlog subscription activity.
+	currentState State        // must use atomic to get/set
+	replClient   *repl.Client // feed contains all binlog subscription activity.
 	throttler    throttler.Throttler
 
 	copier       copier.Copier
@@ -240,7 +240,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// of migrations usually spend time. It is not strictly necessary,
 	// but we always recopy the last-bit, even if we are resuming
 	// partially through the checksum.
-	r.setCurrentState(stateCopyRows)
+	r.setCurrentState(StateCopyRows)
 	if err := r.copier.Run(ctx); err != nil {
 		return err
 	}
@@ -256,7 +256,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// manually after the migration started.
 	if r.migration.RespectSentinel {
 		r.sentinelWaitStartTime = time.Now()
-		r.setCurrentState(stateWaitingOnSentinelTable)
+		r.setCurrentState(StateWaitingOnSentinelTable)
 		if err := r.waitOnSentinelTable(ctx); err != nil {
 			return err
 		}
@@ -274,7 +274,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	// It's time for the final cut-over, where
 	// the tables are swapped under a lock.
-	r.setCurrentState(stateCutOver)
+	r.setCurrentState(StateCutOver)
 	cutoverCfg := []*cutoverConfig{}
 	for _, change := range r.changes {
 		cutoverCfg = append(cutoverCfg, &cutoverConfig{
@@ -338,7 +338,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // could for example cause a stall during the cutover if the replClient
 // has too many pending updates.
 func (r *Runner) prepareForCutover(ctx context.Context) error {
-	r.setCurrentState(stateApplyChangeset)
+	r.setCurrentState(StateApplyChangeset)
 	// Disable the periodic flush and flush all pending events.
 	// We want it disabled for ANALYZE TABLE and acquiring a table lock
 	// *but* it will be started again briefly inside of the checksum
@@ -352,7 +352,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// This is required so on cutover plans don't go sideways, which
 	// is at elevated risk because the batch loading can cause statistics
 	// to be out of date.
-	r.setCurrentState(stateAnalyzeTable)
+	r.setCurrentState(StateAnalyzeTable)
 	r.logger.Infof("Running ANALYZE TABLE")
 	for _, change := range r.changes {
 		if err := dbconn.Exec(ctx, r.db, "ANALYZE TABLE %n.%n", change.newTable.SchemaName, change.newTable.TableName); err != nil {
@@ -623,7 +623,7 @@ func (r *Runner) tableChangeNotification(ctx context.Context) {
 			if !ok {
 				return // channel was closed
 			}
-			if r.getCurrentState() >= stateCutOver {
+			if r.getCurrentState() >= StateCutOver {
 				return
 			}
 
@@ -631,7 +631,7 @@ func (r *Runner) tableChangeNotification(ctx context.Context) {
 			// Before they are sent here, so we know it's one of our tables.
 			// Because there has been an external change,
 			// we now have to cancel our work :(
-			r.setCurrentState(stateErrCleanup)
+			r.setCurrentState(StateErrCleanup)
 			// Write this to the logger, so it can be captured by the initiator.
 			r.logger.Errorf("table definition of %s changed during migration", tbl)
 			// Invalidate the checkpoint, so we don't try to resume.
@@ -672,17 +672,17 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 func (r *Runner) GetProgress() Progress {
 	var summary string
 	switch r.getCurrentState() { //nolint: exhaustive
-	case stateCopyRows:
+	case StateCopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
 			r.copier.GetProgress(),
 			r.getCurrentState().String(),
 			r.copier.GetETA(),
 		)
-	case stateWaitingOnSentinelTable:
+	case StateWaitingOnSentinelTable:
 		summary = "Waiting on Sentinel Table"
-	case stateApplyChangeset, statePostChecksum:
+	case StateApplyChangeset, StatePostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
-	case stateChecksum:
+	case StateChecksum:
 		r.checkerLock.Lock()
 		summary = "Checksum Progress=" + r.checker.GetProgress()
 		r.checkerLock.Unlock()
@@ -704,7 +704,7 @@ func (r *Runner) createSentinelTable(ctx context.Context) error {
 }
 
 func (r *Runner) Close() error {
-	r.setCurrentState(stateClose)
+	r.setCurrentState(StateClose)
 	for _, change := range r.changes {
 		err := change.Close()
 		if err != nil {
@@ -866,7 +866,7 @@ func (r *Runner) initChecksumChunker() error {
 
 // checksum creates the checksum which opens the read view
 func (r *Runner) checksum(ctx context.Context) error {
-	r.setCurrentState(stateChecksum)
+	r.setCurrentState(StateChecksum)
 
 	// The checksum keeps the pool threads open, so we need to extend
 	// by more than +1 on threads as we did previously. We have:
@@ -925,7 +925,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 	// A long checksum extends the binlog deltas
 	// So if we've called this optional checksum, we need one more state
 	// of applying the binlog deltas.
-	r.setCurrentState(statePostChecksum)
+	r.setCurrentState(StatePostChecksum)
 	return r.replClient.Flush(ctx)
 }
 
@@ -938,11 +938,11 @@ func (r *Runner) addsUniqueIndex() bool {
 	return false
 }
 
-func (r *Runner) getCurrentState() migrationState {
-	return migrationState(atomic.LoadInt32((*int32)(&r.currentState)))
+func (r *Runner) getCurrentState() State {
+	return State(atomic.LoadInt32((*int32)(&r.currentState)))
 }
 
-func (r *Runner) setCurrentState(s migrationState) {
+func (r *Runner) setCurrentState(s State) {
 	atomic.StoreInt32((*int32)(&r.currentState), int32(s))
 }
 
@@ -962,7 +962,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	// We require a mutex because the checker can be replaced during
 	// operation, leaving a race condition.
 	var checksumWatermark string
-	if r.getCurrentState() >= stateChecksum {
+	if r.getCurrentState() >= StateChecksum {
 		r.checkerLock.Lock()
 		defer r.checkerLock.Unlock()
 		if r.checker != nil {
@@ -1001,7 +1001,7 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 			return
 		case <-ticker.C:
 			// Continue to checkpoint until we exit the checksum.
-			if r.getCurrentState() >= stateCutOver {
+			if r.getCurrentState() >= StateCutOver {
 				return
 			}
 			if err := r.dumpCheckpoint(ctx); err != nil {
@@ -1032,12 +1032,12 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 			return
 		case <-ticker.C:
 			state := r.getCurrentState()
-			if state > stateCutOver {
+			if state > StateCutOver {
 				return
 			}
 
 			switch state {
-			case stateCopyRows:
+			case StateCopyRows:
 				// Status for copy rows
 				r.logger.Infof("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v conns-in-use=%d",
 					r.getCurrentState().String(),
@@ -1049,7 +1049,7 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 					r.copier.GetThrottler().IsThrottled(),
 					r.db.Stats().InUse,
 				)
-			case stateWaitingOnSentinelTable:
+			case StateWaitingOnSentinelTable:
 				r.logger.Infof("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s conns-in-use=%d",
 					r.getCurrentState().String(),
 					r.changes[0].table.SchemaName,
@@ -1059,7 +1059,7 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 					sentinelWaitLimit,
 					r.db.Stats().InUse,
 				)
-			case stateApplyChangeset, statePostChecksum:
+			case StateApplyChangeset, StatePostChecksum:
 				// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 				// proceeding to the checksum and then the final cutover.
 				r.logger.Infof("migration status: state=%s binlog-deltas=%v total-time=%s conns-in-use=%d",
@@ -1068,7 +1068,7 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 					time.Since(r.startTime).Round(time.Second),
 					r.db.Stats().InUse,
 				)
-			case stateChecksum:
+			case StateChecksum:
 				// This could take a while if it's a large table.
 				r.checkerLock.Lock()
 				if r.checker != nil {

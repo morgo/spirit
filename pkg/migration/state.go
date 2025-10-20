@@ -1,41 +1,41 @@
 package migration
 
-type migrationState int32
+type State int32
 
 const (
-	stateInitial migrationState = iota
-	stateCopyRows
-	stateWaitingOnSentinelTable
-	stateApplyChangeset // first mass apply
-	stateAnalyzeTable
-	stateChecksum
-	statePostChecksum // second mass apply
-	stateCutOver
-	stateClose
-	stateErrCleanup
+	StateInitial State = iota
+	StateCopyRows
+	StateWaitingOnSentinelTable
+	StateApplyChangeset // first mass apply
+	StateAnalyzeTable
+	StateChecksum
+	StatePostChecksum // second mass apply
+	StateCutOver
+	StateClose
+	StateErrCleanup
 )
 
-func (s migrationState) String() string {
+func (s State) String() string {
 	switch s {
-	case stateInitial:
+	case StateInitial:
 		return "initial"
-	case stateCopyRows:
+	case StateCopyRows:
 		return "copyRows"
-	case stateWaitingOnSentinelTable:
+	case StateWaitingOnSentinelTable:
 		return "waitingOnSentinelTable"
-	case stateApplyChangeset:
+	case StateApplyChangeset:
 		return "applyChangeset"
-	case stateAnalyzeTable:
+	case StateAnalyzeTable:
 		return "analyzeTable"
-	case stateChecksum:
+	case StateChecksum:
 		return "checksum"
-	case statePostChecksum:
+	case StatePostChecksum:
 		return "postChecksum"
-	case stateCutOver:
+	case StateCutOver:
 		return "cutOver"
-	case stateClose:
+	case StateClose:
 		return "close"
-	case stateErrCleanup:
+	case StateErrCleanup:
 		return "errCleanup"
 	}
 	return "unknown"

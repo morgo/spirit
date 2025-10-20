@@ -5,16 +5,26 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/migration"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/go-sql-driver/mysql"
+	"github.com/siddontang/loggers"
 	"github.com/sirupsen/logrus"
+)
+
+var (
+	sentinelCheckInterval = 1 * time.Second
+	sentinelWaitLimit     = 48 * time.Hour
+	sentinelTableName     = "_spirit_sentinel" // this is now a const.
 )
 
 type Runner struct {
@@ -23,6 +33,7 @@ type Runner struct {
 	sourceConfig *mysql.Config
 	target       *sql.DB
 	targetConfig *mysql.Config
+	currentState migration.State // must use atomic to get/set
 
 	sourceTables []*table.TableInfo
 
@@ -30,14 +41,23 @@ type Runner struct {
 	copyChunker     table.Chunker
 	checksumChunker table.Chunker
 	copier          copier.Copier
+	checker         *checksum.Checker
 
-	logger   *logrus.Logger
-	dbConfig *dbconn.DBConfig
+	// Track some key statistics.
+	startTime             time.Time
+	sentinelWaitStartTime time.Time
+
+	cutoverFunc func(ctx context.Context) error
+
+	logger     loggers.Advanced
+	cancelFunc context.CancelFunc
+	dbConfig   *dbconn.DBConfig
 }
 
 func NewRunner(m *Move) (*Runner, error) {
 	r := &Runner{
-		move: m,
+		move:   m,
+		logger: logrus.New(),
 	}
 	return r, nil
 }
@@ -107,9 +127,13 @@ func (r *Runner) createTargetTables() error {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	ctx, r.cancelFunc = context.WithCancel(ctx)
+	defer r.cancelFunc()
+	r.startTime = time.Now()
+	r.logger.Infof("Starting table move")
+
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	r.logger = logrus.New()
 	r.logger.Warn("the move command is experimental and not yet safe for production use.")
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	if err != nil {
@@ -144,6 +168,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	// For each table, fetch the CREATE TABLE statement from the source and run it on the target.
 	if err := r.createTargetTables(); err != nil {
 		return err
+	}
+
+	// Create a sentinel.
+	if r.move.CreateSentinel {
+		if err := r.createSentinelTable(ctx); err != nil {
+			return err
+		}
 	}
 
 	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
@@ -210,6 +241,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Run the copier.
+	r.setCurrentState(migration.StateCopyRows)
 	if err := r.copier.Run(ctx); err != nil {
 		return err
 	}
@@ -222,21 +254,33 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logger.Infof("All tables copied successfully.")
 
+	r.sentinelWaitStartTime = time.Now()
+	r.setCurrentState(migration.StateWaitingOnSentinelTable)
+	if err := r.waitOnSentinelTable(ctx); err != nil {
+		return err
+	}
+
 	// Perform a checksum operation + ANALYZE TABLEs
 	// To make sure they are all in a ready state.
 	if err := r.prepareForCutover(ctx); err != nil {
 		return err
 	}
 
-	// In here, what we ideally do is a pluggable "cutover" step.
-	// The steps to update metadata are going to vary by deployment.
-	// Most likely we need to:
-	// - Lock tables on the source.
-	// - Final catch up of the replication client.
-	// - Update external metadata system.
-	// - Rename the tables on the source to be unreachable.
-	// - UNLOCK TABLES on the source.
+	// Create a cutover.
+	r.setCurrentState(migration.StateCutOver)
+	cutover, err := NewCutOver(r.source, r.sourceTables, r.cutoverFunc, r.replClient, r.dbConfig, r.logger)
+	if err != nil {
+		return err
+	}
+	if err = cutover.Run(ctx); err != nil {
+		return err
+	}
+	r.logger.Infof("Move operation complete.")
 	return nil
+}
+
+func (r *Runner) SetLogger(logger loggers.Advanced) {
+	r.logger = logger
 }
 
 func (r *Runner) prepareForCutover(ctx context.Context) error {
@@ -245,6 +289,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// *but* it will be started again briefly inside of the checksum
 	// runner to ensure that the lag does not grow too long.
 	r.replClient.StopPeriodicFlush()
+	r.setCurrentState(migration.StateApplyChangeset)
 	if err := r.replClient.Flush(ctx); err != nil {
 		return err
 	}
@@ -253,6 +298,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// This is required so on cutover plans don't go sideways, which
 	// is at elevated risk because the batch loading can cause statistics
 	// to be out of date.
+	r.setCurrentState(migration.StateAnalyzeTable)
 	r.logger.Infof("Running ANALYZE TABLE")
 	for _, tbl := range r.sourceTables {
 		if err := dbconn.Exec(ctx, r.target, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
@@ -260,13 +306,17 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 		}
 	}
 
+	r.setCurrentState(migration.StateChecksum)
 	if err := r.checksumChunker.Open(); err != nil {
 		return err
 	}
 	defer r.checksumChunker.Close()
 
 	// Perform a checksum operation
-	checker, err := checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+	// TODO: we currently don't support repairing in move
+	// But if we do, we need to modify the checker so it can re-run on failure.
+	var err error
+	r.checker, err = checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
 		Concurrency:     r.move.Threads,
 		TargetChunkTime: r.move.TargetChunkTime,
 		DBConfig:        r.dbConfig,
@@ -276,5 +326,103 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return checker.Run(ctx)
+	return r.checker.Run(ctx)
+}
+
+func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
+	r.cutoverFunc = cutover
+}
+
+func (r *Runner) GetProgress() migration.Progress {
+	var summary string
+	switch r.getCurrentState() { //nolint: exhaustive
+	case migration.StateCopyRows:
+		summary = fmt.Sprintf("%v %s ETA %v",
+			r.copier.GetProgress(),
+			r.getCurrentState().String(),
+			r.copier.GetETA(),
+		)
+	case migration.StateWaitingOnSentinelTable:
+		r.logger.Infof("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s",
+			r.getCurrentState().String(),
+			r.targetConfig.DBName,
+			sentinelTableName,
+			time.Since(r.startTime).Round(time.Second),
+			time.Since(r.sentinelWaitStartTime).Round(time.Second),
+			sentinelWaitLimit,
+		)
+	case migration.StateApplyChangeset, migration.StatePostChecksum:
+		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
+	case migration.StateChecksum:
+		summary = fmt.Sprintf("%v %s",
+			r.checker.GetProgress(),
+			r.getCurrentState().String(),
+		)
+	}
+	return migration.Progress{
+		CurrentState: r.getCurrentState().String(),
+		Summary:      summary,
+	}
+}
+
+func (r *Runner) getCurrentState() migration.State {
+	return migration.State(atomic.LoadInt32((*int32)(&r.currentState)))
+}
+
+func (r *Runner) setCurrentState(s migration.State) {
+	atomic.StoreInt32((*int32)(&r.currentState), int32(s))
+}
+
+func (r *Runner) createSentinelTable(ctx context.Context) error {
+	if err := dbconn.Exec(ctx, r.target, "DROP TABLE IF EXISTS %n.%n", r.targetConfig.DBName, sentinelTableName); err != nil {
+		return err
+	}
+	if err := dbconn.Exec(ctx, r.target, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.targetConfig.DBName, sentinelTableName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
+	sql := "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
+	var sentinelTableExists int
+	err := r.target.QueryRowContext(ctx, sql, r.targetConfig.DBName, sentinelTableName).Scan(&sentinelTableExists)
+	if err != nil {
+		return false, err
+	}
+	return sentinelTableExists > 0, nil
+}
+
+// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped
+func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
+	if sentinelExists, err := r.sentinelTableExists(ctx); err != nil {
+		return err
+	} else if !sentinelExists {
+		// Sentinel table does not exist, we can proceed with cutover
+		return nil
+	}
+
+	r.logger.Warnf("cutover deferred while sentinel table %s exists; will wait %s", sentinelTableName, sentinelWaitLimit)
+
+	timer := time.NewTimer(sentinelWaitLimit)
+	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
+
+	ticker := time.NewTicker(sentinelCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case t := <-ticker.C:
+			sentinelExists, err := r.sentinelTableExists(ctx)
+			if err != nil {
+				return err
+			}
+			if !sentinelExists {
+				// Sentinel table has been dropped, we can proceed with cutover
+				r.logger.Infof("sentinel table dropped at %s", t)
+				return nil
+			}
+		case <-timer.C:
+			return errors.New("timed out waiting for sentinel table to be dropped")
+		}
+	}
 }
