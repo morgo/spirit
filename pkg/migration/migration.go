@@ -61,11 +61,6 @@ func (m *Migration) Run() error {
 		return err
 	}
 	defer migration.Close()
-	if m.EnableExperimentalLinting {
-		if err := migration.lint(); err != nil {
-			return err
-		}
-	}
 	if err := migration.runChecks(context.TODO(), check.ScopePreRun); err != nil {
 		return err
 	}

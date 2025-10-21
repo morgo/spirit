@@ -180,6 +180,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	if r.migration.EnableExperimentalLinting {
+		if err := r.lint(); err != nil {
+			return err
+		}
+	}
+
 	locks := make([]*dbconn.MetadataLock, 0, len(r.changes))
 	// Set info for all of the tables.
 	for _, change := range r.changes {
