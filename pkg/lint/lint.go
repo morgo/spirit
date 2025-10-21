@@ -80,6 +80,7 @@ type Config struct {
 // those settings are applied before running the linter.
 func RunLinters(createTables []*statement.CreateTable, alterStatements []*statement.AbstractStatement, config Config) ([]Violation, error) {
 	var errs []error
+
 	lock.RLock()
 	defer lock.RUnlock()
 
@@ -111,6 +112,7 @@ func RunLinters(createTables []*statement.CreateTable, alterStatements []*statem
 					// In a production system, we might want to log this
 					fmt.Fprintf(os.Stderr, "Error configuring %s: %s\n", name, err)
 					errs = append(errs, err)
+
 					continue
 				}
 			}

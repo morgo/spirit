@@ -280,7 +280,8 @@ func TestPrimaryKeyTypeLinter_Integration(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	violations := RunLinters([]*statement.CreateTable{ct}, nil, Config{})
+	violations, err := RunLinters([]*statement.CreateTable{ct}, nil, Config{})
+	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
@@ -297,11 +298,12 @@ func TestPrimaryKeyTypeLinter_IntegrationDisabled(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	violations := RunLinters([]*statement.CreateTable{ct}, nil, Config{
+	violations, err := RunLinters([]*statement.CreateTable{ct}, nil, Config{
 		Enabled: map[string]bool{
 			"primary_key_type": false,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Empty(t, violations)
 }

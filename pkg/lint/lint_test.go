@@ -147,7 +147,8 @@ func TestGetNonexistent(t *testing.T) {
 func TestRunLinters_Empty(t *testing.T) {
 	Reset()
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 	assert.Empty(t, violations)
 }
 
@@ -169,7 +170,8 @@ func TestRunLinters_SingleLinter(t *testing.T) {
 
 	Register(linter)
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 	assert.Len(t, violations, 1)
 	assert.Equal(t, "test_linter", violations[0].Linter.Name())
 	assert.Equal(t, SeverityError, violations[0].Severity)
@@ -197,7 +199,8 @@ func TestRunLinters_MultipleLinters(t *testing.T) {
 	Register(linter1)
 	Register(linter2)
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 	assert.Len(t, violations, 3)
 }
 
@@ -213,11 +216,12 @@ func TestRunLinters_WithConfig_Disabled(t *testing.T) {
 	Register(linter)
 
 	// Disable the linter via config
-	violations := RunLinters(nil, nil, Config{
+	violations, err := RunLinters(nil, nil, Config{
 		Enabled: map[string]bool{
 			"test_linter": false,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Empty(t, violations)
 }
@@ -237,11 +241,12 @@ func TestRunLinters_WithConfig_Enabled(t *testing.T) {
 	require.NoError(t, Disable("test_linter"))
 
 	// But explicitly enable via config
-	violations := RunLinters(nil, nil, Config{
+	violations, err := RunLinters(nil, nil, Config{
 		Enabled: map[string]bool{
 			"test_linter": true,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Len(t, violations, 1)
 	assert.Equal(t, "Should see this", violations[0].Message)
@@ -258,11 +263,12 @@ func TestRunLinters_ConfigurableLinter(t *testing.T) {
 	Register(linter)
 
 	config := map[string]string{"key": "value"}
-	violations := RunLinters(nil, nil, Config{
+	violations, err := RunLinters(nil, nil, Config{
 		Settings: map[string]any{
 			"configurable_linter": config,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Len(t, violations, 1)
 	assert.True(t, linter.configCalled)
@@ -279,7 +285,8 @@ func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
 	}
 	Register(linter)
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 
 	assert.Len(t, violations, 1)
 	assert.False(t, linter.configCalled)

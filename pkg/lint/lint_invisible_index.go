@@ -36,6 +36,7 @@ func (l *InvisibleIndexBeforeDropLinter) Configure(a any) error {
 	if !ok {
 		return errors.New(l.Name() + " config must be a map[string]string")
 	}
+
 	for k, v := range c {
 		switch k {
 		case "raiseError":
@@ -43,15 +44,18 @@ func (l *InvisibleIndexBeforeDropLinter) Configure(a any) error {
 				l.raiseError = true
 				break
 			}
+
 			if strings.EqualFold(v, "false") {
 				l.raiseError = false
 				break
 			}
+
 			return fmt.Errorf("invalid value for %s: %s", k, v)
 		default:
 			return fmt.Errorf("unknown config key for %s: %s", l.Name(), k)
 		}
 	}
+
 	return nil
 }
 func (l *InvisibleIndexBeforeDropLinter) DefaultConfig() any {
@@ -67,6 +71,7 @@ func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTa
 	if l.raiseError {
 		severity = SeverityError
 	}
+
 	var violations []Violation
 
 	for _, stmt := range statements {

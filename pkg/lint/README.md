@@ -19,7 +19,10 @@ import (
 )
 
 // All built-in linters are automatically registered!
-violations := lint.RunLinters(tables, stmts, lint.Config{})
+violations, err := lint.RunLinters(tables, stmts, lint.Config{})
+if err != nil {
+    // Handle configuration errors
+}
 
 // Check for errors
 if lint.HasErrors(violations) {
@@ -84,12 +87,15 @@ func (l *MyCustomLinter) Lint(createTables []*statement.CreateTable, alterStatem
 
 ```go
 // Disable specific linters
-violations := lint.RunLinters(tables, stmts, lint.Config{
+violations, err := lint.RunLinters(tables, stmts, lint.Config{
     Enabled: map[string]bool{
         "table_name_length": false,
         "duplicate_column":  true,
     },
 })
+if err != nil {
+    // Handle configuration errors
+}
 ```
 
 ## Core Types
@@ -137,7 +143,7 @@ type Location struct {
 
 ### Execution
 
-- `RunLinters(createTables, alterStatements, config)` - Run all enabled linters
+- `RunLinters(createTables, alterStatements, config) ([]Violation, error)` - Run all enabled linters, returns violations and any configuration errors
 - `HasErrors(violations)` - Check if any violations are errors
 - `HasWarnings(violations)` - Check if any violations are warnings
 - `FilterBySeverity(violations, severity)` - Filter by severity level

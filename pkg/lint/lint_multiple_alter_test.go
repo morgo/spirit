@@ -202,7 +202,8 @@ func TestMultipleAlterTableLinter_Integration(t *testing.T) {
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
-	violations := RunLinters(nil, stmts, Config{})
+	violations, err := RunLinters(nil, stmts, Config{})
+	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "multiple_alter_table", violations[0].Linter.Name())
@@ -217,11 +218,12 @@ func TestMultipleAlterTableLinter_IntegrationDisabled(t *testing.T) {
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
-	violations := RunLinters(nil, stmts, Config{
+	violations, err := RunLinters(nil, stmts, Config{
 		Enabled: map[string]bool{
 			"multiple_alter_table": false,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Empty(t, violations)
 }

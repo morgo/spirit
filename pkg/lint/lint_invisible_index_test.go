@@ -152,7 +152,8 @@ func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
-	violations := RunLinters(nil, stmts, Config{})
+	violations, err := RunLinters(nil, stmts, Config{})
+	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
@@ -168,11 +169,12 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationDisabled(t *testing.T) {
 	require.NoError(t, err)
 
 	// Disable the linter
-	violations := RunLinters(nil, stmts, Config{
+	violations, err := RunLinters(nil, stmts, Config{
 		Enabled: map[string]bool{
 			"invisible_index_before_drop": false,
 		},
 	})
+	require.NoError(t, err)
 
 	// Should not have violations when disabled
 	assert.Empty(t, violations)

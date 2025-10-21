@@ -177,7 +177,8 @@ func TestExampleLinters_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run all linters
-	violations := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
+	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
+	require.NoError(t, err)
 
 	// Should have violations from both linters
 	require.Len(t, violations, 2)
@@ -204,12 +205,13 @@ func TestExampleLinters_WithConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	// Disable the table name length linter
-	violations := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
+	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
 		Enabled: map[string]bool{
 			"table_name_length": false,
 			"duplicate_column":  true,
 		},
 	})
+	require.NoError(t, err)
 
 	// Should only have violation from duplicate_column linter
 	require.Len(t, violations, 1)
@@ -230,15 +232,17 @@ func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
 	require.NoError(t, err)
 
 	// With default config (64), should pass
-	violations := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
+	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
+	require.NoError(t, err)
 	assert.Empty(t, violations)
 
 	// Configure max length to 40 via Config.Settings
-	violations = lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
+	violations, err = lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
 		Settings: map[string]any{
 			"table_name_length": TableNameLengthConfig{MaxLength: 40},
 		},
 	})
+	require.NoError(t, err)
 
 	// Should now have a violation
 	require.Len(t, violations, 1)
