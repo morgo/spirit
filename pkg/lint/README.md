@@ -19,7 +19,10 @@ import (
 )
 
 // All built-in linters are automatically registered!
-violations := lint.RunLinters(tables, stmts, lint.Config{})
+violations, err := lint.RunLinters(tables, stmts, lint.Config{})
+if err != nil {
+    // Handle configuration errors
+}
 
 // Check for errors
 if lint.HasErrors(violations) {
@@ -82,15 +85,39 @@ func (l *MyCustomLinter) Lint(createTables []*statement.CreateTable, alterStatem
 
 ### Configuring Linters
 
+#### Enabling/Disabling Linters
+
 ```go
 // Disable specific linters
-violations := lint.RunLinters(tables, stmts, lint.Config{
+violations, err := lint.RunLinters(tables, stmts, lint.Config{
     Enabled: map[string]bool{
-        "table_name_length": false,
-        "duplicate_column":  true,
+        "invisible_index_before_drop": false,
+        "primary_key_type":            true,
     },
 })
+if err != nil {
+    // Handle configuration errors
+}
 ```
+
+#### Configurable Linters
+
+Some linters support additional configuration options via the `Settings` field. Linters that implement the `ConfigurableLinter` interface accept settings as `map[string]string`:
+
+```go
+violations, err := lint.RunLinters(tables, stmts, lint.Config{
+    Settings: map[string]map[string]string{
+        "invisible_index_before_drop": {
+            "raiseError": "true",  // Make violations errors instead of warnings
+        },
+    },
+})
+if err != nil {
+    // Handle configuration errors (e.g., invalid settings)
+}
+```
+
+Each configurable linter defines its own settings keys and values. See the individual linter documentation below for available options.
 
 ## Core Types
 
@@ -137,7 +164,7 @@ type Location struct {
 
 ### Execution
 
-- `RunLinters(createTables, alterStatements, config)` - Run all enabled linters
+- `RunLinters(createTables, alterStatements, config) ([]Violation, error)` - Run all enabled linters, returns violations and any configuration errors
 - `HasErrors(violations)` - Check if any violations are errors
 - `HasWarnings(violations)` - Check if any violations are warnings
 - `FilterBySeverity(violations, severity)` - Filter by severity level
@@ -150,9 +177,16 @@ The `lint` package includes several linters:
 ### invisible_index_before_drop
 
 **Category**: schema  
-**Severity**: Warning
+**Severity**: Warning (default), Error (configurable)  
+**Configurable**: Yes
 
 Requires indexes to be made invisible before dropping them as a safety measure. This ensures the index isn't needed before permanently removing it.
+
+**Configuration Options:**
+
+- `raiseError` (string): Set to `"true"` to make violations errors instead of warnings. Default: `false`.
+
+**Example Usage:**
 
 ```go
 // ❌ Violation
@@ -162,6 +196,18 @@ ALTER TABLE users DROP INDEX idx_email;
 ALTER TABLE users ALTER INDEX idx_email INVISIBLE;
 -- Wait and monitor performance
 ALTER TABLE users DROP INDEX idx_email;
+```
+
+**Configuration Example:**
+
+```go
+violations, err := lint.RunLinters(tables, stmts, lint.Config{
+    Settings: map[string]map[string]string{
+        "invisible_index_before_drop": {
+            "raiseError": "true",  // Violations will be errors
+        },
+    },
+})
 ```
 
 ### multiple_alter_table

@@ -12,7 +12,7 @@
 //	package naming
 //
 //	func init() {
-//	    lint.Register(&TableNameLinter{})
+//	    lint.Register(TableNameLinter{})
 //	}
 //
 //	// Later, run all linters:
@@ -44,7 +44,16 @@
 //	}
 //
 // Configurable linters can implement the ConfigurableLinter interface to accept
-// custom settings via Config.Settings.
+// custom settings via Config.Settings. Settings must be provided as map[string]string:
+//
+//	config := lint.Config{
+//	    Settings: map[string]map[string]string{
+//	        "my_linter": {
+//	            "option1": "value1",
+//	            "option2": "value2",
+//	        },
+//	    },
+//	}
 package lint
 
 import (
@@ -61,9 +70,9 @@ type Config struct {
 	// If a linter is not in this map, it uses its default enabled state
 	Enabled map[string]bool
 
-	// Settings maps linter names to their configuration
-	// The configuration type is linter-specific
-	Settings map[string]any
+	// Settings maps linter names to their configuration as map[string]string
+	// Each linter's settings are provided as key-value string pairs
+	Settings map[string]map[string]string
 }
 
 // RunLinters runs all enabled linters and returns any violations found.
@@ -80,6 +89,7 @@ type Config struct {
 // those settings are applied before running the linter.
 func RunLinters(createTables []*statement.CreateTable, alterStatements []*statement.AbstractStatement, config Config) ([]Violation, error) {
 	var errs []error
+
 	lock.RLock()
 	defer lock.RUnlock()
 
@@ -103,21 +113,35 @@ func RunLinters(createTables []*statement.CreateTable, alterStatements []*statem
 		}
 
 		// Apply configuration if available
-		if configurableLinter, ok := linter.impl.(ConfigurableLinter); ok {
+		if configurableLinter, ok := linter.l.(ConfigurableLinter); ok {
+			// Start with default config
+			defaultConfig := configurableLinter.DefaultConfig()
+
+			// Merge user settings with defaults (user settings override defaults)
+			finalConfig := make(map[string]string)
+			for k, v := range defaultConfig {
+				finalConfig[k] = v
+			}
+
 			if settings, ok := config.Settings[name]; ok {
-				err := configurableLinter.Configure(settings)
-				if err != nil {
-					// Configuration error - skip this linter
-					// In a production system, we might want to log this
-					fmt.Fprintf(os.Stderr, "Error configuring %s: %s\n", name, err)
-					errs = append(errs, err)
-					continue
+				for k, v := range settings {
+					finalConfig[k] = v
 				}
+			}
+
+			// Apply the merged configuration
+			err := configurableLinter.Configure(finalConfig)
+			if err != nil {
+				// Configuration error - skip this linter
+				fmt.Fprintf(os.Stderr, "Error configuring %s: %s\n", name, err)
+				errs = append(errs, err)
+
+				continue
 			}
 		}
 
 		// Run the linter
-		lintViolations := linter.impl.Lint(createTables, alterStatements)
+		lintViolations := linter.l.Lint(createTables, alterStatements)
 		violations = append(violations, lintViolations...)
 	}
 

@@ -31,7 +31,7 @@ type mockConfigurableLinter struct {
 	mockLinter
 
 	configCalled bool
-	configValue  any
+	configValue  map[string]string
 }
 
 func (m *mockConfigurableLinter) String() string {
@@ -39,15 +39,17 @@ func (m *mockConfigurableLinter) String() string {
 	panic("implement me")
 }
 
-func (m *mockConfigurableLinter) Configure(config any) error {
+func (m *mockConfigurableLinter) Configure(config map[string]string) error {
 	m.configCalled = true
 	m.configValue = config
 
 	return nil
 }
 
-func (m *mockConfigurableLinter) DefaultConfig() any {
-	return "default"
+func (m *mockConfigurableLinter) DefaultConfig() map[string]string {
+	return map[string]string{
+		"default": "value",
+	}
 }
 
 func TestRegister(t *testing.T) {
@@ -147,7 +149,8 @@ func TestGetNonexistent(t *testing.T) {
 func TestRunLinters_Empty(t *testing.T) {
 	Reset()
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 	assert.Empty(t, violations)
 }
 
@@ -169,7 +172,8 @@ func TestRunLinters_SingleLinter(t *testing.T) {
 
 	Register(linter)
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 	assert.Len(t, violations, 1)
 	assert.Equal(t, "test_linter", violations[0].Linter.Name())
 	assert.Equal(t, SeverityError, violations[0].Severity)
@@ -197,7 +201,8 @@ func TestRunLinters_MultipleLinters(t *testing.T) {
 	Register(linter1)
 	Register(linter2)
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 	assert.Len(t, violations, 3)
 }
 
@@ -213,11 +218,12 @@ func TestRunLinters_WithConfig_Disabled(t *testing.T) {
 	Register(linter)
 
 	// Disable the linter via config
-	violations := RunLinters(nil, nil, Config{
+	violations, err := RunLinters(nil, nil, Config{
 		Enabled: map[string]bool{
 			"test_linter": false,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Empty(t, violations)
 }
@@ -237,11 +243,12 @@ func TestRunLinters_WithConfig_Enabled(t *testing.T) {
 	require.NoError(t, Disable("test_linter"))
 
 	// But explicitly enable via config
-	violations := RunLinters(nil, nil, Config{
+	violations, err := RunLinters(nil, nil, Config{
 		Enabled: map[string]bool{
 			"test_linter": true,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Len(t, violations, 1)
 	assert.Equal(t, "Should see this", violations[0].Message)
@@ -258,15 +265,21 @@ func TestRunLinters_ConfigurableLinter(t *testing.T) {
 	Register(linter)
 
 	config := map[string]string{"key": "value"}
-	violations := RunLinters(nil, nil, Config{
-		Settings: map[string]any{
+	violations, err := RunLinters(nil, nil, Config{
+		Settings: map[string]map[string]string{
 			"configurable_linter": config,
 		},
 	})
+	require.NoError(t, err)
 
 	assert.Len(t, violations, 1)
 	assert.True(t, linter.configCalled)
-	assert.Equal(t, config, linter.configValue)
+	// User config should be merged with defaults
+	expected := map[string]string{
+		"default": "value", // from DefaultConfig
+		"key":     "value", // from user config
+	}
+	assert.Equal(t, expected, linter.configValue)
 }
 
 func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
@@ -279,10 +292,14 @@ func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
 	}
 	Register(linter)
 
-	violations := RunLinters(nil, nil, Config{})
+	violations, err := RunLinters(nil, nil, Config{})
+	require.NoError(t, err)
 
 	assert.Len(t, violations, 1)
-	assert.False(t, linter.configCalled)
+	// Now Configure is always called (with defaults)
+	assert.True(t, linter.configCalled)
+	// Should have received the default config
+	assert.Equal(t, map[string]string{"default": "value"}, linter.configValue)
 }
 
 func TestHasErrors(t *testing.T) {
@@ -432,4 +449,97 @@ func TestViolationWithContext(t *testing.T) {
 	assert.Len(t, violation.Context, 2)
 	assert.Equal(t, "value1", violation.Context["key1"])
 	assert.Equal(t, 42, violation.Context["key2"])
+}
+
+// ConfigBool tests
+
+func TestConfigBool_ValidTrue(t *testing.T) {
+	tests := []string{"true", "TRUE", "True", "TrUe"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			result, err := ConfigBool(value, "testKey")
+			require.NoError(t, err)
+			assert.True(t, result)
+		})
+	}
+}
+
+func TestConfigBool_ValidFalse(t *testing.T) {
+	tests := []string{"false", "FALSE", "False", "FaLsE"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			result, err := ConfigBool(value, "testKey")
+			require.NoError(t, err)
+			assert.False(t, result)
+		})
+	}
+}
+
+func TestConfigBool_Invalid(t *testing.T) {
+	tests := []struct {
+		value string
+		key   string
+	}{
+		{"yes", "testKey"},
+		{"no", "testKey"},
+		{"1", "testKey"},
+		{"0", "testKey"},
+		{"True ", "testKey"}, // trailing space
+		{" true", "testKey"}, // leading space
+		{"", "testKey"},
+		{"invalid", "myOption"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			result, err := ConfigBool(tt.value, tt.key)
+			require.Error(t, err)
+			assert.False(t, result)
+			assert.Contains(t, err.Error(), "invalid value for "+tt.key)
+			assert.Contains(t, err.Error(), tt.value)
+			assert.Contains(t, err.Error(), "expected 'true' or 'false'")
+		})
+	}
+}
+
+// DefaultConfig tests
+
+func TestRunLinters_AppliesDefaultConfig(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// Run without any config - should apply default (raiseError=false)
+	violations, err := RunLinters(nil, stmts, Config{})
+	require.NoError(t, err)
+
+	require.Len(t, violations, 1)
+	// Default raiseError is "false", so severity should be Warning
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+}
+
+func TestRunLinters_UserConfigOverridesDefault(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// Override default raiseError=false with true
+	violations, err := RunLinters(nil, stmts, Config{
+		Settings: map[string]map[string]string{
+			"invisible_index_before_drop": {
+				"raiseError": "true",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, violations, 1)
+	// User set raiseError=true, so severity should be Error
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }

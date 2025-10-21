@@ -1,9 +1,7 @@
 package lint
 
 import (
-	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -31,32 +29,27 @@ func (l *InvisibleIndexBeforeDropLinter) Description() string {
 	return "Requires indexes to be made invisible before dropping them as a safety measure"
 }
 
-func (l *InvisibleIndexBeforeDropLinter) Configure(a any) error {
-	c, ok := a.(map[string]string)
-	if !ok {
-		return errors.New(l.Name() + " config must be a map[string]string")
-	}
-	for k, v := range c {
+func (l *InvisibleIndexBeforeDropLinter) Configure(config map[string]string) error {
+	for k, v := range config {
 		switch k {
 		case "raiseError":
-			if strings.EqualFold(v, "true") {
-				l.raiseError = true
-				break
+			boolVal, err := ConfigBool(v, k)
+			if err != nil {
+				return err
 			}
-			if strings.EqualFold(v, "false") {
-				l.raiseError = false
-				break
-			}
-			return fmt.Errorf("invalid value for %s: %s", k, v)
+
+			l.raiseError = boolVal
 		default:
 			return fmt.Errorf("unknown config key for %s: %s", l.Name(), k)
 		}
 	}
+
 	return nil
 }
-func (l *InvisibleIndexBeforeDropLinter) DefaultConfig() any {
+
+func (l *InvisibleIndexBeforeDropLinter) DefaultConfig() map[string]string {
 	return map[string]string{
-		"raiseError": "true",
+		"raiseError": "false",
 	}
 }
 
@@ -67,6 +60,7 @@ func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTa
 	if l.raiseError {
 		severity = SeverityError
 	}
+
 	var violations []Violation
 
 	for _, stmt := range statements {
