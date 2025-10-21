@@ -45,6 +45,7 @@ type Migration struct {
 	// These are no longer hidden, we document them.
 	EnableExperimentalMultiTableSupport bool `name:"enable-experimental-multi-table-support" help:"Allow multiple alter statements to run concurrently and cutover together" optional:"" default:"false"`
 	EnableExperimentalBufferedCopy      bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
+	EnableExperimentalLinting           bool `name:"enable-experimental-linting" help:"Enable experimental linting checks before running migration" optional:"" default:"false"`
 
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
@@ -60,6 +61,11 @@ func (m *Migration) Run() error {
 		return err
 	}
 	defer migration.Close()
+	if m.EnableExperimentalLinting {
+		if err := migration.lint(); err != nil {
+			return err
+		}
+	}
 	if err := migration.runChecks(context.TODO(), check.ScopePreRun); err != nil {
 		return err
 	}
