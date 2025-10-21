@@ -13,7 +13,7 @@ func (r *Runner) lint() error {
 	var alterTables []*statement.AbstractStatement
 	config := lint.Config{}
 	if config.Settings == nil {
-		config.Settings = make(map[string]any)
+		config.Settings = make(map[string]map[string]string)
 	}
 	config.Settings["invisible_index_before_drop"] = map[string]string{"raiseError": "true"}
 
