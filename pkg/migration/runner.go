@@ -703,6 +703,14 @@ func (r *Runner) Close() error {
 			return err
 		}
 	}
+	// Set the DDL notification channel to nil before closing it
+	// to prevent race conditions where another goroutine might try to send to it
+	if r.replClient != nil {
+		r.replClient.SetDDLNotificationChannel(nil)
+	}
+	if r.ddlNotification != nil {
+		close(r.ddlNotification)
+	}
 	if r.replClient != nil {
 		r.replClient.Close()
 	}
@@ -723,9 +731,6 @@ func (r *Runner) Close() error {
 		if err != nil {
 			return err
 		}
-	}
-	if r.ddlNotification != nil {
-		close(r.ddlNotification)
 	}
 	return nil
 }
