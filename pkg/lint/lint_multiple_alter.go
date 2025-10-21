@@ -17,7 +17,7 @@ func init() {
 type MultipleAlterTableLinter struct{}
 
 func (l *MultipleAlterTableLinter) String() string {
-	return l.Name()
+	return Stringer(l)
 }
 
 func (l *MultipleAlterTableLinter) Name() string {

@@ -16,7 +16,7 @@ func init() {
 type InvisibleIndexBeforeDropLinter struct{}
 
 func (l *InvisibleIndexBeforeDropLinter) String() string {
-	return l.Name()
+	return Stringer(l)
 }
 
 func (l *InvisibleIndexBeforeDropLinter) Name() string {

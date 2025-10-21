@@ -30,3 +30,9 @@ type ConfigurableLinter interface {
 	// DefaultConfig returns the default configuration for this linter
 	DefaultConfig() any
 }
+
+// Stringer returns a string representation of the linter
+// This is a helper function used by linters' String() methods.
+func Stringer(l Linter) string {
+	return l.Name() + " - " + l.Description()
+}

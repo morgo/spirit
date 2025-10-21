@@ -18,7 +18,7 @@ func init() {
 type PrimaryKeyTypeLinter struct{}
 
 func (l *PrimaryKeyTypeLinter) String() string {
-	return l.Name()
+	return Stringer(l)
 }
 
 func (l *PrimaryKeyTypeLinter) Name() string {

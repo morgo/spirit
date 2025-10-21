@@ -29,7 +29,7 @@ func NewTableNameLengthLinter() *TableNameLengthLinter {
 }
 
 func (l *TableNameLengthLinter) String() string {
-	return l.Name()
+	return lint.Stringer(l)
 }
 
 func (l *TableNameLengthLinter) Name() string {
