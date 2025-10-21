@@ -16,36 +16,43 @@ import (
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 	"github.com/siddontang/loggers"
 	"github.com/sirupsen/logrus"
 )
 
 var (
-	sentinelCheckInterval = 1 * time.Second
-	sentinelWaitLimit     = 48 * time.Hour
-	sentinelTableName     = "_spirit_sentinel" // this is now a const.
+	sentinelCheckInterval   = 1 * time.Second
+	tableStatUpdateInterval = 5 * time.Minute
+	sentinelWaitLimit       = 48 * time.Hour
+	sentinelTableName       = "_spirit_sentinel" // this is now a const.
+	checkpointTableName     = "_spirit_checkpoint"
+	checkpointDumpInterval  = 50 * time.Second
 )
 
 type Runner struct {
-	move         *Move
-	source       *sql.DB
-	sourceConfig *mysql.Config
-	target       *sql.DB
-	targetConfig *mysql.Config
-	currentState migration.State // must use atomic to get/set
+	move            *Move
+	source          *sql.DB
+	sourceConfig    *mysql.Config
+	target          *sql.DB
+	targetConfig    *mysql.Config
+	currentState    migration.State // must use atomic to get/set
+	checkpointTable *table.TableInfo
 
 	sourceTables []*table.TableInfo
 
-	replClient      *repl.Client
-	copyChunker     table.Chunker
-	checksumChunker table.Chunker
-	copier          copier.Copier
-	checker         *checksum.Checker
+	replClient        *repl.Client
+	copyChunker       table.Chunker
+	checksumChunker   table.Chunker
+	copier            copier.Copier
+	checker           *checksum.Checker
+	checksumWatermark string
 
 	// Track some key statistics.
-	startTime             time.Time
-	sentinelWaitStartTime time.Time
+	startTime                time.Time
+	sentinelWaitStartTime    time.Time
+	usedResumeFromCheckpoint bool
 
 	cutoverFunc func(ctx context.Context) error
 
@@ -63,30 +70,37 @@ func NewRunner(m *Move) (*Runner, error) {
 }
 
 func (r *Runner) Close() error {
+	if r.copyChunker != nil {
+		r.copyChunker.Close()
+	}
+	if r.replClient != nil {
+		r.replClient.Close()
+	}
 	return nil
 }
 
-// getSourceTables connects to r.source and fetches the list of tables
-// to populate r.sourceTables.
-func (r *Runner) getSourceTables(ctx context.Context) error {
-	rows, err := r.source.Query("SHOW TABLES")
+// getTables connects to a DB and fetches the list of tables
+// it can be run on either the source or the target.
+func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo, error) {
+	rows, err := db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
 	var tableName string
+	tables := make([]*table.TableInfo, 0)
 	for rows.Next() {
 		if err := rows.Scan(&tableName); err != nil {
-			return err
+			return nil, err
 		}
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
 		if err := tableInfo.SetInfo(ctx); err != nil {
-			return err
+			return nil, err
 		}
-		r.sourceTables = append(r.sourceTables, tableInfo)
+		tables = append(tables, tableInfo)
 	}
-	return rows.Err()
+	return tables, rows.Err()
 }
 
 // checkTargetEmpty checks that the target database is empty.
@@ -126,6 +140,212 @@ func (r *Runner) createTargetTables() error {
 	return nil
 }
 
+func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
+	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	var err error
+	// For each table create a chunker and add a subscription to the replication client.
+	for _, src := range r.sourceTables {
+		dest := table.NewTableInfo(r.target, r.targetConfig.DBName, src.TableName)
+		if err := dest.SetInfo(ctx); err != nil {
+			return err
+		}
+		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		if err := r.replClient.AddSubscription(src, dest, copyChunker.KeyAboveHighWatermark); err != nil {
+			return err
+		}
+		checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		copyChunkers = append(copyChunkers, copyChunker)
+		checksumChunkers = append(checksumChunkers, checksumChunker)
+	}
+
+	// Then create a multi chunker of all chunkers.
+	r.copyChunker = table.NewMultiChunker(copyChunkers...)
+	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
+
+	// Create a copier that reads from the multi chunker and writes to the target.
+	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
+		Concurrency:                   r.move.Threads,
+		TargetChunkTime:               r.move.TargetChunkTime,
+		Logger:                        r.logger,
+		Throttler:                     &throttler.Noop{},
+		MetricsSink:                   &metrics.NoopSink{},
+		DBConfig:                      r.dbConfig,
+		UseExperimentalBufferedCopier: true,
+		WriteDB:                       r.target,
+	})
+	if err != nil {
+		return err
+	}
+
+	// We intentionally SELECT * FROM the checkpoint table because if the structure
+	// changes, we want this operation to fail. This will indicate that the checkpoint
+	// was created by either an earlier or later version of spirit, in which case
+	// we do not support recovery.
+	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
+		r.targetConfig.DBName, checkpointTableName)
+	var copierWatermark, binlogName, statement string
+	var id, binlogPos int
+	err = r.target.QueryRow(query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
+	if err != nil {
+		return fmt.Errorf("could not read from table '%s', err:%v", checkpointTableName, err)
+	}
+
+	r.replClient.SetFlushedPos(gomysql.Position{
+		Name: binlogName,
+		Pos:  uint32(binlogPos),
+	})
+
+	// Open chunker at the specified watermark
+	if err := r.copyChunker.OpenAtWatermark(copierWatermark); err != nil {
+		return err
+	}
+
+	// Start the replication client.
+	if err := r.replClient.Run(ctx); err != nil {
+		return err
+	}
+
+	r.checkpointTable = table.NewTableInfo(r.target, r.targetConfig.DBName, checkpointTableName)
+	r.usedResumeFromCheckpoint = true
+	return nil
+}
+
+func (r *Runner) setup(ctx context.Context) error {
+	var err error
+	// Fetch a list of tables from the source.
+	r.logger.Infof("Fetching source table list")
+	if r.sourceTables, err = r.getTables(ctx, r.source); err != nil {
+		return err
+	}
+	r.logger.Infof("Setting up repl client")
+
+	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
+		Logger:                     r.logger,
+		Concurrency:                r.move.Threads,
+		TargetBatchTime:            r.move.TargetChunkTime,
+		ServerID:                   repl.NewServerID(),
+		UseExperimentalBufferedMap: true,
+		WriteDB:                    r.target,
+	})
+
+	r.logger.Infof("Checking target database state")
+
+	if err := r.checkTargetEmpty(); err != nil {
+		// There are existing tables there.
+		// Optimistically try to resume from a checkpoint written
+		// to the target database. If it fails, unlike schema changes,
+		// the move fails because we don't want to overwrite existing data.
+		if err := r.resumeFromCheckpoint(ctx); err != nil {
+			return errors.New("target database is not empty and could not resume from checkpoint")
+		}
+		r.logger.Infof("Resumed move from existing checkpoint")
+	} else {
+		return r.newCopy(ctx)
+	}
+	return nil
+}
+
+func (r *Runner) newCopy(ctx context.Context) error {
+	// We are starting fresh:
+	// For each table, fetch the CREATE TABLE statement from the source and run it on the target.
+	if err := r.createTargetTables(); err != nil {
+		return err
+	}
+
+	// Create a sentinel.
+	if r.move.CreateSentinel {
+		if err := r.createSentinelTable(ctx); err != nil {
+			return err
+		}
+	}
+
+	if err := r.createCheckpointTable(ctx); err != nil {
+		return err
+	}
+
+	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	var err error
+	// For each table create a chunker and add a subscription to the replication client.
+	for _, src := range r.sourceTables {
+		dest := table.NewTableInfo(r.target, r.targetConfig.DBName, src.TableName)
+		if err := dest.SetInfo(ctx); err != nil {
+			return err
+		}
+		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		if err := r.replClient.AddSubscription(src, dest, copyChunker.KeyAboveHighWatermark); err != nil {
+			return err
+		}
+		checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		copyChunkers = append(copyChunkers, copyChunker)
+		checksumChunkers = append(checksumChunkers, checksumChunker)
+	}
+
+	// Then create a multi chunker of all chunkers.
+	r.copyChunker = table.NewMultiChunker(copyChunkers...)
+	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
+
+	// Create a copier that reads from the multi chunker and writes to the target.
+	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
+		Concurrency:                   r.move.Threads,
+		TargetChunkTime:               r.move.TargetChunkTime,
+		Logger:                        r.logger,
+		Throttler:                     &throttler.Noop{},
+		MetricsSink:                   &metrics.NoopSink{},
+		DBConfig:                      r.dbConfig,
+		UseExperimentalBufferedCopier: true,
+		WriteDB:                       r.target,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Then open the multi chunker.
+	if err := r.copyChunker.Open(); err != nil {
+		return err
+	}
+
+	// Start the replication client.
+	if err := r.replClient.Run(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *Runner) createCheckpointTable(ctx context.Context) error {
+	// drop checkpoint if we've decided to call this func.
+	if err := dbconn.Exec(ctx, r.target, "DROP TABLE IF EXISTS %n.%n", r.targetConfig.DBName, checkpointTableName); err != nil {
+		return err
+	}
+	if err := dbconn.Exec(ctx, r.target, `CREATE TABLE %n.%n (
+	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+	copier_watermark TEXT,
+	checksum_watermark TEXT,
+	binlog_name VARCHAR(255),
+	binlog_pos INT,
+	statement TEXT
+	)`,
+		r.targetConfig.DBName, checkpointTableName); err != nil {
+		return err
+	}
+	r.checkpointTable = table.NewTableInfo(r.target, r.targetConfig.DBName, checkpointTableName)
+	return nil
+}
+
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
@@ -155,90 +375,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Parse the r.move.SourceDSN and fetch the table list.
-	if err = r.getSourceTables(ctx); err != nil {
+	if err := r.setup(ctx); err != nil {
 		return err
 	}
 
-	// Check target is empty.
-	if err := r.checkTargetEmpty(); err != nil {
-		return err
-	}
-
-	// For each table, fetch the CREATE TABLE statement from the source and run it on the target.
-	if err := r.createTargetTables(); err != nil {
-		return err
-	}
-
-	// Create a sentinel.
-	if r.move.CreateSentinel {
-		if err := r.createSentinelTable(ctx); err != nil {
-			return err
-		}
-	}
-
-	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
-		Logger:                     r.logger,
-		Concurrency:                r.move.Threads,
-		TargetBatchTime:            r.move.TargetChunkTime,
-		ServerID:                   repl.NewServerID(),
-		UseExperimentalBufferedMap: true,
-		WriteDB:                    r.target,
-	})
-
-	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
-	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
-
-	// For each table create a chunker and add a subscription to the replication client.
-	for _, src := range r.sourceTables {
-		dest := table.NewTableInfo(r.target, r.targetConfig.DBName, src.TableName)
-		if err := dest.SetInfo(ctx); err != nil {
-			return err
-		}
-		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
-		if err != nil {
-			return err
-		}
-		if err := r.replClient.AddSubscription(src, dest, copyChunker.KeyAboveHighWatermark); err != nil {
-			return err
-		}
-		checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
-		if err != nil {
-			return err
-		}
-		copyChunkers = append(copyChunkers, copyChunker)
-		checksumChunkers = append(checksumChunkers, checksumChunker)
-	}
-
-	// Then create a multi chunker of all chunkers.
-	r.copyChunker = table.NewMultiChunker(copyChunkers...)
-	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
-
-	// Then open the multi chunker.
-	if err := r.copyChunker.Open(); err != nil {
-		return err
-	}
-	defer r.copyChunker.Close()
-
-	// Create a copier that reads from the multi chunker and writes to the target.
-	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.move.Threads,
-		TargetChunkTime:               r.move.TargetChunkTime,
-		Logger:                        r.logger,
-		Throttler:                     &throttler.Noop{},
-		MetricsSink:                   &metrics.NoopSink{},
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: true,
-		WriteDB:                       r.target,
-	})
-	if err != nil {
-		return err
-	}
-
-	// Start the replication client.
-	if err := r.replClient.Run(ctx); err != nil {
-		return err
-	}
+	// Start background monitoring routines
+	r.startBackgroundRoutines(ctx)
 
 	// Run the copier.
 	r.setCurrentState(migration.StateCopyRows)
@@ -277,6 +419,25 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.logger.Infof("Move operation complete.")
 	return nil
+}
+
+// startBackgroundRoutines starts the background routines needed for monitoring.
+// This includes table statistics updates, periodic binlog flushing, and DDL change notifications.
+func (r *Runner) startBackgroundRoutines(ctx context.Context) {
+	// Start routines in table and replication packages to
+	// Continuously update the min/max and estimated rows
+	// and to flush the binary log position periodically.
+	// These will both be stopped when the copier finishes
+	// and checksum starts, although the PeriodicFlush
+	// will be restarted again after.
+	for _, tbl := range r.sourceTables {
+		go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
+	}
+	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+	//go r.tableChangeNotification(ctx)
+
+	//go r.dumpStatus(ctx)                 // start periodically writing status
+	go r.dumpCheckpointContinuously(ctx) // start periodically dumping the checkpoint.
 }
 
 func (r *Runner) SetLogger(logger loggers.Advanced) {
@@ -423,6 +584,81 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 			}
 		case <-timer.C:
 			return errors.New("timed out waiting for sentinel table to be dropped")
+		}
+	}
+}
+
+// dumpCheckpoint is called approximately every minute.
+// It writes the current state of the migration to the checkpoint table,
+// which can be used in recovery. Previously resuming from checkpoint
+// would always restart at the copier, but it can now also resume at
+// the checksum phase.
+func (r *Runner) dumpCheckpoint(ctx context.Context) error {
+	// Retrieve the binlog position first and under a mutex.
+	binlog := r.replClient.GetBinlogApplyPosition()
+	copierWatermark, err := r.copyChunker.GetLowWatermark()
+	if err != nil {
+		return migration.ErrWatermarkNotReady // it might not be ready, we can try again.
+	}
+	// We only dump the checksumWatermark if we are in >= checksum state.
+	// We require a mutex because the checker can be replaced during
+	// operation, leaving a race condition.
+	var checksumWatermark string
+	if r.getCurrentState() >= migration.StateChecksum {
+		if r.checker != nil {
+			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
+			if err != nil {
+				return migration.ErrWatermarkNotReady
+			}
+		}
+	}
+	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
+	// when using the composite chunker are based on actual user-data.
+	// We believe this is OK but may change it in the future. Please do not
+	// add any other fields to this log line.
+	r.logger.Infof("checkpoint: low-watermark=%s log-file=%s log-pos=%d", copierWatermark, binlog.Name, binlog.Pos)
+	err = dbconn.Exec(ctx, r.target, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement) VALUES (%?, %?, %?, %?, %?)",
+		r.checkpointTable.SchemaName,
+		r.checkpointTable.TableName,
+		copierWatermark,
+		checksumWatermark,
+		binlog.Name,
+		binlog.Pos,
+		"",
+	)
+	if err != nil {
+		return migration.ErrCouldNotWriteCheckpoint
+	}
+	return nil
+}
+
+func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
+	ticker := time.NewTicker(checkpointDumpInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Continue to checkpoint until we exit the checksum.
+			if r.getCurrentState() >= migration.StateCutOver {
+				return
+			}
+			if err := r.dumpCheckpoint(ctx); err != nil {
+				if errors.Is(err, migration.ErrWatermarkNotReady) {
+					// This is non fatal, we can try again later.
+					r.logger.Warnf("could not write checkpoint yet, watermark not ready")
+					continue
+				}
+				// Other errors such as not being able to write to the checkpoint
+				// table are considered fatal. This is because if we can't record
+				// our progress, we don't want to continue doing work.
+				// We could get 10 days into a migration, and then fail, and then
+				// discover this. It's better to fast fail now.
+				r.logger.Errorf("error writing checkpoint: %v", err)
+				r.cancelFunc()
+				return
+			}
 		}
 	}
 }
