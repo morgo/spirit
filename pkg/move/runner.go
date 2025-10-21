@@ -5,15 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
-	"github.com/block/spirit/pkg/migration"
 	"github.com/block/spirit/pkg/repl"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -37,7 +36,7 @@ type Runner struct {
 	sourceConfig    *mysql.Config
 	target          *sql.DB
 	targetConfig    *mysql.Config
-	currentState    migration.State // must use atomic to get/set
+	status          status.State // must use atomic to get/set
 	checkpointTable *table.TableInfo
 
 	sourceTables []*table.TableInfo
@@ -383,7 +382,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.startBackgroundRoutines(ctx)
 
 	// Run the copier.
-	r.setCurrentState(migration.StateCopyRows)
+	r.status.Set(status.CopyRows)
 	if err := r.copier.Run(ctx); err != nil {
 		return err
 	}
@@ -397,7 +396,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.logger.Infof("All tables copied successfully.")
 
 	r.sentinelWaitStartTime = time.Now()
-	r.setCurrentState(migration.StateWaitingOnSentinelTable)
+	r.status.Set(status.WaitingOnSentinelTable)
 	if err := r.waitOnSentinelTable(ctx); err != nil {
 		return err
 	}
@@ -409,7 +408,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Create a cutover.
-	r.setCurrentState(migration.StateCutOver)
+	r.status.Set(status.CutOver)
 	cutover, err := NewCutOver(r.source, r.sourceTables, r.cutoverFunc, r.replClient, r.dbConfig, r.logger)
 	if err != nil {
 		return err
@@ -450,7 +449,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// *but* it will be started again briefly inside of the checksum
 	// runner to ensure that the lag does not grow too long.
 	r.replClient.StopPeriodicFlush()
-	r.setCurrentState(migration.StateApplyChangeset)
+	r.status.Set(status.ApplyChangeset)
 	if err := r.replClient.Flush(ctx); err != nil {
 		return err
 	}
@@ -459,7 +458,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// This is required so on cutover plans don't go sideways, which
 	// is at elevated risk because the batch loading can cause statistics
 	// to be out of date.
-	r.setCurrentState(migration.StateAnalyzeTable)
+	r.status.Set(status.AnalyzeTable)
 	r.logger.Infof("Running ANALYZE TABLE")
 	for _, tbl := range r.sourceTables {
 		if err := dbconn.Exec(ctx, r.target, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
@@ -467,7 +466,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 		}
 	}
 
-	r.setCurrentState(migration.StateChecksum)
+	r.status.Set(status.Checksum)
 	if err := r.checksumChunker.Open(); err != nil {
 		return err
 	}
@@ -494,44 +493,36 @@ func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
 	r.cutoverFunc = cutover
 }
 
-func (r *Runner) GetProgress() migration.Progress {
+func (r *Runner) GetProgress() status.Progress {
 	var summary string
-	switch r.getCurrentState() { //nolint: exhaustive
-	case migration.StateCopyRows:
+	switch r.status.Get() { //nolint: exhaustive
+	case status.CopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
 			r.copier.GetProgress(),
-			r.getCurrentState().String(),
+			r.status.Get().String(),
 			r.copier.GetETA(),
 		)
-	case migration.StateWaitingOnSentinelTable:
+	case status.WaitingOnSentinelTable:
 		r.logger.Infof("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s",
-			r.getCurrentState().String(),
+			r.status.Get().String(),
 			r.targetConfig.DBName,
 			sentinelTableName,
 			time.Since(r.startTime).Round(time.Second),
 			time.Since(r.sentinelWaitStartTime).Round(time.Second),
 			sentinelWaitLimit,
 		)
-	case migration.StateApplyChangeset, migration.StatePostChecksum:
+	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
-	case migration.StateChecksum:
+	case status.Checksum:
 		summary = fmt.Sprintf("%v %s",
 			r.checker.GetProgress(),
-			r.getCurrentState().String(),
+			r.status.Get().String(),
 		)
 	}
-	return migration.Progress{
-		CurrentState: r.getCurrentState().String(),
+	return status.Progress{
+		CurrentState: r.status.Get().String(),
 		Summary:      summary,
 	}
-}
-
-func (r *Runner) getCurrentState() migration.State {
-	return migration.State(atomic.LoadInt32((*int32)(&r.currentState)))
-}
-
-func (r *Runner) setCurrentState(s migration.State) {
-	atomic.StoreInt32((*int32)(&r.currentState), int32(s))
 }
 
 func (r *Runner) createSentinelTable(ctx context.Context) error {
@@ -598,17 +589,17 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
-		return migration.ErrWatermarkNotReady // it might not be ready, we can try again.
+		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
 	// We only dump the checksumWatermark if we are in >= checksum state.
 	// We require a mutex because the checker can be replaced during
 	// operation, leaving a race condition.
 	var checksumWatermark string
-	if r.getCurrentState() >= migration.StateChecksum {
+	if r.status.Get() >= status.Checksum {
 		if r.checker != nil {
 			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
 			if err != nil {
-				return migration.ErrWatermarkNotReady
+				return status.ErrWatermarkNotReady
 			}
 		}
 	}
@@ -627,7 +618,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		"",
 	)
 	if err != nil {
-		return migration.ErrCouldNotWriteCheckpoint
+		return status.ErrCouldNotWriteCheckpoint
 	}
 	return nil
 }
@@ -641,11 +632,11 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 			return
 		case <-ticker.C:
 			// Continue to checkpoint until we exit the checksum.
-			if r.getCurrentState() >= migration.StateCutOver {
+			if r.status.Get() >= status.CutOver {
 				return
 			}
 			if err := r.dumpCheckpoint(ctx); err != nil {
-				if errors.Is(err, migration.ErrWatermarkNotReady) {
+				if errors.Is(err, status.ErrWatermarkNotReady) {
 					// This is non fatal, we can try again later.
 					r.logger.Warnf("could not write checkpoint yet, watermark not ready")
 					continue
