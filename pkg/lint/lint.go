@@ -48,6 +48,10 @@
 package lint
 
 import (
+	"errors"
+	"fmt"
+	"os"
+
 	"github.com/block/spirit/pkg/statement"
 )
 
@@ -74,7 +78,8 @@ type Config struct {
 //
 // If a linter implements ConfigurableLinter and has settings in config.Settings,
 // those settings are applied before running the linter.
-func RunLinters(createTables []*statement.CreateTable, alterStatements []*statement.AbstractStatement, config Config) []Violation {
+func RunLinters(createTables []*statement.CreateTable, alterStatements []*statement.AbstractStatement, config Config) ([]Violation, error) {
+	var errs []error
 	lock.RLock()
 	defer lock.RUnlock()
 
@@ -104,6 +109,8 @@ func RunLinters(createTables []*statement.CreateTable, alterStatements []*statem
 				if err != nil {
 					// Configuration error - skip this linter
 					// In a production system, we might want to log this
+					fmt.Fprintf(os.Stderr, "Error configuring %s: %s\n", name, err)
+					errs = append(errs, err)
 					continue
 				}
 			}
@@ -114,7 +121,7 @@ func RunLinters(createTables []*statement.CreateTable, alterStatements []*statem
 		violations = append(violations, lintViolations...)
 	}
 
-	return violations
+	return violations, errors.Join(errs...)
 }
 
 // HasErrors returns true if any violations have ERROR severity.
