@@ -58,9 +58,6 @@ type Migration struct {
 }
 
 func (m *Migration) Run() error {
-
-	fmt.Printf("%#v\n", m.EnableExperimentalLinting)
-
 	migration, err := NewRunner(m)
 	if err != nil {
 		return err
