@@ -65,12 +65,12 @@ func TestTableNameLengthLinter_Configure(t *testing.T) {
 
 	linter := NewTableNameLengthLinter()
 
-	// With default config (64), should pass
+	// With default config (58), should pass
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 	assert.Empty(t, violations)
 
 	// Configure to max length of 40
-	err = linter.Configure(TableNameLengthConfig{MaxLength: 40})
+	err = linter.Configure(map[string]string{"maxLength": "40"})
 	require.NoError(t, err)
 
 	// Now should fail
@@ -82,20 +82,25 @@ func TestTableNameLengthLinter_Configure(t *testing.T) {
 func TestTableNameLengthLinter_Configure_InvalidConfig(t *testing.T) {
 	linter := NewTableNameLengthLinter()
 
-	// Wrong type
-	err := linter.Configure("invalid")
+	// Invalid integer
+	err := linter.Configure(map[string]string{"maxLength": "invalid"})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid config type")
+	assert.Contains(t, err.Error(), "must be a valid integer")
 
 	// Zero length
-	err = linter.Configure(TableNameLengthConfig{MaxLength: 0})
+	err = linter.Configure(map[string]string{"maxLength": "0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "must be positive")
 
 	// Negative length
-	err = linter.Configure(TableNameLengthConfig{MaxLength: -1})
+	err = linter.Configure(map[string]string{"maxLength": "-1"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "must be positive")
+
+	// Unknown key
+	err = linter.Configure(map[string]string{"unknownKey": "value"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown config key")
 }
 
 func TestTableNameLengthLinter_DefaultConfig(t *testing.T) {
@@ -103,10 +108,7 @@ func TestTableNameLengthLinter_DefaultConfig(t *testing.T) {
 
 	config := linter.DefaultConfig()
 	require.NotNil(t, config)
-
-	cfg, ok := config.(TableNameLengthConfig)
-	require.True(t, ok)
-	assert.Equal(t, 64, cfg.MaxLength)
+	assert.Equal(t, "58", config["maxLength"])
 }
 
 func TestDuplicateColumnLinter_NoDuplicates(t *testing.T) {
@@ -231,15 +233,17 @@ func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	// With default config (64), should pass
+	// With default config (58), should pass
 	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
 	require.NoError(t, err)
 	assert.Empty(t, violations)
 
 	// Configure max length to 40 via Config.Settings
 	violations, err = lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
-		Settings: map[string]any{
-			"table_name_length": TableNameLengthConfig{MaxLength: 40},
+		Settings: map[string]map[string]string{
+			"table_name_length": {
+				"maxLength": "40",
+			},
 		},
 	})
 	require.NoError(t, err)

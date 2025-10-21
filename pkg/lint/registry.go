@@ -8,7 +8,7 @@ import (
 
 // linter represents a registered linter with metadata
 type linter struct {
-	impl    Linter
+	l       Linter
 	enabled bool
 }
 
@@ -29,7 +29,7 @@ func Register(l Linter) {
 	}
 
 	linters[l.Name()] = linter{
-		impl:    l,
+		l:       l,
 		enabled: true,
 	}
 }
@@ -98,7 +98,7 @@ func Get(name string) (Linter, error) {
 		return nil, fmt.Errorf("linter %q not found", name)
 	}
 
-	return l.impl, nil
+	return l.l, nil
 }
 
 // Reset clears all registered linters.

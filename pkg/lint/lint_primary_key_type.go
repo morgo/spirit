@@ -143,9 +143,5 @@ func (l *PrimaryKeyTypeLinter) isBinaryType(column *statement.Column) bool {
 	// VARBINARY is mysql.TypeVarchar with binary flag
 	rawType := column.Raw.Tp.GetType()
 
-	// Check if it's a string type with binary flag (BINARY/VARBINARY)
-
-	fmt.Printf("Debug: type=%s rawType=%d, flags=%d, options=%#v\n", column.Type, rawType, column.Raw.Tp.GetFlag(), column.Options)
-
 	return (rawType == mysql.TypeString || rawType == mysql.TypeVarchar) && mysql.HasBinaryFlag(column.Raw.Tp.GetFlag())
 }

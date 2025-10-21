@@ -186,3 +186,267 @@ func TestInvisibleIndexBeforeDropLinter_Metadata(t *testing.T) {
 	assert.Equal(t, "invisible_index_before_drop", linter.Name())
 	assert.NotEmpty(t, linter.Description())
 }
+
+// Configuration Tests
+
+func TestInvisibleIndexBeforeDropLinter_Configure_ValidRaiseErrorTrue(t *testing.T) {
+	linter := &InvisibleIndexBeforeDropLinter{}
+
+	config := map[string]string{
+		"raiseError": "true",
+	}
+
+	err := linter.Configure(config)
+	require.NoError(t, err)
+	assert.True(t, linter.raiseError)
+}
+
+func TestInvisibleIndexBeforeDropLinter_Configure_ValidRaiseErrorFalse(t *testing.T) {
+	linter := &InvisibleIndexBeforeDropLinter{}
+
+	config := map[string]string{
+		"raiseError": "false",
+	}
+
+	err := linter.Configure(config)
+	require.NoError(t, err)
+	assert.False(t, linter.raiseError)
+}
+
+func TestInvisibleIndexBeforeDropLinter_Configure_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected bool
+	}{
+		{"lowercase true", "true", true},
+		{"uppercase TRUE", "TRUE", true},
+		{"mixed True", "True", true},
+		{"lowercase false", "false", false},
+		{"uppercase FALSE", "FALSE", false},
+		{"mixed False", "False", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linter := &InvisibleIndexBeforeDropLinter{}
+
+			config := map[string]string{
+				"raiseError": tt.value,
+			}
+
+			err := linter.Configure(config)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, linter.raiseError)
+		})
+	}
+}
+
+func TestInvisibleIndexBeforeDropLinter_Configure_InvalidRaiseErrorValue(t *testing.T) {
+	linter := &InvisibleIndexBeforeDropLinter{}
+
+	config := map[string]string{
+		"raiseError": "invalid",
+	}
+
+	err := linter.Configure(config)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid value for raiseError")
+}
+
+func TestInvisibleIndexBeforeDropLinter_Configure_UnknownKey(t *testing.T) {
+	linter := &InvisibleIndexBeforeDropLinter{}
+
+	config := map[string]string{
+		"unknownKey": "value",
+	}
+
+	err := linter.Configure(config)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown config key")
+	assert.Contains(t, err.Error(), "unknownKey")
+}
+
+func TestInvisibleIndexBeforeDropLinter_Configure_MultipleKeys(t *testing.T) {
+	linter := &InvisibleIndexBeforeDropLinter{}
+
+	config := map[string]string{
+		"raiseError": "false",
+		"unknownKey": "value",
+	}
+
+	err := linter.Configure(config)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown config key")
+}
+
+func TestInvisibleIndexBeforeDropLinter_DefaultConfig(t *testing.T) {
+	linter := &InvisibleIndexBeforeDropLinter{}
+
+	defaultConfig := linter.DefaultConfig()
+	require.NotNil(t, defaultConfig)
+	assert.Equal(t, "false", defaultConfig["raiseError"])
+}
+
+// Functional Tests with Configuration
+
+func TestInvisibleIndexBeforeDropLinter_RaiseErrorTrue_ProducesError(t *testing.T) {
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+
+	linter := &InvisibleIndexBeforeDropLinter{}
+	err = linter.Configure(map[string]string{"raiseError": "true"})
+	require.NoError(t, err)
+
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestInvisibleIndexBeforeDropLinter_RaiseErrorFalse_ProducesWarning(t *testing.T) {
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+
+	linter := &InvisibleIndexBeforeDropLinter{}
+	err = linter.Configure(map[string]string{"raiseError": "false"})
+	require.NoError(t, err)
+
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+}
+
+func TestInvisibleIndexBeforeDropLinter_DefaultBehavior(t *testing.T) {
+	// Without configuration, default should be raiseError=true (warning)
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+
+	linter := &InvisibleIndexBeforeDropLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	// Default behavior is warning (raiseError defaults to false in struct)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+}
+
+// Integration Tests with RunLinters
+
+func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorTrue(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	violations, err := RunLinters(nil, stmts, Config{
+		Settings: map[string]map[string]string{
+			"invisible_index_before_drop": {
+				"raiseError": "true",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorFalse(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	violations, err := RunLinters(nil, stmts, Config{
+		Settings: map[string]map[string]string{
+			"invisible_index_before_drop": {
+				"raiseError": "false",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+}
+
+func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_InvalidConfig(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// Invalid configuration should result in error
+	violations, err := RunLinters(nil, stmts, Config{
+		Settings: map[string]map[string]string{
+			"invisible_index_before_drop": {
+				"raiseError": "invalid_value",
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid value for raiseError")
+	// Linter should be skipped due to configuration error
+	assert.Empty(t, violations)
+}
+
+func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_DisabledLinter(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// Even with configuration, disabled linter should not run
+	violations, err := RunLinters(nil, stmts, Config{
+		Enabled: map[string]bool{
+			"invisible_index_before_drop": false,
+		},
+		Settings: map[string]map[string]string{
+			"invisible_index_before_drop": {
+				"raiseError": "true",
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
+
+func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_EnabledWithConfig(t *testing.T) {
+	Reset()
+	Register(&InvisibleIndexBeforeDropLinter{})
+
+	sql := "ALTER TABLE users DROP INDEX idx_email"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// Explicitly enabled with custom configuration
+	violations, err := RunLinters(nil, stmts, Config{
+		Enabled: map[string]bool{
+			"invisible_index_before_drop": true,
+		},
+		Settings: map[string]map[string]string{
+			"invisible_index_before_drop": {
+				"raiseError": "false",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+}

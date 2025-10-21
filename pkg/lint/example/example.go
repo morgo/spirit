@@ -3,8 +3,8 @@
 package example
 
 import (
-	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
@@ -14,11 +14,6 @@ import (
 // MySQL has a limit of 64 characters for table names.
 type TableNameLengthLinter struct {
 	maxLength int
-}
-
-// TableNameLengthConfig holds configuration for the table name length linter.
-type TableNameLengthConfig struct {
-	MaxLength int `json:"max_length"`
 }
 
 // NewTableNameLengthLinter creates a new table name length linter with default configuration.
@@ -37,26 +32,33 @@ func (l *TableNameLengthLinter) Name() string {
 }
 
 func (l *TableNameLengthLinter) Description() string {
-	return "Checks that table names do not exceed the configured maximum length (default: 64 characters)"
+	return "Checks that table names do not exceed the configured maximum length (default: 58 characters)"
 }
 
-func (l *TableNameLengthLinter) DefaultConfig() any {
-	return TableNameLengthConfig{
-		MaxLength: 64,
+func (l *TableNameLengthLinter) DefaultConfig() map[string]string {
+	return map[string]string{
+		"maxLength": "58",
 	}
 }
 
-func (l *TableNameLengthLinter) Configure(config any) error {
-	cfg, ok := config.(TableNameLengthConfig)
-	if !ok {
-		return errors.New("invalid config type for table_name_length linter: expected TableNameLengthConfig")
-	}
+func (l *TableNameLengthLinter) Configure(config map[string]string) error {
+	for k, v := range config {
+		switch k {
+		case "maxLength":
+			maxLen, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("maxLength must be a valid integer, got %q: %w", v, err)
+			}
 
-	if cfg.MaxLength <= 0 {
-		return fmt.Errorf("max_length must be positive, got %d", cfg.MaxLength)
-	}
+			if maxLen <= 0 {
+				return fmt.Errorf("maxLength must be positive, got %d", maxLen)
+			}
 
-	l.maxLength = cfg.MaxLength
+			l.maxLength = maxLen
+		default:
+			return fmt.Errorf("unknown config key for %s: %s", l.Name(), k)
+		}
+	}
 
 	return nil
 }
