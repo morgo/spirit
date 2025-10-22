@@ -55,7 +55,7 @@ func (l *InvisibleIndexBeforeDropLinter) DefaultConfig() map[string]string {
 
 var _ ConfigurableLinter = &InvisibleIndexBeforeDropLinter{}
 
-func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTable, statements []*statement.AbstractStatement) []Violation {
+func (l *InvisibleIndexBeforeDropLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
 	severity := SeverityWarning
 	if l.raiseError {
 		severity = SeverityError
@@ -63,7 +63,7 @@ func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTa
 
 	var violations []Violation
 
-	for _, stmt := range statements {
+	for _, stmt := range changes {
 		// Only check ALTER TABLE statements
 		if !stmt.IsAlterTable() {
 			continue
@@ -86,8 +86,8 @@ func (l *InvisibleIndexBeforeDropLinter) Lint(createTables []*statement.CreateTa
 
 			madeInvisible := false
 			// If not made invisible in this ALTER, check if it's invisible in the CREATE TABLE
-			if len(createTables) > 0 {
-				for _, ct := range createTables {
+			if len(existingTables) > 0 {
+				for _, ct := range existingTables {
 					if ct.GetTableName() == tableName {
 						for _, idx := range ct.GetIndexes() {
 							if idx.Name == indexName && idx.Invisible != nil && *idx.Invisible {

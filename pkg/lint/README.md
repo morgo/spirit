@@ -62,10 +62,10 @@ func (l *MyCustomLinter) Category() string    { return "naming" }
 func (l *MyCustomLinter) Description() string { return "Checks naming conventions" }
 func (l *MyCustomLinter) String() string      { return l.Name() }
 
-func (l *MyCustomLinter) Lint(createTables []*statement.CreateTable, alterStatements []*statement.AbstractStatement) []Violation {
+func (l *MyCustomLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
     var violations []Violation
     
-    for _, ct := range createTables {
+    for _, ct := range existingTables {
         // Check table properties
         if /* condition */ {
             violations = append(violations, Violation{
