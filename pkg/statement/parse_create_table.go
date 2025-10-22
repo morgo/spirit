@@ -184,22 +184,13 @@ func ParseCreateTable(sql string) (*CreateTable, error) {
 	}
 
 	// Parse into structured format
-	ct, err := ParseCreateTableAST(createStmt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse CREATE TABLE statement: %w", err)
-	}
-
-	return ct, nil
-}
-
-func ParseCreateTableAST(createStmt *ast.CreateTableStmt) (*CreateTable, error) {
 	ct := &CreateTable{
 		Raw: createStmt,
 	}
 	// Parse into structured format
-	err := ct.parseToStruct()
+	err = ct.parseToStruct()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse CREATE TABLE AST: %w", err)
+		return nil, fmt.Errorf("failed to parse CREATE TABLE: %w", err)
 	}
 	return ct, nil
 }

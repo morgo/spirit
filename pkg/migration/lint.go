@@ -8,25 +8,26 @@ import (
 
 	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
-var linterConfigRE = regexp.MustCompile(`^([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)=(.+)$`)
+var (
+	linterConfigRE = regexp.MustCompile(`^([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)=(.+)$`)
+	// defaultLinterSettings holds settings for linters where we know we want to override linter
+	// system defaults or ensure specific behavior.
+	defaultLinterSettings = map[string]map[string]string{
+		"invisible_index_before_drop": {
+			"raiseError": "false",
+		},
+	}
+)
 
 func (r *Runner) lint(ctx context.Context) error {
 	var createTables []*statement.CreateTable
 	var alterTables []*statement.AbstractStatement
-	config := lint.Config{}
-	if config.Enabled == nil {
-		config.Enabled = make(map[string]bool)
+	config := lint.Config{
+		Enabled:  make(map[string]bool),
+		Settings: defaultLinterSettings,
 	}
-	if config.Settings == nil {
-		config.Settings = make(map[string]map[string]string)
-	}
-
-	// Set default config for invisible_index_before_drop linter
-	// TODO: Put these defaults in a more sensible place
-	config.Settings["invisible_index_before_drop"] = map[string]string{"raiseError": "true"}
 
 	for _, linterName := range r.migration.EnableExperimentalLinters {
 		if linterName[0] == '-' {
@@ -36,6 +37,7 @@ func (r *Runner) lint(ctx context.Context) error {
 		}
 	}
 
+	// Parse linter settings from migration config. These override defaultLinterSettings.
 	for _, cfg := range r.migration.ExperimentalLinterConfig {
 		matches := linterConfigRE.FindStringSubmatch(cfg)
 		if len(matches) != 4 {
@@ -56,7 +58,7 @@ func (r *Runner) lint(ctx context.Context) error {
 	}
 
 	for _, change := range r.changes {
-		// Collect ALTER TABLE statements and their corresponding CREATE TABLEs
+		// Collect ALTER TABLE statements and the CREATE TABLEs for the tables they reference
 		if change.stmt.IsAlterTable() {
 			alterTables = append(alterTables, change.stmt)
 
@@ -67,9 +69,9 @@ func (r *Runner) lint(ctx context.Context) error {
 			createTables = append(createTables, ct)
 		}
 
-		// Collect standalone CREATE TABLE statements
-		if ctAST, ok := (*change.stmt.StmtNode).(*ast.CreateTableStmt); ok {
-			ct, err := statement.ParseCreateTableAST(ctAST)
+		// If the migration creates a table, we need to collect that CREATE TABLE as well
+		if change.stmt.IsCreateTable() {
+			ct, err := change.stmt.ParseCreateTable()
 			if err != nil {
 				return err
 			}
