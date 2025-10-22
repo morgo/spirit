@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
@@ -29,6 +30,9 @@ func (r *Runner) lint(ctx context.Context) error {
 		Settings: defaultLinterSettings,
 	}
 
+	// Enable/disable linters based on migration config.
+	// A linter name prefixed with '-' indicates it should be disabled.
+	// This overrides the default enabled state of linters in the registry.
 	for _, linterName := range r.migration.EnableExperimentalLinters {
 		if linterName[0] == '-' {
 			config.Enabled[linterName[1:]] = false
@@ -100,7 +104,11 @@ func (r *Runner) lint(ctx context.Context) error {
 }
 
 func (r *Runner) getCreateTable(ctx context.Context, db string, tbl string) (*statement.CreateTable, error) {
+	// Escape backticks in db and tbl names to be extra pedantic
+	db = strings.ReplaceAll(db, "`", "``")
+	tbl = strings.ReplaceAll(tbl, "`", "``")
 	sql := fmt.Sprintf("show create table `%s`.`%s`", db, tbl)
+
 	row := r.db.QueryRowContext(ctx, sql)
 	var createTable string
 	if err := row.Scan(&tbl, &createTable); err != nil {
