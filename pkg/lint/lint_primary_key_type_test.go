@@ -88,10 +88,10 @@ func TestPrimaryKeyTypeLinter_IntError(t *testing.T) {
 	linter := &PrimaryKeyTypeLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// INT is not acceptable - should be an error
+	// INT is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "must be BIGINT or BINARY/VARBINARY")
 	assert.Equal(t, "users", violations[0].Location.Table)
 	assert.NotNil(t, violations[0].Location.Column)
@@ -111,10 +111,10 @@ func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
 	linter := &PrimaryKeyTypeLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// VARCHAR is not acceptable - should be an error
+	// VARCHAR is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "must be BIGINT or BINARY/VARBINARY")
 	assert.NotNil(t, violations[0].Context)
 	// The parser returns lowercase "varchar"
@@ -133,10 +133,10 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKey(t *testing.T) {
 	linter := &PrimaryKeyTypeLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// user_id is BIGINT UNSIGNED (good), role_id is INT (error)
+	// user_id is BIGINT UNSIGNED (good), role_id is INT (warning)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Equal(t, "role_id", *violations[0].Location.Column)
 }
 
@@ -211,7 +211,7 @@ func TestPrimaryKeyTypeLinter_MultipleTables(t *testing.T) {
 	// Only orders table should have a violation
 	require.Len(t, violations, 1)
 	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
@@ -225,9 +225,9 @@ func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
 	linter := &PrimaryKeyTypeLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// SMALLINT is not acceptable - should be an error
+	// SMALLINT is not acceptable - should be a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
@@ -241,9 +241,9 @@ func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
 	linter := &PrimaryKeyTypeLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// MEDIUMINT is not acceptable - should be an error
+	// MEDIUMINT is not acceptable - should be a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
@@ -259,7 +259,7 @@ func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
 
 	// CHAR is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_EmptyInput(t *testing.T) {
@@ -375,7 +375,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsVarchar(t *testing.T) {
 
 	// VARCHAR for UUID should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, *violations[0].Suggestion, "BINARY/VARBINARY")
 }
 

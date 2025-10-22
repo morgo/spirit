@@ -148,6 +148,11 @@ func (a *AbstractStatement) IsAlterTable() bool {
 	return ok
 }
 
+func (a *AbstractStatement) IsCreateTable() bool {
+	_, ok := (*a.StmtNode).(*ast.CreateTableStmt)
+	return ok
+}
+
 // AlgorithmInplaceConsideredSafe checks to see if all clauses of an ALTER
 // statement are "safe". We consider an operation to be "safe" if it is "In
 // Place" and "Only Modifies Metadata". See

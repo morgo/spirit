@@ -73,6 +73,10 @@ type Config struct {
 	// Settings maps linter names to their configuration as map[string]string
 	// Each linter's settings are provided as key-value string pairs
 	Settings map[string]map[string]string
+
+	// LintOnlyChanges indicates whether to lint only the changes
+	// or all of the existing schema plus the changes.
+	LintOnlyChanges bool
 }
 
 // RunLinters runs all enabled linters and returns any violations found.
@@ -87,7 +91,7 @@ type Config struct {
 //
 // If a linter implements ConfigurableLinter and has settings in config.Settings,
 // those settings are applied before running the linter.
-func RunLinters(createTables []*statement.CreateTable, alterStatements []*statement.AbstractStatement, config Config) ([]Violation, error) {
+func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.AbstractStatement, config Config) ([]Violation, error) {
 	var errs []error
 
 	lock.RLock()
@@ -141,11 +145,34 @@ func RunLinters(createTables []*statement.CreateTable, alterStatements []*statem
 		}
 
 		// Run the linter
-		lintViolations := linter.l.Lint(createTables, alterStatements)
+		lintViolations := linter.l.Lint(existingSchema, changes)
 		violations = append(violations, lintViolations...)
 	}
 
+	// The linters are agnostic to this, but depending on how RunLinters is called,
+	// we may remove the violations that pertain to tables which are unchanged.
+	if config.LintOnlyChanges {
+		var filtered []Violation
+		tables, err := extractTablesFromChanges(changes)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range violations {
+			if _, ok := tables[v.Location.Table]; ok {
+				filtered = append(filtered, v)
+			}
+		}
+		violations = filtered
+	}
 	return violations, errors.Join(errs...)
+}
+
+func extractTablesFromChanges(changes []*statement.AbstractStatement) (map[string]struct{}, error) {
+	tables := make(map[string]struct{})
+	for _, stmt := range changes {
+		tables[stmt.Table] = struct{}{}
+	}
+	return tables, nil
 }
 
 // HasErrors returns true if any violations have ERROR severity.
