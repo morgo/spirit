@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +71,9 @@ type Client struct {
 	writeDB  *sql.DB
 	dbConfig *dbconn.DBConfig
 
+	// TLS configuration for binary log connections
+	tlsConfig *dbconn.DBConfig
+
 	// subscriptions is a map of tables that are actively
 	// watching for changes on. The key is schemaName.tableName.
 	// each subscription has its own set of changes.
@@ -113,6 +117,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 	return &Client{
 		db:                         db,
 		dbConfig:                   dbconn.NewDBConfig(),
+		tlsConfig:                  config.TLSConfig,
 		host:                       host,
 		username:                   username,
 		password:                   password,
@@ -135,7 +140,8 @@ type ClientConfig struct {
 	OnDDL                      chan string
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
-	WriteDB                    *sql.DB // if not nil, use this DB for writes.
+	WriteDB                    *sql.DB          // if not nil, use this DB for writes.
+	TLSConfig                  *dbconn.DBConfig // TLS configuration for binary log connections
 }
 
 // NewServerID randomizes the server ID to avoid conflicts with other binlog readers.
@@ -300,9 +306,35 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		Password: c.password,
 		Logger:   NewLogWrapper(c.logger),
 	}
-	if dbconn.IsRDSHost(c.host) {
+
+	// Enhanced TLS configuration logic
+	if c.tlsConfig != nil && c.tlsConfig.TLSMode != "DISABLED" {
+		var certData []byte
+		var tlsMode string = c.tlsConfig.TLSMode
+
+		// Load certificate data
+		if c.tlsConfig.TLSCertificatePath != "" {
+			certData, err = dbconn.LoadCertificateFromFile(c.tlsConfig.TLSCertificatePath)
+			if err != nil {
+				return fmt.Errorf("failed to load TLS certificate: %w", err)
+			}
+		} else {
+			// Use embedded RDS bundle as fallback
+			certData = dbconn.GetEmbeddedRDSBundle()
+		}
+
+		// For RDS hosts in REQUIRED mode, use RDS TLS config
+		if dbconn.IsRDSHost(c.host) && strings.ToUpper(tlsMode) == "REQUIRED" {
+			c.cfg.TLSConfig = dbconn.NewTLSConfig()
+		} else {
+			// Use custom TLS config for all other cases
+			c.cfg.TLSConfig = dbconn.NewCustomTLSConfig(certData, tlsMode)
+		}
+	} else if dbconn.IsRDSHost(c.host) {
+		// Fallback to old behavior for RDS hosts when no TLS config is provided
 		c.cfg.TLSConfig = dbconn.NewTLSConfig()
 	}
+
 	if c.cfg.TLSConfig != nil {
 		// Set the ServerName so that the TLS config can verify the server's certificate.
 		c.cfg.TLSConfig.ServerName = host
