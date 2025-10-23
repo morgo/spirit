@@ -155,10 +155,8 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 		params = append(params, inParams...)
 	}
 
-	logger.Infof("query: %s", query)
 	rows, err := db.QueryContext(ctx, query, params...)
 	if err != nil {
-		logger.Errorf("failed to query locking transactions: %v", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -181,7 +179,6 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 			&lock.RunningTime,
 			&lock.TrxWeight,
 		); err != nil {
-			logger.Errorf("failed to scan row: %v", err)
 			return nil, err
 		}
 
@@ -189,12 +186,10 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 		locks = append(locks, lock)
 	}
 	if err := rows.Err(); err != nil {
-		logger.Errorf("error iterating over rows: %v", err)
 		return nil, err
 	}
 
 	if len(locks) == 0 {
-		logger.Infof("No locking transactions found.")
 		return nil, nil
 	}
 
@@ -225,8 +220,9 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger loggers.Advanced, ignorePIDs []int) ([]*LockDetail, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		logger.Errorf("failed to begin transaction: %v", err)
+		return nil, err
 	}
+	defer tx.Rollback()
 	query := TableLockQuery
 	params := make([]any, 0, len(tables)*2)
 	if len(ignorePIDs) > 0 {
@@ -246,7 +242,6 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 		}
 	}
 
-	logger.Infof("query: %s", query)
 	rows, err := tx.QueryContext(ctx, query, params...)
 	if err != nil {
 		logger.Errorf("failed to query table locks: %v", err)
@@ -268,19 +263,15 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 			&lock.Host,
 			&lock.PID,
 		); err != nil {
-			logger.Errorf("failed to scan row: %v", err)
 			return nil, err
 		}
-		logger.Infof("Found table lock: %#v", &lock)
 		locks = append(locks, &lock)
 	}
 	if err := rows.Err(); err != nil {
-		logger.Errorf("error iterating over rows: %v", err)
 		return nil, err
 	}
 
 	if len(locks) == 0 {
-		logger.Infof("No table locks found.")
 		return nil, nil
 	}
 
