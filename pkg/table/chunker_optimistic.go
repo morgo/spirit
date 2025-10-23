@@ -283,14 +283,19 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 // which (due to parallelism) could be significantly behind the high watermark.
 // The value is discovered via ChunkerFeedback(), and when retrieved from this func
 // can be used to write a checkpoint for restoration.
+//
+// For final chunks (UpperBound == nil), we allow the watermark to be returned
+// since it represents a valid "table complete" state.
 func (t *chunkerOptimistic) GetLowWatermark() (string, error) {
 	t.Lock()
 	defer t.Unlock()
 
-	if t.watermark == nil || t.watermark.UpperBound == nil || t.watermark.LowerBound == nil {
+	if t.watermark == nil || t.watermark.LowerBound == nil {
 		return "", errors.New("watermark not yet ready")
 	}
 
+	// For final chunks, UpperBound can be nil - this is valid and represents completion
+	// We only require LowerBound to be present for a valid watermark
 	return t.watermark.JSON(), nil
 }
 
@@ -315,8 +320,16 @@ func (t *chunkerOptimistic) isSpecialRestoredChunk(chunk *Chunk) bool {
 //     stored chunk map is checked to see if an existing chunk lowerBound aligns with the new watermark.
 //   - If any stored chunk aligns, it is deleted off the map and the watermark is bumped.
 //   - This process repeats until there is no more alignment from the stored map *or* the map is empty.
+//
+// Special handling for final chunks: Final chunks have UpperBound == nil, but we still need to
+// update the watermark to indicate progress, especially for multi-table migrations where
+// checkpoint writing continues until all tables are complete.
 func (t *chunkerOptimistic) bumpWatermark(chunk *Chunk) {
+	// Handle final chunks (UpperBound == nil) specially
 	if chunk.UpperBound == nil {
+		// For final chunks, we set the watermark to indicate this table is complete
+		// We create a synthetic watermark that represents "table complete" state
+		t.watermark = chunk
 		return
 	}
 	// Check if this is the first chunk or it's the special restored chunk.
