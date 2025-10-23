@@ -55,14 +55,12 @@ func TestPrivileges(t *testing.T) {
 	r.ForceKill = true
 	err = privilegesCheck(t.Context(), r, logrus.New())
 	assert.Error(t, err)
-	t.Log(err)
 
 	_, err = db.Exec("GRANT SELECT on `performance_schema`.* TO testprivsuser")
 	assert.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, logrus.New())
 	assert.Error(t, err) // still not enough, needs connection_admin
-	t.Log(err)
 
 	_, err = db.Exec("GRANT CONNECTION_ADMIN ON *.* TO testprivsuser")
 	assert.NoError(t, err)
@@ -73,6 +71,15 @@ func TestPrivileges(t *testing.T) {
 
 	_, err = db.Exec("GRANT PROCESS ON *.* TO testprivsuser")
 	assert.NoError(t, err)
+
+	// Reconnect before checking again.
+	// There seems to be a race in MySQL where privileges don't show up immediately
+	// That this can work around.
+	lowPrivDB.Close()
+	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	assert.NoError(t, err)
+	defer lowPrivDB.Close()
+	r.DB = lowPrivDB
 
 	err = privilegesCheck(t.Context(), r, logrus.New())
 	assert.NoError(t, err)
