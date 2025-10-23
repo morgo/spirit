@@ -264,18 +264,25 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 		mock3 := NewMockChunker("table1", 1000)
 		mock4 := NewMockChunker("table2", 2000)
 
-		// Missing table in watermark
+		// Missing table in watermark - this should now succeed with our fix
 		watermarks := map[string]string{
 			"table1": "300",
-			// table2 missing
+			// table2 missing - should start from scratch
 		}
 		watermarkJSON, err := json.Marshal(watermarks)
 		require.NoError(t, err)
 
 		chunker2 := NewMultiChunker(mock3, mock4).(*multiChunker)
 		err = chunker2.OpenAtWatermark(string(watermarkJSON))
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "could not find chunker for table")
+		assert.NoError(t, err, "Should handle missing table watermarks gracefully")
+
+		// Verify table1 was opened at watermark position
+		progress1, _, _ := mock3.Progress()
+		assert.Equal(t, uint64(300), progress1, "table1 should resume from watermark position")
+
+		// Verify table2 was opened from scratch (position 0)
+		progress2, _, _ := mock4.Progress()
+		assert.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
 	})
 }
 
@@ -338,9 +345,17 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 		mock1.SetWatermarkError(errors.New("watermark failed"))
 		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
 
-		_, err := chunker.GetLowWatermark()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "watermark failed")
+		// With our fix, this should succeed and skip the errored chunker
+		watermark, err := chunker.GetLowWatermark()
+		assert.NoError(t, err, "Should skip chunker with watermark error")
+
+		// Parse the watermark to verify only table2 is included
+		var watermarks map[string]string
+		err = json.Unmarshal([]byte(watermark), &watermarks)
+		assert.NoError(t, err)
+
+		assert.NotContains(t, watermarks, "table1", "Should skip table1 due to watermark error")
+		assert.Contains(t, watermarks, "table2", "Should include table2 watermark")
 	})
 }
 
