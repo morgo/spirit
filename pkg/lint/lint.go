@@ -62,6 +62,7 @@ import (
 	"os"
 
 	"github.com/block/spirit/pkg/statement"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 // Config holds linter configuration
@@ -221,4 +222,98 @@ func FilterByLinter(violations []Violation, linterName string) []Violation {
 	}
 
 	return filtered
+}
+
+// AlterTableTypeToString converts an AlterTableType constant to a human-readable string
+func AlterTableTypeToString(tp ast.AlterTableType) string {
+	switch tp {
+	case ast.AlterTableOption:
+		return "ALTER TABLE OPTION"
+	case ast.AlterTableAddColumns:
+		return "ADD COLUMN"
+	case ast.AlterTableAddConstraint:
+		return "ADD CONSTRAINT"
+	case ast.AlterTableDropColumn:
+		return "DROP COLUMN"
+	case ast.AlterTableDropPrimaryKey:
+		return "DROP PRIMARY KEY"
+	case ast.AlterTableDropIndex:
+		return "DROP INDEX"
+	case ast.AlterTableDropForeignKey:
+		return "DROP FOREIGN KEY"
+	case ast.AlterTableModifyColumn:
+		return "MODIFY COLUMN"
+	case ast.AlterTableChangeColumn:
+		return "CHANGE COLUMN"
+	case ast.AlterTableRenameColumn:
+		return "RENAME COLUMN"
+	case ast.AlterTableRenameTable:
+		return "RENAME TABLE"
+	case ast.AlterTableAlterColumn:
+		return "ALTER COLUMN"
+	case ast.AlterTableLock:
+		return "LOCK"
+	case ast.AlterTableAlgorithm:
+		return "ALGORITHM"
+	case ast.AlterTableRenameIndex:
+		return "RENAME INDEX"
+	case ast.AlterTableForce:
+		return "FORCE"
+	case ast.AlterTableAddPartitions:
+		return "ADD PARTITION"
+	case ast.AlterTableCoalescePartitions:
+		return "COALESCE PARTITION"
+	case ast.AlterTableDropPartition:
+		return "DROP PARTITION"
+	case ast.AlterTableTruncatePartition:
+		return "TRUNCATE PARTITION"
+	case ast.AlterTablePartition:
+		return "PARTITION BY"
+	case ast.AlterTableEnableKeys:
+		return "ENABLE KEYS"
+	case ast.AlterTableDisableKeys:
+		return "DISABLE KEYS"
+	case ast.AlterTableRemovePartitioning:
+		return "REMOVE PARTITIONING"
+	case ast.AlterTableWithValidation:
+		return "WITH VALIDATION"
+	case ast.AlterTableWithoutValidation:
+		return "WITHOUT VALIDATION"
+	case ast.AlterTableSecondaryLoad:
+		return "SECONDARY_LOAD"
+	case ast.AlterTableSecondaryUnload:
+		return "SECONDARY_UNLOAD"
+	case ast.AlterTableRebuildPartition:
+		return "REBUILD PARTITION"
+	case ast.AlterTableReorganizePartition:
+		return "REORGANIZE PARTITION"
+	case ast.AlterTableCheckPartitions:
+		return "CHECK PARTITION"
+	case ast.AlterTableExchangePartition:
+		return "EXCHANGE PARTITION"
+	case ast.AlterTableOptimizePartition:
+		return "OPTIMIZE PARTITION"
+	case ast.AlterTableRepairPartition:
+		return "REPAIR PARTITION"
+	case ast.AlterTableImportPartitionTablespace:
+		return "IMPORT PARTITION TABLESPACE"
+	case ast.AlterTableDiscardPartitionTablespace:
+		return "DISCARD PARTITION TABLESPACE"
+	case ast.AlterTableAlterCheck:
+		return "ALTER CHECK"
+	case ast.AlterTableDropCheck:
+		return "DROP CHECK"
+	case ast.AlterTableImportTablespace:
+		return "IMPORT TABLESPACE"
+	case ast.AlterTableDiscardTablespace:
+		return "DISCARD TABLESPACE"
+	case ast.AlterTableIndexInvisible:
+		return "ALTER INDEX INVISIBLE"
+	case ast.AlterTableOrderByColumns:
+		return "ORDER BY"
+	case ast.AlterTableSetTiFlashReplica:
+		return "SET TIFLASH REPLICA"
+	default:
+		return fmt.Sprintf("ALTER TABLE (type %d)", tp)
+	}
 }

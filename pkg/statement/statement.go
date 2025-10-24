@@ -243,6 +243,23 @@ func (a *AbstractStatement) TrimAlter() string {
 	return strings.TrimSuffix(strings.TrimSpace(a.Alter), ";")
 }
 
+func (a *AbstractStatement) ParseCreateTable() (*CreateTable, error) {
+	createStmt, ok := (*a.StmtNode).(*ast.CreateTableStmt)
+	if !ok {
+		return nil, errors.New("not a CREATE TABLE statement")
+	}
+
+	ct := &CreateTable{
+		Raw: createStmt,
+	}
+	// Parse into structured format
+	err := ct.parseToStruct()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CREATE TABLE AST: %w", err)
+	}
+	return ct, nil
+}
+
 func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, error) {
 	ciStmt, isCreateIndexStmt := stmt.(*ast.CreateIndexStmt)
 	if !isCreateIndexStmt {
