@@ -26,6 +26,7 @@ var (
 	defaultUsername = "spirit"
 	defaultPassword = "spirit"
 	defaultDatabase = "test"
+	defaultTLSMode  = "PREFERRED"
 )
 
 type Migration struct {
@@ -47,7 +48,7 @@ type Migration struct {
 	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected" optional:"" default:"false"`
 	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
 	// TLS Configuration
-	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:"" default:"PREFERRED"`
+	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:""`
 	TLSCertificatePath string `name:"tls-ca" help:"Path to custom TLS CA certificate file" optional:""`
 
 	// Experimental features
@@ -170,13 +171,19 @@ func (m *Migration) normalizeConnectionOptions() error {
 	if m.Database == "" {
 		m.Database = confParams.GetDatabase()
 	}
+	if m.TLSMode == "" {
+		m.TLSMode = confParams.GetTLSMode()
+	}
+	if m.TLSCertificatePath == "" {
+		m.TLSCertificatePath = confParams.GetTLSCA()
+	}
 	return nil
 }
 
 // confParams abstracts parameters loaded from ini file. Will provide defaults when receiveer is
 // nil or parameter is not defined.
 type confParams struct {
-	host, database, user, password string
+	host, database, user, password, tlsMode, tlsCA string
 	port                           int
 }
 
@@ -212,6 +219,24 @@ func (c *confParams) GetPassword() string {
 	return c.password
 }
 
+func (c *confParams) GetTLSMode() string {
+	if c == nil || c.tlsMode == "" {
+		return defaultTLSMode
+	}
+
+	return c.tlsMode
+}
+
+// N.B. There is no default for tls-ca but we want to make sure we let whatever is passed
+// via the CLI take precedence so we pass through the value parsed from file.
+func (c *confParams) GetTLSCA() string {
+	if c == nil {
+		return ""
+	}
+
+	return c.tlsCA
+}
+
 func (c *confParams) GetPort() int {
 	if c == nil || c.port == 0 {
 		return defaultPort
@@ -235,11 +260,13 @@ func newConfParams(confFilePath string) (*confParams, error) {
 
 	if creds.HasSection("client") {
 		clientSection := creds.Section("client")
-		confParams.host = clientSection.Key("host").String()
+		confParams.host     = clientSection.Key("host").String()
 		confParams.database = clientSection.Key("database").String()
-		confParams.user = clientSection.Key("user").String()
+		confParams.user     = clientSection.Key("user").String()
 		confParams.password = clientSection.Key("password").String()
-		confParams.port = clientSection.Key("port").MustInt()
+		confParams.tlsMode  = clientSection.Key("tls-mode").String()
+		confParams.tlsCA    = clientSection.Key("tls-ca").String()
+		confParams.port     = clientSection.Key("port").MustInt()
 	}
 
 	return confParams, nil

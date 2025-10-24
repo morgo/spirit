@@ -634,6 +634,8 @@ password = filepass
 host = filehost
 database = filedb
 port = 5678
+tls-mode = REQUIRED
+tls-ca = /path/to/ca
 `
 	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
 	require.NoError(t, err)
@@ -644,10 +646,6 @@ port = 5678
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
-		Host:     "",
-		Username: "",
-		Password: "",
-		Database: "",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
 		ConfFile: tmpFile.Name(),
@@ -660,6 +658,8 @@ port = 5678
 	assert.Equal(t, "filepass", migration.Password)
 	assert.Equal(t, "filehost:5678", migration.Host)
 	assert.Equal(t, "filedb", migration.Database)
+	assert.Equal(t, "REQUIRED", migration.TLSMode)
+	assert.Equal(t, "/path/to/ca", migration.TLSCertificatePath)
 }
 
 func TestConfFileLoadingUsesDefaultPort(t *testing.T) {
@@ -669,6 +669,8 @@ user = fileuser
 password = filepass
 host = filehost
 database = filedb
+tls-mode = VERIFY_IDENTITY
+tls-ca = /path/to/another/ca
 `
 	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
 	require.NoError(t, err)
@@ -679,10 +681,6 @@ database = filedb
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
-		Host:     "",
-		Username: "",
-		Password: "",
-		Database: "",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
 		ConfFile: tmpFile.Name(),
@@ -695,6 +693,8 @@ database = filedb
 	assert.Equal(t, "filepass", migration.Password)
 	assert.Equal(t, "filehost:3306", migration.Host)
 	assert.Equal(t, "filedb",  migration.Database)
+	assert.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
+	assert.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
 }
 
 func TestConfFileLoadingUserOnly(t *testing.T) {
@@ -712,7 +712,6 @@ user = onlyuser
 
 	migration := &Migration{
 		Host:     "localhost:3306",
-		Username: "",
 		Password: "defaultpass",
 		Database: "testdb",
 		Table:    "testtable",
@@ -745,7 +744,6 @@ password = filepass
 	migration := &Migration{
 		Host:     "localhost:3306",
 		Username: "defaultuser",
-		Password: "",
 		Database: "testdb",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -854,6 +852,7 @@ password = mysqlpass
 	assert.Equal(t, "defaultuser", migration.Username)
 	assert.Equal(t, "defaultpass", migration.Password)
 	assert.Equal(t, "testdb", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
 }
 
 func TestConfFileLoadingInvalidFile(t *testing.T) {
@@ -880,7 +879,6 @@ func TestConfFileLoadingEmptyFile(t *testing.T) {
 		Database: "testdb",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
-		ConfFile: "",
 	}
 
 	_, err := migration.normalizeOptions()
