@@ -28,13 +28,13 @@ func (l *MultipleAlterTableLinter) Description() string {
 	return "Detects multiple ALTER TABLE statements on the same table that could be combined"
 }
 
-func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements []*statement.AbstractStatement) []Violation {
+func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
 	var violations []Violation
 
 	// Count ALTER TABLE statements per table
 	tableAlterCounts := make(map[string][]int) // table name -> statement indices
 
-	for i, stmt := range statements {
+	for i, stmt := range changes {
 		if !stmt.IsAlterTable() {
 			continue
 		}
@@ -57,8 +57,8 @@ func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements [
 		var operations []string
 
 		for _, idx := range indices {
-			if statements[idx].Alter != "" {
-				operations = append(operations, statements[idx].Alter)
+			if changes[idx].Alter != "" {
+				operations = append(operations, changes[idx].Alter)
 			}
 		}
 

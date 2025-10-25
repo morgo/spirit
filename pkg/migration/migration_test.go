@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -560,6 +561,30 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: `ALTER TABLE t1secondary ADD KEY (title) SECONDARY_ENGINE_ATTRIBUTE='{"type":"spann", "distance":"l2", "product_quantization":{"dimensions":96}}'`,
+	}
+	err = migration.Run()
+	assert.NoError(t, err)
+}
+
+func TestLargeNumberOfMultiChanges(t *testing.T) {
+	var alterStmts []string
+	for i := range 10 {
+		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS mt_%d`, i))
+		testutils.RunSQL(t, fmt.Sprintf(`CREATE TABLE mt_%d (id int not null primary key auto_increment, b INT NOT NULL)`, i))
+		alterStmts = append(alterStmts, fmt.Sprintf(`ALTER TABLE mt_%d ENGINE=InnoDB`, i))
+	}
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+	migration := &Migration{
+		Host:                                cfg.Addr,
+		Username:                            cfg.User,
+		Password:                            cfg.Passwd,
+		Database:                            cfg.DBName,
+		Threads:                             4,
+		TargetChunkTime:                     2 * time.Second,
+		Statement:                           strings.Join(alterStmts, "; "),
+		EnableExperimentalMultiTableSupport: true,
+		ForceKill:                           true,
 	}
 	err = migration.Run()
 	assert.NoError(t, err)

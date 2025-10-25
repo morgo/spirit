@@ -264,18 +264,25 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 		mock3 := NewMockChunker("table1", 1000)
 		mock4 := NewMockChunker("table2", 2000)
 
-		// Missing table in watermark
+		// Missing table in watermark - this should now succeed with our fix
 		watermarks := map[string]string{
 			"table1": "300",
-			// table2 missing
+			// table2 missing - should start from scratch
 		}
 		watermarkJSON, err := json.Marshal(watermarks)
 		require.NoError(t, err)
 
 		chunker2 := NewMultiChunker(mock3, mock4).(*multiChunker)
 		err = chunker2.OpenAtWatermark(string(watermarkJSON))
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "could not find chunker for table")
+		assert.NoError(t, err, "Should handle missing table watermarks gracefully")
+
+		// Verify table1 was opened at watermark position
+		progress1, _, _ := mock3.Progress()
+		assert.Equal(t, uint64(300), progress1, "table1 should resume from watermark position")
+
+		// Verify table2 was opened from scratch (position 0)
+		progress2, _, _ := mock4.Progress()
+		assert.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
 	})
 }
 
@@ -338,9 +345,17 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 		mock1.SetWatermarkError(errors.New("watermark failed"))
 		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
 
-		_, err := chunker.GetLowWatermark()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "watermark failed")
+		// With our fix, this should succeed and skip the errored chunker
+		watermark, err := chunker.GetLowWatermark()
+		assert.NoError(t, err, "Should skip chunker with watermark error")
+
+		// Parse the watermark to verify only table2 is included
+		var watermarks map[string]string
+		err = json.Unmarshal([]byte(watermark), &watermarks)
+		assert.NoError(t, err)
+
+		assert.NotContains(t, watermarks, "table1", "Should skip table1 due to watermark error")
+		assert.Contains(t, watermarks, "table2", "Should include table2 watermark")
 	})
 }
 
@@ -398,5 +413,184 @@ func TestMultiChunkerDeterministicBehavior(t *testing.T) {
 		for i := 1; i < len(results); i++ {
 			assert.Equal(t, results[0], results[i], "Selection order should be deterministic")
 		}
+	})
+}
+
+// TestMultiChunkerSelectionRegressions tests for specific bugs that were fixed
+// in the multi-chunker selection logic to prevent regressions.
+func TestMultiChunkerSelectionRegressions(t *testing.T) {
+	t.Run("RegressionHighProgressNotStarved", func(t *testing.T) {
+		// Regression test for: High progress tables getting starved by lower progress tables
+		// This was the core issue causing migrations to stall at 95%+ completion
+
+		mock1 := NewMockChunker("table1", 1000) // High progress table
+		mock2 := NewMockChunker("table2", 2000) // Lower progress table
+		chunker := NewMultiChunker(mock1, mock2)
+		require.NoError(t, chunker.Open())
+		defer chunker.Close()
+
+		// Simulate the stalling scenario: table1 at 95.34%, table2 at 90%
+		mock1.SimulateProgress(0.9534) // 95.34% - this was getting starved
+		mock2.SimulateProgress(0.90)   // 90% - this was always being selected
+
+		// The chunker should select table2 (90%) because it has lower progress
+		// This is correct behavior - we want to prioritize the table that's furthest behind
+		chunk, err := chunker.Next()
+		assert.NoError(t, err)
+		assert.Equal(t, "table2", chunk.Table.TableName, "Should select table with lowest progress (90%)")
+
+		// Advance table2's progress past table1
+		mock2.SimulateProgress(0.96) // Now table2 is at 96%
+
+		// Now table1 (95.34%) should be selected as it has lower progress
+		chunk, err = chunker.Next()
+		assert.NoError(t, err)
+		assert.Equal(t, "table1", chunk.Table.TableName, "Should now select table1 as it has lower progress")
+	})
+
+	t.Run("RegressionFirstChunkerBias", func(t *testing.T) {
+		// Regression test for: First chunker always being selected due to minProgressPercent = 2.0 bug
+
+		mock1 := NewMockChunker("table1", 1000) // This would always be selected due to bug
+		mock2 := NewMockChunker("table2", 2000) // This would never be selected
+		mock3 := NewMockChunker("table3", 500)  // This would never be selected
+		chunker := NewMultiChunker(mock1, mock2, mock3)
+		require.NoError(t, chunker.Open())
+		defer chunker.Close()
+
+		// Set table1 to high progress, others to low progress
+		mock1.SimulateProgress(0.95) // 95% - should NOT be selected
+		mock2.SimulateProgress(0.10) // 10% - should be selected (lowest)
+		mock3.SimulateProgress(0.20) // 20%
+
+		chunk, err := chunker.Next()
+		assert.NoError(t, err)
+		assert.Equal(t, "table2", chunk.Table.TableName, "Should select table with lowest progress, not first table")
+
+		// Advance table2 past table3
+		mock2.SimulateProgress(0.25) // Now 25%
+
+		// table3 should now be selected (20% < 25%)
+		chunk, err = chunker.Next()
+		assert.NoError(t, err)
+		assert.Equal(t, "table3", chunk.Table.TableName, "Should select table3 as it now has lowest progress")
+	})
+
+	t.Run("RegressionNilSelectedChunker", func(t *testing.T) {
+		// Regression test for: selectedChunker remaining nil when first chunkers are IsRead() == true
+
+		mock1 := NewMockChunker("table1", 1000)
+		mock2 := NewMockChunker("table2", 2000)
+		mock3 := NewMockChunker("table3", 500)
+		chunker := NewMultiChunker(mock1, mock2, mock3)
+		require.NoError(t, chunker.Open())
+		defer chunker.Close()
+
+		// Mark first two chunkers as complete
+		mock1.MarkAsComplete()
+		mock2.MarkAsComplete()
+		mock3.SimulateProgress(0.50) // Only this one is active
+
+		// Should successfully select the only active chunker
+		chunk, err := chunker.Next()
+		assert.NoError(t, err)
+		assert.Equal(t, "table3", chunk.Table.TableName, "Should select the only active chunker")
+		assert.NotNil(t, chunk, "Chunk should not be nil")
+	})
+
+	t.Run("RegressionAllChunkersComplete", func(t *testing.T) {
+		// Regression test for: Proper handling when all chunkers become complete
+
+		mock1 := NewMockChunker("table1", 1000)
+		mock2 := NewMockChunker("table2", 2000)
+		chunker := NewMultiChunker(mock1, mock2)
+		require.NoError(t, chunker.Open())
+		defer chunker.Close()
+
+		// Mark all chunkers as complete
+		mock1.MarkAsComplete()
+		mock2.MarkAsComplete()
+
+		// Should return ErrTableIsRead when all chunkers are complete
+		_, err := chunker.Next()
+		assert.ErrorIs(t, err, ErrTableIsRead, "Should return ErrTableIsRead when all chunkers are complete")
+	})
+
+	t.Run("RegressionEqualProgressLargestTable", func(t *testing.T) {
+		// Regression test for: When progress is equal, select table with most total rows
+
+		mock1 := NewMockChunker("table1", 500)  // Smaller table
+		mock2 := NewMockChunker("table2", 2000) // Larger table - should be selected
+		mock3 := NewMockChunker("table3", 1000) // Medium table
+		chunker := NewMultiChunker(mock1, mock2, mock3)
+		require.NoError(t, chunker.Open())
+		defer chunker.Close()
+
+		// Set all to equal progress (0%)
+		mock1.SimulateProgress(0.0)
+		mock2.SimulateProgress(0.0)
+		mock3.SimulateProgress(0.0)
+
+		chunk, err := chunker.Next()
+		assert.NoError(t, err)
+		assert.Equal(t, "table2", chunk.Table.TableName, "Should select largest table when progress is equal")
+	})
+
+	t.Run("RegressionWatermarkErrorHandling", func(t *testing.T) {
+		// Regression test for: Watermark errors should not block checkpoint writing for other tables
+
+		mock1 := NewMockChunker("table1", 1000)
+		mock2 := NewMockChunker("table2", 2000)
+		mock3 := NewMockChunker("table3", 500)
+		chunker := NewMultiChunker(mock1, mock2, mock3)
+
+		// Simulate table2 having a watermark error (not ready)
+		mock2.SetWatermarkError(errors.New("watermark not ready"))
+
+		// Simulate progress on all tables
+		mock1.SimulateProgress(0.5)
+		mock2.SimulateProgress(0.7) // This one has watermark error
+		mock3.SimulateProgress(0.3)
+
+		// GetLowWatermark should succeed and include table1 and table3, skip table2
+		watermark, err := chunker.GetLowWatermark()
+		assert.NoError(t, err, "Should not fail when one table has watermark error")
+
+		// Parse the watermark to verify contents
+		var watermarks map[string]string
+		err = json.Unmarshal([]byte(watermark), &watermarks)
+		assert.NoError(t, err)
+
+		// Should contain table1 and table3, but not table2 (error)
+		assert.Contains(t, watermarks, "table1", "Should include table1 watermark")
+		assert.Contains(t, watermarks, "table3", "Should include table3 watermark")
+		assert.NotContains(t, watermarks, "table2", "Should skip table2 due to watermark error")
+	})
+
+	t.Run("RegressionOpenAtWatermarkMissingTable", func(t *testing.T) {
+		// Regression test for: OpenAtWatermark should handle missing table watermarks gracefully
+
+		mock1 := NewMockChunker("table1", 1000)
+		mock2 := NewMockChunker("table2", 2000)
+		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
+
+		// Create watermark with only table1 (table2 missing - simulates watermark not ready scenario)
+		watermarks := map[string]string{
+			"table1": "500", // table2 intentionally missing
+		}
+		watermarkJSON, err := json.Marshal(watermarks)
+		require.NoError(t, err)
+
+		// Should succeed - table1 resumes from watermark, table2 starts from scratch
+		err = chunker.OpenAtWatermark(string(watermarkJSON))
+		assert.NoError(t, err, "Should handle missing table watermarks gracefully")
+
+		// Verify table1 was opened at watermark position
+		progress1, _, _ := mock1.Progress()
+		assert.Equal(t, uint64(500), progress1, "table1 should resume from watermark position")
+
+		// Verify table2 was opened from scratch (position 0)
+		progress2, _, _ := mock2.Progress()
+		assert.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
 	})
 }

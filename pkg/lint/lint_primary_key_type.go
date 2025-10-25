@@ -29,10 +29,23 @@ func (l *PrimaryKeyTypeLinter) Description() string {
 	return "Ensures primary keys use BIGINT (preferably UNSIGNED) or BINARY/VARBINARY types"
 }
 
-func (l *PrimaryKeyTypeLinter) Lint(createTables []*statement.CreateTable, _ []*statement.AbstractStatement) []Violation {
+func (l *PrimaryKeyTypeLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
 	var violations []Violation
 
-	for _, ct := range createTables {
+	// Add any new changes to the change list.
+	for _, change := range changes {
+		if change.IsCreateTable() {
+			ct, err := statement.ParseCreateTable(change.Statement)
+			if err != nil {
+				panic("err passing statement")
+			}
+			existingTables = append(existingTables, ct)
+		}
+	}
+
+	// TODO: do we apply ALTER TABLE changes to existing tables here so we can compare existing?
+
+	for _, ct := range existingTables {
 		tableName := ct.GetTableName()
 
 		// Get primary key columns from indexes (this includes both table-level and column-level PRIMARY KEY)
@@ -119,7 +132,7 @@ func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *stateme
 
 	return &Violation{
 		Linter:   l,
-		Severity: SeverityError,
+		Severity: SeverityWarning,
 		Message:  fmt.Sprintf("Primary key column '%s' has type '%s'; must be BIGINT or BINARY/VARBINARY", column.Name, column.Type),
 		Location: &Location{
 			Table:  tableName,
