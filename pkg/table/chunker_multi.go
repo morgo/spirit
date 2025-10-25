@@ -101,10 +101,12 @@ func (m *multiChunker) Next() (*Chunk, error) {
 	}
 
 	// Find the chunker with the least progress (lowest percentage)
+	// Only consider chunkers that are not complete (IsRead() == false)
 	var selectedChunker Chunker
-	var minProgressPercent = 2.0 // Start higher than 100% so any real progress is selected
-	var maxTotalRows uint64 = 0
+	var minProgressPercent float64
+	var maxTotalRows uint64
 	var hasActiveChunkers = false
+	var firstCandidate = true
 
 	for _, chunker := range m.chunkers {
 		if chunker.IsRead() {
@@ -122,13 +124,17 @@ func (m *multiChunker) Next() (*Chunk, error) {
 			progressPercent = 0.0
 		}
 
-		// Select chunker with lowest progress percentage
-		// If percentages are equal (including both 0), prefer the one with more total rows
-		if progressPercent < minProgressPercent ||
+		// If it's our first candidate, we select it.
+		// Then we could potentially pick a different candidate as we range through
+		// the chunkers. We'll pick a better candidate if:
+		// - It has a lower progress percentage
+		// - If percentages are equal, it has more total rows expected
+		if firstCandidate || progressPercent < minProgressPercent ||
 			(progressPercent == minProgressPercent && totalRowsExpected > maxTotalRows) {
 			minProgressPercent = progressPercent
 			maxTotalRows = totalRowsExpected
 			selectedChunker = chunker
+			firstCandidate = false
 		}
 	}
 
@@ -188,7 +194,9 @@ func (m *multiChunker) Progress() (uint64, uint64, uint64) {
 
 // OpenAtWatermark for multi-chunker. We deserialize the watermarks
 // into a map, and then call OpenAtWatermark on each child chunker
-// with the corresponding watermark.
+// with the corresponding watermark. If a table doesn't have a watermark
+// (because it wasn't ready when the checkpoint was saved), we call Open()
+// instead to start from scratch.
 func (m *multiChunker) OpenAtWatermark(watermark string) error {
 	m.Lock()
 	defer m.Unlock()
@@ -198,25 +206,22 @@ func (m *multiChunker) OpenAtWatermark(watermark string) error {
 		return fmt.Errorf("could not parse multi-chunker watermark: %w", err)
 	}
 
-	// First, check that all chunkers have a corresponding watermark
-	for tableName := range m.chunkers {
-		if _, ok := watermarks[tableName]; !ok {
-			return fmt.Errorf("could not find chunker for table %q in watermark", tableName)
+	// Open each chunker - either at watermark if available, or from scratch if not
+	for tableName, chunker := range m.chunkers {
+		if tableWatermark, hasWatermark := watermarks[tableName]; hasWatermark {
+			// Table has a watermark, resume from checkpoint
+			if err := chunker.OpenAtWatermark(tableWatermark); err != nil {
+				return fmt.Errorf("could not open chunker for table %q at watermark: %w", tableName, err)
+			}
+		} else {
+			// Table doesn't have a watermark (wasn't ready when checkpoint was saved)
+			// Start from scratch
+			if err := chunker.Open(); err != nil {
+				return fmt.Errorf("could not open chunker for table %q from scratch: %w", tableName, err)
+			}
 		}
 	}
 
-	// Now we have to call OpenAtWatermark on each child chunker
-	// The children are in m.chunkers and keyed by their table name
-	for tbl, watermark := range watermarks {
-		chunker, ok := m.chunkers[tbl]
-		if !ok {
-			return fmt.Errorf("could not find chunker for table %q in multi-chunker", tbl)
-		}
-		// Call OpenAtWatermark on the child chunker
-		if err := chunker.OpenAtWatermark(watermark); err != nil {
-			return fmt.Errorf("could not open chunker %q at watermark %q: %w", chunker, watermark, err)
-		}
-	}
 	// Set isOpen to true after successfully opening all child chunkers
 	m.isOpen = true
 	return nil
@@ -224,12 +229,18 @@ func (m *multiChunker) OpenAtWatermark(watermark string) error {
 
 // GetLowWatermark calls GetLowWatermark on all the child chunkers
 // and then merges them into a single watermark string.
+// For multi-table migrations, we include watermarks for all tables, but skip
+// tables that return errors (not ready yet) to avoid blocking checkpoint writing.
 func (m *multiChunker) GetLowWatermark() (string, error) {
 	watermarks := make(map[string]string, len(m.chunkers))
+
 	for _, chunker := range m.chunkers {
 		watermark, err := chunker.GetLowWatermark()
 		if err != nil {
-			return "", err
+			// If this chunker's watermark isn't ready yet, skip it from the checkpoint
+			// This prevents one unready table from blocking checkpoint writing for all tables
+			// On recovery, tables without watermarks will start from scratch via Open()
+			continue
 		}
 		tbl := chunker.Tables()[0]
 		watermarks[tbl.TableName] = watermark
