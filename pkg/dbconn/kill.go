@@ -222,7 +222,7 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback() //nolint: errcheck
+	defer tx.Rollback() //nolint:errcheck
 	query := TableLockQuery
 	params := make([]any, 0, len(tables)*2)
 	if len(ignorePIDs) > 0 {
