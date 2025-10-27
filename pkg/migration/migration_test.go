@@ -561,6 +561,7 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: `ALTER TABLE t1secondary ADD KEY (title) SECONDARY_ENGINE_ATTRIBUTE='{"type":"spann", "distance":"l2", "product_quantization":{"dimensions":96}}'`,
+		ForceKill: true, // this happens to be instant, tests this code path too.
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
