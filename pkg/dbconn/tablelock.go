@@ -39,7 +39,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	}
 
 	// Try and acquire the lock. No retries are permitted here.
-	lockTxn, err = db.BeginTx(ctx, nil)
+	lockTxn, pid, err := BeginStandardTrx(ctx, db, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -52,11 +52,6 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 		}
 	}()
 	if config.ForceKill {
-		var pid int
-		err = lockTxn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&pid)
-		if err != nil {
-			return nil, err
-		}
 		// If ForceKill is true, we will wait for 90% of the configured LockWaitTimeout
 		threshold := time.Duration(float64(config.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
 		timer := time.AfterFunc(threshold, func() {
