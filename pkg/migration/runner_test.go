@@ -2697,12 +2697,6 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	// Create unique database for this test
 	dbName := testutils.CreateUniqueTestDatabase(t)
 
-	statusInterval = 500 * time.Millisecond
-	sentinelWaitLimit = 1 * time.Minute
-	defer func() {
-		sentinelWaitLimit = 10 * time.Second
-	}()
-
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e_stage`
 	checkpointTableName := fmt.Sprintf("_%s_chkpnt", tableName)
