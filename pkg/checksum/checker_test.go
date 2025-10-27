@@ -99,6 +99,63 @@ func TestBasicValidation(t *testing.T) {
 	assert.EqualError(t, err, "feed must be non-nil")
 }
 
+func TestUnfixableUniqueChecksum(t *testing.T) {
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniqfailuret1, uniqfailuret2`)
+	table1 := `CREATE TABLE uniqfailuret1 (
+				id int NOT NULL AUTO_INCREMENT,
+				name varchar(255) NOT NULL,
+				b varchar(255) NOT NULL,
+				PRIMARY KEY (id)
+			)`
+	table2 := `CREATE TABLE uniqfailuret2 (
+				id int NOT NULL AUTO_INCREMENT,
+				name varchar(255) NOT NULL,
+				b varchar(255) NOT NULL,
+				PRIMARY KEY (id),
+				UNIQUE (b)
+			)`
+	testutils.RunSQL(t, table1)
+	testutils.RunSQL(t, table2)
+	testutils.RunSQL(t, "INSERT INTO uniqfailuret1 (name, b) VALUES ('a', REPEAT('a', 200))")
+	testutils.RunSQL(t, "INSERT INTO uniqfailuret1 (name, b) VALUES ('a', REPEAT('b', 200))")
+	testutils.RunSQL(t, "INSERT INTO uniqfailuret1 (name, b) VALUES ('a', REPEAT('c', 200))")
+	testutils.RunSQL(t, "INSERT INTO uniqfailuret1 (name, b) VALUES ('a', REPEAT('a', 200))") // will cause unique index failure
+	testutils.RunSQL(t, `INSERT IGNORE INTO uniqfailuret2 SELECT * FROM uniqfailuret1`)       // will not copy all data
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	t1 := table.NewTableInfo(db, "test", "uniqfailuret1")
+	assert.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "uniqfailuret2")
+	assert.NoError(t, t2.SetInfo(t.Context()))
+	logger := logrus.New()
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        repl.NewServerID(),
+	})
+	defer feed.Close()
+	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
+	assert.NoError(t, feed.Run(t.Context()))
+
+	chunker, err := table.NewChunker(t1, t2, 0, logrus.New())
+	assert.NoError(t, err)
+	assert.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.FixDifferences = true
+	checker, err := NewChecker(db, chunker, feed, config)
+	assert.NoError(t, err)
+	err = checker.Run(t.Context())
+	assert.ErrorContains(t, err, "checksum failed")
+}
+
 func TestFixCorrupt(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS fixcorruption_t1, _fixcorruption_t1_new, _fixcorruption_t1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE fixcorruption_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
@@ -136,18 +193,19 @@ func TestFixCorrupt(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
+	config.MaxRetries = 2
 	checker, err := NewChecker(db, chunker, feed, config)
 	assert.NoError(t, err)
 	err = checker.Run(t.Context())
-	assert.NoError(t, err) // yes there is corruption, but it was fixed.
-	assert.Equal(t, uint64(1), checker.DifferencesFound())
+	assert.NoError(t, err)                                      // yes there is corruption, but it was fixed.
+	assert.Equal(t, uint64(0), checker.differencesFound.Load()) // this is "0", because we fixed it.
 
 	// If we run the checker again, it will report zero differences.
 	checker2, err := NewChecker(db, chunker, feed, config)
 	assert.NoError(t, err)
 	err = checker2.Run(t.Context())
 	assert.NoError(t, err)
-	assert.Equal(t, uint64(0), checker2.DifferencesFound())
+	assert.Equal(t, uint64(0), checker2.differencesFound.Load())
 }
 
 func TestCorruptChecksum(t *testing.T) {

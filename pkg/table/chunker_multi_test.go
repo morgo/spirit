@@ -400,3 +400,146 @@ func TestMultiChunkerDeterministicBehavior(t *testing.T) {
 		}
 	})
 }
+
+func TestMultiChunkerReset(t *testing.T) {
+	// Create mock chunkers with different sizes
+	mock1 := NewMockChunker("table1", 1000)
+	mock2 := NewMockChunker("table2", 2000)
+	mock3 := NewMockChunker("table3", 500)
+
+	chunker := NewMultiChunker(mock1, mock2, mock3).(*multiChunker)
+
+	// Test that Reset() fails when chunker is not open
+	err := chunker.Reset()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "multi-chunker is not open")
+
+	// Open the chunker
+	assert.NoError(t, chunker.Open())
+
+	// Capture initial state after opening
+	initialRowsCopied1, initialChunksCopied1, _ := mock1.Progress()
+	initialRowsCopied2, initialChunksCopied2, _ := mock2.Progress()
+	initialRowsCopied3, initialChunksCopied3, _ := mock3.Progress()
+
+	// Process some chunks to change the state
+	mock1.SimulateProgress(0.1) // 10%
+	mock2.SimulateProgress(0.5) // 50%
+	mock3.SimulateProgress(0.3) // 30%
+
+	// Get chunks from different tables
+	chunk1, err := chunker.Next() // Should select table1 (lowest progress)
+	assert.NoError(t, err)
+	assert.Equal(t, "table1", chunk1.Table.TableName)
+
+	// Advance table1's progress so table3 becomes lowest
+	mock1.SimulateProgress(0.4)
+	chunk2, err := chunker.Next() // Should select table3 (now lowest progress)
+	assert.NoError(t, err)
+	assert.Equal(t, "table3", chunk2.Table.TableName)
+
+	// Give feedback to change state
+	chunker.Feedback(chunk1, time.Second, 100)
+	chunker.Feedback(chunk2, time.Second, 50)
+
+	// Verify state has changed
+	currentRowsCopied1, currentChunksCopied1, _ := mock1.Progress()
+	currentRowsCopied2, currentChunksCopied2, _ := mock2.Progress()
+	currentRowsCopied3, currentChunksCopied3, _ := mock3.Progress()
+
+	assert.Greater(t, currentRowsCopied1, initialRowsCopied1)
+	assert.Greater(t, currentChunksCopied1, initialChunksCopied1)
+	assert.Greater(t, currentRowsCopied3, initialRowsCopied3)
+	assert.Greater(t, currentChunksCopied3, initialChunksCopied3)
+	assert.Greater(t, currentRowsCopied2, initialRowsCopied2)   // in the mock: rows it based on progress.
+	assert.Equal(t, initialChunksCopied2, currentChunksCopied2) // chunks is based on actual
+
+	// Verify feedback was recorded
+	feedback1 := mock1.GetFeedbackCalls()
+	feedback3 := mock3.GetFeedbackCalls()
+	assert.Len(t, feedback1, 1)
+	assert.Len(t, feedback3, 1)
+
+	// Verify watermark exists
+	watermark, err := chunker.GetLowWatermark()
+	assert.NoError(t, err)
+	assert.NotEmpty(t, watermark)
+
+	// Now reset the chunker
+	err = chunker.Reset()
+	assert.NoError(t, err)
+
+	// Verify all child chunkers are reset to initial values
+	resetRowsCopied1, resetChunksCopied1, _ := mock1.Progress()
+	resetRowsCopied2, resetChunksCopied2, _ := mock2.Progress()
+	resetRowsCopied3, resetChunksCopied3, _ := mock3.Progress()
+
+	assert.Equal(t, initialRowsCopied1, resetRowsCopied1, "mock1 rowsCopied should be reset to initial value")
+	assert.Equal(t, initialChunksCopied1, resetChunksCopied1, "mock1 chunksCopied should be reset to initial value")
+	assert.Equal(t, initialRowsCopied2, resetRowsCopied2, "mock2 rowsCopied should be reset to initial value")
+	assert.Equal(t, initialChunksCopied2, resetChunksCopied2, "mock2 chunksCopied should be reset to initial value")
+	assert.Equal(t, initialRowsCopied3, resetRowsCopied3, "mock3 rowsCopied should be reset to initial value")
+	assert.Equal(t, initialChunksCopied3, resetChunksCopied3, "mock3 chunksCopied should be reset to initial value")
+
+	// Verify feedback history is cleared
+	resetFeedback1 := mock1.GetFeedbackCalls()
+	resetFeedback2 := mock2.GetFeedbackCalls()
+	resetFeedback3 := mock3.GetFeedbackCalls()
+	assert.Empty(t, resetFeedback1, "mock1 feedback should be cleared after reset")
+	assert.Empty(t, resetFeedback2, "mock2 feedback should be cleared after reset")
+	assert.Empty(t, resetFeedback3, "mock3 feedback should be cleared after reset")
+
+	// Verify that after reset, the chunker produces the same selection behavior
+	// Reset progress to same initial state
+	mock1.SimulateProgress(0.1) // 10%
+	mock2.SimulateProgress(0.5) // 50%
+	mock3.SimulateProgress(0.3) // 30%
+
+	resetChunk1, err := chunker.Next() // Should select table1 (lowest progress) again
+	assert.NoError(t, err)
+	assert.Equal(t, chunk1.Table.TableName, resetChunk1.Table.TableName, "First chunk after reset should be from same table as original")
+
+	// Advance table1's progress so table3 becomes lowest (same as before)
+	mock1.SimulateProgress(0.4)
+	resetChunk2, err := chunker.Next() // Should select table3 again
+	assert.NoError(t, err)
+	assert.Equal(t, chunk2.Table.TableName, resetChunk2.Table.TableName, "Second chunk after reset should be from same table as original")
+
+	// Test aggregate progress after reset
+	totalRowsCopied, totalChunksCopied, totalRowsExpected := chunker.Progress()
+	assert.Equal(t, uint64(1900), totalRowsCopied)
+	assert.Equal(t, uint64(2), totalChunksCopied)    // 1 + 0 + 1 = 2 chunks processed
+	assert.Equal(t, uint64(3500), totalRowsExpected) // 1000 + 2000 + 500 = 3500
+
+	// Test that reset works with child chunker errors
+	mock1.SetNextError(errors.New("mock error"))
+
+	// Reset should still work even if child chunkers have errors configured
+	err = chunker.Reset()
+	assert.NoError(t, err)
+
+	// Clear the error and verify normal operation resumes
+	mock1.SetNextError(nil)
+	mock1.SimulateProgress(0.0) // Make table1 lowest progress
+	mock2.SimulateProgress(0.5)
+	mock3.SimulateProgress(0.3)
+
+	finalChunk, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, "table1", finalChunk.Table.TableName)
+
+	// Test reset with one child chunker reset error
+	mock2.SetNextError(errors.New("reset would fail but we don't call Next"))
+
+	// Mock chunker doesn't have a way to make Reset() fail, but let's test the error path
+	// by creating a scenario where one child chunker is in a bad state
+	mock2.MarkAsComplete() // This changes state
+
+	err = chunker.Reset()
+	assert.NoError(t, err) // Should still succeed
+
+	// Verify the completed chunker was reset (no longer complete)
+	assert.False(t, mock2.isRead(), "mock2 should not be read after reset")
+
+	assert.NoError(t, chunker.Close())
+}

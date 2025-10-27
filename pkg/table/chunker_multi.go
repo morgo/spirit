@@ -91,6 +91,27 @@ func (m *multiChunker) Close() error {
 	return nil
 }
 
+// Reset resets all wrapped chunkers to start from the beginning
+func (m *multiChunker) Reset() error {
+	m.Lock()
+	defer m.Unlock()
+
+	if !m.isOpen {
+		return errors.New("multi-chunker is not open")
+	}
+
+	var errs []error
+	for name, chunker := range m.chunkers {
+		if err := chunker.Reset(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to reset chunker %s: %w", name, err))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Next returns the next chunk from the chunker that has made the least progress (by percentage)
 func (m *multiChunker) Next() (*Chunk, error) {
 	m.Lock()
