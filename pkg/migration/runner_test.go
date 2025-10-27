@@ -2048,7 +2048,7 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	assert.NoError(t, runner.Close())
 
 	// Insert some more dummy data
-	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM chkpresumetest LIMIT 1000")
+	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM resumestricttest LIMIT 1000")
 
 	// Start a _different_ migration on the same table. We don't expect this to work when --strict is enabled
 	// since the --alter doesn't match what is recorded in the checkpoint table
@@ -2692,8 +2692,6 @@ func TestDeferCutOverE2E(t *testing.T) {
 }
 
 func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
-	t.Parallel()
-
 	// Create unique database for this test
 	dbName := testutils.CreateUniqueTestDatabase(t)
 
