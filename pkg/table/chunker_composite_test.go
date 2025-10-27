@@ -658,7 +658,7 @@ func TestCompositeChunkerReset(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify state is reset to initial values
-	assert.Equal(t, initialChunkPtrs, len(chunker.chunkPtrs), "chunkPtrs should be reset to initial value (empty slice)")
+	assert.Len(t, chunker.chunkPtrs, initialChunkPtrs, "chunkPtrs should be reset to initial value (empty slice)")
 	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value")
 	assert.Equal(t, initialFinalChunkSent, chunker.finalChunkSent, "finalChunkSent should be reset to initial value")
 

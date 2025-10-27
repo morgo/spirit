@@ -53,16 +53,16 @@ func CreateUniqueTestDatabase(t *testing.T) string {
 		defer db.Close()
 
 		// Create the database
-		_, err = db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", dbName))
+		_, err = db.Exec("CREATE DATABASE IF NOT EXISTS " + dbName)
 		assert.NoError(t, err)
 
 		// Register cleanup to drop the database
 		t.Cleanup(func() {
 			db, err := sql.Open("mysql", rootDSN)
-			if err == nil {
-				db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName))
-				db.Close()
-			}
+			assert.NoError(t, err)
+			defer db.Close()
+			_, err = db.Exec("DROP DATABASE IF EXISTS " + dbName)
+			assert.NoError(t, err)
 		})
 	}
 	return dbName
