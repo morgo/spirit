@@ -229,7 +229,7 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 	migration.Alter = "ADD UNIQUE (b)"
 	err = migration.Run()
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "Check that the ALTER statement is not adding a UNIQUE INDEX to non-unique data")
+	assert.ErrorContains(t, err, "checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
 }
 
 func TestGeneratedColumns(t *testing.T) {
