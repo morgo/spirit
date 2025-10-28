@@ -26,31 +26,38 @@ func (l *HasFKLinter) Description() string {
 }
 
 func (l *HasFKLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	for _, change := range changes {
-		if change.IsCreateTable() {
-			createTable, err := change.ParseCreateTable()
-			if err != nil {
+	for ct := range CreateTableStatements(existingTables, changes) {
+		for _, constraint := range ct.Constraints {
+			if constraint.Raw.Tp == ast.ConstraintForeignKey {
 				violations = append(violations, Violation{
-					Linter:   l,
-					Message:  fmt.Sprintf("Failed to parse CREATE TABLE statement for %q for foreign key linting", change.Table),
-					Severity: SeverityError,
+					Linter: l,
+					Location: &Location{
+						Table:      ct.TableName,
+						Constraint: &constraint.Name,
+					},
+					Message:  fmt.Sprintf("Table %q has FOREIGN KEY constraint %q", ct.TableName, constraint.Name),
+					Severity: SeverityWarning,
 				})
-				continue
 			}
-			for _, constraint := range createTable.Constraints {
-				if constraint.Raw.Tp == ast.ConstraintForeignKey {
+		}
+	}
+	for _, change := range changes {
+		if at, ok := change.AsAlterTable(); ok {
+			for _, spec := range at.Specs {
+				if spec.Tp == ast.AlterTableAddConstraint && spec.Constraint != nil && spec.Constraint.Tp == ast.ConstraintForeignKey {
 					violations = append(violations, Violation{
-						Linter: l,
-						Location: &Location{
-							Table:      createTable.TableName,
-							Constraint: &constraint.Name,
-						},
-						Message:  fmt.Sprintf("Table %q has FOREIGN KEY constraint %q", createTable.TableName, constraint.Name),
 						Severity: SeverityWarning,
+						Linter:   l,
+						Location: &Location{
+							Table:      at.Table.Name.O,
+							Constraint: &spec.Constraint.Name,
+						},
+						Message: fmt.Sprintf("Adding foreign key constraint %q to table %q", spec.Constraint.Name, at.Table.Name.O),
 					})
 				}
 			}
 		}
 	}
+
 	return violations
 }

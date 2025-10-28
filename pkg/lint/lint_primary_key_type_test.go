@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -92,12 +93,12 @@ func TestPrimaryKeyTypeLinter_IntError(t *testing.T) {
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "must be BIGINT or BINARY/VARBINARY")
+	assert.Contains(t, violations[0].Message, "key column \"id\" has type \"int\"")
 	assert.Equal(t, "users", violations[0].Location.Table)
 	assert.NotNil(t, violations[0].Location.Column)
 	assert.Equal(t, "id", *violations[0].Location.Column)
 	assert.NotNil(t, violations[0].Suggestion)
-	assert.Contains(t, *violations[0].Suggestion, "BIGINT UNSIGNED")
+	assert.Contains(t, *violations[0].Suggestion, "Change column \"id\" to a supported column type")
 }
 
 func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
@@ -115,7 +116,7 @@ func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "must be BIGINT or BINARY/VARBINARY")
+	assert.Contains(t, violations[0].Message, "Primary key column \"id\" has type \"varchar\"")
 	assert.NotNil(t, violations[0].Context)
 	// The parser returns lowercase "varchar"
 	assert.Equal(t, "varchar", violations[0].Context["current_type"])
@@ -376,7 +377,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsVarchar(t *testing.T) {
 	// VARCHAR for UUID should be an error
 	require.Len(t, violations, 1)
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, *violations[0].Suggestion, "BINARY/VARBINARY")
+	assert.Contains(t, *violations[0].Suggestion, "Change column \"uuid\" to a supported column type")
 }
 
 func TestPrimaryKeyTypeLinter_UUIDAsBinary(t *testing.T) {
@@ -393,4 +394,603 @@ func TestPrimaryKeyTypeLinter_UUIDAsBinary(t *testing.T) {
 
 	// BINARY(16) for UUID is correct - no violations
 	assert.Empty(t, violations)
+}
+
+// Tests for Configure functionality
+
+func TestPrimaryKeyTypeLinter_ConfigureAllowInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bigint,int",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// INT should be allowed with custom config - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureAllowIntSigned(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bigint,int",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Signed INT should still give warning about signedness
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Contains(t, violations[0].Message, "signed INT")
+	assert.Contains(t, violations[0].Message, "UNSIGNED is preferred")
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureAllowVarchar(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id VARCHAR(36) PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bigint,varchar",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// VARCHAR should be allowed with custom config - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureAllowChar(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id CHAR(36) PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bigint,char",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// CHAR should be allowed with custom config - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureMultipleTypes(t *testing.T) {
+	sql1 := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE sessions (
+		id VARCHAR(64) PRIMARY KEY,
+		data TEXT
+	)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	sql3 := `CREATE TABLE logs (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		message TEXT
+	)`
+	ct3, err := statement.ParseCreateTable(sql3)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bigint,int,varchar",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3}, nil)
+
+	// All three types should be allowed - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureWithSpaces(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": " bigint , int , varchar ",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Should handle spaces in config - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureCaseInsensitive(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "BiGiNt,InT,VaRcHaR",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Should handle mixed case in config - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureInvalidType(t *testing.T) {
+	linter := &PrimaryKeyTypeLinter{}
+	err := linter.Configure(map[string]string{
+		"allowedTypes": "bigint,invalidtype",
+	})
+
+	// Should return error for invalid type
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported type")
+	assert.Contains(t, err.Error(), "invalidtype")
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureUnknownKey(t *testing.T) {
+	linter := &PrimaryKeyTypeLinter{}
+	err := linter.Configure(map[string]string{
+		"unknownKey": "value",
+	})
+
+	// Should return error for unknown config key
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown config key")
+	assert.Contains(t, err.Error(), "unknownKey")
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureEmptyString(t *testing.T) {
+	linter := &PrimaryKeyTypeLinter{}
+	err := linter.Configure(map[string]string{
+		"allowedTypes": "",
+	})
+
+	// Empty string results in no types being added, so it should error when splitting
+	// Actually, empty string after split gives [""], which is invalid
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported type")
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureOnlyBigInt(t *testing.T) {
+	sql1 := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE sessions (
+		id INT UNSIGNED PRIMARY KEY,
+		data TEXT
+	)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bigint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2}, nil)
+
+	// Only BIGINT allowed, INT should violate
+	require.Len(t, violations, 1)
+	assert.Equal(t, "sessions", violations[0].Location.Table)
+	assert.Contains(t, violations[0].Message, "int") // Parser returns lowercase
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureAllIntTypes(t *testing.T) {
+	sql1 := `CREATE TABLE t1 (id TINYINT UNSIGNED PRIMARY KEY)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE t2 (id SMALLINT UNSIGNED PRIMARY KEY)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	sql3 := `CREATE TABLE t3 (id MEDIUMINT UNSIGNED PRIMARY KEY)`
+	ct3, err := statement.ParseCreateTable(sql3)
+	require.NoError(t, err)
+
+	sql4 := `CREATE TABLE t4 (id INT UNSIGNED PRIMARY KEY)`
+	ct4, err := statement.ParseCreateTable(sql4)
+	require.NoError(t, err)
+
+	sql5 := `CREATE TABLE t5 (id BIGINT UNSIGNED PRIMARY KEY)`
+	ct5, err := statement.ParseCreateTable(sql5)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "tinyint,smallint,mediumint,int,bigint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4, ct5}, nil)
+
+	// All integer types should be allowed - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureAllStringTypes(t *testing.T) {
+	sql1 := `CREATE TABLE t1 (id CHAR(36) PRIMARY KEY)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE t2 (id VARCHAR(36) PRIMARY KEY)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	sql3 := `CREATE TABLE t3 (id BINARY(16) PRIMARY KEY)`
+	ct3, err := statement.ParseCreateTable(sql3)
+	require.NoError(t, err)
+
+	sql4 := `CREATE TABLE t4 (id VARBINARY(255) PRIMARY KEY)`
+	ct4, err := statement.ParseCreateTable(sql4)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "char,varchar,binary,varbinary",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4}, nil)
+
+	// All string types should be allowed - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureTemporalTypes(t *testing.T) {
+	sql1 := `CREATE TABLE t1 (id DATE PRIMARY KEY)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE t2 (id DATETIME PRIMARY KEY)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	sql3 := `CREATE TABLE t3 (id TIMESTAMP PRIMARY KEY)`
+	ct3, err := statement.ParseCreateTable(sql3)
+	require.NoError(t, err)
+
+	sql4 := `CREATE TABLE t4 (id TIME PRIMARY KEY)`
+	ct4, err := statement.ParseCreateTable(sql4)
+	require.NoError(t, err)
+
+	sql5 := `CREATE TABLE t5 (id YEAR PRIMARY KEY)`
+	ct5, err := statement.ParseCreateTable(sql5)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "date,datetime,timestamp,time,year",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4, ct5}, nil)
+
+	// All temporal types should be allowed - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureOtherTypes(t *testing.T) {
+	sql1 := `CREATE TABLE t1 (id BIT(8) PRIMARY KEY)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE t2 (id DECIMAL(10,0) PRIMARY KEY)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	sql3 := `CREATE TABLE t3 (id ENUM('a','b','c') PRIMARY KEY)`
+	ct3, err := statement.ParseCreateTable(sql3)
+	require.NoError(t, err)
+
+	sql4 := `CREATE TABLE t4 (id SET('x','y','z') PRIMARY KEY)`
+	ct4, err := statement.ParseCreateTable(sql4)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "bit,decimal,enum,set",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4}, nil)
+
+	// All configured types should be allowed - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_DefaultConfig(t *testing.T) {
+	linter := &PrimaryKeyTypeLinter{}
+	defaultConfig := linter.DefaultConfig()
+
+	// Should have allowedTypes key
+	require.Contains(t, defaultConfig, "allowedTypes")
+
+	// Default should be BIGINT,BINARY,VARBINARY (uppercase)
+	assert.Equal(t, "BIGINT,BINARY,VARBINARY", defaultConfig["allowedTypes"])
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureOverridesDefault(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	// First test with default config (INT not allowed)
+	linter1 := &PrimaryKeyTypeLinter{}
+	violations1 := linter1.Lint([]*statement.CreateTable{ct}, nil)
+	require.Len(t, violations1, 1)
+
+	// Now test with custom config (INT allowed)
+	linter2 := &PrimaryKeyTypeLinter{}
+	err = linter2.Configure(map[string]string{
+		"allowedTypes": "int",
+	})
+	require.NoError(t, err)
+	violations2 := linter2.Lint([]*statement.CreateTable{ct}, nil)
+	assert.Empty(t, violations2)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureCompositePrimaryKey(t *testing.T) {
+	sql := `CREATE TABLE user_roles (
+		user_id INT UNSIGNED,
+		role_id SMALLINT UNSIGNED,
+		PRIMARY KEY (user_id, role_id)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "int,smallint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Both INT and SMALLINT should be allowed - no violations
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigurePartialComposite(t *testing.T) {
+	sql := `CREATE TABLE user_roles (
+		user_id INT UNSIGNED,
+		role_id SMALLINT UNSIGNED,
+		PRIMARY KEY (user_id, role_id)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "int",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Only INT is allowed, SMALLINT should violate
+	require.Len(t, violations, 1)
+	assert.Equal(t, "role_id", *violations[0].Location.Column)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureBinaryStillWorks(t *testing.T) {
+	sql := `CREATE TABLE users (
+		uuid BINARY(16) PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "binary,bigint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// BINARY should still work correctly with parser quirk
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
+	sql := `CREATE TABLE users (
+		uuid VARBINARY(255) PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "varbinary,bigint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// VARBINARY should still work correctly with parser quirk
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "int,bigint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Should still warn about signed INT
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Contains(t, violations[0].Message, "signed INT")
+}
+
+func TestPrimaryKeyTypeLinter_IntegrationWithConfig(t *testing.T) {
+	Reset()
+	Register(&PrimaryKeyTypeLinter{})
+
+	sql := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	// Without config, INT should violate
+	violations1, err := RunLinters([]*statement.CreateTable{ct}, nil, Config{})
+	require.NoError(t, err)
+	require.Len(t, violations1, 1)
+
+	// With config allowing INT, should not violate
+	violations2, err := RunLinters([]*statement.CreateTable{ct}, nil, Config{
+		Settings: map[string]map[string]string{
+			"primary_key_type": {
+				"allowedTypes": "int,bigint",
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, violations2)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureMultipleCalls(t *testing.T) {
+	linter := &PrimaryKeyTypeLinter{}
+
+	// First configuration
+	err := linter.Configure(map[string]string{
+		"allowedTypes": "int",
+	})
+	require.NoError(t, err)
+
+	// Second configuration should add to the first
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "varchar",
+	})
+	require.NoError(t, err)
+
+	sql1 := `CREATE TABLE t1 (id INT UNSIGNED PRIMARY KEY)`
+	ct1, err := statement.ParseCreateTable(sql1)
+	require.NoError(t, err)
+
+	sql2 := `CREATE TABLE t2 (id VARCHAR(36) PRIMARY KEY)`
+	ct2, err := statement.ParseCreateTable(sql2)
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2}, nil)
+
+	// Both INT and VARCHAR should be allowed
+	assert.Empty(t, violations)
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureSuggestionUpdates(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id TINYINT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyTypeLinter{}
+	err = linter.Configure(map[string]string{
+		"allowedTypes": "int,bigint",
+	})
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Should suggest the configured allowed types
+	require.Len(t, violations, 1)
+	assert.NotNil(t, violations[0].Suggestion)
+	assert.Contains(t, *violations[0].Suggestion, "INT")
+	assert.Contains(t, *violations[0].Suggestion, "BIGINT")
+}
+
+func TestPrimaryKeyTypeLinter_AllSupportedTypes(t *testing.T) {
+	// Test that all supported types can be configured
+	allTypes := []string{
+		"BINARY", "VARBINARY", "BIGINT",
+		"CHAR", "VARCHAR",
+		"BIT", "DECIMAL", "ENUM", "SET",
+		"TINYINT", "SMALLINT", "MEDIUMINT", "INT",
+		"TIME", "TIMESTAMP", "YEAR", "DATE", "DATETIME",
+	}
+
+	linter := &PrimaryKeyTypeLinter{}
+	err := linter.Configure(map[string]string{
+		"allowedTypes": strings.Join(allTypes, ","),
+	})
+	require.NoError(t, err)
+
+	// Verify all types are in the allowed map
+	assert.Equal(t, len(allTypes), len(linter.allowedTypes))
+}
+
+func TestPrimaryKeyTypeLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
+	linter := &PrimaryKeyTypeLinter{}
+	// Configure with empty string
+	err := linter.Configure(map[string]string{
+		"allowedTypes": "",
+	})
+
+	// Empty string results in error (same as ConfigureEmptyString test)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported type")
 }
