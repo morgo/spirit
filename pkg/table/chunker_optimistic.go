@@ -231,6 +231,42 @@ func (t *chunkerOptimistic) Close() error {
 	return nil
 }
 
+// Reset resets the chunker to start from the beginning, as if Open() was just called.
+// This is used when retrying operations like checksums.
+func (t *chunkerOptimistic) Reset() error {
+	t.Lock()
+	defer t.Unlock()
+
+	if !t.isOpen {
+		return errors.New("chunker is not open, call Open() first")
+	}
+
+	// Reset all state to initial values
+	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])
+	t.checkpointHighPtr = NewNilDatum(t.Ti.keyDatums[0]) // reset checkpoint high pointer
+	t.finalChunkSent = false
+	t.chunkSize = StartingChunkSize
+	t.watermark = nil
+	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
+	t.chunkTimingInfo = []time.Duration{}
+	t.chunkPrefetchingEnabled = false
+
+	// Reset progress tracking
+	atomic.StoreUint64(&t.rowsCopied, 0)
+	atomic.StoreUint64(&t.chunksCopied, 0)
+
+	// Make sure min/max value are always specified
+	// To simplify the code in NextChunk funcs.
+	if t.Ti.minValue.IsNil() {
+		t.Ti.minValue = t.chunkPtr.MinValue()
+	}
+	if t.Ti.maxValue.IsNil() {
+		t.Ti.maxValue = t.chunkPtr.MaxValue()
+	}
+
+	return nil
+}
+
 // Feedback is a way for consumers of chunks to give feedback on how long
 // processing the chunk took. It is incorporated into the calculation of future
 // chunk sizes.

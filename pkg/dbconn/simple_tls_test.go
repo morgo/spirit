@@ -19,8 +19,16 @@ func TestSimpleIsRDSHost(t *testing.T) {
 		host     string
 		expected bool
 	}{
+		// Valid RDS hostnames
 		{"myhost.us-west-2.rds.amazonaws.com", true},
 		{"myhost.us-west-2.rds.amazonaws.com:3306", true},
+
+		// Security test cases - subdomain spoofing attempts
+		{"fake-rds.amazonaws.com", false},
+		{"evil-rds.amazonaws.com", false},
+		{"malicious-rds.amazonaws.com:3306", false},
+
+		// Invalid hostnames
 		{"myhost.example.com", false},
 		{"localhost", false},
 	}
