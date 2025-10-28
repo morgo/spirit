@@ -17,7 +17,7 @@ type Linter interface {
 
 	// Lint performs the actual linting and returns any violations found.
 	// Linters can use either or both of the parameters as needed.
-	Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation
+	Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation)
 
 	// String returns a string representation of the linter
 	String() string
