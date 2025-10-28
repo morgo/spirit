@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/alecthomas/kong v0.7.1
 	github.com/go-mysql-org/go-mysql v1.9.1
-	github.com/go-sql-driver/mysql v1.7.1
+	github.com/go-sql-driver/mysql v1.9.3
 	github.com/pingcap/errors v0.11.5-0.20250523034308-74f78ae071ee
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20250811102254-4230cf349b01
 	github.com/siddontang/go-log v0.0.0-20190221022429-1e957dd83bed
@@ -17,6 +17,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
