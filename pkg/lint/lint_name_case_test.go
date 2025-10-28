@@ -701,7 +701,7 @@ func TestNameCaseLinter_RenameTableStatement(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// The linter currently only checks ALTER TABLE RENAME
-	// RENAME TABLE statements might not be caught
+	// TABLE statements might not be caught
 	// This test documents the current behavior
 	// If no violations, it means RENAME TABLE is not currently handled
 	t.Logf("RENAME TABLE violations: %d", len(violations))

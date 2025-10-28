@@ -73,7 +73,8 @@ func (l *PrimaryKeyTypeLinter) Lint(existingTables []*statement.CreateTable, cha
 
 	// If the linter is run with a default allowedTypes configuration, set it to the default value
 	if len(l.allowedTypes) == 0 {
-		if err := l.Configure(l.DefaultConfig()); err != nil {
+		err := l.Configure(l.DefaultConfig())
+		if err != nil {
 			panic(err)
 		}
 	}
