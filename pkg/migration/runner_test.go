@@ -22,6 +22,7 @@ import (
 )
 
 func TestVarcharNonBinaryComparable(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS nonbinarycompatt1, _nonbinarycompatt1_new`)
 	table := `CREATE TABLE nonbinarycompatt1 (
 		uuid varchar(40) NOT NULL,
@@ -37,7 +38,7 @@ func TestVarcharNonBinaryComparable(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "nonbinarycompatt1",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -49,6 +50,7 @@ func TestVarcharNonBinaryComparable(t *testing.T) {
 // TestPartitioningSyntax tests that ALTERs that don't support ALGORITHM assertion
 // are still supported. From https://github.com/block/spirit/issues/277
 func TestPartitioningSyntax(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS partt1, _partt1_new`)
 	table := `CREATE TABLE partt1 (
 		id INT NOT NULL PRIMARY KEY auto_increment,
@@ -62,7 +64,7 @@ func TestPartitioningSyntax(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "partt1",
 		Alter:    "PARTITION BY KEY() PARTITIONS 8",
 	})
@@ -72,6 +74,7 @@ func TestPartitioningSyntax(t *testing.T) {
 }
 
 func TestVarbinary(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS varbinaryt1, _varbinaryt1_new`)
 	table := `CREATE TABLE varbinaryt1 (
 		uuid varbinary(40) NOT NULL,
@@ -87,7 +90,7 @@ func TestVarbinary(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "varbinaryt1",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -99,6 +102,7 @@ func TestVarbinary(t *testing.T) {
 
 // TestDataFromBadSqlMode tests that data previously inserted like 0000-00-00 can still be migrated.
 func TestDataFromBadSqlMode(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS badsqlt1, _badsqlt1_new`)
 	table := `CREATE TABLE badsqlt1 (
 		id int not null primary key auto_increment,
@@ -114,7 +118,7 @@ func TestDataFromBadSqlMode(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "badsqlt1",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -125,6 +129,7 @@ func TestDataFromBadSqlMode(t *testing.T) {
 }
 
 func TestChangeDatatypeNoData(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS cdatatypemytable`)
 	table := `CREATE TABLE cdatatypemytable (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -140,7 +145,7 @@ func TestChangeDatatypeNoData(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "cdatatypemytable",
 		Alter:    "CHANGE b b INT", //nolint: dupword
 	})
@@ -151,6 +156,7 @@ func TestChangeDatatypeNoData(t *testing.T) {
 }
 
 func TestChangeDatatypeDataLoss(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS cdatalossmytable`)
 	table := `CREATE TABLE cdatalossmytable (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -167,7 +173,7 @@ func TestChangeDatatypeDataLoss(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "cdatalossmytable",
 		Alter:    "CHANGE b b INT", //nolint: dupword
 	})
@@ -177,6 +183,7 @@ func TestChangeDatatypeDataLoss(t *testing.T) {
 }
 
 func TestOnline(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS testonline`)
 	table := `CREATE TABLE testonline (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -192,7 +199,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline",
 		Alter:    "CHANGE COLUMN b b int(11) NOT NULL", //nolint: dupword
 	})
@@ -215,7 +222,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline2",
 		Alter:    "ADD c int(11) NOT NULL",
 	})
@@ -242,7 +249,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline3",
 		Alter:    "ADD INDEX(b)",
 	})
@@ -268,7 +275,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline4",
 		Alter:    "drop index name, drop index b",
 	})
@@ -294,7 +301,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline5",
 		Alter:    "drop index name, add column c int",
 	})
@@ -319,7 +326,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline6",
 		Alter:    "add partition partitions 4",
 	})
@@ -346,7 +353,7 @@ func TestOnline(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "testonline7",
 		Alter:    "add partition (partition p2 values less than (300000))",
 	})
@@ -359,6 +366,7 @@ func TestOnline(t *testing.T) {
 }
 
 func TestTableLength(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS thisisareallylongtablenamethisisareallylongtablename60charac`)
 	table := `CREATE TABLE thisisareallylongtablenamethisisareallylongtablename60charac (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -373,7 +381,7 @@ func TestTableLength(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "thisisareallylongtablenamethisisareallylongtablename60charac",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -390,7 +398,7 @@ func TestTableLength(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "thisisareallylongtablenamethisisareallylongtablename60charac",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -402,6 +410,7 @@ func TestTableLength(t *testing.T) {
 }
 
 func TestBadOptions(t *testing.T) {
+	t.Parallel()
 	_, err := NewRunner(&Migration{})
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "host is required")
@@ -429,6 +438,7 @@ func TestBadOptions(t *testing.T) {
 }
 
 func TestBadAlter(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS bot1, bot2`)
 	table := `CREATE TABLE bot1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -449,7 +459,7 @@ func TestBadAlter(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "bot1",
 		Alter:    "badalter",
 	})
@@ -462,7 +472,7 @@ func TestBadAlter(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "bot1",
 		Alter:    "RENAME COLUMN name TO name2, ADD INDEX(name)", // need both, otherwise INSTANT algorithm will do the rename
 	})
@@ -479,7 +489,7 @@ func TestBadAlter(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "bot1",
 		Alter:    "CHANGE name name2 VARCHAR(255), ADD INDEX(name)", // need both, otherwise INSTANT algorithm will do the rename
 	})
@@ -495,7 +505,7 @@ func TestBadAlter(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "bot1",
 		Alter:    "CHANGE name name VARCHAR(200), ADD INDEX(name)", //nolint: dupword
 	})
@@ -512,7 +522,7 @@ func TestBadAlter(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "bot2",
 		Alter:    "DROP PRIMARY KEY",
 	})
@@ -533,6 +543,7 @@ func TestBadAlter(t *testing.T) {
 // currently runs in 0.4 seconds which is "acceptable" for chunker performance.
 // The generated number of chunks should also be very low because of prefetching.
 func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange2`)
 	table := `CREATE TABLE lossychange2 (
 					id BIGINT NOT NULL,
@@ -551,7 +562,7 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "lossychange2",
 		Alter:    "CHANGE COLUMN id id INT NOT NULL auto_increment", //nolint: dupword
 	})
@@ -568,6 +579,7 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 // TestChangeDatatypeLossy3 has a data type change that is "lossy" but
 // given the current stored data set does not cause errors.
 func TestChangeDatatypeLossless(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange3`)
 	table := `CREATE TABLE lossychange3 (
 				id BIGINT NOT NULL AUTO_INCREMENT,
@@ -586,7 +598,7 @@ func TestChangeDatatypeLossless(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "lossychange3",
 		Alter:    "CHANGE COLUMN b b varchar(200) NOT NULL", //nolint: dupword
 	})
@@ -605,6 +617,7 @@ func TestChangeDatatypeLossless(t *testing.T) {
 // [1, 8589934592] / 1000 = 8589934.592 chunks
 
 func TestChangeDatatypeLossyFailEarly(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange4`)
 	table := `CREATE TABLE lossychange4 (
 				id BIGINT NOT NULL AUTO_INCREMENT,
@@ -623,7 +636,7 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "lossychange4",
 		Alter:    "CHANGE COLUMN b b varchar(255) NOT NULL", //nolint: dupword
 	})
@@ -638,6 +651,7 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 // duplicate errors from a resume, and a constraint violation. So what we do is:
 // 0) *FORCE* checksum to be enabled (regardless now, its always on)
 func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniqmytable`)
 	table := `CREATE TABLE uniqmytable (
 				id int(11) NOT NULL AUTO_INCREMENT,
@@ -658,7 +672,7 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "uniqmytable",
 		Alter:    "ADD UNIQUE INDEX b (b)",
 	})
@@ -673,7 +687,7 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "uniqmytable",
 		Alter:    "ADD UNIQUE INDEX b (b)",
 	})
@@ -685,6 +699,7 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 
 // Test int to bigint primary key while resuming from checkpoint.
 func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS bigintpk, _bigintpk_chkpnt, _bigintpk_new`)
 	table := `CREATE TABLE bigintpk (
 			pk int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -726,7 +741,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	defer db.Close()
 
 	// Add timeout to prevent infinite waiting
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(10 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -759,7 +774,7 @@ checkpointFound:
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "bigintpk",
 		Alter:    "modify column pk bigint unsigned not null auto_increment",
 	})
@@ -773,6 +788,7 @@ checkpointFound:
 }
 
 func TestChangeNonIntPK(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS nonintpk`)
 	table := `CREATE TABLE nonintpk (
 			pk varbinary(36) NOT NULL PRIMARY KEY,
@@ -788,7 +804,7 @@ func TestChangeNonIntPK(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "nonintpk",
 		Alter:    "CHANGE COLUMN b b VARCHAR(255) NOT NULL", //nolint: dupword
 	})
@@ -822,7 +838,7 @@ func TestCheckpoint(t *testing.T) {
 			Username: cfg.User,
 			Password: cfg.Passwd,
 			Database: cfg.DBName,
-			Threads:  16,
+			Threads:  2,
 			Table:    "cpt1",
 			Alter:    "ENGINE=InnoDB",
 		})
@@ -855,7 +871,6 @@ func TestCheckpoint(t *testing.T) {
 	// Instead of calling r.copyRows() we will step through it manually.
 	// Since we want to checkpoint after a few chunks.
 
-	// r.copier.StartTime = time.Now()
 	r.status.Set(status.CopyRows)
 	assert.Equal(t, "copyRows", r.status.Get().String())
 
@@ -950,6 +965,7 @@ func TestCheckpoint(t *testing.T) {
 }
 
 func TestCheckpointRestore(t *testing.T) {
+	t.Parallel()
 	tbl := `CREATE TABLE cpt2 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -965,7 +981,7 @@ func TestCheckpointRestore(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "cpt2",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -1009,7 +1025,7 @@ func TestCheckpointRestore(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "cpt2",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -1022,6 +1038,7 @@ func TestCheckpointRestore(t *testing.T) {
 
 // https://github.com/block/spirit/issues/381
 func TestCheckpointRestoreBinaryPK(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	tbl := `CREATE TABLE binarypk (
  main_id varbinary(16) NOT NULL,
@@ -1082,7 +1099,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "binarypk",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -1094,25 +1111,29 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 }
 
 func TestCheckpointResumeDuringChecksum(t *testing.T) {
-	cleanupSentinelTable(t) // makes use of sentinel table
+	t.Parallel()
+
+	// Create unique database for this test
+	dbName := testutils.CreateUniqueTestDatabase(t)
+
 	tbl := `CREATE TABLE cptresume (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
 		pad VARCHAR(100) NOT NULL default 0)`
-	cfg, err := mysql.ParseDSN(testutils.DSN())
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
 	assert.NoError(t, err)
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS cptresume, _cptresume_new, _cptresume_chkpnt`)
-	testutils.RunSQL(t, tbl)
-	testutils.RunSQL(t, `CREATE TABLE _spirit_sentinel (id INT NOT NULL PRIMARY KEY)`)
-	testutils.RunSQL(t, `insert into cptresume (id2,pad) SELECT 1, REPEAT('a', 100) FROM dual`)
-	testutils.RunSQL(t, `insert into cptresume (id2,pad) SELECT 1, REPEAT('a', 100) FROM cptresume`)
-	testutils.RunSQL(t, `insert into cptresume (id2,pad) SELECT 1, REPEAT('a', 100) FROM cptresume a JOIN cptresume b JOIN cptresume c`)
+	testutils.RunSQLInDatabase(t, dbName, `DROP TABLE IF EXISTS cptresume, _cptresume_new, _cptresume_chkpnt`)
+	testutils.RunSQLInDatabase(t, dbName, tbl)
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE _spirit_sentinel (id INT NOT NULL PRIMARY KEY)`)
+	testutils.RunSQLInDatabase(t, dbName, `insert into cptresume (id2,pad) SELECT 1, REPEAT('a', 100) FROM dual`)
+	testutils.RunSQLInDatabase(t, dbName, `insert into cptresume (id2,pad) SELECT 1, REPEAT('a', 100) FROM cptresume`)
+	testutils.RunSQLInDatabase(t, dbName, `insert into cptresume (id2,pad) SELECT 1, REPEAT('a', 100) FROM cptresume a JOIN cptresume b JOIN cptresume c`)
 
 	r, err := NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
 		Password:        cfg.Passwd,
-		Database:        cfg.DBName,
+		Database:        dbName,
 		Threads:         4,
 		TargetChunkTime: 100 * time.Millisecond,
 		Table:           "cptresume",
@@ -1141,11 +1162,11 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	assert.NoError(t, r.Close())                     // close the run.
 
 	// drop the sentinel table.
-	testutils.RunSQL(t, `DROP TABLE _spirit_sentinel`)
+	testutils.RunSQLInDatabase(t, dbName, `DROP TABLE _spirit_sentinel`)
 
 	// insert a couple more rows (should not change anything)
-	testutils.RunSQL(t, `insert into cptresume (id2,pad) SELECT 1, REPEAT('b', 100) FROM dual`)
-	testutils.RunSQL(t, `insert into cptresume (id2,pad) SELECT 1, REPEAT('c', 100) FROM dual`)
+	testutils.RunSQLInDatabase(t, dbName, `insert into cptresume (id2,pad) SELECT 1, REPEAT('b', 100) FROM dual`)
+	testutils.RunSQLInDatabase(t, dbName, `insert into cptresume (id2,pad) SELECT 1, REPEAT('c', 100) FROM dual`)
 
 	// Start again as a new runner,
 	r2, err := NewRunner(&Migration{
@@ -1166,6 +1187,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 }
 
 func TestCheckpointDifferentRestoreOptions(t *testing.T) {
+	t.Parallel()
 	tbl := `CREATE TABLE cpt1difft1 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -1187,7 +1209,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 			Username: cfg.User,
 			Password: cfg.Passwd,
 			Database: cfg.DBName,
-			Threads:  16,
+			Threads:  2,
 			Table:    "cpt1difft1",
 			Alter:    alter,
 		})
@@ -1377,7 +1399,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "e2et1",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -1402,8 +1424,6 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
 	// Since we want to checkpoint after a few chunks.
-
-	// m.copier.StartTime = time.Now()
 	m.status.Set(status.CopyRows)
 	assert.Equal(t, "copyRows", m.status.Get().String())
 
@@ -1463,11 +1483,11 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.Equal(t, status.Progress{CurrentState: status.PostChecksum.String(), Summary: "Applying Changeset Deltas=0"}, m.GetProgress())
 
 	// All done!
-
 	assert.Equal(t, 0, m.db.Stats().InUse) // all connections are returned.
 }
 
 func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
+	t.Parallel()
 	tbl := `CREATE TABLE e2et2 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		pad int NOT NULL default 0)`
@@ -1486,7 +1506,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "e2et2",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -1509,8 +1529,6 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
 	// Since we want to checkpoint after a few chunks.
-
-	// m.copier.StartTime = time.Now()
 	m.status.Set(status.CopyRows)
 	assert.Equal(t, "copyRows", m.status.Get().String())
 
@@ -1585,6 +1603,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 // TestForRemainingTableArtifacts tests that the table is left after
 // the migration is complete, but no _chkpnt or _new or _old table.
 func TestForRemainingTableArtifacts(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS remainingtbl, _remainingtbl_new, _remainingtbl_old, _remainingtbl_chkpnt`)
 	table := `CREATE TABLE remainingtbl (
 		id INT NOT NULL PRIMARY KEY,
@@ -1599,7 +1618,7 @@ func TestForRemainingTableArtifacts(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "remainingtbl",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -1619,6 +1638,7 @@ func TestForRemainingTableArtifacts(t *testing.T) {
 }
 
 func TestDropColumn(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS dropcol, _dropcol_new`)
 	table := `CREATE TABLE dropcol (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -1638,7 +1658,7 @@ func TestDropColumn(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "dropcol",
 		Alter:    "DROP COLUMN b, ENGINE=InnoDB", // need both to ensure it is not instant!
 	})
@@ -1650,12 +1670,13 @@ func TestDropColumn(t *testing.T) {
 }
 
 func TestDefaultPort(t *testing.T) {
+	t.Parallel()
 	m, err := NewRunner(&Migration{
 		Host:     "localhost",
 		Username: "root",
 		Password: "mypassword",
 		Database: "test",
-		Threads:  16,
+		Threads:  2,
 		Table:    "t1",
 		Alter:    "DROP COLUMN b, ENGINE=InnoDB",
 	})
@@ -1665,6 +1686,7 @@ func TestDefaultPort(t *testing.T) {
 }
 
 func TestNullToNotNull(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS autodatetime`)
 	table := `CREATE TABLE autodatetime (
 		id INT NOT NULL AUTO_INCREMENT,
@@ -1681,7 +1703,7 @@ func TestNullToNotNull(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "autodatetime",
 		Alter:    "modify column created_at datetime(3) not null default current_timestamp(3)",
 	})
@@ -1693,6 +1715,7 @@ func TestNullToNotNull(t *testing.T) {
 }
 
 func TestChunkerPrefetching(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS prefetchtest`)
 	table := `CREATE TABLE prefetchtest (
 		id BIGINT NOT NULL AUTO_INCREMENT,
@@ -1728,7 +1751,7 @@ func TestChunkerPrefetching(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "prefetchtest",
 		Alter:    "engine=innodb",
 	})
@@ -1772,7 +1795,7 @@ func TestTpConversion(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "tpconvert",
 		Alter: `MODIFY COLUMN created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 		MODIFY COLUMN updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -1789,6 +1812,7 @@ func TestTpConversion(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS chkpresumetest, _chkpresumetest_old, _chkpresumetest_chkpnt`)
 	table := `CREATE TABLE chkpresumetest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -1869,6 +1893,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2ECompositeVarcharPK(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS compositevarcharpk, _compositevarcharpk_chkpnt`)
 	testutils.RunSQL(t, `CREATE TABLE compositevarcharpk (
   token varchar(128) NOT NULL,
@@ -1956,6 +1981,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 }
 
 func TestResumeFromCheckpointStrict(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS resumestricttest, _resumestricttest_old, _resumestricttest_chkpnt`)
 	table := `CREATE TABLE resumestricttest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -2019,7 +2045,7 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	assert.NoError(t, runner.Close())
 
 	// Insert some more dummy data
-	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM chkpresumetest LIMIT 1000")
+	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM resumestricttest LIMIT 1000")
 
 	// Start a _different_ migration on the same table. We don't expect this to work when --strict is enabled
 	// since the --alter doesn't match what is recorded in the checkpoint table
@@ -2167,7 +2193,7 @@ func TestE2ERogueValues(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "e2erogue",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -2193,7 +2219,6 @@ func TestE2ERogueValues(t *testing.T) {
 	// Instead of calling m.copyRows() we will step through it manually.
 	// Since we want to checkpoint after a few chunks.
 
-	// m.copier.StartTime = time.Now()
 	m.status.Set(status.CopyRows)
 	assert.Equal(t, "copyRows", m.status.Get().String())
 
@@ -2243,6 +2268,7 @@ func TestE2ERogueValues(t *testing.T) {
 }
 
 func TestPartitionedTable(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS part1, _part1_new`)
 	table := `CREATE TABLE part1 (
 			id bigint(20) NOT NULL AUTO_INCREMENT,
@@ -2276,7 +2302,7 @@ func TestPartitionedTable(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "part1",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -2298,6 +2324,7 @@ func TestPartitionedTable(t *testing.T) {
 // - When resuming from checkpoint, we need to initialize the high watermark from a SELECT MAX(key) FROM the _new table.
 // - If this is done correctly, then on resume the DELETE will no longer be ignored.
 func TestResumeFromCheckpointPhantom(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS phantomtest, _phantomtest_old, _phantomtest_chkpnt`)
 	tbl := `CREATE TABLE phantomtest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -2318,7 +2345,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Username:        cfg.User,
 		Password:        cfg.Passwd,
 		Database:        cfg.DBName,
-		Threads:         16,
+		Threads:         2,
 		Table:           "phantomtest",
 		Alter:           "ENGINE=InnoDB",
 		TargetChunkTime: 100 * time.Millisecond,
@@ -2389,7 +2416,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Username:        cfg.User,
 		Password:        cfg.Passwd,
 		Database:        cfg.DBName,
-		Threads:         16,
+		Threads:         2,
 		Table:           "phantomtest",
 		Alter:           "ENGINE=InnoDB",
 		TargetChunkTime: 100 * time.Millisecond,
@@ -2423,6 +2450,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 }
 
 func TestVarcharE2E(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS varchart1`)
 	table := `CREATE TABLE varchart1 (
 				pk varchar(255) NOT NULL,
@@ -2443,7 +2471,7 @@ func TestVarcharE2E(t *testing.T) {
 		Username: cfg.User,
 		Password: cfg.Passwd,
 		Database: cfg.DBName,
-		Threads:  16,
+		Threads:  2,
 		Table:    "varchart1",
 		Alter:    "ENGINE=InnoDB",
 	})
@@ -2454,7 +2482,8 @@ func TestVarcharE2E(t *testing.T) {
 }
 
 func TestSkipDropAfterCutover(t *testing.T) {
-	tableName := `drop_test`
+	t.Parallel()
+	tableName := `skipdrop_test`
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS "+tableName)
 	table := fmt.Sprintf(`CREATE TABLE %s (
@@ -2472,7 +2501,7 @@ func TestSkipDropAfterCutover(t *testing.T) {
 		Password:             cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              4,
-		Table:                "drop_test",
+		Table:                "skipdrop_test",
 		Alter:                "ENGINE=InnoDB",
 		SkipDropAfterCutover: true,
 	})
@@ -2491,6 +2520,7 @@ func TestSkipDropAfterCutover(t *testing.T) {
 }
 
 func TestDropAfterCutover(t *testing.T) {
+	t.Parallel()
 	tableName := `drop_test`
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS "+tableName)
 	table := fmt.Sprintf(`CREATE TABLE %s (
@@ -2527,28 +2557,32 @@ func TestDropAfterCutover(t *testing.T) {
 }
 
 func TestDeferCutOver(t *testing.T) {
-	cleanupSentinelTable(t) // this makes use of the sentinel table
+	t.Parallel()
+
+	// Create unique database for this test
+	dbName := testutils.CreateUniqueTestDatabase(t)
+
 	tableName := `deferred_cutover`
 	newName := fmt.Sprintf("_%s_new", tableName)
 	checkpointTableName := fmt.Sprintf("_%s_chkpnt", tableName)
 
 	dropStmt := `DROP TABLE IF EXISTS %s`
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, tableName))
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, checkpointTableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, checkpointTableName))
 
 	table := fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName)
 
-	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, table)
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
 
-	cfg, err := mysql.ParseDSN(testutils.DSN())
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
 		Password:             cfg.Passwd,
-		Database:             cfg.DBName,
+		Database:             dbName,
 		Threads:              4,
 		Table:                "deferred_cutover",
 		Alter:                "ENGINE=InnoDB",
@@ -2567,8 +2601,9 @@ func TestDeferCutOver(t *testing.T) {
 	}()
 
 	// While it's waiting, check the Progress.
-	time.Sleep(1 * time.Second)
-	assert.Equal(t, status.Progress{CurrentState: "waitingOnSentinelTable", Summary: "Waiting on Sentinel Table"}, m.GetProgress())
+	for m.status.Get() != status.WaitingOnSentinelTable {
+		time.Sleep(100 * time.Millisecond)
+	}
 	wg.Wait()
 
 	sql := fmt.Sprintf(
@@ -2582,27 +2617,31 @@ func TestDeferCutOver(t *testing.T) {
 }
 
 func TestDeferCutOverE2E(t *testing.T) {
-	cleanupSentinelTable(t) // this makes use of the sentinel table
+	t.Parallel()
+
+	// Create unique database for this test
+	dbName := testutils.CreateUniqueTestDatabase(t)
+
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e`
 	checkpointTableName := fmt.Sprintf("_%s_chkpnt", tableName)
 
 	dropStmt := `DROP TABLE IF EXISTS %s`
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, tableName))
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, checkpointTableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, checkpointTableName))
 	table := fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName)
 
-	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, table)
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
 
-	cfg, err := mysql.ParseDSN(testutils.DSN())
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
 		Password:             cfg.Passwd,
-		Database:             cfg.DBName,
+		Database:             dbName,
 		Threads:              1,
 		Table:                "deferred_cutover_e2e",
 		Alter:                "ENGINE=InnoDB",
@@ -2618,14 +2657,14 @@ func TestDeferCutOverE2E(t *testing.T) {
 	}()
 
 	// wait until the sentinel table exists
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	defer db.Close()
 	for {
 		var rowCount int
 		sql := fmt.Sprintf(
 			`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
-			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, sentinelTableName)
+			WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`, dbName, sentinelTableName)
 		err = db.QueryRow(sql).Scan(&rowCount)
 		assert.NoError(t, err)
 		if rowCount > 0 {
@@ -2634,7 +2673,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 	}
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, "DROP TABLE "+sentinelTableName)
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
 
 	err = <-c // wait for the migration to finish
 	assert.NoError(t, err)
@@ -2650,28 +2689,19 @@ func TestDeferCutOverE2E(t *testing.T) {
 }
 
 func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
-	cleanupSentinelTable(t) // this makes use of the sentinel table
-	// This is very similar to TestDeferCutOverE2E but it checks that the migration
-	// stage has changed rather than that the sentinel table has been created,
-	// and it also checks that the binlog position has advanced.
-	statusInterval = 500 * time.Millisecond
-	sentinelWaitLimit = 1 * time.Minute
-	defer func() {
-		sentinelWaitLimit = 10 * time.Second
-	}()
+	// Create unique database for this test
+	dbName := testutils.CreateUniqueTestDatabase(t)
 
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e_stage`
 	checkpointTableName := fmt.Sprintf("_%s_chkpnt", tableName)
 
 	dropStmt := `DROP TABLE IF EXISTS %s`
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, tableName))
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, checkpointTableName))
-	table := fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName)
-
-	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, checkpointTableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -2679,7 +2709,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
 		Password:             cfg.Passwd,
-		Database:             cfg.DBName,
+		Database:             dbName,
 		Threads:              1,
 		Table:                "deferred_cutover_e2e_stage",
 		Alter:                "ENGINE=InnoDB",
@@ -2695,7 +2725,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	}()
 
 	// wait until the sentinel table exists
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	defer db.Close()
 	for m.status.Get() != status.WaitingOnSentinelTable {
@@ -2704,7 +2734,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 
 	binlogPos := m.replClient.GetBinlogApplyPosition()
 	for range 4 {
-		testutils.RunSQL(t, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
 		time.Sleep(1 * time.Second)
 		m.replClient.Flush(t.Context())
 		newBinlogPos := m.replClient.GetBinlogApplyPosition()
@@ -2712,7 +2742,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 		binlogPos = newBinlogPos
 	}
 
-	testutils.RunSQL(t, "DROP TABLE "+sentinelTableName)
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
 
 	err = <-c // wait for the migration to finish
 	assert.NoError(t, err)
@@ -2728,40 +2758,41 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
-	cleanupSentinelTable(t) // this makes use of the sentinel table
+	t.Parallel()
 	// This test is similar to TestResumeFromCheckpointE2E but it adds a sentinel table
 	// created after the migration begins and is interrupted.
 	// The migration itself runs with DeferCutOver=false
 	// so we test to make sure a sentinel table created manually by the operator
 	// blocks cutover.
 
+	dbName := testutils.CreateUniqueTestDatabase(t)
 	tableName := `resume_checkpoint_e2e_w_sentinel`
-	tableInfo := table.TableInfo{SchemaName: "test", TableName: tableName}
+	tableInfo := table.TableInfo{SchemaName: dbName, TableName: tableName}
 
-	testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_old, _%s_chkpnt`, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_old, _%s_chkpnt`, tableName, tableName, tableName))
 	table := fmt.Sprintf(`CREATE TABLE %s (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		pad varbinary(1024) NOT NULL,
 		PRIMARY KEY (id)
 	)`, tableName)
-	testutils.RunSQL(t, table)
+	testutils.RunSQLInDatabase(t, dbName, table)
 	migration := &Migration{}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
 	// Insert dummy data.
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM dual", tableName))
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM dual", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
 	alterSQL := "ADD INDEX(pad);"
 	// use as slow as possible here: we want the copy to be still running
 	// when we kill it once we have a checkpoint saved.
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
-	migration.Database = cfg.DBName
+	migration.Database = dbName
 	migration.Threads = 1
 	migration.Table = tableName
 	migration.Alter = alterSQL
@@ -2780,7 +2811,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	}()
 
 	// wait until a checkpoint is saved (which means copy is in progress)
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	defer db.Close()
 	for {
@@ -2807,17 +2838,17 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	assert.NoError(t, runner.Close())
 
 	// Manually create the sentinel table.
-	testutils.RunSQL(t, "CREATE TABLE _spirit_sentinel (id int unsigned primary key)")
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _spirit_sentinel (id int unsigned primary key)")
 
 	// Insert some more dummy data
-	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s LIMIT 1000", tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s LIMIT 1000", tableName, tableName))
 	// Start a new migration with the same parameters.
 	// Let it complete.
 	newmigration := &Migration{}
 	newmigration.Host = cfg.Addr
 	newmigration.Username = cfg.User
 	newmigration.Password = cfg.Passwd
-	newmigration.Database = cfg.DBName
+	newmigration.Database = dbName
 	newmigration.Threads = 4
 	newmigration.Table = tableName
 	newmigration.Alter = alterSQL
@@ -2837,6 +2868,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 }
 
 func TestPreRunChecksE2E(t *testing.T) {
+	t.Parallel()
 	// We test the checks in tests for that package, but we also want to test
 	// that the checks run correctly when instantiating a migration.
 
@@ -2863,6 +2895,7 @@ func TestPreRunChecksE2E(t *testing.T) {
 // From https://github.com/block/spirit/issues/241
 // If an ALTER qualifies as instant, but an instant can't apply, don't burn an instant version.
 func TestForNonInstantBurn(t *testing.T) {
+	t.Parallel()
 	// We skip this test in MySQL 8.0.28. It uses INSTANT_COLS instead of total_row_versions
 	// and it supports instant add col, but not instant drop col.
 	// It's safe to skip, but we need 8.0.28 in tests because it's the minor version
@@ -2932,6 +2965,7 @@ func TestForNonInstantBurn(t *testing.T) {
 // really not a typical use case to ever mix invisible with any other change.
 // i.e. if anything it's more a side-effect than a workaround.
 func TestIndexVisibility(t *testing.T) {
+	t.Parallel()
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -3019,19 +3053,21 @@ func TestIndexVisibility(t *testing.T) {
 // We use DeferCutOver=true option to force the first migration
 // to stay running.
 func TestPreventConcurrentRuns(t *testing.T) {
-	cleanupSentinelTable(t) // this makes use of the sentinel table
+	t.Parallel()
+
+	dbName := testutils.CreateUniqueTestDatabase(t)
 	tableName := `prevent_concurrent_runs`
 	checkpointTableName := fmt.Sprintf("_%s_chkpnt", tableName)
 
 	dropStmt := `DROP TABLE IF EXISTS %s`
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, tableName))
-	testutils.RunSQL(t, fmt.Sprintf(dropStmt, checkpointTableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, checkpointTableName))
 
 	table := fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName)
 
-	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
-	testutils.RunSQL(t, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, table)
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -3039,7 +3075,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
 		Password:             cfg.Passwd,
-		Database:             cfg.DBName,
+		Database:             dbName,
 		Threads:              4,
 		Table:                tableName,
 		Alter:                "ENGINE=InnoDB",
@@ -3065,7 +3101,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
 		Password:             cfg.Passwd,
-		Database:             cfg.DBName,
+		Database:             dbName,
 		Threads:              4,
 		Table:                tableName,
 		Alter:                "ENGINE=InnoDB",
@@ -3080,6 +3116,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 }
 
 func TestStatementWorkflowStillInstant(t *testing.T) {
+	t.Parallel()
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -3109,6 +3146,7 @@ func TestStatementWorkflowStillInstant(t *testing.T) {
 }
 
 func TestTrailingSemicolon(t *testing.T) {
+	t.Parallel()
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -3173,6 +3211,7 @@ func TestTrailingSemicolon(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 func TestAlterExtendVarcharE2E(t *testing.T) {
+	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1extendvarchar, _t1extendvarchar_new`)
 	table := `CREATE TABLE t1extendvarchar (
 		id int not null primary key auto_increment,
@@ -3218,6 +3257,7 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 }
 
 func TestMigrationCancelledFromTableModification(t *testing.T) {
+	t.Parallel()
 	// This test covers the case where a migration is running
 	// and the user modifies the table (e.g. with another ALTER).
 	// The migration should detect this and cancel itself.

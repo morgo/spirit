@@ -515,7 +515,7 @@ func (r *Runner) newMigration(ctx context.Context) error {
 
 // setupReplicationThrottler sets up the replication throttler if a replica DSN is configured.
 // This is common logic shared between resume and new migration paths.
-func (r *Runner) setupReplicationThrottler() error {
+func (r *Runner) setupReplicationThrottler(ctx context.Context) error {
 	if r.migration.ReplicaDSN == "" {
 		return nil // No replica DSN specified, use default NOOP throttler
 	}
@@ -546,7 +546,7 @@ func (r *Runner) setupReplicationThrottler() error {
 	}
 
 	r.copier.SetThrottler(r.throttler)
-	return r.throttler.Open()
+	return r.throttler.Open(ctx)
 }
 
 // startBackgroundRoutines starts the background routines needed for migration monitoring.
@@ -599,7 +599,7 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	// Setup replication throttler (common logic for both paths)
-	if err := r.setupReplicationThrottler(); err != nil {
+	if err := r.setupReplicationThrottler(ctx); err != nil {
 		return err
 	}
 
