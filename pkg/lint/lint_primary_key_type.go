@@ -159,7 +159,7 @@ func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *stateme
 	for k := range l.allowedTypes {
 		keys = append(keys, k)
 	}
-	suggestion := fmt.Sprintf("Change column %q to a supported column type (%s)", column.Name, strings.Join(keys, ","))
+	slices.Sort(keys)
 
 	return &Violation{
 		Linter:   l,
@@ -169,7 +169,7 @@ func (l *PrimaryKeyTypeLinter) checkColumnType(tableName string, column *stateme
 			Table:  tableName,
 			Column: &column.Name,
 		},
-		Suggestion: &suggestion,
+		Suggestion: strPtr(fmt.Sprintf("Change column %q to a supported column type (%s)", column.Name, strings.Join(keys, ","))),
 		Context: map[string]interface{}{
 			"current_type": column.Type,
 		},
