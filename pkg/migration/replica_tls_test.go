@@ -15,7 +15,7 @@ import (
 
 func TestReplicaTLSEnhancement(t *testing.T) {
 	// Create temporary certificate file for testing
-	tempFile, err := os.CreateTemp("", "test-cert-*.pem")
+	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
 	defer os.Remove(tempFile.Name())
 
@@ -142,7 +142,7 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 
 func TestReplicationClientTLSConfig(t *testing.T) {
 	// Create temporary certificate file for testing
-	tempFile, err := os.CreateTemp("", "test-cert-*.pem")
+	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
 	defer os.Remove(tempFile.Name())
 
@@ -244,7 +244,7 @@ func TestReplicaTLSIntegration(t *testing.T) {
 	// and replica TLS configuration
 
 	// Create temporary certificate file for testing
-	tempFile, err := os.CreateTemp("", "test-cert-*.pem")
+	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
 	defer os.Remove(tempFile.Name())
 

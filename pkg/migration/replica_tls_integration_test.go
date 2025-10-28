@@ -384,7 +384,7 @@ func TestConcurrentTLSConfiguration(t *testing.T) {
 	runners := make([]*Runner, numRunners)
 
 	// Create multiple runners with different TLS configurations
-	for i := 0; i < numRunners; i++ {
+	for i := range numRunners {
 		migration := &Migration{
 			Host:               cfg.Addr,
 			Username:           cfg.User,

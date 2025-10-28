@@ -310,7 +310,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	// Enhanced TLS configuration logic
 	if c.tlsConfig != nil && c.tlsConfig.TLSMode != "DISABLED" {
 		var certData []byte
-		var tlsMode string = c.tlsConfig.TLSMode
+		tlsMode := c.tlsConfig.TLSMode
 
 		// Load certificate data
 		if c.tlsConfig.TLSCertificatePath != "" {
