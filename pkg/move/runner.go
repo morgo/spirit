@@ -252,7 +252,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		// to the target database. If it fails, unlike schema changes,
 		// the move fails because we don't want to overwrite existing data.
 		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return errors.New("target database is not empty and could not resume from checkpoint")
+			return fmt.Errorf("target database is not empty and could not resume from checkpoint: %v", err)
 		}
 		r.logger.Infof("Resumed move from existing checkpoint")
 	} else {

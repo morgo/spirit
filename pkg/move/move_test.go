@@ -105,9 +105,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	move := &Move{
 		SourceDSN:       sourceDSN,
 		TargetDSN:       targetDSN,
-		TargetChunkTime: 5 * time.Second,
-		Threads:         4,
-		CreateSentinel:  false,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
 	}
 	r, err := NewRunner(move)
 	assert.NoError(t, err)
@@ -155,6 +154,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	assert.NoError(t, r.Close())
 
 	// Drop the additional column, we should be able to resume now.
+	move.TargetChunkTime = 5 * time.Second
+	move.Threads = 4
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
 	assert.NoError(t, err)
