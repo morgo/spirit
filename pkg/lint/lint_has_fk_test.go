@@ -858,9 +858,10 @@ func TestHasFKLinter_MixedCreateAndAlterStatements(t *testing.T) {
 
 	// Verify messages are appropriate for each type
 	for _, v := range violations {
-		if v.Location.Table == "orders" {
+		switch v.Location.Table {
+		case "orders":
 			assert.Contains(t, v.Message, "has FOREIGN KEY constraint")
-		} else if v.Location.Table == "order_items" {
+		case "order_items":
 			assert.Contains(t, v.Message, "Adding foreign key constraint")
 		}
 	}

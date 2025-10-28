@@ -193,7 +193,7 @@ func TestHasFloatLinter_FloatWithPrecision(t *testing.T) {
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "value")
 	// The parser may normalize the type name
-	assert.True(t, strings.Contains(strings.ToLower(violations[0].Message), "float"))
+	assert.Contains(t, strings.ToLower(violations[0].Message), "float")
 }
 
 func TestHasFloatLinter_DoubleWithPrecision(t *testing.T) {
@@ -211,7 +211,7 @@ func TestHasFloatLinter_DoubleWithPrecision(t *testing.T) {
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "value")
 	// The parser may normalize the type name
-	assert.True(t, strings.Contains(strings.ToLower(violations[0].Message), "double"))
+	assert.Contains(t, strings.ToLower(violations[0].Message), "double")
 }
 
 func TestHasFloatLinter_EmptyInput(t *testing.T) {
@@ -985,7 +985,7 @@ func TestHasFloatLinter_AlterTableChangeColumnWithConstraints(t *testing.T) {
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnSameName(t *testing.T) {
-	sql := `ALTER TABLE measurements CHANGE COLUMN temperature temperature FLOAT`
+	sql := "ALTER TABLE measurements CHANGE COLUMN temperature temperature FLOAT" //nolint:dupword
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 

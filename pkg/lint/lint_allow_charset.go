@@ -50,7 +50,7 @@ func (l *AllowCharset) DefaultConfig() map[string]string {
 
 func (l *AllowCharset) Lint(createTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	// TODO: do we care about supporting character sets that are valid for MySQL but not valid for the TiDB parser? For example big5
-	suggestion := fmt.Sprintf("Use a supported character set: %s", strings.Join(l.charsets, ", "))
+	suggestion := "Use a supported character set: " + strings.Join(l.charsets, ", ")
 	for ct := range CreateTableStatements(createTables, changes) {
 		if ct.TableOptions != nil && ct.TableOptions.Charset != nil && !slices.Contains(l.charsets, *ct.TableOptions.Charset) {
 			violations = append(violations, Violation{
@@ -59,7 +59,6 @@ func (l *AllowCharset) Lint(createTables []*statement.CreateTable, changes []*st
 				Message:    fmt.Sprintf("Character set %q given for table %q is not allowed", *ct.TableOptions.Charset, ct.TableName),
 				Suggestion: &suggestion,
 			})
-
 		}
 		for _, column := range ct.Columns {
 			charset := column.Raw.Tp.GetCharset()

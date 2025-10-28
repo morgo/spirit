@@ -53,7 +53,7 @@ func (l *UnsafeLinter) DefaultConfig() map[string]string {
 
 func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	for _, change := range changes {
-		switch node := (*change.StmtNode).(type) { //nolint: exhaustive
+		switch node := (*change.StmtNode).(type) {
 		case *ast.TruncateTableStmt, *ast.DropTableStmt, *ast.DropDatabaseStmt:
 			violations = append(violations, Violation{
 				Linter:   l,
@@ -73,7 +73,7 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 					violations = append(violations, Violation{
 						Linter:   l,
 						Location: &Location{Table: change.Table},
-						Message:  fmt.Sprintf("Unsafe operation detected: %s", AlterTableTypeToString(spec.Tp)),
+						Message:  "Unsafe operation detected: " + AlterTableTypeToString(spec.Tp),
 						Severity: SeverityError,
 					})
 				case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
@@ -99,7 +99,7 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 					v := Violation{
 						Linter:   l,
 						Location: &Location{Table: change.Table},
-						Message:  fmt.Sprintf("Changing column type could lead to data loss by truncation"),
+						Message:  "Changing column type could lead to data loss by truncation",
 						Severity: SeverityWarning,
 					}
 					if spec.OldColumnName != nil {

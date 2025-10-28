@@ -980,7 +980,7 @@ func TestPrimaryKeyTypeLinter_AllSupportedTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all types are in the allowed map
-	assert.Equal(t, len(allTypes), len(linter.allowedTypes))
+	assert.Len(t, linter.allowedTypes, len(allTypes))
 }
 
 func TestPrimaryKeyTypeLinter_ConfigureEmptyAllowedTypes(t *testing.T) {

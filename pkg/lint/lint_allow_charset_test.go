@@ -19,7 +19,7 @@ CREATE TABLE t1 (
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestDisallowedCharacterSet(t *testing.T) {
@@ -49,7 +49,7 @@ func TestAllowedColumnCharacterSet(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestDisallowedColumnCharacterSet(t *testing.T) {
@@ -116,7 +116,7 @@ func TestTableAndColumnBothAllowed(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestTableAllowedColumnDisallowed(t *testing.T) {
@@ -186,7 +186,7 @@ func TestMultipleAllowedCharsets(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4", "utf8"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestMultipleAllowedCharsetsOneDisallowed(t *testing.T) {
@@ -216,7 +216,7 @@ func TestColumnWithoutCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestTableWithoutCharset(t *testing.T) {
@@ -229,7 +229,7 @@ func TestTableWithoutCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 // Tests for different column types
@@ -244,7 +244,7 @@ func TestCharColumnWithCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestTextColumnWithCharset(t *testing.T) {
@@ -257,7 +257,7 @@ func TestTextColumnWithCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestTextColumnWithDisallowedCharset(t *testing.T) {
@@ -284,7 +284,7 @@ func TestEnumColumnWithCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestSetColumnWithCharset(t *testing.T) {
@@ -297,7 +297,7 @@ func TestSetColumnWithCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 // Tests for non-string columns (should not have charset)
@@ -312,7 +312,7 @@ func TestIntColumnNoCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestDateColumnNoCharset(t *testing.T) {
@@ -325,7 +325,7 @@ func TestDateColumnNoCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 // Tests for multiple tables
@@ -349,7 +349,7 @@ func TestMultipleTablesAllAllowed(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestMultipleTablesSomeDisallowed(t *testing.T) {
@@ -396,7 +396,7 @@ func TestConfigureSingleCharset(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestConfigureMultipleCharsets(t *testing.T) {
@@ -415,7 +415,7 @@ func TestConfigureMultipleCharsets(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestConfigureInvalidKey(t *testing.T) {
@@ -446,7 +446,7 @@ func TestExistingTableWithAllowedCharset(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint([]*statement.CreateTable{existingTable}, nil)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestExistingTableWithDisallowedCharset(t *testing.T) {
@@ -526,7 +526,7 @@ func TestAllCommonCharsets(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4", "utf8", "latin1", "ascii"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestRestrictiveCharsetPolicy(t *testing.T) {
@@ -619,7 +619,7 @@ func TestEmptyTable(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestTableWithOnlyIntColumns(t *testing.T) {
@@ -633,7 +633,7 @@ func TestTableWithOnlyIntColumns(t *testing.T) {
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 0)
+	require.Empty(t, violations)
 }
 
 func TestEmptyCharsetsList(t *testing.T) {
