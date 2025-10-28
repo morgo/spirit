@@ -39,6 +39,7 @@ type Checker struct {
 	fixDifferences   bool
 	differencesFound atomic.Uint64
 	recopyLock       sync.Mutex
+	maxRetries       int
 }
 
 type CheckerConfig struct {
@@ -49,6 +50,7 @@ type CheckerConfig struct {
 	FixDifferences  bool
 	Watermark       string  // optional; defines a watermark to start from
 	WriteDB         *sql.DB // optional; use a different DB for the "new" side.
+	MaxRetries      int
 }
 
 func NewCheckerDefaultConfig() *CheckerConfig {
@@ -58,6 +60,7 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 		DBConfig:        dbconn.NewDBConfig(),
 		Logger:          logrus.New(),
 		FixDifferences:  false,
+		MaxRetries:      3,
 	}
 }
 
@@ -75,6 +78,9 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 	if config.WriteDB != nil && config.FixDifferences {
 		return nil, errors.New("fix differences not yet supported when using a different WriteDB")
 	}
+	if config.MaxRetries == 0 {
+		config.MaxRetries = 3
+	}
 	checksum := &Checker{
 		concurrency:    config.Concurrency,
 		db:             db,
@@ -84,6 +90,7 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 		logger:         config.Logger,
 		fixDifferences: config.FixDifferences,
 		writeDB:        config.WriteDB,
+		maxRetries:     config.MaxRetries,
 	}
 	return checksum, nil
 }
@@ -146,10 +153,6 @@ func (c *Checker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPool, ch
 	// When we give feedback, we need to say how many rows were in the chunk.
 	c.chunker.Feedback(chunk, time.Since(startTime), targetCount)
 	return nil
-}
-
-func (c *Checker) DifferencesFound() uint64 {
-	return c.differencesFound.Load()
 }
 
 func (c *Checker) getStats() (uint64, uint64, float64) {
@@ -385,6 +388,44 @@ func (c *Checker) Run(ctx context.Context) error {
 		c.ExecTime = time.Since(startTime)
 	}()
 
+	// Try the checksum up to n times if differences are found and we can fix them
+	for attempt := 1; attempt <= c.maxRetries; attempt++ {
+		if attempt > 1 {
+			c.logger.Errorf("checksum failed, retrying %d/%d times", attempt, c.maxRetries)
+			// Reset the chunker to start from the beginning
+			if err := c.chunker.Reset(); err != nil {
+				return fmt.Errorf("failed to reset chunker for retry: %w", err)
+			}
+			// Reset differences found counter
+			c.differencesFound.Store(0)
+		}
+
+		// Run the actual checksum
+		if err := c.runChecksum(ctx); err != nil {
+			// This is really not expected to fail, since if there are differences
+			// it will run the resolver and report the differences in DifferencesFound().
+			return err
+		}
+
+		// If we are here, the checksum passed.
+		// But we don't know if differences were found and chunks were recopied.
+		// We want to know it passed without finding differences.
+		if c.differencesFound.Load() == 0 {
+			c.logger.Info("checksum passed")
+			return nil
+		}
+	}
+
+	// Retries exhausted:
+	// This used to say "checksum failed, this should never happen" but that's not entirely true.
+	// If the user attempts a lossy schema change such as adding a UNIQUE INDEX to non-unique data,
+	// then the checksum will fail. This is entirely expected, and not considered a bug. We should
+	// do our best-case to differentiate that we believe this ALTER statement is lossy, and
+	// customize the returned error based on it.
+	return fmt.Errorf("checksum failed after %d attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit", c.maxRetries)
+}
+
+func (c *Checker) runChecksum(ctx context.Context) error {
 	// initConnPool initialize the connection pool.
 	// This is done under a table lock which is acquired in this func.
 	// It is released as the func is returned.
