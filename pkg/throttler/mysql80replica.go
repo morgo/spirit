@@ -1,7 +1,6 @@
 package throttler
 
 import (
-	"context"
 	"errors"
 	"sync/atomic"
 	"time"
@@ -44,24 +43,19 @@ var _ Throttler = &MySQL80Replica{}
 // Because chunk-sizes are typically 500ms, getting fine-grained metrics is not realistic.
 // We only check the replica every 5 seconds, and typically allow up to 120s
 // of replica lag, which is a lot.
-func (l *MySQL80Replica) Open(ctx context.Context) error {
+func (l *MySQL80Replica) Open() error {
 	if err := l.UpdateLag(); err != nil {
 		return err
 	}
 	go func() {
 		ticker := time.NewTicker(loopInterval)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for range ticker.C {
+			if l.isClosed.Load() {
 				return
-			case <-ticker.C:
-				if l.isClosed.Load() {
-					return
-				}
-				if err := l.UpdateLag(); err != nil {
-					l.logger.Errorf("error getting lag: %s", err.Error())
-				}
+			}
+			if err := l.UpdateLag(); err != nil {
+				l.logger.Errorf("error getting lag: %s", err.Error())
 			}
 		}
 	}()

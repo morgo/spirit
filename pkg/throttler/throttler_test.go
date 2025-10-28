@@ -31,7 +31,7 @@ func TestThrottlerInterface(t *testing.T) {
 	loopInterval = 1 * time.Millisecond
 	throttler, err := NewReplicationThrottler(db, 60*time.Second, logrus.New())
 	assert.NoError(t, err)
-	assert.NoError(t, throttler.Open(t.Context()))
+	assert.NoError(t, throttler.Open())
 
 	time.Sleep(50 * time.Millisecond)        // make sure the throttler loop can calculate.
 	throttler.BlockWait()                    // wait for catch up (there's no activity)
@@ -44,7 +44,7 @@ func TestThrottlerInterface(t *testing.T) {
 
 func TestNoopThrottler(t *testing.T) {
 	throttler := &Noop{}
-	assert.NoError(t, throttler.Open(t.Context()))
+	assert.NoError(t, throttler.Open())
 	throttler.currentLag = 1 * time.Second
 	throttler.lagTolerance = 2 * time.Second
 	assert.False(t, throttler.IsThrottled())

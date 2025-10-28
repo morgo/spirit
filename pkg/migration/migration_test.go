@@ -19,6 +19,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// cleanupSentinelTable drops the sentinel table to ensure tests start with a clean state
+// and registers a cleanup function to drop it after the test completes
+func cleanupSentinelTable(t *testing.T) {
+	t.Helper()
+	// Drop the table before the test starts
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS _spirit_sentinel`)
+	// Register cleanup to drop it after the test completes (even if test fails)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP TABLE IF EXISTS _spirit_sentinel`)
+	})
+}
+
 func TestMain(m *testing.M) {
 	checkpointDumpInterval = 100 * time.Millisecond
 	statusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
@@ -29,7 +41,6 @@ func TestMain(m *testing.M) {
 }
 
 func TestE2ENullAlterEmpty(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1e2e, _t1e2e_new`)
 	table := `CREATE TABLE t1e2e (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -54,9 +65,8 @@ func TestE2ENullAlterEmpty(t *testing.T) {
 }
 
 func TestMissingAlter(t *testing.T) {
-	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1missing, _t1missing_new`)
-	table := `CREATE TABLE t1missing (
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1, _t1_new`)
+	table := `CREATE TABLE t1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
@@ -70,8 +80,8 @@ func TestMissingAlter(t *testing.T) {
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1missing"
+	migration.Threads = 16
+	migration.Table = "t1"
 	migration.Alter = ""
 
 	err = migration.Run()
@@ -80,9 +90,8 @@ func TestMissingAlter(t *testing.T) {
 }
 
 func TestBadDatabaseCredentials(t *testing.T) {
-	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1bad, _t1bad_new`)
-	table := `CREATE TABLE t1bad (
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1, _t1_new`)
+	table := `CREATE TABLE t1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
@@ -96,8 +105,8 @@ func TestBadDatabaseCredentials(t *testing.T) {
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1bad"
+	migration.Threads = 16
+	migration.Table = "t1"
 	migration.Alter = "ENGINE=InnoDB"
 
 	err = migration.Run()
@@ -106,15 +115,14 @@ func TestBadDatabaseCredentials(t *testing.T) {
 }
 
 func TestE2ENullAlter1Row(t *testing.T) {
-	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1nullalter, _t1nullalter_new`)
-	table := `CREATE TABLE t1nullalter (
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1, _t1_new`)
+	table := `CREATE TABLE t1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
 	)`
 	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, `insert into t1nullalter (id,name) values (1, 'aaa')`)
+	testutils.RunSQL(t, `insert into t1 (id,name) values (1, 'aaa')`)
 	migration := &Migration{}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -123,8 +131,8 @@ func TestE2ENullAlter1Row(t *testing.T) {
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1nullalter"
+	migration.Threads = 16
+	migration.Table = "t1"
 	migration.Alter = "ENGINE=InnoDB"
 
 	err = migration.Run()
@@ -132,7 +140,6 @@ func TestE2ENullAlter1Row(t *testing.T) {
 }
 
 func TestE2ENullAlterWithReplicas(t *testing.T) {
-	t.Parallel()
 	replicaDSN := os.Getenv("REPLICA_DSN")
 	if replicaDSN == "" {
 		t.Skip("skipping replica tests because REPLICA_DSN not set")
@@ -152,7 +159,7 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
-	migration.Threads = 2
+	migration.Threads = 16
 	migration.Table = "replicatest"
 	migration.Alter = "ENGINE=InnoDB"
 	migration.ReplicaDSN = replicaDSN
@@ -167,7 +174,6 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 // the rename check applies. It's only when it needs to actually migrate
 // that it won't allow renames.
 func TestRenameInMySQL80(t *testing.T) {
-	t.Parallel()
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer db.Close()
@@ -186,7 +192,7 @@ func TestRenameInMySQL80(t *testing.T) {
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
-	migration.Threads = 2
+	migration.Threads = 16
 	migration.Table = "renamet1"
 	migration.Alter = "CHANGE name nameNew varchar(255) not null"
 
@@ -198,7 +204,6 @@ func TestRenameInMySQL80(t *testing.T) {
 // 1. Fail trying to add a unique index on non-unique data.
 // 2. The error does not blame spirit, but is instead suggestive of user-data error.
 func TestUniqueOnNonUniqueData(t *testing.T) {
-	t.Parallel()
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer db.Close()
@@ -219,16 +224,15 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 	migration.Username = cfg.User
 	migration.Password = cfg.Passwd
 	migration.Database = cfg.DBName
-	migration.Threads = 2
+	migration.Threads = 16
 	migration.Table = "uniquet1"
 	migration.Alter = "ADD UNIQUE (b)"
 	err = migration.Run()
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
+	assert.ErrorContains(t, err, "Check that the ALTER statement is not adding a UNIQUE INDEX to non-unique data")
 }
 
 func TestGeneratedColumns(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1generated, _t1generated_new`)
 	table := `CREATE TABLE t1generated (
 	 id int not null primary key auto_increment,
@@ -253,7 +257,6 @@ func TestGeneratedColumns(t *testing.T) {
 }
 
 func TestStoredGeneratedColumns(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1stored, _t1stored_new`)
 	table := `CREATE TABLE t1stored (
   id bigint NOT NULL AUTO_INCREMENT,
@@ -315,7 +318,6 @@ type testcase struct {
 // It works fine from varbinary(50)->varbinary(100), but not from binary(50)->binary(100),
 // without an intermediate cast.
 func TestBinaryChecksum(t *testing.T) {
-	t.Parallel()
 	tests := []testcase{
 		{"binary(50)", "varbinary(100)"},
 		{"binary(50)", "binary(100)"},
@@ -355,7 +357,6 @@ func TestBinaryChecksum(t *testing.T) {
 // and that the non 7-bit characters that can be represented in latin1 as 1 byte,
 // checksum correctly against their multi-byte utf8mb4 representations
 func TestConvertCharset(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1charset, _t1charset_new`)
 	table := `CREATE TABLE t1charset (
 	 id int not null primary key auto_increment,
@@ -392,7 +393,6 @@ func TestConvertCharset(t *testing.T) {
 }
 
 func TestStmtWorkflow(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1s, _t1s_new`)
 	table := `CREATE TABLE t1s (
 	 id int not null primary key auto_increment,
@@ -429,7 +429,6 @@ func TestStmtWorkflow(t *testing.T) {
 // which feels like a reasonable limitation based on its capabilities.
 // Example TiDB bug: https://github.com/pingcap/tidb/issues/54700
 func TestUnparsableStatements(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1parse, _t1parse_new`)
 	table := `CREATE TABLE t1parse (id int not null primary key auto_increment, b BLOB DEFAULT ('abc'))`
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -500,7 +499,6 @@ func TestUnparsableStatements(t *testing.T) {
 }
 
 func TestCreateIndexIsRewritten(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1createindex, _t1createindex_new`)
 	tbl := `CREATE TABLE t1createindex (
 	 id int not null primary key auto_increment,
@@ -523,7 +521,6 @@ func TestCreateIndexIsRewritten(t *testing.T) {
 }
 
 func TestSchemaNameIncluded(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1schemaname, _t1schemaname_new`)
 	tbl := `CREATE TABLE t1schemaname (
 	 id int not null primary key auto_increment,
@@ -549,7 +546,6 @@ func TestSchemaNameIncluded(t *testing.T) {
 // may not be supported in the version of MySQL we are using:
 // https://github.com/block/spirit/issues/405
 func TestSecondaryEngineAttribute(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1secondary, _t1secondary_new`)
 	tbl := `CREATE /*vt+ QUERY_TIMEOUT_MS=0 */ TABLE t1secondary (
 	id int not null primary key auto_increment,
