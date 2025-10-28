@@ -44,9 +44,9 @@ CREATE TABLE test_table (
 
 -- Insert test data for users table (used by all TLS tests)
 INSERT INTO users (name, email) VALUES 
-    ('Alice Johnson', 'alice@example.com'),
-    ('Bob Smith', 'bob@example.com'),
-    ('Carol Davis', 'carol@example.com');
+    ('user1', 'user1@example.com'),
+    ('user2', 'user2@example.com'),
+    ('user3', 'user3@example.com');
 
 -- Insert test data for test_table (used by replication tests)
 INSERT INTO test_table (name) VALUES 

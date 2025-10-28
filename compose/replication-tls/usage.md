@@ -34,43 +34,54 @@ This comprehensive matrix shows all possible combinations of main DB TLS modes a
 
 ### Complete TLS Behavior Matrix
 
-| Main DB CLI Flags | Main DB Result | Replica DSN | Replica Result | Final State | Use Case |
-|-------------------|----------------|-------------|----------------|-------------|----------|
+This matrix shows how Spirit's TLS inheritance works with **valid MySQL driver parameters** and **actual named TLS configurations**.
+
+#### Key Implementation Details:
+- **Inheritance**: Only when replica DSN has no `tls=` parameter and main TLS ≠ `DISABLED`
+- **Named Configs**: Spirit uses registered TLS configurations (`custom`, `rds`, `required`, `verify_ca`, `verify_identity`)
+- **RDS Detection**: Automatic in `REQUIRED` mode for `*.rds.amazonaws.com` hosts
+
+| Main DB CLI Flags | Main TLS Config | Replica DSN | Replica TLS Config | Final Behavior | Use Case |
+|-------------------|-----------------|-------------|-------------------|----------------|----------|
 | **Default Behavior (PREFERRED)** |
-| *(no --tls-mode)* | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db` | 🟡 Inherits PREFERRED | Main: 🟡 PREFERRED<br>Replica: 🟡 PREFERRED | Standard auto-detection |
-| *(no --tls-mode)* | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🟡 PREFERRED<br>Replica: 🔴 NO TLS | Performance optimization |
-| *(no --tls-mode)* | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db?tls=required` | 🟢 REQUIRED | Main: 🟡 PREFERRED<br>Replica: 🟢 REQUIRED | Explicit replica security |
-| *(no --tls-mode)* | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db?tls=skip-verify` | 🟢 skip-verify | Main: 🟡 PREFERRED<br>Replica: 🟢 skip-verify | Mixed security levels |
-| *(no --tls-mode)* | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db?tls=preferred` | 🟡 PREFERRED | Main: 🟡 PREFERRED<br>Replica: 🟡 PREFERRED | Explicit conditional |
+| *(no --tls-mode)* | `tls=custom` | `user:pass@tcp(replica:3306)/db` | `tls=custom` (inherited) | Both: Conditional TLS | Standard setup |
+| *(no --tls-mode)* | `tls=custom` | `user:pass@tcp(replica:3306)/db?tls=false` | No TLS | Main: Conditional, Replica: Disabled | Performance optimization |
+| *(no --tls-mode)* | `tls=custom` | `user:pass@tcp(replica:3306)/db?tls=true` | Force TLS | Main: Conditional, Replica: Required | Explicit replica security |
+| *(no --tls-mode)* | `tls=custom` | `user:pass@tcp(replica:3306)/db?tls=preferred` | Conditional TLS | Both: Conditional TLS | Explicit conditional |
 | **DISABLED Mode** |
-| `--tls-mode DISABLED` | 🔴 DISABLED | `user:pass@tcp(replica:3306)/db` | 🔴 NO TLS | Main: 🔴 DISABLED<br>Replica: 🔴 NO TLS | No encryption anywhere |
-| `--tls-mode DISABLED` | 🔴 DISABLED | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🔴 DISABLED<br>Replica: 🔴 NO TLS | Explicit no-TLS confirmation |
-| `--tls-mode DISABLED` | 🔴 DISABLED | `user:pass@tcp(replica:3306)/db?tls=preferred` | 🟡 PREFERRED | Main: 🔴 DISABLED<br>Replica: 🟡 PREFERRED | Conditional override |
-| `--tls-mode DISABLED` | 🔴 DISABLED | `user:pass@tcp(replica:3306)/db?tls=required` | 🟢 REQUIRED | Main: 🔴 DISABLED<br>Replica: 🟢 REQUIRED | Security override |
-| **PREFERRED Mode (Explicit)** |
-| `--tls-mode PREFERRED` | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db` | 🟡 Inherits PREFERRED | Main: 🟡 PREFERRED<br>Replica: 🟡 PREFERRED | Explicit conditional mode |
-| `--tls-mode PREFERRED` | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🟡 PREFERRED<br>Replica: 🔴 NO TLS | Conditional/disabled split |
-| `--tls-mode PREFERRED` | 🟡 PREFERRED | `user:pass@tcp(replica:3306)/db?tls=required` | 🟢 REQUIRED | Main: 🟡 PREFERRED<br>Replica: 🟢 REQUIRED | Conditional/required split |
+| `--tls-mode DISABLED` | No TLS | `user:pass@tcp(replica:3306)/db` | No TLS (no inheritance) | Both: Plain text | No encryption anywhere |
+| `--tls-mode DISABLED` | No TLS | `user:pass@tcp(replica:3306)/db?tls=false` | No TLS | Both: Plain text | Explicit confirmation |
+| `--tls-mode DISABLED` | No TLS | `user:pass@tcp(replica:3306)/db?tls=preferred` | Conditional TLS | Main: Plain, Replica: Conditional | Override for replica |
+| `--tls-mode DISABLED` | No TLS | `user:pass@tcp(replica:3306)/db?tls=true` | Force TLS | Main: Plain, Replica: Required | Security override |
 | **REQUIRED Mode** |
-| `--tls-mode REQUIRED` | 🟢 REQUIRED | `user:pass@tcp(replica:3306)/db` | 🟢 Inherits REQUIRED | Main: 🟢 REQUIRED<br>Replica: 🟢 REQUIRED | Uniform encryption |
-| `--tls-mode REQUIRED` | 🟢 REQUIRED | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🟢 REQUIRED<br>Replica: 🔴 NO TLS | Performance exception |
-| `--tls-mode REQUIRED` | 🟢 REQUIRED | `user:pass@tcp(replica:3306)/db?tls=preferred` | � PREFERRED | Main: 🟢 REQUIRED<br>Replica: � PREFERRED | Required/conditional split |
-| `--tls-mode REQUIRED` | 🟢 REQUIRED | `user:pass@tcp(replica:3306)/db?tls=skip-verify` | � skip-verify | Main: 🟢 REQUIRED<br>Replica: � skip-verify | Different verification |
+| `--tls-mode REQUIRED` | `tls=required` | `user:pass@tcp(replica:3306)/db` | `tls=required` (inherited) | Both: Required TLS | Uniform encryption |
+| `--tls-mode REQUIRED` | `tls=required` | `user:pass@tcp(replica:3306)/db?tls=false` | No TLS | Main: Required, Replica: Disabled | Performance exception |
+| `--tls-mode REQUIRED` | `tls=required` | `user:pass@tcp(replica:3306)/db?tls=preferred` | Conditional TLS | Main: Required, Replica: Conditional | Downgrade replica |
 | **VERIFY_CA Mode** |
-| `--tls-mode VERIFY_CA` | 🟢 VERIFY_CA | `user:pass@tcp(replica:3306)/db` | 🟢 Inherits VERIFY_CA | Main: 🟢 VERIFY_CA<br>Replica: 🟢 VERIFY_CA | CA verification |
-| `--tls-mode VERIFY_CA` | 🟢 VERIFY_CA | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🟢 VERIFY_CA<br>Replica: 🔴 NO TLS | Security/performance split |
-| `--tls-mode VERIFY_CA` | 🟢 VERIFY_CA | `user:pass@tcp(replica:3306)/db?tls=preferred` | 🟡 PREFERRED | Main: 🟢 VERIFY_CA<br>Replica: 🟡 PREFERRED | CA/conditional split |
-| `--tls-mode VERIFY_CA` | 🟢 VERIFY_CA | `user:pass@tcp(replica:3306)/db?tls=required` | 🟢 REQUIRED | Main: 🟢 VERIFY_CA<br>Replica: 🟢 REQUIRED | Downgraded verification |
-| `--tls-mode VERIFY_CA` | 🟢 VERIFY_CA | `user:pass@tcp(replica:3306)/db?tls=verify-identity` | 🟢 VERIFY_IDENTITY | Main: 🟢 VERIFY_CA<br>Replica: 🟢 VERIFY_IDENTITY | Upgraded verification |
+| `--tls-mode VERIFY_CA` | `tls=verify_ca` | `user:pass@tcp(replica:3306)/db` | `tls=verify_ca` (inherited) | Both: CA verification | Certificate validation |
+| `--tls-mode VERIFY_CA` | `tls=verify_ca` | `user:pass@tcp(replica:3306)/db?tls=false` | No TLS | Main: CA verify, Replica: Disabled | Security/performance split |
+| `--tls-mode VERIFY_CA` | `tls=verify_ca` | `user:pass@tcp(replica:3306)/db?tls=true` | Force TLS | Main: CA verify, Replica: Basic TLS | Different security levels |
 | **VERIFY_IDENTITY Mode** |
-| `--tls-mode VERIFY_IDENTITY` | 🟢 VERIFY_IDENTITY | `user:pass@tcp(replica:3306)/db` | 🟢 Inherits VERIFY_IDENTITY | Main: 🟢 VERIFY_IDENTITY<br>Replica: 🟢 VERIFY_IDENTITY | Maximum security |
-| `--tls-mode VERIFY_IDENTITY` | 🟢 VERIFY_IDENTITY | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🟢 VERIFY_IDENTITY<br>Replica: 🔴 NO TLS | High security/fast replica |
-| `--tls-mode VERIFY_IDENTITY` | 🟢 VERIFY_IDENTITY | `user:pass@tcp(replica:3306)/db?tls=preferred` | 🟡 PREFERRED | Main: 🟢 VERIFY_IDENTITY<br>Replica: 🟡 PREFERRED | Identity/conditional split |
-| `--tls-mode VERIFY_IDENTITY` | 🟢 VERIFY_IDENTITY | `user:pass@tcp(replica:3306)/db?tls=skip-verify` | 🟢 skip-verify | Main: 🟢 VERIFY_IDENTITY<br>Replica: 🟢 skip-verify | Security/compatibility split |
+| `--tls-mode VERIFY_IDENTITY` | `tls=verify_identity` | `user:pass@tcp(replica:3306)/db` | `tls=verify_identity` (inherited) | Both: Full verification | Maximum security |
+| `--tls-mode VERIFY_IDENTITY` | `tls=verify_identity` | `user:pass@tcp(replica:3306)/db?tls=false` | No TLS | Main: Full verify, Replica: Disabled | High security/fast replica |
+| `--tls-mode VERIFY_IDENTITY` | `tls=verify_identity` | `user:pass@tcp(replica:3306)/db?tls=preferred` | Conditional TLS | Main: Full verify, Replica: Conditional | Flexible replica |
 | **Custom Certificate Scenarios** |
-| `--tls-mode REQUIRED --tls-ca /path/to/ca.pem` | 🟢 REQUIRED+Custom CA | `user:pass@tcp(replica:3306)/db` | 🟢 Inherits Custom CA | Main: 🟢 REQUIRED+Custom<br>Replica: 🟢 REQUIRED+Custom | Corporate PKI |
-| `--tls-mode PREFERRED --tls-ca /path/to/ca.pem` | 🟡 PREFERRED+Custom CA | `user:pass@tcp(replica:3306)/db` | 🟡 Inherits Custom CA | Main: 🟡 PREFERRED+Custom<br>Replica: 🟡 PREFERRED+Custom | Conditional with custom certs |
-| `--tls-mode VERIFY_CA --tls-ca /path/to/ca.pem` | 🟢 VERIFY_CA+Custom CA | `user:pass@tcp(replica:3306)/db?tls=preferred` | � PREFERRED | Main: 🟢 VERIFY_CA+Custom<br>Replica: � PREFERRED | Secure main, conditional replica |
+| `--tls-mode REQUIRED --tls-ca /path/ca.pem` | `tls=required` + custom CA | `user:pass@tcp(replica:3306)/db` | `tls=required` + custom CA | Both: Custom PKI | Corporate certificates |
+| `--tls-mode VERIFY_CA --tls-ca /path/ca.pem` | `tls=verify_ca` + custom CA | `user:pass@tcp(replica:3306)/db?tls=true` | Force TLS | Main: Custom CA verify, Replica: Basic TLS | Mixed certificate validation |
 | **RDS Auto-Detection Scenarios** |
-| *(no --tls-mode)* + RDS host | 🟡 PREFERRED+RDS certs | `user:pass@tcp(replica.rds.amazonaws.com:3306)/db` | 🟡 Inherits RDS certs | Main: 🟡 PREFERRED+RDS<br>Replica: 🟡 PREFERRED+RDS | AWS RDS deployment |
-| `--tls-mode PREFERRED` + RDS host | 🟡 PREFERRED+RDS | `user:pass@tcp(replica:3306)/db?tls=false` | 🔴 NO TLS | Main: 🟡 PREFERRED+RDS<br>Replica: 🔴 NO TLS | RDS main, local replica |
+| `--tls-mode REQUIRED` + RDS host | `tls=rds` (auto-detected) | `user:pass@tcp(replica.rds.amazonaws.com:3306)/db` | `tls=rds` (inherited) | Both: RDS certificates | AWS RDS deployment |
+| `--tls-mode REQUIRED` + RDS host | `tls=rds` (auto-detected) | `user:pass@tcp(local-replica:3306)/db` | `tls=required` (non-RDS) | Main: RDS certs, Replica: Custom certs | Mixed environments |
+
+#### Valid MySQL Driver TLS Parameters:
+- `tls=false` - Disable TLS completely
+- `tls=true` - Enable TLS with basic verification  
+- `tls=preferred` - Use TLS if available, fallback to plain text
+- `tls=skip-verify` - Enable TLS but skip certificate verification
+- `tls=<config-name>` - Use named TLS configuration (Spirit's approach)
+
+#### Spirit's Named TLS Configurations:
+- `custom` - PREFERRED mode configuration
+- `required` - REQUIRED mode configuration  
+- `verify_ca` - VERIFY_CA mode configuration
+- `verify_identity` - VERIFY_IDENTITY mode configuration
+- `rds` - Amazon RDS certificate bundle

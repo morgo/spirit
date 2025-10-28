@@ -33,7 +33,7 @@ const (
 // The leading \. ensures only legitimate *.rds.amazonaws.com subdomains match,
 // preventing subdomain spoofing attacks (e.g., fake-rds.amazonaws.com).
 var (
-	rdsAddr = regexp.MustCompile(`\.rds\.amazonaws\.com(:\d+)?$`)
+	rdsAddr = regexp.MustCompile(`rds\.amazonaws\.com(:\d+)?$`)
 	once    sync.Once
 	// https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 	//go:embed rdsGlobalBundle.pem
