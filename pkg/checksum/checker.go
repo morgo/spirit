@@ -391,7 +391,7 @@ func (c *Checker) Run(ctx context.Context) error {
 	// Try the checksum up to n times if differences are found and we can fix them
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
-			c.logger.Errorf("checksum failed, retrying %d/%d times", attempt-1, c.maxRetries)
+			c.logger.Errorf("checksum failed, retrying %d/%d times", attempt, c.maxRetries)
 			// Reset the chunker to start from the beginning
 			if err := c.chunker.Reset(); err != nil {
 				return fmt.Errorf("failed to reset chunker for retry: %w", err)
