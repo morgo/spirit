@@ -59,6 +59,7 @@ package lint
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 
 	"github.com/block/spirit/pkg/statement"
@@ -315,5 +316,34 @@ func AlterTableTypeToString(tp ast.AlterTableType) string {
 		return "SET TIFLASH REPLICA"
 	default:
 		return fmt.Sprintf("ALTER TABLE (type %d)", tp)
+	}
+}
+
+// CreateTableStatements returns an iterator over all CREATE TABLE statements,
+// combining those from the existing schema state and those included in incoming changes.
+func CreateTableStatements(statements ...any) iter.Seq[*statement.CreateTable] {
+	return func(yield func(*statement.CreateTable) bool) {
+		for _, arg := range statements {
+			switch v := arg.(type) {
+			case []*statement.CreateTable:
+				for _, ct := range v {
+					if !yield(ct) {
+						return
+					}
+				}
+			case []*statement.AbstractStatement:
+				for _, stmt := range v {
+					if stmt.IsCreateTable() {
+						ct, _ := stmt.ParseCreateTable()
+						if !yield(ct) {
+							return
+						}
+					}
+				}
+			default:
+				// If someone passes an unsupported type, just skip it — it's not a CREATE TABLE statement
+				continue
+			}
+		}
 	}
 }

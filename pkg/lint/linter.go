@@ -55,3 +55,14 @@ func ConfigBool(value string, key string) (bool, error) {
 
 	return false, fmt.Errorf("invalid value for %s: %s (expected 'true' or 'false')", key, value)
 }
+
+func GetConfigBool(c map[string]string, key string) bool {
+	if v, ok := c[key]; ok {
+		return strings.EqualFold(v, "true")
+	}
+	return false
+}
+
+func strPtr(s string) *string {
+	return &s
+}
