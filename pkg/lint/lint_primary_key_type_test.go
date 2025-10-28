@@ -17,7 +17,7 @@ func TestPrimaryKeyTypeLinter_BigIntUnsigned(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT UNSIGNED is ideal - no violations
@@ -32,12 +32,12 @@ func TestPrimaryKeyTypeLinter_BigIntSigned(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT without UNSIGNED should be a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "signed BIGINT")
 	assert.Contains(t, violations[0].Message, "UNSIGNED is preferred")
@@ -56,7 +56,7 @@ func TestPrimaryKeyTypeLinter_Binary(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BINARY is acceptable - no violations
@@ -71,7 +71,7 @@ func TestPrimaryKeyTypeLinter_VarBinary(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// VARBINARY is acceptable - no violations
@@ -86,12 +86,12 @@ func TestPrimaryKeyTypeLinter_IntError(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// INT is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "key column \"id\" has type \"int\"")
 	assert.Equal(t, "users", violations[0].Location.Table)
@@ -109,12 +109,12 @@ func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// VARCHAR is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "Primary key column \"id\" has type \"varchar\"")
 	assert.NotNil(t, violations[0].Context)
@@ -131,12 +131,12 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKey(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// user_id is BIGINT UNSIGNED (good), role_id is INT (warning)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Equal(t, "role_id", *violations[0].Location.Column)
 }
@@ -150,7 +150,7 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKeyAllGood(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Both columns are BIGINT UNSIGNED - no violations
@@ -166,12 +166,12 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKeyMixed(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// user_id is signed BIGINT (warning)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Equal(t, "user_id", *violations[0].Location.Column)
 }
@@ -184,11 +184,13 @@ func TestPrimaryKeyTypeLinter_NoPrimaryKey(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// No primary key - no violations from this linter
-	assert.Empty(t, violations)
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_MultipleTables(t *testing.T) {
@@ -206,7 +208,7 @@ func TestPrimaryKeyTypeLinter_MultipleTables(t *testing.T) {
 	ct2, err := statement.ParseCreateTable(sql2)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2}, nil)
 
 	// Only orders table should have a violation
@@ -223,7 +225,7 @@ func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// SMALLINT is not acceptable - should be a warning
@@ -239,7 +241,7 @@ func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// MEDIUMINT is not acceptable - should be a warning
@@ -255,7 +257,7 @@ func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// CHAR is not acceptable - should be an error
@@ -264,7 +266,7 @@ func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_EmptyInput(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint(nil, nil)
 
 	assert.Empty(t, violations)
@@ -272,7 +274,7 @@ func TestPrimaryKeyTypeLinter_EmptyInput(t *testing.T) {
 
 func TestPrimaryKeyTypeLinter_Integration(t *testing.T) {
 	Reset()
-	Register(&PrimaryKeyTypeLinter{})
+	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
 		id INT PRIMARY KEY,
@@ -285,12 +287,12 @@ func TestPrimaryKeyTypeLinter_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key_type", violations[0].Linter.Name())
+	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 }
 
 func TestPrimaryKeyTypeLinter_IntegrationDisabled(t *testing.T) {
 	Reset()
-	Register(&PrimaryKeyTypeLinter{})
+	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
 		id INT PRIMARY KEY,
@@ -301,7 +303,7 @@ func TestPrimaryKeyTypeLinter_IntegrationDisabled(t *testing.T) {
 
 	violations, err := RunLinters([]*statement.CreateTable{ct}, nil, Config{
 		Enabled: map[string]bool{
-			"primary_key_type": false,
+			"primary_key": false,
 		},
 	})
 	require.NoError(t, err)
@@ -310,9 +312,9 @@ func TestPrimaryKeyTypeLinter_IntegrationDisabled(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_Metadata(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 
-	assert.Equal(t, "primary_key_type", linter.Name())
+	assert.Equal(t, "primary_key", linter.Name())
 	assert.NotEmpty(t, linter.Description())
 }
 
@@ -324,7 +326,7 @@ func TestPrimaryKeyTypeLinter_BigIntUnsignedExplicit(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT(20) UNSIGNED is ideal - no violations
@@ -340,7 +342,7 @@ func TestPrimaryKeyTypeLinter_CaseInsensitive(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Should recognize lowercase bigint unsigned
@@ -355,7 +357,7 @@ func TestPrimaryKeyTypeLinter_AutoIncrement(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT UNSIGNED with AUTO_INCREMENT is ideal - no violations
@@ -371,7 +373,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsVarchar(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// VARCHAR for UUID should be an error
@@ -389,7 +391,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsBinary(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BINARY(16) for UUID is correct - no violations
@@ -406,7 +408,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowInt(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bigint,int",
 	})
@@ -426,7 +428,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowIntSigned(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bigint,int",
 	})
@@ -449,7 +451,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowVarchar(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bigint,varchar",
 	})
@@ -469,7 +471,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowChar(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bigint,char",
 	})
@@ -503,7 +505,7 @@ func TestPrimaryKeyTypeLinter_ConfigureMultipleTypes(t *testing.T) {
 	ct3, err := statement.ParseCreateTable(sql3)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bigint,int,varchar",
 	})
@@ -523,7 +525,7 @@ func TestPrimaryKeyTypeLinter_ConfigureWithSpaces(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": " bigint , int , varchar ",
 	})
@@ -543,7 +545,7 @@ func TestPrimaryKeyTypeLinter_ConfigureCaseInsensitive(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "BiGiNt,InT,VaRcHaR",
 	})
@@ -556,7 +558,7 @@ func TestPrimaryKeyTypeLinter_ConfigureCaseInsensitive(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_ConfigureInvalidType(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"allowedTypes": "bigint,invalidtype",
 	})
@@ -568,7 +570,7 @@ func TestPrimaryKeyTypeLinter_ConfigureInvalidType(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_ConfigureUnknownKey(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"unknownKey": "value",
 	})
@@ -580,7 +582,7 @@ func TestPrimaryKeyTypeLinter_ConfigureUnknownKey(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_ConfigureEmptyString(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"allowedTypes": "",
 	})
@@ -606,7 +608,7 @@ func TestPrimaryKeyTypeLinter_ConfigureOnlyBigInt(t *testing.T) {
 	ct2, err := statement.ParseCreateTable(sql2)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bigint",
 	})
@@ -641,7 +643,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllIntTypes(t *testing.T) {
 	ct5, err := statement.ParseCreateTable(sql5)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "tinyint,smallint,mediumint,int,bigint",
 	})
@@ -670,7 +672,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllStringTypes(t *testing.T) {
 	ct4, err := statement.ParseCreateTable(sql4)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "char,varchar,binary,varbinary",
 	})
@@ -703,7 +705,7 @@ func TestPrimaryKeyTypeLinter_ConfigureTemporalTypes(t *testing.T) {
 	ct5, err := statement.ParseCreateTable(sql5)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "date,datetime,timestamp,time,year",
 	})
@@ -732,7 +734,7 @@ func TestPrimaryKeyTypeLinter_ConfigureOtherTypes(t *testing.T) {
 	ct4, err := statement.ParseCreateTable(sql4)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "bit,decimal,enum,set",
 	})
@@ -745,7 +747,7 @@ func TestPrimaryKeyTypeLinter_ConfigureOtherTypes(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_DefaultConfig(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	defaultConfig := linter.DefaultConfig()
 
 	// Should have allowedTypes key
@@ -764,12 +766,12 @@ func TestPrimaryKeyTypeLinter_ConfigureOverridesDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	// First test with default config (INT not allowed)
-	linter1 := &PrimaryKeyTypeLinter{}
+	linter1 := &PrimaryKeyLinter{}
 	violations1 := linter1.Lint([]*statement.CreateTable{ct}, nil)
 	require.Len(t, violations1, 1)
 
 	// Now test with custom config (INT allowed)
-	linter2 := &PrimaryKeyTypeLinter{}
+	linter2 := &PrimaryKeyLinter{}
 	err = linter2.Configure(map[string]string{
 		"allowedTypes": "int",
 	})
@@ -787,7 +789,7 @@ func TestPrimaryKeyTypeLinter_ConfigureCompositePrimaryKey(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "int,smallint",
 	})
@@ -808,7 +810,7 @@ func TestPrimaryKeyTypeLinter_ConfigurePartialComposite(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "int",
 	})
@@ -829,7 +831,7 @@ func TestPrimaryKeyTypeLinter_ConfigureBinaryStillWorks(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "binary,bigint",
 	})
@@ -849,7 +851,7 @@ func TestPrimaryKeyTypeLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "varbinary,bigint",
 	})
@@ -869,7 +871,7 @@ func TestPrimaryKeyTypeLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "int,bigint",
 	})
@@ -885,7 +887,7 @@ func TestPrimaryKeyTypeLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
 
 func TestPrimaryKeyTypeLinter_IntegrationWithConfig(t *testing.T) {
 	Reset()
-	Register(&PrimaryKeyTypeLinter{})
+	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
 		id INT UNSIGNED PRIMARY KEY,
@@ -902,7 +904,7 @@ func TestPrimaryKeyTypeLinter_IntegrationWithConfig(t *testing.T) {
 	// With config allowing INT, should not violate
 	violations2, err := RunLinters([]*statement.CreateTable{ct}, nil, Config{
 		Settings: map[string]map[string]string{
-			"primary_key_type": {
+			"primary_key": {
 				"allowedTypes": "int,bigint",
 			},
 		},
@@ -912,7 +914,7 @@ func TestPrimaryKeyTypeLinter_IntegrationWithConfig(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_ConfigureMultipleCalls(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 
 	// First configuration
 	err := linter.Configure(map[string]string{
@@ -948,7 +950,7 @@ func TestPrimaryKeyTypeLinter_ConfigureSuggestionUpdates(t *testing.T) {
 	ct, err := statement.ParseCreateTable(sql)
 	require.NoError(t, err)
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err = linter.Configure(map[string]string{
 		"allowedTypes": "int,bigint",
 	})
@@ -973,7 +975,7 @@ func TestPrimaryKeyTypeLinter_AllSupportedTypes(t *testing.T) {
 		"TIME", "TIMESTAMP", "YEAR", "DATE", "DATETIME",
 	}
 
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"allowedTypes": strings.Join(allTypes, ","),
 	})
@@ -984,7 +986,7 @@ func TestPrimaryKeyTypeLinter_AllSupportedTypes(t *testing.T) {
 }
 
 func TestPrimaryKeyTypeLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
-	linter := &PrimaryKeyTypeLinter{}
+	linter := &PrimaryKeyLinter{}
 	// Configure with empty string
 	err := linter.Configure(map[string]string{
 		"allowedTypes": "",
