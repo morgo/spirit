@@ -29,9 +29,11 @@ const (
 )
 
 // rdsAddr matches Amazon RDS hostnames with optional :port suffix.
-// It's used to automatically load the Amazon RDS CA and enable TLS
+// It's used to automatically load the Amazon RDS CA and enable TLS.
+// The leading \. ensures only legitimate *.rds.amazonaws.com subdomains match,
+// preventing subdomain spoofing attacks (e.g., fake-rds.amazonaws.com).
 var (
-	rdsAddr = regexp.MustCompile(`rds\.amazonaws\.com(:\d+)?$`)
+	rdsAddr = regexp.MustCompile(`\.rds\.amazonaws\.com(:\d+)?$`)
 	once    sync.Once
 	// https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 	//go:embed rdsGlobalBundle.pem
