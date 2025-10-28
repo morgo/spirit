@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/block/spirit/pkg/check"
@@ -53,11 +52,7 @@ type Runner struct {
 	copyDuration time.Duration // how long the copy took
 
 	checker         *checksum.Checker
-	checkerLock     sync.Mutex
 	checksumChunker table.Chunker // the chunker for checksum
-
-	// used to recover direct to checksum.
-	checksumWatermark string
 
 	ddlNotification chan string
 
@@ -420,7 +415,7 @@ func (r *Runner) checkpointTableName() string {
 	return cpName
 }
 
-func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
+func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 	// Create copier with the prepared chunker
@@ -456,7 +451,17 @@ func (r *Runner) setupCopierAndReplClient(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+
+	r.checker, err = checksum.NewChecker(r.db, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+		Concurrency:     r.migration.Threads,
+		TargetChunkTime: r.migration.TargetChunkTime,
+		DBConfig:        r.dbConfig,
+		Logger:          r.logger,
+		FixDifferences:  true, // we want to repair the differences.
+		MaxRetries:      3,
+	})
+
+	return err
 }
 
 // newMigration is called when resumeFromCheckpoint has failed.
@@ -481,7 +486,7 @@ func (r *Runner) newMigration(ctx context.Context) error {
 		}
 	}
 	// Now that new tables are created, we can initialize the chunker
-	if err := r.initCopierChunker(); err != nil {
+	if err := r.initChunkers(); err != nil {
 		return err
 	}
 	// Finally we open the chunker, since in the resume
@@ -489,10 +494,15 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	if err := r.copyChunker.Open(); err != nil {
 		return err // could not open chunker
 	}
+
+	if err := r.checksumChunker.Open(); err != nil {
+		return err
+	}
+
 	// This is setup the same way in both code-paths,
 	// but we need to do it before we finish resumeFromCheckpoint
 	// because we need to check that the binlog file exists.
-	if err := r.setupCopierAndReplClient(ctx); err != nil {
+	if err := r.setupCopierCheckerAndReplClient(ctx); err != nil {
 		return err
 	}
 
@@ -675,9 +685,7 @@ func (r *Runner) GetProgress() status.Progress {
 	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
 	case status.Checksum:
-		r.checkerLock.Lock()
 		summary = "Checksum Progress=" + r.checker.GetProgress()
-		r.checkerLock.Unlock()
 	}
 	return status.Progress{
 		CurrentState: r.status.Get().String(),
@@ -750,9 +758,9 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// we do not support recovery.
 	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.changes[0].stmt.Schema, r.checkpointTableName())
-	var copierWatermark, binlogName, statement string
+	var copierWatermark, binlogName, statement, checksumWatermark string
 	var id, binlogPos int
-	err := r.db.QueryRow(query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
+	err := r.db.QueryRow(query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
 		return fmt.Errorf("could not read from table '%s', err:%v", r.checkpointTableName(), err)
 	}
@@ -776,7 +784,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	// Initialize the chunker now that we have the new table info
-	if err := r.initCopierChunker(); err != nil {
+	if err := r.initChunkers(); err != nil {
 		return err
 	}
 
@@ -785,10 +793,20 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
+	if checksumWatermark != "" {
+		if err := r.checksumChunker.OpenAtWatermark(checksumWatermark); err != nil {
+			return err
+		}
+	} else {
+		if err = r.checksumChunker.Open(); err != nil {
+			return err
+		}
+	}
+
 	// This is setup the same way in both code-paths,
 	// but we need to do it before we finish resumeFromCheckpoint
 	// because we need to check that the binlog file exists.
-	if err := r.setupCopierAndReplClient(ctx); err != nil {
+	if err := r.setupCopierCheckerAndReplClient(ctx); err != nil {
 		return err
 	}
 
@@ -805,60 +823,37 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		r.logger.Warnf("resuming from checkpoint failed because resuming from the previous binlog position failed. log-file: %s log-pos: %d", binlogName, binlogPos)
 		return err
 	}
-	r.logger.Warnf("resuming from checkpoint. copier-watermark: %s checksum-watermark: %s log-file: %s log-pos: %d", copierWatermark, r.checksumWatermark, binlogName, binlogPos)
+	r.logger.Warnf("resuming from checkpoint. copier-watermark: %s checksum-watermark: %s log-file: %s log-pos: %d", copierWatermark, checksumWatermark, binlogName, binlogPos)
 	r.usedResumeFromCheckpoint = true
 	return nil
 }
 
-// initCopierChunker sets up the chunker(s) for the migration.
+// initChunkers sets up the chunker(s) for the migration.
 // It does not open them yet, and we need to either
 // call Open() or OpenAtWatermark() later.
-func (r *Runner) initCopierChunker() error {
-	chunkers := make([]table.Chunker, 0, len(r.changes))
+func (r *Runner) initChunkers() error {
+	copyChunkers := make([]table.Chunker, 0, len(r.changes))
+	checksumChunkers := make([]table.Chunker, 0, len(r.changes))
 	for _, change := range r.changes {
-		chunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		copyChunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-		chunkers = append(chunkers, chunker)
+		checksumChunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+		copyChunkers = append(copyChunkers, copyChunker)
+		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 	if !r.migration.EnableExperimentalMultiTableSupport {
-		r.copyChunker = chunkers[0]
+		r.copyChunker = copyChunkers[0]
+		r.checksumChunker = checksumChunkers[0]
 	} else {
-		r.copyChunker = table.NewMultiChunker(chunkers...)
+		r.copyChunker = table.NewMultiChunker(copyChunkers...)
+		r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 	}
 	return nil
-}
-
-// initChecksumChunker initializes the checksum chunker.
-// There are two code-paths for now: the single-table and multi-table case.
-// The main requirement for this is that multi-table is currently non resumable.
-// Both call Open/OpenAtWatermark on the chunker.
-func (r *Runner) initChecksumChunker() error {
-	r.checkerLock.Lock()
-	defer r.checkerLock.Unlock()
-
-	chunkers := make([]table.Chunker, 0, len(r.changes))
-	for _, change := range r.changes {
-		// Create chunker first with destination table info, then create copier with it
-		chunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
-		if err != nil {
-			return err
-		}
-		chunkers = append(chunkers, chunker)
-	}
-
-	// Handle the single table case first, it is the only one
-	// which can resume right now.
-	if !r.migration.EnableExperimentalMultiTableSupport {
-		r.checksumChunker = chunkers[0]
-	} else {
-		r.checksumChunker = table.NewMultiChunker(chunkers...)
-	}
-	if r.checksumWatermark != "" {
-		return r.checksumChunker.OpenAtWatermark(r.checksumWatermark)
-	}
-	return r.checksumChunker.Open()
 }
 
 // checksum creates the checksum which opens the read view
@@ -872,52 +867,15 @@ func (r *Runner) checksum(ctx context.Context) error {
 	// - checksum "replaceChunk" DB connections
 	// Handle a case just in the tests not having a dbConfig
 	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
-	var err error
-	for i := range 3 { // try the checksum up to 3 times.
-		if i > 0 {
-			r.checksumWatermark = "" // reset the watermark if we are retrying.
+
+	// Run the checksum with internal retry logic
+	if err := r.checker.Run(ctx); err != nil {
+		if r.addsUniqueIndex() {
+			// Overwrite the error if we think it's because of a unique index addition
+			return errors.New("checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
 		}
-		if err = r.initChecksumChunker(); err != nil {
-			return err // could not init checksum.
-		}
-		// Protect the assignment of r.checker with the lock to prevent races with dumpStatus()
-		r.checkerLock.Lock()
-		r.checker, err = checksum.NewChecker(r.db, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
-			Concurrency:     r.migration.Threads,
-			TargetChunkTime: r.migration.TargetChunkTime,
-			DBConfig:        r.dbConfig,
-			Logger:          r.logger,
-			FixDifferences:  true, // we want to repair the differences.
-		})
-		r.checkerLock.Unlock()
-		if err != nil {
-			return err
-		}
-		if err := r.checker.Run(ctx); err != nil {
-			// This is really not expected to happen. The checksum should always pass.
-			// If it doesn't, we have a resolver.
-			return err
-		}
-		// If we are here, the checksum passed.
-		// But we don't know if differences were found and chunks were recopied.
-		// We want to know it passed without one.
-		if r.checker.DifferencesFound() == 0 {
-			break // success!
-		}
-		if i >= 2 {
-			// This used to say "checksum failed, this should never happen" but that's not entirely true.
-			// If the user attempts a lossy schema change such as adding a UNIQUE INDEX to non-unique data,
-			// then the checksum will fail. This is entirely expected, and not considered a bug. We should
-			// do our best-case to differentiate that we believe this ALTER statement is lossy, and
-			// customize the returned error based on it.
-			if r.addsUniqueIndex() {
-				return errors.New("checksum failed after 3 attempts. Check that the ALTER statement is not adding a UNIQUE INDEX to non-unique data")
-			}
-			return errors.New("checksum failed after 3 attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit")
-		}
-		r.logger.Errorf("checksum failed, retrying %d/%d times", i+1, 3)
+		return err
 	}
-	r.logger.Info("checksum passed")
 
 	// A long checksum extends the binlog deltas
 	// So if we've called this optional checksum, we need one more state
@@ -952,8 +910,6 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	// operation, leaving a race condition.
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum {
-		r.checkerLock.Lock()
-		defer r.checkerLock.Unlock()
 		if r.checker != nil {
 			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
 			if err != nil {
@@ -1059,7 +1015,6 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 				)
 			case status.Checksum:
 				// This could take a while if it's a large table.
-				r.checkerLock.Lock()
 				if r.checker != nil {
 					checkerProgress := r.checker.GetProgress()
 					checkerStartTime := r.checker.StartTime()
@@ -1079,7 +1034,6 @@ func (r *Runner) dumpStatus(ctx context.Context) {
 						r.db.Stats().InUse,
 					)
 				}
-				r.checkerLock.Unlock()
 			default:
 				// For the linter:
 				// Status for all other states

@@ -1525,9 +1525,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
 	assert.NoError(t, err)
-
 	assert.NoError(t, m.setup(t.Context()))
-
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
 	// Since we want to checkpoint after a few chunks.

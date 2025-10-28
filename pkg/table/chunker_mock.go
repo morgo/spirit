@@ -42,6 +42,8 @@ type FeedbackCall struct {
 	Timestamp  time.Time
 }
 
+var _ Chunker = &MockChunker{}
+
 // NewMockChunker creates a new mock chunker for testing
 func NewMockChunker(tableName string, totalRows uint64) *MockChunker {
 	tableInfo := &TableInfo{
@@ -158,6 +160,24 @@ func (m *MockChunker) Close() error {
 	}
 
 	m.isOpen = false
+	return nil
+}
+
+func (m *MockChunker) Reset() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.isOpen {
+		return errors.New("mock chunker is not open")
+	}
+
+	// Reset to initial state
+	m.currentPosition = 0
+	m.isComplete = false
+	m.feedbackCalls = make([]FeedbackCall, 0)
+	m.nextCalls = 0
+	m.progressCalls = 0
+
 	return nil
 }
 
