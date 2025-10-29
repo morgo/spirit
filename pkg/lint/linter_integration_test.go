@@ -381,6 +381,8 @@ func TestZeroDateIntegration(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
+	linter := &ZeroDateLinter{}
+
 	// Test 1: Table without zero date defaults - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS zero_date_test_safe`)
 	testutils.RunSQL(t, `CREATE TABLE zero_date_test_safe (
@@ -389,24 +391,32 @@ func TestZeroDateIntegration(t *testing.T) {
 	)`)
 
 	ct := getCreateTableStatement(t, db, "zero_date_test_safe")
-	linter := &ZeroDateLinter{}
-
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 	assert.Empty(t, violations, "Table without zero date defaults should pass")
 
 	// Test 2: Table with zero date default - should detect
-	// Note: We need to disable strict mode temporarily to create this table
-	testutils.RunSQL(t, `SET SESSION sql_mode = ''`)
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS zero_date_test_unsafe`)
-	testutils.RunSQL(t, `CREATE TABLE zero_date_test_unsafe (
+	// We need to disable strict mode temporarily to create this table
+	_, err = db.ExecContext(t.Context(), `SET SESSION sql_mode = ''`)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(t.Context(), `DROP TABLE IF EXISTS zero_date_test_unsafe`)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE zero_date_test_unsafe (
 		id INT PRIMARY KEY,
 		created_at DATETIME DEFAULT '0000-00-00 00:00:00'
 	)`)
+	require.NoError(t, err)
 
 	ct = getCreateTableStatement(t, db, "zero_date_test_unsafe")
 	violations = linter.Lint([]*statement.CreateTable{ct}, nil)
 	assert.NotEmpty(t, violations, "Table with zero date default should be detected")
 	assert.Contains(t, violations[0].Message, "created_at")
+	assert.Contains(t, violations[0].Message, "zero default value")
+
+	// Restore strict mode
+	_, err = db.ExecContext(t.Context(), `SET SESSION sql_mode = DEFAULT`)
+	require.NoError(t, err)
 
 	// Test 3: ALTER TABLE ADD COLUMN with zero date default - should fail
 	alterStmt := statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN legacy_date DATETIME DEFAULT '0000-00-00 00:00:00'")
@@ -432,18 +442,30 @@ func TestZeroDateIntegration(t *testing.T) {
 	violations = linter.Lint(nil, alterStmt)
 	assert.NotEmpty(t, violations, "Modifying column to have zero date default should be detected")
 	assert.Contains(t, violations[0].Message, "created_at")
+	assert.Contains(t, violations[0].Message, "zero default value")
 
 	// Test 7: ALTER TABLE CHANGE COLUMN with zero date default - should fail
 	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe CHANGE COLUMN created_at created_at DATETIME DEFAULT '0000-00-00 00:00:00'") //nolint:dupword
 	violations = linter.Lint(nil, alterStmt)
 	assert.NotEmpty(t, violations, "Changing column to have zero date default should be detected")
 	assert.Contains(t, violations[0].Message, "created_at")
+	assert.Contains(t, violations[0].Message, "zero default value")
 
-	// Restore strict mode
-	testutils.RunSQL(t, `SET SESSION sql_mode = DEFAULT`)
+	// Test 8: ALTER TABLE ADD COLUMN with zero DATE default (not DATETIME) - should fail
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN zero_date DATE DEFAULT '0000-00-00'")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Adding column with zero DATE default should be detected")
+	assert.Contains(t, violations[0].Message, "zero_date")
+	assert.Contains(t, violations[0].Message, "zero default value")
+
+	// Test 9: ALTER TABLE ADD COLUMN nullable with NULL default - should pass
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN nullable_date DATETIME NULL DEFAULT NULL")
+	violations = linter.Lint(nil, alterStmt)
+	assert.Empty(t, violations, "Adding nullable column with NULL default should pass")
 
 	// Cleanup
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS zero_date_test_safe, zero_date_test_unsafe`)
+	_, err = db.ExecContext(t.Context(), `DROP TABLE IF EXISTS zero_date_test_safe, zero_date_test_unsafe`)
+	require.NoError(t, err)
 }
 
 // TestAutoIncCapacityIntegration tests the AutoIncCapacityLinter
