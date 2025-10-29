@@ -55,6 +55,32 @@ func TestAllowCharsetIntegration(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "charset_test_disallowed")
 	assert.Contains(t, violations[0].Message, "latin1")
 
+	// Test 3: ALTER TABLE ADD COLUMN with disallowed charset - should fail
+	alterStmt := statement.MustNew("ALTER TABLE charset_test_allowed ADD COLUMN legacy VARCHAR(100) CHARACTER SET latin1")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Adding column with latin1 charset should not be allowed")
+	assert.Contains(t, violations[0].Message, "latin1")
+	assert.Contains(t, violations[0].Message, "disallowed")
+
+	// Test 4: ALTER TABLE ADD COLUMN with allowed charset - should pass
+	alterStmt = statement.MustNew("ALTER TABLE charset_test_allowed ADD COLUMN new_col VARCHAR(100) CHARACTER SET utf8mb4")
+	violations = linter.Lint(nil, alterStmt)
+	assert.Empty(t, violations, "Adding column with utf8mb4 charset should be allowed")
+
+	// Test 5: ALTER TABLE MODIFY COLUMN with disallowed charset - should fail
+	alterStmt = statement.MustNew("ALTER TABLE charset_test_allowed MODIFY COLUMN name VARCHAR(100) CHARACTER SET latin1")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Modifying column to latin1 charset should not be allowed")
+	assert.Contains(t, violations[0].Message, "latin1")
+	assert.Contains(t, violations[0].Message, "disallowed")
+
+	// Test 6: ALTER TABLE CHANGE COLUMN with disallowed charset - should fail
+	alterStmt = statement.MustNew("ALTER TABLE charset_test_allowed CHANGE COLUMN name name VARCHAR(100) CHARACTER SET latin1")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Changing column to latin1 charset should not be allowed")
+	assert.Contains(t, violations[0].Message, "latin1")
+	assert.Contains(t, violations[0].Message, "disallowed")
+
 	// Cleanup
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS charset_test_allowed, charset_test_disallowed`)
 }
@@ -88,6 +114,18 @@ func TestAllowEngineIntegration(t *testing.T) {
 	assert.NotEmpty(t, violations, "MyISAM engine should not be allowed")
 	assert.Contains(t, violations[0].Message, "engine_test_disallowed")
 	assert.Contains(t, violations[0].Message, "MyISAM")
+
+	// Test 3: ALTER TABLE ENGINE with disallowed engine - should fail
+	alterStmt := statement.MustNew("ALTER TABLE engine_test_allowed ENGINE=MyISAM")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Altering to MyISAM engine should not be allowed")
+	assert.Contains(t, violations[0].Message, "engine_test_allowed")
+	assert.Contains(t, violations[0].Message, "MyISAM")
+
+	// Test 4: ALTER TABLE ENGINE with allowed engine - should pass
+	alterStmt = statement.MustNew("ALTER TABLE engine_test_allowed ENGINE=InnoDB")
+	violations = linter.Lint(nil, alterStmt)
+	assert.Empty(t, violations, "Altering to InnoDB engine should be allowed")
 
 	// Cleanup
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS engine_test_allowed, engine_test_disallowed`)
@@ -366,6 +404,37 @@ func TestZeroDateIntegration(t *testing.T) {
 	ct = getCreateTableStatement(t, db, "zero_date_test_unsafe")
 	violations = linter.Lint([]*statement.CreateTable{ct}, nil)
 	assert.NotEmpty(t, violations, "Table with zero date default should be detected")
+	assert.Contains(t, violations[0].Message, "created_at")
+
+	// Test 3: ALTER TABLE ADD COLUMN with zero date default - should fail
+	alterStmt := statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN legacy_date DATETIME DEFAULT '0000-00-00 00:00:00'")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Adding column with zero date default should be detected")
+	assert.Contains(t, violations[0].Message, "legacy_date")
+	assert.Contains(t, violations[0].Message, "zero default value")
+
+	// Test 4: ALTER TABLE ADD COLUMN with valid default - should pass
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN valid_date DATETIME DEFAULT CURRENT_TIMESTAMP")
+	violations = linter.Lint(nil, alterStmt)
+	assert.Empty(t, violations, "Adding column with valid default should pass")
+
+	// Test 5: ALTER TABLE ADD COLUMN NOT NULL without default (zero date will be assigned) - should warn
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN no_default_date DATETIME NOT NULL")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Adding NOT NULL date column without default should warn")
+	assert.Contains(t, violations[0].Message, "no_default_date")
+	assert.Contains(t, violations[0].Message, "not nullable and has no default")
+
+	// Test 6: ALTER TABLE MODIFY COLUMN with zero date default - should fail
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe MODIFY COLUMN created_at DATETIME DEFAULT '0000-00-00 00:00:00'")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Modifying column to have zero date default should be detected")
+	assert.Contains(t, violations[0].Message, "created_at")
+
+	// Test 7: ALTER TABLE CHANGE COLUMN with zero date default - should fail
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe CHANGE COLUMN created_at created_at DATETIME DEFAULT '0000-00-00 00:00:00'")
+	violations = linter.Lint(nil, alterStmt)
+	assert.NotEmpty(t, violations, "Changing column to have zero date default should be detected")
 	assert.Contains(t, violations[0].Message, "created_at")
 
 	// Restore strict mode

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
@@ -78,6 +79,28 @@ func (l *AllowEngine) Lint(existingTables []*statement.CreateTable, changes []*s
 				Message:    fmt.Sprintf("Table %q uses an unsupported engine %q", ct.TableName, engineName),
 				Suggestion: strPtr("Use a supported storage engine: " + strings.Join(slices.Sorted(maps.Keys(l.allowedEngines)), ", ")),
 			})
+		}
+	}
+	for _, change := range changes {
+		alter, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		for _, spec := range alter.Specs {
+			for _, option := range spec.Options {
+				if option.Tp != ast.TableOptionEngine {
+					continue
+				}
+				engineName := option.StrValue
+				if _, ok := l.allowedEngines[strings.ToLower(engineName)]; !ok {
+					violations = append(violations, Violation{
+						Linter:     l,
+						Location:   &Location{Table: alter.Table.Name.String()},
+						Message:    fmt.Sprintf("Table %q uses an unsupported engine %q", alter.Table.Name, engineName),
+						Suggestion: strPtr("Use a supported storage engine: " + strings.Join(slices.Sorted(maps.Keys(l.allowedEngines)), ", ")),
+					})
+				}
+			}
 		}
 	}
 	return violations
