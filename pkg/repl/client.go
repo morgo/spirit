@@ -42,6 +42,14 @@ const (
 	DefaultFlushInterval = 30 * time.Second
 	// DefaultTimeout is how long BlockWait is supposed to wait before returning errors.
 	DefaultTimeout = 30 * time.Second
+	// Maximum number of consecutive errors before recreating the streamer
+	maxConsecutiveErrors = 5
+	// Initial backoff duration for streamer recreation
+	initialBackoffDuration = time.Second
+	// Maximum backoff duration
+	maxBackoffDuration = time.Minute
+	// Backoff multiplier
+	backoffMultiplier = 2
 )
 
 type Client struct {
@@ -50,6 +58,7 @@ type Client struct {
 	username string
 	password string
 
+	cfg      replication.BinlogSyncerConfig
 	syncer   *replication.BinlogSyncer
 	streamer *replication.BinlogStreamer
 
@@ -282,7 +291,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to parse port: %w", err)
 	}
-	cfg := replication.BinlogSyncerConfig{
+	c.cfg = replication.BinlogSyncerConfig{
 		ServerID: c.serverID,
 		Flavor:   "mysql",
 		Host:     host,
@@ -292,11 +301,11 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		Logger:   NewLogWrapper(c.logger),
 	}
 	if dbconn.IsRDSHost(c.host) {
-		cfg.TLSConfig = dbconn.NewTLSConfig()
+		c.cfg.TLSConfig = dbconn.NewTLSConfig()
 	}
-	if cfg.TLSConfig != nil {
+	if c.cfg.TLSConfig != nil {
 		// Set the ServerName so that the TLS config can verify the server's certificate.
-		cfg.TLSConfig.ServerName = host
+		c.cfg.TLSConfig.ServerName = host
 	}
 	if dbconn.IsMySQL84(c.db) { // handle MySQL 8.4
 		c.isMySQL84 = true
@@ -313,7 +322,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	} else if c.binlogPositionIsImpossible() {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
-	c.syncer = replication.NewBinlogSyncer(cfg)
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
@@ -325,6 +334,31 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	return nil
 }
 
+// recreateStreamer recreates the binlog streamer from the current buffered position
+func (c *Client) recreateStreamer() error {
+	c.logger.Warnf("Recreating binlog streamer from position: %v", c.getBufferedPos())
+
+	if c.syncer != nil {
+		c.syncer.Close()
+	}
+
+	// Create new syncer and streamer
+	// Start from the current buffered position
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
+	startPos := c.getBufferedPos()
+	if startPos.Name == "" {
+		// If no buffered position, use flushed position
+		startPos = c.flushedPos
+	}
+	var err error
+	c.streamer, err = c.syncer.StartSync(startPos)
+	if err != nil {
+		return fmt.Errorf("failed to start binlog streamer: %w", err)
+	}
+	c.logger.Infof("Successfully recreated binlog streamer from position: %v", startPos)
+	return nil
+}
+
 // readStream continuously reads the binlog stream. It is usually called in a go routine.
 // It will read the stream until the context is closed
 // *and* it continues on any errors
@@ -332,6 +366,11 @@ func (c *Client) readStream(ctx context.Context) {
 	c.Lock()
 	currentLogName := c.flushedPos.Name
 	c.Unlock()
+
+	consecutiveErrors := 0
+	backoffDuration := initialBackoffDuration
+	lastErrorTime := time.Time{}
+
 	for {
 		// Check if context is done before processing
 		select {
@@ -344,24 +383,73 @@ func (c *Client) readStream(ctx context.Context) {
 		ev, err := c.streamer.GetEvent(ctx)
 		if err != nil {
 			// We only stop processing for context cancelled errors.
-			// For other errors we just continue, because we want the readStream
-			// to continually retry.
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil || c.isClosed.Load() {
 				return // stop processing
 			}
-			c.logger.Errorf("error reading binlog stream: %v, current position: %v",
-				err, c.getBufferedPos())
+
+			consecutiveErrors++
+			currentTime := time.Now()
+
+			c.logger.Errorf("error reading binlog stream (consecutive errors: %d): %v, current position: %v",
+				consecutiveErrors, err, c.getBufferedPos())
+
+			// If we've had too many consecutive errors, try to recreate the streamer
+			if consecutiveErrors >= maxConsecutiveErrors {
+				c.logger.Warnf("Too many consecutive errors (%d), attempting to recreate streamer", consecutiveErrors)
+
+				// Apply exponential backoff
+				if currentTime.Sub(lastErrorTime) < backoffDuration {
+					c.logger.Infof("Backing off for %v before recreating streamer", backoffDuration)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoffDuration):
+					}
+				}
+
+				// Try to recreate the streamer
+				if recreateErr := c.recreateStreamer(); recreateErr != nil {
+					c.logger.Errorf("Failed to recreate streamer: %v", recreateErr)
+
+					// Increase backoff duration for next attempt
+					backoffDuration *= backoffMultiplier
+					if backoffDuration > maxBackoffDuration {
+						backoffDuration = maxBackoffDuration
+					}
+				} else {
+					// Successfully recreated, reset counters
+					consecutiveErrors = 0
+					backoffDuration = initialBackoffDuration
+				}
+				lastErrorTime = currentTime
+			}
+
+			// Short sleep before retrying
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 			continue
 		}
+
+		// Reset error counters on successful read
+		if consecutiveErrors > 0 {
+			c.logger.Infof("Binlog stream recovered after %d consecutive errors", consecutiveErrors)
+			consecutiveErrors = 0
+			backoffDuration = initialBackoffDuration
+		}
+
 		if ev == nil {
 			continue
 		}
 		// Handle the event.
 		switch ev.Event.(type) {
 		case *replication.RotateEvent:
-			// Rotate event, update the flushed position.
+			// Rotate event, update the current log name.
 			rotateEvent := ev.Event.(*replication.RotateEvent)
 			currentLogName = string(rotateEvent.NextLogName)
+			c.logger.Debugf("Binlog rotated to: %s", currentLogName)
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
@@ -391,7 +479,8 @@ func (c *Client) readStream(ctx context.Context) {
 				c.processDDLNotification(table)
 			}
 		default:
-			// Unsure how to handle this event.
+			// Log unknown event types for debugging
+			c.logger.Debugf("Received unknown event type: %T", ev.Event)
 		}
 		// Update the buffered position
 		// under a mutex.

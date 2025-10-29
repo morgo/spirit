@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/block/spirit/pkg/checksum"
@@ -147,7 +148,16 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	for _, src := range r.sourceTables {
 		dest := table.NewTableInfo(r.target, r.targetConfig.DBName, src.TableName)
 		if err := dest.SetInfo(ctx); err != nil {
+			// An error here could indicate that a table in the destination is missing,
+			// i.e. the move cannot be resumed because a new table was created.
 			return err
+		}
+
+		// We don't need to compare the complete structure, since incompatible datatype
+		// changes will be detected from the checksum. We just need to make sure
+		// when the checksum intersects columns they are the same.
+		if !slices.Equal(src.Columns, dest.Columns) {
+			return fmt.Errorf("source and target table structures do not match for table '%s'", src.TableName)
 		}
 		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
 		if err != nil {
@@ -242,7 +252,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		// to the target database. If it fails, unlike schema changes,
 		// the move fails because we don't want to overwrite existing data.
 		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return errors.New("target database is not empty and could not resume from checkpoint")
+			return fmt.Errorf("target database is not empty and could not resume from checkpoint: %v", err)
 		}
 		r.logger.Infof("Resumed move from existing checkpoint")
 	} else {
@@ -640,6 +650,10 @@ func (r *Runner) dumpCheckpointContinuously(ctx context.Context) {
 					// This is non fatal, we can try again later.
 					r.logger.Warnf("could not write checkpoint yet, watermark not ready")
 					continue
+				}
+				// If the error is context canceled, that's fine too.
+				if errors.Is(err, context.Canceled) {
+					return
 				}
 				// Other errors such as not being able to write to the checkpoint
 				// table are considered fatal. This is because if we can't record
