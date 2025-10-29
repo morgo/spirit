@@ -547,3 +547,493 @@ func TestRunLinters_UserConfigOverridesDefault(t *testing.T) {
 	// User set raiseError=true, so severity should be Error
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
+
+// LintOnlyChanges tests
+
+func TestRunLinters_LintOnlyChanges_False(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on products table",
+			Location: &Location{Table: "products"},
+		},
+	}
+	Register(linter)
+
+	// Parse changes that only affect users table
+	sql := "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
+	changes, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// With LintOnlyChanges=false, all violations should be returned
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: false,
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 3)
+	assert.Equal(t, "Violation on users table", violations[0].Message)
+	assert.Equal(t, "Violation on orders table", violations[1].Message)
+	assert.Equal(t, "Violation on products table", violations[2].Message)
+}
+
+func TestRunLinters_LintOnlyChanges_True(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on products table",
+			Location: &Location{Table: "products"},
+		},
+	}
+	Register(linter)
+
+	// Parse changes that only affect users table
+	sql := "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
+	changes, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// With LintOnlyChanges=true, only violations for changed tables should be returned
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: true,
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "Violation on users table", violations[0].Message)
+	assert.Equal(t, "users", violations[0].Location.Table)
+}
+
+func TestRunLinters_LintOnlyChanges_MultipleChangedTables(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on products table",
+			Location: &Location{Table: "products"},
+		},
+	}
+	Register(linter)
+
+	// Parse changes that affect both users and orders tables
+	sql := `
+		ALTER TABLE users ADD COLUMN email VARCHAR(255);
+		ALTER TABLE orders ADD COLUMN total DECIMAL(10,2);
+	`
+	changes, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// With LintOnlyChanges=true, violations for users and orders should be returned
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: true,
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 2)
+
+	// Check that we have violations for the right tables
+	tableNames := make(map[string]bool)
+	for _, v := range violations {
+		tableNames[v.Location.Table] = true
+	}
+	assert.True(t, tableNames["users"])
+	assert.True(t, tableNames["orders"])
+	assert.False(t, tableNames["products"])
+}
+
+func TestRunLinters_LintOnlyChanges_NoChanges(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+	}
+	Register(linter)
+
+	// No changes provided
+	violations, err := RunLinters(nil, nil, Config{
+		LintOnlyChanges: true,
+	})
+	require.NoError(t, err)
+
+	// With no changes, no violations should be returned
+	assert.Empty(t, violations)
+}
+
+func TestRunLinters_LintOnlyChanges_ViolationWithoutLocation(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation without location",
+			Location: nil, // No location
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+	}
+	Register(linter)
+
+	sql := "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
+	changes, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// With LintOnlyChanges=true, violations without location should be filtered out
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: true,
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "Violation on users table", violations[0].Message)
+}
+
+// IgnoreTables tests
+
+func TestRunLinters_IgnoreTables_Empty(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+	}
+	Register(linter)
+
+	// With empty IgnoreTables, all violations should be returned
+	violations, err := RunLinters(nil, nil, Config{
+		IgnoreTables: map[string]bool{},
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 2)
+}
+
+func TestRunLinters_IgnoreTables_SingleTable(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+	}
+	Register(linter)
+
+	// Ignore violations on users table
+	violations, err := RunLinters(nil, nil, Config{
+		IgnoreTables: map[string]bool{
+			"users": true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "Violation on orders table", violations[0].Message)
+	assert.Equal(t, "orders", violations[0].Location.Table)
+}
+
+func TestRunLinters_IgnoreTables_MultipleTables(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on products table",
+			Location: &Location{Table: "products"},
+		},
+	}
+	Register(linter)
+
+	// Ignore violations on users and products tables
+	violations, err := RunLinters(nil, nil, Config{
+		IgnoreTables: map[string]bool{
+			"users":    true,
+			"products": true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "Violation on orders table", violations[0].Message)
+	assert.Equal(t, "orders", violations[0].Location.Table)
+}
+
+func TestRunLinters_IgnoreTables_AllTables(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+	}
+	Register(linter)
+
+	// Ignore all tables
+	violations, err := RunLinters(nil, nil, Config{
+		IgnoreTables: map[string]bool{
+			"users":  true,
+			"orders": true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, violations)
+}
+
+func TestRunLinters_IgnoreTables_ViolationWithoutLocation(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation without location",
+			Location: nil, // No location
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+	}
+	Register(linter)
+
+	// Ignore users table
+	violations, err := RunLinters(nil, nil, Config{
+		IgnoreTables: map[string]bool{
+			"users": true,
+		},
+	})
+	require.NoError(t, err)
+
+	// Violations without location should be kept
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "Violation without location", violations[0].Message)
+	assert.Nil(t, violations[0].Location)
+}
+
+func TestRunLinters_IgnoreTables_FalseValue(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+	}
+	Register(linter)
+
+	// Set users to false (should not be ignored)
+	violations, err := RunLinters(nil, nil, Config{
+		IgnoreTables: map[string]bool{
+			"users": false,
+		},
+	})
+	require.NoError(t, err)
+
+	// Both violations should be returned since users is not truly ignored
+	assert.Len(t, violations, 2)
+}
+
+// Combined tests for LintOnlyChanges and IgnoreTables
+
+func TestRunLinters_LintOnlyChanges_And_IgnoreTables(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on products table",
+			Location: &Location{Table: "products"},
+		},
+	}
+	Register(linter)
+
+	// Changes affect users and orders
+	sql := `
+		ALTER TABLE users ADD COLUMN email VARCHAR(255);
+		ALTER TABLE orders ADD COLUMN total DECIMAL(10,2);
+	`
+	changes, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// LintOnlyChanges=true (filter to users and orders)
+	// IgnoreTables ignores orders
+	// Result: only users violation should remain
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: true,
+		IgnoreTables: map[string]bool{
+			"orders": true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "Violation on users table", violations[0].Message)
+	assert.Equal(t, "users", violations[0].Location.Table)
+}
+
+func TestRunLinters_LintOnlyChanges_And_IgnoreTables_NoResults(t *testing.T) {
+	Reset()
+
+	linter := &mockLinter{name: "test_linter"}
+	linter.violations = []Violation{
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on users table",
+			Location: &Location{Table: "users"},
+		},
+		{
+			Linter:   linter,
+			Severity: SeverityWarning,
+			Message:  "Violation on orders table",
+			Location: &Location{Table: "orders"},
+		},
+	}
+	Register(linter)
+
+	// Changes affect only users
+	sql := "ALTER TABLE users ADD COLUMN email VARCHAR(255)"
+	changes, err := statement.New(sql)
+	require.NoError(t, err)
+
+	// LintOnlyChanges=true (filter to users only)
+	// IgnoreTables ignores users
+	// Result: no violations should remain
+	violations, err := RunLinters(nil, changes, Config{
+		LintOnlyChanges: true,
+		IgnoreTables: map[string]bool{
+			"users": true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, violations)
+}
