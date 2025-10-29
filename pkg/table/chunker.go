@@ -34,10 +34,11 @@ type Chunker interface { //nolint: interfacebloat
 	Close() error
 	Next() (*Chunk, error)
 	Feedback(chunk *Chunk, duration time.Duration, actualRows uint64)
-	KeyAboveHighWatermark(key any) bool
+	KeyAboveHighWatermark(key0 any) bool
+	KeyBelowLowWatermark(key0 any) bool
 	Progress() (rowsRead uint64, chunksCopied uint64, totalRowsExpected uint64)
 	OpenAtWatermark(watermark string) error
-	GetLowWatermark() (string, error)
+	GetLowWatermark() (watermark string, err error)
 	// Reset resets the chunker to start from the beginning, as if Open() was just called.
 	// This is used when retrying operations like checksums.
 	Reset() error
