@@ -79,6 +79,9 @@ type Config struct {
 	// LintOnlyChanges indicates whether to lint only the changes
 	// or all of the existing schema plus the changes.
 	LintOnlyChanges bool
+
+	// IgnoreTables can be used to discard violations for specific tables
+	IgnoreTables map[string]bool
 }
 
 // RunLinters runs all enabled linters and returns any violations found.
@@ -160,12 +163,25 @@ func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.Ab
 			return nil, err
 		}
 		for _, v := range violations {
-			if _, ok := tables[v.Location.Table]; ok {
+			if v.Location != nil {
+				if _, ok := tables[v.Location.Table]; ok {
+					filtered = append(filtered, v)
+				}
+			}
+		}
+		violations = filtered
+	}
+
+	if len(config.IgnoreTables) > 0 {
+		var filtered []Violation
+		for _, v := range violations {
+			if v.Location == nil || !config.IgnoreTables[v.Location.Table] {
 				filtered = append(filtered, v)
 			}
 		}
 		violations = filtered
 	}
+
 	return violations, errors.Join(errs...)
 }
 
