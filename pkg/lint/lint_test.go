@@ -164,7 +164,7 @@ func TestRunLinters_SingleLinter(t *testing.T) {
 	expectedViolations := []Violation{
 		{
 			Linter:   linter,
-			Severity: SeverityError,
+			Severity: SeverityWarning,
 			Message:  "Test error",
 		},
 	}
@@ -176,7 +176,7 @@ func TestRunLinters_SingleLinter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, violations, 1)
 	assert.Equal(t, "test_linter", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 	assert.Equal(t, "Test error", violations[0].Message)
 }
 
@@ -187,7 +187,7 @@ func TestRunLinters_MultipleLinters(t *testing.T) {
 		name: "linter1",
 	}
 	linter1.violations = []Violation{
-		{Linter: linter1, Severity: SeverityError, Message: "Error 1"},
+		{Linter: linter1, Severity: SeverityWarning, Message: "Error 1"},
 	}
 
 	linter2 := &mockLinter{
@@ -195,7 +195,7 @@ func TestRunLinters_MultipleLinters(t *testing.T) {
 	}
 	linter2.violations = []Violation{
 		{Linter: linter2, Severity: SeverityWarning, Message: "Warning 1"},
-		{Linter: linter2, Severity: SeverityInfo, Message: "Info 1"},
+		{Linter: linter2, Severity: SeverityWarning, Message: "Info 1"},
 	}
 
 	Register(linter1)
@@ -213,7 +213,7 @@ func TestRunLinters_WithConfig_Disabled(t *testing.T) {
 		name: "test_linter",
 	}
 	linter.violations = []Violation{
-		{Linter: linter, Severity: SeverityError, Message: "Should not see this"},
+		{Linter: linter, Severity: SeverityWarning, Message: "Should not see this"},
 	}
 	Register(linter)
 
@@ -235,7 +235,7 @@ func TestRunLinters_WithConfig_Enabled(t *testing.T) {
 		name: "test_linter",
 	}
 	linter.violations = []Violation{
-		{Linter: linter, Severity: SeverityError, Message: "Should see this"},
+		{Linter: linter, Severity: SeverityWarning, Message: "Should see this"},
 	}
 
 	// Disable by default
@@ -260,7 +260,7 @@ func TestRunLinters_ConfigurableLinter(t *testing.T) {
 	linter := &mockConfigurableLinter{}
 	linter.name = "configurable_linter"
 	linter.violations = []Violation{
-		{Linter: linter, Severity: SeverityError, Message: "Test"},
+		{Linter: linter, Severity: SeverityWarning, Message: "Test"},
 	}
 	Register(linter)
 
@@ -288,7 +288,7 @@ func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
 	linter := &mockConfigurableLinter{}
 	linter.name = "configurable_linter"
 	linter.violations = []Violation{
-		{Linter: linter, Severity: SeverityError, Message: "Test"},
+		{Linter: linter, Severity: SeverityWarning, Message: "Test"},
 	}
 	Register(linter)
 
@@ -305,20 +305,23 @@ func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
 func TestHasErrors(t *testing.T) {
 	violations := []Violation{
 		{Severity: SeverityWarning},
-		{Severity: SeverityInfo},
+		{Severity: SeverityWarning},
 	}
+	// All linters now use SeverityWarning, so HasErrors should return false
 	assert.False(t, HasErrors(violations))
 
-	violations = append(violations, Violation{Severity: SeverityError})
-	assert.True(t, HasErrors(violations))
+	// Even adding more warnings shouldn't make HasErrors return true
+	violations = append(violations, Violation{Severity: SeverityWarning})
+	assert.False(t, HasErrors(violations))
 }
 
 func TestHasWarnings(t *testing.T) {
 	violations := []Violation{
-		{Severity: SeverityError},
-		{Severity: SeverityInfo},
+		{Severity: SeverityWarning},
+		{Severity: SeverityWarning},
 	}
-	assert.False(t, HasWarnings(violations))
+	// All violations are warnings, so HasWarnings should return true
+	assert.True(t, HasWarnings(violations))
 
 	violations = append(violations, Violation{Severity: SeverityWarning})
 	assert.True(t, HasWarnings(violations))
@@ -326,24 +329,25 @@ func TestHasWarnings(t *testing.T) {
 
 func TestFilterBySeverity(t *testing.T) {
 	violations := []Violation{
-		{Severity: SeverityError, Message: "Error 1"},
 		{Severity: SeverityWarning, Message: "Warning 1"},
-		{Severity: SeverityError, Message: "Error 2"},
-		{Severity: SeverityInfo, Message: "Info 1"},
+		{Severity: SeverityWarning, Message: "Warning 2"},
+		{Severity: SeverityWarning, Message: "Warning 3"},
+		{Severity: SeverityWarning, Message: "Warning 4"},
 	}
 
-	errors := FilterBySeverity(violations, SeverityError)
-	assert.Len(t, errors, 2)
-	assert.Equal(t, "Error 1", errors[0].Message)
-	assert.Equal(t, "Error 2", errors[1].Message)
-
+	// All violations are warnings now
 	warnings := FilterBySeverity(violations, SeverityWarning)
-	assert.Len(t, warnings, 1)
+	assert.Len(t, warnings, 4)
 	assert.Equal(t, "Warning 1", warnings[0].Message)
+	assert.Equal(t, "Warning 2", warnings[1].Message)
 
+	// No errors exist
+	errors := FilterBySeverity(violations, SeverityError)
+	assert.Len(t, errors, 0)
+
+	// No info exist
 	infos := FilterBySeverity(violations, SeverityInfo)
-	assert.Len(t, infos, 1)
-	assert.Equal(t, "Info 1", infos[0].Message)
+	assert.Len(t, infos, 0)
 }
 
 func TestFilterByLinter(t *testing.T) {
@@ -402,7 +406,7 @@ func TestViolationWithLocation(t *testing.T) {
 
 	violation := Violation{
 		Linter:   linter,
-		Severity: SeverityError,
+		Severity: SeverityWarning,
 		Message:  "Test message",
 		Location: &Location{
 			Table:      "test_table",
@@ -438,7 +442,7 @@ func TestViolationWithContext(t *testing.T) {
 
 	violation := Violation{
 		Linter:   linter,
-		Severity: SeverityInfo,
+		Severity: SeverityWarning,
 		Message:  "Test message",
 		Context: map[string]any{
 			"key1": "value1",
@@ -541,5 +545,5 @@ func TestRunLinters_UserConfigOverridesDefault(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	// User set raiseError=true, so severity should be Error
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }

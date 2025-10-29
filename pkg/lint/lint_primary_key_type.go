@@ -87,11 +87,12 @@ func (l *PrimaryKeyLinter) Lint(existingTables []*statement.CreateTable, changes
 		pkColumns := l.getPrimaryKeyColumnsFromIndexes(ct)
 		if len(pkColumns) == 0 {
 			violations = append(violations, Violation{
-				Linter:     l,
-				Location:   &Location{Table: tableName},
-				Message:    "No primary key defined",
+				Linter:   l,
+				Location: &Location{Table: tableName},
+				Message:  "No primary key defined",
+				// TODO: Consider changing back to SeverityError - missing primary keys are a serious schema issue
+				Severity:   SeverityWarning,
 				Suggestion: strPtr("Every table should have an explicit primary key"),
-				Severity:   SeverityError,
 			})
 			continue
 		}
@@ -170,8 +171,9 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 	slices.Sort(keys)
 
 	return &Violation{
-		Linter:   l,
-		Severity: SeverityError,
+		Linter: l,
+		// TODO: Consider changing back to SeverityError - wrong primary key types are a serious schema issue
+		Severity: SeverityWarning,
 		Message:  fmt.Sprintf("Primary key column %q has type %q", column.Name, column.Type),
 		Location: &Location{
 			Table:  tableName,
