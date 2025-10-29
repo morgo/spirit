@@ -27,7 +27,6 @@
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
   - [Experimental Features](#experimental-features)
-    - [enable-experimental-multi-table-support](#enable-experimental-multi-table-support)
     - [enable-experimental-buffered-copy](#enable-experimental-buffered-copy)
     - [`move` command](#move-command)
     - [native linting support](#native-linting-support)
@@ -328,16 +327,6 @@ spirit --tls-mode VERIFY_IDENTITY \
 
 ## Experimental Features
 
-### enable-experimental-multi-table-support
-
-**Feature Description**
-
-This feature allows Spirit to apply multiple schema changes at once, and cut them over atomically. The intended use-case is for complicated scenarios where there are collation mismatches between tables. If you change the collation of one table, it could result in performance issues with joins. For satefy, you really need to change all collation settings at once, which has not historically been easy.
-
-**Current Status**
-
-This feature is feature complete. The main issue is that there is insufficient test coverage. See issue [#388](https://github.com/block/spirit/issues/388) for details.
-
 ### enable-experimental-buffered-copy
 
 **Feature Description**
@@ -356,7 +345,6 @@ Buffered changes also puts a lot more stress on the `spirit` binary in terms of 
 
 There is also the risk that the buffered algorithm write threads can overwhelm a server. We need to implement a throttler that detects that the server is overloaded, and possibly some configuration over write threads.
 
-
 ### `move` command
 
 **Feature Description**
@@ -365,10 +353,9 @@ This feature provides a new top level binary `move`, which can copy whole schema
 
 **Current Status**
 
-This command depends strongly on the experimental buffered copy and multi-table support, both which are currently experimental. There is not too much which is special to move on top of these two features, so once they become stable, so too can `move`.
+This command depends strongly on buffered copy which is currently experimental. It is also missing some minor functionality.
 
-It is anticipated that `move` will need to provide some pluggable method of cutover so external metadata systems can be updated. There is no current design for this.
-
+It is anticipated that `move` will need to provide some pluggable method of cutover so external metadata systems can be updated. Currently there is a cutover function which can be specified when using `move` via the API, but when using the CLI there is no user friendly way of doing this.
 
 ### native linting support
 
