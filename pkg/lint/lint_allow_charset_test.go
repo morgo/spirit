@@ -64,7 +64,7 @@ func TestDisallowedColumnCharacterSet(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 	require.Len(t, violations, 1)
 	require.Contains(t, violations[0].Message, "Column \"name\" has unsupported character set: \"latin1\"")
-	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 	require.Equal(t, "t1", violations[0].Location.Table)
 	require.NotNil(t, violations[0].Location.Column)
 	require.Equal(t, "name", *violations[0].Location.Column)
@@ -584,7 +584,7 @@ func TestViolationStructureColumnLevel(t *testing.T) {
 	v := violations[0]
 	require.NotNil(t, v.Linter)
 	require.Equal(t, "allow_charset", v.Linter.Name())
-	require.Equal(t, SeverityError, v.Severity)
+	require.Equal(t, SeverityWarning, v.Severity)
 	require.NotEmpty(t, v.Message)
 	require.NotNil(t, v.Location)
 	require.Equal(t, "t1", v.Location.Table)

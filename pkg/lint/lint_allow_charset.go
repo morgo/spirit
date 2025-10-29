@@ -112,7 +112,7 @@ func (l *AllowCharset) checkColumnCharset(column *ast.ColumnDef, message string)
 				Column: &column.Name.Name.O,
 			},
 			Message:    fmt.Sprintf("%s: %q", message, charset),
-			Severity:   SeverityError,
+			Severity:   SeverityWarning,
 			Suggestion: &suggestion,
 		}
 	}

@@ -176,7 +176,7 @@ The `lint` package includes 11 built-in linters covering schema design, data typ
 
 ### allow_charset
 
-**Severity**: Error  
+**Severity**: Warning  
 **Configurable**: Yes  
 **Checks**: CREATE TABLE, ALTER TABLE (ADD/MODIFY/CHANGE COLUMN)
 
@@ -221,7 +221,7 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ### allow_engine
 
-**Severity**: Error  
+**Severity**: Warning  
 **Configurable**: Yes  
 **Checks**: CREATE TABLE, ALTER TABLE ENGINE
 
@@ -264,7 +264,7 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ### auto_inc_capacity
 
-**Severity**: Error  
+**Severity**: Warning  
 **Configurable**: Yes  
 **Checks**: CREATE TABLE
 
@@ -403,7 +403,7 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ### multiple_alter_table
 
-**Severity**: Info  
+**Severity**: Warning  
 **Configurable**: No  
 **Checks**: ALTER TABLE
 
@@ -453,7 +453,7 @@ ALTER TABLE users RENAME TO UserAccounts;
 
 ### primary_key
 
-**Severity**: Error (missing/invalid types), Warning (signed integers)  
+**Severity**: Warning (missing/invalid types), Warning (signed integers)  
 **Configurable**: Yes  
 **Checks**: CREATE TABLE
 
@@ -503,9 +503,46 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ---
 
+### reserved_words
+
+**Severity**: Warning  
+**Configurable**: No  
+**Checks**: CREATE TABLE, ALTER TABLE (ADD/MODIFY/CHANGE COLUMN, RENAME)
+
+Checks for usage of MySQL reserved words in table and column names. Using reserved words as identifiers can cause syntax errors and requires backtick quoting. The linter uses a static list of 259 reserved words from MySQL 9.5.0.
+
+**Examples:**
+
+```sql
+-- ❌ Violation (SELECT is reserved)
+CREATE TABLE `select` (
+  id INT PRIMARY KEY
+);
+
+-- ❌ Violation (ORDER is reserved)
+CREATE TABLE `order` (
+  id INT PRIMARY KEY,
+  `where` VARCHAR(100)  -- WHERE is also reserved
+);
+
+-- ✅ Correct (non-reserved words)
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  location VARCHAR(100)
+);
+
+-- ❌ Violation in ALTER TABLE
+ALTER TABLE users ADD COLUMN `select` VARCHAR(100);
+ALTER TABLE users RENAME TO `table`;
+```
+
+**Note:** While MySQL allows reserved words as identifiers when quoted with backticks, it's better practice to avoid them entirely to prevent confusion and potential issues. The reserved words list is sourced directly from MySQL 9.5.0 and includes all keywords that cannot be used as unquoted identifiers.
+
+---
+
 ### unsafe
 
-**Severity**: Error  
+**Severity**: Warning  
 **Configurable**: Yes  
 **Checks**: ALTER TABLE, DROP TABLE, TRUNCATE TABLE, DROP DATABASE
 
@@ -585,16 +622,17 @@ ALTER TABLE users ADD COLUMN legacy_date DATETIME DEFAULT '0000-00-00 00:00:00';
 
 | Linter | Configurable | CREATE TABLE | ALTER TABLE | Severity |
 |--------|--------------|--------------|-------------|----------|
-| `allow_charset` | ✅ | ✅ | ✅ | Error |
-| `allow_engine` | ✅ | ✅ | ✅ | Error |
-| `auto_inc_capacity` | ✅ | ✅ | ❌ | Error |
+| `allow_charset` | ✅ | ✅ | ✅ | Warning |
+| `allow_engine` | ✅ | ✅ | ✅ | Warning |
+| `auto_inc_capacity` | ✅ | ✅ | ❌ | Warning |
 | `has_fk` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
-| `invisible_index_before_drop` | ✅ | ❌ | ✅ | Warning/Error |
-| `multiple_alter_table` | ❌ | ❌ | ✅ | Info |
+| `invisible_index_before_drop` | ✅ | ❌ | ✅ | Warning |
+| `multiple_alter_table` | ❌ | ❌ | ✅ | Warning |
 | `name_case` | ❌ | ✅ | ✅ | Warning |
-| `primary_key` | ✅ | ✅ | ❌ | Error/Warning |
-| `unsafe` | ✅ | ❌ | ✅ | Error |
+| `primary_key` | ✅ | ✅ | ❌ | Warning |
+| `reserved_words` | ❌ | ✅ | ✅ | Warning |
+| `unsafe` | ✅ | ❌ | ✅ | Warning |
 | `zero_date` | ❌ | ✅ | ✅ | Warning |
 
 ## Example Linters
