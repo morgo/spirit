@@ -92,7 +92,7 @@ func TestPrimaryKeyTypeLinter_IntError(t *testing.T) {
 	// INT is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "key column \"id\" has type \"int\"")
 	assert.Equal(t, "users", violations[0].Location.Table)
 	assert.NotNil(t, violations[0].Location.Column)
@@ -115,7 +115,7 @@ func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
 	// VARCHAR is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "Primary key column \"id\" has type \"varchar\"")
 	assert.NotNil(t, violations[0].Context)
 	// The parser returns lowercase "varchar"
@@ -134,10 +134,10 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKey(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// user_id is BIGINT UNSIGNED (good), role_id is INT (warning)
+	// user_id is BIGINT UNSIGNED (good), role_id is INT (error)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Equal(t, "role_id", *violations[0].Location.Column)
 }
 
@@ -187,7 +187,7 @@ func TestPrimaryKeyTypeLinter_NoPrimaryKey(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// No primary key - no violations from this linter
+	// No primary key - that's an error
 	assert.Len(t, violations, 1)
 	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 	assert.Equal(t, SeverityError, violations[0].Severity)
@@ -214,7 +214,7 @@ func TestPrimaryKeyTypeLinter_MultipleTables(t *testing.T) {
 	// Only orders table should have a violation
 	require.Len(t, violations, 1)
 	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
@@ -228,9 +228,9 @@ func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// SMALLINT is not acceptable - should be a warning
+	// SMALLINT is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
@@ -244,9 +244,9 @@ func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	// MEDIUMINT is not acceptable - should be a warning
+	// MEDIUMINT is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
@@ -262,7 +262,7 @@ func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
 
 	// CHAR is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestPrimaryKeyTypeLinter_EmptyInput(t *testing.T) {
@@ -378,7 +378,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsVarchar(t *testing.T) {
 
 	// VARCHAR for UUID should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, *violations[0].Suggestion, "Change column \"uuid\" to a supported column type")
 }
 
