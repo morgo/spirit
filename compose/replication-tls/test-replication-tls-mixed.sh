@@ -2,6 +2,7 @@
 # Test script for Spirit replication TLS in mixed environments
 # Tests behavior when main and replica have different TLS configurations
 # Simplified version using SQL initialization
+# Usage: ./test-replication-tls-mixed.sh [cleanup]
 
 set -e
 
@@ -10,6 +11,83 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+YELLOW='\033[1;33m'
+
+# Function to print colored output
+print_step() {
+    echo -e "${BLUE}🔧 $1${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+# Comprehensive cleanup function
+cleanup() {
+    echo ""
+    echo "🧹 CLEANUP: Spirit Replication TLS Mixed Environment Test"
+    echo "======================================================="
+    echo ""
+    
+    # Step 1: Stop containers
+    print_step "Stopping all mixed environment replication containers..."
+    docker-compose -f replication-tls-mixed.yml down 2>/dev/null || true
+    docker stop spirit-mysql-mixed-main spirit-mysql-mixed-replica 2>/dev/null || true
+    print_success "All containers stopped"
+
+    # Step 2: Remove containers
+    print_step "Removing stopped containers..."
+    docker container prune -f > /dev/null 2>&1
+    print_success "Containers cleaned up"
+
+    # Step 3: Remove images if they exist
+    print_step "Removing old images..."
+    docker rmi replication-tls-mixed_mysql-main replication-tls-mixed_mysql-replica 2>/dev/null || true
+    docker rmi mysql:8.0.33 2>/dev/null || true
+    print_success "Images cleaned up"
+
+    # Step 4: Remove volumes
+    print_step "Removing MySQL data volumes..."
+    docker volume rm \
+        replication-tls-mixed_mysql_main_data \
+        replication-tls-mixed_mysql_replica_data \
+        replication-tls-mixed_mysql-main-data \
+        replication-tls-mixed_mysql-replica-data \
+        mysql_mixed_main_data \
+        mysql_mixed_replica_data \
+        2>/dev/null || true
+    print_success "Volumes cleaned up"
+
+    # Step 5: Network cleanup
+    print_step "Cleaning up networks..."
+    docker network prune -f > /dev/null 2>&1
+    print_success "Networks cleaned up"
+
+    # Step 6: Remove Spirit binary
+    print_step "Cleaning up Spirit binary..."
+    rm -f spirit 2>/dev/null || true
+    print_success "Spirit binary cleaned up"
+
+    print_success "🎉 MIXED ENVIRONMENT CLEANUP COMPLETE!"
+    echo ""
+    echo "Environment cleaned and ready for fresh start."
+    echo "You can now run 'docker-compose -f replication-tls-mixed.yml up -d' to start fresh containers."
+    echo ""
+}
+
+# Check for cleanup command
+if [ "$1" = "cleanup" ]; then
+    cleanup
+    exit 0
+fi
 
 # Function to log test results
 log_test() {

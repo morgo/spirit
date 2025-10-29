@@ -9,10 +9,10 @@ Docker Compose tests for Spirit's replica TLS support, validating both replica t
 make cleanup && make start && make verify && make cleanup
 
 # Test full VERIFY_IDENTITY support (custom certificates)
-make cleanup && make generate-certs && make start-custom && make verify-custom && make cleanup-custom
+make cleanup-custom && make generate-certs && make start-custom && make verify-custom && make cleanup-custom
 
 # Test mixed TLS environments (main TLS enabled, replica TLS disabled)
-make cleanup && make start-mixed && make verify-mixed && make cleanup-mixed
+make cleanup-mixed && make start-mixed && make verify-mixed && make cleanup-mixed
 ```
 
 ## Test Environments

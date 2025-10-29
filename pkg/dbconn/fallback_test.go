@@ -15,13 +15,13 @@ func TestCreateFallbackDSN(t *testing.T) {
 	}{
 		{
 			name:        "DSN with tls parameter",
-			inputDSN:    "user:pass@tcp(host:3306)/db?tls=custom&charset=utf8",
+			inputDSN:    "user:pass@tcp(host:3306)/db?tls=true&charset=utf8",
 			expectedDSN: "user:pass@tcp(host:3306)/db?charset=utf8",
 			description: "Should remove tls parameter but keep other parameters",
 		},
 		{
 			name:        "DSN with only tls parameter",
-			inputDSN:    "user:pass@tcp(host:3306)/db?tls=required",
+			inputDSN:    "user:pass@tcp(host:3306)/db?tls=true",
 			expectedDSN: "user:pass@tcp(host:3306)/db",
 			description: "Should remove tls parameter when it's the only parameter",
 		},
@@ -39,7 +39,7 @@ func TestCreateFallbackDSN(t *testing.T) {
 		},
 		{
 			name:        "Complex DSN with tls",
-			inputDSN:    "root:rootpassword@tcp(127.0.0.1:3421)/test?tls=custom&timeout=30s&readTimeout=30s",
+			inputDSN:    "root:rootpassword@tcp(127.0.0.1:3421)/test?tls=skip-verify&timeout=30s&readTimeout=30s",
 			expectedDSN: "root:rootpassword@tcp(127.0.0.1:3421)/test?readTimeout=30s&timeout=30s",
 			description: "Should remove tls but preserve other complex parameters",
 		},
