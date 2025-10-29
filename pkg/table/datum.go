@@ -217,6 +217,9 @@ func (d Datum) GreaterThanOrEqual(d2 Datum) bool {
 	if !d.IsNumeric() {
 		panic("not supported on binary type")
 	}
+	if d.Tp != d2.Tp {
+		panic("cannot compare different datum types")
+	}
 	if d.Tp == signedType {
 		return d.Val.(int64) >= d2.Val.(int64)
 	}
@@ -226,6 +229,9 @@ func (d Datum) GreaterThanOrEqual(d2 Datum) bool {
 func (d Datum) GreaterThan(d2 Datum) bool {
 	if !d.IsNumeric() {
 		panic("not supported on binary type")
+	}
+	if d.Tp != d2.Tp {
+		panic("cannot compare different datum types")
 	}
 	if d.Tp == signedType {
 		return d.Val.(int64) > d2.Val.(int64)

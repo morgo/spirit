@@ -108,7 +108,7 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 	for key, isDelete := range s.changes {
 		unhashedKey := utils.UnhashKey(key)
 		if s.chunker != nil && !s.chunker.KeyBelowLowWatermark(unhashedKey[0]) {
-			s.c.logger.Debugf("key below watermark: %v", unhashedKey[0])
+			s.c.logger.Debugf("key not below watermark: %v", unhashedKey[0])
 			allChangesFlushed = false
 			continue
 		}
