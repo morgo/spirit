@@ -39,7 +39,8 @@ This matrix shows how Spirit's TLS inheritance works with **valid MySQL driver p
 #### Key Implementation Details:
 - **Inheritance**: Only when replica DSN has no `tls=` parameter and main TLS ≠ `DISABLED`
 - **Named Configs**: Spirit uses registered TLS configurations (`custom`, `rds`, `required`, `verify_ca`, `verify_identity`)
-- **RDS Detection**: Automatic in `REQUIRED` mode for `*.rds.amazonaws.com` hosts
+- **RDS Detection**: Automatic in all TLS modes for `*.rds.amazonaws.com` hosts
+- **Parameter Preservation**: Existing `tls=` parameters in replica DSN are always preserved (no inheritance)
 
 | Main DB CLI Flags | Main TLS Config | Replica DSN | Replica TLS Config | Final Behavior | Use Case |
 |-------------------|-----------------|-------------|-------------------|----------------|----------|

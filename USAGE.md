@@ -133,8 +133,8 @@ Spirit automatically applies the main database TLS configuration to replica conn
 - The main database TLS mode is not `DISABLED`
 
 **TLS Inheritance Rules:**
-- If replica DSN contains `tls=` parameter (any case), that setting is preserved
-- If main TLS mode is `DISABLED`, no TLS is added to replica DSN
+- If replica DSN contains `tls=` parameter (any case), that setting is preserved (even if main TLS mode is `DISABLED`)
+- If main TLS mode is `DISABLED`, no TLS inheritance occurs but existing replica TLS settings remain untouched
 - Otherwise, replica inherits main DB TLS mode and certificate configuration
 - RDS replicas automatically use RDS certificate bundle when appropriate
 

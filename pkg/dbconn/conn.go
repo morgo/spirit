@@ -33,7 +33,7 @@ const (
 // The leading \. ensures only legitimate *.rds.amazonaws.com subdomains match,
 // preventing subdomain spoofing attacks (e.g., fake-rds.amazonaws.com).
 var (
-	rdsAddr = regexp.MustCompile(`rds\.amazonaws\.com(:\d+)?$`)
+	rdsAddr = regexp.MustCompile(`\.rds\.amazonaws\.com(:\d+)?$`)
 	once    sync.Once
 	// https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 	//go:embed rdsGlobalBundle.pem
@@ -385,6 +385,7 @@ func EnhanceDSNWithTLS(inputDSN string, config *DBConfig) (string, error) {
 
 	cfg, err := mysql.ParseDSN(inputDSN)
 	if err != nil {
+		_ = err              // Explicitly ignore parsing error for graceful degradation
 		return inputDSN, nil // Return original DSN without error if parsing fails
 	}
 
@@ -463,6 +464,7 @@ func addTLSParametersToDSN(dsn string, config *DBConfig) (string, error) {
 func createFallbackDSN(inputDSN string) (string, error) {
 	cfg, err := mysql.ParseDSN(inputDSN)
 	if err != nil {
+		_ = err              // Explicitly ignore parsing error for graceful degradation
 		return inputDSN, nil // Return original DSN without error if parsing fails
 	}
 
