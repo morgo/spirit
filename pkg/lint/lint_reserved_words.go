@@ -96,11 +96,6 @@ func (l *ReservedWordsLinter) String() string {
 	return Stringer(l)
 }
 
-// isReservedWord checks if a word is a MySQL reserved keyword
-func (l *ReservedWordsLinter) isReservedWord(word string) bool {
-	return mysqlReservedWords[strings.ToUpper(word)]
-}
-
 func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	// Check CREATE TABLE statements
 	for ct := range CreateTableStatements(existingTables, changes) {
@@ -144,7 +139,7 @@ func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, chan
 		tableName := at.Table.Name.String()
 
 		for _, spec := range at.Specs {
-			switch spec.Tp {
+			switch spec.Tp { //nolint:exhaustive
 			case ast.AlterTableAddColumns, ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
 				// Check new column names
 				for _, column := range spec.NewColumns {
@@ -183,4 +178,9 @@ func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, chan
 	}
 
 	return violations
+}
+
+// isReservedWord checks if a word is a MySQL reserved keyword
+func (l *ReservedWordsLinter) isReservedWord(word string) bool {
+	return mysqlReservedWords[strings.ToUpper(word)]
 }
