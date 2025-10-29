@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
@@ -61,20 +62,59 @@ func (l *AllowCharset) Lint(createTables []*statement.CreateTable, changes []*st
 			})
 		}
 		for _, column := range ct.Columns {
-			charset := column.Raw.Tp.GetCharset()
-			if charset != "" && !slices.Contains(l.charsets, charset) {
-				violations = append(violations, Violation{
-					Linter: l,
-					Location: &Location{
-						Table:  ct.TableName,
-						Column: &column.Name,
-					},
-					Message:    fmt.Sprintf("Column %q has unsupported character set %q", column.Name, charset),
-					Severity:   SeverityError,
-					Suggestion: &suggestion,
-				})
+			v := l.checkColumnCharset(column.Raw, fmt.Sprintf("Column %q has unsupported character set", column.Name))
+			if v != nil {
+				if v.Location != nil {
+					v.Location.Table = ct.TableName
+				}
+				violations = append(violations, *v)
+			}
+		}
+	}
+
+	for _, change := range changes {
+		at, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		for _, spec := range at.Specs {
+			var message string
+			switch spec.Tp {
+			case ast.AlterTableAddColumns:
+				message = "New column %q in table %q uses a disallowed character set"
+			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
+				message = "Column %q in table %q modified to use a disallowed character set"
+			default:
+				continue
+			}
+
+			for _, column := range spec.NewColumns {
+				v := l.checkColumnCharset(column, message)
+				if v != nil {
+					if v.Location != nil && at.Table != nil {
+						v.Location.Table = at.Table.Name.String()
+					}
+					violations = append(violations, *v)
+				}
 			}
 		}
 	}
 	return violations
+}
+
+func (l *AllowCharset) checkColumnCharset(column *ast.ColumnDef, message string) *Violation {
+	suggestion := "Use a supported character set: " + strings.Join(l.charsets, ", ")
+	charset := column.Tp.GetCharset()
+	if charset != "" && !slices.Contains(l.charsets, charset) {
+		return &Violation{
+			Linter: l,
+			Location: &Location{
+				Column: &column.Name.Name.O,
+			},
+			Message:    fmt.Sprintf("%s: %q", message, charset),
+			Severity:   SeverityError,
+			Suggestion: &suggestion,
+		}
+	}
+	return nil
 }
