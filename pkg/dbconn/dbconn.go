@@ -209,7 +209,6 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	// We always apply the threshold since in this path ForceKill is always true.
 	threshold := time.Duration(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
 	timer := time.AfterFunc(threshold, func() {
-		logger.Warnf("waited for %v; trying to kill locking transactions", threshold)
 		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
 		if err != nil {
 			logger.Errorf("failed to kill locking transactions: %v", err)
