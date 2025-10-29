@@ -2,7 +2,6 @@ package lint
 
 import (
 	"database/sql"
-	"fmt"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -16,7 +15,7 @@ import (
 func getCreateTableStatement(t *testing.T, db *sql.DB, tableName string) *statement.CreateTable {
 	t.Helper()
 	var tbl, createStmt string
-	err := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE %s", tableName)).Scan(&tbl, &createStmt)
+	err := db.QueryRowContext(t.Context(), "SHOW CREATE TABLE "+tableName).Scan(&tbl, &createStmt)
 	require.NoError(t, err)
 
 	ct, err := statement.ParseCreateTable(createStmt)
