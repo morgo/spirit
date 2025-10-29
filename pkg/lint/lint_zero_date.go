@@ -45,7 +45,7 @@ func (l *ZeroDateLinter) Lint(existingTables []*statement.CreateTable, changes [
 			continue
 		}
 		for _, spec := range at.Specs {
-			switch spec.Tp {
+			switch spec.Tp { //nolint:exhaustive
 			case ast.AlterTableAddColumns, ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
 				for _, column := range spec.NewColumns {
 					v := l.checkColumnZeroDate(column, at.Table.Name.String())
@@ -71,16 +71,18 @@ func (l *ZeroDateLinter) checkColumnZeroDate(column *ast.ColumnDef, tableName st
 
 	// Check if column is nullable and extract default value
 	for _, option := range column.Options {
-		if option.Tp == ast.ColumnOptionNotNull {
+		switch option.Tp { //nolint:exhaustive
+		case ast.ColumnOptionNotNull:
 			nullable = false
-		} else if option.Tp == ast.ColumnOptionNull {
+		case ast.ColumnOptionNull:
 			nullable = true
-		} else if option.Tp == ast.ColumnOptionDefaultValue {
+		case ast.ColumnOptionDefaultValue:
 			if option.Expr != nil {
 				// Extract default value from expression using Restore
 				var sb strings.Builder
 				rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-				if err := option.Expr.Restore(rCtx); err == nil {
+				err := option.Expr.Restore(rCtx)
+				if err == nil {
 					val := sb.String()
 					// Remove surrounding quotes if present for string literals
 					if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {

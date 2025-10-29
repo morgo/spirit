@@ -24,6 +24,8 @@ func getCreateTableStatement(t *testing.T, db *sql.DB, tableName string) *statem
 }
 
 // TestAllowCharsetIntegration tests the AllowCharset linter against real database tables
+//
+
 func TestAllowCharsetIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
@@ -75,7 +77,7 @@ func TestAllowCharsetIntegration(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "disallowed")
 
 	// Test 6: ALTER TABLE CHANGE COLUMN with disallowed charset - should fail
-	alterStmt = statement.MustNew("ALTER TABLE charset_test_allowed CHANGE COLUMN name name VARCHAR(100) CHARACTER SET latin1")
+	alterStmt = statement.MustNew("ALTER TABLE charset_test_allowed CHANGE COLUMN name name VARCHAR(100) CHARACTER SET latin1") //nolint:dupword
 	violations = linter.Lint(nil, alterStmt)
 	assert.NotEmpty(t, violations, "Changing column to latin1 charset should not be allowed")
 	assert.Contains(t, violations[0].Message, "latin1")
@@ -432,7 +434,7 @@ func TestZeroDateIntegration(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "created_at")
 
 	// Test 7: ALTER TABLE CHANGE COLUMN with zero date default - should fail
-	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe CHANGE COLUMN created_at created_at DATETIME DEFAULT '0000-00-00 00:00:00'")
+	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe CHANGE COLUMN created_at created_at DATETIME DEFAULT '0000-00-00 00:00:00'") //nolint:dupword
 	violations = linter.Lint(nil, alterStmt)
 	assert.NotEmpty(t, violations, "Changing column to have zero date default should be detected")
 	assert.Contains(t, violations[0].Message, "created_at")
