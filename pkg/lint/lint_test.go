@@ -343,11 +343,11 @@ func TestFilterBySeverity(t *testing.T) {
 
 	// No errors exist
 	errors := FilterBySeverity(violations, SeverityError)
-	assert.Len(t, errors, 0)
+	assert.Empty(t, errors)
 
 	// No info exist
 	infos := FilterBySeverity(violations, SeverityInfo)
-	assert.Len(t, infos, 0)
+	assert.Empty(t, infos)
 }
 
 func TestFilterByLinter(t *testing.T) {
