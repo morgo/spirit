@@ -447,7 +447,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		if err := change.newTable.SetInfo(ctx); err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(change.table, change.newTable, r.copyChunker.KeyAboveHighWatermark); err != nil {
+		if err := r.replClient.AddSubscription(change.table, change.newTable, r.copyChunker); err != nil {
 			return err
 		}
 	}
