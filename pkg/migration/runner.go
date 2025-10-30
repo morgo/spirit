@@ -492,14 +492,24 @@ func (r *Runner) newMigration(ctx context.Context) error {
 		return err
 	}
 
-	// This is setup the same way in both code-paths,
-	// but we need to do it before we finish resumeFromCheckpoint
-	// because we need to check that the binlog file exists.
+	// Setup the copier, checker and replication client, but don't start the binlog reader yet.
+	// We need to do this before we finish resumeFromCheckpoint because we need to check
+	// that the binlog file exists.
 	if err := r.setupCopierCheckerAndReplClient(ctx); err != nil {
 		return err
 	}
 
-	// Start the binary log feed now
+	// CRITICAL: Update the binlog position to the current position AFTER all DDL setup is complete.
+	// This ensures that Spirit's own DDL operations (CREATE TABLE, ALTER TABLE) are not
+	// processed by the binlog reader, preventing false positive DDL notifications that would
+	// cause the migration to cancel itself.
+	currentPos, err := r.replClient.GetCurrentBinlogPosition()
+	if err != nil {
+		return fmt.Errorf("failed to get current binlog position after setup: %w", err)
+	}
+	r.replClient.SetFlushedPos(currentPos)
+
+	// Start the binary log feed now - AFTER all table setup is complete and position is updated.
 	if err := r.replClient.Run(ctx); err != nil {
 		return err
 	}

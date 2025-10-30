@@ -880,3 +880,9 @@ func (c *Client) SetDDLNotificationChannel(ch chan string) {
 	defer c.Unlock()
 	c.onDDL = ch
 }
+
+// GetCurrentBinlogPosition returns the current binlog position from the server.
+// This is a public wrapper around getCurrentBinlogPosition for use by the migration runner.
+func (c *Client) GetCurrentBinlogPosition() (mysql.Position, error) {
+	return c.getCurrentBinlogPosition()
+}
