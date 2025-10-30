@@ -71,7 +71,7 @@ func (l *PrimaryKeyLinter) DefaultConfig() map[string]string {
 func (l *PrimaryKeyLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	// TODO: add support for ALTER TABLE statements that try to modify a primary key to an unsupported type
 
-	// If the linter is run with a default allowedTypes configuration, set it to the default value
+	// If the linter is run without a default allowedTypes configuration, set it to the default value
 	if len(l.allowedTypes) == 0 {
 		err := l.Configure(l.DefaultConfig())
 		if err != nil {
@@ -136,18 +136,22 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 
 	if _, ok := l.allowedTypes[columnType]; ok {
 		// If the PK column uses a signed integer type, return a warning that it should be unsigned instead
-		if isSignedIntType(column) {
-			return &Violation{
-				Linter:   l,
-				Severity: SeverityWarning,
-				Message:  fmt.Sprintf("Primary key column %q uses signed %s; UNSIGNED is preferred", column.Name, columnType),
-				Location: &Location{
-					Table:  tableName,
-					Column: &column.Name,
-				},
-				Suggestion: strPtr(fmt.Sprintf("Consider using BIGINT UNSIGNED for column '%s' to avoid negative values and increase range", column.Name)),
+		// disabling this functionality for now to avoid overly verbose linter output
+		/*
+			if isSignedIntType(column) {
+				return &Violation{
+					Linter:   l,
+					Severity: SeverityWarning,
+					Message:  fmt.Sprintf("Primary key column %q uses signed %s; UNSIGNED is preferred", column.Name, columnType),
+					Location: &Location{
+						Table:  tableName,
+						Column: &column.Name,
+					},
+					Suggestion: strPtr(fmt.Sprintf("Consider using BIGINT UNSIGNED for column '%s' to avoid negative values and increase range", column.Name)),
+				}
 			}
-		}
+
+		*/
 		return nil
 	}
 
