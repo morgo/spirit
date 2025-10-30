@@ -365,6 +365,63 @@ func (c *Checker) replaceChunk(ctx context.Context, chunk *table.Chunk) error {
 		// Within the same database we use a REPLACE INTO .. SELECT approach.
 		// Within database we also support intersecting columns (i.e.
 		// there might be a schema change/transformation that applies).
+		//
+		// Note: historically this process has caused deadlocks between the DELETE statement
+		// in one replaceChunk and the REPLACE statement of another chunk. Inspection of
+		// SHOW ENGINE INNODB STATUS shows that this is not caused by locks on the PRIMARY KEY,
+		// but a unique secondary key (in our case an idempotence key):
+		//
+		// ------------------------
+		// LATEST DETECTED DEADLOCK
+		// ------------------------
+		// 2024-06-11 18:34:21 70676106989440
+		// *** (1) TRANSACTION:
+		// TRANSACTION 15106308424, ACTIVE 4 sec updating or deleting
+		// mysql tables in use 1, locked 1
+		// LOCK WAIT 620 lock struct(s), heap size 73848, 49663 row lock(s), undo log entries 49661
+		// MySQL thread id 540806, OS thread handle 70369444421504, query id 409280999 10.137.84.232 <snip> updating
+		// DELETE FROM `<snip>`.`_<snip>_new` WHERE `id` >= 1108588365 AND `id` < 1108688365
+		//
+		// *** (1) HOLDS THE LOCK(S):
+		// RECORD LOCKS space id 1802 page no 26277057 n bits 232 index idempotence_key_idx of table `<snip>`.`_<snip>_new` trx id 15106308424 lock_mode X locks rec but not gap
+		// Record lock, heap no 163 PHYSICAL RECORD: n_fields 2; compact format; info bits 32
+		// 0: len 30; hex <snip>; asc <snip>; (total 62 bytes);
+		// 1: len 8; hex <snip>; asc     <snip>;;
+		//
+		//
+		// *** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+		// RECORD LOCKS space id 1802 page no 1945840 n bits 280 index idempotence_key_idx of table `<snip>`.`_<snip>_new` trx id 15106308424 lock_mode X locks rec but not gap waiting
+		// Record lock, heap no 75 PHYSICAL RECORD: n_fields 2; compact format; info bits 0
+		// 0: len 30; hex <snip>; asc <snip>; (total 62 bytes);
+		// 1: len 8; hex <snip>; asc     <snip>;;
+		//
+		//
+		// *** (2) TRANSACTION:
+		// TRANSACTION 15106301192, ACTIVE 58 sec inserting
+		// mysql tables in use 2, locked 1
+		// LOCK WAIT 220020 lock struct(s), heap size 27680888, 409429 row lock(s), undo log entries 162834
+		// MySQL thread id 540264, OS thread handle 70369485823872, query id 409127061 10.137.84.232 <snip> executing
+		// REPLACE INTO `<snip>`.`_<snip>_new` (`id`, <snip> FROM `<snip>`.`<snip>` WHERE `id` >= 1106488365 AND `id` < 1106588365
+		//
+		// *** (2) HOLDS THE LOCK(S):
+		// RECORD LOCKS space id 1802 page no 1945840 n bits 280 index idempotence_key_idx of table `<snip>`.`_<snip>_new` trx id 15106301192 lock_mode X
+		// Record lock, heap no 75 PHYSICAL RECORD: n_fields 2; compact format; info bits 0
+		// 0: len 30; hex <snip>; asc <snip>; (total 62 bytes);
+		// 1: len 8; hex <snip>; asc     B yI;;
+		//
+		//
+		// *** (2) WAITING FOR THIS LOCK TO BE GRANTED:
+		// RECORD LOCKS space id 1802 page no 26277057 n bits 232 index idempotence_key_idx of table `<snip>`.`_<snip>_new` trx id 15106301192 lock_mode X waiting
+		// Record lock, heap no 163 PHYSICAL RECORD: n_fields 2; compact format; info bits 32
+		// 0: len 30; hex <snip>; asc <snip>; (total 62 bytes);
+		// 1: len 8; hex <snip>; asc     <snip>;;
+		//
+		// *** WE ROLL BACK TRANSACTION (1)
+		//
+		// We don't need this to be an atomic transaction. We just need to delete from the _new table
+		// first so that any since-deleted rows (which wouldn't get removed by replace) are removed first.
+		// By doing this as two transactions we should be able to remove
+		// the opportunity for deadlocks.
 		replaceStmt := fmt.Sprintf("REPLACE INTO %s (%s) SELECT %s FROM %s WHERE %s",
 			chunk.NewTable.QuotedName,
 			utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
