@@ -7,6 +7,7 @@ package lint
 // To re-enable these tests, uncomment the signed integer warning code in PrimaryKeyLinter.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1005,4 +1006,270 @@ func TestPrimaryKeyLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
 	// Empty string results in error (same as ConfigureEmptyString test)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported type")
+}
+
+// Tests for isSignedIntType helper function
+
+func TestIsSignedIntType_SignedBigInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id BIGINT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// BIGINT without UNSIGNED should be signed
+	assert.True(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_UnsignedBigInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// BIGINT UNSIGNED should not be signed
+	assert.False(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_SignedInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// INT without UNSIGNED should be signed
+	assert.True(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_UnsignedInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// INT UNSIGNED should not be signed
+	assert.False(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_SignedTinyInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id TINYINT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// TINYINT without UNSIGNED should be signed
+	assert.True(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_UnsignedTinyInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id TINYINT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// TINYINT UNSIGNED should not be signed
+	assert.False(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_SignedSmallInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id SMALLINT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// SMALLINT without UNSIGNED should be signed
+	assert.True(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_UnsignedSmallInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id SMALLINT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// SMALLINT UNSIGNED should not be signed
+	assert.False(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_SignedMediumInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id MEDIUMINT PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// MEDIUMINT without UNSIGNED should be signed
+	assert.True(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_UnsignedMediumInt(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id MEDIUMINT UNSIGNED PRIMARY KEY,
+		name VARCHAR(255)
+	)`
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	column := ct.GetColumns().ByName("id")
+	require.NotNil(t, column)
+
+	// MEDIUMINT UNSIGNED should not be signed
+	assert.False(t, isSignedIntType(column))
+}
+
+func TestIsSignedIntType_NonIntegerTypes(t *testing.T) {
+	testCases := []struct {
+		name     string
+		sql      string
+		expected bool
+	}{
+		{
+			name: "VARCHAR",
+			sql: `CREATE TABLE users (
+				id VARCHAR(36) PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+		{
+			name: "CHAR",
+			sql: `CREATE TABLE users (
+				id CHAR(36) PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+		{
+			name: "BINARY",
+			sql: `CREATE TABLE users (
+				id BINARY(16) PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+		{
+			name: "VARBINARY",
+			sql: `CREATE TABLE users (
+				id VARBINARY(255) PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+		{
+			name: "DECIMAL",
+			sql: `CREATE TABLE users (
+				id DECIMAL(10,0) PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+		{
+			name: "DATETIME",
+			sql: `CREATE TABLE users (
+				id DATETIME PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+		{
+			name: "TIMESTAMP",
+			sql: `CREATE TABLE users (
+				id TIMESTAMP PRIMARY KEY,
+				name VARCHAR(255)
+			)`,
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := statement.ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			column := ct.GetColumns().ByName("id")
+			require.NotNil(t, column)
+
+			// Non-integer types should return false
+			assert.Equal(t, tc.expected, isSignedIntType(column))
+		})
+	}
+}
+
+func TestIsSignedIntType_AllIntegerTypes(t *testing.T) {
+	intTypes := []struct {
+		name           string
+		typeName       string
+		shouldBeSigned bool
+	}{
+		{"SignedTinyInt", "TINYINT", true},
+		{"UnsignedTinyInt", "TINYINT UNSIGNED", false},
+		{"SignedSmallInt", "SMALLINT", true},
+		{"UnsignedSmallInt", "SMALLINT UNSIGNED", false},
+		{"SignedMediumInt", "MEDIUMINT", true},
+		{"UnsignedMediumInt", "MEDIUMINT UNSIGNED", false},
+		{"SignedInt", "INT", true},
+		{"UnsignedInt", "INT UNSIGNED", false},
+		{"SignedBigInt", "BIGINT", true},
+		{"UnsignedBigInt", "BIGINT UNSIGNED", false},
+	}
+
+	for _, tc := range intTypes {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf(`CREATE TABLE users (
+				id %s PRIMARY KEY,
+				name VARCHAR(255)
+			)`, tc.typeName)
+			ct, err := statement.ParseCreateTable(sql)
+			require.NoError(t, err)
+
+			column := ct.GetColumns().ByName("id")
+			require.NotNil(t, column)
+
+			assert.Equal(t, tc.shouldBeSigned, isSignedIntType(column),
+				"Expected %s to have signed=%v", tc.typeName, tc.shouldBeSigned)
+		})
+	}
 }
