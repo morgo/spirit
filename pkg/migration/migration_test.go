@@ -13,6 +13,7 @@ import (
 
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/go-sql-driver/mysql"
 
@@ -20,8 +21,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	checkpointDumpInterval = 100 * time.Millisecond
-	statusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
+	status.CheckpointDumpInterval = 100 * time.Millisecond
+	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
 	sentinelCheckInterval = 100 * time.Millisecond
 	sentinelWaitLimit = 10 * time.Second
 	goleak.VerifyTestMain(m)

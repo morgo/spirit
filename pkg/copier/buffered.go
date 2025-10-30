@@ -226,7 +226,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		chunk, err := c.chunker.Next()
 		if err != nil {
 			if err == table.ErrTableIsRead {
-				c.logger.Infof("readWorker %d: table is read, exiting", workerID)
+				c.logger.Debugf("readWorker %d: table is read, exiting", workerID)
 				return nil
 			}
 			c.setInvalid(true)
@@ -264,7 +264,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		totalChunklets := (len(rows) + chunkletSize - 1) / chunkletSize // Ceiling division
 
 		if chunkID%20 == 0 {
-			c.logger.Infof("readWorker %d: breaking chunk %d (%s) with %d rows into %d chunklets",
+			c.logger.Debugf("readWorker %d: breaking chunk %d (%s) with %d rows into %d chunklets",
 				workerID, chunkID, chunk.String(), len(rows), totalChunklets)
 		}
 		// Register the chunk with its expected chunklet count
@@ -414,7 +414,7 @@ func (c *buffered) writeChunklet(ctx context.Context, chunkletData chunklet) (in
 
 // feedbackCoordinator tracks chunklet completions and sends feedback when all chunklets for a chunk are done
 func (c *buffered) feedbackCoordinator(ctx context.Context) error {
-	c.logger.Infof("feedbackCoordinator started")
+	c.logger.Debugf("feedbackCoordinator started")
 
 	for {
 		select {
@@ -596,7 +596,7 @@ func (c *buffered) monitorBuffers(ctx context.Context) {
 			// Get the current chunk ID that's being processed
 			currentChunkID := atomic.LoadInt64(&c.nextChunkID)
 
-			c.logger.Infof("BUFFER MONITOR: sharedBuffer=%d/%d, pendingChunks=%d (oldest=%d, newest=%d, current=%d, partial=%d)",
+			c.logger.Debugf("BUFFER MONITOR: sharedBuffer=%d/%d, pendingChunks=%d (oldest=%d, newest=%d, current=%d, partial=%d)",
 				sharedBufferLen, c.bufferSize,
 				pendingChunksCount, oldestChunkID, newestChunkID, currentChunkID, partiallyCompleted)
 		}
