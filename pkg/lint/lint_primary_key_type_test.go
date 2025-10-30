@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPrimaryKeyTypeLinter_BigIntUnsigned(t *testing.T) {
+func TestPrimaryKeyLinter_BigIntUnsigned(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -30,7 +30,7 @@ func TestPrimaryKeyTypeLinter_BigIntUnsigned(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_BigIntSigned(t *testing.T) {
+func TestPrimaryKeyLinter_BigIntSigned(t *testing.T) {
 	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
 	sql := `CREATE TABLE users (
 		id BIGINT PRIMARY KEY,
@@ -55,7 +55,7 @@ func TestPrimaryKeyTypeLinter_BigIntSigned(t *testing.T) {
 	assert.Contains(t, *violations[0].Suggestion, "BIGINT UNSIGNED")
 }
 
-func TestPrimaryKeyTypeLinter_Binary(t *testing.T) {
+func TestPrimaryKeyLinter_Binary(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id BINARY(16) PRIMARY KEY,
 		name VARCHAR(255)
@@ -70,7 +70,7 @@ func TestPrimaryKeyTypeLinter_Binary(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_VarBinary(t *testing.T) {
+func TestPrimaryKeyLinter_VarBinary(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id VARBINARY(255) PRIMARY KEY,
 		name VARCHAR(255)
@@ -85,7 +85,7 @@ func TestPrimaryKeyTypeLinter_VarBinary(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_IntError(t *testing.T) {
+func TestPrimaryKeyLinter_IntError(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id INT PRIMARY KEY,
 		name VARCHAR(255)
@@ -108,7 +108,7 @@ func TestPrimaryKeyTypeLinter_IntError(t *testing.T) {
 	assert.Contains(t, *violations[0].Suggestion, "Change column \"id\" to a supported column type")
 }
 
-func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
+func TestPrimaryKeyLinter_VarcharError(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id VARCHAR(36) PRIMARY KEY,
 		name VARCHAR(255)
@@ -129,7 +129,7 @@ func TestPrimaryKeyTypeLinter_VarcharError(t *testing.T) {
 	assert.Equal(t, "varchar", violations[0].Context["current_type"])
 }
 
-func TestPrimaryKeyTypeLinter_CompositePrimaryKey(t *testing.T) {
+func TestPrimaryKeyLinter_CompositePrimaryKey(t *testing.T) {
 	sql := `CREATE TABLE user_roles (
 		user_id BIGINT UNSIGNED,
 		role_id INT,
@@ -148,7 +148,7 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKey(t *testing.T) {
 	assert.Equal(t, "role_id", *violations[0].Location.Column)
 }
 
-func TestPrimaryKeyTypeLinter_CompositePrimaryKeyAllGood(t *testing.T) {
+func TestPrimaryKeyLinter_CompositePrimaryKeyAllGood(t *testing.T) {
 	sql := `CREATE TABLE user_roles (
 		user_id BIGINT UNSIGNED,
 		role_id BIGINT UNSIGNED,
@@ -164,7 +164,7 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKeyAllGood(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_CompositePrimaryKeyMixed(t *testing.T) {
+func TestPrimaryKeyLinter_CompositePrimaryKeyMixed(t *testing.T) {
 	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
 	sql := `CREATE TABLE user_roles (
 		user_id BIGINT,
@@ -184,7 +184,7 @@ func TestPrimaryKeyTypeLinter_CompositePrimaryKeyMixed(t *testing.T) {
 	assert.Equal(t, "user_id", *violations[0].Location.Column)
 }
 
-func TestPrimaryKeyTypeLinter_NoPrimaryKey(t *testing.T) {
+func TestPrimaryKeyLinter_NoPrimaryKey(t *testing.T) {
 	sql := `CREATE TABLE logs (
 		id BIGINT UNSIGNED,
 		message TEXT
@@ -201,7 +201,7 @@ func TestPrimaryKeyTypeLinter_NoPrimaryKey(t *testing.T) {
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
-func TestPrimaryKeyTypeLinter_MultipleTables(t *testing.T) {
+func TestPrimaryKeyLinter_MultipleTables(t *testing.T) {
 	sql1 := `CREATE TABLE users (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -225,7 +225,7 @@ func TestPrimaryKeyTypeLinter_MultipleTables(t *testing.T) {
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
-func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
+func TestPrimaryKeyLinter_SmallIntError(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id SMALLINT PRIMARY KEY,
 		name VARCHAR(255)
@@ -241,7 +241,7 @@ func TestPrimaryKeyTypeLinter_SmallIntError(t *testing.T) {
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
-func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
+func TestPrimaryKeyLinter_MediumIntError(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id MEDIUMINT PRIMARY KEY,
 		name VARCHAR(255)
@@ -257,7 +257,7 @@ func TestPrimaryKeyTypeLinter_MediumIntError(t *testing.T) {
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
-func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
+func TestPrimaryKeyLinter_CharError(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id CHAR(36) PRIMARY KEY,
 		name VARCHAR(255)
@@ -273,14 +273,14 @@ func TestPrimaryKeyTypeLinter_CharError(t *testing.T) {
 	assert.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
-func TestPrimaryKeyTypeLinter_EmptyInput(t *testing.T) {
+func TestPrimaryKeyLinter_EmptyInput(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint(nil, nil)
 
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_Integration(t *testing.T) {
+func TestPrimaryKeyLinter_Integration(t *testing.T) {
 	Reset()
 	Register(&PrimaryKeyLinter{})
 
@@ -298,7 +298,7 @@ func TestPrimaryKeyTypeLinter_Integration(t *testing.T) {
 	assert.Equal(t, "primary_key", violations[0].Linter.Name())
 }
 
-func TestPrimaryKeyTypeLinter_IntegrationDisabled(t *testing.T) {
+func TestPrimaryKeyLinter_IntegrationDisabled(t *testing.T) {
 	Reset()
 	Register(&PrimaryKeyLinter{})
 
@@ -319,14 +319,14 @@ func TestPrimaryKeyTypeLinter_IntegrationDisabled(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_Metadata(t *testing.T) {
+func TestPrimaryKeyLinter_Metadata(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 
 	assert.Equal(t, "primary_key", linter.Name())
 	assert.NotEmpty(t, linter.Description())
 }
 
-func TestPrimaryKeyTypeLinter_BigIntUnsignedExplicit(t *testing.T) {
+func TestPrimaryKeyLinter_BigIntUnsignedExplicit(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id BIGINT(20) UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -341,7 +341,7 @@ func TestPrimaryKeyTypeLinter_BigIntUnsignedExplicit(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_CaseInsensitive(t *testing.T) {
+func TestPrimaryKeyLinter_CaseInsensitive(t *testing.T) {
 	// Test that type checking is case-insensitive
 	sql := `CREATE TABLE users (
 		id bigint unsigned PRIMARY KEY,
@@ -357,7 +357,7 @@ func TestPrimaryKeyTypeLinter_CaseInsensitive(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_AutoIncrement(t *testing.T) {
+func TestPrimaryKeyLinter_AutoIncrement(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
 		name VARCHAR(255)
@@ -372,7 +372,7 @@ func TestPrimaryKeyTypeLinter_AutoIncrement(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_UUIDAsVarchar(t *testing.T) {
+func TestPrimaryKeyLinter_UUIDAsVarchar(t *testing.T) {
 	// Common anti-pattern: using VARCHAR for UUIDs
 	sql := `CREATE TABLE users (
 		uuid VARCHAR(36) PRIMARY KEY,
@@ -390,7 +390,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsVarchar(t *testing.T) {
 	assert.Contains(t, *violations[0].Suggestion, "Change column \"uuid\" to a supported column type")
 }
 
-func TestPrimaryKeyTypeLinter_UUIDAsBinary(t *testing.T) {
+func TestPrimaryKeyLinter_UUIDAsBinary(t *testing.T) {
 	// Correct way to store UUIDs
 	sql := `CREATE TABLE users (
 		uuid BINARY(16) PRIMARY KEY,
@@ -408,7 +408,7 @@ func TestPrimaryKeyTypeLinter_UUIDAsBinary(t *testing.T) {
 
 // Tests for Configure functionality
 
-func TestPrimaryKeyTypeLinter_ConfigureAllowInt(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureAllowInt(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id INT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -428,7 +428,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowInt(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureAllowIntSigned(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureAllowIntSigned(t *testing.T) {
 	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
 	sql := `CREATE TABLE users (
 		id INT PRIMARY KEY,
@@ -452,7 +452,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowIntSigned(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "UNSIGNED is preferred")
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureAllowVarchar(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureAllowVarchar(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id VARCHAR(36) PRIMARY KEY,
 		name VARCHAR(255)
@@ -472,7 +472,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowVarchar(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureAllowChar(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureAllowChar(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id CHAR(36) PRIMARY KEY,
 		name VARCHAR(255)
@@ -492,7 +492,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllowChar(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureMultipleTypes(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureMultipleTypes(t *testing.T) {
 	sql1 := `CREATE TABLE users (
 		id INT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -526,7 +526,7 @@ func TestPrimaryKeyTypeLinter_ConfigureMultipleTypes(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureWithSpaces(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureWithSpaces(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id INT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -546,7 +546,7 @@ func TestPrimaryKeyTypeLinter_ConfigureWithSpaces(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureCaseInsensitive(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureCaseInsensitive(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id INT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -566,7 +566,7 @@ func TestPrimaryKeyTypeLinter_ConfigureCaseInsensitive(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureInvalidType(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureInvalidType(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"allowedTypes": "bigint,invalidtype",
@@ -578,7 +578,7 @@ func TestPrimaryKeyTypeLinter_ConfigureInvalidType(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalidtype")
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureUnknownKey(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureUnknownKey(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"unknownKey": "value",
@@ -590,7 +590,7 @@ func TestPrimaryKeyTypeLinter_ConfigureUnknownKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknownKey")
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureEmptyString(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureEmptyString(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	err := linter.Configure(map[string]string{
 		"allowedTypes": "",
@@ -602,7 +602,7 @@ func TestPrimaryKeyTypeLinter_ConfigureEmptyString(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported type")
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureOnlyBigInt(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureOnlyBigInt(t *testing.T) {
 	sql1 := `CREATE TABLE users (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -631,7 +631,7 @@ func TestPrimaryKeyTypeLinter_ConfigureOnlyBigInt(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "int") // Parser returns lowercase
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureAllIntTypes(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureAllIntTypes(t *testing.T) {
 	sql1 := `CREATE TABLE t1 (id TINYINT UNSIGNED PRIMARY KEY)`
 	ct1, err := statement.ParseCreateTable(sql1)
 	require.NoError(t, err)
@@ -664,7 +664,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllIntTypes(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureAllStringTypes(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureAllStringTypes(t *testing.T) {
 	sql1 := `CREATE TABLE t1 (id CHAR(36) PRIMARY KEY)`
 	ct1, err := statement.ParseCreateTable(sql1)
 	require.NoError(t, err)
@@ -693,7 +693,7 @@ func TestPrimaryKeyTypeLinter_ConfigureAllStringTypes(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureTemporalTypes(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureTemporalTypes(t *testing.T) {
 	sql1 := `CREATE TABLE t1 (id DATE PRIMARY KEY)`
 	ct1, err := statement.ParseCreateTable(sql1)
 	require.NoError(t, err)
@@ -726,7 +726,7 @@ func TestPrimaryKeyTypeLinter_ConfigureTemporalTypes(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureOtherTypes(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureOtherTypes(t *testing.T) {
 	sql1 := `CREATE TABLE t1 (id BIT(8) PRIMARY KEY)`
 	ct1, err := statement.ParseCreateTable(sql1)
 	require.NoError(t, err)
@@ -755,7 +755,7 @@ func TestPrimaryKeyTypeLinter_ConfigureOtherTypes(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_DefaultConfig(t *testing.T) {
+func TestPrimaryKeyLinter_DefaultConfig(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	defaultConfig := linter.DefaultConfig()
 
@@ -766,7 +766,7 @@ func TestPrimaryKeyTypeLinter_DefaultConfig(t *testing.T) {
 	assert.Equal(t, "BIGINT,BINARY,VARBINARY", defaultConfig["allowedTypes"])
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureOverridesDefault(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureOverridesDefault(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id INT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255)
@@ -789,7 +789,7 @@ func TestPrimaryKeyTypeLinter_ConfigureOverridesDefault(t *testing.T) {
 	assert.Empty(t, violations2)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureCompositePrimaryKey(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureCompositePrimaryKey(t *testing.T) {
 	sql := `CREATE TABLE user_roles (
 		user_id INT UNSIGNED,
 		role_id SMALLINT UNSIGNED,
@@ -810,7 +810,7 @@ func TestPrimaryKeyTypeLinter_ConfigureCompositePrimaryKey(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigurePartialComposite(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigurePartialComposite(t *testing.T) {
 	sql := `CREATE TABLE user_roles (
 		user_id INT UNSIGNED,
 		role_id SMALLINT UNSIGNED,
@@ -832,7 +832,7 @@ func TestPrimaryKeyTypeLinter_ConfigurePartialComposite(t *testing.T) {
 	assert.Equal(t, "role_id", *violations[0].Location.Column)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureBinaryStillWorks(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureBinaryStillWorks(t *testing.T) {
 	sql := `CREATE TABLE users (
 		uuid BINARY(16) PRIMARY KEY,
 		name VARCHAR(255)
@@ -852,7 +852,7 @@ func TestPrimaryKeyTypeLinter_ConfigureBinaryStillWorks(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
 	sql := `CREATE TABLE users (
 		uuid VARBINARY(255) PRIMARY KEY,
 		name VARCHAR(255)
@@ -872,7 +872,7 @@ func TestPrimaryKeyTypeLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
 	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
 	sql := `CREATE TABLE users (
 		id INT PRIMARY KEY,
@@ -895,7 +895,7 @@ func TestPrimaryKeyTypeLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "signed INT")
 }
 
-func TestPrimaryKeyTypeLinter_IntegrationWithConfig(t *testing.T) {
+func TestPrimaryKeyLinter_IntegrationWithConfig(t *testing.T) {
 	Reset()
 	Register(&PrimaryKeyLinter{})
 
@@ -923,7 +923,7 @@ func TestPrimaryKeyTypeLinter_IntegrationWithConfig(t *testing.T) {
 	assert.Empty(t, violations2)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureMultipleCalls(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureMultipleCalls(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 
 	// First configuration
@@ -952,7 +952,7 @@ func TestPrimaryKeyTypeLinter_ConfigureMultipleCalls(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureSuggestionUpdates(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureSuggestionUpdates(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id TINYINT PRIMARY KEY,
 		name VARCHAR(255)
@@ -975,7 +975,7 @@ func TestPrimaryKeyTypeLinter_ConfigureSuggestionUpdates(t *testing.T) {
 	assert.Contains(t, *violations[0].Suggestion, "BIGINT")
 }
 
-func TestPrimaryKeyTypeLinter_AllSupportedTypes(t *testing.T) {
+func TestPrimaryKeyLinter_AllSupportedTypes(t *testing.T) {
 	// Test that all supported types can be configured
 	allTypes := []string{
 		"BINARY", "VARBINARY", "BIGINT",
@@ -995,7 +995,7 @@ func TestPrimaryKeyTypeLinter_AllSupportedTypes(t *testing.T) {
 	assert.Len(t, linter.allowedTypes, len(allTypes))
 }
 
-func TestPrimaryKeyTypeLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
+func TestPrimaryKeyLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	// Configure with empty string
 	err := linter.Configure(map[string]string{
