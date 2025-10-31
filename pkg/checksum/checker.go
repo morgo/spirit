@@ -76,7 +76,6 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig()
 	}
-
 	if config.MaxRetries == 0 {
 		config.MaxRetries = 3
 	}

@@ -652,7 +652,6 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 // duplicate errors from a resume, and a constraint violation. So what we do is:
 // 0) *FORCE* checksum to be enabled (regardless now, its always on)
 func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniqmytable`)
 	table := `CREATE TABLE uniqmytable (
 				id int(11) NOT NULL AUTO_INCREMENT,
@@ -683,7 +682,8 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 	assert.NoError(t, m.Close()) // need to close now otherwise we'll get an error on re-opening it.
 
 	testutils.RunSQL(t, "DELETE FROM uniqmytable WHERE b = REPEAT('a', 200) LIMIT 1") // make unique
-	m, err = NewRunner(&Migration{
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS _uniqmytable_chkpnt`)                   // make sure no checkpoint exists, we need to start again.
+	m2, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
 		Password: cfg.Passwd,
@@ -693,9 +693,9 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 		Alter:    "ADD UNIQUE INDEX b (b)",
 	})
 	assert.NoError(t, err)
-	err = m.Run(t.Context())
+	err = m2.Run(t.Context())
 	assert.NoError(t, err) // works fine.
-	assert.NoError(t, m.Close())
+	assert.NoError(t, m2.Close())
 }
 
 // Test int to bigint primary key while resuming from checkpoint.

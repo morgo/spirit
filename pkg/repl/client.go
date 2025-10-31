@@ -264,12 +264,9 @@ func (c *Client) getCurrentBinlogPosition() (mysql.Position, error) {
 	var binlogFile, fake string
 	var binlogPos uint32
 	var binlogPosStmt = "SHOW MASTER STATUS"
-
-	// Check MySQL version dynamically since this method might be called before Run()
-	if dbconn.IsMySQL84(c.db) {
+	if c.isMySQL84 {
 		binlogPosStmt = "SHOW BINARY LOG STATUS"
 	}
-
 	err := c.db.QueryRow(binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
 		return mysql.Position{}, err
@@ -372,16 +369,20 @@ func (c *Client) readStream(ctx context.Context) {
 
 	c.Lock()
 	currentLogName := c.flushedPos.Name
+	startPos := c.flushedPos // Copy while holding lock
 	c.Unlock()
 
 	consecutiveErrors := 0
 	backoffDuration := initialBackoffDuration
 	lastErrorTime := time.Time{}
 
+	c.logger.Debugf("readStream started for binlog position: %v, current log name: %v", startPos, currentLogName)
+
 	for {
 		// Check if context is done before processing
 		select {
 		case <-ctx.Done():
+			c.logger.Debugf("readStream context cancelled: %v", ctx.Err())
 			return // stop processing
 		default:
 		}
@@ -899,10 +900,4 @@ func (c *Client) SetDDLNotificationChannel(ch chan string) {
 	c.Lock()
 	defer c.Unlock()
 	c.onDDL = ch
-}
-
-// GetCurrentBinlogPosition returns the current binlog position from the server.
-// This is a public wrapper around getCurrentBinlogPosition for use by the migration runner.
-func (c *Client) GetCurrentBinlogPosition() (mysql.Position, error) {
-	return c.getCurrentBinlogPosition()
 }
