@@ -1,5 +1,3 @@
-set persist max_connections = 1000;
-
 use mysql;
 
 create role if not exists R_MIGRATOR;

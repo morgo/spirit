@@ -19,8 +19,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// These are really constants, but we set them as vars so we can overwrite in the tests.
-var (
+const (
 	chunkletSize      = 1000 // Number of rows per chunklet
 	defaultBufferSize = 128  // Size of the shared buffer channel for chunklets
 	writeWorkers      = 40   // Number of write workers
@@ -188,7 +187,7 @@ func (c *buffered) Run(ctx context.Context) error {
 	}
 
 	// Start write workers that process chunklets
-	c.writeWorkersCount = int32(writeWorkers)
+	c.writeWorkersCount = writeWorkers
 	c.logger.Infof("starting %d write workers", writeWorkers)
 	for range writeWorkers {
 		g.Go(func() error {

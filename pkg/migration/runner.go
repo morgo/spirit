@@ -166,32 +166,29 @@ func (r *Runner) Run(ctx context.Context) error {
 			return nil
 		}
 	}
-
+	locks := make([]*dbconn.MetadataLock, 0, len(r.changes))
 	// Set info for all of the tables.
-	tables := make([]*table.TableInfo, 0, len(r.changes))
 	for _, change := range r.changes {
 		change.table = table.NewTableInfo(r.db, change.stmt.Schema, change.stmt.Table)
 		if err := change.table.SetInfo(ctx); err != nil {
 			return err
 		}
-		tables = append(tables, change.table)
+		// Take a metadata lock on the source table to prevent concurrent DDL.
+		// We release the lock when this function finishes executing.
+		lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), change.table, r.dbConfig, r.logger)
+		if err != nil {
+			return err
+		}
+		locks = append(locks, lock)
 	}
-
-	// Take a single metadata lock for all tables to prevent concurrent DDL.
-	// This uses a single DB connection instead of one per table.
-	// We release the lock when this function finishes executing.
-	lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), tables, r.dbConfig, r.logger)
-	if err != nil {
-		return err
-	}
-
-	// Release the lock
+	// Release all our locks
 	defer func() {
-		if err := lock.Close(); err != nil {
-			r.logger.Errorf("failed to release metadata lock: %v", err)
+		for _, lock := range locks {
+			if err := lock.Close(); err != nil {
+				r.logger.Errorf("failed to release metadata lock: %v", err)
+			}
 		}
 	}()
-
 	// This step is technically optional, but first we attempt to
 	// use MySQL's built-in DDL. This is because it's usually faster
 	// when it is compatible. If it returns no error, that means it

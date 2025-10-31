@@ -27,26 +27,21 @@ type MetadataLock struct {
 	closeCh         chan error
 	refreshInterval time.Duration
 	db              *sql.DB
-	lockNames       []string // Multiple lock names for multiple tables
+	lockName        string
 }
 
-func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo, config *DBConfig, logger loggers.Advanced, optionFns ...func(*MetadataLock)) (*MetadataLock, error) {
-	if len(tables) == 0 {
-		return nil, errors.New("no tables provided for metadata lock")
+func NewMetadataLock(ctx context.Context, dsn string, table *table.TableInfo, config *DBConfig, logger loggers.Advanced, optionFns ...func(*MetadataLock)) (*MetadataLock, error) {
+	if table == nil {
+		return nil, errors.New("metadata lock table info is nil")
 	}
+
 	mdl := &MetadataLock{
 		refreshInterval: refreshInterval,
-		lockNames:       make([]string, 0, len(tables)),
 	}
 
 	// Apply option functions
 	for _, optionFn := range optionFns {
 		optionFn(mdl)
-	}
-
-	// Compute lock names for all tables
-	for _, tbl := range tables {
-		mdl.lockNames = append(mdl.lockNames, computeLockName(tbl))
 	}
 
 	// Setup the dedicated connection for this lock
@@ -59,37 +54,43 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 		return nil, err
 	}
 
-	// Function to acquire all locks
-	getLocks := func() error {
-		// Acquire locks for all tables
+	// Function to acquire the lock
+	getLock := func() error {
 		// https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html#function_get-lock
-		for _, lockName := range mdl.lockNames {
-			var answer int
-			stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
-			if err := mdl.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
-				return fmt.Errorf("could not acquire metadata lock for %s: %s", lockName, err)
-			}
-			if answer == 0 {
-				// 0 means the lock is held by another connection
-				logger.Warnf("could not acquire metadata lock for %s, lock is held by another connection", lockName)
-				return fmt.Errorf("could not acquire metadata lock for %s, lock is held by another connection", lockName)
-			} else if answer != 1 {
-				// probably we never get here, but just in case
-				return fmt.Errorf("could not acquire metadata lock %s, GET_LOCK returned: %d", lockName, answer)
-			}
+		var answer int
+		// Using the table name alone entails a maximum lock length and leads to conflicts
+		// between different tables with the same name in different schemas.
+		// We use the schema name and table name to create a unique lock name with a hash.
+		// The hash is truncated to 8 characters to avoid the maximum lock length.
+		// bizarrely_long_schema_name.thisisareallylongtablenamethisisareallylongtablename60charac ==>
+		// bizarrely_long_schem.thisisareallylongtablenamethisis-66fec116
+		mdl.lockName = computeLockName(table)
+		stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", mdl.lockName, getLockTimeout.Seconds())
+		if err := mdl.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
+			return fmt.Errorf("could not acquire metadata lock: %s", err)
+		}
+		if answer == 0 {
+			// 0 means the lock is held by another connection
+			// TODO: we could lookup the connection that holds the lock and report details about it
+			logger.Warnf("could not acquire metadata lock for %s, lock is held by another connection", mdl.lockName)
+
+			// TODO: we could deal in error codes instead of string contains checks.
+			return fmt.Errorf("could not acquire metadata lock for %s, lock is held by another connection", mdl.lockName)
+		} else if answer != 1 {
+			// probably we never get here, but just in case
+			return fmt.Errorf("could not acquire metadata lock %s, GET_LOCK returned: %d", mdl.lockName, answer)
 		}
 		return nil
 	}
 
-	// Acquire all locks or return an error immediately
-	logger.Infof("attempting to acquire metadata lock ")
-	if err = getLocks(); err != nil {
+	// Acquire the lock or return an error immediately
+	// We only Infof the initial acquisition.
+	logger.Infof("attempting to acquire metadata lock %s", mdl.lockName)
+	if err = getLock(); err != nil {
 		mdl.db.Close() // close if we are not returning an MDL.
 		return nil, err
 	}
-	for _, lockName := range mdl.lockNames {
-		logger.Infof("acquired metadata lock: %s", lockName)
-	}
+	logger.Infof("acquired metadata lock: %s", mdl.lockName)
 
 	// Setup background refresh runner
 	ctx, mdl.cancel = context.WithCancel(ctx)
@@ -100,10 +101,8 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 		for {
 			select {
 			case <-ctx.Done():
-				// Close the dedicated connection to release all locks
-				for _, lockName := range mdl.lockNames {
-					logger.Infof("releasing metadata lock: %s", lockName)
-				}
+				// Close the dedicated connection to release the lock
+				logger.Infof("releasing metadata lock: %s", mdl.lockName)
 				// Use select with default to avoid blocking if Close() isn't called
 				select {
 				case mdl.closeCh <- mdl.db.Close():
@@ -113,13 +112,13 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				}
 				return
 			case <-ticker.C:
-				if err = getLocks(); err != nil {
+				if err = getLock(); err != nil {
 					// if we can't refresh the lock, it's okay.
 					// We have other safety mechanisms in place to prevent corruption
 					// for example, we watch the binary log to see metadata changes
 					// that we did not make. This makes it a warning, not an error,
 					// and we can try again on the next tick interval.
-					logger.Warnf("could not refresh metadata locks: %s", err)
+					logger.Warnf("could not refresh metadata lock: %s", err)
 
 					// try to close the existing connection
 					if closeErr := mdl.db.Close(); closeErr != nil {
@@ -134,15 +133,15 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 						continue
 					}
 
-					// try to acquire the locks again with the new connection
-					if err = getLocks(); err != nil {
-						logger.Warnf("could not acquire metadata locks after re-establishing connection: %s", err)
+					// try to acquire the lock again with the new connection
+					if err = getLock(); err != nil {
+						logger.Warnf("could not acquire metadata lock after re-establishing connection: %s", err)
 						continue
 					}
 
-					logger.Infof("re-acquired metadata locks after re-establishing connection")
+					logger.Infof("re-acquired metadata lock after re-establishing connection: %s", mdl.lockName)
 				} else {
-					logger.Debugf("refreshed metadata locks")
+					logger.Debugf("refreshed metadata lock for %s", mdl.lockName)
 				}
 			}
 		}
@@ -169,15 +168,7 @@ func (m *MetadataLock) CloseDBConnection(logger loggers.Advanced) error {
 }
 
 func (m *MetadataLock) GetLockName() string {
-	// For backwards compatibility, return the first lock name
-	if len(m.lockNames) > 0 {
-		return m.lockNames[0]
-	}
-	return ""
-}
-
-func (m *MetadataLock) GetLockNames() []string {
-	return m.lockNames
+	return m.lockName
 }
 
 func computeLockName(table *table.TableInfo) string {
