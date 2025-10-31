@@ -67,6 +67,14 @@ func continuallyDumpCheckpoint(ctx context.Context, task Task, logger loggers.Ad
 				if errors.Is(err, context.Canceled) {
 					return
 				}
+				if task.Progress().CurrentState >= CutOver {
+					// We don't block progress while we dump checkpoints.
+					// There was a race where we were safe to checkpoint
+					// when we initiated the dump checkpoint, but into it
+					// the checkpoint table might have been dropped because
+					// we've cutover already.
+					return
+				}
 				// Other errors such as not being able to write to the checkpoint
 				// table are considered fatal. This is because if we can't record
 				// our progress, we don't want to continue doing work.
