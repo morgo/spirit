@@ -683,6 +683,7 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 
 	testutils.RunSQL(t, "DELETE FROM uniqmytable WHERE b = REPEAT('a', 200) LIMIT 1") // make unique
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS _uniqmytable_chkpnt`)                   // make sure no checkpoint exists, we need to start again.
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS _uniqmytable_new`)                      // cleanup temp table from first run
 	m2, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
@@ -736,32 +737,20 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 		err := m.Run(ctx)
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
-	// wait until a checkpoint is saved (which means copy is in progress)
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Add timeout to prevent infinite waiting
-	timeout := time.After(10 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			t.Fatal("Timeout waiting for checkpoint to be created")
-		case <-ticker.C:
-			var rowCount int
-			err = db.QueryRow(`SELECT count(*) from _bigintpk_chkpnt`).Scan(&rowCount)
-			if err != nil {
-				continue // table does not exist yet
-			}
-			if rowCount > 0 {
-				goto checkpointFound
-			}
-		}
+	// Wait until we are at least copying rows
+	// before we dump a checkpoint.
+	for m.status.Get() != status.CopyRows {
+		time.Sleep(10 * time.Millisecond)
 	}
-checkpointFound:
+	// The checkpoint may fail initially because of watermark
+	// not ready, wait for the first successful one.
+	for {
+		err = m.DumpCheckpoint(t.Context())
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	// Between cancel and Close() every resource is freed.
 	assert.NoError(t, m.Close())
 	cancel()
@@ -2778,6 +2767,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	dbName := testutils.CreateUniqueTestDatabase(t)
 	tableName := `resume_checkpoint_e2e_w_sentinel`
 	tableInfo := table.TableInfo{SchemaName: dbName, TableName: tableName}
+	lockTables := []*table.TableInfo{&tableInfo}
 
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_old, _%s_chkpnt`, tableName, tableName, tableName))
 	table := fmt.Sprintf(`CREATE TABLE %s (
@@ -2834,7 +2824,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 			// Test that it's not possible to acquire metadata lock with name
 			// as tablename while the migration is running.
 			lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(),
-				&tableInfo, dbconn.NewDBConfig(), logrus.New())
+				lockTables, dbconn.NewDBConfig(), logrus.New())
 			assert.Error(t, err)
 			if lock != nil {
 				assert.ErrorContains(t, err, fmt.Sprintf("could not acquire metadata lock for %s, lock is held by another connection", lock.GetLockName()))

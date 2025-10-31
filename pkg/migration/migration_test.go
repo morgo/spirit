@@ -578,7 +578,7 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 // https://github.com/block/spirit/issues/502
 func TestLargeNumberOfMultiChanges(t *testing.T) {
 	var alterStmts []string
-	for i := range 10 {
+	for i := range 50 {
 		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS mt_%d`, i))
 		testutils.RunSQL(t, fmt.Sprintf(`CREATE TABLE mt_%d (id int not null primary key auto_increment, b INT NOT NULL)`, i))
 		alterStmts = append(alterStmts, fmt.Sprintf(`ALTER TABLE mt_%d ENGINE=InnoDB`, i))

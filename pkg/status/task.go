@@ -54,7 +54,7 @@ func continuallyDumpCheckpoint(ctx context.Context, task Task, logger loggers.Ad
 			return
 		case <-ticker.C:
 			state := task.Progress().CurrentState
-			if state > CutOver {
+			if state >= CutOver {
 				return
 			}
 			if err := task.DumpCheckpoint(ctx); err != nil {

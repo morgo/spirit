@@ -20,6 +20,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	writeWorkers = 10 // use fewer connections in tests.
 	goleak.VerifyTestMain(m)
 	os.Exit(m.Run())
 }
