@@ -63,6 +63,12 @@ func NewDatum(val any, tp datumTp) Datum {
 			// do nothing
 		case uint:
 			val = uint64(v)
+		case uint32:
+			val = uint64(v)
+		case int32:
+			// MySQL binlog sometimes sends unsigned int columns as signed int32.
+			// We need to reinterpret the bits as unsigned.
+			val = uint64(uint32(v))
 		default:
 			val, err = strconv.ParseUint(fmt.Sprint(val), 10, 64)
 			if err != nil {
