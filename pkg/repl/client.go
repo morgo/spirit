@@ -101,6 +101,7 @@ type Client struct {
 	cancelFunc func()
 	isClosed   atomic.Bool
 	logger     loggers.Advanced
+	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
 	useExperimentalBufferedMap bool // for testing new subscription type
 }
@@ -263,9 +264,12 @@ func (c *Client) getCurrentBinlogPosition() (mysql.Position, error) {
 	var binlogFile, fake string
 	var binlogPos uint32
 	var binlogPosStmt = "SHOW MASTER STATUS"
-	if c.isMySQL84 {
+
+	// Check MySQL version dynamically since this method might be called before Run()
+	if dbconn.IsMySQL84(c.db) {
 		binlogPosStmt = "SHOW BINARY LOG STATUS"
 	}
+
 	err := c.db.QueryRow(binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
 		return mysql.Position{}, err
@@ -330,6 +334,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	// Start the binlog reader in a go routine, using a context with cancel.
 	// Write the cancel function to c.cancelFunc
 	ctx, c.cancelFunc = context.WithCancel(ctx)
+	c.streamWG.Add(1)
 	go c.readStream(ctx)
 	return nil
 }
@@ -363,6 +368,8 @@ func (c *Client) recreateStreamer() error {
 // It will read the stream until the context is closed
 // *and* it continues on any errors
 func (c *Client) readStream(ctx context.Context) {
+	defer c.streamWG.Done() // Signal completion when goroutine exits
+
 	c.Lock()
 	currentLogName := c.flushedPos.Name
 	c.Unlock()
@@ -400,10 +407,12 @@ func (c *Client) readStream(ctx context.Context) {
 				// Apply exponential backoff
 				if currentTime.Sub(lastErrorTime) < backoffDuration {
 					c.logger.Infof("Backing off for %v before recreating streamer", backoffDuration)
+					backoffTimer := time.NewTimer(backoffDuration)
 					select {
 					case <-ctx.Done():
+						backoffTimer.Stop()
 						return
-					case <-time.After(backoffDuration):
+					case <-backoffTimer.C:
 					}
 				}
 
@@ -425,10 +434,12 @@ func (c *Client) readStream(ctx context.Context) {
 			}
 
 			// Short sleep before retrying
+			retryTimer := time.NewTimer(100 * time.Millisecond)
 			select {
 			case <-ctx.Done():
+				retryTimer.Stop()
 				return
-			case <-time.After(100 * time.Millisecond):
+			case <-retryTimer.C:
 			}
 			continue
 		}
@@ -643,11 +654,20 @@ func (c *Client) binlogPositionIsImpossible() bool {
 
 func (c *Client) Close() {
 	c.isClosed.Store(true)
-	if c.syncer != nil {
-		c.syncer.Close()
-	}
+
+	// Cancel the context first to signal readStream goroutine to exit
 	if c.cancelFunc != nil {
 		c.cancelFunc()
+	}
+
+	// Wait for the readStream goroutine to exit cleanly
+	// This prevents goroutine leaks detected by goleak in tests
+	// It will eventually catch the ctx cancel from calling
+	// c.cancelFunc()
+	c.streamWG.Wait()
+
+	if c.syncer != nil {
+		c.syncer.Close()
 	}
 }
 
