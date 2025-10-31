@@ -34,7 +34,7 @@ func TestUnsafeLinter_DropTable(t *testing.T) {
 	// DROP TABLE is unsafe
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "Unsafe operation")
 	t.Log(violations[0].Message)
 	assert.Equal(t, "users", violations[0].Location.Table)
@@ -51,7 +51,7 @@ func TestUnsafeLinter_DropTableIfExists(t *testing.T) {
 	// DROP TABLE IF EXISTS is still unsafe
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestUnsafeLinter_AlterTableDropColumn(t *testing.T) {
@@ -65,7 +65,7 @@ func TestUnsafeLinter_AlterTableDropColumn(t *testing.T) {
 	// DROP COLUMN is unsafe
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "Unsafe operation")
 	t.Log(violations[0].Message)
 	assert.Equal(t, "users", violations[0].Location.Table)
@@ -82,7 +82,7 @@ func TestUnsafeLinter_AlterTableDropPrimaryKey(t *testing.T) {
 	// DROP PRIMARY KEY is unsafe
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "Unsafe operation")
 }
 
@@ -97,7 +97,7 @@ func TestUnsafeLinter_AlterTableDropPartition(t *testing.T) {
 	// DROP PARTITION is unsafe
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestUnsafeLinter_AlterTableCoalescePartitions(t *testing.T) {
@@ -111,7 +111,7 @@ func TestUnsafeLinter_AlterTableCoalescePartitions(t *testing.T) {
 	// COALESCE PARTITION is unsafe
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestUnsafeLinter_AlterTableAddColumn(t *testing.T) {
@@ -312,7 +312,7 @@ func TestUnsafeLinter_AlterTableMultipleSpecs(t *testing.T) {
 	// Should detect the DROP COLUMN in the multi-spec ALTER
 	require.Len(t, violations, 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Equal(t, "users", violations[0].Location.Table)
 }
 
@@ -331,7 +331,7 @@ func TestUnsafeLinter_AlterTableMultipleUnsafeSpecs(t *testing.T) {
 
 	for _, v := range violations {
 		assert.Equal(t, "unsafe", v.Linter.Name())
-		assert.Equal(t, SeverityWarning, v.Severity)
+		assert.Equal(t, SeverityError, v.Severity)
 		assert.Equal(t, "users", v.Location.Table)
 	}
 }
@@ -437,7 +437,7 @@ func TestUnsafeLinter_ViolationStructure(t *testing.T) {
 	// Verify violation structure
 	assert.NotNil(t, v.Linter)
 	assert.Equal(t, "unsafe", v.Linter.Name())
-	assert.Equal(t, SeverityWarning, v.Severity)
+	assert.Equal(t, SeverityError, v.Severity)
 	assert.NotEmpty(t, v.Message)
 	assert.NotNil(t, v.Location)
 	assert.Equal(t, "users", v.Location.Table)
@@ -528,7 +528,7 @@ func TestUnsafeLinter_DropMultipleTables(t *testing.T) {
 	// Note: The statement parser might handle this differently
 	require.GreaterOrEqual(t, len(violations), 1)
 	assert.Equal(t, "unsafe", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestUnsafeLinter_AlterTableCharset(t *testing.T) {

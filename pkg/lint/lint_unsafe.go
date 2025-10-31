@@ -52,6 +52,9 @@ func (l *UnsafeLinter) DefaultConfig() map[string]string {
 }
 
 func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
+	if l.allowUnsafe {
+		return nil // No violations if unsafe operations are allowed
+	}
 	for _, change := range changes {
 		switch node := (*change.StmtNode).(type) {
 		case *ast.TruncateTableStmt, *ast.DropTableStmt, *ast.DropDatabaseStmt:
@@ -59,8 +62,7 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 				Linter:   l,
 				Location: &Location{Table: change.Table},
 				Message:  fmt.Sprintf("Unsafe operation detected: %q", node.OriginalText()),
-				// TODO: Consider changing back to SeverityError - unsafe operations can cause data loss
-				Severity: SeverityWarning,
+				Severity: SeverityError,
 			})
 		case *ast.DropIndexStmt, *ast.RenameTableStmt:
 			// In some definitions of "safe" these might be unsafe,
@@ -75,8 +77,7 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 						Linter:   l,
 						Location: &Location{Table: change.Table},
 						Message:  "Unsafe operation detected: " + AlterTableTypeToString(spec.Tp),
-						// TODO: Consider changing back to SeverityError - these operations can cause data loss
-						Severity: SeverityWarning,
+						Severity: SeverityError,
 					})
 				case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
 					// These could be "lossy" changes in theory, but because spirit
