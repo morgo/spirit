@@ -305,11 +305,11 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 // append additional options to it to standardize the connection.
 // It will also ping the connection to ensure it is valid.
 func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
-	return NewWithContext(inputDSN, config, "main database")
+	return NewWithConnectionType(inputDSN, config, "main database")
 }
 
-// NewWithContext is like New but includes context about the connection type for better error messages
-func NewWithContext(inputDSN string, config *DBConfig, connectionType string) (db *sql.DB, err error) {
+// NewWithConnectionType is like New but includes context about the connection type for better error messages
+func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType string) (db *sql.DB, err error) {
 	dsn, err := newDSN(inputDSN, config)
 	if err != nil {
 		return nil, err

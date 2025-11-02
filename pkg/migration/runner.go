@@ -544,7 +544,7 @@ func (r *Runner) setupReplicationThrottler(ctx context.Context) error {
 		enhancedReplicaDSN = r.migration.ReplicaDSN
 	}
 
-	r.replica, err = dbconn.NewWithContext(enhancedReplicaDSN, replicaDBConfig, "replica database")
+	r.replica, err = dbconn.NewWithConnectionType(enhancedReplicaDSN, replicaDBConfig, "replica database")
 	if err != nil {
 		return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", r.migration.ReplicaDSN, err)
 	}
