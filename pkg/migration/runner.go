@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/block/spirit/pkg/check"
@@ -146,7 +147,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
-		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", r.dsn(), err)
+		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", maskPasswordInDSN(r.dsn()), err)
 	}
 
 	if r.migration.EnableExperimentalMultiTableSupport {
@@ -404,6 +405,30 @@ func (r *Runner) dsn() string {
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s", r.migration.Username, r.migration.Password, r.migration.Host, r.changes[0].stmt.Schema)
 }
 
+// maskPasswordInDSN masks the password in any DSN string for safe logging
+func maskPasswordInDSN(dsn string) string {
+	// DSN format: user:password@tcp(host:port)/database
+	// We want to replace the password part with ***
+	if dsn == "" {
+		return dsn
+	}
+
+	// Find the @ symbol that separates credentials from host
+	atIndex := strings.Index(dsn, "@")
+	if atIndex == -1 {
+		return dsn // No credentials in DSN
+	}
+
+	// Find the : that separates username from password
+	colonIndex := strings.Index(dsn, ":")
+	if colonIndex == -1 || colonIndex > atIndex {
+		return dsn // No password in DSN
+	}
+
+	// Replace password with ***
+	return dsn[:colonIndex+1] + "***" + dsn[atIndex:]
+}
+
 func (r *Runner) checkpointTableName() string {
 	// We also call the create functions for the sentinel
 	// and checkpoint tables.
@@ -546,7 +571,7 @@ func (r *Runner) setupReplicationThrottler(ctx context.Context) error {
 
 	r.replica, err = dbconn.NewWithConnectionType(enhancedReplicaDSN, replicaDBConfig, "replica database")
 	if err != nil {
-		return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", r.migration.ReplicaDSN, err)
+		return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(r.migration.ReplicaDSN), err)
 	}
 
 	// An error here means the connection to the replica is not valid, or it can't be detected

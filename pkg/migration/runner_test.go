@@ -3334,3 +3334,56 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	require.Error(t, gErr)
 	require.NoError(t, m.Close())
 }
+
+func TestPasswordMasking(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "basic DSN with password",
+			input:    "user:password@tcp(localhost:3306)/database",
+			expected: "user:***@tcp(localhost:3306)/database",
+		},
+		{
+			name:     "DSN with complex password",
+			input:    "myuser:c0mplex!Pa$$w0rd@tcp(db.example.com:3306)/mydb",
+			expected: "myuser:***@tcp(db.example.com:3306)/mydb",
+		},
+		{
+			name:     "DSN without password",
+			input:    "user@tcp(localhost:3306)/database",
+			expected: "user@tcp(localhost:3306)/database",
+		},
+		{
+			name:     "DSN with empty password",
+			input:    "user:@tcp(localhost:3306)/database",
+			expected: "user:***@tcp(localhost:3306)/database",
+		},
+		{
+			name:     "empty DSN",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "malformed DSN without @",
+			input:    "user:password",
+			expected: "user:password",
+		},
+		{
+			name:     "DSN with colon in password",
+			input:    "user:pass:word@tcp(localhost:3306)/database",
+			expected: "user:***@tcp(localhost:3306)/database",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := maskPasswordInDSN(tt.input)
+			assert.Equal(t, tt.expected, result, "Password masking failed for input: %s", tt.input)
+		})
+	}
+}
