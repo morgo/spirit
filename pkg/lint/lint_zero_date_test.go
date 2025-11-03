@@ -102,51 +102,6 @@ func TestZeroDateLinter_NullableDateTimeWithNullDefault(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-// Test NOT NULL DATE with no default (should warn)
-func TestZeroDateLinter_NotNullDateWithNoDefault(t *testing.T) {
-	linter := &ZeroDateLinter{}
-	sql := "CREATE TABLE users (id INT PRIMARY KEY, birth_date DATE NOT NULL)"
-	stmts, err := statement.New(sql)
-	require.NoError(t, err)
-
-	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.Equal(t, "birth_date", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "not nullable and has no default")
-}
-
-// Test NOT NULL DATETIME with no default (should warn)
-func TestZeroDateLinter_NotNullDateTimeWithNoDefault(t *testing.T) {
-	linter := &ZeroDateLinter{}
-	sql := "CREATE TABLE events (id INT PRIMARY KEY, event_time DATETIME NOT NULL)"
-	stmts, err := statement.New(sql)
-	require.NoError(t, err)
-
-	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "events", violations[0].Location.Table)
-	assert.Equal(t, "event_time", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "not nullable and has no default")
-}
-
-// Test NOT NULL TIMESTAMP with no default (should warn)
-func TestZeroDateLinter_NotNullTimestampWithNoDefault(t *testing.T) {
-	linter := &ZeroDateLinter{}
-	sql := "CREATE TABLE logs (id INT PRIMARY KEY, created_at TIMESTAMP NOT NULL)"
-	stmts, err := statement.New(sql)
-	require.NoError(t, err)
-
-	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "logs", violations[0].Location.Table)
-	assert.Equal(t, "created_at", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "not nullable and has no default")
-}
-
 // Test NOT NULL DATE with valid default (should pass)
 func TestZeroDateLinter_NotNullDateWithValidDefault(t *testing.T) {
 	linter := &ZeroDateLinter{}
@@ -205,15 +160,11 @@ func TestZeroDateLinter_MultipleColumns(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	require.Len(t, violations, 2)
+	require.Len(t, violations, 1)
 
 	// First violation: created_at with zero default
 	assert.Equal(t, "created_at", *violations[0].Location.Column)
 	assert.Contains(t, violations[0].Message, "zero default value")
-
-	// Second violation: event_date NOT NULL with no default
-	assert.Equal(t, "event_date", *violations[1].Location.Column)
-	assert.Contains(t, violations[1].Message, "not nullable and has no default")
 }
 
 // Test non-date columns (should pass)
@@ -264,12 +215,12 @@ func TestZeroDateLinter_ExistingAndNewTables(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{existingStmt}, newStmts)
-	require.Len(t, violations, 2)
+	require.Len(t, violations, 1)
 
 	// Check both violations
-	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
+	tables := []string{violations[0].Location.Table}
 	assert.Contains(t, tables, "users")
-	assert.Contains(t, tables, "events")
+	assert.NotContains(t, tables, "events")
 }
 
 // Test case sensitivity of NULL default

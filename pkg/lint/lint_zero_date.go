@@ -99,20 +99,6 @@ func (l *ZeroDateLinter) checkColumnZeroDate(column *ast.ColumnDef, tableName st
 		return nil
 	}
 
-	if !nullable && defaultValue == nil {
-		// If the column is *not* nullable and has no default, MySQL will try to assign a zero date default value
-		// *unless* strict mode and NO_ZERO_DATE are enabled
-		return &Violation{
-			Linter: l,
-			Location: &Location{
-				Table:  tableName,
-				Column: &columnName,
-			},
-			Severity: SeverityWarning,
-			Message:  fmt.Sprintf("date column %s is not nullable and has no default", columnName),
-		}
-	}
-
 	if defaultValue != nil {
 		if *defaultValue == l.getZeroDate(tp) {
 			return &Violation{

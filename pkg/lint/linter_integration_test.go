@@ -433,9 +433,7 @@ func TestZeroDateIntegration(t *testing.T) {
 	// Test 5: ALTER TABLE ADD COLUMN NOT NULL without default (zero date will be assigned) - should warn
 	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe ADD COLUMN no_default_date DATETIME NOT NULL")
 	violations = linter.Lint(nil, alterStmt)
-	assert.NotEmpty(t, violations, "Adding NOT NULL date column without default should warn")
-	assert.Contains(t, violations[0].Message, "no_default_date")
-	assert.Contains(t, violations[0].Message, "not nullable and has no default")
+	assert.Empty(t, violations, "Adding NOT NULL date column without default is permitted (at least for now)")
 
 	// Test 6: ALTER TABLE MODIFY COLUMN with zero date default - should fail
 	alterStmt = statement.MustNew("ALTER TABLE zero_date_test_safe MODIFY COLUMN created_at DATETIME DEFAULT '0000-00-00 00:00:00'")
