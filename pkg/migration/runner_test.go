@@ -3382,6 +3382,7 @@ func TestPasswordMasking(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := maskPasswordInDSN(tt.input)
 			assert.Equal(t, tt.expected, result, "Password masking failed for input: %s", tt.input)
 		})
