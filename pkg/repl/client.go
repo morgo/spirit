@@ -398,7 +398,7 @@ func (c *Client) readStream(ctx context.Context) {
 		// If streamer is nil (such as after a failed recreation), treat it as an error
 		// This will then trigger the recreation
 		if c.streamer == nil {
-			err = fmt.Errorf("binlog streamer is nil, cannot read events")
+			err = errors.New("binlog streamer is nil, cannot read events")
 		} else {
 			// Read the next event from the stream
 			ev, err = c.streamer.GetEvent(ctx)
