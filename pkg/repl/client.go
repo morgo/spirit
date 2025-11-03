@@ -50,6 +50,13 @@ const (
 	maxBackoffDuration = time.Minute
 	// Backoff multiplier
 	backoffMultiplier = 2
+	// Default maximum number of streamer recreation attempts before panic.
+	maxRecreateAttemptsDefault = 10
+)
+
+var (
+	// This is a variable to allow modification in tests.
+	maxRecreateAttempts = maxRecreateAttemptsDefault
 )
 
 type Client struct {
@@ -209,9 +216,14 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 }
 
 // getBufferedPos returns the buffered position under a mutex.
+// If bufferedPos has no name (not yet set), it falls back to flushedPos.
 func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
+	if c.bufferedPos.Name == "" {
+		// If no buffered position, use flushed position
+		return c.flushedPos
+	}
 	return c.bufferedPos
 }
 
@@ -368,6 +380,7 @@ func (c *Client) readStream(ctx context.Context) {
 	c.Unlock()
 
 	consecutiveErrors := 0
+	recreateAttempts := 0
 	backoffDuration := initialBackoffDuration
 	lastErrorTime := time.Time{}
 
@@ -379,8 +392,18 @@ func (c *Client) readStream(ctx context.Context) {
 		default:
 		}
 
-		// Read the next event from the stream
-		ev, err := c.streamer.GetEvent(ctx)
+		var ev *replication.BinlogEvent
+		var err error
+
+		// If streamer is nil (such as after a failed recreation), treat it as an error
+		// This will then trigger the recreation
+		if c.streamer == nil {
+			err = fmt.Errorf("binlog streamer is nil, cannot read events")
+		} else {
+			// Read the next event from the stream
+			ev, err = c.streamer.GetEvent(ctx)
+		}
+
 		if err != nil {
 			// We only stop processing for context cancelled errors.
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil || c.isClosed.Load() {
@@ -395,7 +418,15 @@ func (c *Client) readStream(ctx context.Context) {
 
 			// If we've had too many consecutive errors, try to recreate the streamer
 			if consecutiveErrors >= maxConsecutiveErrors {
-				c.logger.Warnf("Too many consecutive errors (%d), attempting to recreate streamer", consecutiveErrors)
+				recreateAttempts++
+				c.logger.Warnf("Too many consecutive errors (%d), attempting to recreate streamer (attempt %d/%d)",
+					consecutiveErrors, recreateAttempts, maxRecreateAttempts)
+
+				// Check if we've exceeded the maximum number of recreation attempts
+				if recreateAttempts >= maxRecreateAttempts {
+					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up",
+						recreateAttempts, c.getBufferedPos()))
+				}
 
 				// Apply exponential backoff
 				if currentTime.Sub(lastErrorTime) < backoffDuration {
@@ -411,6 +442,9 @@ func (c *Client) readStream(ctx context.Context) {
 				if recreateErr := c.recreateStreamer(); recreateErr != nil {
 					c.logger.Errorf("Failed to recreate streamer: %v", recreateErr)
 
+					// Set streamer to nil so next iteration will trigger recreation
+					c.streamer = nil
+
 					// Increase backoff duration for next attempt
 					backoffDuration *= backoffMultiplier
 					if backoffDuration > maxBackoffDuration {
@@ -419,6 +453,7 @@ func (c *Client) readStream(ctx context.Context) {
 				} else {
 					// Successfully recreated, reset counters
 					consecutiveErrors = 0
+					recreateAttempts = 0
 					backoffDuration = initialBackoffDuration
 				}
 				lastErrorTime = currentTime
