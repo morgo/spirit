@@ -70,9 +70,6 @@ type Client struct {
 	writeDB  *sql.DB
 	dbConfig *dbconn.DBConfig
 
-	// TLS configuration for binary log connections
-	tlsConfig *dbconn.DBConfig
-
 	// subscriptions is a map of tables that are actively
 	// watching for changes on. The key is schemaName.tableName.
 	// each subscription has its own set of changes.
@@ -113,10 +110,12 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 	if config.WriteDB == nil {
 		config.WriteDB = db // default to using the read DB for writes
 	}
+	if config.DBConfig == nil {
+		config.DBConfig = dbconn.NewDBConfig() // default DB config
+	}
 	return &Client{
 		db:                         db,
-		dbConfig:                   dbconn.NewDBConfig(),
-		tlsConfig:                  config.TLSConfig,
+		dbConfig:                   config.DBConfig,
 		host:                       host,
 		username:                   username,
 		password:                   password,
@@ -140,7 +139,7 @@ type ClientConfig struct {
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
 	WriteDB                    *sql.DB          // if not nil, use this DB for writes.
-	TLSConfig                  *dbconn.DBConfig // TLS configuration for binary log connections
+	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
 }
 
 // NewServerID randomizes the server ID to avoid conflicts with other binlog readers.
@@ -307,8 +306,8 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	}
 
 	// Apply TLS configuration using the same infrastructure as main database connections
-	if c.tlsConfig != nil {
-		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.tlsConfig, host)
+	if c.dbConfig != nil {
+		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.dbConfig, host)
 		if err != nil {
 			return fmt.Errorf("failed to configure TLS for binlog connection: %w", err)
 		}

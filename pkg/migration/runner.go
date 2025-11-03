@@ -465,7 +465,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		TargetBatchTime: r.migration.TargetChunkTime,
 		OnDDL:           r.ddlNotification,
 		ServerID:        repl.NewServerID(),
-		TLSConfig:       r.dbConfig, // Pass TLS configuration to replication client
+		DBConfig:        r.dbConfig, // Pass database configuration to replication client
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.

@@ -82,24 +82,24 @@ func TestClientTLSConfiguration(t *testing.T) {
 
 			// Create a mock client (we can't actually connect without real DB)
 			client := &Client{
-				host:      tc.host,
-				username:  "testuser",
-				password:  "testpass",
-				tlsConfig: tlsConfig,
+				host:     tc.host,
+				username: "testuser",
+				password: "testpass",
+				dbConfig: tlsConfig,
 			}
 
 			// Verify TLS config is stored correctly
-			assert.NotNil(t, client.tlsConfig)
-			assert.Equal(t, tc.tlsMode, client.tlsConfig.TLSMode)
-			assert.Equal(t, tc.tlsCert, client.tlsConfig.TLSCertificatePath)
+			assert.NotNil(t, client.dbConfig)
+			assert.Equal(t, tc.tlsMode, client.dbConfig.TLSMode)
+			assert.Equal(t, tc.tlsCert, client.dbConfig.TLSCertificatePath)
 
 			// Test the TLS mode validation logic that would be used in Run()
 			if tc.tlsMode == "DISABLED" {
 				// For disabled mode, TLS should not be configured in actual connection
-				assert.Equal(t, "DISABLED", client.tlsConfig.TLSMode)
+				assert.Equal(t, "DISABLED", client.dbConfig.TLSMode)
 			} else {
 				// For other modes, TLS should be configured
-				assert.NotEqual(t, "DISABLED", client.tlsConfig.TLSMode)
+				assert.NotEqual(t, "DISABLED", client.dbConfig.TLSMode)
 			}
 		})
 	}

@@ -14,27 +14,27 @@ func TestTLSConfigurationLogic(t *testing.T) {
 	tests := []struct {
 		name             string
 		host             string
-		tlsConfig        *dbconn.DBConfig
+		dbConfig         *dbconn.DBConfig
 		expectTLSSet     bool
 		expectServerName string
 	}{
 		{
 			name:         "No TLS config - non-RDS host",
 			host:         "localhost:3306",
-			tlsConfig:    nil,
+			dbConfig:     nil,
 			expectTLSSet: false,
 		},
 		{
 			name:             "No TLS config - RDS host gets fallback TLS",
 			host:             "mydb.cluster-123.us-west-2.rds.amazonaws.com:3306",
-			tlsConfig:        nil,
+			dbConfig:         nil,
 			expectTLSSet:     true,
 			expectServerName: "mydb.cluster-123.us-west-2.rds.amazonaws.com",
 		},
 		{
 			name: "TLS disabled",
 			host: "localhost:3306",
-			tlsConfig: &dbconn.DBConfig{
+			dbConfig: &dbconn.DBConfig{
 				TLSMode: "DISABLED",
 			},
 			expectTLSSet: false,
@@ -42,7 +42,7 @@ func TestTLSConfigurationLogic(t *testing.T) {
 		{
 			name: "TLS enabled - REQUIRED mode",
 			host: "localhost:3306",
-			tlsConfig: &dbconn.DBConfig{
+			dbConfig: &dbconn.DBConfig{
 				TLSMode: "REQUIRED",
 			},
 			expectTLSSet:     true,
@@ -51,7 +51,7 @@ func TestTLSConfigurationLogic(t *testing.T) {
 		{
 			name: "TLS enabled - PREFERRED mode",
 			host: "localhost:3306",
-			tlsConfig: &dbconn.DBConfig{
+			dbConfig: &dbconn.DBConfig{
 				TLSMode: "PREFERRED",
 			},
 			expectTLSSet:     true,
@@ -60,7 +60,7 @@ func TestTLSConfigurationLogic(t *testing.T) {
 		{
 			name: "TLS enabled with custom cert",
 			host: "localhost:3306",
-			tlsConfig: &dbconn.DBConfig{
+			dbConfig: &dbconn.DBConfig{
 				TLSMode:            "REQUIRED",
 				TLSCertificatePath: "/path/to/cert.pem",
 			},
@@ -73,9 +73,9 @@ func TestTLSConfigurationLogic(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a mock client with the test configuration
 			client := &Client{
-				host:      tt.host,
-				tlsConfig: tt.tlsConfig,
-				cfg:       replication.BinlogSyncerConfig{},
+				host:     tt.host,
+				dbConfig: tt.dbConfig,
+				cfg:      replication.BinlogSyncerConfig{},
 			}
 
 			// Extract host part for ServerName (remove port)
@@ -90,7 +90,7 @@ func TestTLSConfigurationLogic(t *testing.T) {
 			}
 
 			// Apply our TLS configuration logic
-			if client.tlsConfig != nil && client.tlsConfig.TLSMode != "DISABLED" {
+			if client.dbConfig != nil && client.dbConfig.TLSMode != "DISABLED" {
 				// Create a TLS config based on the mode, same as main DB connections
 				var tlsConfig *tls.Config
 
@@ -100,7 +100,7 @@ func TestTLSConfigurationLogic(t *testing.T) {
 				} else {
 					// For testing, use embedded RDS bundle since we don't have actual cert files
 					certData := dbconn.GetEmbeddedRDSBundle()
-					tlsConfig = dbconn.NewCustomTLSConfig(certData, client.tlsConfig.TLSMode)
+					tlsConfig = dbconn.NewCustomTLSConfig(certData, client.dbConfig.TLSMode)
 				}
 
 				if tlsConfig != nil {

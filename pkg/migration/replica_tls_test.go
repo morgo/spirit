@@ -209,14 +209,12 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 			tlsConfig.TLSMode = tc.tlsMode
 			tlsConfig.TLSCertificatePath = tc.tlsCert
 
-			// Create replication client config with TLS
+			// Create replication client config with database config
 			clientConfig := &repl.ClientConfig{
-				Logger:    logrus.New(),
-				ServerID:  repl.NewServerID(),
-				TLSConfig: tlsConfig,
-			}
-
-			// Create a mock database connection for testing
+				Logger:   logrus.New(),
+				ServerID: repl.NewServerID(),
+				DBConfig: tlsConfig,
+			} // Create a mock database connection for testing
 			db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 			require.NoError(t, err)
 			defer db.Close()
@@ -231,9 +229,9 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 				// The actual TLS behavior is tested in the Run() method
 			} else {
 				// For non-disabled modes, the config should be present
-				assert.NotNil(t, clientConfig.TLSConfig)
-				assert.Equal(t, tc.tlsMode, clientConfig.TLSConfig.TLSMode)
-				assert.Equal(t, tc.tlsCert, clientConfig.TLSConfig.TLSCertificatePath)
+				assert.NotNil(t, clientConfig.DBConfig)
+				assert.Equal(t, tc.tlsMode, clientConfig.DBConfig.TLSMode)
+				assert.Equal(t, tc.tlsCert, clientConfig.DBConfig.TLSCertificatePath)
 			}
 		})
 	}
