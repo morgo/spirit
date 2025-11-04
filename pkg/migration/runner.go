@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
@@ -146,7 +149,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", maskPasswordInDSN(r.dsn()), err)
 	}
 
 	if r.migration.EnableExperimentalMultiTableSupport {
@@ -404,6 +407,34 @@ func (r *Runner) dsn() string {
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s", r.migration.Username, r.migration.Password, r.migration.Host, r.changes[0].stmt.Schema)
 }
 
+// maskPasswordInDSN masks the password in any DSN string for safe logging
+func maskPasswordInDSN(dsn string) string {
+	if dsn == "" {
+		return dsn
+	}
+
+	// Use MySQL driver's ParseDSN for robust parsing
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		// If parsing fails, fall back to the original DSN
+		// This preserves the original behavior for malformed DSNs
+		return dsn
+	}
+
+	// Check if the original DSN had a password field by looking for `:` before `@`
+	// This handles both empty passwords (user:@host) and non-empty passwords (user:pass@host)
+	atIndex := strings.Index(dsn, "@")
+	colonIndex := strings.Index(dsn, ":")
+	hasPasswordField := colonIndex != -1 && atIndex != -1 && colonIndex < atIndex
+
+	// Only mask if there was actually a password field in the original DSN
+	if hasPasswordField {
+		cfg.Passwd = "***"
+	}
+
+	return cfg.FormatDSN()
+}
+
 func (r *Runner) checkpointTableName() string {
 	// We also call the create functions for the sentinel
 	// and checkpoint tables.
@@ -440,6 +471,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		TargetBatchTime: r.migration.TargetChunkTime,
 		OnDDL:           r.ddlNotification,
 		ServerID:        repl.NewServerID(),
+		DBConfig:        r.dbConfig, // Pass database configuration to replication client
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
@@ -521,19 +553,31 @@ func (r *Runner) setupReplicationThrottler(ctx context.Context) error {
 	}
 
 	var err error
-	// Create a separate DB config for replica connection without TLS overrides
-	// The replica DSN should contain its own TLS configuration
+	// Create a separate DB config for replica connection
 	replicaDBConfig := dbconn.NewDBConfig()
 	replicaDBConfig.LockWaitTimeout = r.dbConfig.LockWaitTimeout
 	replicaDBConfig.InterpolateParams = r.dbConfig.InterpolateParams
 	replicaDBConfig.ForceKill = r.dbConfig.ForceKill
 	replicaDBConfig.MaxOpenConnections = r.dbConfig.MaxOpenConnections
-	// Note: Deliberately NOT copying TLS settings (TLSMode, TLSCertificatePath)
-	// TODO: Replica TLS configuration will be handled in a separate PR
-	// See https://github.com/block/spirit/issues/175
-	r.replica, err = dbconn.New(r.migration.ReplicaDSN, replicaDBConfig)
+
+	// Copy TLS settings from main DB config to replica config
+	// This allows the DSN enhancement to use the correct TLS settings
+	replicaDBConfig.TLSMode = r.dbConfig.TLSMode
+	replicaDBConfig.TLSCertificatePath = r.dbConfig.TLSCertificatePath
+
+	// Enhance replica DSN with TLS settings if not already present
+	// This preserves any explicit TLS configuration in the replica DSN
+	// while providing sensible defaults from the main DB configuration
+	enhancedReplicaDSN, err := dbconn.EnhanceDSNWithTLS(r.migration.ReplicaDSN, replicaDBConfig)
 	if err != nil {
-		return err
+		r.logger.Warnf("could not enhance replica DSN with TLS settings: %v", err)
+		// Continue with original DSN if enhancement fails
+		enhancedReplicaDSN = r.migration.ReplicaDSN
+	}
+
+	r.replica, err = dbconn.NewWithConnectionType(enhancedReplicaDSN, replicaDBConfig, "replica database")
+	if err != nil {
+		return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(r.migration.ReplicaDSN), err)
 	}
 
 	// An error here means the connection to the replica is not valid, or it can't be detected
