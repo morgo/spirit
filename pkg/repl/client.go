@@ -50,13 +50,12 @@ const (
 	maxBackoffDuration = time.Minute
 	// Backoff multiplier
 	backoffMultiplier = 2
-	// Default maximum number of streamer recreation attempts before panic.
-	maxRecreateAttemptsDefault = 10
 )
 
+// These are really consts, but set to var for testing.
 var (
-	// This is a variable to allow modification in tests.
-	maxRecreateAttempts = maxRecreateAttemptsDefault
+	// maxRecreateAttempts is the maximum number of streamer recreation attempts before panic.
+	maxRecreateAttempts = 10
 )
 
 type Client struct {

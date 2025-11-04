@@ -23,6 +23,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	maxRecreateAttempts = 3
 	goleak.VerifyTestMain(m)
 	os.Exit(m.Run())
 }
@@ -761,23 +762,6 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }
 
-// TestMaxRecreateAttempts validates the maxRecreateAttempts variable and verifies
-// the counter logic works correctly (increment and reset).
-func TestMaxRecreateAttempts(t *testing.T) {
-	// Verify the variable exists and has the correct default value
-	assert.Equal(t, maxRecreateAttemptsDefault, maxRecreateAttempts, "maxRecreateAttempts should default to 10")
-
-	// Test that we can modify it for testing
-	originalValue := maxRecreateAttempts
-	defer func() { maxRecreateAttempts = originalValue }()
-
-	maxRecreateAttempts = 5
-	assert.Equal(t, 5, maxRecreateAttempts)
-
-	maxRecreateAttempts = originalValue
-	assert.Equal(t, maxRecreateAttemptsDefault, maxRecreateAttempts)
-}
-
 // TestMaxRecreateAttemptsPanic tests that the panic actually occurs after max attempts.
 // This uses a subprocess pattern to test the panic behavior.
 func TestMaxRecreateAttemptsPanic(t *testing.T) {
@@ -816,9 +800,6 @@ func TestMaxRecreateAttemptsPanic(t *testing.T) {
 }
 
 func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
-	// Set a very small value for fast testing
-	maxRecreateAttempts = 2
-
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	if err != nil {
 		t.Skipf("MySQL not available: %v", err)
