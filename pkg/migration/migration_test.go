@@ -586,15 +586,14 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	migration := &Migration{
-		Host:                                cfg.Addr,
-		Username:                            cfg.User,
-		Password:                            cfg.Passwd,
-		Database:                            cfg.DBName,
-		Threads:                             2,
-		TargetChunkTime:                     2 * time.Second,
-		Statement:                           strings.Join(alterStmts, "; "),
-		EnableExperimentalMultiTableSupport: true,
-		ForceKill:                           true,
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         2,
+		TargetChunkTime: 2 * time.Second,
+		Statement:       strings.Join(alterStmts, "; "),
+		ForceKill:       true,
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
