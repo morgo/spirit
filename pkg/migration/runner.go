@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
@@ -407,26 +409,30 @@ func (r *Runner) dsn() string {
 
 // maskPasswordInDSN masks the password in any DSN string for safe logging
 func maskPasswordInDSN(dsn string) string {
-	// DSN format: user:password@tcp(host:port)/database
-	// We want to replace the password part with ***
 	if dsn == "" {
 		return dsn
 	}
 
-	// Find the @ symbol that separates credentials from host
+	// Use MySQL driver's ParseDSN for robust parsing
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		// If parsing fails, fall back to the original DSN
+		// This preserves the original behavior for malformed DSNs
+		return dsn
+	}
+
+	// Check if the original DSN had a password field by looking for `:` before `@`
+	// This handles both empty passwords (user:@host) and non-empty passwords (user:pass@host)
 	atIndex := strings.Index(dsn, "@")
-	if atIndex == -1 {
-		return dsn // No credentials in DSN
-	}
-
-	// Find the : that separates username from password
 	colonIndex := strings.Index(dsn, ":")
-	if colonIndex == -1 || colonIndex > atIndex {
-		return dsn // No password in DSN
+	hasPasswordField := colonIndex != -1 && atIndex != -1 && colonIndex < atIndex
+
+	// Only mask if there was actually a password field in the original DSN
+	if hasPasswordField {
+		cfg.Passwd = "***"
 	}
 
-	// Replace password with ***
-	return dsn[:colonIndex+1] + "***" + dsn[atIndex:]
+	return cfg.FormatDSN()
 }
 
 func (r *Runner) checkpointTableName() string {
