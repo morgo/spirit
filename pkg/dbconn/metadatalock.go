@@ -176,10 +176,6 @@ func (m *MetadataLock) GetLockName() string {
 	return ""
 }
 
-func (m *MetadataLock) GetLockNames() []string {
-	return m.lockNames
-}
-
 func computeLockName(table *table.TableInfo) string {
 	schemaNamePart := table.SchemaName
 	if len(schemaNamePart) > 20 {
