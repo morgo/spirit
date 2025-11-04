@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	maxRecreateAttempts = 3
 	goleak.VerifyTestMain(m)
 	os.Exit(m.Run())
 }
@@ -604,7 +607,7 @@ func TestCompositePKUpdate(t *testing.T) {
 	)`)
 
 	// Insert initial test data in *both* source and destination tables
-	testutils.RunSQL(t, `INSERT INTO composite_pk_src (organization_id, from_id, id, message) VALUES 
+	testutils.RunSQL(t, `INSERT INTO composite_pk_src (organization_id, from_id, id, message) VALUES
 		(1, 100, 1, 'message 1'),
 		(1, 200, 2, 'message 2'),
 		(1, 300, 3, 'message 3'),
@@ -651,14 +654,14 @@ func TestCompositePKUpdate(t *testing.T) {
 	var count int
 
 	// Check that rows with new from_id exist in destination
-	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst 
+	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst
 		WHERE organization_id = 1 AND from_id = 999 AND id IN (1, 3)`).Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count, "Rows with updated from_id should exist in destination")
 
 	// Check that rows with old from_id don't exist in destination
-	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst 
-		WHERE (organization_id = 1 AND from_id = 100 AND id = 1) 
+	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst
+		WHERE (organization_id = 1 AND from_id = 100 AND id = 1)
 		   OR (organization_id = 1 AND from_id = 300 AND id = 3)`).Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, count, "Rows with old from_id should not exist in destination")
@@ -675,7 +678,7 @@ func TestCompositePKUpdate(t *testing.T) {
 	assert.NoError(t, client.Flush(t.Context()))
 
 	// Verify the second update
-	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst 
+	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst
 		WHERE organization_id = 2 AND from_id = 888 AND id = 5`).Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count, "Row with updated from_id=888 should exist in destination")
@@ -757,4 +760,91 @@ func TestAllChangesFlushed(t *testing.T) {
 
 	subQueue.HasChanged([]any{3}, nil, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
+}
+
+// TestMaxRecreateAttemptsPanic tests that the panic actually occurs after max attempts.
+// This uses a subprocess pattern to test the panic behavior.
+func TestMaxRecreateAttemptsPanic(t *testing.T) {
+	if os.Getenv("TEST_PANIC_SUBPROCESS") == "1" {
+		// This is the subprocess that should panic
+		testMaxRecreateAttemptsPanicSubprocess(t)
+		return
+	}
+
+	// Run the test in a subprocess
+	cmd := exec.Command(os.Args[0], "-test.run=TestMaxRecreateAttemptsPanic")
+	cmd.Env = append(os.Environ(), "TEST_PANIC_SUBPROCESS=1")
+	output, err := cmd.CombinedOutput()
+
+	outputStr := string(output)
+	t.Logf("Subprocess output:\n%s", outputStr)
+
+	// We expect the subprocess to exit with non-zero (panic or crash)
+	if err == nil {
+		t.Fatal("Expected subprocess to panic or crash, but it exited successfully")
+	}
+
+	if !strings.Contains(outputStr, "consecutive errors") {
+		t.Errorf("Expected to see consecutive errors. Output:\n%s", outputStr)
+	}
+	if !strings.Contains(outputStr, "Failed to recreate streamer") {
+		t.Errorf("Expected to see recreation attempt. Output:\n%s", outputStr)
+	}
+
+	// If we DID get the max attempts panic message, verify it's correct
+	if strings.Contains(outputStr, "failed to recreate binlog streamer after") {
+		if !strings.Contains(outputStr, "giving up") {
+			t.Errorf("Panic message should contain 'giving up'. Output:\n%s", outputStr)
+		}
+	}
+}
+
+func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	if err != nil {
+		t.Skipf("MySQL not available: %v", err)
+	}
+	defer db.Close()
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS panic_test_t1, panic_test_t2")
+	testutils.RunSQL(t, "CREATE TABLE panic_test_t1 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE panic_test_t2 (a INT NOT NULL PRIMARY KEY)")
+
+	t1 := table.NewTableInfo(db, "test", "panic_test_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "panic_test_t2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	require.NoError(t, client.Run(t.Context()))
+
+	// Give the connection time to settle
+	time.Sleep(200 * time.Millisecond)
+
+	// Break the connection by changing config and closing syncer
+	client.cfg.Host = "invalid-host.local"
+	client.cfg.Port = 9999
+
+	if client.syncer != nil {
+		client.syncer.Close()
+	}
+
+	// Wait for the panic to occur (with max 30 seconds timeout)
+	// With 2 attempts and fast failures, should happen quickly
+	time.Sleep(30 * time.Second)
+
+	// If we reach here, test failed - no panic occurred
+	t.Fatal("Expected panic did not occur")
 }
