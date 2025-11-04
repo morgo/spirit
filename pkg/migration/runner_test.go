@@ -2767,6 +2767,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	dbName := testutils.CreateUniqueTestDatabase(t)
 	tableName := `resume_checkpoint_e2e_w_sentinel`
 	tableInfo := table.TableInfo{SchemaName: dbName, TableName: tableName}
+	lockTables := []*table.TableInfo{&tableInfo}
 
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_old, _%s_chkpnt`, tableName, tableName, tableName))
 	table := fmt.Sprintf(`CREATE TABLE %s (
@@ -2823,7 +2824,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 			// Test that it's not possible to acquire metadata lock with name
 			// as tablename while the migration is running.
 			lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(),
-				&tableInfo, dbconn.NewDBConfig(), logrus.New())
+				lockTables, dbconn.NewDBConfig(), logrus.New())
 			assert.Error(t, err)
 			if lock != nil {
 				assert.ErrorContains(t, err, fmt.Sprintf("could not acquire metadata lock for %s, lock is held by another connection", lock.GetLockName()))
@@ -3313,4 +3314,58 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 
 	require.Error(t, gErr)
 	require.NoError(t, m.Close())
+}
+
+func TestPasswordMasking(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "basic DSN with password",
+			input:    "user:password@tcp(localhost:3306)/database",
+			expected: "user:***@tcp(localhost:3306)/database",
+		},
+		{
+			name:     "DSN with complex password",
+			input:    "myuser:c0mplex!Pa$$w0rd@tcp(db.example.com:3306)/mydb",
+			expected: "myuser:***@tcp(db.example.com:3306)/mydb",
+		},
+		{
+			name:     "DSN without password",
+			input:    "user@tcp(localhost:3306)/database",
+			expected: "user@tcp(localhost:3306)/database",
+		},
+		{
+			name:     "DSN with empty password",
+			input:    "user:@tcp(localhost:3306)/database",
+			expected: "user:***@tcp(localhost:3306)/database",
+		},
+		{
+			name:     "empty DSN",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "malformed DSN without @",
+			input:    "user:password",
+			expected: "user:password",
+		},
+		{
+			name:     "DSN with colon in password",
+			input:    "user:pass:word@tcp(localhost:3306)/database",
+			expected: "user:***@tcp(localhost:3306)/database",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := maskPasswordInDSN(tt.input)
+			assert.Equal(t, tt.expected, result, "Password masking failed for input: %s", tt.input)
+		})
+	}
 }
