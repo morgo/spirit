@@ -683,7 +683,7 @@ func TestRedundantIndexLinter_CreateTableInChanges(t *testing.T) {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC;`
 
 	linter := &RedundantIndexLinter{}
-	
+
 	// Parse as a change (AbstractStatement)
 	abstractStmt, err := statement.New(createTableSQL)
 	assert.NoError(t, err)
