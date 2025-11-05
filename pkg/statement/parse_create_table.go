@@ -214,7 +214,14 @@ func (ct *CreateTable) GetIndexes() Indexes {
 	indexList := make([]Index, 0, len(ct.Indexes))
 
 	// Add table-level indexes
-	indexList = append(indexList, ct.Indexes...)
+	for _, index := range ct.Indexes {
+		if index.Type == "PRIMARY KEY" {
+			if index.Name == "" {
+				index.Name = "PRIMARY"
+			}
+		}
+		indexList = append(indexList, index)
+	}
 
 	// Add column-level constraints that turn into indexes (PRIMARY KEY, UNIQUE)
 	for _, col := range ct.Columns {

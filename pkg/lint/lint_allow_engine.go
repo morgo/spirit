@@ -35,7 +35,7 @@ func (l *AllowEngine) Configure(config map[string]string) error {
 	for k, v := range config {
 		switch k {
 		case "allowed_engines":
-			for _, engine := range strings.Split(v, ",") {
+			for engine := range strings.SplitSeq(v, ",") {
 				engine = strings.TrimSpace(engine)
 				if engine != "" {
 					l.allowedEngines[strings.ToLower(engine)] = struct{}{}
