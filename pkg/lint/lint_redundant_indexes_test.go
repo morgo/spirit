@@ -659,3 +659,41 @@ func TestRedundantIndexLinter_CompositePrimaryKey(t *testing.T) {
 	assert.Contains(t, violatedIndexes, "idx_created", "idx_created should have redundant suffix")
 	assert.Contains(t, violatedIndexes["idx_created"], "suffix")
 }
+
+// TestRedundantIndexLinter_CreateTableInChanges tests that the linter
+// correctly detects redundant indexes in CREATE TABLE statements passed as changes.
+// This is a regression test for the bug where CREATE TABLE statements in changes
+// were not being linted.
+func TestRedundantIndexLinter_CreateTableInChanges(t *testing.T) {
+	createTableSQL := `CREATE TABLE bankaccount_capability (
+		id bigint unsigned NOT NULL AUTO_INCREMENT,
+		token varchar(191) NOT NULL,
+		bank_account_id bigint unsigned NOT NULL,
+		transfer_instruction_route_id bigint unsigned NOT NULL,
+		type varchar(50) NOT NULL,
+		status varchar(50) NOT NULL,
+		last_used_at timestamp NULL DEFAULT NULL,
+		created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		PRIMARY KEY (id),
+		UNIQUE KEY (bank_account_id, transfer_instruction_route_id, type),
+		UNIQUE KEY (token),
+		KEY idx_bank_account_id (bank_account_id),
+		KEY idx_transfer_instruction_route_id (transfer_instruction_route_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC;`
+
+	linter := &RedundantIndexLinter{}
+	
+	// Parse as a change (AbstractStatement)
+	abstractStmt, err := statement.New(createTableSQL)
+	assert.NoError(t, err)
+	assert.Len(t, abstractStmt, 1)
+
+	// Lint with the CREATE TABLE as a change (not an existing table)
+	violations := linter.Lint(nil, abstractStmt)
+
+	// Should detect idx_bank_account_id as redundant to the UNIQUE KEY
+	assert.Len(t, violations, 1, "Expected one violation for redundant index")
+	assert.Contains(t, violations[0].Message, "idx_bank_account_id")
+	assert.Contains(t, violations[0].Message, "redundant")
+}

@@ -33,8 +33,8 @@ func (l *RedundantIndexLinter) Description() string {
 func (l *RedundantIndexLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
 	var violations []Violation
 
-	// Only check existing tables - we're analyzing the current schema
-	for _, table := range existingTables {
+	// Check both existing tables and CREATE TABLE statements in changes
+	for table := range CreateTableStatements(existingTables, changes) {
 		indexes := table.GetIndexes()
 		primaryKey := indexes.ByName("PRIMARY")
 
