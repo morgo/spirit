@@ -104,6 +104,35 @@ func TestRedundantIndexLinter_PrefixRedundancy(t *testing.T) {
 	}
 }
 
+// TestRedundantIndexLinter_RedundantToUniqueIndex tests a simplified integration
+// case where an index is redundant to a UNIQUE index.
+func TestRedundantIndexLinter_RedundantToUniqueIndex(t *testing.T) {
+	createTable := `CREATE TABLE t1 (
+    id bigint unsigned NOT NULL AUTO_INCREMENT,
+    token varchar(191) NOT NULL,
+    XYZ_id bigint unsigned NOT NULL,
+    ZYX_id bigint unsigned NOT NULL,
+    type varchar(50) NOT NULL,
+    status varchar(50) NOT NULL,
+    last_used_at timestamp NULL DEFAULT NULL,
+    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY (XYZ_id, ZYX_id, type),
+    UNIQUE KEY (token),
+    KEY idx_XYZ_id (XYZ_id),
+    KEY idx_ZYX_id (ZYX_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC;`
+	linter := &RedundantIndexLinter{}
+	ct, err := statement.ParseCreateTable(createTable)
+	assert.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	assert.Len(t, violations, 1, "Expected one violation")
+	assert.Contains(t, violations[0].Message, "Index 'idx_XYZ_id' on columns (XYZ_id) is redundant")
+}
+
 func TestRedundantIndexLinter_DuplicateIndexes(t *testing.T) {
 	tests := []struct {
 		name           string
