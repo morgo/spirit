@@ -697,3 +697,234 @@ func TestRedundantIndexLinter_CreateTableInChanges(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "idx_bank_account_id")
 	assert.Contains(t, violations[0].Message, "redundant")
 }
+
+// TestRedundantIndexLinter_AlterTableAddRedundantIndex tests that the linter
+// detects redundant indexes being added via ALTER TABLE statements.
+func TestRedundantIndexLinter_AlterTableAddRedundantIndex(t *testing.T) {
+	tests := []struct {
+		name            string
+		existingTable   string
+		alterSQL        string
+		expectViolated  bool
+		violatedIndex   string
+		messageContains string
+	}{
+		{
+			name: "ADD INDEX redundant to existing index",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_ab (a, b)
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD INDEX idx_a (a)",
+			expectViolated:  true,
+			violatedIndex:   "idx_a",
+			messageContains: "redundant",
+		},
+		{
+			name: "ADD INDEX redundant to PRIMARY KEY",
+			existingTable: `CREATE TABLE t1 (
+				a INT,
+				b INT,
+				PRIMARY KEY (a, b)
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD INDEX idx_a (a)",
+			expectViolated:  true,
+			violatedIndex:   "idx_a",
+			messageContains: "PRIMARY KEY",
+		},
+		{
+			name: "ADD UNIQUE redundant to existing UNIQUE",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				UNIQUE KEY idx_ab (a, b)
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD UNIQUE KEY idx_a (a)",
+			expectViolated:  true,
+			violatedIndex:   "idx_a",
+			messageContains: "redundant",
+		},
+		{
+			name: "ADD INDEX with PK suffix redundancy",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD INDEX idx_ab_id (a, b, id)",
+			expectViolated:  true,
+			violatedIndex:   "idx_ab_id",
+			messageContains: "redundant PRIMARY KEY suffix",
+		},
+		{
+			name: "ADD INDEX not redundant",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_a (a)
+			)`,
+			alterSQL:       "ALTER TABLE t1 ADD INDEX idx_b (b)",
+			expectViolated: false,
+		},
+		{
+			name: "ADD INDEX duplicate of existing",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_ab (a, b)
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD INDEX idx_ab_dup (a, b)",
+			expectViolated:  true,
+			violatedIndex:   "idx_ab_dup",
+			messageContains: "duplicate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linter := &RedundantIndexLinter{}
+
+			// Parse existing table
+			existingCT, err := statement.ParseCreateTable(tt.existingTable)
+			assert.NoError(t, err)
+
+			// Parse ALTER TABLE statement
+			alterStmt, err := statement.New(tt.alterSQL)
+			assert.NoError(t, err)
+			assert.Len(t, alterStmt, 1)
+
+			// Run linter
+			violations := linter.Lint([]*statement.CreateTable{existingCT}, alterStmt)
+
+			if tt.expectViolated {
+				assert.NotEmpty(t, violations, "Expected violations but got none")
+				found := false
+				for _, v := range violations {
+					if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
+						found = true
+						if tt.messageContains != "" {
+							assert.Contains(t, v.Message, tt.messageContains)
+						}
+						assert.Equal(t, SeverityWarning, v.Severity)
+						break
+					}
+				}
+				assert.True(t, found, "Expected violation for index %s", tt.violatedIndex)
+			} else {
+				assert.Empty(t, violations, "Expected no violations but got: %v", violations)
+			}
+		})
+	}
+}
+
+// TestRedundantIndexLinter_AlterTableMultipleIndexes tests ALTER TABLE
+// statements that add multiple indexes.
+func TestRedundantIndexLinter_AlterTableMultipleIndexes(t *testing.T) {
+	existingTable := `CREATE TABLE t1 (
+		id INT PRIMARY KEY,
+		a INT,
+		b INT,
+		c INT,
+		INDEX idx_abc (a, b, c)
+	)`
+
+	// Add two indexes: one redundant, one not
+	alterSQL := `ALTER TABLE t1 
+		ADD INDEX idx_a (a),
+		ADD INDEX idx_d (c)`
+
+	linter := &RedundantIndexLinter{}
+
+	existingCT, err := statement.ParseCreateTable(existingTable)
+	assert.NoError(t, err)
+
+	// Parse ALTER TABLE - note this creates separate statements for each ADD INDEX
+	alterStmts, err := statement.New(alterSQL)
+	assert.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{existingCT}, alterStmts)
+
+	// Should detect idx_a as redundant but not idx_d
+	violatedIndexes := make(map[string]bool)
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Index != nil {
+			violatedIndexes[*v.Location.Index] = true
+		}
+	}
+
+	assert.True(t, violatedIndexes["idx_a"], "idx_a should be flagged as redundant")
+	assert.False(t, violatedIndexes["idx_d"], "idx_d should not be flagged")
+}
+
+// TestRedundantIndexLinter_AlterTableOnNonExistentTable tests that the linter
+// gracefully handles ALTER TABLE on tables that don't exist in the schema.
+func TestRedundantIndexLinter_AlterTableOnNonExistentTable(t *testing.T) {
+	linter := &RedundantIndexLinter{}
+
+	alterSQL := "ALTER TABLE nonexistent ADD INDEX idx_a (a)"
+	alterStmt, err := statement.New(alterSQL)
+	assert.NoError(t, err)
+
+	// Run linter with no existing tables
+	violations := linter.Lint(nil, alterStmt)
+
+	// Should not crash and should return no violations
+	assert.Empty(t, violations)
+}
+
+// TestRedundantIndexLinter_AlterTableComplex tests a complex scenario
+// with multiple tables and ALTER statements.
+func TestRedundantIndexLinter_AlterTableComplex(t *testing.T) {
+	// Create two tables
+	table1SQL := `CREATE TABLE users (
+		id INT PRIMARY KEY,
+		email VARCHAR(255),
+		name VARCHAR(255),
+		UNIQUE KEY idx_email (email)
+	)`
+
+	table2SQL := `CREATE TABLE orders (
+		id INT PRIMARY KEY,
+		user_id INT,
+		product_id INT,
+		INDEX idx_user_product (user_id, product_id)
+	)`
+
+	linter := &RedundantIndexLinter{}
+
+	table1, err := statement.ParseCreateTable(table1SQL)
+	assert.NoError(t, err)
+
+	table2, err := statement.ParseCreateTable(table2SQL)
+	assert.NoError(t, err)
+
+	// ALTER statements: one adds redundant index, one doesn't
+	alterSQL1 := "ALTER TABLE users ADD INDEX idx_email_dup (email)"
+	alterSQL2 := "ALTER TABLE orders ADD INDEX idx_product (product_id)"
+
+	alter1, err := statement.New(alterSQL1)
+	assert.NoError(t, err)
+
+	alter2, err := statement.New(alterSQL2)
+	assert.NoError(t, err)
+
+	allAlters := append(alter1, alter2...)
+
+	violations := linter.Lint([]*statement.CreateTable{table1, table2}, allAlters)
+
+	// Should detect idx_email_dup as redundant but not idx_product
+	violatedIndexes := make(map[string]bool)
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Index != nil {
+			violatedIndexes[*v.Location.Index] = true
+		}
+	}
+
+	assert.True(t, violatedIndexes["idx_email_dup"], "idx_email_dup should be flagged")
+	assert.False(t, violatedIndexes["idx_product"], "idx_product should not be flagged")
+}

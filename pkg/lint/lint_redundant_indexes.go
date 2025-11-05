@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
@@ -35,59 +36,70 @@ func (l *RedundantIndexLinter) Lint(existingTables []*statement.CreateTable, cha
 
 	// Check both existing tables and CREATE TABLE statements in changes
 	for table := range CreateTableStatements(existingTables, changes) {
-		indexes := table.GetIndexes()
-		primaryKey := indexes.ByName("PRIMARY")
-
-		// Track which indexes we've already reported as redundant
-		// to avoid duplicate violations
-		reportedRedundant := make(map[string]bool)
-
-		for _, index := range indexes {
-			if reportedRedundant[index.Name] {
-				continue
-			}
-
-			// Check 1: Redundant PK suffix (can coexist with other issues)
-			// This checks if the index explicitly includes PK columns at the end
-			if primaryKey != nil {
-				if hasRedundant, colCount := hasRedundantPKSuffix(index, *primaryKey); hasRedundant {
-					violations = append(violations, createPKSuffixViolation(
-						table.GetTableName(),
-						index,
-						*primaryKey,
-						colCount,
-					))
-					// Continue checking - index might also be fully redundant
-				}
-			}
-
-			// Check 2: Redundant to another index
-			for _, otherIndex := range indexes {
-				if index.Name == otherIndex.Name {
-					continue
-				}
-
-				if isRedundantToIndex(index, otherIndex) {
-					isDuplicate := len(index.Columns) == len(otherIndex.Columns)
-					violations = append(violations, createRedundancyViolation(
-						table.GetTableName(),
-						index,
-						otherIndex,
-						isDuplicate,
-						otherIndex.Type == "PRIMARY KEY",
-					))
-					reportedRedundant[index.Name] = true
-					break
-				}
-			}
-		}
+		violations = append(violations, l.checkTableIndexes(table)...)
 	}
+
+	// Check ALTER TABLE statements that add indexes
+	violations = append(violations, l.checkAlterTableStatements(existingTables, changes)...)
 
 	return violations
 }
 
 func (l *RedundantIndexLinter) String() string {
 	return Stringer(l)
+}
+
+// checkTableIndexes checks a single table for redundant indexes
+func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) []Violation {
+	var violations []Violation
+	indexes := table.GetIndexes()
+	primaryKey := indexes.ByName("PRIMARY")
+
+	// Track which indexes we've already reported as redundant
+	// to avoid duplicate violations
+	reportedRedundant := make(map[string]bool)
+
+	for _, index := range indexes {
+		if reportedRedundant[index.Name] {
+			continue
+		}
+
+		// Check 1: Redundant PK suffix (can coexist with other issues)
+		// This checks if the index explicitly includes PK columns at the end
+		if primaryKey != nil {
+			if hasRedundant, colCount := hasRedundantPKSuffix(index, *primaryKey); hasRedundant {
+				violations = append(violations, createPKSuffixViolation(
+					table.GetTableName(),
+					index,
+					*primaryKey,
+					colCount,
+				))
+				// Continue checking - index might also be fully redundant
+			}
+		}
+
+		// Check 2: Redundant to another index
+		for _, otherIndex := range indexes {
+			if index.Name == otherIndex.Name {
+				continue
+			}
+
+			if isRedundantToIndex(index, otherIndex) {
+				isDuplicate := len(index.Columns) == len(otherIndex.Columns)
+				violations = append(violations, createRedundancyViolation(
+					table.GetTableName(),
+					index,
+					otherIndex,
+					isDuplicate,
+					otherIndex.Type == "PRIMARY KEY",
+				))
+				reportedRedundant[index.Name] = true
+				break
+			}
+		}
+	}
+
+	return violations
 }
 
 // isRedundantToIndex checks if indexA is redundant to indexB.
@@ -325,5 +337,157 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 			"primary_key_columns": primaryKey.Columns,
 			"redundant_col_count": redundantColCount,
 		},
+	}
+}
+
+// checkAlterTableStatements checks ALTER TABLE statements that add indexes
+// for potential redundancy with existing indexes or other indexes being added.
+func (l *RedundantIndexLinter) checkAlterTableStatements(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
+	var violations []Violation
+
+	// Build a map of existing tables for quick lookup
+	existingTableMap := make(map[string]*statement.CreateTable)
+	for _, table := range existingTables {
+		existingTableMap[table.GetTableName()] = table
+	}
+
+	// Process each ALTER TABLE statement
+	for _, change := range changes {
+		alterStmt, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+
+		tableName := change.Table
+
+		// Get the existing table definition (if it exists)
+		existingTable := existingTableMap[tableName]
+		if existingTable == nil {
+			// Table doesn't exist yet - might be created in this batch of changes
+			// For now, we'll skip checking ALTER on non-existent tables
+			continue
+		}
+
+		// Extract indexes being added in this ALTER TABLE
+		newIndexes := l.extractIndexesFromAlter(alterStmt)
+		if len(newIndexes) == 0 {
+			continue
+		}
+
+		// Get existing indexes from the table
+		existingIndexes := existingTable.GetIndexes()
+		primaryKey := existingIndexes.ByName("PRIMARY")
+
+		// Check each new index for redundancy
+		for i, newIndex := range newIndexes {
+			// Check against existing indexes
+			if v := l.checkIndexRedundancy(tableName, newIndex, existingIndexes, primaryKey); v != nil {
+				violations = append(violations, *v)
+			}
+
+			// Check against other new indexes being added in the same ALTER
+			// (only check against indexes that come before this one to avoid duplicates)
+			for j := range i {
+				otherNewIndex := newIndexes[j]
+
+				// Check if newIndex is redundant to otherNewIndex
+				if isRedundantToIndex(newIndex, otherNewIndex) {
+					isDuplicate := len(newIndex.Columns) == len(otherNewIndex.Columns)
+					violations = append(violations, createRedundancyViolation(
+						tableName,
+						newIndex,
+						otherNewIndex,
+						isDuplicate,
+						false, // not redundant to PK
+					))
+					break // Only report first redundancy
+				}
+			}
+		}
+	}
+
+	return violations
+}
+
+// checkIndexRedundancy checks if a single index is redundant to any index in the provided list.
+// Returns a violation if redundancy is found, nil otherwise.
+func (l *RedundantIndexLinter) checkIndexRedundancy(tableName string, index statement.Index, existingIndexes statement.Indexes, primaryKey *statement.Index) *Violation {
+	// Check for redundant PK suffix first
+	if primaryKey != nil {
+		if hasRedundant, colCount := hasRedundantPKSuffix(index, *primaryKey); hasRedundant {
+			v := createPKSuffixViolation(tableName, index, *primaryKey, colCount)
+			return &v
+		}
+	}
+
+	// Check if redundant to any existing index
+	for _, existingIndex := range existingIndexes {
+		if isRedundantToIndex(index, existingIndex) {
+			isDuplicate := len(index.Columns) == len(existingIndex.Columns)
+			v := createRedundancyViolation(
+				tableName,
+				index,
+				existingIndex,
+				isDuplicate,
+				existingIndex.Type == "PRIMARY KEY",
+			)
+			return &v
+		}
+	}
+
+	return nil
+}
+
+// extractIndexesFromAlter extracts index definitions from an ALTER TABLE statement
+func (l *RedundantIndexLinter) extractIndexesFromAlter(alterStmt *ast.AlterTableStmt) []statement.Index {
+	var indexes []statement.Index
+
+	for _, spec := range alterStmt.Specs {
+		if spec.Tp == ast.AlterTableAddConstraint && spec.Constraint != nil {
+			index := l.constraintToIndex(spec.Constraint)
+			if index != nil {
+				indexes = append(indexes, *index)
+			}
+		}
+	}
+
+	return indexes
+}
+
+// constraintToIndex converts an ast.Constraint to a statement.Index
+func (l *RedundantIndexLinter) constraintToIndex(constraint *ast.Constraint) *statement.Index {
+	// Extract column names from the constraint
+	var columns []string
+	for _, key := range constraint.Keys {
+		if key.Column != nil {
+			columns = append(columns, key.Column.Name.O)
+		}
+	}
+
+	if len(columns) == 0 {
+		return nil
+	}
+
+	// Determine the index type
+	var indexType string
+	switch constraint.Tp {
+	case ast.ConstraintPrimaryKey:
+		indexType = "PRIMARY KEY"
+	case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
+		indexType = "UNIQUE"
+	case ast.ConstraintKey, ast.ConstraintIndex:
+		indexType = "INDEX"
+	case ast.ConstraintFulltext:
+		indexType = "FULLTEXT"
+	default:
+		// Not an index constraint (e.g., foreign key, check)
+		return nil
+	}
+
+	return &statement.Index{
+		Name:    constraint.Name,
+		Type:    indexType,
+		Columns: columns,
+		Raw:     constraint,
 	}
 }
