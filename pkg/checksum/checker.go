@@ -23,6 +23,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var (
+	// Query template for row checksums
+	queryTemplate = "SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s"
+)
+
 type Checker struct {
 	sync.Mutex
 	concurrency      int
@@ -168,15 +173,12 @@ func (c *Checker) GetProgress() string {
 func (c *Checker) inspectDifferences(srcTrx, writeTrx *sql.Tx, chunk *table.Chunk) error {
 	c.logger.Infof("inspecting differences for chunk: %s", chunk.String())
 
-	// Query source database for row checksums
-	sourceQuery := fmt.Sprintf("SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s",
+	sourceRows, err := srcTrx.Query(fmt.Sprintf(queryTemplate,
 		c.intersectColumns(chunk),
 		strings.Join(chunk.Table.KeyColumns, ", "),
 		chunk.Table.QuotedName,
 		chunk.String(),
-	)
-
-	sourceRows, err := srcTrx.Query(sourceQuery)
+	))
 	if err != nil {
 		return fmt.Errorf("failed to query source rows: %w", err)
 	}
@@ -195,15 +197,12 @@ func (c *Checker) inspectDifferences(srcTrx, writeTrx *sql.Tx, chunk *table.Chun
 		return fmt.Errorf("error iterating source rows: %w", err)
 	}
 
-	// Query target database for row checksums
-	targetQuery := fmt.Sprintf("SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s",
+	targetRows, err := writeTrx.Query(fmt.Sprintf(queryTemplate,
 		c.intersectColumns(chunk),
 		strings.Join(chunk.NewTable.KeyColumns, ", "),
 		chunk.NewTable.QuotedName,
 		chunk.String(),
-	)
-
-	targetRows, err := writeTrx.Query(targetQuery)
+	))
 	if err != nil {
 		return fmt.Errorf("failed to query target rows: %w", err)
 	}

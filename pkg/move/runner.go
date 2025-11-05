@@ -470,7 +470,7 @@ func (r *Runner) Status() string {
 	if state > status.CutOver {
 		return ""
 	}
-	switch state { //nolint: exhaustive
+	switch state {
 	case status.CopyRows:
 		// Status for copy rows
 		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v",
@@ -506,8 +506,9 @@ func (r *Runner) Status() string {
 			time.Since(r.startTime).Round(time.Second),
 			time.Since(r.checker.StartTime()).Round(time.Second),
 		)
+	default:
+		return ""
 	}
-	return ""
 }
 
 func (r *Runner) SetLogger(logger loggers.Advanced) {
