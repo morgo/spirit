@@ -184,7 +184,7 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 			Column: &column.Name,
 		},
 		Suggestion: strPtr(fmt.Sprintf("Change column %q to a supported column type (%s)", column.Name, strings.Join(keys, ","))),
-		Context: map[string]interface{}{
+		Context: map[string]any{
 			"current_type": column.Type,
 		},
 	}

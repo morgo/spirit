@@ -60,6 +60,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"os"
 
 	"github.com/block/spirit/pkg/statement"
@@ -128,15 +129,8 @@ func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.Ab
 
 			// Merge user settings with defaults (user settings override defaults)
 			finalConfig := make(map[string]string)
-			for k, v := range defaultConfig {
-				finalConfig[k] = v
-			}
-
-			if settings, ok := config.Settings[name]; ok {
-				for k, v := range settings {
-					finalConfig[k] = v
-				}
-			}
+			maps.Copy(finalConfig, defaultConfig)
+			maps.Copy(finalConfig, config.Settings[name])
 
 			// Apply the merged configuration
 			err := configurableLinter.Configure(finalConfig)
