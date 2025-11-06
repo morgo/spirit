@@ -545,7 +545,7 @@ func TestRunLinters_UserConfigOverridesDefault(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	// User set raiseError=true, so severity should be Error
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
 // LintOnlyChanges tests
