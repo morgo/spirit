@@ -42,6 +42,20 @@ const (
 	DefaultFlushInterval = 30 * time.Second
 	// DefaultTimeout is how long BlockWait is supposed to wait before returning errors.
 	DefaultTimeout = 30 * time.Second
+	// Maximum number of consecutive errors before recreating the streamer
+	maxConsecutiveErrors = 5
+	// Initial backoff duration for streamer recreation
+	initialBackoffDuration = time.Second
+	// Maximum backoff duration
+	maxBackoffDuration = time.Minute
+	// Backoff multiplier
+	backoffMultiplier = 2
+)
+
+// These are really consts, but set to var for testing.
+var (
+	// maxRecreateAttempts is the maximum number of streamer recreation attempts before panic.
+	maxRecreateAttempts = 10
 )
 
 type Client struct {
@@ -50,6 +64,7 @@ type Client struct {
 	username string
 	password string
 
+	cfg      replication.BinlogSyncerConfig
 	syncer   *replication.BinlogSyncer
 	streamer *replication.BinlogStreamer
 
@@ -92,6 +107,7 @@ type Client struct {
 	cancelFunc func()
 	isClosed   atomic.Bool
 	logger     loggers.Advanced
+	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
 	useExperimentalBufferedMap bool // for testing new subscription type
 }
@@ -101,9 +117,12 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 	if config.WriteDB == nil {
 		config.WriteDB = db // default to using the read DB for writes
 	}
+	if config.DBConfig == nil {
+		config.DBConfig = dbconn.NewDBConfig() // default DB config
+	}
 	return &Client{
 		db:                         db,
-		dbConfig:                   dbconn.NewDBConfig(),
+		dbConfig:                   config.DBConfig,
 		host:                       host,
 		username:                   username,
 		password:                   password,
@@ -126,7 +145,8 @@ type ClientConfig struct {
 	OnDDL                      chan string
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
-	WriteDB                    *sql.DB // if not nil, use this DB for writes.
+	WriteDB                    *sql.DB          // if not nil, use this DB for writes.
+	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
 }
 
 // NewServerID randomizes the server ID to avoid conflicts with other binlog readers.
@@ -148,7 +168,7 @@ func NewClientDefaultConfig() *ClientConfig {
 
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
-func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAboveCopierCallback func(any) bool) error {
+func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.Chunker) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -161,32 +181,32 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, keyAbo
 	// But will fall back to deltaQueue if the PK is not memory comparable.
 	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
 		c.subscriptions[subKey] = &deltaQueue{
-			table:                  currentTable,
-			newTable:               newTable,
-			changes:                make([]queuedChange, 0),
-			c:                      c,
-			keyAboveCopierCallback: keyAboveCopierCallback,
+			table:    currentTable,
+			newTable: newTable,
+			changes:  make([]queuedChange, 0),
+			c:        c,
+			chunker:  chunker,
 		}
 		return nil
 	}
 	if c.useExperimentalBufferedMap {
 		c.logger.Infof("Using experimental buffered map for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 		c.subscriptions[subKey] = &bufferedMap{
-			table:                  currentTable,
-			newTable:               newTable,
-			changes:                make(map[string]logicalRow),
-			c:                      c,
-			keyAboveCopierCallback: keyAboveCopierCallback,
+			table:    currentTable,
+			newTable: newTable,
+			changes:  make(map[string]logicalRow),
+			c:        c,
+			chunker:  chunker,
 		}
 		return nil
 	}
 	// Default case is delta map
 	c.subscriptions[subKey] = &deltaMap{
-		table:                  currentTable,
-		newTable:               newTable,
-		changes:                make(map[string]bool),
-		c:                      c,
-		keyAboveCopierCallback: keyAboveCopierCallback,
+		table:    currentTable,
+		newTable: newTable,
+		changes:  make(map[string]bool),
+		c:        c,
+		chunker:  chunker,
 	}
 	return nil
 }
@@ -200,9 +220,14 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 }
 
 // getBufferedPos returns the buffered position under a mutex.
+// If bufferedPos has no name (not yet set), it falls back to flushedPos.
 func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
+	if c.bufferedPos.Name == "" {
+		// If no buffered position, use flushed position
+		return c.flushedPos
+	}
 	return c.bufferedPos
 }
 
@@ -282,7 +307,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to parse port: %w", err)
 	}
-	cfg := replication.BinlogSyncerConfig{
+	c.cfg = replication.BinlogSyncerConfig{
 		ServerID: c.serverID,
 		Flavor:   "mysql",
 		Host:     host,
@@ -291,12 +316,14 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		Password: c.password,
 		Logger:   NewLogWrapper(c.logger),
 	}
-	if dbconn.IsRDSHost(c.host) {
-		cfg.TLSConfig = dbconn.NewTLSConfig()
-	}
-	if cfg.TLSConfig != nil {
-		// Set the ServerName so that the TLS config can verify the server's certificate.
-		cfg.TLSConfig.ServerName = host
+
+	// Apply TLS configuration using the same infrastructure as main database connections
+	if c.dbConfig != nil {
+		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.dbConfig, host)
+		if err != nil {
+			return fmt.Errorf("failed to configure TLS for binlog connection: %w", err)
+		}
+		c.cfg.TLSConfig = tlsConfig
 	}
 	if dbconn.IsMySQL84(c.db) { // handle MySQL 8.4
 		c.isMySQL84 = true
@@ -313,7 +340,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	} else if c.binlogPositionIsImpossible() {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
-	c.syncer = replication.NewBinlogSyncer(cfg)
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
@@ -321,7 +348,33 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	// Start the binlog reader in a go routine, using a context with cancel.
 	// Write the cancel function to c.cancelFunc
 	ctx, c.cancelFunc = context.WithCancel(ctx)
+	c.streamWG.Add(1)
 	go c.readStream(ctx)
+	return nil
+}
+
+// recreateStreamer recreates the binlog streamer from the current buffered position
+func (c *Client) recreateStreamer() error {
+	c.logger.Warnf("Recreating binlog streamer from position: %v", c.getBufferedPos())
+
+	if c.syncer != nil {
+		c.syncer.Close()
+	}
+
+	// Create new syncer and streamer
+	// Start from the current buffered position
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
+	startPos := c.getBufferedPos()
+	if startPos.Name == "" {
+		// If no buffered position, use flushed position
+		startPos = c.flushedPos
+	}
+	var err error
+	c.streamer, err = c.syncer.StartSync(startPos)
+	if err != nil {
+		return fmt.Errorf("failed to start binlog streamer: %w", err)
+	}
+	c.logger.Infof("Successfully recreated binlog streamer from position: %v", startPos)
 	return nil
 }
 
@@ -329,39 +382,126 @@ func (c *Client) Run(ctx context.Context) (err error) {
 // It will read the stream until the context is closed
 // *and* it continues on any errors
 func (c *Client) readStream(ctx context.Context) {
+	defer c.streamWG.Done() // Signal completion when goroutine exits
+
 	c.Lock()
 	currentLogName := c.flushedPos.Name
+	startPos := c.flushedPos // Copy while holding lock
 	c.Unlock()
+
+	consecutiveErrors := 0
+	recreateAttempts := 0
+	backoffDuration := initialBackoffDuration
+	lastErrorTime := time.Time{}
+
+	c.logger.Debugf("readStream started for binlog position: %v, current log name: %v", startPos, currentLogName)
+
 	for {
 		// Check if context is done before processing
 		select {
 		case <-ctx.Done():
+			c.logger.Debugf("readStream context cancelled: %v", ctx.Err())
 			return // stop processing
 		default:
 		}
 
-		// Read the next event from the stream
-		ev, err := c.streamer.GetEvent(ctx)
+		var ev *replication.BinlogEvent
+		var err error
+
+		// If streamer is nil (such as after a failed recreation), treat it as an error
+		// This will then trigger the recreation
+		if c.streamer == nil {
+			err = errors.New("binlog streamer is nil, cannot read events")
+		} else {
+			// Read the next event from the stream
+			ev, err = c.streamer.GetEvent(ctx)
+		}
+
 		if err != nil {
 			// We only stop processing for context cancelled errors.
-			// For other errors we just continue, because we want the readStream
-			// to continually retry.
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil || c.isClosed.Load() {
 				return // stop processing
 			}
-			c.logger.Errorf("error reading binlog stream: %v, current position: %v",
-				err, c.getBufferedPos())
+
+			consecutiveErrors++
+			currentTime := time.Now()
+
+			c.logger.Errorf("error reading binlog stream (consecutive errors: %d): %v, current position: %v",
+				consecutiveErrors, err, c.getBufferedPos())
+
+			// If we've had too many consecutive errors, try to recreate the streamer
+			if consecutiveErrors >= maxConsecutiveErrors {
+				recreateAttempts++
+				c.logger.Warnf("Too many consecutive errors (%d), attempting to recreate streamer (attempt %d/%d)",
+					consecutiveErrors, recreateAttempts, maxRecreateAttempts)
+
+				// Check if we've exceeded the maximum number of recreation attempts
+				if recreateAttempts >= maxRecreateAttempts {
+					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up",
+						recreateAttempts, c.getBufferedPos()))
+				}
+
+				// Apply exponential backoff
+				if currentTime.Sub(lastErrorTime) < backoffDuration {
+					c.logger.Infof("Backing off for %v before recreating streamer", backoffDuration)
+					backoffTimer := time.NewTimer(backoffDuration)
+					select {
+					case <-ctx.Done():
+						backoffTimer.Stop()
+						return
+					case <-backoffTimer.C:
+					}
+				}
+
+				// Try to recreate the streamer
+				if recreateErr := c.recreateStreamer(); recreateErr != nil {
+					c.logger.Errorf("Failed to recreate streamer: %v", recreateErr)
+
+					// Set streamer to nil so next iteration will trigger recreation
+					c.streamer = nil
+
+					// Increase backoff duration for next attempt
+					backoffDuration *= backoffMultiplier
+					if backoffDuration > maxBackoffDuration {
+						backoffDuration = maxBackoffDuration
+					}
+				} else {
+					// Successfully recreated, reset counters
+					consecutiveErrors = 0
+					recreateAttempts = 0
+					backoffDuration = initialBackoffDuration
+				}
+				lastErrorTime = currentTime
+			}
+
+			// Short sleep before retrying
+			retryTimer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				retryTimer.Stop()
+				return
+			case <-retryTimer.C:
+			}
 			continue
 		}
+
+		// Reset error counters on successful read
+		if consecutiveErrors > 0 {
+			c.logger.Infof("Binlog stream recovered after %d consecutive errors", consecutiveErrors)
+			consecutiveErrors = 0
+			backoffDuration = initialBackoffDuration
+		}
+
 		if ev == nil {
 			continue
 		}
 		// Handle the event.
 		switch ev.Event.(type) {
 		case *replication.RotateEvent:
-			// Rotate event, update the flushed position.
+			// Rotate event, update the current log name.
 			rotateEvent := ev.Event.(*replication.RotateEvent)
 			currentLogName = string(rotateEvent.NextLogName)
+			c.logger.Debugf("Binlog rotated to: %s", currentLogName)
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
@@ -391,7 +531,8 @@ func (c *Client) readStream(ctx context.Context) {
 				c.processDDLNotification(table)
 			}
 		default:
-			// Unsure how to handle this event.
+			// Log unknown event types for debugging
+			c.logger.Debugf("Received unknown event type: %T", ev.Event)
 		}
 		// Update the buffered position
 		// under a mutex.
@@ -554,11 +695,20 @@ func (c *Client) binlogPositionIsImpossible() bool {
 
 func (c *Client) Close() {
 	c.isClosed.Store(true)
-	if c.syncer != nil {
-		c.syncer.Close()
-	}
+
+	// Cancel the context first to signal readStream goroutine to exit
 	if c.cancelFunc != nil {
 		c.cancelFunc()
+	}
+
+	// Wait for the readStream goroutine to exit cleanly
+	// This prevents goroutine leaks detected by goleak in tests
+	// It will eventually catch the ctx cancel from calling
+	// c.cancelFunc()
+	c.streamWG.Wait()
+
+	if c.syncer != nil {
+		c.syncer.Close()
 	}
 }
 
@@ -594,14 +744,32 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	c.Lock()
 	newFlushedPos := c.bufferedPos
 	c.Unlock()
-
+	var allChangesFlushed = true
 	for _, subscription := range c.subscriptions {
-		if err := subscription.Flush(ctx, underLock, lock); err != nil {
+		flushed, err := subscription.Flush(ctx, underLock, lock)
+		if err != nil {
 			return err
 		}
+		if !flushed {
+			allChangesFlushed = false
+		}
 	}
-	// Update the position that has been flushed.
-	c.SetFlushedPos(newFlushedPos)
+	// If there is a scenario where a key couldn't be flushed because it wasn't
+	// below the watermark, then we need to skip advancing the checkpoint.
+	// TODO: This could lead to a starvation issue under contention where
+	// the checkpoint never advances. The longterm fix for this is that we
+	// would need to track the minimum binlog position that applies to a key.
+	// We could then advance up to just below the lowest key that couldn't be flushed.
+	// This is a little bit complicated, so for now we just accept that in some
+	// high contention scenarios the binlog position in the checkpoint
+	// won't advance.
+	// Another potential fix is that we disable the belowLowWatermark optimization
+	// for these high contention cases. But that's not a great solution either,
+	// because the low watermark optimization helps a lot in these cases because
+	// it reduces contention between the copier and the repl applier.
+	if allChangesFlushed {
+		c.SetFlushedPos(newFlushedPos)
+	}
 	return nil
 }
 

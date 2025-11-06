@@ -70,22 +70,40 @@ func (c *change) oldTableName() string {
 }
 
 func (c *change) attemptInstantDDL(ctx context.Context) error {
+	if c.runner.migration.ForceKill {
+		return dbconn.ForceExec(
+			ctx,
+			c.runner.db,
+			[]*table.TableInfo{c.table},
+			c.runner.dbConfig,
+			c.runner.logger,
+			"ALTER TABLE %n.%n ALGORITHM=INSTANT, "+c.stmt.Alter,
+			c.table.SchemaName,
+			c.table.TableName,
+		)
+	}
 	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n ALGORITHM=INSTANT, "+c.stmt.Alter, c.table.SchemaName, c.table.TableName)
 }
 
 func (c *change) attemptInplaceDDL(ctx context.Context) error {
+	if c.runner.migration.ForceKill {
+		return dbconn.ForceExec(
+			ctx,
+			c.runner.db,
+			[]*table.TableInfo{c.table},
+			c.runner.dbConfig,
+			c.runner.logger,
+			"ALTER TABLE %n.%n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter,
+			c.table.SchemaName,
+			c.table.TableName,
+		)
+	}
 	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter, c.table.SchemaName, c.table.TableName)
 }
 
 func (c *change) cleanup(ctx context.Context) error {
 	if c.newTable != nil {
 		if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.newTable.SchemaName, c.newTable.TableName); err != nil {
-			return err
-		}
-	}
-	// TODO: only cleanup this migration, not the checkpoint table.
-	if c.runner.checkpointTable != nil {
-		if err := c.runner.dropCheckpoint(ctx); err != nil {
 			return err
 		}
 	}

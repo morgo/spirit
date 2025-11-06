@@ -28,13 +28,13 @@ func (l *MultipleAlterTableLinter) Description() string {
 	return "Detects multiple ALTER TABLE statements on the same table that could be combined"
 }
 
-func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements []*statement.AbstractStatement) []Violation {
+func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
 	var violations []Violation
 
 	// Count ALTER TABLE statements per table
 	tableAlterCounts := make(map[string][]int) // table name -> statement indices
 
-	for i, stmt := range statements {
+	for i, stmt := range changes {
 		if !stmt.IsAlterTable() {
 			continue
 		}
@@ -57,8 +57,8 @@ func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements [
 		var operations []string
 
 		for _, idx := range indices {
-			if statements[idx].Alter != "" {
-				operations = append(operations, statements[idx].Alter)
+			if changes[idx].Alter != "" {
+				operations = append(operations, changes[idx].Alter)
 			}
 		}
 
@@ -69,14 +69,11 @@ func (l *MultipleAlterTableLinter) Lint(_ []*statement.CreateTable, statements [
 				strings.Join(operations, ", "))
 		}
 
-		message := fmt.Sprintf("Table '%s' has %d separate ALTER TABLE statements that could be combined into one for better performance",
-			tableName,
-			len(indices))
-
 		violation := Violation{
-			Linter:   l,
-			Severity: SeverityInfo,
-			Message:  message,
+			Linter: l,
+			// TODO: Consider changing back to SeverityInfo - this is an optimization suggestion, not a problem
+			Severity: SeverityWarning,
+			Message:  fmt.Sprintf("Table '%s' has %d separate ALTER TABLE statements that could be combined into one for better performance", tableName, len(indices)),
 			Location: &Location{
 				Table: tableName,
 			},

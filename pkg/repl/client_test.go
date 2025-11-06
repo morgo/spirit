@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	maxRecreateAttempts = 3
 	goleak.VerifyTestMain(m)
 	os.Exit(m.Run())
 }
@@ -30,10 +33,9 @@ func TestReplClient(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS replt1, replt2, _replt1_chkpnt")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replt1, replt2")
 	testutils.RunSQL(t, "CREATE TABLE replt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 	testutils.RunSQL(t, "CREATE TABLE replt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE _replt1_chkpnt (a int)") // just used to advance binlog
 
 	t1 := table.NewTableInfo(db, "test", "replt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -73,10 +75,9 @@ func TestReplClientComplex(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS replcomplext1, replcomplext2, _replcomplext1_chkpnt")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replcomplext1, replcomplext2")
 	testutils.RunSQL(t, "CREATE TABLE replcomplext1 (a INT NOT NULL auto_increment, b INT, c INT, PRIMARY KEY (a))")
 	testutils.RunSQL(t, "CREATE TABLE replcomplext2 (a INT NOT NULL  auto_increment, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE _replcomplext1_chkpnt (a int)") // just used to advance binlog
 
 	testutils.RunSQL(t, "INSERT INTO replcomplext1 (a, b, c) SELECT NULL, 1, 1 FROM dual")
 	testutils.RunSQL(t, "INSERT INTO replcomplext1 (a, b, c) SELECT NULL, 1, 1 FROM replcomplext1 a JOIN replcomplext1 b JOIN replcomplext1 c LIMIT 100000")
@@ -94,13 +95,13 @@ func TestReplClientComplex(t *testing.T) {
 
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, NewClientDefaultConfig())
 
-	chunker, err := table.NewChunker(t1, t2, 1000, logrus.New())
+	chunker, err := table.NewChunker(t1, t2, time.Second, logrus.New())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 	_, err = copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker.KeyAboveHighWatermark))
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 	client.SetKeyAboveWatermarkOptimization(true)
@@ -111,10 +112,13 @@ func TestReplClientComplex(t *testing.T) {
 	assert.Equal(t, 0, client.GetDeltaLen())
 
 	// Read from the copier so that the key is below the watermark
+	// + give feedback
 	chk, err := chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`a` < 1", chk.String())
-	// read again
+	chunker.Feedback(chk, time.Second, 10)
+
+	// read again but don't give feedback
 	chk, err = chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`a` >= 1 AND `a` < 1001", chk.String())
@@ -124,8 +128,16 @@ func TestReplClientComplex(t *testing.T) {
 	assert.NoError(t, client.BlockWait(t.Context()))
 	assert.Equal(t, 10, client.GetDeltaLen()) // 10 keys did not exist on t1
 
-	// Flush the changeset
+	// Try to flush the changeset
+	// It should be empty, but it's not! This is because of KeyBelowWatermark
 	assert.NoError(t, client.Flush(t.Context()))
+	assert.Equal(t, 10, client.GetDeltaLen())
+
+	// However after we give feedback, then it should be able to flush these deltas.
+	// This is because the watermark advances above 1000.
+	chunker.Feedback(chk, time.Second, 1000)
+	assert.NoError(t, client.Flush(t.Context()))
+	assert.Equal(t, 0, client.GetDeltaLen())
 
 	// Accumulate more deltas
 	testutils.RunSQL(t, "DELETE FROM replcomplext1 WHERE a >= 550 AND a < 570")
@@ -269,6 +281,9 @@ func TestReplClientOpts(t *testing.T) {
 	assert.NotEqual(t, startingPos, client.GetBinlogApplyPosition())
 }
 
+// TestReplClientQueue tests the "queue" based approach to buffering changes
+// We've removed the queue based approach, but we keep this test anyway to ensure
+// the buffered map behaves correct for this.
 func TestReplClientQueue(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
@@ -301,7 +316,7 @@ func TestReplClientQueue(t *testing.T) {
 	_, err = copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
 	assert.NoError(t, err)
 	// Attach chunker's keyabovewatermark to the repl client
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker.KeyAboveHighWatermark))
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -592,7 +607,7 @@ func TestCompositePKUpdate(t *testing.T) {
 	)`)
 
 	// Insert initial test data in *both* source and destination tables
-	testutils.RunSQL(t, `INSERT INTO composite_pk_src (organization_id, from_id, id, message) VALUES 
+	testutils.RunSQL(t, `INSERT INTO composite_pk_src (organization_id, from_id, id, message) VALUES
 		(1, 100, 1, 'message 1'),
 		(1, 200, 2, 'message 2'),
 		(1, 300, 3, 'message 3'),
@@ -639,14 +654,14 @@ func TestCompositePKUpdate(t *testing.T) {
 	var count int
 
 	// Check that rows with new from_id exist in destination
-	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst 
+	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst
 		WHERE organization_id = 1 AND from_id = 999 AND id IN (1, 3)`).Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count, "Rows with updated from_id should exist in destination")
 
 	// Check that rows with old from_id don't exist in destination
-	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst 
-		WHERE (organization_id = 1 AND from_id = 100 AND id = 1) 
+	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst
+		WHERE (organization_id = 1 AND from_id = 100 AND id = 1)
 		   OR (organization_id = 1 AND from_id = 300 AND id = 3)`).Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, count, "Rows with old from_id should not exist in destination")
@@ -663,7 +678,7 @@ func TestCompositePKUpdate(t *testing.T) {
 	assert.NoError(t, client.Flush(t.Context()))
 
 	// Verify the second update
-	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst 
+	err = db.QueryRow(`SELECT COUNT(*) FROM composite_pk_dst
 		WHERE organization_id = 2 AND from_id = 888 AND id = 5`).Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count, "Row with updated from_id=888 should exist in destination")
@@ -745,4 +760,91 @@ func TestAllChangesFlushed(t *testing.T) {
 
 	subQueue.HasChanged([]any{3}, nil, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
+}
+
+// TestMaxRecreateAttemptsPanic tests that the panic actually occurs after max attempts.
+// This uses a subprocess pattern to test the panic behavior.
+func TestMaxRecreateAttemptsPanic(t *testing.T) {
+	if os.Getenv("TEST_PANIC_SUBPROCESS") == "1" {
+		// This is the subprocess that should panic
+		testMaxRecreateAttemptsPanicSubprocess(t)
+		return
+	}
+
+	// Run the test in a subprocess
+	cmd := exec.Command(os.Args[0], "-test.run=TestMaxRecreateAttemptsPanic")
+	cmd.Env = append(os.Environ(), "TEST_PANIC_SUBPROCESS=1")
+	output, err := cmd.CombinedOutput()
+
+	outputStr := string(output)
+	t.Logf("Subprocess output:\n%s", outputStr)
+
+	// We expect the subprocess to exit with non-zero (panic or crash)
+	if err == nil {
+		t.Fatal("Expected subprocess to panic or crash, but it exited successfully")
+	}
+
+	if !strings.Contains(outputStr, "consecutive errors") {
+		t.Errorf("Expected to see consecutive errors. Output:\n%s", outputStr)
+	}
+	if !strings.Contains(outputStr, "Failed to recreate streamer") {
+		t.Errorf("Expected to see recreation attempt. Output:\n%s", outputStr)
+	}
+
+	// If we DID get the max attempts panic message, verify it's correct
+	if strings.Contains(outputStr, "failed to recreate binlog streamer after") {
+		if !strings.Contains(outputStr, "giving up") {
+			t.Errorf("Panic message should contain 'giving up'. Output:\n%s", outputStr)
+		}
+	}
+}
+
+func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	if err != nil {
+		t.Skipf("MySQL not available: %v", err)
+	}
+	defer db.Close()
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS panic_test_t1, panic_test_t2")
+	testutils.RunSQL(t, "CREATE TABLE panic_test_t1 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE panic_test_t2 (a INT NOT NULL PRIMARY KEY)")
+
+	t1 := table.NewTableInfo(db, "test", "panic_test_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "panic_test_t2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	require.NoError(t, client.Run(t.Context()))
+
+	// Give the connection time to settle
+	time.Sleep(200 * time.Millisecond)
+
+	// Break the connection by changing config and closing syncer
+	client.cfg.Host = "invalid-host.local"
+	client.cfg.Port = 9999
+
+	if client.syncer != nil {
+		client.syncer.Close()
+	}
+
+	// Wait for the panic to occur (with max 30 seconds timeout)
+	// With 2 attempts and fast failures, should happen quickly
+	time.Sleep(30 * time.Second)
+
+	// If we reach here, test failed - no panic occurred
+	t.Fatal("Expected panic did not occur")
 }

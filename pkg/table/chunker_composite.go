@@ -233,6 +233,31 @@ func (t *chunkerComposite) Close() error {
 	return nil
 }
 
+// Reset resets the chunker to start from the beginning, as if Open() was just called.
+// This is used when retrying operations like checksums.
+func (t *chunkerComposite) Reset() error {
+	t.Lock()
+	defer t.Unlock()
+
+	if !t.isOpen {
+		return errors.New("chunker is not open, call Open() first")
+	}
+
+	// Reset all state to initial values
+	t.chunkPtrs = []Datum{} // reset to empty slice (first chunk)
+	t.finalChunkSent = false
+	t.chunkSize = StartingChunkSize
+	t.watermark = nil
+	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
+	t.chunkTimingInfo = []time.Duration{}
+
+	// Reset progress tracking
+	atomic.StoreUint64(&t.rowsCopied, 0)
+	atomic.StoreUint64(&t.chunksCopied, 0)
+
+	return nil
+}
+
 // Feedback is a way for consumers of chunks to give feedback on how long
 // processing the chunk took. It is incorporated into the calculation of future
 // chunk sizes.
@@ -446,8 +471,16 @@ func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
 	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), atomic.LoadUint64(&t.Ti.EstimatedRows)
 }
 
-func (t *chunkerComposite) KeyAboveHighWatermark(key any) bool {
+// KeyAboveHighWatermark is not yet supported for composite chunker.
+// See: https://github.com/block/spirit/issues/479
+func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	return false
+}
+
+// KeyBelowLowWatermark is not yet supported for composite chunker.
+// See: https://github.com/block/spirit/issues/479
+func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
+	return true
 }
 
 // SetKey allows you to chunk on a secondary index, and not the primary key.

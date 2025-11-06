@@ -14,6 +14,7 @@
     - [lock-wait-timeout](#lock-wait-timeout)
     - [password](#password)
     - [replica-dsn](#replica-dsn)
+      - [Replica TLS Behavior](#replica-tls-behavior)
     - [replica-max-lag](#replica-max-lag)
     - [statement](#statement)
     - [strict](#strict)
@@ -27,7 +28,6 @@
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
   - [Experimental Features](#experimental-features)
-    - [enable-experimental-multi-table-support](#enable-experimental-multi-table-support)
     - [enable-experimental-buffered-copy](#enable-experimental-buffered-copy)
     - [`move` command](#move-command)
     - [native linting support](#native-linting-support)
@@ -125,6 +125,24 @@ The password to use when connecting to MySQL.
 
 Used in combination with [replica-max-lag](#replica-max-lag). This is the host which Spirit will connect to to determine if the copy should be throttled to ensure replica health.
 
+#### Replica TLS Behavior
+
+Spirit automatically applies the main database TLS configuration to replica connections when:
+- The replica DSN does not already contain TLS configuration
+- The main database TLS mode is not `DISABLED`
+
+**TLS Inheritance Rules:**
+- If replica DSN contains `tls=` parameter (any case), that setting is preserved (even if main TLS mode is `DISABLED`)
+- If main TLS mode is `DISABLED`, no TLS inheritance occurs but existing replica TLS settings remain untouched
+- Otherwise, replica inherits main DB TLS mode and certificate configuration
+- RDS replicas automatically use RDS certificate bundle when appropriate
+
+**Examples and Test Matrix:**
+
+For comprehensive examples of replica TLS behavior, including all possible combinations of main DB TLS modes and replica DSN configurations, see:
+
+📋 **[Replica TLS Testing Matrix](compose/replication-tls/usage.md)**
+
 ### replica-max-lag
 
 - Type: Duration
@@ -145,11 +163,15 @@ The replication throttler only affects the copy-rows operation, and does not app
 
 - Type: String
 
-Spirit accepts either a `--table` and `--alter` argument or a `--statement` argument. When using `--statement` you can send most DDL statements to spirit, including `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE` and `DROP TABLE`.
+Spirit accepts either a pair of `--table` and `--alter` arguments or a `--statement` argument. When using `--statement` you can send most DDL statements to Spirit, including `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE` and `DROP TABLE`. Others such as `DROP INDEX` are _not_ supported and should be rewritten as `ALTER TABLE` statements.
 
-The advantage of using `--statement` is you can send all schema changes directly to Spirit without having to parse statements in your automatation layer and decide which should be sent where.
+You can also send multiple `ALTER TABLE` statements at once, for example: `--statement="ALTER TABLE t1 CHARSET=utf8mb4; ALTER TABLE t2 CHARSET=utf8mb4;"` All of these statements will cutover atomically, which is useful when you are changing charsets or collations since if you were to perform these alters sequentially it may cause performance issues due to datatype mismatches in joins.
 
-There are some restrictions to this. Spirit requires that the statements can be parsed by the TiDB parser, so (for example) it is not possible to send `CREATE PROCEDURE` or `CREATE TRIGGER` statements to Spirit this way.
+There are some restrictions to `--statement`:
+- Spirit requires that the statements can be parsed by the TiDB parser, so (for example) it is not possible to send `CREATE PROCEDURE` or `CREATE TRIGGER` statements to Spirit this way.
+- When sending multiple statements, all statements must be `ALTER TABLE` statements.
+- When sending multiple statements, the `INSTANT` and `INPLACE` optimizations will be skipped. This means that metadata-only changes that would execute instantly if submitted alone will require a full table copy.
+- When sending multiple statements, all statements must operate on tables in the same underlying database (aka schema).
 
 ### strict
 
@@ -213,6 +235,16 @@ The username to use when connecting to MySQL.
 
 ### tls
 Spirit uses the same TLS/SSL mode options as the MySQL client, making it familiar and intuitive for users. 
+
+Spirit applies TLS configuration consistently across all database connections:
+
+**Main Database Connection**: Uses the specified `--tls-mode` and `--tls-ca` settings.
+
+**Replica Throttler Connection**: Automatically inherits TLS settings from main database unless the replica DSN already contains TLS configuration.
+
+**Binary Log Replication**: Uses the same TLS configuration as the main database for streaming binary log events.
+
+This ensures security consistency across all database communications during the migration process.
 
 | Mode | Description | Encryption | CA Verification | Hostname Verification | --tls-ca Required? |
 |------|-------------|------------|-----------------|----------------------|-------------------|
@@ -328,16 +360,6 @@ spirit --tls-mode VERIFY_IDENTITY \
 
 ## Experimental Features
 
-### enable-experimental-multi-table-support
-
-**Feature Description**
-
-This feature allows Spirit to apply multiple schema changes at once, and cut them over atomically. The intended use-case is for complicated scenarios where there are collation mismatches between tables. If you change the collation of one table, it could result in performance issues with joins. For satefy, you really need to change all collation settings at once, which has not historically been easy.
-
-**Current Status**
-
-This feature is feature complete. The main issue is that there is insufficient test coverage. See issue [#388](https://github.com/block/spirit/issues/388) for details.
-
 ### enable-experimental-buffered-copy
 
 **Feature Description**
@@ -356,7 +378,6 @@ Buffered changes also puts a lot more stress on the `spirit` binary in terms of 
 
 There is also the risk that the buffered algorithm write threads can overwhelm a server. We need to implement a throttler that detects that the server is overloaded, and possibly some configuration over write threads.
 
-
 ### `move` command
 
 **Feature Description**
@@ -365,10 +386,9 @@ This feature provides a new top level binary `move`, which can copy whole schema
 
 **Current Status**
 
-This command depends strongly on the experimental buffered copy and multi-table support, both which are currently experimental. There is not too much which is special to move on top of these two features, so once they become stable, so too can `move`.
+This command depends strongly on buffered copy which is currently experimental. It is also missing some minor functionality.
 
-It is anticipated that `move` will need to provide some pluggable method of cutover so external metadata systems can be updated. There is no current design for this.
-
+It is anticipated that `move` will need to provide some pluggable method of cutover so external metadata systems can be updated. Currently there is a cutover function which can be specified when using `move` via the API, but when using the CLI there is no user friendly way of doing this.
 
 ### native linting support
 

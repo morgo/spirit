@@ -2,6 +2,7 @@
 package throttler
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -13,7 +14,7 @@ var (
 )
 
 type Throttler interface {
-	Open() error
+	Open(ctx context.Context) error
 	Close() error
 	IsThrottled() bool
 	BlockWait()

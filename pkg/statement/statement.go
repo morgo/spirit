@@ -119,7 +119,7 @@ func New(statement string) ([]*AbstractStatement, error) {
 				StmtNode:  &stmtNodes[i],
 			})
 		default:
-			return nil, ErrNotSupportedStatement
+			return nil, fmt.Errorf("%w: %v (%T)", ErrNotSupportedStatement, node.Text(), node)
 		}
 	}
 
@@ -148,11 +148,17 @@ func (a *AbstractStatement) IsAlterTable() bool {
 	return ok
 }
 
+// AsAlterTable is a helper function that simply wraps the type case so the caller
+// doesn't have to import the ast package and use the cast syntax
+func (a *AbstractStatement) AsAlterTable() (*ast.AlterTableStmt, bool) {
+	at, ok := (*a.StmtNode).(*ast.AlterTableStmt)
+	return at, ok
+}
+
 func (a *AbstractStatement) IsCreateTable() bool {
 	_, ok := (*a.StmtNode).(*ast.CreateTableStmt)
 	return ok
 }
-
 func (a *AbstractStatement) ParseCreateTable() (*CreateTable, error) {
 	createStmt, ok := (*a.StmtNode).(*ast.CreateTableStmt)
 	if !ok {
@@ -163,10 +169,7 @@ func (a *AbstractStatement) ParseCreateTable() (*CreateTable, error) {
 		Raw: createStmt,
 	}
 	// Parse into structured format
-	err := ct.parseToStruct()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse CREATE TABLE AST: %w", err)
-	}
+	ct.parseToStruct()
 	return ct, nil
 }
 

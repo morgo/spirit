@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
+	"github.com/block/spirit/pkg/table"
 	"github.com/go-sql-driver/mysql"
+	"github.com/siddontang/loggers"
 )
 
 const (
@@ -182,6 +184,39 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 func backoff(i int) {
 	randFactor := i * rand.Intn(10) * int(time.Millisecond)
 	time.Sleep(time.Duration(randFactor))
+}
+
+// ForceExec is like Exec but it has some added logic to force kill
+// any connections that are holding up metadata locks preventing this from
+// succeeding.
+func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbConfig *DBConfig, logger loggers.Advanced, stmt string, args ...any) error {
+	trx, connId, err := BeginStandardTrx(ctx, db, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// We need to ensure we always clean up the transaction.
+		// In the typically case we are using this for non-transactional
+		// statements (and could rollback either way), but just to be safe
+		// we check the error and commit on-nil.
+		if err != nil {
+			_ = trx.Rollback()
+		} else {
+			_ = trx.Commit()
+		}
+	}()
+
+	// We always apply the threshold since in this path ForceKill is always true.
+	threshold := time.Duration(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
+	timer := time.AfterFunc(threshold, func() {
+		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
+		if err != nil {
+			return // just return, we can't do much more here
+		}
+	})
+	defer timer.Stop()
+	_, err = trx.ExecContext(ctx, sqlescape.MustEscapeSQL(stmt, args...))
+	return err
 }
 
 // Exec is like db.Exec but only returns an error.

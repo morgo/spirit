@@ -115,10 +115,19 @@ func TestLowWatermark(t *testing.T) {
 	assert.NoError(t, err)
 	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"1001\"],\"Inclusive\":false}}", watermark)
 
+	// Check key w.r.t. watermark
+	assert.False(t, chunker.KeyAboveHighWatermark(1000))
+	assert.True(t, chunker.KeyAboveHighWatermark(1001))
+	assert.True(t, chunker.KeyBelowLowWatermark(1000)) // 1000 is done, so this is below.
+	assert.False(t, chunker.KeyBelowLowWatermark(1001))
+
 	chunk, err = chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`id` >= 1001 AND `id` < 2001", chunk.String()) // first chunk
+	// Check KeyBelowLowWatermark before and after feedback.
+	assert.False(t, chunker.KeyBelowLowWatermark(1001))
 	chunker.Feedback(chunk, time.Second, 1)
+	assert.True(t, chunker.KeyBelowLowWatermark(1001))
 	watermark, err = chunker.GetLowWatermark()
 	assert.NoError(t, err)
 	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
@@ -126,14 +135,17 @@ func TestLowWatermark(t *testing.T) {
 	chunkAsync1, err := chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`id` >= 2001 AND `id` < 3001", chunkAsync1.String())
+	assert.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunkAsync2, err := chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`id` >= 3001 AND `id` < 4001", chunkAsync2.String())
+	assert.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunkAsync3, err := chunker.Next()
 	assert.NoError(t, err)
 	assert.Equal(t, "`id` >= 4001 AND `id` < 5001", chunkAsync3.String())
+	assert.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunker.Feedback(chunkAsync2, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
@@ -144,11 +156,14 @@ func TestLowWatermark(t *testing.T) {
 	watermark, err = chunker.GetLowWatermark()
 	assert.NoError(t, err)
 	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
+	assert.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunker.Feedback(chunkAsync1, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
 	assert.NoError(t, err)
 	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"4001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"5001\"],\"Inclusive\":false}}", watermark)
+	assert.True(t, chunker.KeyBelowLowWatermark(2001))
+	assert.True(t, chunker.KeyBelowLowWatermark(5000))
 
 	chunk, err = chunker.Next()
 	assert.NoError(t, err)
@@ -310,4 +325,138 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 		chunker.Feedback(chunk, 100*time.Millisecond, 1) // way too short.
 	}
 	assert.True(t, chunker.chunkPrefetchingEnabled)
+}
+
+func TestOptimisticChunkerReset(t *testing.T) {
+	// Create a table info for testing
+	t1 := &TableInfo{
+		minValue:          NewDatum(1, signedType),
+		maxValue:          NewDatum(1000000, signedType),
+		EstimatedRows:     1000000,
+		SchemaName:        "test",
+		TableName:         "t1",
+		QuotedName:        "`test`.`t1`",
+		KeyColumns:        []string{"id"},
+		keyColumnsMySQLTp: []string{"bigint"},
+		keyDatums:         []datumTp{signedType},
+		KeyIsAutoInc:      true,
+		Columns:           []string{"id", "name"},
+	}
+	t1.statisticsLastUpdated = time.Now()
+
+	// Create chunker
+	chunker := &chunkerOptimistic{
+		Ti:                     t1,
+		ChunkerTarget:          ChunkerDefaultTarget,
+		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
+		logger:                 logrus.New(),
+	}
+	chunker.setDynamicChunking(false)
+
+	// Test that Reset() fails when chunker is not open
+	err := chunker.Reset()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "chunker is not open")
+
+	// Open the chunker
+	assert.NoError(t, chunker.Open())
+
+	// Capture initial state after opening
+	initialChunkPtr := chunker.chunkPtr
+	initialChunkSize := chunker.chunkSize
+	initialFinalChunkSent := chunker.finalChunkSent
+	initialRowsCopied, initialChunksCopied, _ := chunker.Progress()
+
+	// Process some chunks to change the state
+	chunk1, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, "`id` < 1", chunk1.String()) // first chunk
+
+	chunk2, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, "`id` >= 1 AND `id` < 1001", chunk2.String())
+
+	chunk3, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, "`id` >= 1001 AND `id` < 2001", chunk3.String())
+
+	// Give feedback to advance watermark and change state
+	chunker.Feedback(chunk1, time.Second, 100)
+	chunker.Feedback(chunk2, time.Second, 100)
+	chunker.Feedback(chunk3, time.Second, 100)
+
+	// Verify state has changed
+	currentRowsCopied, currentChunksCopied, _ := chunker.Progress()
+	assert.Greater(t, currentRowsCopied, initialRowsCopied)
+	assert.Greater(t, currentChunksCopied, initialChunksCopied)
+	assert.NotEqual(t, initialChunkPtr.String(), chunker.chunkPtr.String())
+
+	// Verify watermark exists
+	watermark, err := chunker.GetLowWatermark()
+	assert.NoError(t, err)
+	assert.NotEmpty(t, watermark)
+
+	// Now reset the chunker
+	err = chunker.Reset()
+	assert.NoError(t, err)
+
+	// Verify state is reset to initial values
+	assert.Equal(t, initialChunkPtr.String(), chunker.chunkPtr.String(), "chunkPtr should be reset to initial value")
+	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value")
+	assert.Equal(t, initialFinalChunkSent, chunker.finalChunkSent, "finalChunkSent should be reset to initial value")
+
+	// Verify progress is reset
+	resetRowsCopied, resetChunksCopied, _ := chunker.Progress()
+	assert.Equal(t, initialRowsCopied, resetRowsCopied, "rowsCopied should be reset to initial value")
+	assert.Equal(t, initialChunksCopied, resetChunksCopied, "chunksCopied should be reset to initial value")
+
+	// Verify watermark is cleared
+	assert.Nil(t, chunker.watermark, "watermark should be nil after reset")
+	assert.Empty(t, chunker.lowerBoundWatermarkMap, "lowerBoundWatermarkMap should be empty after reset")
+	assert.Empty(t, chunker.chunkTimingInfo, "chunkTimingInfo should be empty after reset")
+	assert.False(t, chunker.chunkPrefetchingEnabled, "chunkPrefetchingEnabled should be false after reset")
+
+	// Verify watermark is not ready after reset
+	_, err = chunker.GetLowWatermark()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "watermark not yet ready")
+
+	// Verify that after reset, the chunker produces the same sequence as a fresh chunker
+	resetChunk1, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk1.String(), resetChunk1.String(), "First chunk after reset should match original first chunk")
+
+	resetChunk2, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk2.String(), resetChunk2.String(), "Second chunk after reset should match original second chunk")
+
+	// Verify KeyAboveHighWatermark behavior is reset
+	// In the previous copy we had Next()'ed up to id=2000
+	// Here we have only up to 1001.
+	assert.True(t, chunker.KeyAboveHighWatermark(1500), "KeyAboveHighWatermark not reset correctly")
+	assert.False(t, chunker.KeyAboveHighWatermark(900), "KeyAboveHighWatermark not reset correctly")
+
+	resetChunk3, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk3.String(), resetChunk3.String(), "Third chunk after reset should match original third chunk")
+
+	// Test that reset works even with more complex state changes
+	chunker.Feedback(resetChunk1, 5*time.Second, 50) // Very slow feedback to trigger panic reduction
+
+	// The chunk size should change due to panic factor
+	_, err = chunker.Next()
+	assert.NoError(t, err)
+	// The chunk size might be reduced due to the slow feedback
+
+	// Reset again
+	err = chunker.Reset()
+	assert.NoError(t, err)
+
+	// Verify chunk size is back to initial value
+	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value even after dynamic changes")
+
+	// Verify we can still get the same first chunk
+	finalResetChunk, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk1.String(), finalResetChunk.String(), "First chunk after second reset should still match original")
 }
