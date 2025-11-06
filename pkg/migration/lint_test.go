@@ -189,10 +189,9 @@ func TestLintPrimaryKeyType_IntError(t *testing.T) {
 		Statement:                 `CREATE TABLE t1pkint (id INT NOT NULL PRIMARY KEY, name VARCHAR(255))`,
 	}
 
-	// Should fail because INT is not allowed for primary key
+	// Should succeed with warning (INT is not recommended but only raises a warning)
 	err = migration.Run()
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "must be BIGINT or BINARY/VARBINARY")
+	assert.NoError(t, err)
 }
 
 // TestLintPrimaryKeyType_SignedBigintWarning tests that signed BIGINT raises a warning
@@ -279,7 +278,7 @@ func TestLintPrimaryKeyType_DisableLinter(t *testing.T) {
 		Database:                  cfg.DBName,
 		Threads:                   1,
 		EnableExperimentalLinting: true,
-		EnableExperimentalLinters: []string{"-primary_key_type"},
+		EnableExperimentalLinters: []string{"-primary_key"},
 		Statement:                 `CREATE TABLE t1pkdisable (id INT NOT NULL PRIMARY KEY, name VARCHAR(255))`,
 	}
 
@@ -310,14 +309,13 @@ func TestLintMultipleAlterTable(t *testing.T) {
 
 	// Multiple ALTER statements on different tables - should not trigger the linter
 	migration := &Migration{
-		Host:                                cfg.Addr,
-		Username:                            cfg.User,
-		Password:                            cfg.Passwd,
-		Database:                            cfg.DBName,
-		Threads:                             1,
-		EnableExperimentalLinting:           true,
-		EnableExperimentalMultiTableSupport: true,
-		Statement:                           `ALTER TABLE t1multi ADD COLUMN c1 INT; ALTER TABLE t2multi ADD COLUMN c2 INT`,
+		Host:                      cfg.Addr,
+		Username:                  cfg.User,
+		Password:                  cfg.Passwd,
+		Database:                  cfg.DBName,
+		Threads:                   1,
+		EnableExperimentalLinting: true,
+		Statement:                 `ALTER TABLE t1multi ADD COLUMN c1 INT; ALTER TABLE t2multi ADD COLUMN c2 INT`,
 	}
 
 	// Should succeed - different tables, no violation
@@ -415,7 +413,7 @@ func TestLintCombinedEnableDisable(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create table with INT primary key and an index to drop
-	// Disable primary_key_type but keep invisible_index_before_drop enabled with raiseError=true
+	// Disable primary_key but keep invisible_index_before_drop enabled with raiseError=true
 	migration := &Migration{
 		Host:                      cfg.Addr,
 		Username:                  cfg.User,
@@ -423,11 +421,11 @@ func TestLintCombinedEnableDisable(t *testing.T) {
 		Database:                  cfg.DBName,
 		Threads:                   1,
 		EnableExperimentalLinting: true,
-		EnableExperimentalLinters: []string{"-primary_key_type"},
+		EnableExperimentalLinters: []string{"-primary_key"},
 		Statement:                 `CREATE TABLE t1combined (id INT NOT NULL PRIMARY KEY, c1 VARCHAR(255), KEY idx_c1 (c1))`,
 	}
 
-	// Should succeed - primary_key_type is disabled so INT is OK
+	// Should succeed - primary_key is disabled so INT is OK
 	err = migration.Run()
 	assert.NoError(t, err)
 
