@@ -636,3 +636,71 @@ func TestLintEnableByLintersOnly(t *testing.T) {
 	err = migration.Run()
 	assert.NoError(t, err)
 }
+
+// TestLintExperimentalLintOnly tests that ExperimentalLintOnly runs linters and exits without performing migration
+func TestLintExperimentalLintOnly(t *testing.T) {
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1lintonly, _t1lintonly_new`)
+	table := `CREATE TABLE t1lintonly (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		c1 varchar(255) NOT NULL,
+		c2 varchar(255) NOT NULL,
+		PRIMARY KEY (id),
+		KEY c2 (c2)
+	)`
+	testutils.RunSQL(t, table)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	// Test with ExperimentalLintOnly=true and a violation that would normally fail
+	migration := &Migration{
+		Host:                      cfg.Addr,
+		Username:                  cfg.User,
+		Password:                  cfg.Passwd,
+		Database:                  cfg.DBName,
+		Table:                     "t1lintonly",
+		Alter:                     "DROP INDEX c2",
+		Threads:                   1,
+		EnableExperimentalLinting: true,
+		ExperimentalLinterConfig:  []string{"invisible_index_before_drop.raiseError=true"},
+		ExperimentalLintOnly:      true,
+	}
+
+	// Should fail because of the linting error (index not invisible)
+	err = migration.Run()
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "should be made invisible before dropping")
+
+	// Verify that the new table was NOT created (migration didn't run)
+	// We need to check this directly via SQL
+	testutils.RunSQL(t, `SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '_t1lintonly_new'`)
+
+	// Test with ExperimentalLintOnly=true and no violations
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1lintonly2, _t1lintonly2_new`)
+	table2 := `CREATE TABLE t1lintonly2 (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	testutils.RunSQL(t, table2)
+
+	migration = &Migration{
+		Host:                      cfg.Addr,
+		Username:                  cfg.User,
+		Password:                  cfg.Passwd,
+		Database:                  cfg.DBName,
+		Table:                     "t1lintonly2",
+		Alter:                     "ADD COLUMN email VARCHAR(255)",
+		Threads:                   1,
+		EnableExperimentalLinting: true,
+		ExperimentalLintOnly:      true,
+	}
+
+	// Should succeed - no linting violations
+	err = migration.Run()
+	assert.NoError(t, err)
+
+	// Verify that the new table was NOT created (migration didn't run)
+	// Check that _t1lintonly2_new does not exist
+	testutils.RunSQL(t, `SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '_t1lintonly2_new'`)
+}
