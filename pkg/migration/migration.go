@@ -32,7 +32,7 @@ var (
 type Migration struct {
 	Host                 string        `name:"host" help:"Hostname" optional:""`
 	Username             string        `name:"username" help:"User" optional:""`
-	Password             string        `name:"password" help:"Password" optional:""`
+	Password             *string       `name:"password" help:"Password" optional:""`
 	Database             string        `name:"database" help:"Database" optional:""`
 	ConfFile             string        `name:"conf" help:"MySQL conf file" optional:"" type:"existingfile"`
 	Table                string        `name:"table" help:"Table" optional:""`
@@ -165,8 +165,9 @@ func (m *Migration) normalizeConnectionOptions() error {
 	if m.Username == "" {
 		m.Username = confParams.GetUser()
 	}
-	if m.Password == "" {
-		m.Password = confParams.GetPassword()
+	if m.Password == nil {
+		pw := confParams.GetPassword()
+		m.Password = &pw
 	}
 	if m.Database == "" {
 		m.Database = confParams.GetDatabase()
@@ -183,7 +184,8 @@ func (m *Migration) normalizeConnectionOptions() error {
 // confParams abstracts parameters loaded from ini file. Will provide defaults when receiveer is
 // nil or parameter is not defined.
 type confParams struct {
-	host, database, user, password, tlsMode, tlsCA string
+	host, database, user, tlsMode, tlsCA string
+	password *string
 	port                           int
 }
 
@@ -212,11 +214,11 @@ func (c *confParams) GetUser() string {
 }
 
 func (c *confParams) GetPassword() string {
-	if c == nil || c.password == "" {
+	if c == nil || c.password == nil {
 		return defaultPassword
 	}
 
-	return c.password
+	return *c.password
 }
 
 func (c *confParams) GetTLSMode() string {
@@ -263,10 +265,14 @@ func newConfParams(confFilePath string) (*confParams, error) {
 		confParams.host     = clientSection.Key("host").String()
 		confParams.database = clientSection.Key("database").String()
 		confParams.user     = clientSection.Key("user").String()
-		confParams.password = clientSection.Key("password").String()
 		confParams.tlsMode  = clientSection.Key("tls-mode").String()
 		confParams.tlsCA    = clientSection.Key("tls-ca").String()
 		confParams.port     = clientSection.Key("port").MustInt()
+
+		if clientSection.HasKey("password") {
+			pw := clientSection.Key("password").String()
+			confParams.password = &pw
+		}
 	}
 
 	return confParams, nil

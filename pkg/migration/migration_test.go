@@ -31,6 +31,19 @@ func cleanupSentinelTable(t *testing.T) {
 	})
 }
 
+func mkPtr[T any](t T) *T {
+	return &t
+}
+
+func mkIniFile(t *testing.T, content string) *os.File {
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
+	require.NoError(t, err)
+	_, err = tmpFile.WriteString(content)
+	require.NoError(t, err)
+
+	return tmpFile
+}
+
 func TestMain(m *testing.M) {
 	checkpointDumpInterval = 100 * time.Millisecond
 	statusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
@@ -54,7 +67,7 @@ func TestE2ENullAlterEmpty(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
 	migration.Table = "t1e2e"
@@ -78,7 +91,7 @@ func TestMissingAlter(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 16
 	migration.Table = "t1"
@@ -103,7 +116,7 @@ func TestBadDatabaseCredentials(t *testing.T) {
 
 	migration.Host = "127.0.0.1:9999"
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 16
 	migration.Table = "t1"
@@ -129,7 +142,7 @@ func TestE2ENullAlter1Row(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 16
 	migration.Table = "t1"
@@ -157,7 +170,7 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 16
 	migration.Table = "replicatest"
@@ -190,7 +203,7 @@ func TestRenameInMySQL80(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 16
 	migration.Table = "renamet1"
@@ -222,7 +235,7 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 16
 	migration.Table = "uniquet1"
@@ -246,7 +259,7 @@ func TestGeneratedColumns(t *testing.T) {
 
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
 	migration.Table = "t1generated"
@@ -290,7 +303,7 @@ VALUES
 	migration := &Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  2,
 		Statement: `ALTER TABLE t1stored
@@ -343,7 +356,7 @@ func TestBinaryChecksum(t *testing.T) {
 		assert.NoError(t, err)
 		migration.Host = cfg.Addr
 		migration.Username = cfg.User
-		migration.Password = cfg.Passwd
+		migration.Password = &cfg.Passwd
 		migration.Database = cfg.DBName
 		migration.Threads = 1
 		migration.Table = "t1varbin"
@@ -369,7 +382,7 @@ func TestConvertCharset(t *testing.T) {
 	assert.NoError(t, err)
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
 	migration.Table = "t1charset"
@@ -382,7 +395,7 @@ func TestConvertCharset(t *testing.T) {
 	migration = &Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "t1charset",
@@ -403,7 +416,7 @@ func TestStmtWorkflow(t *testing.T) {
 	migration := &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: table, // CREATE TABLE.
@@ -414,7 +427,7 @@ func TestStmtWorkflow(t *testing.T) {
 	migration = &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: "ALTER TABLE t1s ADD COLUMN c int", // ALTER TABLE.
@@ -436,7 +449,7 @@ func TestUnparsableStatements(t *testing.T) {
 	migration := &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: table,
@@ -448,7 +461,7 @@ func TestUnparsableStatements(t *testing.T) {
 	migration = &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: "ALTER TABLE t1parse ADD COLUMN c BLOB DEFAULT ('abc')",
@@ -463,7 +476,7 @@ func TestUnparsableStatements(t *testing.T) {
 	migration = &Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "t1parse",
@@ -476,7 +489,7 @@ func TestUnparsableStatements(t *testing.T) {
 	migration = &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: "CREATE TRIGGER ins_sum BEFORE INSERT ON t1parse FOR EACH ROW SET @sum = @sum + NEW.b;",
@@ -489,7 +502,7 @@ func TestUnparsableStatements(t *testing.T) {
 	migration = &Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "t1parse",
@@ -502,7 +515,7 @@ func TestCreateIndexIsRewritten(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1createindex, _t1createindex_new`)
 	tbl := `CREATE TABLE t1createindex (
 	 id int not null primary key auto_increment,
-  	b int not null
+	 b int not null
 	)`
 	testutils.RunSQL(t, tbl)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -511,7 +524,7 @@ func TestCreateIndexIsRewritten(t *testing.T) {
 	migration := &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: "CREATE INDEX idx ON " + cfg.DBName + ".t1createindex (b)",
@@ -524,7 +537,7 @@ func TestSchemaNameIncluded(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1schemaname, _t1schemaname_new`)
 	tbl := `CREATE TABLE t1schemaname (
 	 id int not null primary key auto_increment,
-  	b int not null
+	b int not null
 	)`
 	testutils.RunSQL(t, tbl)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -532,7 +545,7 @@ func TestSchemaNameIncluded(t *testing.T) {
 	migration := &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: "ALTER TABLE test.t1schemaname ADD COLUMN c int",
@@ -557,7 +570,7 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 	migration := &Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: `ALTER TABLE t1secondary ADD KEY (title) SECONDARY_ENGINE_ATTRIBUTE='{"type":"spann", "distance":"l2", "product_quantization":{"dimensions":96}}'`,
@@ -578,7 +591,7 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 	migration := &Migration{
 		Host:                                cfg.Addr,
 		Username:                            cfg.User,
-		Password:                            cfg.Passwd,
+		Password:                            &cfg.Passwd,
 		Database:                            cfg.DBName,
 		Threads:                             4,
 		TargetChunkTime:                     2 * time.Second,
@@ -590,276 +603,66 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestConfFileLoadingPrefersCommandLineOptions(t *testing.T) {
-	// Create a temporary credentials file
-	credsContent := `[client]
-user = fileuser
-password = filepass
-host = filehost
-database = filedb
-port = 5678
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
+func TestMigrationParamsDefaultsUsed(t *testing.T) {
+	migration := &Migration{Table: "test_table", Alter: "ENGINE=INNODB"}
 
-	_, err = tmpFile.WriteString(credsContent)
+	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
 
+	assert.Equal(t, defaultUsername, migration.Username)
+	assert.Equal(t, defaultPassword, *migration.Password)
+	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
+	assert.Equal(t, defaultDatabase, migration.Database)
+	assert.Equal(t, defaultTLSMode, migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsCLIUsed(t *testing.T) {
 	migration := &Migration{
-		Host:     "cli-host:1234",
+		Host:     "cli-host:3306",
 		Username: "cli-user",
-		Password: "cli-password",
+		Password: mkPtr("cli-password"),
 		Database: "cli-db",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
+		TLSMode:  "VERIFY_CA",
+		TLSCertificatePath: "/path/to/ca",
 	}
 
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
+	_, err := migration.normalizeOptions()
+	assert.NoError(t, err)
 
+	assert.Equal(t, "cli-host:3306", migration.Host)
 	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", migration.Password)
-	assert.Equal(t, "cli-host:1234", migration.Host)
+	assert.Equal(t, "cli-password", *migration.Password)
 	assert.Equal(t, "cli-db", migration.Database)
-}
-
-func TestConfFileLoadingIfNoCommandLineOptions(t *testing.T) {
-	// Create a temporary credentials file
-	credsContent := `[client]
-user = fileuser
-password = filepass
-host = filehost
-database = filedb
-port = 5678
-tls-mode = REQUIRED
-tls-ca = /path/to/ca
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
-	migration := &Migration{
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-	}
-
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
-
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "filepass", migration.Password)
-	assert.Equal(t, "filehost:5678", migration.Host)
-	assert.Equal(t, "filedb", migration.Database)
-	assert.Equal(t, "REQUIRED", migration.TLSMode)
+	assert.Equal(t, "VERIFY_CA", migration.TLSMode)
 	assert.Equal(t, "/path/to/ca", migration.TLSCertificatePath)
 }
 
-func TestConfFileLoadingUsesDefaultPort(t *testing.T) {
-	// Create a temporary credentials file
-	credsContent := `[client]
-user = fileuser
-password = filepass
-host = filehost
-database = filedb
-tls-mode = VERIFY_IDENTITY
-tls-ca = /path/to/another/ca
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
+func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
 	migration := &Migration{
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
+		Password: mkPtr(""),
+		Table: "test_table",
+		Alter: "ENGINE=INNODB",
 	}
 
-	_, err = migration.normalizeOptions()
+	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "filepass", migration.Password)
-	assert.Equal(t, "filehost:3306", migration.Host)
-	assert.Equal(t, "filedb",  migration.Database)
-	assert.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
-	assert.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
+	assert.Equal(t, defaultUsername, migration.Username)
+	assert.Equal(t, "", *migration.Password)
+	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
+	assert.Equal(t, defaultDatabase, migration.Database)
+	assert.Equal(t, defaultTLSMode, migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
 }
 
-func TestConfFileLoadingUserOnly(t *testing.T) {
-	// Test with only username in creds file
-	credsContent := `[client]
-user = onlyuser
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
-	migration := &Migration{
-		Host:     "localhost:3306",
-		Password: "defaultpass",
-		Database: "testdb",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-	}
-
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
-
-	assert.Equal(t, "onlyuser", migration.Username)
-	assert.Equal(t, "defaultpass", migration.Password)
-	assert.Equal(t, "localhost:3306", migration.Host)
-	assert.Equal(t, "testdb", migration.Database)
-}
-
-func TestConfFileLoadingPasswordOnly(t *testing.T) {
-	// Test with only password in creds file
-	credsContent := `[client]
-password = filepass
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
+func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
 	migration := &Migration{
 		Host:     "localhost:3306",
 		Username: "defaultuser",
-		Database: "testdb",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-	}
-
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
-
-	assert.Equal(t, "filepass", migration.Password)
-	assert.Equal(t, "defaultuser", migration.Username)
-	assert.Equal(t, "localhost:3306", migration.Host)
-	assert.Equal(t, "testdb", migration.Database)
-}
-
-func TestConfFilePortUsedIfCommandLineHostHasNone(t *testing.T) {
-	credsContent := `[client]
-port=1234
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
-	migration := &Migration{
-		Host:     "localhost",
-		Username: "defaultuser",
-		Password: "defaultpass",
-		Database: "testdb",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-	}
-
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
-
-	assert.Equal(t, "defaultpass", migration.Password)
-	assert.Equal(t, "defaultuser", migration.Username)
-	assert.Equal(t, "localhost:1234", migration.Host)
-	assert.Equal(t, "testdb", migration.Database)
-}
-
-func TestConfFileLoadingEmptyClientSection(t *testing.T) {
-	// Test with empty client section
-	credsContent := `[client]
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
-	migration := &Migration{
-		Host:     "localhost:3306",
-		Username: "defaultuser",
-		Password: "defaultpass",
-		Database: "testdb",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-	}
-
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
-
-	assert.Equal(t, "localhost:3306", migration.Host)
-	assert.Equal(t, "defaultuser", migration.Username)
-	assert.Equal(t, "defaultpass", migration.Password)
-	assert.Equal(t, "testdb", migration.Database)
-}
-
-func TestConfFileLoadingNoClientSection(t *testing.T) {
-	// Test with no client section at all
-	credsContent := `[mysql]
-user = mysqluser
-password = mysqlpass
-`
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	defer os.Remove(tmpFile.Name())
-
-	_, err = tmpFile.WriteString(credsContent)
-	require.NoError(t, err)
-	require.NoError(t, tmpFile.Close())
-
-	migration := &Migration{
-		Host:     "localhost:3306",
-		Username: "defaultuser",
-		Password: "defaultpass",
-		Database: "testdb",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-	}
-
-	_, err = migration.normalizeOptions()
-	require.NoError(t, err)
-
-	assert.Equal(t, "localhost:3306", migration.Host)
-	assert.Equal(t, "defaultuser", migration.Username)
-	assert.Equal(t, "defaultpass", migration.Password)
-	assert.Equal(t, "testdb", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-}
-
-func TestConfFileLoadingInvalidFile(t *testing.T) {
-	migration := &Migration{
-		Host:     "localhost:3306",
-		Username: "defaultuser",
-		Password: "defaultpass",
+		Password: mkPtr("defaultpass"),
 		Database: "testdb",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -871,21 +674,293 @@ func TestConfFileLoadingInvalidFile(t *testing.T) {
 	assert.ErrorContains(t, err, "no such file or directory")
 }
 
-func TestConfFileLoadingEmptyFile(t *testing.T) {
+func TestMigrationParamsIniFilePreferCommandLineOptions(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+user = fileuser
+password = filepass
+host = filehost
+database = filedb
+port = 5678
+tls-mode = VERIFY_IDENTITY
+tls-ca = /path/from/file
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
 	migration := &Migration{
-		Host:     "localhost:3306",
-		Username: "defaultuser",
-		Password: "defaultpass",
-		Database: "testdb",
+		Host:     "cli-host:1234",
+		Username: "cli-user",
+		Password: mkPtr("cli-password"),
+		Database: "cli-db",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+		TLSMode:  "REQUIRED",
+		TLSCertificatePath: "/path/to/cert",
 	}
 
 	_, err := migration.normalizeOptions()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Equal(t, "localhost:3306", migration.Host)
-	assert.Equal(t, "defaultuser", migration.Username)
-	assert.Equal(t, "defaultpass", migration.Password)
-	assert.Equal(t, "testdb", migration.Database)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-password", *migration.Password)
+	assert.Equal(t, "cli-host:1234", migration.Host)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "REQUIRED", migration.TLSMode)
+	assert.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileNoCommandLineOptions(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+user = fileuser
+password = filepass
+host = filehost
+database = filedb
+port = 5678
+tls-mode = REQUIRED
+tls-ca = /path/to/cert
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "fileuser", migration.Username)
+	assert.Equal(t, "filepass", *migration.Password)
+	assert.Equal(t, "filehost:5678", migration.Host)
+	assert.Equal(t, "filedb", migration.Database)
+	assert.Equal(t, "REQUIRED", migration.TLSMode)
+	assert.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileUseDefaultPort(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+user = fileuser
+password = filepass
+host = filehost
+database = filedb
+tls-mode = VERIFY_IDENTITY
+tls-ca = /path/to/another/ca
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "fileuser", migration.Username)
+	assert.Equal(t, "filepass", *migration.Password)
+	assert.Equal(t, "filehost:3306", migration.Host)
+	assert.Equal(t, "filedb",  migration.Database)
+	assert.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
+	assert.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileOnlyUserSpecifiedInFile(t *testing.T) {
+	// Test with only username in creds file
+	tmpFile := mkIniFile(t, `[client]
+user = fileuser
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host:3306",
+		Password: mkPtr("cli-pass"),
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "fileuser", migration.Username)
+	assert.Equal(t, "cli-pass", *migration.Password)
+	assert.Equal(t, "cli-host:3306", migration.Host)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileOnlyPasswordSpecifiedInFile(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+password = filepass
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host:3306",
+		Username: "cli-user",
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "filepass", *migration.Password)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-host:3306", migration.Host)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileEmptyPasswordPassedThrough(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+password =
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host:3306",
+		Username: "cli-user",
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "", *migration.Password)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-host:3306", migration.Host)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileEmptyPasswordOverridenByCommandLine(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+password =
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host:3306",
+		Password: mkPtr("cli-password"),
+		Username: "cli-user",
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "cli-password", *migration.Password)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-host:3306", migration.Host)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileOnlyPortUsedFromFile(t *testing.T) {
+	tmpFile := mkIniFile(t, `[client]
+port=1234
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host",
+		Username: "cli-user",
+		Password: mkPtr("cli-password"),
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "cli-password", *migration.Password)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-host:1234", migration.Host)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
+	// Test with empty client section
+	tmpFile := mkIniFile(t, `[client]
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host:3306",
+		Username: "cli-user",
+		Password: mkPtr("cli-password"),
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "cli-host:3306", migration.Host)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-password", *migration.Password)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+func TestMigrationParamsIniFileHasNoClientSection(t *testing.T) {
+	// Test with no client section at all
+	tmpFile := mkIniFile(t, `[mysql]
+user = mysqluser
+password = mysqlpass
+`)
+	defer os.Remove(tmpFile.Name())
+	require.NoError(t, tmpFile.Close())
+
+	migration := &Migration{
+		Host:     "cli-host:3306",
+		Username: "cli-user",
+		Password: mkPtr("cli-password"),
+		Database: "cli-db",
+		Table:    "testtable",
+		Alter:    "ENGINE=InnoDB",
+		ConfFile: tmpFile.Name(),
+	}
+
+	_, err := migration.normalizeOptions()
+	require.NoError(t, err)
+
+	assert.Equal(t, "cli-host:3306", migration.Host)
+	assert.Equal(t, "cli-user", migration.Username)
+	assert.Equal(t, "cli-password", *migration.Password)
+	assert.Equal(t, "cli-db", migration.Database)
+	assert.Equal(t, "PREFERRED", migration.TLSMode)
+	assert.Empty(t, migration.TLSCertificatePath)
 }

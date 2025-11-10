@@ -37,7 +37,7 @@ func TestVarcharNonBinaryComparable(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "nonbinarycompatt1",
@@ -62,7 +62,7 @@ func TestPartitioningSyntax(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "partt1",
@@ -87,7 +87,7 @@ func TestVarbinary(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "varbinaryt1",
@@ -114,7 +114,7 @@ func TestDataFromBadSqlMode(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "badsqlt1",
@@ -140,7 +140,7 @@ func TestChangeDatatypeNoData(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "cdatatypemytable",
@@ -167,7 +167,7 @@ func TestChangeDatatypeDataLoss(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "cdatalossmytable",
@@ -192,7 +192,7 @@ func TestOnline(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline",
@@ -215,7 +215,7 @@ func TestOnline(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline2",
@@ -242,7 +242,7 @@ func TestOnline(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline3",
@@ -268,7 +268,7 @@ func TestOnline(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline4",
@@ -294,7 +294,7 @@ func TestOnline(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline5",
@@ -319,7 +319,7 @@ func TestOnline(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline6",
@@ -346,7 +346,7 @@ func TestOnline(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "testonline7",
@@ -373,7 +373,7 @@ func TestTableLength(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "thisisareallylongtablenamethisisareallylongtablename60charac",
@@ -390,7 +390,7 @@ func TestTableLength(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "thisisareallylongtablenamethisisareallylongtablename60charac",
@@ -451,7 +451,7 @@ func TestBadAlter(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "bot1",
@@ -464,7 +464,7 @@ func TestBadAlter(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "bot1",
@@ -481,7 +481,7 @@ func TestBadAlter(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "bot1",
@@ -497,7 +497,7 @@ func TestBadAlter(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "bot1",
@@ -514,7 +514,7 @@ func TestBadAlter(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "bot2",
@@ -553,7 +553,7 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "lossychange2",
@@ -588,7 +588,7 @@ func TestChangeDatatypeLossless(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "lossychange3",
@@ -625,7 +625,7 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "lossychange4",
@@ -660,7 +660,7 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "uniqmytable",
@@ -675,7 +675,7 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "uniqmytable",
@@ -710,7 +710,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         1,
 		TargetChunkTime: 100 * time.Millisecond,
@@ -761,7 +761,7 @@ checkpointFound:
 	m2, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "bigintpk",
@@ -790,7 +790,7 @@ func TestChangeNonIntPK(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "nonintpk",
@@ -824,7 +824,7 @@ func TestCheckpoint(t *testing.T) {
 		r, err := NewRunner(&Migration{
 			Host:     cfg.Addr,
 			Username: cfg.User,
-			Password: cfg.Passwd,
+			Password: &cfg.Passwd,
 			Database: cfg.DBName,
 			Threads:  16,
 			Table:    "cpt1",
@@ -967,7 +967,7 @@ func TestCheckpointRestore(t *testing.T) {
 	r, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "cpt2",
@@ -1011,7 +1011,7 @@ func TestCheckpointRestore(t *testing.T) {
 	r2, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "cpt2",
@@ -1047,7 +1047,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	r, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "binarypk",
@@ -1084,7 +1084,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	r2, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "binarypk",
@@ -1115,7 +1115,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	r, err := NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         4,
 		TargetChunkTime: 100 * time.Millisecond,
@@ -1155,7 +1155,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	r2, err := NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         4,
 		TargetChunkTime: 100 * time.Millisecond,
@@ -1190,7 +1190,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 		m, err := NewRunner(&Migration{
 			Host:     cfg.Addr,
 			Username: cfg.User,
-			Password: cfg.Passwd,
+			Password: &cfg.Passwd,
 			Database: cfg.DBName,
 			Threads:  16,
 			Table:    "cpt1difft1",
@@ -1380,7 +1380,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "e2et1",
@@ -1409,7 +1409,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.NoError(t, m.changes[0].alterNewTable(t.Context()))
 	assert.NoError(t, m.createCheckpointTable(t.Context()))
 	logger := logrus.New()
-	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, m.migration.Password, &repl.ClientConfig{
+	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, *m.migration.Password, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: m.migration.TargetChunkTime,
@@ -1517,7 +1517,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "e2et2",
@@ -1545,7 +1545,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	assert.NoError(t, m.changes[0].alterNewTable(t.Context()))
 	assert.NoError(t, m.createCheckpointTable(t.Context()))
 	logger := logrus.New()
-	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, m.migration.Password, &repl.ClientConfig{
+	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, *m.migration.Password, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: m.migration.TargetChunkTime,
@@ -1660,7 +1660,7 @@ func TestForRemainingTableArtifacts(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "remainingtbl",
@@ -1699,7 +1699,7 @@ func TestDropColumn(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "dropcol",
@@ -1716,7 +1716,7 @@ func TestDefaultPort(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     "localhost",
 		Username: "root",
-		Password: "mypassword",
+		Password: mkPtr("mypassword"),
 		Database: "test",
 		Threads:  16,
 		Table:    "t1",
@@ -1742,7 +1742,7 @@ func TestNullToNotNull(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "autodatetime",
@@ -1789,7 +1789,7 @@ func TestChunkerPrefetching(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "prefetchtest",
@@ -1833,7 +1833,7 @@ func TestTpConversion(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "tpconvert",
@@ -1874,7 +1874,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// when we kill it once we have a checkpoint saved.
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
 	migration.Table = "chkpresumetest"
@@ -1914,7 +1914,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	newmigration := &Migration{}
 	newmigration.Host = cfg.Addr
 	newmigration.Username = cfg.User
-	newmigration.Password = cfg.Passwd
+	newmigration.Password = &cfg.Passwd
 	newmigration.Database = cfg.DBName
 	newmigration.Threads = 4
 	newmigration.Table = "chkpresumetest"
@@ -1965,7 +1965,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 	migration := &Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         1,
 		Table:           "compositevarcharpk",
@@ -2001,7 +2001,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 	newmigration := &Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         2,
 		Table:           "compositevarcharpk",
@@ -2042,7 +2042,7 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	migration := &Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         1,
 		Table:           "resumestricttest",
@@ -2228,7 +2228,7 @@ func TestE2ERogueValues(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "e2erogue",
@@ -2255,7 +2255,7 @@ func TestE2ERogueValues(t *testing.T) {
 	assert.NoError(t, m.changes[0].alterNewTable(t.Context()))
 	assert.NoError(t, m.createCheckpointTable(t.Context()))
 	logger := logrus.New()
-	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, m.migration.Password, &repl.ClientConfig{
+	m.replClient = repl.NewClient(m.db, m.migration.Host, m.migration.Username, *m.migration.Password, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: m.migration.TargetChunkTime,
@@ -2363,7 +2363,7 @@ func TestPartitionedTable(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "part1",
@@ -2405,7 +2405,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         16,
 		Table:           "phantomtest",
@@ -2476,7 +2476,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         16,
 		Table:           "phantomtest",
@@ -2530,7 +2530,7 @@ func TestVarcharE2E(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  16,
 		Table:    "varchart1",
@@ -2558,7 +2558,7 @@ func TestSkipDropAfterCutover(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              4,
 		Table:                "drop_test",
@@ -2594,7 +2594,7 @@ func TestDropAfterCutover(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              4,
 		Table:                "drop_test",
@@ -2636,7 +2636,7 @@ func TestDeferCutOver(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              4,
 		Table:                "deferred_cutover",
@@ -2690,7 +2690,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              1,
 		Table:                "deferred_cutover_e2e",
@@ -2767,7 +2767,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              1,
 		Table:                "deferred_cutover_e2e_stage",
@@ -2849,7 +2849,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	// when we kill it once we have a checkpoint saved.
 	migration.Host = cfg.Addr
 	migration.Username = cfg.User
-	migration.Password = cfg.Passwd
+	migration.Password = &cfg.Passwd
 	migration.Database = cfg.DBName
 	migration.Threads = 1
 	migration.Table = tableName
@@ -2905,7 +2905,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	newmigration := &Migration{}
 	newmigration.Host = cfg.Addr
 	newmigration.Username = cfg.User
-	newmigration.Password = cfg.Passwd
+	newmigration.Password = &cfg.Passwd
 	newmigration.Database = cfg.DBName
 	newmigration.Threads = 4
 	newmigration.Table = tableName
@@ -2935,7 +2935,7 @@ func TestPreRunChecksE2E(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "test_checks_e2e",
@@ -2994,7 +2994,7 @@ func TestForNonInstantBurn(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "instantburn",
@@ -3036,7 +3036,7 @@ func TestIndexVisibility(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "indexvisibility",
@@ -3053,7 +3053,7 @@ func TestIndexVisibility(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "indexvisibility",
@@ -3070,7 +3070,7 @@ func TestIndexVisibility(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "indexvisibility",
@@ -3090,7 +3090,7 @@ func TestIndexVisibility(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Threads:  1,
 		Table:    "indexvisibility",
@@ -3126,7 +3126,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              4,
 		Table:                tableName,
@@ -3152,7 +3152,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	m2, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
-		Password:             cfg.Passwd,
+		Password:             &cfg.Passwd,
 		Database:             cfg.DBName,
 		Threads:              4,
 		Table:                tableName,
@@ -3183,7 +3183,7 @@ func TestStatementWorkflowStillInstant(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: "ALTER TABLE stmtworkflow ADD newcol INT",
@@ -3215,7 +3215,7 @@ func TestTrailingSemicolon(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Table:    "multiSecondary",
 		Alter:    dropIndexesAlter,
@@ -3231,7 +3231,7 @@ func TestTrailingSemicolon(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:      cfg.Addr,
 		Username:  cfg.User,
-		Password:  cfg.Passwd,
+		Password:  &cfg.Passwd,
 		Database:  cfg.DBName,
 		Statement: "alter table multiSecondary add index idx1(v), add index idx2(v), add index idx3(v), add index idx4(v);",
 		Threads:   1,
@@ -3246,7 +3246,7 @@ func TestTrailingSemicolon(t *testing.T) {
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
-		Password: cfg.Passwd,
+		Password: &cfg.Passwd,
 		Database: cfg.DBName,
 		Table:    "multiSecondary",
 		// https://github.com/block/spirit/issues/384
@@ -3289,7 +3289,7 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 		m, err := NewRunner(&Migration{
 			Host:      cfg.Addr,
 			Username:  cfg.User,
-			Password:  cfg.Passwd,
+			Password:  &cfg.Passwd,
 			Database:  cfg.DBName,
 			Threads:   1,
 			Statement: attempt.Statement,
@@ -3329,7 +3329,7 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:            cfg.Addr,
 		Username:        cfg.User,
-		Password:        cfg.Passwd,
+		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         1,
 		TargetChunkTime: 100 * time.Millisecond, // weak performance at copying.
