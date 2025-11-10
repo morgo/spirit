@@ -1,6 +1,9 @@
 package throttler
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Noop struct {
 	currentLag   time.Duration // used for testing
@@ -9,7 +12,7 @@ type Noop struct {
 
 var _ Throttler = &Noop{}
 
-func (t *Noop) Open() error {
+func (t *Noop) Open(_ context.Context) error {
 	return nil
 }
 

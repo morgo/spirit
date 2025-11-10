@@ -231,6 +231,42 @@ func (t *chunkerOptimistic) Close() error {
 	return nil
 }
 
+// Reset resets the chunker to start from the beginning, as if Open() was just called.
+// This is used when retrying operations like checksums.
+func (t *chunkerOptimistic) Reset() error {
+	t.Lock()
+	defer t.Unlock()
+
+	if !t.isOpen {
+		return errors.New("chunker is not open, call Open() first")
+	}
+
+	// Reset all state to initial values
+	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])
+	t.checkpointHighPtr = NewNilDatum(t.Ti.keyDatums[0]) // reset checkpoint high pointer
+	t.finalChunkSent = false
+	t.chunkSize = StartingChunkSize
+	t.watermark = nil
+	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
+	t.chunkTimingInfo = []time.Duration{}
+	t.chunkPrefetchingEnabled = false
+
+	// Reset progress tracking
+	atomic.StoreUint64(&t.rowsCopied, 0)
+	atomic.StoreUint64(&t.chunksCopied, 0)
+
+	// Make sure min/max value are always specified
+	// To simplify the code in NextChunk funcs.
+	if t.Ti.minValue.IsNil() {
+		t.Ti.minValue = t.chunkPtr.MinValue()
+	}
+	if t.Ti.maxValue.IsNil() {
+		t.Ti.maxValue = t.chunkPtr.MaxValue()
+	}
+
+	return nil
+}
+
 // Feedback is a way for consumers of chunks to give feedback on how long
 // processing the chunk took. It is incorporated into the calculation of future
 // chunk sizes.
@@ -463,7 +499,10 @@ func (t *chunkerOptimistic) Progress() (uint64, uint64, uint64) {
 // KeyAboveHighWatermark returns true if the key is above the high watermark.
 // TRUE means that the row will be discarded so if there is any ambiguity,
 // it's important to return FALSE.
-func (t *chunkerOptimistic) KeyAboveHighWatermark(key any) bool {
+// The Key in this context is really key[0], but the optimistic
+// chunker only supports single-column primary keys that are auto-increment,
+// so it is a safe assumption.
+func (t *chunkerOptimistic) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 	if t.chunkPtr.IsNil() && t.checkpointHighPtr.IsNil() {
@@ -472,7 +511,7 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key any) bool {
 	if t.finalChunkSent {
 		return false // we're done, so everything is below.
 	}
-	keyDatum := NewDatum(key, t.chunkPtr.Tp)
+	keyDatum := NewDatum(key0, t.chunkPtr.Tp)
 
 	// If there is a checkpoint high pointer, first verify that
 	// the key is above it. If it's not above it, we return FALSE
@@ -483,6 +522,29 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key any) bool {
 	}
 	// Finally we check the chunkPtr.
 	return keyDatum.GreaterThanOrEqual(t.chunkPtr)
+}
+
+// KeyBelowLowWatermark checks if the key is below the low watermark.
+// The Key in this context is really key[0], but the optimistic
+// chunker only supports single-column primary keys that are auto-increment,
+// so it is a safe assumption.
+func (t *chunkerOptimistic) KeyBelowLowWatermark(key0 any) bool {
+	t.Lock()
+	defer t.Unlock()
+	if t.finalChunkSent {
+		return true // we're done, so everything is below.
+	}
+	// There should be no race where there is no upperBound, but final chunk is not sent,
+	// but we check for nil on upper bound anyway.
+	if t.watermark == nil || t.watermark.LowerBound == nil || t.watermark.UpperBound == nil {
+		return false // watermark is probably not ready.
+	}
+
+	// We are in the regular state, so we can compare the watermark's
+	// upperBound to the key to decide what to return.
+	keyDatum := NewDatum(key0, t.chunkPtr.Tp)
+	watermarkDatum := NewDatum(t.watermark.UpperBound.Value[0].Val, t.chunkPtr.Tp)
+	return watermarkDatum.GreaterThan(keyDatum)
 }
 
 func (t *chunkerOptimistic) Tables() []*TableInfo {

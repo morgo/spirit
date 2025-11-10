@@ -579,3 +579,163 @@ func TestSetKeyCompositeKeyMerge(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"dob", "name", "city", "ssn"}, chunker.chunkKeys)
 }
+
+func TestCompositeChunkerReset(t *testing.T) {
+	// Create test table with data
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositereset_t1")
+	testutils.RunSQL(t, `CREATE TABLE compositereset_t1 (
+		pk int NOT NULL primary key auto_increment,
+		a int NOT NULL,
+		b int NOT NULL
+	)`)
+	// Insert test data - enough for multiple chunks
+	testutils.RunSQL(t, `INSERT INTO compositereset_t1 (pk, a, b) SELECT NULL, 1, 1 FROM dual`)
+	testutils.RunSQL(t, `INSERT INTO compositereset_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositereset_t1 a JOIN compositereset_t1 b JOIN compositereset_t1 c LIMIT 5000`)
+	testutils.RunSQL(t, `INSERT INTO compositereset_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositereset_t1 a JOIN compositereset_t1 b JOIN compositereset_t1 c LIMIT 5000`)
+	testutils.RunSQL(t, `INSERT INTO compositereset_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositereset_t1 a JOIN compositereset_t1 b JOIN compositereset_t1 c LIMIT 5000`)
+	testutils.RunSQL(t, `INSERT INTO compositereset_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositereset_t1 a JOIN compositereset_t1 b JOIN compositereset_t1 c LIMIT 5000`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	// Create table info and chunker
+	t1 := NewTableInfo(db, "test", "compositereset_t1")
+	assert.NoError(t, t1.SetInfo(t.Context()))
+
+	chunker := &chunkerComposite{
+		Ti:                     t1,
+		ChunkerTarget:          ChunkerDefaultTarget,
+		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
+		logger:                 logrus.New(),
+	}
+
+	// Test that Reset() fails when chunker is not open
+	err = chunker.Reset()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "chunker is not open")
+
+	// Open the chunker
+	assert.NoError(t, chunker.Open())
+
+	// Capture initial state after opening
+	initialChunkPtrs := len(chunker.chunkPtrs) // Should be 0 (empty slice)
+	initialChunkSize := chunker.chunkSize
+	initialFinalChunkSent := chunker.finalChunkSent
+	initialRowsCopied, initialChunksCopied, _ := chunker.Progress()
+
+	// Process some chunks to change the state
+	chunk1, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Contains(t, chunk1.String(), "`pk` <") // first chunk
+
+	chunk2, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Contains(t, chunk2.String(), "`pk` >=") // second chunk has bounds
+
+	chunk3, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Contains(t, chunk3.String(), "`pk` >=") // third chunk has bounds
+
+	// Give feedback to advance watermark and change state
+	chunker.Feedback(chunk1, time.Second, 100)
+	chunker.Feedback(chunk2, time.Second, 100)
+	chunker.Feedback(chunk3, time.Second, 100)
+
+	// Verify state has changed
+	currentRowsCopied, currentChunksCopied, _ := chunker.Progress()
+	assert.Greater(t, currentRowsCopied, initialRowsCopied)
+	assert.Greater(t, currentChunksCopied, initialChunksCopied)
+	assert.Greater(t, len(chunker.chunkPtrs), initialChunkPtrs) // Should have chunk pointers now
+
+	// Verify watermark exists
+	watermark, err := chunker.GetLowWatermark()
+	assert.NoError(t, err)
+	assert.NotEmpty(t, watermark)
+
+	// Now reset the chunker
+	err = chunker.Reset()
+	assert.NoError(t, err)
+
+	// Verify state is reset to initial values
+	assert.Len(t, chunker.chunkPtrs, initialChunkPtrs, "chunkPtrs should be reset to initial value (empty slice)")
+	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value")
+	assert.Equal(t, initialFinalChunkSent, chunker.finalChunkSent, "finalChunkSent should be reset to initial value")
+
+	// Verify progress is reset
+	resetRowsCopied, resetChunksCopied, _ := chunker.Progress()
+	assert.Equal(t, initialRowsCopied, resetRowsCopied, "rowsCopied should be reset to initial value")
+	assert.Equal(t, initialChunksCopied, resetChunksCopied, "chunksCopied should be reset to initial value")
+
+	// Verify watermark is cleared
+	assert.Nil(t, chunker.watermark, "watermark should be nil after reset")
+	assert.Empty(t, chunker.lowerBoundWatermarkMap, "lowerBoundWatermarkMap should be empty after reset")
+	assert.Empty(t, chunker.chunkTimingInfo, "chunkTimingInfo should be empty after reset")
+
+	// Verify watermark is not ready after reset
+	_, err = chunker.GetLowWatermark()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "watermark not yet ready")
+
+	// Verify that after reset, the chunker produces the same sequence as a fresh chunker
+	resetChunk1, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk1.String(), resetChunk1.String(), "First chunk after reset should match original first chunk")
+
+	resetChunk2, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk2.String(), resetChunk2.String(), "Second chunk after reset should match original second chunk")
+
+	resetChunk3, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk3.String(), resetChunk3.String(), "Third chunk after reset should match original third chunk")
+
+	// Test that reset works even with more complex state changes
+	chunker.Feedback(resetChunk1, 5*time.Second, 50) // Very slow feedback to trigger panic reduction
+
+	// The chunk size should change due to panic factor
+	_, err = chunker.Next()
+	assert.NoError(t, err)
+	// The chunk size might be reduced due to the slow feedback
+
+	// Reset again
+	err = chunker.Reset()
+	assert.NoError(t, err)
+
+	// Verify chunk size is back to initial value
+	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value even after dynamic changes")
+
+	// Verify we can still get the same first chunk
+	finalResetChunk, err := chunker.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, chunk1.String(), finalResetChunk.String(), "First chunk after second reset should still match original")
+
+	// Test with custom key and where condition
+	chunker2 := &chunkerComposite{
+		Ti:                     t1,
+		ChunkerTarget:          ChunkerDefaultTarget,
+		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
+		logger:                 logrus.New(),
+	}
+
+	// Set a custom key and where condition
+	err = chunker2.SetKey("PRIMARY", "a = 1")
+	assert.NoError(t, err)
+	assert.NoError(t, chunker2.Open())
+
+	// Get a chunk with the custom condition
+	customChunk, err := chunker2.Next()
+	assert.NoError(t, err)
+	assert.Contains(t, customChunk.String(), "a = 1") // Should contain the where condition
+
+	// Reset and verify the custom condition is preserved
+	err = chunker2.Reset()
+	assert.NoError(t, err)
+
+	resetCustomChunk, err := chunker2.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, customChunk.String(), resetCustomChunk.String(), "Custom chunk should match after reset")
+
+	assert.NoError(t, chunker2.Close())
+	assert.NoError(t, chunker.Close())
+}

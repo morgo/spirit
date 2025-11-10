@@ -183,16 +183,15 @@ func ParseCreateTable(sql string) (*CreateTable, error) {
 		return nil, fmt.Errorf("expected CREATE TABLE statement, got %T", stmts[0])
 	}
 
+	// Parse into structured format
 	ct := &CreateTable{
 		Raw: createStmt,
 	}
-
 	// Parse into structured format
-	err = ct.parseToStruct()
+	ct.parseToStruct()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse CREATE TABLE statement: %w", err)
+		return nil, fmt.Errorf("failed to parse CREATE TABLE: %w", err)
 	}
-
 	return ct, nil
 }
 
@@ -214,7 +213,14 @@ func (ct *CreateTable) GetIndexes() Indexes {
 	indexList := make([]Index, 0, len(ct.Indexes))
 
 	// Add table-level indexes
-	indexList = append(indexList, ct.Indexes...)
+	for _, index := range ct.Indexes {
+		if index.Type == "PRIMARY KEY" {
+			if index.Name == "" {
+				index.Name = "PRIMARY"
+			}
+		}
+		indexList = append(indexList, index)
+	}
 
 	// Add column-level constraints that turn into indexes (PRIMARY KEY, UNIQUE)
 	for _, col := range ct.Columns {
@@ -301,7 +307,7 @@ func (constraints Constraints) HasForeignKeys() bool {
 }
 
 // parseToStruct converts the AST into a structured CreateTable
-func (ct *CreateTable) parseToStruct() error {
+func (ct *CreateTable) parseToStruct() {
 	ct.TableName = ct.Raw.Table.Name.String()
 	ct.IfNotExists = ct.Raw.IfNotExists
 	ct.Temporary = ct.Raw.TemporaryKeyword != 0
@@ -337,8 +343,6 @@ func (ct *CreateTable) parseToStruct() error {
 	if ct.Raw.Partition != nil {
 		ct.Partition = ct.parsePartitionOptions(ct.Raw.Partition)
 	}
-
-	return nil
 }
 
 // parseColumn converts a column definition to a Column struct

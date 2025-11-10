@@ -17,10 +17,6 @@ import (
 )
 
 var (
-	ErrMismatchedAlter         = errors.New("alter statement in checkpoint table does not match the alter statement specified here")
-	ErrCouldNotWriteCheckpoint = errors.New("could not write checkpoint")
-	ErrWatermarkNotReady       = errors.New("watermark not ready")
-
 	defaultHost     = "127.0.0.1"
 	defaultPort     = 3306
 	defaultUsername = "spirit"
@@ -53,8 +49,12 @@ type Migration struct {
 
 	// Experimental features
 	// These are no longer hidden, we document them.
-	EnableExperimentalMultiTableSupport bool `name:"enable-experimental-multi-table-support" help:"Allow multiple alter statements to run concurrently and cutover together" optional:"" default:"false"`
-	EnableExperimentalBufferedCopy      bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
+	EnableExperimentalBufferedCopy bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
+
+	EnableExperimentalLinting bool     `name:"enable-experimental-linting" help:"Enable experimental linting checks before running migration" optional:"" default:"false"`
+	EnableExperimentalLinters []string `name:"enable-experimental-linters" help:"Experimental linters to enable (default \"all\")" optional:""`
+	ExperimentalLinterConfig  []string `name:"experimental-linter-config" help:"Configuration options for experimental linters in the form linter_name.key=value" optional:""`
+	ExperimentalLintOnly      bool     `name:"experimental-lint-only" help:"Exit after executing linters" optional:"" default:"false"`
 
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
@@ -143,10 +143,6 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 			StmtNode:  &stmtNodes[0],
 		})
 	}
-
-	if len(stmts) > 1 && !m.EnableExperimentalMultiTableSupport {
-		return nil, errors.New("multiple statements detected. To enable this experimental feature, please specify --enable-experimental-multi-table-support")
-	}
 	return stmts, err
 }
 
@@ -229,8 +225,7 @@ func (c *confParams) GetTLSMode() string {
 	return c.tlsMode
 }
 
-// N.B. There is no default for tls-ca but we want to make sure we let whatever is passed
-// via the CLI take precedence so we pass through the value parsed from file.
+// N.B. There is no default for tls-ca
 func (c *confParams) GetTLSCA() string {
 	if c == nil {
 		return ""
