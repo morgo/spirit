@@ -181,8 +181,8 @@ func (m *Migration) normalizeConnectionOptions() error {
 // nil or parameter is not defined.
 type confParams struct {
 	host, database, user, tlsMode, tlsCA string
-	password *string
-	port                           int
+	password                             *string
+	port                                 int
 }
 
 func (c *confParams) GetHost() string {
@@ -257,12 +257,12 @@ func newConfParams(confFilePath string) (*confParams, error) {
 
 	if creds.HasSection("client") {
 		clientSection := creds.Section("client")
-		confParams.host     = clientSection.Key("host").String()
+		confParams.host = clientSection.Key("host").String()
 		confParams.database = clientSection.Key("database").String()
-		confParams.user     = clientSection.Key("user").String()
-		confParams.tlsMode  = clientSection.Key("tls-mode").String()
-		confParams.tlsCA    = clientSection.Key("tls-ca").String()
-		confParams.port     = clientSection.Key("port").MustInt()
+		confParams.user = clientSection.Key("user").String()
+		confParams.tlsMode = clientSection.Key("tls-mode").String()
+		confParams.tlsCA = clientSection.Key("tls-ca").String()
+		confParams.port = clientSection.Key("port").MustInt()
 
 		if clientSection.HasKey("password") {
 			pw := clientSection.Key("password").String()

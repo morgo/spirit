@@ -628,13 +628,13 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 
 func TestMigrationParamsCLIUsed(t *testing.T) {
 	migration := &Migration{
-		Host:     "cli-host:3306",
-		Username: "cli-user",
-		Password: mkPtr("cli-password"),
-		Database: "cli-db",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		TLSMode:  "VERIFY_CA",
+		Host:               "cli-host:3306",
+		Username:           "cli-user",
+		Password:           mkPtr("cli-password"),
+		Database:           "cli-db",
+		Table:              "testtable",
+		Alter:              "ENGINE=InnoDB",
+		TLSMode:            "VERIFY_CA",
 		TLSCertificatePath: "/path/to/ca",
 	}
 
@@ -652,15 +652,15 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
 	migration := &Migration{
 		Password: mkPtr(""),
-		Table: "test_table",
-		Alter: "ENGINE=INNODB",
+		Table:    "test_table",
+		Alter:    "ENGINE=INNODB",
 	}
 
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
 	assert.Equal(t, defaultUsername, migration.Username)
-	assert.Equal(t, "", *migration.Password)
+	assert.Empty(t, *migration.Password)
 	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
 	assert.Equal(t, defaultDatabase, migration.Database)
 	assert.Equal(t, defaultTLSMode, migration.TLSMode)
@@ -697,14 +697,14 @@ tls-ca = /path/from/file
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
-		Host:     "cli-host:1234",
-		Username: "cli-user",
-		Password: mkPtr("cli-password"),
-		Database: "cli-db",
-		Table:    "testtable",
-		Alter:    "ENGINE=InnoDB",
-		ConfFile: tmpFile.Name(),
-		TLSMode:  "REQUIRED",
+		Host:               "cli-host:1234",
+		Username:           "cli-user",
+		Password:           mkPtr("cli-password"),
+		Database:           "cli-db",
+		Table:              "testtable",
+		Alter:              "ENGINE=InnoDB",
+		ConfFile:           tmpFile.Name(),
+		TLSMode:            "REQUIRED",
 		TLSCertificatePath: "/path/to/cert",
 	}
 
@@ -773,7 +773,7 @@ tls-ca = /path/to/another/ca
 	assert.Equal(t, "fileuser", migration.Username)
 	assert.Equal(t, "filepass", *migration.Password)
 	assert.Equal(t, "filehost:3306", migration.Host)
-	assert.Equal(t, "filedb",  migration.Database)
+	assert.Equal(t, "filedb", migration.Database)
 	assert.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
 	assert.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
 }
@@ -852,7 +852,7 @@ password =
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "", *migration.Password)
+	assert.Empty(t, *migration.Password)
 	assert.Equal(t, "cli-user", migration.Username)
 	assert.Equal(t, "cli-host:3306", migration.Host)
 	assert.Equal(t, "cli-db", migration.Database)
