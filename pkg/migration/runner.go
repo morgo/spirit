@@ -397,7 +397,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			// Instead we check the credentials provided.
 			Host:                     r.migration.Host,
 			Username:                 r.migration.Username,
-			Password:                 r.migration.Password,
+			Password:                 *r.migration.Password,
 			TLSMode:                  r.migration.TLSMode,
 			TLSCertificatePath:       r.migration.TLSCertificatePath,
 			SkipDropAfterCutover:     r.migration.SkipDropAfterCutover,
@@ -410,7 +410,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 }
 
 func (r *Runner) dsn() string {
-	return fmt.Sprintf("%s:%s@tcp(%s)/%s", r.migration.Username, r.migration.Password, r.migration.Host, r.changes[0].stmt.Schema)
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s", r.migration.Username, *r.migration.Password, r.migration.Host, r.changes[0].stmt.Schema)
 }
 
 // maskPasswordInDSN masks the password in any DSN string for safe logging
@@ -469,7 +469,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 
 	// Set the binlog position.
 	// Create a binlog subscriber
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, r.migration.Password, &repl.ClientConfig{
+	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, &repl.ClientConfig{
 		Logger:          r.logger,
 		Concurrency:     r.migration.Threads,
 		TargetBatchTime: r.migration.TargetChunkTime,

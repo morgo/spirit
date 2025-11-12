@@ -108,7 +108,7 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 			migration := &Migration{
 				Host:               cfg.Addr,
 				Username:           cfg.User,
-				Password:           cfg.Passwd,
+				Password:           &cfg.Passwd,
 				Database:           cfg.DBName,
 				Table:              "test_table",
 				Alter:              "ADD COLUMN test_col INT",
@@ -260,7 +260,7 @@ func TestReplicaTLSIntegration(t *testing.T) {
 	migration := &Migration{
 		Host:               cfg.Addr,
 		Username:           cfg.User,
-		Password:           cfg.Passwd,
+		Password:           &cfg.Passwd,
 		Database:           cfg.DBName,
 		Table:              "test_table",
 		Alter:              "ADD COLUMN test_col INT",
