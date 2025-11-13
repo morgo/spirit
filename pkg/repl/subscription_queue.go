@@ -53,7 +53,7 @@ func (s *deltaQueue) HasChanged(key, _ []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.keyAboveWatermarkEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
-		s.c.logger.Debugf("key above watermark: %v", key[0])
+		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
 	s.changes = append(s.changes, queuedChange{key: utils.HashKey(key), isDelete: deleted})

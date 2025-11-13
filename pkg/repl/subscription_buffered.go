@@ -66,7 +66,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.keyAboveWatermarkEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
-		s.c.logger.Debugf("key above watermark: %v", key[0])
+		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
 
@@ -194,7 +194,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 	for key, logicalRow := range s.changes {
 		unhashedKey := utils.UnhashKey(key)
 		if s.chunker != nil && s.chunker.KeyBelowLowWatermark(unhashedKey[0]) {
-			s.c.logger.Debugf("key below watermark: %v", unhashedKey[0])
+			s.c.logger.Debug("key below watermark", "key", unhashedKey[0])
 			allChangesFlushed = false
 			continue
 		}
