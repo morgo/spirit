@@ -441,6 +441,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err = cutover.Run(ctx); err != nil {
 		return err
 	}
+	// Delete checkpoint table
+	if err := dbconn.Exec(ctx, r.target, "DROP TABLE IF EXISTS %n.%n", r.targetConfig.DBName, checkpointTableName); err != nil {
+		return err
+	}
 	r.logger.Info("Move operation complete.")
 	return nil
 }
