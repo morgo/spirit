@@ -1,6 +1,4 @@
 # Docker Compose configuration for CI testing (no TLS)
-# This file provides the same replication setup as the old compose/replication
-# but uses the modern structure from replication-tls
 services:
   mysql:
     image: mysql:8.0.33
