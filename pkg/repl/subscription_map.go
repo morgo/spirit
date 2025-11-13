@@ -50,7 +50,7 @@ func (s *deltaMap) HasChanged(key, _ []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.keyAboveWatermarkEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
-		s.c.logger.Debugf("key above watermark: %v", key[0])
+		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
 	s.changes[utils.HashKey(key)] = deleted
@@ -108,7 +108,7 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 	for key, isDelete := range s.changes {
 		unhashedKey := utils.UnhashKey(key)
 		if s.chunker != nil && !s.chunker.KeyBelowLowWatermark(unhashedKey[0]) {
-			s.c.logger.Debugf("key not below watermark: %v", unhashedKey[0])
+			s.c.logger.Debug("key not below watermark", "key", unhashedKey[0])
 			allChangesFlushed = false
 			continue
 		}

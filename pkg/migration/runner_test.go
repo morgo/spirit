@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"testing"
@@ -17,7 +18,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1683,7 +1683,7 @@ func TestDefaultPort(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "localhost:3306", m.migration.Host)
-	m.SetLogger(logrus.New())
+	m.SetLogger(slog.Default())
 }
 
 func TestNullToNotNull(t *testing.T) {
@@ -2826,7 +2826,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 			// Test that it's not possible to acquire metadata lock with name
 			// as tablename while the migration is running.
 			lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(),
-				lockTables, dbconn.NewDBConfig(), logrus.New())
+				lockTables, dbconn.NewDBConfig(), slog.Default())
 			assert.Error(t, err)
 			if lock != nil {
 				assert.ErrorContains(t, err, fmt.Sprintf("could not acquire metadata lock for %s, lock is held by another connection", lock.GetLockName()))
