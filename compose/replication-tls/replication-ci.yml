@@ -19,7 +19,7 @@ services:
       retries: 60
     volumes:
       - mysql-data-dir:/var/lib/mysql
-      - ./init-ci-bootstrap.sql:/docker-entrypoint-initdb.d/init-ci-bootstrap.sql
+      - ../bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
     command: --server-id=1 --log-bin=mysql-bin --gtid-mode=on --enforce-gtid-consistency=on
 
   mysql_replica:
