@@ -85,6 +85,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 	if err := c.feed.Flush(ctx); err != nil {
 		return err
 	}
+
 	if !c.feed.AllChangesFlushed() {
 		return errors.New("not all changes flushed, final flush might be broken")
 	}
