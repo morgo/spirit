@@ -73,7 +73,7 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 	defer sourceDB.Close()
 
 	// Start concurrent write load
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var wg sync.WaitGroup
@@ -82,7 +82,7 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 	numThreads := 4
 
 	// Start write threads
-	for i := 0; i < numThreads; i++ {
+	for range numThreads {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -166,7 +166,7 @@ func doOneWriteLoop(db *sql.DB) error {
 	stoken := uuid.New().String()
 	rtoken := uuid.New().String()
 
-	// Insert
+	//nolint: dupword
 	_, err = trx.Exec(`INSERT INTO xfers (x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at)
 		VALUES (?, 100, 'USD', ?, ?, 1, HEX(RANDOM_BYTES(10)), HEX(RANDOM_BYTES(100)), HEX(RANDOM_BYTES(5)), NOW(), NOW(), NOW(), 1, 2, NOW(), NOW())`,
 		xtoken, stoken, rtoken)
@@ -181,12 +181,15 @@ func doOneWriteLoop(db *sql.DB) error {
 	}
 
 	// Do some cached reads
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		rows, err := trx.Query(`SELECT * FROM xfers WHERE x_token = ?`, xtoken)
 		if err != nil {
 			return err
 		}
-		rows.Close()
+		if rows.Err() != nil {
+			return rows.Err()
+		}
+		rows.Close() //nolint: sqlclosecheck
 	}
 
 	return trx.Commit()
