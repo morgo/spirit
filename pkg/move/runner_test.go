@@ -17,6 +17,7 @@ import (
 // TestMoveWithConcurrentWrites reproduces the "not all changes flushed" error
 // that occurs during cutover when there are lots of concurrent writes.
 func TestMoveWithConcurrentWrites(t *testing.T) {
+	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
