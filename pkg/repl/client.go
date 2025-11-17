@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -193,9 +194,10 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		c.subscriptions[subKey] = &bufferedMap{
 			table:    currentTable,
 			newTable: newTable,
-			changes:  make(map[string]logicalRow),
+			changes:  make(map[string]applier.LogicalRow),
 			c:        c,
 			chunker:  chunker,
+			applier:  applier.NewSingleTargetApplier(c.writeDB, c.dbConfig, c.logger),
 		}
 		return nil
 	}

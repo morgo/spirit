@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
@@ -83,7 +84,7 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 			metricsSink:      config.MetricsSink,
 			dbConfig:         config.DBConfig,
 			copierEtaHistory: newcopierEtaHistory(),
-			writeDB:          config.WriteDB,
+			applier:          applier.NewSingleTargetApplier(config.WriteDB, config.DBConfig, config.Logger),
 		}, nil
 	}
 	return &Unbuffered{
