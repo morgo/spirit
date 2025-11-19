@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
@@ -400,7 +401,7 @@ func TestFromWatermark(t *testing.T) {
 	assert.NoError(t, checker.Run(t.Context()))
 }
 
-func TestFixCorruptWithWriter(t *testing.T) {
+func TestFixCorruptWithApplier(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	newDBName := testutils.CreateUniqueTestDatabase(t)
@@ -438,7 +439,7 @@ func TestFixCorruptWithWriter(t *testing.T) {
 		TargetBatchTime:            time.Second,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
-		WriteDB:                    dest,
+		Applier:                    applier.NewSingleTargetApplier(dest, dbconn.NewDBConfig(), slog.Default()),
 	})
 	defer feed.Close()
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))

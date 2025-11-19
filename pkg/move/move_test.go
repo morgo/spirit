@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -121,11 +122,21 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	r.dbConfig = dbconn.NewDBConfig()
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	assert.NoError(t, err)
-	r.target, err = dbconn.New(r.move.TargetDSN, r.dbConfig)
+
+	// Set up target (single target for this test)
+	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
 	assert.NoError(t, err)
+	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+	assert.NoError(t, err)
+	r.targets = []applier.Target{
+		{
+			DB:       targetDB,
+			Config:   targetConfig,
+			KeyRange: "", // Empty for single target
+		},
+	}
+
 	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
-	assert.NoError(t, err)
-	r.targetConfig, err = mysql.ParseDSN(r.move.TargetDSN)
 	assert.NoError(t, err)
 	assert.NoError(t, r.setup(ctx))
 	r.startBackgroundRoutines(ctx)
@@ -145,7 +156,10 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// Now close the context, we are canceling this run.
 	r.cancelFunc()
 	assert.NoError(t, r.source.Close())
-	assert.NoError(t, r.target.Close())
+	// Close all target databases
+	for _, target := range r.targets {
+		assert.NoError(t, target.DB.Close())
+	}
 	r.Close()
 
 	// Alter the definition of target.t1 just to be difficult.

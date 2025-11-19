@@ -15,34 +15,29 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
+	"github.com/go-sql-driver/mysql"
 )
 
-// Target represents a shard target with its database connection and key range.
+// Target represents a shard target with its database connection, configuration, and key range.
 // Key ranges are expressed as Vitess-style strings (e.g., "-80", "80-", "80-c0").
 // An empty string means all key space (unsharded).
 type Target struct {
 	DB       *sql.DB
+	Config   *mysql.Config
 	KeyRange string // Vitess-style key range: "-80", "80-", "80-c0"
 }
-
-// VindexFunc is a hash function that takes a single column value and returns a uint64 hash.
-// This matches Vitess vindex behavior where the hash is used to determine shard placement.
-// The hash value is then matched against key ranges to find the target shard.
-type VindexFunc func(value any) (uint64, error)
 
 // ShardedApplier applies rows to multiple target databases based on a Vitess-style vindex.
 // It extracts a specific column value from each row, applies a hash function to it,
 // and routes the row to the appropriate shard based on the hash value and key ranges.
 //
-// The vindex column is specified by name (e.g., "user_id") and is extracted from each row
-// using the table metadata. The hash function returns a uint64 which is then matched
-// against the target key ranges to determine the destination shard.
+// The vindex column and hash function are configured per-table in the TableInfo.VindexColumn
+// and TableInfo.VindexFunc fields. This allows different tables to use different sharding keys
+// in multi-table migrations.
 type ShardedApplier struct {
-	shards       []*shardTarget
-	vindexFunc   VindexFunc // Hash function: value -> uint64
-	vindexColumn string     // Column name to extract and hash (e.g., "user_id")
-	dbConfig     *dbconn.DBConfig
-	logger       *slog.Logger
+	shards   []*shardTarget
+	dbConfig *dbconn.DBConfig
+	logger   *slog.Logger
 
 	// Pending work tracking (shared across all shards)
 	pendingWork  map[int64]*pendingWork
@@ -88,19 +83,13 @@ type shardedChunkletCompletion struct {
 //
 // Parameters:
 //   - targets: Slice of Target structs containing DB and key range for each shard
-//   - vindexColumn: Name of the column to hash (e.g., "user_id") - REQUIRED
-//   - vindexFunc: Hash function that takes a column value and returns uint64
 //   - dbConfig: Database configuration
 //   - logger: Logger instance
 //
-// The vindexColumn will be extracted from each row based on the table metadata,
-// and the vindexFunc will be applied to determine which shard the row belongs to
-// by matching the hash against the target key ranges.
-func NewShardedApplier(targets []Target, vindexColumn string, vindexFunc VindexFunc, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*ShardedApplier, error) {
-	if vindexColumn == "" {
-		return nil, errors.New("vindexColumn is required for ShardedApplier")
-	}
-
+// The vindex column and hash function are configured per-table in the TableInfo.VindexColumn
+// and TableInfo.VindexFunc fields. This allows different tables to use different sharding keys
+// in multi-table migrations.
+func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*ShardedApplier, error) {
 	shards := make([]*shardTarget, len(targets))
 	for i, target := range targets {
 		// Parse the key range
@@ -135,12 +124,10 @@ func NewShardedApplier(targets []Target, vindexColumn string, vindexFunc VindexF
 	}
 
 	return &ShardedApplier{
-		shards:       shards,
-		vindexFunc:   vindexFunc,
-		vindexColumn: vindexColumn,
-		dbConfig:     dbConfig,
-		logger:       logger,
-		pendingWork:  make(map[int64]*pendingWork),
+		shards:      shards,
+		dbConfig:    dbConfig,
+		logger:      logger,
+		pendingWork: make(map[int64]*pendingWork),
 	}, nil
 }
 
@@ -167,23 +154,35 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 }
 
 // Apply sends rows to be written to the appropriate target shards.
-// Rows are distributed across shards based on the vindex column and hash function.
+// Rows are distributed across shards based on the vindex column and hash function
+// configured in the chunk's Table.VindexColumn and Table.VindexFunc.
 func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback ApplyCallback) error {
-	a.logger.Info("Apply called", "rowCount", len(rows), "vindexColumn", a.vindexColumn)
-
 	if len(rows) == 0 {
 		// No rows to apply, invoke callback immediately
 		callback(0, nil)
 		return nil
 	}
 
+	// Extract vindex configuration from the table
+	vindexColumn := chunk.Table.VindexColumn
+	vindexFunc := chunk.Table.VindexFunc
+
+	if vindexColumn == "" {
+		return errors.New("VindexColumn not configured in TableInfo")
+	}
+	if vindexFunc == nil {
+		return errors.New("VindexFunc not configured in TableInfo")
+	}
+
+	a.logger.Info("Apply called", "rowCount", len(rows), "vindexColumn", vindexColumn, "table", chunk.Table.TableName)
+
 	// Find the ordinal position of the vindex column
-	vindexOrdinal, err := chunk.Table.GetColumnOrdinal(a.vindexColumn)
+	vindexOrdinal, err := chunk.Table.GetColumnOrdinal(vindexColumn)
 	if err != nil {
 		return err
 	}
 
-	a.logger.Info("Found vindex column", "vindexColumn", a.vindexColumn, "ordinal", vindexOrdinal)
+	a.logger.Info("Found vindex column", "vindexColumn", vindexColumn, "ordinal", vindexOrdinal)
 
 	// Assign a work ID for tracking
 	workID := atomic.AddInt64(&a.nextWorkID, 1)
@@ -198,7 +197,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		vindexValue := row[vindexOrdinal]
 
 		// Apply the hash function to get the hash value
-		hashValue, err := a.vindexFunc(vindexValue)
+		hashValue, err := vindexFunc(vindexValue)
 		if err != nil {
 			return fmt.Errorf("vindex function error: %w", err)
 		}
@@ -221,7 +220,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		}
 		if shardID == -1 {
 			return fmt.Errorf("no shard found for hash value %x (vindex column: %s, value: %v)",
-				hashValue, a.vindexColumn, vindexValue)
+				hashValue, vindexColumn, vindexValue)
 		}
 
 		// Add to the appropriate shard's row list
@@ -602,17 +601,24 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 		return 0, nil
 	}
 
+	if sourceTable.VindexColumn == "" {
+		return 0, errors.New("VindexColumn not configured in TableInfo")
+	}
+	if sourceTable.VindexFunc == nil {
+		return 0, errors.New("VindexFunc not configured in TableInfo")
+	}
+
 	// Find the ordinal position of the vindex column within NonGeneratedColumns
 	// (since RowImage is structured according to NonGeneratedColumns)
 	vindexOrdinal := -1
 	for i, col := range sourceTable.NonGeneratedColumns {
-		if col == a.vindexColumn {
+		if col == sourceTable.VindexColumn {
 			vindexOrdinal = i
 			break
 		}
 	}
 	if vindexOrdinal == -1 {
-		return 0, fmt.Errorf("vindex column %s not found in non-generated columns", a.vindexColumn)
+		return 0, fmt.Errorf("vindex column %s not found in non-generated columns", sourceTable.VindexColumn)
 	}
 
 	// Get the intersected column indices
@@ -637,7 +643,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 		vindexValue := row.RowImage[vindexOrdinal]
 
 		// Apply the hash function to get the hash value
-		hashValue, err := a.vindexFunc(vindexValue)
+		hashValue, err := sourceTable.VindexFunc(vindexValue)
 		if err != nil {
 			return 0, fmt.Errorf("vindex function error: %w", err)
 		}
@@ -652,7 +658,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 		}
 		if shardID == -1 {
 			return 0, fmt.Errorf("no shard found for hash value %x (vindex column: %s, value: %v)",
-				hashValue, a.vindexColumn, vindexValue)
+				hashValue, sourceTable.VindexColumn, vindexValue)
 		}
 		shardRows[shardID] = append(shardRows[shardID], row)
 	}

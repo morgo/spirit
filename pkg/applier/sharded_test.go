@@ -79,6 +79,10 @@ func TestShardedApplierIntegration(t *testing.T) {
 	err = sourceTable.SetInfo(ctx)
 	require.NoError(t, err)
 
+	// Configure vindex on source table
+	sourceTable.VindexColumn = "user_id"
+	sourceTable.VindexFunc = evenOddHasher
+
 	shard1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = shard1Table.SetInfo(ctx)
 	require.NoError(t, err)
@@ -93,8 +97,6 @@ func TestShardedApplierIntegration(t *testing.T) {
 	}
 	applier, err := NewShardedApplier(
 		targets,
-		"user_id",
-		evenOddHasher,
 		dbConfig,
 		slog.Default(),
 	)
@@ -276,6 +278,10 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 	err = sourceTable.SetInfo(ctx)
 	require.NoError(t, err)
 
+	// Configure vindex on source table
+	sourceTable.VindexColumn = "user_id"
+	sourceTable.VindexFunc = evenOddHasher
+
 	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = target1Table.SetInfo(ctx)
 	require.NoError(t, err)
@@ -288,8 +294,6 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 	}
 	applier, err := NewShardedApplier(
 		targets,
-		"user_id",
-		evenOddHasher,
 		dbConfig,
 		slog.Default(),
 	)
@@ -366,12 +370,16 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	err = targetTable.SetInfo(ctx)
 	require.NoError(t, err)
 
+	// Configure vindex on target table
+	targetTable.VindexColumn = "user_id"
+	targetTable.VindexFunc = evenOddHasher
+
 	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(targets, "user_id", evenOddHasher, dbConfig, slog.Default())
+	applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
 	require.NoError(t, err)
 
 	// Delete with empty keys
@@ -435,6 +443,10 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	err = sourceTable.SetInfo(ctx)
 	require.NoError(t, err)
 
+	// Configure vindex on source table
+	sourceTable.VindexColumn = "user_id"
+	sourceTable.VindexFunc = evenOddHasher
+
 	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = target1Table.SetInfo(ctx)
 	require.NoError(t, err)
@@ -446,8 +458,6 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	}
 	applier, err := NewShardedApplier(
 		targets,
-		"user_id",
-		evenOddHasher,
 		dbConfig,
 		slog.Default(),
 	)
@@ -583,12 +593,16 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	err = targetTable.SetInfo(ctx)
 	require.NoError(t, err)
 
+	// Configure vindex on target table
+	targetTable.VindexColumn = "user_id"
+	targetTable.VindexFunc = evenOddHasher
+
 	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(targets, "user_id", evenOddHasher, dbConfig, slog.Default())
+	applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
 	require.NoError(t, err)
 
 	// Upsert with deleted rows mixed in
@@ -653,12 +667,16 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	err = targetTable.SetInfo(ctx)
 	require.NoError(t, err)
 
+	// Configure vindex on target table
+	targetTable.VindexColumn = "user_id"
+	targetTable.VindexFunc = evenOddHasher
+
 	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(targets, "user_id", evenOddHasher, dbConfig, slog.Default())
+	applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
 	require.NoError(t, err)
 
 	// Upsert with empty rows

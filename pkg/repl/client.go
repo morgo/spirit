@@ -70,10 +70,10 @@ type Client struct {
 
 	// The DB connection is used for queries like SHOW MASTER STATUS
 	db *sql.DB
-	// The writeDB is used for flushing writes from subscriptions
+	// The applier is used for flushing writes from subscriptions
 	// In spirit, it's the same as the db connection, but for Move
 	// it will be the target.
-	writeDB  *sql.DB
+	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
 
 	// subscriptions is a map of tables that are actively
@@ -114,9 +114,6 @@ type Client struct {
 
 // NewClient creates a new Client instance.
 func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
-	if config.WriteDB == nil {
-		config.WriteDB = db // default to using the read DB for writes
-	}
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
@@ -134,7 +131,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		onDDL:                      config.OnDDL,
 		serverID:                   config.ServerID,
 		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
-		writeDB:                    config.WriteDB,
+		applier:                    config.Applier,
 	}
 }
 
@@ -145,7 +142,7 @@ type ClientConfig struct {
 	OnDDL                      chan string
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
-	WriteDB                    *sql.DB          // if not nil, use this DB for writes.
+	Applier                    applier.Applier  // Applier for writing to target(s)
 	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
 }
 
@@ -197,7 +194,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 			changes:  make(map[string]applier.LogicalRow),
 			c:        c,
 			chunker:  chunker,
-			applier:  applier.NewSingleTargetApplier(c.writeDB, c.dbConfig, c.logger),
+			applier:  c.applier,
 		}
 		return nil
 	}
