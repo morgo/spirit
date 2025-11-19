@@ -352,3 +352,15 @@ func (t *TableInfo) GetColumnMySQLType(col string) (string, bool) {
 	tp, ok := t.columnsMySQLTps[col]
 	return tp, ok
 }
+
+// GetColumnOrdinal returns the ordinal position (0-indexed) of a column by name.
+// This is useful for extracting values from row slices where the position matters.
+// Returns an error if the column is not found.
+func (t *TableInfo) GetColumnOrdinal(columnName string) (int, error) {
+	for i, col := range t.Columns {
+		if col == columnName {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("column %s not found in table %s", columnName, t.TableName)
+}

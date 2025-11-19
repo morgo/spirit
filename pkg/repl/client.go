@@ -621,16 +621,15 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 
 			for pkIdx, pkCol := range sub.Tables()[0].KeyColumns {
 				// Find the position of this PK column in the table columns
-				for colIdx, col := range sub.Tables()[0].Columns {
-					if col == pkCol {
-						// If this column exists in the after image and is not nil, use it
-						if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
-							if fmt.Sprintf("%v", beforeKey[pkIdx]) != fmt.Sprintf("%v", afterRowSlice[colIdx]) {
-								afterKey[pkIdx] = afterRowSlice[colIdx]
-								isPKUpdate = true
-							}
-						}
-						break
+				colIdx, err := sub.Tables()[0].GetColumnOrdinal(pkCol)
+				if err != nil {
+					return err
+				}
+				// If this column exists in the after image and is not nil, use it
+				if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
+					if fmt.Sprintf("%v", beforeKey[pkIdx]) != fmt.Sprintf("%v", afterRowSlice[colIdx]) {
+						afterKey[pkIdx] = afterRowSlice[colIdx]
+						isPKUpdate = true
 					}
 				}
 			}

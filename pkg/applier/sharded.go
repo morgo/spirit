@@ -178,15 +178,9 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	}
 
 	// Find the ordinal position of the vindex column
-	vindexOrdinal := -1
-	for i, col := range chunk.Table.Columns {
-		if col == a.vindexColumn {
-			vindexOrdinal = i
-			break
-		}
-	}
-	if vindexOrdinal == -1 {
-		return fmt.Errorf("vindex column %s not found in table %s", a.vindexColumn, chunk.Table.TableName)
+	vindexOrdinal, err := chunk.Table.GetColumnOrdinal(a.vindexColumn)
+	if err != nil {
+		return err
 	}
 
 	a.logger.Info("Found vindex column", "vindexColumn", a.vindexColumn, "ordinal", vindexOrdinal)
@@ -513,102 +507,47 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 	}
 }
 
-// DeleteKeys deletes rows by their key values synchronously, distributing across shards.
+// DeleteKeys deletes rows by their key values synchronously, broadcasting to all shards.
 // The keys are hashed key strings (from utils.HashKey).
 // If lock is non-nil, operations are executed under table locks (one per shard).
 //
-// Note: This method requires that the vindex column is part of the primary key,
-// or that we can extract it from the key somehow. For now, we assume the vindex
-// column is the first column in the key.
+// Note: we only track modifications by PRIMARY KEY, not by shard key (aka primary vindex).
+// For this reason we can't extract the vindex value, and must instead broadcast
+// the deletes to all shards. The vindex value is considered immutable, and we will
+// error if it changes on an update.
 func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
 
-	// Find the ordinal position of the vindex column in the key columns
-	vindexOrdinalInKey := -1
-	for i, col := range sourceTable.KeyColumns {
-		if col == a.vindexColumn {
-			vindexOrdinalInKey = i
-			break
-		}
-	}
-	if vindexOrdinalInKey == -1 {
-		return 0, fmt.Errorf("vindex column %s not found in key columns for DeleteKeys", a.vindexColumn)
-	}
-
-	// Group keys by shard
-	shardKeys := make([][]string, len(a.shards))
+	// Convert hashed keys to row value constructor format
+	var pkValues []string
 	for _, key := range keys {
-		// Unhash the key to get the actual key values
-		keyStrings := utils.UnhashKey(key)
-
-		if vindexOrdinalInKey >= len(keyStrings) {
-			return 0, fmt.Errorf("vindex column ordinal %d exceeds key length %d", vindexOrdinalInKey, len(keyStrings))
-		}
-
-		// Extract the vindex column value from the key
-		vindexValueStr := keyStrings[vindexOrdinalInKey]
-
-		// Convert to the appropriate type (for now, assume int64)
-		// TODO: This should be more robust and handle different types
-		var vindexValue int64
-		_, err := fmt.Sscanf(vindexValueStr, "%d", &vindexValue)
-		if err != nil {
-			return 0, fmt.Errorf("failed to parse vindex value %s as int64: %w", vindexValueStr, err)
-		}
-
-		// Apply the hash function
-		hashValue, err := a.vindexFunc(vindexValue)
-		if err != nil {
-			return 0, fmt.Errorf("vindex function error: %w", err)
-		}
-
-		// Find which shard's key range contains this hash value
-		shardID := -1
-		for i, shard := range a.shards {
-			if shard.keyRange.contains(hashValue) {
-				shardID = i
-				break
-			}
-		}
-		if shardID == -1 {
-			return 0, fmt.Errorf("no shard found for hash value %x (vindex column: %s, value: %v)",
-				hashValue, a.vindexColumn, vindexValue)
-		}
-
-		shardKeys[shardID] = append(shardKeys[shardID], key)
+		pkValues = append(pkValues, utils.UnhashKeyToString(key))
 	}
 
-	// Execute deletes on each shard in parallel
+	// Build DELETE statement
+	// Use just the table name, not the fully qualified name, because
+	// the database connection (shard.writeDB) already determines which database to write to
+	tableName := fmt.Sprintf("`%s`", targetTable.TableName)
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
+		tableName,
+		table.QuoteColumns(sourceTable.KeyColumns),
+		strings.Join(pkValues, ","),
+	)
+
+	// Execute deletes on all shards in parallel (broadcast)
 	var totalAffected int64
 	var mu sync.Mutex
 	var errGroup error
 
 	var wg sync.WaitGroup
-	for shardID, keys := range shardKeys {
-		if len(keys) == 0 {
-			continue
-		}
-
+	for i := range a.shards {
 		wg.Add(1)
-		go func(sid int, k []string) {
+		go func(shardID int) {
 			defer wg.Done()
 
-			// Convert hashed keys to row value constructor format
-			var pkValues []string
-			for _, key := range k {
-				pkValues = append(pkValues, utils.UnhashKeyToString(key))
-			}
-
-			// Build DELETE statement
-			deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-				targetTable.QuotedName,
-				table.QuoteColumns(sourceTable.KeyColumns),
-				strings.Join(pkValues, ","),
-			)
-
-			a.logger.Debug("executing delete on shard", "shardID", sid, "keyCount", len(k), "table", targetTable.QuotedName)
+			a.logger.Debug("broadcasting delete to shard", "shardID", shardID, "keyCount", len(keys), "table", targetTable.QuotedName)
 
 			var affected int64
 			var err error
@@ -616,15 +555,16 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 			// Execute under lock if provided
 			if lock != nil {
 				if err = lock.ExecUnderLock(ctx, deleteStmt); err != nil {
-					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", sid, err)
+					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", shardID, err)
 				} else {
-					affected = int64(len(k))
+					// We can't know the actual affected rows when using lock, so estimate
+					affected = 0
 				}
 			} else {
 				// Execute as a retryable transaction
-				affected, err = dbconn.RetryableTransaction(ctx, a.shards[sid].writeDB, false, a.shards[sid].dbConfig, deleteStmt)
+				affected, err = dbconn.RetryableTransaction(ctx, a.shards[shardID].writeDB, false, a.shards[shardID].dbConfig, deleteStmt)
 				if err != nil {
-					err = fmt.Errorf("failed to execute delete on shard %d: %w", sid, err)
+					err = fmt.Errorf("failed to execute delete on shard %d: %w", shardID, err)
 				}
 			}
 
@@ -634,36 +574,45 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 			}
 			totalAffected += affected
 			mu.Unlock()
-		}(shardID, keys)
+		}(i)
 	}
-
 	wg.Wait()
-
 	if errGroup != nil {
 		return 0, errGroup
 	}
-
 	return totalAffected, nil
 }
 
 // UpsertRows performs upserts synchronously, distributing across shards.
 // The rows are LogicalRow structs containing the row images.
 // If lock is non-nil, operations are executed under table locks (one per shard).
+//
+// Note: we only track modifications by PRIMARY KEY, not be shard key (aka primary vindex).
+// For this reason we could get in trouble if there was a PK update that mutated the vindex column.
+// This is because we would only see the last operation (modification) and not know to DELETE
+// from one of the shards.
+//
+// The way we address this, is we consider the vindex column immutable. The replication client is told
+// that it should error if there are any updates to it, and the entire operation is canceled.
+//
+// This is likely not too big of a limitation, as Vitess itself recommends that vindex columns be immutable.
+// If it turns out to be a problem, we can revisit tracking by other columns later.
 func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
 
-	// Find the ordinal position of the vindex column
+	// Find the ordinal position of the vindex column within NonGeneratedColumns
+	// (since RowImage is structured according to NonGeneratedColumns)
 	vindexOrdinal := -1
-	for i, col := range sourceTable.Columns {
+	for i, col := range sourceTable.NonGeneratedColumns {
 		if col == a.vindexColumn {
 			vindexOrdinal = i
 			break
 		}
 	}
 	if vindexOrdinal == -1 {
-		return 0, fmt.Errorf("vindex column %s not found in table %s", a.vindexColumn, sourceTable.TableName)
+		return 0, fmt.Errorf("vindex column %s not found in non-generated columns", a.vindexColumn)
 	}
 
 	// Get the intersected column indices
@@ -705,7 +654,6 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 			return 0, fmt.Errorf("no shard found for hash value %x (vindex column: %s, value: %v)",
 				hashValue, a.vindexColumn, vindexValue)
 		}
-
 		shardRows[shardID] = append(shardRows[shardID], row)
 	}
 
@@ -777,8 +725,11 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 				}
 			}
 
+			// Use just the table name, not the fully qualified name, because
+			// the database connection (shard.writeDB) already determines which database to write to
+			tableName := fmt.Sprintf("`%s`", targetTable.TableName)
 			upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-				targetTable.QuotedName,
+				tableName,
 				columnList,
 				strings.Join(valuesClauses, ", "),
 				strings.Join(updateClauses, ", "),
