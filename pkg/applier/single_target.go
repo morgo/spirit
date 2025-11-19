@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -409,11 +410,8 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 	// Get the intersected column indices
 	var intersectedColumns []int
 	for i, sourceCol := range sourceTable.NonGeneratedColumns {
-		for _, destCol := range targetTable.NonGeneratedColumns {
-			if sourceCol == destCol {
-				intersectedColumns = append(intersectedColumns, i)
-				break
-			}
+		if slices.Contains(targetTable.NonGeneratedColumns, sourceCol) {
+			intersectedColumns = append(intersectedColumns, i)
 		}
 	}
 
@@ -456,23 +454,9 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 	var updateClauses []string
 	for _, col := range targetTable.NonGeneratedColumns {
 		// Skip primary key columns in the UPDATE clause
-		isPrimaryKey := false
-		for _, pkCol := range targetTable.KeyColumns {
-			if col == pkCol {
-				isPrimaryKey = true
-				break
-			}
-		}
-		if !isPrimaryKey {
+		if !slices.Contains(targetTable.KeyColumns, col) {
 			// Check if this column exists in both tables
-			columnExistsInBoth := false
-			for _, sourceCol := range sourceTable.NonGeneratedColumns {
-				if col == sourceCol {
-					columnExistsInBoth = true
-					break
-				}
-			}
-			if columnExistsInBoth {
+			if slices.Contains(sourceTable.NonGeneratedColumns, col) {
 				updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
 			}
 		}

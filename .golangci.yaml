@@ -4,6 +4,8 @@ run:
 linters:
   default: all
   disable:
+    - noinlineerr
+    - funcorder
     - wsl_v5
     - cyclop
     - depguard
