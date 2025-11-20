@@ -450,12 +450,11 @@ func (r *Runner) Run(ctx context.Context) error {
 				KeyRange: "0",
 			},
 		}
-	} else if len(r.move.Targets) > 0 {
-		// Copy targets from move config
+	} else {
+		if len(r.move.Targets) == 0 {
+			return errors.New("no target databases specified")
+		}
 		r.targets = r.move.Targets
-	}
-	if len(r.targets) == 0 {
-		return errors.New("no target databases specified")
 	}
 	if err := r.setup(ctx); err != nil {
 		return err

@@ -134,7 +134,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 		{
 			DB:       targetDB,
 			Config:   targetConfig,
-			KeyRange: "", // Empty for single target
+			KeyRange: "0", // Empty for single target
 		},
 	}
 
