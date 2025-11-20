@@ -15,14 +15,13 @@ type Move struct {
 	Threads         int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
 	CreateSentinel  bool          `name:"create-sentinel" help:"Create a sentinel table in the target database to block after table copy" default:"false"`
 
-	Targets []applier.Target
-
 	// VindexProvider optionally provides vindex metadata for resharding operations.
 	// If nil, tables will not have vindex configuration (suitable for simple MoveTables 1:1 operations).
 	// For resharding operations (1:many), this should be set to provide sharding key information.
 	// The provider is called during table discovery to configure VindexColumn and VindexFunc
 	// on each TableInfo.
 	VindexProvider table.VindexMetadataProvider
+	Targets        []applier.Target
 }
 
 func (m *Move) Run() error {

@@ -347,7 +347,6 @@ func (r *Runner) newCopy(ctx context.Context) error {
 
 		copyChunkers = append(copyChunkers, copyChunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
-
 	}
 
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
@@ -432,7 +431,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return errors.New("cannot use both TargetDSN and TargetDSNs; please use only TargetDSNs for multiple targets")
 	}
 
-	// The authorative config for target is the r.targets field.
+	// The authoritative config for target is the r.targets field.
 	// If we are coming in via CLI we will specify TargetDSN, which means
 	// r.targets is empty and we need to populate it.
 	if r.move.TargetDSN != "" {
@@ -451,6 +450,9 @@ func (r *Runner) Run(ctx context.Context) error {
 				KeyRange: "0",
 			},
 		}
+	} else if len(r.move.Targets) > 0 {
+		// Copy targets from move config
+		r.targets = r.move.Targets
 	}
 	if len(r.targets) == 0 {
 		return errors.New("no target databases specified")
