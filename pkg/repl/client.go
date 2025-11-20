@@ -502,7 +502,7 @@ func (c *Client) readStream(ctx context.Context) {
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, ev.Event.(*replication.RowsEvent)); err != nil {
-				panic("could not process events")
+				panic(fmt.Sprintf("could not process events: %v", err))
 			}
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
@@ -605,6 +605,23 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 			}
 			if len(beforeKey) == 0 {
 				return fmt.Errorf("no primary key found for before row: %#v", beforeRow)
+			}
+
+			// If there is a VindexColumn set, we need to check that it has not been mutated.
+			// This is because reshards require vindex columns to be immutable (unless we start tracking
+			// changes by the vindex column instead of the PK). We do not handle the case that
+			// this could be a MINIMAL RBR event, because MINIMAL is not supported with buffered
+			// changes.
+			if sub.Tables()[0].VindexColumn != "" {
+				vindexColIdx, err := sub.Tables()[0].GetColumnOrdinal(sub.Tables()[0].VindexColumn)
+				if err != nil {
+					return err
+				}
+				// Check if the vindex column value has changed
+				if fmt.Sprintf("%v", beforeRow[vindexColIdx]) != fmt.Sprintf("%v", afterRow[vindexColIdx]) {
+					return fmt.Errorf("vindex column %s cannot be modified (before: %v, after: %v). MoveTables resharding requires vindex columns to be immutable",
+						sub.Tables()[0].VindexColumn, beforeRow[vindexColIdx], afterRow[vindexColIdx])
+				}
 			}
 
 			// With MINIMAL row image, we need to reconstruct the after key
