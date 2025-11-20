@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -40,6 +41,7 @@ type Runner struct {
 
 	sourceTables []*table.TableInfo
 
+	applier           applier.Applier
 	replClient        *repl.Client
 	copyChunker       table.Chunker
 	checksumChunker   table.Chunker
@@ -105,8 +107,8 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 
 // checkTargetEmpty checks that the target database is empty.
 // If any tables exist it returns an error and the move fails.
-func (r *Runner) checkTargetEmpty() error {
-	rows, err := r.target.Query("SHOW TABLES")
+func (r *Runner) checkTargetEmpty(ctx context.Context) error {
+	rows, err := r.target.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
 		return err
 	}
@@ -124,16 +126,16 @@ func (r *Runner) checkTargetEmpty() error {
 // in r.sourceTables and runs it on r.target. For now, we require that
 // the target is identical to the source. In future, we may create
 // the target with secondary indexes disabled, and re-add them after.
-func (r *Runner) createTargetTables() error {
+func (r *Runner) createTargetTables(ctx context.Context) error {
 	for _, t := range r.sourceTables {
 		var createStmt string
-		row := r.source.QueryRow(fmt.Sprintf("SHOW CREATE TABLE `%s`", t.TableName))
+		row := r.source.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", t.TableName))
 		var tbl string
 		if err := row.Scan(&tbl, &createStmt); err != nil {
 			return err
 		}
 		// Execute the create statement on the target.
-		if _, err := r.target.Exec(createStmt); err != nil {
+		if _, err := r.target.ExecContext(ctx, createStmt); err != nil {
 			return err
 		}
 	}
@@ -178,7 +180,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create a copier that reads from the multi chunker and writes to the target.
+	// Create a copier that reads from the multi chunker and uses the shared applier.
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
@@ -187,21 +189,21 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		MetricsSink:                   &metrics.NoopSink{},
 		DBConfig:                      r.dbConfig,
 		UseExperimentalBufferedCopier: true,
-		WriteDB:                       r.target,
+		Applier:                       r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
 	}
 
-	// We intentionally SELECT * FROM the checkpoint table because if the structure
-	// changes, we want this operation to fail. This will indicate that the checkpoint
+	// We explicitly specify the columns we need from the checkpoint table.
+	// If the structure changes, this will fail and indicate that the checkpoint
 	// was created by either an earlier or later version of spirit, in which case
 	// we do not support recovery.
-	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
+	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.targetConfig.DBName, checkpointTableName)
 	var copierWatermark, binlogName, statement string
 	var id, binlogPos int
-	err = r.target.QueryRow(query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
+	err = r.target.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
 		return fmt.Errorf("could not read from table '%s', err:%v", checkpointTableName, err)
 	}
@@ -233,20 +235,29 @@ func (r *Runner) setup(ctx context.Context) error {
 	if r.sourceTables, err = r.getTables(ctx, r.source); err != nil {
 		return err
 	}
-	r.logger.Info("Setting up repl client")
 
+	// Create a single applier instance that will be shared by both
+	// the replication client and the copier
+	r.logger.Info("Creating shared applier")
+	r.applier, err = r.createApplier()
+	if err != nil {
+		return err
+	}
+
+	r.logger.Info("Setting up repl client")
 	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
 		Logger:                     r.logger,
 		Concurrency:                r.move.Threads,
 		TargetBatchTime:            r.move.TargetChunkTime,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
-		WriteDB:                    r.target,
+		Applier:                    r.applier, // Use the shared applier
+		DBConfig:                   r.dbConfig,
 	})
 
 	r.logger.Info("Checking target database state")
 
-	if err := r.checkTargetEmpty(); err != nil {
+	if err := r.checkTargetEmpty(ctx); err != nil {
 		// There are existing tables there.
 		// Optimistically try to resume from a checkpoint written
 		// to the target database. If it fails, unlike schema changes,
@@ -264,7 +275,7 @@ func (r *Runner) setup(ctx context.Context) error {
 func (r *Runner) newCopy(ctx context.Context) error {
 	// We are starting fresh:
 	// For each table, fetch the CREATE TABLE statement from the source and run it on the target.
-	if err := r.createTargetTables(); err != nil {
+	if err := r.createTargetTables(ctx); err != nil {
 		return err
 	}
 
@@ -307,7 +318,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create a copier that reads from the multi chunker and writes to the target.
+	// Create a copier that reads from the multi chunker and uses the shared applier.
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
@@ -316,7 +327,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		MetricsSink:                   &metrics.NoopSink{},
 		DBConfig:                      r.dbConfig,
 		UseExperimentalBufferedCopier: true,
-		WriteDB:                       r.target,
+		Applier:                       r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -580,7 +591,7 @@ func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
 
 func (r *Runner) Progress() status.Progress {
 	var summary string
-	switch r.status.Get() { //nolint: exhaustive
+	switch r.status.Get() {
 	case status.CopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
 			r.copier.GetProgress(),
@@ -599,6 +610,8 @@ func (r *Runner) Progress() status.Progress {
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
 	case status.Checksum:
 		summary = "Checksum Progress=" + r.checker.GetProgress()
+	default:
+		summary = ""
 	}
 	return status.Progress{
 		CurrentState: r.status.Get(),
@@ -711,4 +724,13 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 
 func (r *Runner) Cancel() {
 	r.cancelFunc()
+}
+
+// createApplier creates a SingleTargetApplier for the move operation.
+// For move operations, we always have a single target database.
+func (r *Runner) createApplier() (applier.Applier, error) {
+	// For move, we always have a single target
+	appl := applier.NewSingleTargetApplier(r.target, r.dbConfig, r.logger)
+	r.logger.Info("Created SingleTargetApplier for move operation")
+	return appl, nil
 }

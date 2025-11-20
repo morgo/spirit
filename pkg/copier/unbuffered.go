@@ -20,6 +20,7 @@ import (
 
 type Unbuffered struct {
 	sync.Mutex
+
 	db               *sql.DB
 	chunker          table.Chunker
 	concurrency      int

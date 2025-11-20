@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
@@ -44,7 +45,7 @@ type CopierConfig struct {
 	MetricsSink                   metrics.Sink
 	DBConfig                      *dbconn.DBConfig
 	UseExperimentalBufferedCopier bool
-	WriteDB                       *sql.DB // for move command
+	Applier                       applier.Applier
 }
 
 // NewCopierDefaultConfig returns a default config for the copier.
@@ -70,9 +71,6 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 	if config.DBConfig == nil {
 		return nil, errors.New("dbConfig must be non-nil")
 	}
-	if config.WriteDB == nil {
-		config.WriteDB = db
-	}
 	if config.UseExperimentalBufferedCopier {
 		return &buffered{
 			db:               db,
@@ -83,7 +81,7 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 			metricsSink:      config.MetricsSink,
 			dbConfig:         config.DBConfig,
 			copierEtaHistory: newcopierEtaHistory(),
-			writeDB:          config.WriteDB,
+			applier:          config.Applier,
 		}, nil
 	}
 	return &Unbuffered{
