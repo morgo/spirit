@@ -63,9 +63,9 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	assert.NoError(t, err)
 	defer db.Close()
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest_concurrent")
+	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_concurrent")
 	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest_concurrent")
+	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_concurrent")
 	assert.NoError(t, err)
 
 	// Open connection to source for concurrent writes
@@ -121,13 +121,13 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 
 	// Verify data was moved correctly
 	var sourceCount, targetCount int
-	err = sourceDB.QueryRow("SELECT COUNT(*) FROM source_concurrent.xfers_old").Scan(&sourceCount)
+	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM source_concurrent.xfers_old").Scan(&sourceCount)
 	assert.NoError(t, err)
 
 	targetDB, err := sql.Open("mysql", targetDSN)
 	assert.NoError(t, err)
 	defer targetDB.Close()
-	err = targetDB.QueryRow("SELECT COUNT(*) FROM dest_concurrent.xfers").Scan(&targetCount)
+	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_concurrent.xfers").Scan(&targetCount)
 	assert.NoError(t, err)
 
 	t.Logf("Source count: %d, Target count: %d", sourceCount, targetCount)
@@ -141,7 +141,7 @@ func concurrentWriteThread(ctx context.Context, db *sql.DB, writeCount, errorCou
 		case <-ctx.Done():
 			return
 		default:
-			if err := doOneWriteLoop(db); err != nil {
+			if err := doOneWriteLoop(ctx, db); err != nil {
 				errorCount.Add(1)
 				// Continue on error - some errors are expected during cutover
 			} else {
@@ -152,8 +152,8 @@ func concurrentWriteThread(ctx context.Context, db *sql.DB, writeCount, errorCou
 }
 
 // doOneWriteLoop performs one iteration of insert + update + reads
-func doOneWriteLoop(db *sql.DB) error {
-	trx, err := db.Begin()
+func doOneWriteLoop(ctx context.Context, db *sql.DB) error {
+	trx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func doOneWriteLoop(db *sql.DB) error {
 	rtoken := uuid.New().String()
 
 	//nolint: dupword
-	_, err = trx.Exec(`INSERT INTO xfers (x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at)
+	_, err = trx.ExecContext(ctx, `INSERT INTO xfers (x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at)
 		VALUES (?, 100, 'USD', ?, ?, 1, HEX(RANDOM_BYTES(10)), HEX(RANDOM_BYTES(100)), HEX(RANDOM_BYTES(5)), NOW(), NOW(), NOW(), 1, 2, NOW(), NOW())`,
 		xtoken, stoken, rtoken)
 	if err != nil {
@@ -176,14 +176,15 @@ func doOneWriteLoop(db *sql.DB) error {
 	}
 
 	// Update
-	_, err = trx.Exec(`UPDATE xfers SET version = 2, updated_at = NOW() WHERE x_token = ?`, xtoken)
+	_, err = trx.ExecContext(ctx, `UPDATE xfers SET version = 2, updated_at = NOW() WHERE x_token = ?`, xtoken)
 	if err != nil {
 		return err
 	}
 
 	// Do some cached reads
 	for range 10 {
-		rows, err := trx.Query(`SELECT * FROM xfers WHERE x_token = ?`, xtoken)
+		// Explicitly specify columns instead of SELECT *
+		rows, err := trx.QueryContext(ctx, `SELECT id, x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at FROM xfers WHERE x_token = ?`, xtoken)
 		if err != nil {
 			return err
 		}

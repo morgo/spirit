@@ -51,9 +51,9 @@ func TestBasicMove(t *testing.T) {
 	// reset the target database.
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	assert.NoError(t, err)
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest")
+	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest")
 	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest")
+	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest")
 	assert.NoError(t, err)
 	defer db.Close()
 	// test
@@ -102,9 +102,9 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// reset the target database.
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	assert.NoError(t, err)
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest_resume")
+	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_resume")
 	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest_resume")
+	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_resume")
 	assert.NoError(t, err)
 	defer db.Close()
 	// test
@@ -243,14 +243,14 @@ func TestBasicReshard(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest_shard1")
+	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_shard1")
 	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest_shard1")
+	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_shard1")
 	assert.NoError(t, err)
 
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest_shard2")
+	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_shard2")
 	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest_shard2")
+	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_shard2")
 	assert.NoError(t, err)
 
 	// Set up target connections
@@ -297,40 +297,40 @@ func TestBasicReshard(t *testing.T) {
 	// Verify data distribution
 	// Shard 1 (-80) should have even user_ids: 2, 4, 6
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM dest_shard1.t1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_shard1.t1").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 3, count, "Shard 1 should have 3 rows in t1 (even user_ids)")
 
-	err = db.QueryRow("SELECT COUNT(*) FROM dest_shard1.t2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_shard1.t2").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 3, count, "Shard 1 should have 3 rows in t2 (even user_ids)")
 
 	// Shard 2 (80-) should have odd user_ids: 1, 3, 5
-	err = db.QueryRow("SELECT COUNT(*) FROM dest_shard2.t1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_shard2.t1").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 3, count, "Shard 2 should have 3 rows in t1 (odd user_ids)")
 
-	err = db.QueryRow("SELECT COUNT(*) FROM dest_shard2.t2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_shard2.t2").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 3, count, "Shard 2 should have 3 rows in t2 (odd user_ids)")
 
 	// Verify specific rows went to correct shards
 	// Check shard 1 has even user_ids
 	var userID int64
-	err = db.QueryRow("SELECT user_id FROM dest_shard1.t1 WHERE id = 2").Scan(&userID)
+	err = db.QueryRowContext(t.Context(), "SELECT user_id FROM dest_shard1.t1 WHERE id = 2").Scan(&userID)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(2), userID, "Shard 1 should have user_id 2")
 
-	err = db.QueryRow("SELECT user_id FROM dest_shard1.t1 WHERE id = 4").Scan(&userID)
+	err = db.QueryRowContext(t.Context(), "SELECT user_id FROM dest_shard1.t1 WHERE id = 4").Scan(&userID)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(4), userID, "Shard 1 should have user_id 4")
 
 	// Check shard 2 has odd user_ids
-	err = db.QueryRow("SELECT user_id FROM dest_shard2.t1 WHERE id = 1").Scan(&userID)
+	err = db.QueryRowContext(t.Context(), "SELECT user_id FROM dest_shard2.t1 WHERE id = 1").Scan(&userID)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(1), userID, "Shard 2 should have user_id 1")
 
-	err = db.QueryRow("SELECT user_id FROM dest_shard2.t1 WHERE id = 3").Scan(&userID)
+	err = db.QueryRowContext(t.Context(), "SELECT user_id FROM dest_shard2.t1 WHERE id = 3").Scan(&userID)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(3), userID, "Shard 2 should have user_id 3")
 }

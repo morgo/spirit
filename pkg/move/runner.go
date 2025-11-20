@@ -245,11 +245,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	// Read checkpoint from SOURCE (not target)
-	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
+	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.sourceConfig.DBName, checkpointTableName)
 	var copierWatermark, binlogName, statement string
 	var id, binlogPos int
-	err = r.source.QueryRow(query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
+	err = r.source.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
 		return fmt.Errorf("could not read from checkpoint table '%s' on source: %v", checkpointTableName, err)
 	}
@@ -665,6 +665,8 @@ func (r *Runner) Progress() status.Progress {
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.replClient.GetDeltaLen())
 	case status.Checksum:
 		summary = "Checksum Progress=" + r.checker.GetProgress()
+	default:
+		summary = ""
 	}
 	return status.Progress{
 		CurrentState: r.status.Get(),
