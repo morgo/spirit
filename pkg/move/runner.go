@@ -89,8 +89,6 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 
 	var tableName string
 	tables := make([]*table.TableInfo, 0)
-	// TODO: how do these tables set their vindex info?
-	// They need it for the reshard to work.
 	for rows.Next() {
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, err
@@ -101,6 +99,24 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
 		if err := tableInfo.SetInfo(ctx); err != nil {
 			return nil, err
+		}
+
+		// If a VindexProvider is configured, get vindex metadata for this table.
+		// This is used for resharding operations where rows need to be distributed
+		// across multiple target shards based on a sharding key.
+		if r.move.VindexProvider != nil {
+			vindexColumn, vindexFunc, err := r.move.VindexProvider.GetVindexMetadata(r.sourceConfig.DBName, tableName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get vindex metadata for table %s: %w", tableName, err)
+			}
+			// Only set if vindex metadata is available (could be empty for some tables)
+			if vindexColumn != "" && vindexFunc != nil {
+				tableInfo.VindexColumn = vindexColumn
+				tableInfo.VindexFunc = vindexFunc
+				r.logger.Info("configured vindex for table",
+					"table", tableName,
+					"vindexColumn", vindexColumn)
+			}
 		}
 		tables = append(tables, tableInfo)
 	}
@@ -146,7 +162,7 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 
 // createApplier creates the appropriate applier based on the number of targets.
 func (r *Runner) createApplier(ctx context.Context) (applier.Applier, error) {
-	if len(r.targets) == 1 {
+	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
 		// Single target - use SingleTargetApplier
 		appl := applier.NewSingleTargetApplier(r.targets[0].DB, r.dbConfig, r.logger)
 		if err := appl.Start(ctx); err != nil {
@@ -207,7 +223,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create applier
+	// Create appl
 	appl, err := r.createApplier(ctx)
 	if err != nil {
 		return err
@@ -263,8 +279,8 @@ func (r *Runner) setup(ctx context.Context) error {
 		return err
 	}
 	r.logger.Info("Setting up repl client")
-	// Create applier for repl client
-	applier, err := r.createApplier(ctx)
+	// Create appl for repl client
+	appl, err := r.createApplier(ctx)
 	if err != nil {
 		return err
 	}
@@ -274,7 +290,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		TargetBatchTime:            r.move.TargetChunkTime,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier,
+		Applier:                    appl,
 		DBConfig:                   r.dbConfig,
 	})
 
@@ -337,7 +353,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create applier
+	// Create appl
 	appl, err := r.createApplier(ctx)
 	if err != nil {
 		return err
@@ -416,8 +432,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		return errors.New("cannot use both TargetDSN and TargetDSNs; please use only TargetDSNs for multiple targets")
 	}
 
+	// The authorative config for target is the r.targets field.
+	// If we are coming in via CLI we will specify TargetDSN, which means
+	// r.targets is empty and we need to populate it.
 	if r.move.TargetDSN != "" {
-		// Convert the target DSN to a target.
 		targetCfg, err := mysql.ParseDSN(r.move.TargetDSN)
 		if err != nil {
 			return fmt.Errorf("failed to parse target DSN: %w", err)
@@ -434,7 +452,9 @@ func (r *Runner) Run(ctx context.Context) error {
 			},
 		}
 	}
-
+	if len(r.targets) == 0 {
+		return errors.New("no target databases specified")
+	}
 	if err := r.setup(ctx); err != nil {
 		return err
 	}
