@@ -50,19 +50,18 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 		)
 	`
 
-	ctx := context.Background()
-	_, err = sourceDB.ExecContext(ctx, createTableSQL)
+	_, err = sourceDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	// Create table info objects
 	sourceTable := table.NewTableInfo(sourceDB, source.DBName, "test_table")
-	err = sourceTable.SetInfo(ctx)
+	err = sourceTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -167,12 +166,11 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -219,12 +217,11 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -288,12 +285,11 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, batch INT, value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -370,16 +366,15 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	// Insert test data
-	_, err = targetDB.ExecContext(ctx, "INSERT INTO test_table VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie'), (4, 'Diana'), (5, 'Eve')")
+	_, err = targetDB.ExecContext(t.Context(), "INSERT INTO test_table VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie'), (4, 'Diana'), (5, 'Eve')")
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -444,12 +439,11 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -477,16 +471,15 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100), value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	// Insert initial data
-	_, err = targetDB.ExecContext(ctx, "INSERT INTO test_table VALUES (1, 'Alice', 100), (2, 'Bob', 200)")
+	_, err = targetDB.ExecContext(t.Context(), "INSERT INTO test_table VALUES (1, 'Alice', 100), (2, 'Bob', 200)")
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -556,12 +549,11 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -609,12 +601,11 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -641,19 +632,18 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
 	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
 
 	// Create a cancellable context
-	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancelCtx, cancel := context.WithCancel(t.Context())
 
 	err = applier.Start(cancelCtx)
 	require.NoError(t, err)
@@ -701,12 +691,11 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -728,7 +717,7 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a context with very short timeout
-	timeoutCtx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	timeoutCtx, cancel := context.WithTimeout(t.Context(), 1*time.Nanosecond)
 	defer cancel()
 
 	// Wait should timeout (or succeed if fast enough)
@@ -754,12 +743,11 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
