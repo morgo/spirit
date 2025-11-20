@@ -274,13 +274,13 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	}
 
 	// Build the INSERT statement
-	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.QuotedName,
+	query := fmt.Sprintf("INSERT IGNORE INTO `%s` (%s) VALUES %s",
+		chunkletData.chunk.NewTable.TableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
-	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.QuotedName)
+	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
 
 	// Execute the batch insert
 	result, err := dbconn.RetryableTransaction(ctx, a.writeDB, true, a.dbConfig, query)
@@ -362,6 +362,13 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 		return 0, nil
 	}
 
+	if targetTable == nil {
+		// Support the movetables case where there might not be a target per-se
+		targetTable = sourceTable
+	}
+
+	a.logger.Info("DeleteKeys: starting", "keyCount", len(keys), "table", targetTable.TableName, "underLock", lock != nil)
+
 	// Convert hashed keys to row value constructor format
 	var pkValues []string
 	for _, key := range keys {
@@ -369,29 +376,35 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	}
 
 	// Build DELETE statement
-	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-		targetTable.QuotedName,
+	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE (%s) IN (%s)",
+		targetTable.TableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		strings.Join(pkValues, ","),
 	)
 
-	a.logger.Debug("executing delete", "keyCount", len(keys), "table", targetTable.QuotedName)
+	a.logger.Debug("DeleteKeys: executing statement", "statement", deleteStmt)
 
 	// Execute under lock if provided
 	if lock != nil {
+		a.logger.Info("DeleteKeys: executing under lock")
 		if err := lock.ExecUnderLock(ctx, deleteStmt); err != nil {
+			a.logger.Error("DeleteKeys: failed under lock", "error", err)
 			return 0, fmt.Errorf("failed to execute delete under lock: %w", err)
 		}
+		a.logger.Info("DeleteKeys: complete under lock", "keyCount", len(keys))
 		// We don't get affected rows from ExecUnderLock, so return the key count
 		return int64(len(keys)), nil
 	}
 
 	// Execute as a retryable transaction
+	a.logger.Info("DeleteKeys: executing as retryable transaction")
 	affectedRows, err := dbconn.RetryableTransaction(ctx, a.writeDB, false, a.dbConfig, deleteStmt)
 	if err != nil {
+		a.logger.Error("DeleteKeys: failed", "error", err)
 		return 0, fmt.Errorf("failed to execute delete: %w", err)
 	}
 
+	a.logger.Info("DeleteKeys: complete", "affectedRows", affectedRows)
 	return affectedRows, nil
 }
 
@@ -401,6 +414,11 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
+	}
+
+	if targetTable == nil {
+		// Support the movetables case where there might not be a target per-se
+		targetTable = sourceTable
 	}
 
 	// Get the columns that exist in both source and destination tables
@@ -462,29 +480,35 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 		}
 	}
 
-	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		targetTable.QuotedName,
+	upsertStmt := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+		targetTable.TableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 		strings.Join(updateClauses, ", "),
 	)
 
-	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", targetTable.QuotedName)
+	a.logger.Info("UpsertRows: starting", "rowCount", len(valuesClauses), "table", targetTable.TableName, "underLock", lock != nil)
 
 	// Execute under lock if provided
 	if lock != nil {
+		a.logger.Info("UpsertRows: executing under lock")
 		if err := lock.ExecUnderLock(ctx, upsertStmt); err != nil {
+			a.logger.Error("UpsertRows: failed under lock", "error", err)
 			return 0, fmt.Errorf("failed to execute upsert under lock: %w", err)
 		}
+		a.logger.Info("UpsertRows: complete under lock", "rowCount", len(valuesClauses))
 		// We don't get affected rows from ExecUnderLock, so return the row count
 		return int64(len(valuesClauses)), nil
 	}
 
 	// Execute as a retryable transaction
+	a.logger.Info("UpsertRows: executing as retryable transaction")
 	affectedRows, err := dbconn.RetryableTransaction(ctx, a.writeDB, false, a.dbConfig, upsertStmt)
 	if err != nil {
+		a.logger.Error("UpsertRows: failed", "error", err)
 		return 0, fmt.Errorf("failed to execute upsert: %w", err)
 	}
 
+	a.logger.Info("UpsertRows: complete", "affectedRows", affectedRows)
 	return affectedRows, nil
 }

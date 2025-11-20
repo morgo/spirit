@@ -137,10 +137,9 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = waitErr
 	}
 
-	// Close the applier
-	if closeErr := c.applier.Close(); closeErr != nil && err == nil {
-		err = closeErr
-	}
+	// NOTE: We do NOT close the applier here because it may be shared
+	// with the replication client. The owner (e.g., Runner) is responsible
+	// for closing the applier when the entire migration is complete.
 
 	return err
 }

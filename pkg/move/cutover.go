@@ -74,34 +74,43 @@ func (c *CutOver) Run(ctx context.Context) error {
 }
 
 func (c *CutOver) algorithmCutover(ctx context.Context) error {
+	c.logger.Info("algorithmCutover: acquiring table lock")
 	tableLock, err := dbconn.NewTableLock(ctx, c.db, c.tables, c.dbConfig, c.logger)
 	if err != nil {
+		c.logger.Error("algorithmCutover: failed to acquire table lock", "error", err)
 		return err
 	}
 	defer tableLock.Close()
+	c.logger.Info("algorithmCutover: table lock acquired, flushing feed")
 
 	// We don't use FlushUnderLock: that's for within the same server.
 	// We use a regular flush. No new changes will arrive because of the table lock.
 	if err := c.feed.Flush(ctx); err != nil {
+		c.logger.Error("algorithmCutover: feed flush failed", "error", err)
 		return err
 	}
+	c.logger.Info("algorithmCutover: feed flushed, checking if all changes flushed")
 
 	if !c.feed.AllChangesFlushed() {
+		c.logger.Error("algorithmCutover: not all changes flushed")
 		return errors.New("not all changes flushed, final flush might be broken")
 	}
+	c.logger.Info("algorithmCutover: all changes flushed")
 
 	// If we have all changes flushed under a lock, we can now run the cutover func.
 	if c.cutoverFunc != nil {
-		c.logger.Info("Running cutover function")
+		c.logger.Info("algorithmCutover: running cutover function")
 		if err := c.cutoverFunc(ctx); err != nil {
+			c.logger.Error("algorithmCutover: cutover function failed", "error", err)
 			return err
 		}
-		c.logger.Info("Cutover function complete")
+		c.logger.Info("algorithmCutover: cutover function complete")
 	}
 
 	// If the cutover func succeeded, we can do a rename to prevent
 	// the original tables from being used. We are now effectively serving
 	// from the new location.
+	c.logger.Info("algorithmCutover: preparing rename statement")
 	renameFragments := []string{}
 	for _, tbl := range c.tables {
 		oldQuotedName := fmt.Sprintf("`%s`.`%s_old`", tbl.SchemaName, tbl.TableName)
@@ -110,5 +119,12 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		)
 	}
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
-	return tableLock.ExecUnderLock(ctx, renameStatement)
+	c.logger.Info("algorithmCutover: executing rename under lock", "statement", renameStatement)
+	err = tableLock.ExecUnderLock(ctx, renameStatement)
+	if err != nil {
+		c.logger.Error("algorithmCutover: rename failed", "error", err)
+		return err
+	}
+	c.logger.Info("algorithmCutover: rename complete")
+	return nil
 }

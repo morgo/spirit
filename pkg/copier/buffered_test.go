@@ -3,6 +3,7 @@ package copier
 import (
 	"testing"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -31,6 +32,7 @@ func TestBufferedCopier(t *testing.T) {
 
 	cfg := NewCopierDefaultConfig()
 	cfg.UseExperimentalBufferedCopier = true
+	cfg.Applier = applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), cfg.Logger)
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
 

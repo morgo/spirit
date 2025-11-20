@@ -139,29 +139,38 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 // If lock is non-nil, the operations are executed under the table lock.
 func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upsertRows []applier.LogicalRow, lock *dbconn.TableLock) error {
 	if len(deleteKeys) == 0 && len(upsertRows) == 0 {
+		s.c.logger.Debug("flushBatch: no changes to flush")
 		return nil
 	}
 
+	s.c.logger.Info("flushBatch: starting", "deleteKeys", len(deleteKeys), "upsertRows", len(upsertRows), "underLock", lock != nil)
 	startTime := time.Now()
 
 	// Execute deletes
 	if len(deleteKeys) > 0 {
+		s.c.logger.Info("flushBatch: executing deletes", "count", len(deleteKeys))
 		affectedRows, err := s.applier.DeleteKeys(ctx, s.table, s.newTable, deleteKeys, lock)
 		if err != nil {
+			s.c.logger.Error("flushBatch: delete failed", "error", err)
 			return fmt.Errorf("failed to delete keys: %w", err)
 		}
+		s.c.logger.Info("flushBatch: deletes complete", "affectedRows", affectedRows)
 		s.c.feedback(int(affectedRows), time.Since(startTime))
 	}
 
 	// Execute upserts
 	if len(upsertRows) > 0 {
+		s.c.logger.Info("flushBatch: executing upserts", "count", len(upsertRows))
 		affectedRows, err := s.applier.UpsertRows(ctx, s.table, s.newTable, upsertRows, lock)
 		if err != nil {
+			s.c.logger.Error("flushBatch: upsert failed", "error", err)
 			return fmt.Errorf("failed to upsert rows: %w", err)
 		}
+		s.c.logger.Info("flushBatch: upserts complete", "affectedRows", affectedRows)
 		s.c.feedback(int(affectedRows), time.Since(startTime))
 	}
 
+	s.c.logger.Info("flushBatch: complete", "duration", time.Since(startTime))
 	return nil
 }
 

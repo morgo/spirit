@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/testutils"
 	mysql2 "github.com/go-sql-driver/mysql"
@@ -90,6 +91,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
+		Applier:                    applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), logger),
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -138,6 +140,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
+		Applier:                    applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), logger),
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))

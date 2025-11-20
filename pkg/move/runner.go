@@ -39,6 +39,7 @@ type Runner struct {
 
 	sourceTables []*table.TableInfo
 
+	applier           applier.Applier // Shared applier for both copier and replication
 	replClient        *repl.Client
 	copyChunker       table.Chunker
 	checksumChunker   table.Chunker
@@ -74,6 +75,9 @@ func (r *Runner) Close() error {
 	}
 	if r.replClient != nil {
 		r.replClient.Close()
+	}
+	for _, target := range r.targets {
+		target.DB.Close()
 	}
 	return nil
 }
@@ -161,13 +165,11 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 }
 
 // createApplier creates the appropriate applier based on the number of targets.
-func (r *Runner) createApplier(ctx context.Context) (applier.Applier, error) {
+// Note: The applier is NOT started here. The copier will start it when it begins copying.
+func (r *Runner) createApplier() (applier.Applier, error) {
 	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
 		// Single target - use SingleTargetApplier
 		appl := applier.NewSingleTargetApplier(r.targets[0].DB, r.dbConfig, r.logger)
-		if err := appl.Start(ctx); err != nil {
-			return nil, err
-		}
 		r.logger.Info("Created SingleTargetApplier")
 		return appl, nil
 	}
@@ -185,12 +187,7 @@ func (r *Runner) createApplier(ctx context.Context) (applier.Applier, error) {
 		return nil, fmt.Errorf("failed to create ShardedApplier: %w", err)
 	}
 
-	// Start the applier
-	if err := appl.Start(ctx); err != nil {
-		return nil, fmt.Errorf("failed to start ShardedApplier: %w", err)
-	}
-
-	r.logger.Info("ShardedApplier created and started successfully")
+	r.logger.Info("ShardedApplier created successfully")
 	return appl, nil
 }
 
@@ -200,18 +197,19 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var err error
 
 	// For each table and each target, create a chunker and add a subscription
-	// The src and dest are the same because this refers to the table structure
-	// which is unchanged in move operations.
+	// The destination is nil because this is used for table structure checking, which is unused in move
+	// We also have the problem that the dest could be multiple destinations (sharded) which makes it
+	// ambiguous.
 	for _, src := range r.sourceTables {
-		copyChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		copyChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(src, src, copyChunker); err != nil {
+		if err := r.replClient.AddSubscription(src, nil, copyChunker); err != nil {
 			return err
 		}
 
-		checksumChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		checksumChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
@@ -223,13 +221,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create appl
-	appl, err := r.createApplier(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Create copier with applier
+	// Create copier with the shared applier
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
@@ -238,7 +230,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		MetricsSink:                   &metrics.NoopSink{},
 		DBConfig:                      r.dbConfig,
 		UseExperimentalBufferedCopier: true,
-		Applier:                       appl, // Pass applier instead of WriteDB
+		Applier:                       r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -278,19 +270,23 @@ func (r *Runner) setup(ctx context.Context) error {
 	if r.sourceTables, err = r.getTables(ctx, r.source); err != nil {
 		return err
 	}
-	r.logger.Info("Setting up repl client")
-	// Create appl for repl client
-	appl, err := r.createApplier(ctx)
+
+	// Create a single applier instance that will be shared by both
+	// the replication client and the copier
+	r.logger.Info("Creating shared applier")
+	r.applier, err = r.createApplier()
 	if err != nil {
 		return err
 	}
+
+	r.logger.Info("Setting up repl client")
 	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
 		Logger:                     r.logger,
 		Concurrency:                r.move.Threads,
 		TargetBatchTime:            r.move.TargetChunkTime,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    appl,
+		Applier:                    r.applier, // Use the shared applier
 		DBConfig:                   r.dbConfig,
 	})
 
@@ -329,18 +325,19 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
 
 	// For each table and each target, create a chunker and add a subscription
-	// The src and dest are the same because this refers to the table structure
-	// which is unchanged in move operations.
+	// The destination is nil because this is used for table structure checking, which is unused in move
+	// We also have the problem that the dest could be multiple destinations (sharded) which makes it
+	// ambiguous.
 	for _, src := range r.sourceTables {
-		copyChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		copyChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(src, src, copyChunker); err != nil {
+		if err := r.replClient.AddSubscription(src, nil, copyChunker); err != nil {
 			return err
 		}
 
-		checksumChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		checksumChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
@@ -352,13 +349,8 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create appl
-	appl, err := r.createApplier(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Create copier with applier
+	// Create copier with the shared applier
+	var err error
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
@@ -367,7 +359,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		MetricsSink:                   &metrics.NoopSink{},
 		DBConfig:                      r.dbConfig,
 		UseExperimentalBufferedCopier: true,
-		Applier:                       appl, // Pass applier instead of WriteDB
+		Applier:                       r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -527,6 +519,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
 	}
+
+	// Close the applier now that the move is complete
+	if r.applier != nil {
+		r.logger.Info("Closing applier")
+		if err := r.applier.Close(); err != nil {
+			r.logger.Error("failed to close applier", "error", err)
+			// Don't return the error, just log it
+		}
+	}
+
 	r.logger.Info("Move operation complete.")
 	return nil
 }

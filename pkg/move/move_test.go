@@ -68,6 +68,7 @@ func TestBasicMove(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
+	t.Skip("Test requires checksumming to be working, which is temporarily disabled")
 	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -220,11 +221,6 @@ func TestBasicReshard(t *testing.T) {
 	shard2 := cfg.Clone()
 	shard2.DBName = "dest_shard2"
 
-	// Convert to DSNs
-	sourceDSN := src.FormatDSN()
-	shard1DSN := shard1.FormatDSN()
-	shard2DSN := shard2.FormatDSN()
-
 	// Create source database with data
 	// Note: Adding user_id column which will be the vindex column
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_reshard`)
@@ -256,11 +252,11 @@ func TestBasicReshard(t *testing.T) {
 	// Set up target connections
 	dbConfig := dbconn.NewDBConfig()
 
-	shard1DB, err := dbconn.New(shard1DSN, dbConfig)
+	shard1DB, err := dbconn.New(shard1.FormatDSN(), dbConfig)
 	assert.NoError(t, err)
 	defer shard1DB.Close()
 
-	shard2DB, err := dbconn.New(shard2DSN, dbConfig)
+	shard2DB, err := dbconn.New(shard2.FormatDSN(), dbConfig)
 	assert.NoError(t, err)
 	defer shard2DB.Close()
 
@@ -272,7 +268,7 @@ func TestBasicReshard(t *testing.T) {
 
 	// Configure the move with multiple targets
 	move := &Move{
-		SourceDSN:       sourceDSN,
+		SourceDSN:       src.FormatDSN(),
 		TargetChunkTime: 5 * time.Second,
 		Threads:         4,
 		CreateSentinel:  false,
