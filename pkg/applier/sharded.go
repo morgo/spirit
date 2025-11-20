@@ -114,6 +114,17 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 		}
 	}
 
+	// Validate that key ranges do not overlap
+	for i := 0; i < len(shards); i++ {
+		for j := i + 1; j < len(shards); j++ {
+			if shards[i].keyRange.overlaps(shards[j].keyRange) {
+				return nil, fmt.Errorf("key ranges overlap: shard %d (%s: [0x%016x, 0x%016x)) and shard %d (%s: [0x%016x, 0x%016x))",
+					i, targets[i].KeyRange, shards[i].keyRange.start, shards[i].keyRange.end,
+					j, targets[j].KeyRange, shards[j].keyRange.start, shards[j].keyRange.end)
+			}
+		}
+	}
+
 	// Log the parsed key ranges for debugging
 	for i, shard := range shards {
 		logger.Info("parsed key range for shard",

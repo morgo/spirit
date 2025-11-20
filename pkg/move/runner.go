@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -96,6 +95,9 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, err
 		}
+		if tableName == checkpointTableName || tableName == sentinelTableName {
+			continue // Skip if the table name is the checkpoint or sentinel table
+		}
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
 		if err := tableInfo.SetInfo(ctx); err != nil {
 			return nil, err
@@ -177,38 +179,29 @@ func (r *Runner) createApplier(ctx context.Context) (applier.Applier, error) {
 }
 
 func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
-	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
-	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
+	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	var err error
 
 	// For each table and each target, create a chunker and add a subscription
+	// The src and dest are the same because this refers to the table structure
+	// which is unchanged in move operations.
 	for _, src := range r.sourceTables {
-		for _, target := range r.targets {
-			dest := table.NewTableInfo(target.DB, target.Config.DBName, src.TableName)
-			if err := dest.SetInfo(ctx); err != nil {
-				return err
-			}
-
-			if !slices.Equal(src.Columns, dest.Columns) {
-				return fmt.Errorf("source and target table structures do not match for table '%s' on target", src.TableName)
-			}
-
-			copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
-			if err != nil {
-				return err
-			}
-			if err := r.replClient.AddSubscription(src, dest, copyChunker); err != nil {
-				return err
-			}
-
-			checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
-			if err != nil {
-				return err
-			}
-
-			copyChunkers = append(copyChunkers, copyChunker)
-			checksumChunkers = append(checksumChunkers, checksumChunker)
+		copyChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
 		}
+		if err := r.replClient.AddSubscription(src, src, copyChunker); err != nil {
+			return err
+		}
+
+		checksumChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+
+		copyChunkers = append(copyChunkers, copyChunker)
+		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
@@ -319,31 +312,26 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
 	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
 
-	// For each table and each target, create chunkers and subscriptions
+	// For each table and each target, create a chunker and add a subscription
+	// The src and dest are the same because this refers to the table structure
+	// which is unchanged in move operations.
 	for _, src := range r.sourceTables {
-		for _, target := range r.targets {
-			cfg := target.Config
-			dest := table.NewTableInfo(target.DB, cfg.DBName, src.TableName)
-			if err := dest.SetInfo(ctx); err != nil {
-				return err
-			}
-
-			copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
-			if err != nil {
-				return err
-			}
-			if err := r.replClient.AddSubscription(src, dest, copyChunker); err != nil {
-				return err
-			}
-
-			checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
-			if err != nil {
-				return err
-			}
-
-			copyChunkers = append(copyChunkers, copyChunker)
-			checksumChunkers = append(checksumChunkers, checksumChunker)
+		copyChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
 		}
+		if err := r.replClient.AddSubscription(src, src, copyChunker); err != nil {
+			return err
+		}
+
+		checksumChunker, err := table.NewChunker(src, src, r.move.TargetChunkTime, r.logger)
+		if err != nil {
+			return err
+		}
+
+		copyChunkers = append(copyChunkers, copyChunker)
+		checksumChunkers = append(checksumChunkers, checksumChunker)
+
 	}
 
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)

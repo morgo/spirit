@@ -59,3 +59,13 @@ func parseKeyRange(kr string) (keyRange, error) {
 func (kr keyRange) contains(hash uint64) bool {
 	return hash >= kr.start && hash < kr.end
 }
+
+// overlaps checks if two key ranges overlap
+func (kr keyRange) overlaps(other keyRange) bool {
+	// Two ranges [a, b) and [c, d) overlap if:
+	// - a < d AND c < b
+	// This is because:
+	// - If a >= d, then the first range starts at or after the second range ends (no overlap)
+	// - If c >= b, then the second range starts at or after the first range ends (no overlap)
+	return kr.start < other.end && other.start < kr.end
+}

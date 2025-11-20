@@ -634,6 +634,117 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	assert.Equal(t, 2, count1+count2)
 }
 
+// The sharded applier only sends a key to one shard, if the user
+// misconfigures and sends overlapping key ranges, we should validate
+// it early and error out.
+func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS overlap_test1")
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS overlap_test2")
+	testutils.RunSQL(t, "CREATE DATABASE overlap_test1")
+	testutils.RunSQL(t, "CREATE DATABASE overlap_test2")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	target1 := base.Clone()
+	target1.DBName = "overlap_test1"
+	target1DB, err := sql.Open("mysql", target1.FormatDSN())
+	require.NoError(t, err)
+	defer target1DB.Close()
+
+	target2 := base.Clone()
+	target2.DBName = "overlap_test2"
+	target2DB, err := sql.Open("mysql", target2.FormatDSN())
+	require.NoError(t, err)
+	defer target2DB.Close()
+
+	dbConfig := dbconn.NewDBConfig()
+
+	// Test case 1: Overlapping ranges "-80" and "40-c0"
+	// "-80" covers 0x0000000000000000 to 0x8000000000000000 (exclusive)
+	// "40-c0" covers 0x4000000000000000 to 0xc000000000000000 (exclusive)
+	// These overlap in the range 0x4000000000000000 to 0x8000000000000000
+	t.Run("overlapping ranges -80 and 40-c0", func(t *testing.T) {
+		targets := []Target{
+			{DB: target1DB, KeyRange: "-80"},
+			{DB: target2DB, KeyRange: "40-c0"},
+		}
+		_, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		assert.Error(t, err, "Should error on overlapping key ranges")
+		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
+	})
+
+	// Test case 2: Overlapping ranges "40-80" and "60-a0"
+	// "40-80" covers 0x4000000000000000 to 0x8000000000000000 (exclusive)
+	// "60-a0" covers 0x6000000000000000 to 0xa000000000000000 (exclusive)
+	// These overlap in the range 0x6000000000000000 to 0x8000000000000000
+	t.Run("overlapping ranges 40-80 and 60-a0", func(t *testing.T) {
+		targets := []Target{
+			{DB: target1DB, KeyRange: "40-80"},
+			{DB: target2DB, KeyRange: "60-a0"},
+		}
+		_, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		assert.Error(t, err, "Should error on overlapping key ranges")
+		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
+	})
+
+	// Test case 3: Non-overlapping ranges should succeed
+	// "-80" covers 0x0000000000000000 to 0x8000000000000000 (exclusive)
+	// "80-" covers 0x8000000000000000 to 0xffffffffffffffff (inclusive)
+	t.Run("non-overlapping ranges -80 and 80-", func(t *testing.T) {
+		targets := []Target{
+			{DB: target1DB, KeyRange: "-80"},
+			{DB: target2DB, KeyRange: "80-"},
+		}
+		applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		assert.NoError(t, err, "Should not error on non-overlapping key ranges")
+		assert.NotNil(t, applier)
+	})
+
+	// Test case 4: Three shards with one overlapping pair
+	// "-40" covers 0x0000000000000000 to 0x4000000000000000 (exclusive)
+	// "40-80" covers 0x4000000000000000 to 0x8000000000000000 (exclusive)
+	// "60-" covers 0x6000000000000000 to 0xffffffffffffffff (inclusive)
+	// "40-80" and "60-" overlap
+	t.Run("three shards with overlap", func(t *testing.T) {
+		target3 := base.Clone()
+		target3.DBName = "overlap_test1" // Reuse existing DB
+		target3DB, err := sql.Open("mysql", target3.FormatDSN())
+		require.NoError(t, err)
+		defer target3DB.Close()
+
+		targets := []Target{
+			{DB: target1DB, KeyRange: "-40"},
+			{DB: target2DB, KeyRange: "40-80"},
+			{DB: target3DB, KeyRange: "60-"},
+		}
+		_, err = NewShardedApplier(targets, dbConfig, slog.Default())
+		assert.Error(t, err, "Should error when any two shards overlap")
+		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
+	})
+
+	// Test case 5: Adjacent non-overlapping ranges should succeed
+	// "-40" covers 0x0000000000000000 to 0x4000000000000000 (exclusive)
+	// "40-80" covers 0x4000000000000000 to 0x8000000000000000 (exclusive)
+	// "80-" covers 0x8000000000000000 to 0xffffffffffffffff (inclusive)
+	t.Run("three adjacent non-overlapping ranges", func(t *testing.T) {
+		target3 := base.Clone()
+		target3.DBName = "overlap_test1" // Reuse existing DB
+		target3DB, err := sql.Open("mysql", target3.FormatDSN())
+		require.NoError(t, err)
+		defer target3DB.Close()
+
+		targets := []Target{
+			{DB: target1DB, KeyRange: "-40"},
+			{DB: target2DB, KeyRange: "40-80"},
+			{DB: target3DB, KeyRange: "80-"},
+		}
+		applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		assert.NoError(t, err, "Should not error on adjacent non-overlapping ranges")
+		assert.NotNil(t, applier)
+	})
+}
+
 // TestShardedApplierUpsertRowsEmpty tests UpsertRows with empty row list
 func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_upsert_empty_test1")
