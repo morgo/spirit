@@ -47,6 +47,7 @@ type SingleTargetApplier struct {
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
+	closeOnce  sync.Once // Ensures Close() is idempotent
 }
 
 // rowData represents a single row with all its column values
@@ -89,7 +90,8 @@ func NewSingleTargetApplier(writeDB *sql.DB, dbConfig *dbconn.DBConfig, logger *
 	}
 }
 
-// Start initializes the applier's write workers and begins processing
+// Start initializes the applier's async write workers and begins processing
+// This does not control the synchronous methods like UpsertRows/DeleteKeys
 func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	workerCtx, cancelFunc := context.WithCancel(ctx)
 	a.cancelFunc = cancelFunc
@@ -188,12 +190,17 @@ func (a *SingleTargetApplier) Wait(ctx context.Context) error {
 }
 
 // Close signals the applier to shut down gracefully
+// This does not control the synchronous methods like UpsertRows/DeleteKeys,
+// which can continue after Close() is called.
+// This method is idempotent and can be called multiple times safely.
 func (a *SingleTargetApplier) Close() error {
-	if a.cancelFunc != nil {
-		a.cancelFunc()
-	}
-	close(a.chunkletBuffer)
-	a.wg.Wait()
+	a.closeOnce.Do(func() {
+		if a.cancelFunc != nil {
+			a.cancelFunc()
+		}
+		close(a.chunkletBuffer)
+		a.wg.Wait()
+	})
 	return nil
 }
 
@@ -274,13 +281,13 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	}
 
 	// Build the INSERT statement
-	query := fmt.Sprintf("INSERT IGNORE INTO `%s` (%s) VALUES %s",
-		chunkletData.chunk.NewTable.TableName,
+	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
+		chunkletData.chunk.NewTable.QuotedName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
-	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
+	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.QuotedName)
 
 	// Execute the batch insert
 	result, err := dbconn.RetryableTransaction(ctx, a.writeDB, true, a.dbConfig, query)
@@ -357,17 +364,16 @@ func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
 // DeleteKeys deletes rows by their key values synchronously.
 // The keys are hashed key strings (from utils.HashKey).
 // If lock is non-nil, the delete is executed under the table lock.
+// If targetTable is nil, sourceTable is used for both (appropriate for move operations).
 func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
 
+	// For move operations, targetTable may be nil - use sourceTable for both
 	if targetTable == nil {
-		// Support the movetables case where there might not be a target per-se
 		targetTable = sourceTable
 	}
-
-	a.logger.Info("DeleteKeys: starting", "keyCount", len(keys), "table", targetTable.TableName, "underLock", lock != nil)
 
 	// Convert hashed keys to row value constructor format
 	var pkValues []string
@@ -376,48 +382,43 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	}
 
 	// Build DELETE statement
-	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE (%s) IN (%s)",
-		targetTable.TableName,
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
+		targetTable.QuotedName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		strings.Join(pkValues, ","),
 	)
 
-	a.logger.Debug("DeleteKeys: executing statement", "statement", deleteStmt)
+	a.logger.Debug("executing delete", "keyCount", len(keys), "table", targetTable.QuotedName)
 
 	// Execute under lock if provided
 	if lock != nil {
-		a.logger.Info("DeleteKeys: executing under lock")
 		if err := lock.ExecUnderLock(ctx, deleteStmt); err != nil {
-			a.logger.Error("DeleteKeys: failed under lock", "error", err)
 			return 0, fmt.Errorf("failed to execute delete under lock: %w", err)
 		}
-		a.logger.Info("DeleteKeys: complete under lock", "keyCount", len(keys))
 		// We don't get affected rows from ExecUnderLock, so return the key count
 		return int64(len(keys)), nil
 	}
 
 	// Execute as a retryable transaction
-	a.logger.Info("DeleteKeys: executing as retryable transaction")
 	affectedRows, err := dbconn.RetryableTransaction(ctx, a.writeDB, false, a.dbConfig, deleteStmt)
 	if err != nil {
-		a.logger.Error("DeleteKeys: failed", "error", err)
 		return 0, fmt.Errorf("failed to execute delete: %w", err)
 	}
 
-	a.logger.Info("DeleteKeys: complete", "affectedRows", affectedRows)
 	return affectedRows, nil
 }
 
 // UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
 // The rows are LogicalRow structs containing the row images.
 // If lock is non-nil, the upsert is executed under the table lock.
+// If targetTable is nil, sourceTable is used for both (appropriate for move operations).
 func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
 
+	// For move operations, targetTable may be nil - use sourceTable for both
 	if targetTable == nil {
-		// Support the movetables case where there might not be a target per-se
 		targetTable = sourceTable
 	}
 
@@ -480,35 +481,29 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 		}
 	}
 
-	upsertStmt := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		targetTable.TableName,
+	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+		targetTable.QuotedName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 		strings.Join(updateClauses, ", "),
 	)
 
-	a.logger.Info("UpsertRows: starting", "rowCount", len(valuesClauses), "table", targetTable.TableName, "underLock", lock != nil)
+	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", targetTable.QuotedName)
 
 	// Execute under lock if provided
 	if lock != nil {
-		a.logger.Info("UpsertRows: executing under lock")
 		if err := lock.ExecUnderLock(ctx, upsertStmt); err != nil {
-			a.logger.Error("UpsertRows: failed under lock", "error", err)
 			return 0, fmt.Errorf("failed to execute upsert under lock: %w", err)
 		}
-		a.logger.Info("UpsertRows: complete under lock", "rowCount", len(valuesClauses))
 		// We don't get affected rows from ExecUnderLock, so return the row count
 		return int64(len(valuesClauses)), nil
 	}
 
 	// Execute as a retryable transaction
-	a.logger.Info("UpsertRows: executing as retryable transaction")
 	affectedRows, err := dbconn.RetryableTransaction(ctx, a.writeDB, false, a.dbConfig, upsertStmt)
 	if err != nil {
-		a.logger.Error("UpsertRows: failed", "error", err)
 		return 0, fmt.Errorf("failed to execute upsert: %w", err)
 	}
 
-	a.logger.Info("UpsertRows: complete", "affectedRows", affectedRows)
 	return affectedRows, nil
 }

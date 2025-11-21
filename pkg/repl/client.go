@@ -60,6 +60,7 @@ var (
 
 type Client struct {
 	sync.Mutex
+
 	host     string
 	username string
 	password string
@@ -69,10 +70,7 @@ type Client struct {
 	streamer *replication.BinlogStreamer
 
 	// The DB connection is used for queries like SHOW MASTER STATUS
-	db *sql.DB
-	// The applier is used for flushing writes from subscriptions
-	// In spirit, it's the same as the db connection, but for Move
-	// it will be the target.
+	db       *sql.DB
 	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
 
@@ -142,7 +140,7 @@ type ClientConfig struct {
 	OnDDL                      chan string
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
-	Applier                    applier.Applier  // Applier for writing to target(s)
+	Applier                    applier.Applier
 	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
 }
 
@@ -273,14 +271,14 @@ func (c *Client) GetDeltaLen() int {
 	return deltaLen
 }
 
-func (c *Client) getCurrentBinlogPosition() (mysql.Position, error) {
+func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, error) {
 	var binlogFile, fake string
 	var binlogPos uint32
 	var binlogPosStmt = "SHOW MASTER STATUS"
 	if c.isMySQL84 {
 		binlogPosStmt = "SHOW BINARY LOG STATUS"
 	}
-	err := c.db.QueryRow(binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
 		return mysql.Position{}, err
 	}
@@ -331,11 +329,11 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	// now, but for resume cases we just need to check that the
 	// position is resumable.
 	if c.flushedPos.Name == "" {
-		c.flushedPos, err = c.getCurrentBinlogPosition()
+		c.flushedPos, err = c.getCurrentBinlogPosition(ctx)
 		if err != nil {
 			return errors.New("failed to get binlog position, check binary is enabled")
 		}
-	} else if c.binlogPositionIsImpossible() {
+	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
@@ -502,7 +500,7 @@ func (c *Client) readStream(ctx context.Context) {
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, ev.Event.(*replication.RowsEvent)); err != nil {
-				panic(fmt.Sprintf("could not process events: %v", err))
+				panic("could not process events")
 			}
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
@@ -607,23 +605,6 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 				return fmt.Errorf("no primary key found for before row: %#v", beforeRow)
 			}
 
-			// If there is a VindexColumn set, we need to check that it has not been mutated.
-			// This is because reshards require vindex columns to be immutable (unless we start tracking
-			// changes by the vindex column instead of the PK). We do not handle the case that
-			// this could be a MINIMAL RBR event, because MINIMAL is not supported with buffered
-			// changes.
-			if sub.Tables()[0].VindexColumn != "" {
-				vindexColIdx, err := sub.Tables()[0].GetColumnOrdinal(sub.Tables()[0].VindexColumn)
-				if err != nil {
-					return err
-				}
-				// Check if the vindex column value has changed
-				if fmt.Sprintf("%v", beforeRow[vindexColIdx]) != fmt.Sprintf("%v", afterRow[vindexColIdx]) {
-					return fmt.Errorf("vindex column %s cannot be modified (before: %v, after: %v). MoveTables resharding requires vindex columns to be immutable",
-						sub.Tables()[0].VindexColumn, beforeRow[vindexColIdx], afterRow[vindexColIdx])
-				}
-			}
-
 			// With MINIMAL row image, we need to reconstruct the after key
 			// by combining the before key with any changed PK columns from the after image
 			afterKey := make([]any, len(beforeKey))
@@ -635,15 +616,16 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 
 			for pkIdx, pkCol := range sub.Tables()[0].KeyColumns {
 				// Find the position of this PK column in the table columns
-				colIdx, err := sub.Tables()[0].GetColumnOrdinal(pkCol)
-				if err != nil {
-					return err
-				}
-				// If this column exists in the after image and is not nil, use it
-				if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
-					if fmt.Sprintf("%v", beforeKey[pkIdx]) != fmt.Sprintf("%v", afterRowSlice[colIdx]) {
-						afterKey[pkIdx] = afterRowSlice[colIdx]
-						isPKUpdate = true
+				for colIdx, col := range sub.Tables()[0].Columns {
+					if col == pkCol {
+						// If this column exists in the after image and is not nil, use it
+						if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
+							if fmt.Sprintf("%v", beforeKey[pkIdx]) != fmt.Sprintf("%v", afterRowSlice[colIdx]) {
+								afterKey[pkIdx] = afterRowSlice[colIdx]
+								isPKUpdate = true
+							}
+						}
+						break
 					}
 				}
 			}
@@ -681,8 +663,8 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	return nil
 }
 
-func (c *Client) binlogPositionIsImpossible() bool {
-	rows, err := c.db.Query("SHOW BINARY LOGS")
+func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
+	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
 		return true // if we can't get the logs, its already impossible
 	}
@@ -864,7 +846,7 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
 func (c *Client) BlockWait(ctx context.Context) error {
-	targetPos, err := c.getCurrentBinlogPosition()
+	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {
 		return err
 	}
@@ -923,9 +905,7 @@ func (c *Client) feedback(numberOfKeys int, d time.Duration) {
 	if len(c.timingHistory) >= 10 {
 		timePerKey := table.LazyFindP90(c.timingHistory)
 		newBatchSize := int64(float64(c.targetBatchTime) / float64(timePerKey))
-		if newBatchSize < minBatchSize {
-			newBatchSize = minBatchSize
-		}
+		newBatchSize = max(newBatchSize, minBatchSize)
 		atomic.StoreInt64(&c.targetBatchSize, newBatchSize)
 		c.timingHistory = nil // reset
 	}

@@ -439,7 +439,7 @@ func TestFixCorruptWithApplier(t *testing.T) {
 		TargetBatchTime:            time.Second,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(dest, dbconn.NewDBConfig(), slog.Default()),
+		Applier:                    applier.NewSingleTargetApplier(dest, dbconn.NewDBConfig(), logger),
 	})
 	defer feed.Close()
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))

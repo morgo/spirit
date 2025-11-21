@@ -39,7 +39,7 @@ type Runner struct {
 
 	sourceTables []*table.TableInfo
 
-	applier           applier.Applier // Shared applier for both copier and replication
+	applier           applier.Applier
 	replClient        *repl.Client
 	copyChunker       table.Chunker
 	checksumChunker   table.Chunker
@@ -75,6 +75,11 @@ func (r *Runner) Close() error {
 	}
 	if r.replClient != nil {
 		r.replClient.Close()
+	}
+	if r.applier != nil {
+		if err := r.applier.Close(); err != nil {
+			r.logger.Error("failed to close applier in Runner.Close()", "error", err)
+		}
 	}
 	for _, target := range r.targets {
 		target.DB.Close()
@@ -146,6 +151,9 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 }
 
 // createTargetTables creates tables on all targets.
+// For now, we require that the target is identical to the source.
+// In future, we may create the target with secondary indexes disabled,
+// and re-add them after.
 func (r *Runner) createTargetTables(ctx context.Context) error {
 	for _, t := range r.sourceTables {
 		var createStmt string
@@ -221,7 +229,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create copier with the shared applier
+	// Create a copier that reads from the multi chunker and uses the shared applier.
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
@@ -236,9 +244,12 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// Read checkpoint from SOURCE (not target)
-	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
-		r.sourceConfig.DBName, checkpointTableName)
+	// We explicitly specify the columns we need from the checkpoint table.
+	// If the structure changes, this will fail and indicate that the checkpoint
+	// was created by either an earlier or later version of spirit, in which case
+	// we do not support recovery.
+	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s` ORDER BY id DESC LIMIT 1",
+		checkpointTableName)
 	var copierWatermark, binlogName, statement string
 	var id, binlogPos int
 	err = r.source.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
@@ -293,6 +304,11 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.logger.Info("Checking target database state")
 
 	if err := r.checkTargetEmpty(ctx); err != nil {
+		// There are existing tables there.
+		// Optimistically try to resume from a checkpoint written to the source database.
+		// The checkpoint is on the source (not target) because reshards are 1:N and the
+		// source is always guaranteed to be singular. If resume fails, unlike schema changes,
+		// the move fails because we don't want to overwrite existing data.
 		if err := r.resumeFromCheckpoint(ctx); err != nil {
 			return fmt.Errorf("target database is not empty and could not resume from checkpoint: %v", err)
 		}
@@ -304,7 +320,8 @@ func (r *Runner) setup(ctx context.Context) error {
 }
 
 func (r *Runner) newCopy(ctx context.Context) error {
-	// Create tables on all targets
+	// We are starting fresh:
+	// For each table, fetch the CREATE TABLE statement from the source and run it on the target.
 	if err := r.createTargetTables(ctx); err != nil {
 		return err
 	}
@@ -518,15 +535,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Delete checkpoint table from SOURCE
 	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
-	}
-
-	// Close the applier now that the move is complete
-	if r.applier != nil {
-		r.logger.Info("Closing applier")
-		if err := r.applier.Close(); err != nil {
-			r.logger.Error("failed to close applier", "error", err)
-			// Don't return the error, just log it
-		}
 	}
 
 	r.logger.Info("Move operation complete.")

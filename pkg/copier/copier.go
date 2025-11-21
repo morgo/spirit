@@ -45,7 +45,7 @@ type CopierConfig struct {
 	MetricsSink                   metrics.Sink
 	DBConfig                      *dbconn.DBConfig
 	UseExperimentalBufferedCopier bool
-	Applier                       applier.Applier // the Applier is used by the buffered copier.
+	Applier                       applier.Applier
 }
 
 // NewCopierDefaultConfig returns a default config for the copier.

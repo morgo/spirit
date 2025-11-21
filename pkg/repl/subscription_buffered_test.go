@@ -55,11 +55,11 @@ func TestBufferedMap(t *testing.T) {
 
 	// The destination table should now have the 2 rows.
 	var name string
-	err = db.QueryRow("SELECT name FROM _subscription_test_new WHERE id = 2").Scan(&name)
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 2").Scan(&name)
 	assert.NoError(t, err)
 	assert.Equal(t, "test2", name)
 
-	err = db.QueryRow("SELECT name FROM _subscription_test_new WHERE id = 3").Scan(&name)
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 3").Scan(&name)
 	assert.NoError(t, err)
 	assert.Equal(t, "test3", name)
 }
@@ -99,7 +99,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	defer client.Close()
 	defer db.Close()
 
-	_, err = db.Exec("INSERT INTO subscription_test (id, name, extracol) VALUES (1, 'whatever', JSON_ARRAY(1,2,3))")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO subscription_test (id, name, extracol) VALUES (1, 'whatever', JSON_ARRAY(1,2,3))")
 	assert.NoError(t, err)
 	assert.NoError(t, client.BlockWait(t.Context()))
 
@@ -151,7 +151,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	// This includes quotes, backslashes, and nulls.
 	// Also test with a string that includes a null byte.
 
-	_, err = db.Exec("INSERT INTO subscription_test (id, name, dt, ts) VALUES (1, 'test''s', '2025-10-06 09:09:46 +02:00', '2025-10-06 09:09:46 +02:00'), (2, 'back\\slash', NOW(), NOW()), (3, NULL, NOW(), NOW()), (4, 'null\000byte', NOW(), NOW())")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO subscription_test (id, name, dt, ts) VALUES (1, 'test''s', '2025-10-06 09:09:46 +02:00', '2025-10-06 09:09:46 +02:00'), (2, 'back\\slash', NOW(), NOW()), (3, NULL, NOW(), NOW()), (4, 'null\000byte', NOW(), NOW())")
 	assert.NoError(t, err)
 	assert.NoError(t, client.BlockWait(t.Context()))
 
@@ -163,10 +163,10 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	// Now we want to check that the tables match,
 	// using an adhoc checksum.
 	var checksumSrc, checksumDst string
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(name)) as checksum FROM subscription_test").Scan(&checksumSrc)
+	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(name)) as checksum FROM subscription_test").Scan(&checksumSrc)
 	assert.NoError(t, err)
 
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(name)) as checksum FROM _subscription_test_new").Scan(&checksumDst)
+	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(name)) as checksum FROM _subscription_test_new").Scan(&checksumDst)
 	assert.NoError(t, err)
 	assert.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
 }

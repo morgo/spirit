@@ -136,12 +136,12 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Verify the results
 		var count int
-		err = db.QueryRow("SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
+		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 		assert.NoError(t, err)
 		assert.Equal(t, 4, count) // Should have 1,2,4,5 but not 3
 
 		// Verify specific IDs
-		rows, err := db.Query("SELECT id FROM _subscription_test_new ORDER BY id")
+		rows, err := db.QueryContext(t.Context(), "SELECT id FROM _subscription_test_new ORDER BY id")
 		assert.NoError(t, err)
 		defer rows.Close()
 
@@ -191,7 +191,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Verify all records were inserted
 		var count int
-		err = db.QueryRow("SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
+		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 		assert.NoError(t, err)
 		assert.Equal(t, 5, count)
 	})
@@ -234,7 +234,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Verify the results
 		var count int
-		err = db.QueryRow("SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
+		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, count) // Only ID 1 should be present
 	})
@@ -289,7 +289,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Verify that records were inserted
 		var count int
-		err = db.QueryRow("SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
+		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 		assert.NoError(t, err)
 		assert.Positive(t, count, "Should have inserted some records")
 	})
@@ -343,7 +343,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 		assert.True(t, allFlushed)
 
 		// Verify final state
-		rows, err := db.Query("SELECT id FROM _subscription_test_new ORDER BY id")
+		rows, err := db.QueryContext(t.Context(), "SELECT id FROM _subscription_test_new ORDER BY id")
 		assert.NoError(t, err)
 		defer rows.Close()
 

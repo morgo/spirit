@@ -50,19 +50,18 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 		)
 	`
 
-	ctx := context.Background()
-	_, err = sourceDB.ExecContext(ctx, createTableSQL)
+	_, err = sourceDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	// Create table info objects
 	sourceTable := table.NewTableInfo(sourceDB, source.DBName, "test_table")
-	err = sourceTable.SetInfo(ctx)
+	err = sourceTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -88,14 +87,17 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	}
 
 	// Apply the rows
-	callbackInvoked := false
-	var callbackAffectedRows int64
+	var callbackInvoked atomic.Bool
+	var callbackAffectedRows atomic.Int64
+	var callbackErrMu sync.Mutex
 	var callbackErr error
 
 	callback := func(affectedRows int64, err error) {
-		callbackInvoked = true
-		callbackAffectedRows = affectedRows
+		callbackInvoked.Store(true)
+		callbackAffectedRows.Store(affectedRows)
+		callbackErrMu.Lock()
 		callbackErr = err
+		callbackErrMu.Unlock()
 	}
 
 	err = applier.Apply(t.Context(), chunk, testRows, callback)
@@ -106,9 +108,11 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify callback was invoked
-	assert.True(t, callbackInvoked, "Callback should have been invoked")
+	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked")
+	callbackErrMu.Lock()
 	assert.NoError(t, callbackErr, "Callback should not have an error")
-	assert.Equal(t, int64(3), callbackAffectedRows, "Should have affected 3 rows")
+	callbackErrMu.Unlock()
+	assert.Equal(t, int64(3), callbackAffectedRows.Load(), "Should have affected 3 rows")
 
 	// Verify data in target
 	var count int
@@ -162,12 +166,11 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -184,9 +187,9 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 		NewTable: targetTable,
 	}
 
-	callbackInvoked := false
+	var callbackInvoked atomic.Bool
 	callback := func(affectedRows int64, err error) {
-		callbackInvoked = true
+		callbackInvoked.Store(true)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(0), affectedRows)
 	}
@@ -195,7 +198,7 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 	require.NoError(t, err)
 
 	// Callback should be invoked immediately for empty rows
-	assert.True(t, callbackInvoked, "Callback should have been invoked immediately for empty rows")
+	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked immediately for empty rows")
 }
 
 // TestSingleTargetApplierLargeDataset tests applying a large dataset that spans multiple chunklets
@@ -214,12 +217,11 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -233,7 +235,7 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	// Create 2500 rows (will span 3 chunklets of 1000 each)
 	rowCount := 2500
 	testRows := make([][]any, rowCount)
-	for i := 0; i < rowCount; i++ {
+	for i := range rowCount {
 		testRows[i] = []any{int64(i + 1), int64(i * 10)}
 	}
 
@@ -242,12 +244,12 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 		NewTable: targetTable,
 	}
 
-	callbackInvoked := false
-	var callbackAffectedRows int64
+	var callbackInvoked atomic.Bool
+	var callbackAffectedRows atomic.Int64
 
 	callback := func(affectedRows int64, err error) {
-		callbackInvoked = true
-		callbackAffectedRows = affectedRows
+		callbackInvoked.Store(true)
+		callbackAffectedRows.Store(affectedRows)
 		assert.NoError(t, err)
 	}
 
@@ -257,8 +259,8 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	err = applier.Wait(t.Context())
 	require.NoError(t, err)
 
-	assert.True(t, callbackInvoked)
-	assert.Equal(t, int64(rowCount), callbackAffectedRows)
+	assert.True(t, callbackInvoked.Load())
+	assert.Equal(t, int64(rowCount), callbackAffectedRows.Load())
 
 	// Verify count
 	var count int
@@ -283,12 +285,11 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, batch INT, value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -305,14 +306,14 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	var wg sync.WaitGroup
 	var totalCallbacks int32
 
-	for batch := 0; batch < numBatches; batch++ {
+	for batch := range numBatches {
 		wg.Add(1)
 		go func(batchNum int) {
 			defer wg.Done()
 
 			// Create rows for this batch
 			testRows := make([][]any, rowsPerBatch)
-			for i := 0; i < rowsPerBatch; i++ {
+			for i := range rowsPerBatch {
 				id := batchNum*rowsPerBatch + i + 1
 				testRows[i] = []any{int64(id), int64(batchNum), int64(i)}
 			}
@@ -365,16 +366,15 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	// Insert test data
-	_, err = targetDB.ExecContext(ctx, "INSERT INTO test_table VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie'), (4, 'Diana'), (5, 'Eve')")
+	_, err = targetDB.ExecContext(t.Context(), "INSERT INTO test_table VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie'), (4, 'Diana'), (5, 'Eve')")
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -439,12 +439,11 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -472,16 +471,15 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100), value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	// Insert initial data
-	_, err = targetDB.ExecContext(ctx, "INSERT INTO test_table VALUES (1, 'Alice', 100), (2, 'Bob', 200)")
+	_, err = targetDB.ExecContext(t.Context(), "INSERT INTO test_table VALUES (1, 'Alice', 100), (2, 'Bob', 200)")
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	// Create applier
@@ -551,12 +549,11 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -604,12 +601,11 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -636,19 +632,18 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
 	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
 
 	// Create a cancellable context
-	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancelCtx, cancel := context.WithCancel(t.Context())
 
 	err = applier.Start(cancelCtx)
 	require.NoError(t, err)
@@ -656,7 +651,7 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 
 	// Create a large dataset
 	testRows := make([][]any, 1000)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		testRows[i] = []any{int64(i + 1), int64(i)}
 	}
 
@@ -671,6 +666,7 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	}
 
 	err = applier.Apply(cancelCtx, chunk, testRows, callback)
+	require.NoError(t, err)
 	// Cancel the context
 	cancel()
 
@@ -695,12 +691,11 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -722,7 +717,7 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a context with very short timeout
-	timeoutCtx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	timeoutCtx, cancel := context.WithTimeout(t.Context(), 1*time.Nanosecond)
 	defer cancel()
 
 	// Wait should timeout (or succeed if fast enough)
@@ -748,12 +743,11 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	defer targetDB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
-	ctx := context.Background()
-	_, err = targetDB.ExecContext(ctx, createTableSQL)
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
 	require.NoError(t, err)
 
 	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
-	err = targetTable.SetInfo(ctx)
+	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
@@ -770,9 +764,9 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 		NewTable: targetTable,
 	}
 
-	callbackInvoked := false
+	var callbackInvoked atomic.Bool
 	callback := func(affectedRows int64, err error) {
-		callbackInvoked = true
+		callbackInvoked.Store(true)
 		assert.NoError(t, err)
 	}
 
@@ -782,7 +776,7 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	// Wait for work to complete
 	err = applier.Wait(t.Context())
 	require.NoError(t, err)
-	assert.True(t, callbackInvoked)
+	assert.True(t, callbackInvoked.Load())
 
 	// Close the applier
 	err = applier.Close()

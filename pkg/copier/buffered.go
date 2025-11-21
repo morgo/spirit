@@ -27,6 +27,7 @@ import (
 
 type buffered struct {
 	sync.Mutex
+
 	db               *sql.DB
 	applier          applier.Applier
 	chunker          table.Chunker
@@ -137,9 +138,12 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = waitErr
 	}
 
-	// NOTE: We do NOT close the applier here because it may be shared
-	// with the replication client. The owner (e.g., Runner) is responsible
-	// for closing the applier when the entire migration is complete.
+	// "Close" the applier. This will free up the gouroutines that
+	// were used for copying, but it won't close the DB connections
+
+	if closeErr := c.applier.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
 
 	return err
 }
@@ -159,7 +163,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 				return nil
 			}
 			c.logger.Error("readWorker got error from chunker", "error", err)
-			c.setInvalid(true)
+			c.setInvalid()
 			return err
 		}
 		c.logger.Debug("readWorker got chunk", "chunk", chunk.String())
@@ -167,7 +171,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		readStart := time.Now()
 		rows, err := c.readChunkData(ctx, chunk)
 		if err != nil {
-			c.setInvalid(true)
+			c.setInvalid()
 			return fmt.Errorf("failed to read chunk data: %w", err)
 		}
 		readTime := time.Since(readStart)
@@ -192,7 +196,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		callback := func(affectedRows int64, err error) {
 			if err != nil {
 				c.logger.Error("applier callback received error", "chunk", chunk.String(), "error", err)
-				c.setInvalid(true)
+				c.setInvalid()
 				return
 			}
 
@@ -210,7 +214,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 		// Apply the rows
 		if err := c.applier.Apply(ctx, chunk, rows, callback); err != nil {
-			c.setInvalid(true)
+			c.setInvalid()
 			return fmt.Errorf("failed to apply rows: %w", err)
 		}
 	}
@@ -219,10 +223,10 @@ func (c *buffered) readWorker(ctx context.Context) error {
 	return nil
 }
 
-func (c *buffered) setInvalid(newVal bool) {
+func (c *buffered) setInvalid() {
 	c.Lock()
 	defer c.Unlock()
-	c.isInvalid = newVal
+	c.isInvalid = true
 }
 
 func (c *buffered) SetThrottler(throttler throttler.Throttler) {

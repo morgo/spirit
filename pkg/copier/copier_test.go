@@ -26,6 +26,7 @@ func TestMain(m *testing.M) {
 
 type TestMetricsSink struct {
 	sync.Mutex
+
 	called int
 }
 
@@ -64,7 +65,7 @@ func TestCopier(t *testing.T) {
 
 	// Verify that t2 has one row.
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM copiert2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM copiert2").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count)
 
@@ -99,7 +100,7 @@ func TestThrottler(t *testing.T) {
 
 	// Verify that t2 has one row.
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM throttlert2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM throttlert2").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
@@ -219,7 +220,7 @@ func TestSQLModeAllowZeroInvalidDates(t *testing.T) {
 	assert.NoError(t, err)
 	// Verify that t2 has one row.
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM invaliddt2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM invaliddt2").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
@@ -244,9 +245,9 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 	// Lock table t2 for 2 seconds.
 	// This should be enough to retry, but it will eventually be successful.
 	go func() {
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(t.Context(), nil)
 		assert.NoError(t, err)
-		_, err = tx.Exec("SELECT * FROM lockt2 WHERE a = 1 FOR UPDATE")
+		_, err = tx.ExecContext(t.Context(), "SELECT a,b,c FROM lockt2 WHERE a = 1 FOR UPDATE")
 		assert.NoError(t, err)
 		wg1.Done()
 		time.Sleep(2 * time.Second)
@@ -294,9 +295,9 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 	wg1.Add(1)
 	wg2.Add(1)
 	go func() {
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(t.Context(), nil)
 		assert.NoError(t, err)
-		_, err = tx.Exec("SELECT * FROM lock2t2 WHERE a = 1 FOR UPDATE")
+		_, err = tx.ExecContext(t.Context(), "SELECT a,b,c FROM lock2t2 WHERE a = 1 FOR UPDATE")
 		assert.NoError(t, err)
 		wg1.Done()
 		time.Sleep(10 * time.Second)
@@ -359,7 +360,7 @@ func TestCopierFromCheckpoint(t *testing.T) {
 
 	// Verify that t1new has 10 rows
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM _copierchkpt1_new").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _copierchkpt1_new").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 10, count)
 }

@@ -1,6 +1,7 @@
 package copier
 
 import (
+	"log/slog"
 	"testing"
 
 	"github.com/block/spirit/pkg/applier"
@@ -32,7 +33,7 @@ func TestBufferedCopier(t *testing.T) {
 
 	cfg := NewCopierDefaultConfig()
 	cfg.UseExperimentalBufferedCopier = true
-	cfg.Applier = applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), cfg.Logger)
+	cfg.Applier = applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), slog.Default())
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
 
@@ -45,10 +46,10 @@ func TestBufferedCopier(t *testing.T) {
 	// We should expect to have the same number of rows
 	// and a basic checksum confirms a match.
 	var checksumSrc, checksumDst string
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt1").Scan(&checksumSrc)
+	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt1").Scan(&checksumSrc)
 	assert.NoError(t, err)
 
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt2").Scan(&checksumDst)
+	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt2").Scan(&checksumDst)
 	assert.NoError(t, err)
 	assert.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
 
