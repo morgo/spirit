@@ -112,7 +112,7 @@ func TestFlushWithLock(t *testing.T) {
 
 	// Verify the changes were applied
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count) // Only ID 1 should be present, ID 2 was deleted
 }
@@ -166,7 +166,7 @@ func TestFlushWithoutLock(t *testing.T) {
 
 	// Verify the changes were applied
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count) // IDs 1 and 2 should be present, 3 and 4 were deleted
 }

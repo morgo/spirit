@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -59,6 +60,7 @@ var (
 
 type Client struct {
 	sync.Mutex
+
 	host     string
 	username string
 	password string
@@ -68,11 +70,8 @@ type Client struct {
 	streamer *replication.BinlogStreamer
 
 	// The DB connection is used for queries like SHOW MASTER STATUS
-	db *sql.DB
-	// The writeDB is used for flushing writes from subscriptions
-	// In spirit, it's the same as the db connection, but for Move
-	// it will be the target.
-	writeDB  *sql.DB
+	db       *sql.DB
+	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
 
 	// subscriptions is a map of tables that are actively
@@ -113,9 +112,6 @@ type Client struct {
 
 // NewClient creates a new Client instance.
 func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
-	if config.WriteDB == nil {
-		config.WriteDB = db // default to using the read DB for writes
-	}
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
@@ -133,7 +129,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		onDDL:                      config.OnDDL,
 		serverID:                   config.ServerID,
 		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
-		writeDB:                    config.WriteDB,
+		applier:                    config.Applier,
 	}
 }
 
@@ -144,7 +140,7 @@ type ClientConfig struct {
 	OnDDL                      chan string
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
-	WriteDB                    *sql.DB          // if not nil, use this DB for writes.
+	Applier                    applier.Applier
 	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
 }
 
@@ -193,9 +189,10 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		c.subscriptions[subKey] = &bufferedMap{
 			table:    currentTable,
 			newTable: newTable,
-			changes:  make(map[string]logicalRow),
+			changes:  make(map[string]applier.LogicalRow),
 			c:        c,
 			chunker:  chunker,
+			applier:  c.applier,
 		}
 		return nil
 	}
@@ -274,14 +271,14 @@ func (c *Client) GetDeltaLen() int {
 	return deltaLen
 }
 
-func (c *Client) getCurrentBinlogPosition() (mysql.Position, error) {
+func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, error) {
 	var binlogFile, fake string
 	var binlogPos uint32
 	var binlogPosStmt = "SHOW MASTER STATUS"
 	if c.isMySQL84 {
 		binlogPosStmt = "SHOW BINARY LOG STATUS"
 	}
-	err := c.db.QueryRow(binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
 		return mysql.Position{}, err
 	}
@@ -332,11 +329,11 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	// now, but for resume cases we just need to check that the
 	// position is resumable.
 	if c.flushedPos.Name == "" {
-		c.flushedPos, err = c.getCurrentBinlogPosition()
+		c.flushedPos, err = c.getCurrentBinlogPosition(ctx)
 		if err != nil {
 			return errors.New("failed to get binlog position, check binary is enabled")
 		}
-	} else if c.binlogPositionIsImpossible() {
+	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
@@ -666,8 +663,8 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	return nil
 }
 
-func (c *Client) binlogPositionIsImpossible() bool {
-	rows, err := c.db.Query("SHOW BINARY LOGS")
+func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
+	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
 		return true // if we can't get the logs, its already impossible
 	}
@@ -849,7 +846,7 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
 func (c *Client) BlockWait(ctx context.Context) error {
-	targetPos, err := c.getCurrentBinlogPosition()
+	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {
 		return err
 	}
@@ -908,9 +905,7 @@ func (c *Client) feedback(numberOfKeys int, d time.Duration) {
 	if len(c.timingHistory) >= 10 {
 		timePerKey := table.LazyFindP90(c.timingHistory)
 		newBatchSize := int64(float64(c.targetBatchTime) / float64(timePerKey))
-		if newBatchSize < minBatchSize {
-			newBatchSize = minBatchSize
-		}
+		newBatchSize = max(newBatchSize, minBatchSize)
 		atomic.StoreInt64(&c.targetBatchSize, newBatchSize)
 		c.timingHistory = nil // reset
 	}

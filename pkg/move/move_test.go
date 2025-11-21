@@ -46,13 +46,9 @@ func TestBasicMove(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO source.t2 (id, val) VALUES (4, 'four'), (5, 'five'), (6, 'six')`)
 
 	// reset the target database.
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	assert.NoError(t, err)
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest")
-	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest")
-	assert.NoError(t, err)
-	defer db.Close()
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest`)
+	testutils.RunSQL(t, `CREATE DATABASE dest`)
+
 	// test
 	move := &Move{
 		SourceDSN:       sourceDSN,
@@ -99,9 +95,9 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// reset the target database.
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	assert.NoError(t, err)
-	_, err = db.Exec("DROP DATABASE IF EXISTS dest_resume")
+	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_resume")
 	assert.NoError(t, err)
-	_, err = db.Exec("CREATE DATABASE dest_resume")
+	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_resume")
 	assert.NoError(t, err)
 	defer db.Close()
 	// test

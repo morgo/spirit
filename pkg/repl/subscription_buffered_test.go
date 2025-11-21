@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/testutils"
 	mysql2 "github.com/go-sql-driver/mysql"
@@ -28,33 +29,24 @@ func TestBufferedMap(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 1, sub.Length())
 
-	assert.False(t, sub.changes["1"].isDeleted)
-	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].rowImage)
-
-	// As single row:
-	statement, err := sub.createUpsertStmt([]logicalRow{sub.changes["1"]})
-	assert.NoError(t, err)
-	assert.Equal(t, "INSERT INTO `test`.`_subscription_test_new` (`id`, `name`) VALUES (1, 'test') AS new ON DUPLICATE KEY UPDATE `name` = new.`name`", statement.stmt)
+	// Check the logical row structure
+	assert.False(t, sub.changes["1"].IsDeleted)
+	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].RowImage)
 
 	// Now delete the row.
 	testutils.RunSQL(t, "DELETE FROM subscription_test WHERE id = 1")
 	assert.NoError(t, client.BlockWait(t.Context()))
 
-	assert.True(t, sub.changes["1"].isDeleted)
-	assert.Equal(t, []any(nil), sub.changes["1"].rowImage)
+	assert.True(t, sub.changes["1"].IsDeleted)
+	assert.Equal(t, []any(nil), sub.changes["1"].RowImage)
 
 	// Now insert 2 more rows:
 	testutils.RunSQL(t, "INSERT INTO subscription_test (id, name) VALUES (2, 'test2'), (3, 'test3')")
 	assert.NoError(t, client.BlockWait(t.Context()))
 
 	assert.Equal(t, 3, sub.Length())
-	assert.False(t, sub.changes["2"].isDeleted)
-	assert.False(t, sub.changes["3"].isDeleted)
-
-	// Check the upsert statement.
-	statement, err = sub.createUpsertStmt([]logicalRow{sub.changes["2"], sub.changes["3"]})
-	assert.NoError(t, err)
-	assert.Equal(t, "INSERT INTO `test`.`_subscription_test_new` (`id`, `name`) VALUES (2, 'test2'), (3, 'test3') AS new ON DUPLICATE KEY UPDATE `name` = new.`name`", statement.stmt)
+	assert.False(t, sub.changes["2"].IsDeleted)
+	assert.False(t, sub.changes["3"].IsDeleted)
 
 	// Now flush the changes.
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
@@ -63,11 +55,11 @@ func TestBufferedMap(t *testing.T) {
 
 	// The destination table should now have the 2 rows.
 	var name string
-	err = db.QueryRow("SELECT name FROM _subscription_test_new WHERE id = 2").Scan(&name)
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 2").Scan(&name)
 	assert.NoError(t, err)
 	assert.Equal(t, "test2", name)
 
-	err = db.QueryRow("SELECT name FROM _subscription_test_new WHERE id = 3").Scan(&name)
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 3").Scan(&name)
 	assert.NoError(t, err)
 	assert.Equal(t, "test3", name)
 }
@@ -99,6 +91,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
+		Applier:                    applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), logger),
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -106,7 +99,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	defer client.Close()
 	defer db.Close()
 
-	_, err = db.Exec("INSERT INTO subscription_test (id, name, extracol) VALUES (1, 'whatever', JSON_ARRAY(1,2,3))")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO subscription_test (id, name, extracol) VALUES (1, 'whatever', JSON_ARRAY(1,2,3))")
 	assert.NoError(t, err)
 	assert.NoError(t, client.BlockWait(t.Context()))
 
@@ -147,6 +140,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
+		Applier:                    applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), logger),
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -157,7 +151,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	// This includes quotes, backslashes, and nulls.
 	// Also test with a string that includes a null byte.
 
-	_, err = db.Exec("INSERT INTO subscription_test (id, name, dt, ts) VALUES (1, 'test''s', '2025-10-06 09:09:46 +02:00', '2025-10-06 09:09:46 +02:00'), (2, 'back\\slash', NOW(), NOW()), (3, NULL, NOW(), NOW()), (4, 'null\000byte', NOW(), NOW())")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO subscription_test (id, name, dt, ts) VALUES (1, 'test''s', '2025-10-06 09:09:46 +02:00', '2025-10-06 09:09:46 +02:00'), (2, 'back\\slash', NOW(), NOW()), (3, NULL, NOW(), NOW()), (4, 'null\000byte', NOW(), NOW())")
 	assert.NoError(t, err)
 	assert.NoError(t, client.BlockWait(t.Context()))
 
@@ -169,10 +163,10 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	// Now we want to check that the tables match,
 	// using an adhoc checksum.
 	var checksumSrc, checksumDst string
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(name)) as checksum FROM subscription_test").Scan(&checksumSrc)
+	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(name)) as checksum FROM subscription_test").Scan(&checksumSrc)
 	assert.NoError(t, err)
 
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(name)) as checksum FROM _subscription_test_new").Scan(&checksumDst)
+	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(name)) as checksum FROM _subscription_test_new").Scan(&checksumDst)
 	assert.NoError(t, err)
 	assert.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
 }
