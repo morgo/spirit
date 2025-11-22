@@ -70,7 +70,7 @@ func TestVindexProviderInterface(t *testing.T) {
 
 		column, hashFunc, err := provider.GetVindexMetadata("testdb", "config")
 		require.NoError(t, err)
-		assert.Equal(t, "", column)
+		assert.Empty(t, column)
 		assert.Nil(t, hashFunc)
 	})
 
@@ -189,7 +189,7 @@ func TestMultiTableVindexProvider(t *testing.T) {
 	t.Run("returns empty for unconfigured table", func(t *testing.T) {
 		column, hashFunc, err := provider.GetVindexMetadata("testdb", "config")
 		require.NoError(t, err)
-		assert.Equal(t, "", column)
+		assert.Empty(t, column)
 		assert.Nil(t, hashFunc)
 	})
 }

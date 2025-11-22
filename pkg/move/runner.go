@@ -34,7 +34,7 @@ type Runner struct {
 	source          *sql.DB
 	sourceConfig    *mysql.Config
 	targets         []applier.Target // Combined DB, Config, and KeyRange
-	status          status.State
+	status          status.State     // must use atomic to get/set
 	checkpointTable *table.TableInfo
 
 	sourceTables []*table.TableInfo
@@ -75,11 +75,6 @@ func (r *Runner) Close() error {
 	}
 	if r.replClient != nil {
 		r.replClient.Close()
-	}
-	if r.applier != nil {
-		if err := r.applier.Close(); err != nil {
-			r.logger.Error("failed to close applier in Runner.Close()", "error", err)
-		}
 	}
 	for _, target := range r.targets {
 		target.DB.Close()
@@ -132,7 +127,8 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 	return tables, rows.Err()
 }
 
-// checkTargetEmpty checks that all target databases are empty.
+// checkTargetEmpty checks that the target database is empty.
+// If any tables exist it returns an error and the move fails.
 func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 	for i, target := range r.targets {
 		rows, err := target.DB.QueryContext(ctx, "SHOW TABLES")
@@ -172,33 +168,6 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 	return nil
 }
 
-// createApplier creates the appropriate applier based on the number of targets.
-// Note: The applier is NOT started here. The copier will start it when it begins copying.
-func (r *Runner) createApplier() (applier.Applier, error) {
-	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
-		// Single target - use SingleTargetApplier
-		appl := applier.NewSingleTargetApplier(r.targets[0].DB, r.dbConfig, r.logger)
-		r.logger.Info("Created SingleTargetApplier")
-		return appl, nil
-	}
-
-	// Multiple targets - use ShardedApplier
-	r.logger.Info("Creating ShardedApplier", "targetCount", len(r.targets))
-
-	// Create the ShardedApplier
-	appl, err := applier.NewShardedApplier(
-		r.targets,
-		r.dbConfig,
-		r.logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ShardedApplier: %w", err)
-	}
-
-	r.logger.Info("ShardedApplier created successfully")
-	return appl, nil
-}
-
 func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
@@ -216,16 +185,15 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		if err := r.replClient.AddSubscription(src, nil, copyChunker); err != nil {
 			return err
 		}
-
 		checksumChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-
 		copyChunkers = append(copyChunkers, copyChunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 
+	// Then create a multi chunker of all chunkers.
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
@@ -262,10 +230,12 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		Pos:  uint32(binlogPos),
 	})
 
+	// Open chunker at the specified watermark
 	if err := r.copyChunker.OpenAtWatermark(copierWatermark); err != nil {
 		return err
 	}
 
+	// Start the replication client.
 	if err := r.replClient.Run(ctx); err != nil {
 		return err
 	}
@@ -277,6 +247,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 func (r *Runner) setup(ctx context.Context) error {
 	var err error
+	// Fetch a list of tables from the source.
 	r.logger.Info("Fetching source table list")
 	if r.sourceTables, err = r.getTables(ctx, r.source); err != nil {
 		return err
@@ -353,20 +324,19 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		if err := r.replClient.AddSubscription(src, nil, copyChunker); err != nil {
 			return err
 		}
-
 		checksumChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-
 		copyChunkers = append(copyChunkers, copyChunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 
+	// Then create a multi chunker of all chunkers.
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
-	// Create copier with the shared applier
+	// Create a copier that reads from the multi chunker and uses the shared applier.
 	var err error
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
@@ -382,10 +352,12 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		return err
 	}
 
+	// Then open the multi chunker.
 	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
 
+	// Start the replication client.
 	if err := r.replClient.Run(ctx); err != nil {
 		return err
 	}
@@ -421,16 +393,14 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	r.dbConfig.ForceKill = true
+	r.dbConfig.ForceKill = true // in move we always use force kill; it's new code.
 	r.logger.Warn("the move command is experimental and not yet safe for production use.")
-
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	if err != nil {
 		return err
 	}
 	defer r.source.Close()
 
-	// Parse source config
 	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
 	if err != nil {
 		return err
@@ -554,6 +524,9 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
 	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+	//go r.tableChangeNotification(ctx)
+
+	// Start go routines for checkpointing and dumping status
 	status.WatchTask(ctx, r, r.logger)
 }
 
@@ -564,6 +537,7 @@ func (r *Runner) Status() string {
 	}
 	switch state {
 	case status.CopyRows:
+		// Status for copy rows
 		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v",
 			r.status.Get().String(),
 			r.copier.GetProgress(),
@@ -581,12 +555,15 @@ func (r *Runner) Status() string {
 			sentinelWaitLimit,
 		)
 	case status.ApplyChangeset, status.PostChecksum:
+		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
+		// proceeding to the checksum and then the final cutover.
 		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s",
 			r.status.Get().String(),
 			r.replClient.GetDeltaLen(),
 			time.Since(r.startTime).Round(time.Second),
 		)
 	case status.Checksum:
+		// This could take a while if it's a large table.
 		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s",
 			r.status.Get().String(),
 			r.checker.GetProgress(),
@@ -604,13 +581,20 @@ func (r *Runner) SetLogger(logger *slog.Logger) {
 }
 
 func (r *Runner) prepareForCutover(ctx context.Context) error {
+	// Disable the periodic flush and flush all pending events.
+	// We want it disabled for ANALYZE TABLE and acquiring a table lock
+	// *but* it will be started again briefly inside of the checksum
+	// runner to ensure that the lag does not grow too long.
 	r.replClient.StopPeriodicFlush()
 	r.status.Set(status.ApplyChangeset)
 	if err := r.replClient.Flush(ctx); err != nil {
 		return err
 	}
 
-	// Run ANALYZE TABLE on all targets
+	// Run ANALYZE TABLE to update the statistics on the new table.
+	// This is required so on cutover plans don't go sideways, which
+	// is at elevated risk because the batch loading can cause statistics
+	// to be out of date.
 	r.status.Set(status.AnalyzeTable)
 	r.logger.Info("Running ANALYZE TABLE on all targets")
 	for i, target := range r.targets {
@@ -706,10 +690,12 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 	return sentinelTableExists > 0, nil
 }
 
+// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped
 func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	if sentinelExists, err := r.sentinelTableExists(ctx); err != nil {
 		return err
 	} else if !sentinelExists {
+		// Sentinel table does not exist, we can proceed with cutover
 		return nil
 	}
 
@@ -718,11 +704,10 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 		"wait-limit", sentinelWaitLimit)
 
 	timer := time.NewTimer(sentinelWaitLimit)
-	defer timer.Stop()
+	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
 
 	ticker := time.NewTicker(sentinelCheckInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case t := <-ticker.C:
@@ -745,9 +730,8 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
-		return status.ErrWatermarkNotReady
+		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
-
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum {
 		if r.checker != nil {
@@ -757,12 +741,14 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			}
 		}
 	}
-
+	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
+	// when using the composite chunker are based on actual user-data.
+	// We believe this is OK but may change it in the future. Please do not
+	// add any other fields to this log line.
 	r.logger.Info("checkpoint",
 		"low-watermark", copierWatermark,
 		"log-file", binlog.Name,
 		"log-pos", binlog.Pos)
-
 	err = dbconn.Exec(ctx, r.source, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement) VALUES (%?, %?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
@@ -780,4 +766,30 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 
 func (r *Runner) Cancel() {
 	r.cancelFunc()
+}
+
+// createApplier creates the appropriate applier based on the number of targets.
+// Note: The applier is NOT started here. The copier will start it when it begins copying.
+func (r *Runner) createApplier() (applier.Applier, error) {
+	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
+		// Single target - use SingleTargetApplier
+		appl := applier.NewSingleTargetApplier(r.targets[0].DB, r.dbConfig, r.logger)
+		r.logger.Info("Created SingleTargetApplier")
+		return appl, nil
+	}
+
+	// Multiple targets - use ShardedApplier
+	r.logger.Info("Creating ShardedApplier", "targetCount", len(r.targets))
+
+	// Create the ShardedApplier
+	appl, err := applier.NewShardedApplier(
+		r.targets,
+		r.dbConfig,
+		r.logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ShardedApplier: %w", err)
+	}
+	r.logger.Info("ShardedApplier created successfully")
+	return appl, nil
 }

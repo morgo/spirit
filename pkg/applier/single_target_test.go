@@ -71,7 +71,9 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	// Start the applier
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Close()
+	defer func() {
+		assert.NoError(t, applier.Stop())
+	}()
 
 	// Prepare test data
 	testRows := [][]any{
@@ -179,7 +181,7 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Close()
+	defer applier.Stop()
 
 	// Apply empty rows
 	chunk := &table.Chunk{
@@ -230,7 +232,9 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Close()
+	defer func() {
+		assert.NoError(t, applier.Stop())
+	}()
 
 	// Create 2500 rows (will span 3 chunklets of 1000 each)
 	rowCount := 2500
@@ -298,7 +302,7 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Close()
+	defer applier.Stop()
 
 	// Launch multiple concurrent Apply operations
 	numBatches := 10
@@ -647,7 +651,7 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 
 	err = applier.Start(cancelCtx)
 	require.NoError(t, err)
-	defer applier.Close()
+	defer applier.Stop()
 
 	// Create a large dataset
 	testRows := make([][]any, 1000)
@@ -703,7 +707,7 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Close()
+	defer applier.Stop()
 
 	// Apply some work
 	testRows := [][]any{{int64(1)}, {int64(2)}}
@@ -779,7 +783,7 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	assert.True(t, callbackInvoked.Load())
 
 	// Close the applier
-	err = applier.Close()
+	err = applier.Stop()
 	require.NoError(t, err)
 
 	// Verify data was written

@@ -48,8 +48,8 @@ type Applier interface {
 	// Wait blocks until all pending work is complete and all callbacks have been invoked
 	Wait(ctx context.Context) error
 
-	// Close shuts down the applier gracefully
-	Close() error
+	// Stops the applier workers
+	Stop() error
 }
 
 // LogicalRow represents the current state of a row in the subscription buffer.

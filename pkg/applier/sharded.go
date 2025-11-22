@@ -150,10 +150,10 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 	a.logger.Info("starting ShardedApplier", "shardCount", len(a.shards))
 
 	// Start workers for each shard
-	for _, shard := range a.shards {
-		for range shard.writeWorkersCount {
+	for i := range a.shards {
+		for range a.shards[i].writeWorkersCount {
 			a.wg.Add(1)
-			go a.writeWorker(workerCtx, shard)
+			go a.writeWorker(workerCtx, a.shards[i])
 		}
 	}
 
@@ -310,8 +310,8 @@ func (a *ShardedApplier) Wait(ctx context.Context) error {
 	}
 }
 
-// Close signals the applier to shut down gracefully
-func (a *ShardedApplier) Close() error {
+// Stop signals the applier to shut down gracefully
+func (a *ShardedApplier) Stop() error {
 	if a.cancelFunc != nil {
 		a.cancelFunc()
 	}

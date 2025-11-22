@@ -47,7 +47,6 @@ type SingleTargetApplier struct {
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
-	closeOnce  sync.Once // Ensures Close() is idempotent
 }
 
 // rowData represents a single row with all its column values
@@ -189,18 +188,15 @@ func (a *SingleTargetApplier) Wait(ctx context.Context) error {
 	}
 }
 
-// Close signals the applier to shut down gracefully
+// Stop signals the applier to shut down gracefully
 // This does not control the synchronous methods like UpsertRows/DeleteKeys,
-// which can continue after Close() is called.
-// This method is idempotent and can be called multiple times safely.
-func (a *SingleTargetApplier) Close() error {
-	a.closeOnce.Do(func() {
-		if a.cancelFunc != nil {
-			a.cancelFunc()
-		}
-		close(a.chunkletBuffer)
-		a.wg.Wait()
-	})
+// which can continue after Stop() is called.
+func (a *SingleTargetApplier) Stop() error {
+	if a.cancelFunc != nil {
+		a.cancelFunc()
+	}
+	close(a.chunkletBuffer)
+	a.wg.Wait()
 	return nil
 }
 

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -64,7 +66,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 	`
 
 	// Create table in source
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err = sourceDB.ExecContext(ctx, createTableSQL)
 	require.NoError(t, err)
 
@@ -105,7 +107,9 @@ func TestShardedApplierIntegration(t *testing.T) {
 	// Start the applier
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Close()
+	defer func() {
+		assert.NoError(t, applier.Stop())
+	}()
 
 	// Prepare test data - 10 rows with alternating user_ids
 	testRows := [][]any{
@@ -128,14 +132,17 @@ func TestShardedApplierIntegration(t *testing.T) {
 	}
 
 	// Apply the rows
-	callbackInvoked := false
-	var callbackAffectedRows int64
+	var callbackInvoked atomic.Bool
+	var callbackAffectedRows atomic.Int64
+	var callbackErrMu sync.Mutex
 	var callbackErr error
 
 	callback := func(affectedRows int64, err error) {
-		callbackInvoked = true
-		callbackAffectedRows = affectedRows
+		callbackInvoked.Store(true)
+		callbackAffectedRows.Store(affectedRows)
+		callbackErrMu.Lock()
 		callbackErr = err
+		callbackErrMu.Unlock()
 	}
 
 	err = applier.Apply(t.Context(), chunk, testRows, callback)
@@ -146,9 +153,11 @@ func TestShardedApplierIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify callback was invoked
-	assert.True(t, callbackInvoked, "Callback should have been invoked")
+	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked")
+	callbackErrMu.Lock()
 	assert.NoError(t, callbackErr, "Callback should not have an error")
-	assert.Equal(t, int64(10), callbackAffectedRows, "Should have affected 10 rows")
+	callbackErrMu.Unlock()
+	assert.Equal(t, int64(10), callbackAffectedRows.Load(), "Should have affected 10 rows")
 
 	// Verify data distribution across shards
 	// Based on our hash function:
@@ -174,7 +183,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 	// Verify which rows went where
 	rows, err := target1DB.QueryContext(t.Context(), "SELECT user_id FROM users ORDER BY user_id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var shard0UserIDs []int64
 	for rows.Next() {
 		var userID int64
@@ -321,6 +330,7 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 		// Verify the correct rows remain
 		rows, err := db.QueryContext(t.Context(), "SELECT id FROM users ORDER BY id")
 		require.NoError(t, err)
+		defer func() { _ = rows.Close() }()
 		var ids []int64
 		for rows.Next() {
 			var id int64
@@ -328,7 +338,6 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 			require.NoError(t, err)
 			ids = append(ids, id)
 		}
-		rows.Close()
 		require.NoError(t, rows.Err())
 
 		assert.Equal(t, []int64{1, 3, 5}, ids, "Shard %d should have ids 1, 3, 5 remaining", i)
@@ -583,7 +592,7 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	defer target2DB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, user_id INT, name VARCHAR(100))`
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err = target1DB.ExecContext(ctx, createTableSQL)
 	require.NoError(t, err)
 	_, err = target2DB.ExecContext(ctx, createTableSQL)

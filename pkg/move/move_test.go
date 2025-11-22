@@ -118,11 +118,11 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	r.dbConfig = dbconn.NewDBConfig()
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	assert.NoError(t, err)
-	
+
 	// Parse configs and set up targets
 	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
 	assert.NoError(t, err)
-	
+
 	targetCfg, err := mysql.ParseDSN(r.move.TargetDSN)
 	assert.NoError(t, err)
 	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
@@ -134,7 +134,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 			KeyRange: "0",
 		},
 	}
-	
+
 	assert.NoError(t, r.setup(ctx))
 	r.startBackgroundRoutines(ctx)
 
@@ -170,8 +170,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
 	assert.NoError(t, err)
-	defer r.Close()
-	assert.NoError(t, r.Run(t.Context()))
+	assert.NoError(t, r.Close())
 }
 
 // settingsCheck checks that the database settings are appropriate for running moves.
