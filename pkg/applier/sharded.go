@@ -115,7 +115,7 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 	}
 
 	// Validate that key ranges do not overlap
-	for i := 0; i < len(shards); i++ {
+	for i := range shards {
 		for j := i + 1; j < len(shards); j++ {
 			if shards[i].keyRange.overlaps(shards[j].keyRange) {
 				return nil, fmt.Errorf("key ranges overlap: shard %d (%s: [0x%016x, 0x%016x)) and shard %d (%s: [0x%016x, 0x%016x))",
@@ -416,7 +416,7 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	)
 
 	a.logger.Debug("writing chunklet to shard", "shardID", shard.shardID,
-		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.QuotedName)
+		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
 
 	// Execute the batch insert on this shard's database
 	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, true, shard.dbConfig, query)
@@ -557,7 +557,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 		go func(shardID int) {
 			defer wg.Done()
 
-			a.logger.Debug("broadcasting delete to shard", "shardID", shardID, "keyCount", len(keys), "table", targetTable.QuotedName)
+			a.logger.Debug("broadcasting delete to shard", "shardID", shardID, "keyCount", len(keys), "table", targetTable.TableName)
 
 			var affected int64
 			var err error
@@ -752,7 +752,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 				strings.Join(updateClauses, ", "),
 			)
 
-			a.logger.Debug("executing upsert on shard", "shardID", sid, "rowCount", len(valuesClauses), "table", targetTable.QuotedName)
+			a.logger.Debug("executing upsert on shard", "shardID", sid, "rowCount", len(valuesClauses), "table", targetTable.TableName)
 
 			var affected int64
 			var err error

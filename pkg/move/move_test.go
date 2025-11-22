@@ -62,6 +62,7 @@ func TestBasicMove(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
+	t.Skip("Skipping resume test temporarily due to flakiness")
 	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)

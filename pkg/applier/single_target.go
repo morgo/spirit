@@ -278,12 +278,12 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 
 	// Build the INSERT statement
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.QuotedName,
+		chunkletData.chunk.NewTable.TableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
-	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.QuotedName)
+	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
 
 	// Execute the batch insert
 	result, err := dbconn.RetryableTransaction(ctx, a.writeDB, true, a.dbConfig, query)
@@ -379,12 +379,12 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 
 	// Build DELETE statement
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-		targetTable.QuotedName,
+		targetTable.TableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		strings.Join(pkValues, ","),
 	)
 
-	a.logger.Debug("executing delete", "keyCount", len(keys), "table", targetTable.QuotedName)
+	a.logger.Debug("executing delete", "keyCount", len(keys), "table", targetTable.TableName)
 
 	// Execute under lock if provided
 	if lock != nil {
@@ -478,13 +478,13 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 	}
 
 	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		targetTable.QuotedName,
+		targetTable.TableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 		strings.Join(updateClauses, ", "),
 	)
 
-	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", targetTable.QuotedName)
+	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", targetTable.TableName)
 
 	// Execute under lock if provided
 	if lock != nil {

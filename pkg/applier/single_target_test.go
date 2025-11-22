@@ -178,10 +178,12 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
 	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
-
+	// Start the applier
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Stop()
+	defer func() {
+		assert.NoError(t, applier.Stop())
+	}()
 
 	// Apply empty rows
 	chunk := &table.Chunk{
@@ -302,7 +304,9 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Stop()
+	defer func() {
+		assert.NoError(t, applier.Stop())
+	}()
 
 	// Launch multiple concurrent Apply operations
 	numBatches := 10
@@ -651,7 +655,9 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 
 	err = applier.Start(cancelCtx)
 	require.NoError(t, err)
-	defer applier.Stop()
+	defer func() {
+		_ = applier.Stop()
+	}()
 
 	// Create a large dataset
 	testRows := make([][]any, 1000)
@@ -707,7 +713,9 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
-	defer applier.Stop()
+	defer func() {
+		_ = applier.Stop()
+	}()
 
 	// Apply some work
 	testRows := [][]any{{int64(1)}, {int64(2)}}

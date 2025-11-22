@@ -1,7 +1,6 @@
 package applier
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -261,7 +260,7 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 		)
 	`
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err = sourceDB.ExecContext(ctx, createTableSQL)
 	require.NoError(t, err)
 
@@ -369,7 +368,7 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	defer target2DB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, user_id INT)`
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err = target1DB.ExecContext(ctx, createTableSQL)
 	require.NoError(t, err)
 	_, err = target2DB.ExecContext(ctx, createTableSQL)
@@ -437,7 +436,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 		)
 	`
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err = sourceDB.ExecContext(ctx, createTableSQL)
 	require.NoError(t, err)
 
@@ -777,7 +776,7 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	defer target2DB.Close()
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, user_id INT)`
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err = target1DB.ExecContext(ctx, createTableSQL)
 	require.NoError(t, err)
 	_, err = target2DB.ExecContext(ctx, createTableSQL)
