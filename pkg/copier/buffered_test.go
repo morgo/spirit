@@ -33,7 +33,11 @@ func TestBufferedCopier(t *testing.T) {
 
 	cfg := NewCopierDefaultConfig()
 	cfg.UseExperimentalBufferedCopier = true
-	cfg.Applier = applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), slog.Default())
+	target := applier.Target{
+		DB:       db,
+		KeyRange: "0",
+	}
+	cfg.Applier = applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), slog.Default())
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
 
