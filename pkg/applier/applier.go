@@ -2,10 +2,21 @@ package applier
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
+	"github.com/go-sql-driver/mysql"
 )
+
+// Target represents a shard target with its database connection, configuration, and key range.
+// Key ranges are expressed as Vitess-style strings (e.g., "-80", "80-", "80-c0").
+// An empty string or "0" means all key space (unsharded).
+type Target struct {
+	DB       *sql.DB
+	Config   *mysql.Config
+	KeyRange string // Vitess-style key range: "-80", "80-", "80-c0", or "0" for unsharded
+}
 
 // ApplyCallback is invoked when rows have been safely flushed to the target(s).
 // affectedRows is the total number of rows affected across all targets.
@@ -50,6 +61,12 @@ type Applier interface {
 
 	// Stops the applier workers
 	Stop() error
+
+	// GetTargets returns target information for direct database access.
+	// This is used by operations like checksum that need to query targets directly.
+	// For SingleTargetApplier, this returns a single target.
+	// For ShardedApplier, this returns all shards.
+	GetTargets() []Target
 }
 
 // LogicalRow represents the current state of a row in the subscription buffer.

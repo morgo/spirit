@@ -44,7 +44,7 @@ type Runner struct {
 	copyChunker       table.Chunker
 	checksumChunker   table.Chunker
 	copier            copier.Copier
-	checker           *checksum.Checker
+	checker           *checksum.SingleChecker
 	checksumWatermark string
 
 	// Track some key statistics.
@@ -621,7 +621,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 			TargetChunkTime: r.move.TargetChunkTime,
 			DBConfig:        r.dbConfig,
 			Logger:          r.logger,
-			WriteDB:         r.targets[0].DB, // This needs to be refactored to use applier
+			Applier: 	   r.applier, // Use the shared applier
 			FixDifferences:  true,
 		})
 		if err != nil {

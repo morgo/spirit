@@ -15,17 +15,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/go-sql-driver/mysql"
 )
-
-// Target represents a shard target with its database connection, configuration, and key range.
-// Key ranges are expressed as Vitess-style strings (e.g., "-80", "80-", "80-c0").
-// An empty string means all key space (unsharded).
-type Target struct {
-	DB       *sql.DB
-	Config   *mysql.Config
-	KeyRange string // Vitess-style key range: "-80", "80-", "80-c0"
-}
 
 // ShardedApplier applies rows to multiple target databases based on a Vitess-style vindex.
 // It extracts a specific column value from each row, applies a hash function to it,
@@ -36,6 +26,7 @@ type Target struct {
 // in multi-table migrations.
 type ShardedApplier struct {
 	shards   []*shardTarget
+	targets  []Target // Original target configurations
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
 
@@ -136,6 +127,7 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 
 	return &ShardedApplier{
 		shards:      shards,
+		targets:     targets,
 		dbConfig:    dbConfig,
 		logger:      logger,
 		pendingWork: make(map[int64]*pendingWork),
@@ -788,4 +780,10 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 	}
 
 	return totalAffected, nil
+}
+
+// GetTargets returns the target database configurations for direct access.
+// This is used by operations like checksum that need to query targets directly.
+func (a *ShardedApplier) GetTargets() []Target {
+	return a.targets
 }

@@ -51,7 +51,7 @@ type Runner struct {
 	copyChunker  table.Chunker // the chunker for copying
 	copyDuration time.Duration // how long the copy took
 
-	checker         *checksum.Checker
+	checker         checksum.Checker
 	checksumChunker table.Chunker // the chunker for checksum
 
 	ddlNotification chan string
@@ -322,7 +322,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		"inplace-ddl", r.usedInplaceDDL,
 		"total-chunks", copiedChunks,
 		"copy-rows-time", r.copyDuration.Round(time.Second),
-		"checksum-time", r.checker.ExecTime.Round(time.Second),
+		"checksum-time", r.checker.ExecTime().Round(time.Second),
 		"total-time", time.Since(r.startTime).Round(time.Second),
 		"conns-in-use", r.db.Stats().InUse,
 	)

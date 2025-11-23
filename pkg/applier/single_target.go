@@ -27,6 +27,7 @@ const (
 // completion to invoke callbacks when all chunklets for a set of rows are done.
 type SingleTargetApplier struct {
 	writeDB  *sql.DB
+	target   Target // Target configuration for GetTargets()
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
 
@@ -79,7 +80,12 @@ type pendingWork struct {
 // NewSingleTargetApplier creates a new SingleTargetApplier
 func NewSingleTargetApplier(writeDB *sql.DB, dbConfig *dbconn.DBConfig, logger *slog.Logger) *SingleTargetApplier {
 	return &SingleTargetApplier{
-		writeDB:             writeDB,
+		writeDB: writeDB,
+		target: Target{
+			DB:       writeDB,
+			Config:   nil, // Config is optional and may not be available
+			KeyRange: "0", // Single target uses unsharded key range
+		},
 		dbConfig:            dbConfig,
 		logger:              logger,
 		chunkletBuffer:      make(chan chunklet, defaultBufferSize),
@@ -502,4 +508,10 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 	}
 
 	return affectedRows, nil
+}
+
+// GetTargets returns the target database configuration for direct access.
+// This is used by operations like checksum that need to query targets directly.
+func (a *SingleTargetApplier) GetTargets() []Target {
+	return []Target{a.target}
 }
