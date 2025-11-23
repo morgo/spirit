@@ -341,7 +341,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 			if c.trxPool != nil {
 				c.trxPool.Close()
 			}
-			for j := 0; j < i; j++ {
+			for j := range i {
 				if c.targetTrxPools[j] != nil {
 					c.targetTrxPools[j].Close()
 				}
@@ -456,9 +456,9 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		return err
 	}
 	// Close all target transaction pools
-	for i, targetTrxPool := range c.targetTrxPools {
-		if targetTrxPool != nil {
-			if err := targetTrxPool.Close(); err != nil {
+	for i := range c.targetTrxPools {
+		if c.targetTrxPools[i] != nil {
+			if err := c.targetTrxPools[i].Close(); err != nil {
 				c.logger.Error("failed to close target transaction pool", "targetID", i, "error", err)
 				// Continue closing other pools even if one fails
 			}
