@@ -44,7 +44,7 @@ type Runner struct {
 	copyChunker       table.Chunker
 	checksumChunker   table.Chunker
 	copier            copier.Copier
-	checker           *checksum.SingleChecker
+	checker           checksum.Checker
 	checksumWatermark string
 
 	// Track some key statistics.
@@ -609,29 +609,26 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// For now, we skip the checksum phase
 	r.logger.Warn("Checksum is currently disabled and needs refactoring for multiple targets")
 
-	/*
-		if err := r.checksumChunker.Open(); err != nil {
-			return err
-		}
-		defer r.checksumChunker.Close()
+	if err := r.checksumChunker.Open(); err != nil {
+		return err
+	}
+	defer r.checksumChunker.Close()
 
-		var err error
-		r.checker, err = checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
-			Concurrency:     r.move.Threads,
-			TargetChunkTime: r.move.TargetChunkTime,
-			DBConfig:        r.dbConfig,
-			Logger:          r.logger,
-			Applier: 	   r.applier, // Use the shared applier
-			FixDifferences:  true,
-		})
-		if err != nil {
-			return err
-		}
-		r.status.Set(status.Checksum)
-		return r.checker.Run(ctx)
-	*/
+	var err error
+	r.checker, err = checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+		Concurrency:     r.move.Threads,
+		TargetChunkTime: r.move.TargetChunkTime,
+		DBConfig:        r.dbConfig,
+		Logger:          r.logger,
+		Applier:         r.applier, // Use the shared applier
+		FixDifferences:  true,
+	})
+	if err != nil {
+		return err
+	}
+	r.status.Set(status.Checksum)
+	return r.checker.Run(ctx)
 
-	return nil
 }
 
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {

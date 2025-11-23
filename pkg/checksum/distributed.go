@@ -142,17 +142,31 @@ func (c *DistributedChecker) GetProgress() string {
 }
 
 // replaceChunk recopies the data from source to targets for a given chunk.
-// In the distributed case, we use the copier's Apply method which will
-// handle distribution across multiple targets via the applier.
+// In the distributed case, we first delete the entire chunk range from all targets,
+// then use Apply to recopy the data from the source. This handles both missing rows
+// and extra rows on the destination.
 func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) error {
-	c.logger.Warn("recopying chunk via applier", "chunk", chunk.String())
+	c.logger.Warn("recopying chunk via DELETE + Apply", "chunk", chunk.String())
 
 	// We further prevent the chance of deadlocks from the recopying process by only re-copying one chunk at a time.
 	// We may revisit this in future, but since conflicts are expected to be low, it should be fine for now.
 	c.recopyLock.Lock()
 	defer c.recopyLock.Unlock()
 
-	// Read all rows from the source chunk
+	// Step 1: Delete all rows in the chunk range from all targets
+	// This ensures we remove any extra rows that shouldn't be there
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.NewTable.QuotedName, chunk.String())
+
+	targets := c.applier.GetTargets()
+	for i, target := range targets {
+		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String())
+		_, err := dbconn.RetryableTransaction(ctx, target.DB, false, c.dbConfig, deleteStmt)
+		if err != nil {
+			return fmt.Errorf("failed to delete chunk from target %d: %w", i, err)
+		}
+	}
+
+	// Step 2: Read all rows from the source chunk
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		strings.Join(chunk.Table.Columns, ", "),
 		chunk.Table.QuotedName,
@@ -185,32 +199,34 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 
 	c.logger.Info("recopying chunk via applier", "chunk", chunk.String(), "rowCount", len(rowData))
 
-	// Use the applier to write the rows to all targets
+	// Step 3: Use the applier to write the rows to all targets
 	// The applier will handle distribution across shards if needed
-	done := make(chan error, 1)
-	err = c.applier.Apply(ctx, chunk, rowData, func(affectedRows int64, err error) {
+	if len(rowData) > 0 {
+		done := make(chan error, 1)
+		err = c.applier.Apply(ctx, chunk, rowData, func(affectedRows int64, err error) {
+			if err != nil {
+				c.logger.Error("failed to recopy chunk via applier", "error", err)
+				done <- err
+			} else {
+				c.logger.Debug("successfully recopied chunk via applier", "affectedRows", affectedRows)
+				done <- nil
+			}
+		})
 		if err != nil {
-			c.logger.Error("failed to recopy chunk via applier", "error", err)
-			done <- err
-		} else {
-			c.logger.Debug("successfully recopied chunk via applier", "affectedRows", affectedRows)
-			done <- nil
+			return fmt.Errorf("failed to initiate recopy via applier: %w", err)
 		}
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initiate recopy via applier: %w", err)
-	}
 
-	// Wait for the apply to complete
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("recopy via applier failed: %w", err)
+		// Wait for the apply to complete
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("recopy via applier failed: %w", err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-	case <-ctx.Done():
-		return ctx.Err()
 	}
-
+	c.logger.Info("successfully recopied chunk", "chunk", chunk.String(), "rowCount", len(rowData))
 	return nil
 }
 
