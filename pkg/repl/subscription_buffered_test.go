@@ -85,13 +85,18 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
+	target := applier.Target{
+		DB:       db,
+		KeyRange: "0",
+		Config:   cfg,
+	}
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), logger),
+		Applier:                    applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger),
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -134,13 +139,18 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
+	target := applier.Target{
+		DB:       db,
+		KeyRange: "0",
+		Config:   cfg,
+	}
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(db, dbconn.NewDBConfig(), logger),
+		Applier:                    applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger),
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))
