@@ -98,9 +98,30 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, err
 		}
+		if tableName == checkpointTableName || tableName == sentinelTableName {
+			continue // Skip if the table name is the checkpoint or sentinel table
+		}
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
 		if err := tableInfo.SetInfo(ctx); err != nil {
 			return nil, err
+		}
+
+		// If a VindexProvider is configured, get vindex metadata for this table.
+		// This is used for resharding operations where rows need to be distributed
+		// across multiple target shards based on a sharding key.
+		if r.move.VindexProvider != nil {
+			vindexColumn, vindexFunc, err := r.move.VindexProvider.GetVindexMetadata(r.sourceConfig.DBName, tableName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get vindex metadata for table %s: %w", tableName, err)
+			}
+			// Only set if vindex metadata is available (could be empty for some tables)
+			if vindexColumn != "" && vindexFunc != nil {
+				tableInfo.VindexColumn = vindexColumn
+				tableInfo.VindexFunc = vindexFunc
+				r.logger.Info("configured vindex for table",
+					"table", tableName,
+					"vindexColumn", vindexColumn)
+			}
 		}
 		tables = append(tables, tableInfo)
 	}
@@ -152,34 +173,37 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	var err error
-	// For each table create a chunker and add a subscription to the replication client.
-	for _, src := range r.sourceTables {
-		dest := table.NewTableInfo(r.targets[0].DB, r.targets[0].Config.DBName, src.TableName)
-		if err := dest.SetInfo(ctx); err != nil {
-			// An error here could indicate that a table in the destination is missing,
-			// i.e. the move cannot be resumed because a new table was created.
-			return err
-		}
 
-		// We don't need to compare the complete structure, since incompatible datatype
-		// changes will be detected from the checksum. We just need to make sure
-		// when the checksum intersects columns they are the same.
-		if !slices.Equal(src.Columns, dest.Columns) {
-			return fmt.Errorf("source and target table structures do not match for table '%s'", src.TableName)
-		}
-		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+	// For each table and each target, create a chunker and add a subscription
+	// The destination is nil because this is used for table structure checking, which is unused in move
+	// We also have the problem that the dest could be multiple destinations (sharded) which makes it
+	// ambiguous.
+	for _, src := range r.sourceTables {
+		copyChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(src, dest, copyChunker); err != nil {
+		if err := r.replClient.AddSubscription(src, nil, copyChunker); err != nil {
 			return err
 		}
-		checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		checksumChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
 		copyChunkers = append(copyChunkers, copyChunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
+
+		// Perform an exhaustive check to ensure that the columns
+		// match between source and target for all tables, on all targets.
+		for i, target := range r.targets {
+			targetTable := table.NewTableInfo(target.DB, target.Config.DBName, src.TableName)
+			if err := targetTable.SetInfo(ctx); err != nil {
+				return fmt.Errorf("failed to get table info for target %d table %s: %w", i, src.TableName, err)
+			}
+			if !slices.Equal(src.Columns, targetTable.Columns) {
+				return fmt.Errorf("source and target table structures do not match for table '%s' on target %d", src.TableName, i)
+			}
+		}
 	}
 
 	// Then create a multi chunker of all chunkers.
@@ -206,12 +230,12 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// was created by either an earlier or later version of spirit, in which case
 	// we do not support recovery.
 	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
-		r.targets[0].Config.DBName, checkpointTableName)
+		r.sourceConfig.DBName, checkpointTableName)
 	var copierWatermark, binlogName, statement string
 	var id, binlogPos int
-	err = r.targets[0].DB.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
+	err = r.source.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
-		return fmt.Errorf("could not read from table '%s', err:%v", checkpointTableName, err)
+		return fmt.Errorf("could not read from checkpoint table '%s' on source: %v", checkpointTableName, err)
 	}
 
 	r.replClient.SetFlushedPos(gomysql.Position{
@@ -229,7 +253,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	r.checkpointTable = table.NewTableInfo(r.targets[0].DB, r.targets[0].Config.DBName, checkpointTableName)
+	r.checkpointTable = table.NewTableInfo(r.source, r.sourceConfig.DBName, checkpointTableName)
 	r.usedResumeFromCheckpoint = true
 	return nil
 }
@@ -265,8 +289,9 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	if err := r.checkTargetEmpty(ctx); err != nil {
 		// There are existing tables there.
-		// Optimistically try to resume from a checkpoint written
-		// to the target database. If it fails, unlike schema changes,
+		// Optimistically try to resume from a checkpoint written to the source database.
+		// The checkpoint is on the source (not target) because reshards are 1:N and the
+		// source is always guaranteed to be singular. If resume fails, unlike schema changes,
 		// the move fails because we don't want to overwrite existing data.
 		if err := r.resumeFromCheckpoint(ctx); err != nil {
 			return fmt.Errorf("target database is not empty and could not resume from checkpoint: %v", err)
@@ -285,34 +310,34 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		return err
 	}
 
-	// Create a sentinel.
+	// Create sentinel on SOURCE
 	if r.move.CreateSentinel {
 		if err := r.createSentinelTable(ctx); err != nil {
 			return err
 		}
 	}
 
+	// Create checkpoint on SOURCE
 	if err := r.createCheckpointTable(ctx); err != nil {
 		return err
 	}
 
 	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
-	var err error
-	// For each table create a chunker and add a subscription to the replication client.
+
+	// For each table and each target, create a chunker and add a subscription
+	// The destination is nil because this is used for table structure checking, which is unused in move
+	// We also have the problem that the dest could be multiple destinations (sharded) which makes it
+	// ambiguous.
 	for _, src := range r.sourceTables {
-		dest := table.NewTableInfo(r.targets[0].DB, r.targets[0].Config.DBName, src.TableName)
-		if err := dest.SetInfo(ctx); err != nil {
-			return err
-		}
-		copyChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		copyChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(src, dest, copyChunker); err != nil {
+		if err := r.replClient.AddSubscription(src, nil, copyChunker); err != nil {
 			return err
 		}
-		checksumChunker, err := table.NewChunker(src, dest, r.move.TargetChunkTime, r.logger)
+		checksumChunker, err := table.NewChunker(src, nil, r.move.TargetChunkTime, r.logger)
 		if err != nil {
 			return err
 		}
@@ -325,6 +350,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
 	// Create a copier that reads from the multi chunker and uses the shared applier.
+	var err error
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.move.Threads,
 		TargetChunkTime:               r.move.TargetChunkTime,
@@ -352,12 +378,13 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	return nil
 }
 
+// createCheckpointTable creates checkpoint table on SOURCE (not target).
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	// drop checkpoint if we've decided to call this func.
-	if err := dbconn.Exec(ctx, r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.targets[0].Config.DBName, checkpointTableName); err != nil {
+	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
 	}
-	if err := dbconn.Exec(ctx, r.targets[0].DB, `CREATE TABLE %n.%n (
+	if err := dbconn.Exec(ctx, r.source, `CREATE TABLE %n.%n (
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
@@ -365,10 +392,10 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	binlog_pos INT,
 	statement TEXT
 	)`,
-		r.targets[0].Config.DBName, checkpointTableName); err != nil {
+		r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
 	}
-	r.checkpointTable = table.NewTableInfo(r.targets[0].DB, r.targets[0].Config.DBName, checkpointTableName)
+	r.checkpointTable = table.NewTableInfo(r.source, r.sourceConfig.DBName, checkpointTableName)
 	return nil
 }
 
@@ -463,7 +490,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	r.logger.Info("Checksum completed successfully, starting cutover")
-
 	// Create a cutover.
 	r.status.Set(status.CutOver)
 	cutover, err := NewCutOver(r.source, r.sourceTables, r.cutoverFunc, r.replClient, r.dbConfig, r.logger)
@@ -474,7 +500,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	// Delete checkpoint table
-	if err := dbconn.Exec(ctx, r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.targets[0].Config.DBName, checkpointTableName); err != nil {
+	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
 	}
 	r.logger.Info("Move operation complete.")
@@ -567,9 +593,11 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// to be out of date.
 	r.status.Set(status.AnalyzeTable)
 	r.logger.Info("Running ANALYZE TABLE")
-	for _, tbl := range r.sourceTables {
-		if err := dbconn.Exec(ctx, r.targets[0].DB, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
-			return err
+	for _, target := range r.targets {
+		for _, tbl := range r.sourceTables {
+			if err := dbconn.Exec(ctx, target.DB, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -611,7 +639,7 @@ func (r *Runner) Progress() status.Progress {
 	case status.WaitingOnSentinelTable:
 		r.logger.Info("migration status",
 			"state", r.status.Get().String(),
-			"sentinel-table", fmt.Sprintf("%s.%s", r.targets[0].Config.DBName, sentinelTableName),
+			"sentinel-table", fmt.Sprintf("%s.%s", r.sourceConfig.DBName, sentinelTableName),
 			"total-time", time.Since(r.startTime).Round(time.Second),
 			"sentinel-wait-time", time.Since(r.sentinelWaitStartTime).Round(time.Second),
 			"sentinel-max-wait-time", sentinelWaitLimit,
@@ -629,20 +657,22 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
+// createSentinelTable creates sentinel table on SOURCE (not target).
 func (r *Runner) createSentinelTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.targets[0].Config.DBName, sentinelTableName); err != nil {
+	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, sentinelTableName); err != nil {
 		return err
 	}
-	if err := dbconn.Exec(ctx, r.targets[0].DB, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.targets[0].Config.DBName, sentinelTableName); err != nil {
+	if err := dbconn.Exec(ctx, r.source, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.sourceConfig.DBName, sentinelTableName); err != nil {
 		return err
 	}
 	return nil
 }
 
+// sentinelTableExists checks if sentinel table exists on SOURCE (not target).
 func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 	sql := "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
 	var sentinelTableExists int
-	err := r.targets[0].DB.QueryRowContext(ctx, sql, r.targets[0].Config.DBName, sentinelTableName).Scan(&sentinelTableExists)
+	err := r.source.QueryRowContext(ctx, sql, r.sourceConfig.DBName, sentinelTableName).Scan(&sentinelTableExists)
 	if err != nil {
 		return false, err
 	}
@@ -717,7 +747,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		"low-watermark", copierWatermark,
 		"log-file", binlog.Name,
 		"log-pos", binlog.Pos)
-	err = dbconn.Exec(ctx, r.targets[0].DB, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement) VALUES (%?, %?, %?, %?, %?)",
+	err = dbconn.Exec(ctx, r.source, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement) VALUES (%?, %?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		copierWatermark,
@@ -736,11 +766,28 @@ func (r *Runner) Cancel() {
 	r.cancelFunc()
 }
 
-// createApplier creates a SingleTargetApplier for the move operation.
-// For move operations, we always have a single target database.
+// createApplier creates the appropriate applier based on the number of targets.
+// Note: The applier is NOT started here. The copier will start it when it begins copying.
 func (r *Runner) createApplier() (applier.Applier, error) {
-	// For move, we always have a single target
-	appl := applier.NewSingleTargetApplier(r.targets[0], r.dbConfig, r.logger)
-	r.logger.Info("Created SingleTargetApplier for move operation")
+	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
+		// Single target - use SingleTargetApplier
+		appl := applier.NewSingleTargetApplier(r.targets[0], r.dbConfig, r.logger)
+		r.logger.Info("Created SingleTargetApplier")
+		return appl, nil
+	}
+
+	// Multiple targets - use ShardedApplier
+	r.logger.Info("Creating ShardedApplier", "targetCount", len(r.targets))
+
+	// Create the ShardedApplier
+	appl, err := applier.NewShardedApplier(
+		r.targets,
+		r.dbConfig,
+		r.logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ShardedApplier: %w", err)
+	}
+	r.logger.Info("ShardedApplier created successfully")
 	return appl, nil
 }
