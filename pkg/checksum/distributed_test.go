@@ -45,14 +45,20 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	t2 := table.NewTableInfo(dest, newDBName, "corruptt1")
 	assert.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
-
+	target := applier.Target{
+		DB:       dest,
+		KeyRange: "0",
+		Config:   destDB,
+	}
+	applier := applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger)
+	// Start the applier so its workers can process async Apply calls
 	feed := repl.NewClient(src, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
 		TargetBatchTime:            time.Second,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(dest, dbconn.NewDBConfig(), logger),
+		Applier:                    applier,
 	})
 	defer feed.Close()
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
@@ -63,9 +69,8 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	assert.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
-	// TODO: add an applier
-	// config.WriteDB = dest // there is a write DB.
 	config.FixDifferences = true
+	config.Applier = applier
 
 	checker, err := NewChecker(src, chunker, feed, config)
 	assert.Equal(t, "0/3 0.00%", checker.GetProgress())

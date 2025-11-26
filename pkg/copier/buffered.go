@@ -138,7 +138,7 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = waitErr
 	}
 
-	// Stop the applier. This will free up the gouroutines that
+	// "Stop" the applier. This will free up the gouroutines that
 	// were used for copying, but it won't close the DB connections
 	if closeErr := c.applier.Stop(); closeErr != nil && err == nil {
 		err = closeErr

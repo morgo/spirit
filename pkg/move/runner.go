@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -191,6 +192,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 		copyChunkers = append(copyChunkers, copyChunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
+
+		// Perform an exhaustive check to ensure that the columns
+		// match between source and target for all tables, on all targets.
+		for i, target := range r.targets {
+			targetTable := table.NewTableInfo(target.DB, target.Config.DBName, src.TableName)
+			if err := targetTable.SetInfo(ctx); err != nil {
+				return fmt.Errorf("failed to get table info for target %d table %s: %w", i, src.TableName, err)
+			}
+			if !slices.Equal(src.Columns, targetTable.Columns) {
+				return fmt.Errorf("source and target table structures do not match for table '%s' on target %d", src.TableName, i)
+			}
+		}
 	}
 
 	// Then create a multi chunker of all chunkers.
@@ -216,8 +229,8 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// If the structure changes, this will fail and indicate that the checkpoint
 	// was created by either an earlier or later version of spirit, in which case
 	// we do not support recovery.
-	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s` ORDER BY id DESC LIMIT 1",
-		checkpointTableName)
+	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
+		r.sourceConfig.DBName, checkpointTableName)
 	var copierWatermark, binlogName, statement string
 	var id, binlogPos int
 	err = r.source.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
@@ -309,8 +322,8 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		return err
 	}
 
-	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
-	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables)*len(r.targets))
+	copyChunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	checksumChunkers := make([]table.Chunker, 0, len(r.sourceTables))
 
 	// For each table and each target, create a chunker and add a subscription
 	// The destination is nil because this is used for table structure checking, which is unused in move
@@ -367,6 +380,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 
 // createCheckpointTable creates checkpoint table on SOURCE (not target).
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
+	// drop checkpoint if we've decided to call this func.
 	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
 	}
@@ -401,40 +415,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	defer r.source.Close()
 
-	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
+	db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
 	if err != nil {
 		return err
 	}
 
-	if r.move.TargetDSN != "" && len(r.move.Targets) > 0 {
-		return errors.New("cannot use both TargetDSN and TargetDSNs; please use only TargetDSNs for multiple targets")
+	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
+	if err != nil {
+		return err
 	}
-
-	// The authoritative config for target is the r.targets field.
-	// If we are coming in via CLI we will specify TargetDSN, which means
-	// r.targets is empty and we need to populate it.
-	if r.move.TargetDSN != "" {
-		targetCfg, err := mysql.ParseDSN(r.move.TargetDSN)
-		if err != nil {
-			return fmt.Errorf("failed to parse target DSN: %w", err)
-		}
-		targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
-		if err != nil {
-			return fmt.Errorf("failed to connect to target DSN: %w", err)
-		}
-		r.targets = []applier.Target{
-			{
-				DB:       targetDB,
-				Config:   targetCfg,
-				KeyRange: "0",
-			},
-		}
-	} else {
-		if len(r.move.Targets) == 0 {
-			return errors.New("no target databases specified")
-		}
-		r.targets = r.move.Targets
+	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+	if err != nil {
+		return err
 	}
+	r.targets = []applier.Target{{
+		KeyRange: "0",
+		DB:       db,
+		Config:   targetConfig,
+	}}
 	if err := r.setup(ctx); err != nil {
 		return err
 	}
@@ -491,8 +489,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	r.logger.Info("Preparation for cutover completed successfully, starting cutover")
-
+	r.logger.Info("Checksum completed successfully, starting cutover")
+	// Create a cutover.
 	r.status.Set(status.CutOver)
 	cutover, err := NewCutOver(r.source, r.sourceTables, r.cutoverFunc, r.replClient, r.dbConfig, r.logger)
 	if err != nil {
@@ -501,12 +499,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err = cutover.Run(ctx); err != nil {
 		return err
 	}
-
-	// Delete checkpoint table from SOURCE
+	// Delete checkpoint table
 	if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.sourceConfig.DBName, checkpointTableName); err != nil {
 		return err
 	}
-
 	r.logger.Info("Move operation complete.")
 	return nil
 }
@@ -596,31 +592,28 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	// is at elevated risk because the batch loading can cause statistics
 	// to be out of date.
 	r.status.Set(status.AnalyzeTable)
-	r.logger.Info("Running ANALYZE TABLE on all targets")
-	for i, target := range r.targets {
+	r.logger.Info("Running ANALYZE TABLE")
+	for _, target := range r.targets {
 		for _, tbl := range r.sourceTables {
-			if err := dbconn.Exec(ctx, target.DB, "ANALYZE TABLE %n", tbl.TableName); err != nil {
-				return fmt.Errorf("failed to analyze table on target %d: %w", i, err)
+			if err := dbconn.Exec(ctx, target.DB, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
+				return err
 			}
 		}
 	}
-
-	// TODO: Checksum needs to be refactored to work with multiple targets and appliers
-	// For now, we skip the checksum phase
-	r.logger.Warn("Checksum is currently disabled and needs refactoring for multiple targets")
 
 	if err := r.checksumChunker.Open(); err != nil {
 		return err
 	}
 	defer r.checksumChunker.Close()
 
+	// Perform a checksum operation
 	var err error
 	r.checker, err = checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
 		Concurrency:     r.move.Threads,
 		TargetChunkTime: r.move.TargetChunkTime,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
-		Applier:         r.applier, // Use the shared applier
+		Applier:         r.applier,
 		FixDifferences:  true,
 	})
 	if err != nil {
@@ -628,7 +621,6 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	}
 	r.status.Set(status.Checksum)
 	return r.checker.Run(ctx)
-
 }
 
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
@@ -713,6 +705,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 				return err
 			}
 			if !sentinelExists {
+				// Sentinel table has been dropped, we can proceed with cutover
 				r.logger.Info("sentinel table dropped", "time", t)
 				return nil
 			}
@@ -722,13 +715,21 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	}
 }
 
-// DumpCheckpoint writes checkpoint to SOURCE (not target).
+// DumpCheckpoint is called approximately every minute.
+// It writes the current state of the migration to the checkpoint table,
+// which can be used in recovery. Previously resuming from checkpoint
+// would always restart at the copier, but it can now also resume at
+// the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
+	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
+	// We only dump the checksumWatermark if we are in >= checksum state.
+	// We require a mutex because the checker can be replaced during
+	// operation, leaving a race condition.
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum {
 		if r.checker != nil {
@@ -770,7 +771,7 @@ func (r *Runner) Cancel() {
 func (r *Runner) createApplier() (applier.Applier, error) {
 	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
 		// Single target - use SingleTargetApplier
-		appl := applier.NewSingleTargetApplier(r.targets[0].DB, r.dbConfig, r.logger)
+		appl := applier.NewSingleTargetApplier(r.targets[0], r.dbConfig, r.logger)
 		r.logger.Info("Created SingleTargetApplier")
 		return appl, nil
 	}

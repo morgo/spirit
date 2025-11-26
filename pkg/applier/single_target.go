@@ -2,7 +2,6 @@ package applier
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -26,8 +25,7 @@ const (
 // It internally splits rows into chunklets for optimal batching and tracks
 // completion to invoke callbacks when all chunklets for a set of rows are done.
 type SingleTargetApplier struct {
-	writeDB  *sql.DB
-	target   Target // Target configuration for GetTargets()
+	target   Target
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
 
@@ -48,6 +46,11 @@ type SingleTargetApplier struct {
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
+
+	// State management to make Start/Stop idempotent
+	started    bool
+	stopped    bool
+	stateMutex sync.Mutex
 }
 
 // rowData represents a single row with all its column values
@@ -78,14 +81,9 @@ type pendingWork struct {
 }
 
 // NewSingleTargetApplier creates a new SingleTargetApplier
-func NewSingleTargetApplier(writeDB *sql.DB, dbConfig *dbconn.DBConfig, logger *slog.Logger) *SingleTargetApplier {
+func NewSingleTargetApplier(target Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) *SingleTargetApplier {
 	return &SingleTargetApplier{
-		writeDB: writeDB,
-		target: Target{
-			DB:       writeDB,
-			Config:   nil, // Config is optional and may not be available
-			KeyRange: "0", // Single target uses unsharded key range
-		},
+		target:              target,
 		dbConfig:            dbConfig,
 		logger:              logger,
 		chunkletBuffer:      make(chan chunklet, defaultBufferSize),
@@ -97,7 +95,27 @@ func NewSingleTargetApplier(writeDB *sql.DB, dbConfig *dbconn.DBConfig, logger *
 
 // Start initializes the applier's async write workers and begins processing
 // This does not control the synchronous methods like UpsertRows/DeleteKeys
+// This method is idempotent - calling it multiple times is safe.
 func (a *SingleTargetApplier) Start(ctx context.Context) error {
+	a.stateMutex.Lock()
+	defer a.stateMutex.Unlock()
+
+	// If already started, return without error
+	if a.started {
+		a.logger.Debug("SingleTargetApplier already started, skipping")
+		return nil
+	}
+
+	// If previously stopped, we need to reinitialize channels
+	if a.stopped {
+		a.logger.Info("restarting SingleTargetApplier after previous stop")
+		a.chunkletBuffer = make(chan chunklet, defaultBufferSize)
+		a.chunkletCompletions = make(chan chunkletCompletion, defaultBufferSize)
+		a.writeWorkersFinished = 0
+		a.workerIDCounter = 0
+		a.stopped = false
+	}
+
 	workerCtx, cancelFunc := context.WithCancel(ctx)
 	a.cancelFunc = cancelFunc
 
@@ -113,6 +131,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.wg.Add(1)
 	go a.feedbackCoordinator(workerCtx)
 
+	a.started = true
 	return nil
 }
 
@@ -197,12 +216,35 @@ func (a *SingleTargetApplier) Wait(ctx context.Context) error {
 // Stop signals the applier to shut down gracefully
 // This does not control the synchronous methods like UpsertRows/DeleteKeys,
 // which can continue after Stop() is called.
+// This method is idempotent - calling it multiple times is safe.
 func (a *SingleTargetApplier) Stop() error {
+	a.stateMutex.Lock()
+	defer a.stateMutex.Unlock()
+
+	// If already stopped or never started, return without error
+	if a.stopped || !a.started {
+		a.logger.Debug("SingleTargetApplier already stopped or never started, skipping")
+		return nil
+	}
+
+	a.logger.Info("stopping SingleTargetApplier")
+
+	// Cancel the context to signal workers to stop
 	if a.cancelFunc != nil {
 		a.cancelFunc()
 	}
+
+	// Close the chunklet buffer to signal no more work
 	close(a.chunkletBuffer)
+
+	// Mark as stopped before waiting to avoid deadlock
+	a.stopped = true
+	a.started = false
+
+	// Wait for all workers to finish
 	a.wg.Wait()
+
+	a.logger.Info("SingleTargetApplier stopped")
 	return nil
 }
 
@@ -292,7 +334,7 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
 
 	// Execute the batch insert
-	result, err := dbconn.RetryableTransaction(ctx, a.writeDB, true, a.dbConfig, query)
+	result, err := dbconn.RetryableTransaction(ctx, a.target.DB, true, a.dbConfig, query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute chunklet insert: %w", err)
 	}
@@ -366,17 +408,14 @@ func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
 // DeleteKeys deletes rows by their key values synchronously.
 // The keys are hashed key strings (from utils.HashKey).
 // If lock is non-nil, the delete is executed under the table lock.
-// If targetTable is nil, sourceTable is used for both (appropriate for move operations).
 func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
-
 	// For move operations, targetTable may be nil - use sourceTable for both
 	if targetTable == nil {
 		targetTable = sourceTable
 	}
-
 	// Convert hashed keys to row value constructor format
 	var pkValues []string
 	for _, key := range keys {
@@ -402,7 +441,7 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	}
 
 	// Execute as a retryable transaction
-	affectedRows, err := dbconn.RetryableTransaction(ctx, a.writeDB, false, a.dbConfig, deleteStmt)
+	affectedRows, err := dbconn.RetryableTransaction(ctx, a.target.DB, false, a.dbConfig, deleteStmt)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute delete: %w", err)
 	}
@@ -413,17 +452,14 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 // UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
 // The rows are LogicalRow structs containing the row images.
 // If lock is non-nil, the upsert is executed under the table lock.
-// If targetTable is nil, sourceTable is used for both (appropriate for move operations).
 func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
-
 	// For move operations, targetTable may be nil - use sourceTable for both
 	if targetTable == nil {
 		targetTable = sourceTable
 	}
-
 	// Get the columns that exist in both source and destination tables
 	columnList := utils.IntersectNonGeneratedColumns(sourceTable, targetTable)
 	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(sourceTable, targetTable)
@@ -502,7 +538,7 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 	}
 
 	// Execute as a retryable transaction
-	affectedRows, err := dbconn.RetryableTransaction(ctx, a.writeDB, false, a.dbConfig, upsertStmt)
+	affectedRows, err := dbconn.RetryableTransaction(ctx, a.target.DB, false, a.dbConfig, upsertStmt)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute upsert: %w", err)
 	}

@@ -62,7 +62,6 @@ func TestBasicMove(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
-	t.Skip("Skipping resume test temporarily due to flakiness")
 	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -119,23 +118,17 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	r.dbConfig = dbconn.NewDBConfig()
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	assert.NoError(t, err)
-
-	// Parse configs and set up targets
+	db, err = dbconn.New(r.move.TargetDSN, r.dbConfig)
+	assert.NoError(t, err)
 	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
 	assert.NoError(t, err)
-
-	targetCfg, err := mysql.ParseDSN(r.move.TargetDSN)
+	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
 	assert.NoError(t, err)
-	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
-	assert.NoError(t, err)
-	r.targets = []applier.Target{
-		{
-			DB:       targetDB,
-			Config:   targetCfg,
-			KeyRange: "0",
-		},
-	}
-
+	r.targets = []applier.Target{{
+		KeyRange: "0",
+		DB:       db,
+		Config:   targetConfig,
+	}}
 	assert.NoError(t, r.setup(ctx))
 	r.startBackgroundRoutines(ctx)
 
@@ -171,7 +164,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
 	assert.NoError(t, err)
-	assert.NoError(t, r.Close())
+	defer r.Close()
+	assert.NoError(t, r.Run(t.Context()))
 }
 
 // settingsCheck checks that the database settings are appropriate for running moves.

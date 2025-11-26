@@ -66,13 +66,18 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Start the applier
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
 	defer func() {
-		assert.NoError(t, applier.Stop())
+		require.NoError(t, applier.Stop())
 	}()
 
 	// Prepare test data
@@ -177,12 +182,17 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
-	// Start the applier
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
 	defer func() {
-		assert.NoError(t, applier.Stop())
+		require.NoError(t, applier.Stop())
 	}()
 
 	// Apply empty rows
@@ -230,12 +240,17 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
 	defer func() {
-		assert.NoError(t, applier.Stop())
+		require.NoError(t, applier.Stop())
 	}()
 
 	// Create 2500 rows (will span 3 chunklets of 1000 each)
@@ -300,12 +315,17 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
 	defer func() {
-		assert.NoError(t, applier.Stop())
+		require.NoError(t, applier.Stop())
 	}()
 
 	// Launch multiple concurrent Apply operations
@@ -387,7 +407,12 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Delete keys 2 and 4
 	keysToDelete := []string{
@@ -455,7 +480,12 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Delete with empty keys
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
@@ -492,7 +522,12 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 
 	// Create applier
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Upsert rows: update id=1, insert id=3
 	upsertRows := []LogicalRow{
@@ -565,7 +600,12 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Upsert with deleted rows mixed in
 	upsertRows := []LogicalRow{
@@ -617,7 +657,12 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Upsert with empty rows
 	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, []LogicalRow{}, nil)
@@ -648,7 +693,12 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Create a cancellable context
 	cancelCtx, cancel := context.WithCancel(t.Context())
@@ -656,7 +706,7 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	err = applier.Start(cancelCtx)
 	require.NoError(t, err)
 	defer func() {
-		_ = applier.Stop()
+		_ = applier.Stop() // Ignore error as context is cancelled
 	}()
 
 	// Create a large dataset
@@ -709,12 +759,17 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
 	defer func() {
-		_ = applier.Stop()
+		require.NoError(t, applier.Stop())
 	}()
 
 	// Apply some work
@@ -763,7 +818,12 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	require.NoError(t, err)
 
 	dbConfig := dbconn.NewDBConfig()
-	applier := NewSingleTargetApplier(targetDB, dbConfig, slog.Default())
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
 
 	// Start the applier
 	err = applier.Start(t.Context())

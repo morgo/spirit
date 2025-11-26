@@ -37,11 +37,6 @@ type CheckerConfig struct {
 	Applier         applier.Applier // optional; indicates it is a distributed checker
 }
 
-// rowData represents a single row with all its column values
-type rowData struct {
-	values []any
-}
-
 func NewCheckerDefaultConfig() *CheckerConfig {
 	return &CheckerConfig{
 		Concurrency:     4,

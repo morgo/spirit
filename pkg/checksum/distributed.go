@@ -341,7 +341,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 			if c.trxPool != nil {
 				c.trxPool.Close()
 			}
-			for j := 0; j < i; j++ {
+			for j := range i {
 				if c.targetTrxPools[j] != nil {
 					c.targetTrxPools[j].Close()
 				}
@@ -362,8 +362,15 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	startTime := c.startTime // capture for defer
 	c.Unlock()
 
+	// This is only really used if there are checksum failures
+	// and chunks need to be recopied.
+	if err := c.applier.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start applier: %w", err)
+	}
+
 	defer func() {
 		c.execTime = time.Since(startTime)
+		_ = c.applier.Stop()
 	}()
 
 	// Try the checksum up to n times if differences are found and we can fix them
@@ -449,9 +456,9 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		return err
 	}
 	// Close all target transaction pools
-	for i, targetTrxPool := range c.targetTrxPools {
-		if targetTrxPool != nil {
-			if err := targetTrxPool.Close(); err != nil {
+	for i := range c.targetTrxPools {
+		if c.targetTrxPools[i] != nil {
+			if err := c.targetTrxPools[i].Close(); err != nil {
 				c.logger.Error("failed to close target transaction pool", "targetID", i, "error", err)
 				// Continue closing other pools even if one fails
 			}
