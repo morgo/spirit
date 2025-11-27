@@ -38,7 +38,8 @@ type Runner struct {
 	status          status.State     // must use atomic to get/set
 	checkpointTable *table.TableInfo
 
-	sourceTables []*table.TableInfo
+	sourceTables   []*table.TableInfo
+	sourceTableMap map[string]bool // used when only some tables are to be moved.
 
 	applier           applier.Applier
 	replClient        *repl.Client
@@ -85,12 +86,21 @@ func (r *Runner) Close() error {
 
 // getTables connects to a DB and fetches the list of tables
 // it can be run on either the source or the target.
+// If SourceTables is specified in the Move config, only those tables will be returned.
 func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo, error) {
 	rows, err := db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
+	// Build a map of source tables if filtering is requested
+	if len(r.move.SourceTables) > 0 {
+		r.sourceTableMap = make(map[string]bool, len(r.move.SourceTables))
+		for _, tbl := range r.move.SourceTables {
+			r.sourceTableMap[tbl] = true
+		}
+	}
 
 	var tableName string
 	tables := make([]*table.TableInfo, 0)
@@ -101,6 +111,12 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		if tableName == checkpointTableName || tableName == sentinelTableName {
 			continue // Skip if the table name is the checkpoint or sentinel table
 		}
+
+		// If SourceTables is specified, only include tables in that list
+		if r.sourceTableMap != nil && !r.sourceTableMap[tableName] {
+			continue
+		}
+
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
 		if err := tableInfo.SetInfo(ctx); err != nil {
 			return nil, err
@@ -125,11 +141,19 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		}
 		tables = append(tables, tableInfo)
 	}
+
+	// Validate that all source tables were found. We can do this
+	// by just comparing the lengths of the r.move.SourceTables to tables
+	// this should have been pre-validated by the caller.
+	if r.sourceTableMap != nil && len(tables) != len(r.move.SourceTables) {
+		return nil, errors.New("could not find all SourceTables in the source database")
+	}
 	return tables, rows.Err()
 }
 
-// checkTargetEmpty checks that the target database is empty.
-// If any tables exist it returns an error and the move fails.
+// checkTargetEmpty checks that the target database is ready for the move operation.
+// If SourceTables is specified, it checks that those specific tables don't exist in the target.
+// If SourceTables is not specified, it checks that the target database is completely empty.
 func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 	for i, target := range r.targets {
 		rows, err := target.DB.QueryContext(ctx, "SHOW TABLES")
@@ -137,7 +161,16 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 			return fmt.Errorf("failed to check target %d: %w", i, err)
 		}
 		defer rows.Close()
-		if rows.Next() {
+		var tableName string
+		for rows.Next() {
+			if err := rows.Scan(&tableName); err != nil {
+				return fmt.Errorf("failed to scan table name on target %d: %w", i, err)
+			}
+			if r.sourceTableMap != nil && !r.sourceTableMap[tableName] {
+				// We are only copying specific tables, but this table
+				// found is not one of them, so we can ignore and continue.
+				continue
+			}
 			return fmt.Errorf("target database %d (%s) is not empty", i, target.Config.DBName)
 		}
 		if err := rows.Err(); err != nil {

@@ -15,6 +15,11 @@ type Move struct {
 	Threads         int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
 	CreateSentinel  bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
 
+	// SourceTables optionally specifies a list of tables to move.
+	// If empty, all tables in the source database will be moved.
+	// This is useful for Vitess MoveTables operations where only specific tables should be moved.
+	SourceTables []string
+
 	// VindexProvider optionally provides vindex metadata for resharding operations.
 	// If nil, tables will not have vindex configuration (suitable for simple MoveTables 1:1 operations).
 	// For resharding operations (1:many), this should be set to provide sharding key information.
