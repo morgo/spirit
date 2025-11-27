@@ -38,6 +38,7 @@ type ShardedApplier struct {
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
+	stopped    atomic.Bool // Track if Stop() has been called
 }
 
 // shardTarget represents a single shard with its own connection, key range, and workers
@@ -304,6 +305,14 @@ func (a *ShardedApplier) Wait(ctx context.Context) error {
 
 // Stop signals the applier to shut down gracefully
 func (a *ShardedApplier) Stop() error {
+	// Check if already stopped to prevent double-close panic
+	if !a.stopped.CompareAndSwap(false, true) {
+		a.logger.Debug("Stop called but applier already stopped, skipping")
+		return nil
+	}
+
+	a.logger.Debug("Stopping ShardedApplier")
+
 	if a.cancelFunc != nil {
 		a.cancelFunc()
 	}
@@ -314,6 +323,7 @@ func (a *ShardedApplier) Stop() error {
 	}
 
 	a.wg.Wait()
+	a.logger.Debug("ShardedApplier stopped")
 	return nil
 }
 
@@ -522,6 +532,12 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 		return 0, nil
 	}
 
+	// In move operations, targetTable may be nil because there isn't a single target table.
+	// In this case, use sourceTable since the schema is the same.
+	if targetTable == nil {
+		targetTable = sourceTable
+	}
+
 	// Convert hashed keys to row value constructor format
 	var pkValues []string
 	for _, key := range keys {
@@ -544,29 +560,26 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 	var errGroup error
 
 	var wg sync.WaitGroup
-	for i := range a.shards {
+	for _, shard := range a.shards {
 		wg.Add(1)
-		go func(shardID int) {
+		go func(shard *shardTarget) {
 			defer wg.Done()
-
-			a.logger.Debug("broadcasting delete to shard", "shardID", shardID, "keyCount", len(keys), "table", targetTable.TableName)
 
 			var affected int64
 			var err error
-
 			// Execute under lock if provided
 			if lock != nil {
 				if err = lock.ExecUnderLock(ctx, deleteStmt); err != nil {
-					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", shardID, err)
+					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", shard.shardID, err)
 				} else {
 					// We can't know the actual affected rows when using lock, so estimate
 					affected = 0
 				}
 			} else {
 				// Execute as a retryable transaction
-				affected, err = dbconn.RetryableTransaction(ctx, a.shards[shardID].writeDB, false, a.shards[shardID].dbConfig, deleteStmt)
+				affected, err = dbconn.RetryableTransaction(ctx, shard.writeDB, false, shard.dbConfig, deleteStmt)
 				if err != nil {
-					err = fmt.Errorf("failed to execute delete on shard %d: %w", shardID, err)
+					err = fmt.Errorf("failed to execute delete on shard %d: %w", shard.shardID, err)
 				}
 			}
 
@@ -576,7 +589,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 			}
 			totalAffected += affected
 			mu.Unlock()
-		}(i)
+		}(shard)
 	}
 	wg.Wait()
 	if errGroup != nil {
@@ -602,6 +615,12 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
+	}
+
+	// In move operations, targetTable may be nil because there isn't a single target table.
+	// In this case, use sourceTable since the schema is the same.
+	if targetTable == nil {
+		targetTable = sourceTable
 	}
 
 	if sourceTable.VindexColumn == "" {

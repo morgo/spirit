@@ -415,24 +415,32 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	defer r.source.Close()
 
-	db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
-	if err != nil {
-		return err
-	}
-
 	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
 	if err != nil {
 		return err
 	}
-	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
-	if err != nil {
-		return err
+
+	// If targets are already configured (e.g., for resharding), use them.
+	// Otherwise, create a single target from TargetDSN (for simple 1:1 moves).
+	if len(r.move.Targets) > 0 {
+		r.targets = r.move.Targets
+		r.logger.Info("Using pre-configured targets", "count", len(r.targets))
+	} else {
+		db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
+		if err != nil {
+			return err
+		}
+		targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+		if err != nil {
+			return err
+		}
+		r.targets = []applier.Target{{
+			KeyRange: "0",
+			DB:       db,
+			Config:   targetConfig,
+		}}
+		r.logger.Info("Created single target from TargetDSN")
 	}
-	r.targets = []applier.Target{{
-		KeyRange: "0",
-		DB:       db,
-		Config:   targetConfig,
-	}}
 	if err := r.setup(ctx); err != nil {
 		return err
 	}
