@@ -266,6 +266,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		return err
 	}
 
+	if len(r.sourceTables) == 0 {
+		r.logger.Info("No tables found in source database; nothing to move")
+		return nil
+	}
+
 	// Create a single applier instance that will be shared by both
 	// the replication client and the copier
 	r.logger.Info("Creating shared applier")
@@ -443,6 +448,27 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	if err := r.setup(ctx); err != nil {
 		return err
+	}
+
+	if len(r.sourceTables) == 0 {
+		// Because this is called from orchestration, there might be a bug where
+		// it is asked to move *no tables*. Since there are no tables,
+		// there is no:
+		// - copier, replication changes
+		// - metadata lock
+		// - cutover step
+		//
+		// But the caller will still want their cutoverFunc called. So we do that
+		// and then exit.
+		r.logger.Info("No tables to copy, proceeding directly to cutover")
+		r.status.Set(status.CutOver)
+		if r.cutoverFunc != nil {
+			if err := r.cutoverFunc(ctx); err != nil {
+				return err
+			}
+		}
+		r.logger.Info("Move operation complete.")
+		return nil
 	}
 
 	// Take a single metadata lock for all tables to prevent concurrent DDL.
