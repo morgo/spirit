@@ -90,7 +90,6 @@ func TestDatumInt32ToUnsigned(t *testing.T) {
 }
 
 func TestStringPanic(t *testing.T) {
-
 	ti := &TableInfo{
 		SchemaName:        "test",
 		TableName:         "t1",
@@ -121,7 +120,7 @@ func TestStringPanic(t *testing.T) {
 	originalVal := int32(-12345)
 
 	// 2. copy behavior of utils.HashKey
-	hashed := fmt.Sprintf("%v", originalVal)
+	hashed := fmt.Sprintf("%v", originalVal) //nolint:perfsprint
 	assert.Equal(t, "-12345", hashed)
 
 	// 3. copy behavior of utils.UnhashKey
