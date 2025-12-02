@@ -2,13 +2,13 @@ package table
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -105,7 +105,7 @@ func TestStringPanic(t *testing.T) {
 	chk := &chunkerOptimistic{
 		Ti:            ti,
 		ChunkerTarget: 100 * time.Millisecond,
-		logger:        logrus.New(),
+		logger:        slog.Default(),
 		watermark: &Chunk{
 			UpperBound: &Boundary{Value: []Datum{NewDatum(uint64(100), unsignedType)}},
 			LowerBound: &Boundary{Value: []Datum{NewDatum(uint64(0), unsignedType)}},
