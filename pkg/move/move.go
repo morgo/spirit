@@ -20,13 +20,13 @@ type Move struct {
 	// This is useful for Vitess MoveTables operations where only specific tables should be moved.
 	SourceTables []string
 
-	// VindexProvider optionally provides vindex metadata for resharding operations.
+	// ShardingProvider optionally provides vindex metadata for resharding operations.
 	// If nil, tables will not have vindex configuration (suitable for simple MoveTables 1:1 operations).
 	// For resharding operations (1:many), this should be set to provide sharding key information.
-	// The provider is called during table discovery to configure VindexColumn and VindexFunc
+	// The provider is called during table discovery to configure ShardingColumn and HashFunc
 	// on each TableInfo.
-	VindexProvider table.VindexMetadataProvider
-	Targets        []applier.Target
+	ShardingProvider table.ShardingMetadataProvider
+	Targets          []applier.Target
 }
 
 func (m *Move) Run() error {

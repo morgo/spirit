@@ -3,6 +3,7 @@ package applier
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -33,6 +34,10 @@ func parseKeyRange(kr string) (keyRange, error) {
 	if parts[0] == "" {
 		start = 0
 	} else {
+		// Validate hex format [0-9a-f]+
+		if !regexp.MustCompile(`^[0-9a-f]+$`).MatchString(parts[0]) {
+			return keyRange{}, fmt.Errorf("invalid start key range: %s (expected hex characters [0-9a-f])", parts[0])
+		}
 		// Pad to 16 hex chars (64 bits) and parse
 		padded := parts[0] + strings.Repeat("0", 16-len(parts[0]))
 		start, err = strconv.ParseUint(padded, 16, 64)
@@ -45,6 +50,10 @@ func parseKeyRange(kr string) (keyRange, error) {
 	if parts[1] == "" {
 		end = ^uint64(0) // max uint64
 	} else {
+		// Validate hex format [0-9a-f]+
+		if !regexp.MustCompile(`^[0-9a-f]+$`).MatchString(parts[1]) {
+			return keyRange{}, fmt.Errorf("invalid end key range: %s (expected hex characters [0-9a-f])", parts[1])
+		}
 		// Pad to 16 hex chars (64 bits) and parse
 		padded := parts[1] + strings.Repeat("0", 16-len(parts[1]))
 		end, err = strconv.ParseUint(padded, 16, 64)

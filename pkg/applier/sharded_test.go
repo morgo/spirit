@@ -81,8 +81,8 @@ func TestShardedApplierIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Configure vindex on source table
-	sourceTable.VindexColumn = "user_id"
-	sourceTable.VindexFunc = evenOddHasher
+	sourceTable.ShardingColumn = "user_id"
+	sourceTable.HashFunc = evenOddHasher
 
 	shard1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = shard1Table.SetInfo(ctx)
@@ -287,8 +287,8 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// Configure vindex on source table
-	sourceTable.VindexColumn = "user_id"
-	sourceTable.VindexFunc = evenOddHasher
+	sourceTable.ShardingColumn = "user_id"
+	sourceTable.HashFunc = evenOddHasher
 
 	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = target1Table.SetInfo(ctx)
@@ -379,8 +379,8 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Configure vindex on target table
-	targetTable.VindexColumn = "user_id"
-	targetTable.VindexFunc = evenOddHasher
+	targetTable.ShardingColumn = "user_id"
+	targetTable.HashFunc = evenOddHasher
 
 	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
@@ -452,8 +452,8 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	require.NoError(t, err)
 
 	// Configure vindex on source table
-	sourceTable.VindexColumn = "user_id"
-	sourceTable.VindexFunc = evenOddHasher
+	sourceTable.ShardingColumn = "user_id"
+	sourceTable.HashFunc = evenOddHasher
 
 	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = target1Table.SetInfo(ctx)
@@ -602,8 +602,8 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	require.NoError(t, err)
 
 	// Configure vindex on target table
-	targetTable.VindexColumn = "user_id"
-	targetTable.VindexFunc = evenOddHasher
+	targetTable.ShardingColumn = "user_id"
+	targetTable.HashFunc = evenOddHasher
 
 	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
@@ -787,8 +787,8 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Configure vindex on target table
-	targetTable.VindexColumn = "user_id"
-	targetTable.VindexFunc = evenOddHasher
+	targetTable.ShardingColumn = "user_id"
+	targetTable.HashFunc = evenOddHasher
 
 	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{

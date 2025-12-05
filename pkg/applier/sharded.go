@@ -21,8 +21,8 @@ import (
 // It extracts a specific column value from each row, applies a hash function to it,
 // and routes the row to the appropriate shard based on the hash value and key ranges.
 //
-// The vindex column and hash function are configured per-table in the TableInfo.VindexColumn
-// and TableInfo.VindexFunc fields. This allows different tables to use different sharding keys
+// The sharding column and hash function are configured per-table in the TableInfo.ShardingColumn
+// and TableInfo.HashFunc fields. This allows different tables to use different sharding keys
 // in multi-table migrations.
 type ShardedApplier struct {
 	shards   []*shardTarget
@@ -78,8 +78,8 @@ type shardedChunkletCompletion struct {
 //   - dbConfig: Database configuration
 //   - logger: Logger instance
 //
-// The vindex column and hash function are configured per-table in the TableInfo.VindexColumn
-// and TableInfo.VindexFunc fields. This allows different tables to use different sharding keys
+// The sharding column and hash function are configured per-table in the TableInfo.ShardingColumn
+// and TableInfo.HashFunc fields. This allows different tables to use different sharding keys
 // in multi-table migrations.
 func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*ShardedApplier, error) {
 	shards := make([]*shardTarget, len(targets))
@@ -158,8 +158,8 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 }
 
 // Apply sends rows to be written to the appropriate target shards.
-// Rows are distributed across shards based on the vindex column and hash function
-// configured in the chunk's Table.VindexColumn and Table.VindexFunc.
+// Rows are distributed across shards based on the sharding column and hash function
+// configured in the chunk's Table.ShardingColumn and Table.HashFunc.
 func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback ApplyCallback) error {
 	if len(rows) == 0 {
 		// No rows to apply, invoke callback immediately
@@ -167,26 +167,26 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		return nil
 	}
 
-	// Extract vindex configuration from the table
-	vindexColumn := chunk.Table.VindexColumn
-	vindexFunc := chunk.Table.VindexFunc
+	// Extract sharding configuration from the table
+	shardingColumn := chunk.Table.ShardingColumn
+	hashFunc := chunk.Table.HashFunc
 
-	if vindexColumn == "" {
-		return errors.New("VindexColumn not configured in TableInfo")
+	if shardingColumn == "" {
+		return errors.New("ShardingColumn not configured in TableInfo")
 	}
-	if vindexFunc == nil {
-		return errors.New("VindexFunc not configured in TableInfo")
+	if hashFunc == nil {
+		return errors.New("HashFunc not configured in TableInfo")
 	}
 
-	a.logger.Info("Apply called", "rowCount", len(rows), "vindexColumn", vindexColumn, "table", chunk.Table.TableName)
+	a.logger.Info("Apply called", "rowCount", len(rows), "shardingColumn", shardingColumn, "table", chunk.Table.TableName)
 
-	// Find the ordinal position of the vindex column
-	vindexOrdinal, err := chunk.Table.GetColumnOrdinal(vindexColumn)
+	// Find the ordinal position of the sharding column
+	shardingOrdinal, err := chunk.Table.GetColumnOrdinal(shardingColumn)
 	if err != nil {
 		return err
 	}
 
-	a.logger.Info("Found vindex column", "vindexColumn", vindexColumn, "ordinal", vindexOrdinal)
+	a.logger.Info("Found sharding column", "shardingColumn", shardingColumn, "ordinal", shardingOrdinal)
 
 	// Assign a work ID for tracking
 	workID := atomic.AddInt64(&a.nextWorkID, 1)
@@ -194,16 +194,16 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	// Group rows by shard
 	shardRows := make([][]rowData, len(a.shards))
 	for _, row := range rows {
-		// Extract the vindex column value
-		if vindexOrdinal >= len(row) {
-			return fmt.Errorf("vindex column ordinal %d exceeds row length %d", vindexOrdinal, len(row))
+		// Extract the sharding column value
+		if shardingOrdinal >= len(row) {
+			return fmt.Errorf("sharding column ordinal %d exceeds row length %d", shardingOrdinal, len(row))
 		}
-		vindexValue := row[vindexOrdinal]
+		shardingValue := row[shardingOrdinal]
 
 		// Apply the hash function to get the hash value
-		hashValue, err := vindexFunc(vindexValue)
+		hashValue, err := hashFunc(shardingValue)
 		if err != nil {
-			return fmt.Errorf("vindex function error: %w", err)
+			return fmt.Errorf("hash function error: %w", err)
 		}
 
 		// Find which shard's key range contains this hash value
@@ -211,7 +211,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		for i, shard := range a.shards {
 			contains := shard.keyRange.contains(hashValue)
 			a.logger.Info("checking shard for hash",
-				"vindexValue", vindexValue,
+				"shardingValue", shardingValue,
 				"hashValue", fmt.Sprintf("0x%016x", hashValue),
 				"shardID", i,
 				"shardStart", fmt.Sprintf("0x%016x", shard.keyRange.start),
@@ -223,8 +223,8 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 			}
 		}
 		if shardID == -1 {
-			return fmt.Errorf("no shard found for hash value %x (vindex column: %s, value: %v)",
-				hashValue, vindexColumn, vindexValue)
+			return fmt.Errorf("no shard found for hash value %x (sharding column: %s, value: %v)",
+				hashValue, shardingColumn, shardingValue)
 		}
 
 		// Add to the appropriate shard's row list
@@ -623,24 +623,24 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 		targetTable = sourceTable
 	}
 
-	if sourceTable.VindexColumn == "" {
-		return 0, errors.New("VindexColumn not configured in TableInfo")
+	if sourceTable.ShardingColumn == "" {
+		return 0, errors.New("ShardingColumn not configured in TableInfo")
 	}
-	if sourceTable.VindexFunc == nil {
-		return 0, errors.New("VindexFunc not configured in TableInfo")
+	if sourceTable.HashFunc == nil {
+		return 0, errors.New("HashFunc not configured in TableInfo")
 	}
 
-	// Find the ordinal position of the vindex column within NonGeneratedColumns
+	// Find the ordinal position of the sharding column within NonGeneratedColumns
 	// (since RowImage is structured according to NonGeneratedColumns)
-	vindexOrdinal := -1
+	shardingOrdinal := -1
 	for i, col := range sourceTable.NonGeneratedColumns {
-		if col == sourceTable.VindexColumn {
-			vindexOrdinal = i
+		if col == sourceTable.ShardingColumn {
+			shardingOrdinal = i
 			break
 		}
 	}
-	if vindexOrdinal == -1 {
-		return 0, fmt.Errorf("vindex column %s not found in non-generated columns", sourceTable.VindexColumn)
+	if shardingOrdinal == -1 {
+		return 0, fmt.Errorf("sharding column %s not found in non-generated columns", sourceTable.ShardingColumn)
 	}
 
 	// Get the intersected column indices
@@ -658,16 +658,16 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 			continue // Skip deleted rows
 		}
 
-		// Extract the vindex column value from the row image
-		if vindexOrdinal >= len(row.RowImage) {
-			return 0, fmt.Errorf("vindex column ordinal %d exceeds row image length %d", vindexOrdinal, len(row.RowImage))
+		// Extract the sharding column value from the row image
+		if shardingOrdinal >= len(row.RowImage) {
+			return 0, fmt.Errorf("sharding column ordinal %d exceeds row image length %d", shardingOrdinal, len(row.RowImage))
 		}
-		vindexValue := row.RowImage[vindexOrdinal]
+		shardingValue := row.RowImage[shardingOrdinal]
 
 		// Apply the hash function to get the hash value
-		hashValue, err := sourceTable.VindexFunc(vindexValue)
+		hashValue, err := sourceTable.HashFunc(shardingValue)
 		if err != nil {
-			return 0, fmt.Errorf("vindex function error: %w", err)
+			return 0, fmt.Errorf("hash function error: %w", err)
 		}
 
 		// Find which shard's key range contains this hash value
@@ -679,8 +679,8 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 			}
 		}
 		if shardID == -1 {
-			return 0, fmt.Errorf("no shard found for hash value %x (vindex column: %s, value: %v)",
-				hashValue, sourceTable.VindexColumn, vindexValue)
+			return 0, fmt.Errorf("no shard found for hash value %x (sharding column: %s, value: %v)",
+				hashValue, sourceTable.ShardingColumn, shardingValue)
 		}
 		shardRows[shardID] = append(shardRows[shardID], row)
 	}

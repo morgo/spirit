@@ -8,30 +8,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestVindexProvider is a simple test implementation of VindexMetadataProvider
-type TestVindexProvider struct {
+// TestShardingProvider is a simple test implementation of ShardingMetadataProvider
+type TestShardingProvider struct {
 	vindexColumn string
-	vindexFunc   VindexFunc
+	vindexFunc   HashFunc
 	shouldError  bool
 }
 
-func NewTestVindexProvider(column string, hashFunc VindexFunc) *TestVindexProvider {
-	return &TestVindexProvider{
+func NewTestShardingProvider(column string, hashFunc HashFunc) *TestShardingProvider {
+	return &TestShardingProvider{
 		vindexColumn: column,
 		vindexFunc:   hashFunc,
 		shouldError:  false,
 	}
 }
 
-func (t *TestVindexProvider) GetVindexMetadata(schemaName, tableName string) (string, VindexFunc, error) {
+func (t *TestShardingProvider) GetShardingMetadata(schemaName, tableName string) (string, HashFunc, error) {
 	if t.shouldError {
 		return "", nil, fmt.Errorf("test error for table %s.%s", schemaName, tableName)
 	}
 	return t.vindexColumn, t.vindexFunc, nil
 }
 
-// TestVindexProviderInterface verifies the interface contract
-func TestVindexProviderInterface(t *testing.T) {
+// TestShardingProviderInterface verifies the interface contract
+func TestShardingProviderInterface(t *testing.T) {
 	// Simple hash function for testing
 	simpleHash := func(value any) (uint64, error) {
 		switch v := value.(type) {
@@ -52,9 +52,9 @@ func TestVindexProviderInterface(t *testing.T) {
 	}
 
 	t.Run("returns vindex metadata", func(t *testing.T) {
-		provider := NewTestVindexProvider("user_id", simpleHash)
+		provider := NewTestShardingProvider("user_id", simpleHash)
 
-		column, hashFunc, err := provider.GetVindexMetadata("testdb", "users")
+		column, hashFunc, err := provider.GetShardingMetadata("testdb", "users")
 		require.NoError(t, err)
 		assert.Equal(t, "user_id", column)
 		assert.NotNil(t, hashFunc)
@@ -66,27 +66,27 @@ func TestVindexProviderInterface(t *testing.T) {
 	})
 
 	t.Run("returns empty for no vindex", func(t *testing.T) {
-		provider := NewTestVindexProvider("", nil)
+		provider := NewTestShardingProvider("", nil)
 
-		column, hashFunc, err := provider.GetVindexMetadata("testdb", "config")
+		column, hashFunc, err := provider.GetShardingMetadata("testdb", "config")
 		require.NoError(t, err)
 		assert.Empty(t, column)
 		assert.Nil(t, hashFunc)
 	})
 
 	t.Run("returns error", func(t *testing.T) {
-		provider := &TestVindexProvider{
+		provider := &TestShardingProvider{
 			shouldError: true,
 		}
 
-		_, _, err := provider.GetVindexMetadata("testdb", "users")
+		_, _, err := provider.GetShardingMetadata("testdb", "users")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "test error")
 	})
 }
 
-// TestVindexFunc verifies VindexFunc behavior
-func TestVindexFunc(t *testing.T) {
+// TestHashFunc verifies HashFunc behavior
+func TestHashFunc(t *testing.T) {
 	t.Run("handles different types", func(t *testing.T) {
 		hashFunc := func(value any) (uint64, error) {
 			switch v := value.(type) {
@@ -116,35 +116,35 @@ func TestVindexFunc(t *testing.T) {
 	})
 }
 
-// MultiTableVindexProvider is a test provider that can return different
+// MultiTableShardingProvider is a test provider that can return different
 // vindex configurations for different tables
-type MultiTableVindexProvider struct {
+type MultiTableShardingProvider struct {
 	tableConfigs map[string]struct {
 		column   string
-		hashFunc VindexFunc
+		hashFunc HashFunc
 	}
 }
 
-func NewMultiTableVindexProvider() *MultiTableVindexProvider {
-	return &MultiTableVindexProvider{
+func NewMultiTableShardingProvider() *MultiTableShardingProvider {
+	return &MultiTableShardingProvider{
 		tableConfigs: make(map[string]struct {
 			column   string
-			hashFunc VindexFunc
+			hashFunc HashFunc
 		}),
 	}
 }
 
-func (m *MultiTableVindexProvider) AddTable(tableName, column string, hashFunc VindexFunc) {
+func (m *MultiTableShardingProvider) AddTable(tableName, column string, hashFunc HashFunc) {
 	m.tableConfigs[tableName] = struct {
 		column   string
-		hashFunc VindexFunc
+		hashFunc HashFunc
 	}{
 		column:   column,
 		hashFunc: hashFunc,
 	}
 }
 
-func (m *MultiTableVindexProvider) GetVindexMetadata(schemaName, tableName string) (string, VindexFunc, error) {
+func (m *MultiTableShardingProvider) GetShardingMetadata(schemaName, tableName string) (string, HashFunc, error) {
 	config, exists := m.tableConfigs[tableName]
 	if !exists {
 		return "", nil, nil // No vindex for this table
@@ -152,7 +152,7 @@ func (m *MultiTableVindexProvider) GetVindexMetadata(schemaName, tableName strin
 	return config.column, config.hashFunc, nil
 }
 
-func TestMultiTableVindexProvider(t *testing.T) {
+func TestMultiTableShardingProvider(t *testing.T) {
 	userHash := func(value any) (uint64, error) {
 		return uint64(1), nil
 	}
@@ -160,12 +160,12 @@ func TestMultiTableVindexProvider(t *testing.T) {
 		return uint64(2), nil
 	}
 
-	provider := NewMultiTableVindexProvider()
+	provider := NewMultiTableShardingProvider()
 	provider.AddTable("users", "user_id", userHash)
 	provider.AddTable("orders", "order_id", orderHash)
 
 	t.Run("returns correct config for users table", func(t *testing.T) {
-		column, hashFunc, err := provider.GetVindexMetadata("testdb", "users")
+		column, hashFunc, err := provider.GetShardingMetadata("testdb", "users")
 		require.NoError(t, err)
 		assert.Equal(t, "user_id", column)
 		assert.NotNil(t, hashFunc)
@@ -176,7 +176,7 @@ func TestMultiTableVindexProvider(t *testing.T) {
 	})
 
 	t.Run("returns correct config for orders table", func(t *testing.T) {
-		column, hashFunc, err := provider.GetVindexMetadata("testdb", "orders")
+		column, hashFunc, err := provider.GetShardingMetadata("testdb", "orders")
 		require.NoError(t, err)
 		assert.Equal(t, "order_id", column)
 		assert.NotNil(t, hashFunc)
@@ -187,7 +187,7 @@ func TestMultiTableVindexProvider(t *testing.T) {
 	})
 
 	t.Run("returns empty for unconfigured table", func(t *testing.T) {
-		column, hashFunc, err := provider.GetVindexMetadata("testdb", "config")
+		column, hashFunc, err := provider.GetShardingMetadata("testdb", "config")
 		require.NoError(t, err)
 		assert.Empty(t, column)
 		assert.Nil(t, hashFunc)

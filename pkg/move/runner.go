@@ -122,21 +122,21 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 			return nil, err
 		}
 
-		// If a VindexProvider is configured, get vindex metadata for this table.
+		// If a ShardingProvider is configured, get sharding metadata for this table.
 		// This is used for resharding operations where rows need to be distributed
 		// across multiple target shards based on a sharding key.
-		if r.move.VindexProvider != nil {
-			vindexColumn, vindexFunc, err := r.move.VindexProvider.GetVindexMetadata(r.sourceConfig.DBName, tableName)
+		if r.move.ShardingProvider != nil {
+			shardingColumn, hashFunc, err := r.move.ShardingProvider.GetShardingMetadata(r.sourceConfig.DBName, tableName)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get vindex metadata for table %s: %w", tableName, err)
+				return nil, fmt.Errorf("failed to get sharding metadata for table %s: %w", tableName, err)
 			}
-			// Only set if vindex metadata is available (could be empty for some tables)
-			if vindexColumn != "" && vindexFunc != nil {
-				tableInfo.VindexColumn = vindexColumn
-				tableInfo.VindexFunc = vindexFunc
-				r.logger.Info("configured vindex for table",
+			// Only set if sharding metadata is available (could be empty for some tables)
+			if shardingColumn != "" && hashFunc != nil {
+				tableInfo.ShardingColumn = shardingColumn
+				tableInfo.HashFunc = hashFunc
+				r.logger.Info("configured sharding for table",
 					"table", tableName,
-					"vindexColumn", vindexColumn)
+					"shardingColumn", shardingColumn)
 			}
 		}
 		tables = append(tables, tableInfo)

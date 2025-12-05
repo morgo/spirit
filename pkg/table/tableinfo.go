@@ -46,14 +46,14 @@ type TableInfo struct {
 
 	// Sharding configuration (for ShardedApplier)
 	// These are set per-table when using multi-table migrations with different sharding keys
-	VindexColumn string     // Column name to extract and hash (e.g., "user_id")
-	VindexFunc   VindexFunc // Hash function: value -> uint64
+	ShardingColumn string   // Column name to extract and hash (e.g., "user_id")
+	HashFunc       HashFunc // Hash function: value -> uint64
 }
 
-// VindexFunc is a hash function that takes a single column value and returns a uint64 hash.
+// HashFunc is a hash function that takes a single column value and returns a uint64 hash.
 // This matches Vitess vindex behavior where the hash is used to determine shard placement.
 // The hash value is then matched against key ranges to find the target shard.
-type VindexFunc func(value any) (uint64, error)
+type HashFunc func(value any) (uint64, error)
 
 func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	return &TableInfo{
