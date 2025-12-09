@@ -69,12 +69,18 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	hashedKey := utils.HashKey(key)
 
 	if deleted {
-		s.changes[hashedKey] = applier.LogicalRow{IsDeleted: true}
+		s.changes[hashedKey] = bufferedChange{
+			logicalRow:  applier.LogicalRow{IsDeleted: true},
+			originalKey: key,
+		}
 		return
 	}
 
 	// Set the logical row to be the new row
-	s.changes[hashedKey] = applier.LogicalRow{RowImage: row}
+	s.changes[hashedKey] = bufferedChange{
+		logicalRow:  applier.LogicalRow{RowImage: row},
+		originalKey: key,
+	}
 }
 
 // Flush writes the pending changes to the new table.
@@ -100,22 +106,22 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 		lockToUse = lock
 	}
 
-	for key, logicalRow := range s.changes {
-		unhashedKey := utils.UnhashKey(key)
-		// Check low watermark only if the optimization is enabled
+	for key, change := range s.changes {
+		// Check low watermark only if the optimization is enabled.
+		// Use originalKey to preserve typed values for watermark comparison.
 		// Note: bufferedMap has inverted logic - KeyBelowLowWatermark returns true
-		// for keys that are still being copied, so we skip flushing them
-		if s.watermarkOptimizationEnabled() && s.chunker.KeyBelowLowWatermark(unhashedKey[0]) {
-			s.c.logger.Debug("key below watermark", "key", unhashedKey[0])
+		// for keys that are still being copied, so we skip flushing them.
+		if s.watermarkOptimizationEnabled() && s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+			s.c.logger.Debug("key below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
 		}
 		i++
 		keysFlushed = append(keysFlushed, key) // we are going to flush this key
-		if logicalRow.IsDeleted {
+		if change.logicalRow.IsDeleted {
 			deleteKeys = append(deleteKeys, key)
 		} else {
-			upsertRows = append(upsertRows, logicalRow)
+			upsertRows = append(upsertRows, change.logicalRow)
 		}
 		if (i % target) == 0 {
 			// Flush this batch
