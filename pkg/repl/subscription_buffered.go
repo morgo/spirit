@@ -19,6 +19,11 @@ import (
 // across different MySQL servers. In combination with Atomic DDL,
 // we have all the components needed for cloning sets of tables between servers.
 
+type bufferedChange struct {
+	logicalRow  applier.LogicalRow
+	originalKey []any // preserve original typed key for watermark comparison
+}
+
 type bufferedMap struct {
 	sync.Mutex // protects the subscription from changes.
 
@@ -28,7 +33,7 @@ type bufferedMap struct {
 	table    *table.TableInfo
 	newTable *table.TableInfo
 
-	changes map[string]applier.LogicalRow
+	changes map[string]bufferedChange
 
 	watermarkOptimization bool
 	chunker               table.Chunker

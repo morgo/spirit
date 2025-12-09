@@ -714,7 +714,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 	client.subscriptions[EncodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
@@ -733,7 +733,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 	client.subscriptions["test2"] = sub2
 	sub2.HasChanged([]any{2}, nil, false)

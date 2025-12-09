@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type mapChange struct {
+	isDelete    bool
+	originalKey []any // preserve original typed key for watermark comparison
+}
+
 type deltaMap struct {
 	sync.Mutex // protects the subscription from changes.
 
@@ -21,7 +26,7 @@ type deltaMap struct {
 	table    *table.TableInfo
 	newTable *table.TableInfo
 
-	changes map[string]bool // delta map, for memory comparable PKs
+	changes map[string]mapChange // delta map, for memory comparable PKs
 
 	watermarkOptimization bool
 	chunker               table.Chunker
@@ -53,7 +58,7 @@ func (s *deltaMap) HasChanged(key, _ []any, deleted bool) {
 		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
-	s.changes[utils.HashKey(key)] = deleted
+	s.changes[utils.HashKey(key)] = mapChange{isDelete: deleted, originalKey: key}
 }
 
 func (s *deltaMap) createDeleteStmt(deleteKeys []string) statement {
