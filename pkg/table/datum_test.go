@@ -1,11 +1,9 @@
 package table
 
 import (
-	"fmt"
 	"log/slog"
 	"math"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -89,7 +87,35 @@ func TestDatumInt32ToUnsigned(t *testing.T) {
 	assert.Equal(t, "3454523340", d5.String())
 }
 
-func TestStringPanic(t *testing.T) {
+func TestDatumInt64ToUnsigned(t *testing.T) {
+	// Test that int64 values are correctly converted to unsigned uint64
+	// This simulates MySQL binlog sending unsigned BIGINT columns as signed int64
+
+	// Positive int64 value
+	positiveInt64 := int64(123456789012345)
+	d1 := NewDatum(positiveInt64, unsignedType)
+	assert.Equal(t, uint64(123456789012345), d1.Val)
+	assert.Equal(t, "123456789012345", d1.String())
+
+	// Negative int64 value (large unsigned value)
+	// -1 as int64 = max uint64
+	negativeInt64 := int64(-1)
+	d2 := NewDatum(negativeInt64, unsignedType)
+	assert.Equal(t, uint64(negativeInt64), d2.Val)
+	assert.Equal(t, uint64(math.MaxUint64), d2.Val)
+
+	// Edge case: int64 max value
+	maxInt64 := int64(math.MaxInt64)
+	d3 := NewDatum(maxInt64, unsignedType)
+	assert.Equal(t, uint64(math.MaxInt64), d3.Val)
+
+	// Test int values (platform dependent, but should work)
+	intVal := int(12345)
+	d4 := NewDatum(intVal, unsignedType)
+	assert.Equal(t, uint64(12345), d4.Val)
+}
+
+func TestInt32KeyBelowLowWatermark(t *testing.T) {
 	ti := &TableInfo{
 		SchemaName:        "test",
 		TableName:         "t1",
@@ -114,22 +140,16 @@ func TestStringPanic(t *testing.T) {
 		chunkPtr: NewDatum(uint64(0), unsignedType),
 	}
 
-	// 1. setup value like it would in repl.deltaMap
+	// KeyBelowLowWatermark receives the original typed value
 	// Value arrives as int32(-12345) (representing a large unsigned int)
 	// 4294954951 as uint32 is -12345 as int32
 	originalVal := int32(-12345)
 
-	// 2. copy behavior of utils.HashKey
-	hashed := fmt.Sprintf("%v", originalVal) //nolint:perfsprint
-	assert.Equal(t, "-12345", hashed)
-
-	// 3. copy behavior of utils.UnhashKey
-	unhashed := strings.Split(hashed, "-#-")
-	assert.Equal(t, "-12345", unhashed[0])
-
-	// 4. flush function in repl.deltaMap calls KeyBelowLowWatermark with this string
-	// This triggers NewDatum("-12345", unsignedType)
+	// KeyBelowLowWatermark should correctly handle int32 values for unsigned columns
+	// The int32 will be reinterpreted as uint32, giving us 4294954951
+	// Since 4294954951 > 100 (watermark), it should return false
 	assert.NotPanics(t, func() {
-		chk.KeyBelowLowWatermark(unhashed[0])
-	}, "KeyBelowLowWatermark should NOT panic with negative string input for unsigned type")
+		result := chk.KeyBelowLowWatermark(originalVal)
+		assert.False(t, result, "4294954951 should not be below watermark of 100")
+	}, "KeyBelowLowWatermark should handle int32 values for unsigned columns")
 }
