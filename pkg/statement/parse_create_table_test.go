@@ -1258,7 +1258,6 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 		shouldKeepPrimary   bool
 		shouldKeepUnique    bool
 		shouldKeepFulltext  bool
-		shouldKeepSpatial   bool
 		shouldRemoveRegular bool
 	}{
 		{
