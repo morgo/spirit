@@ -1294,7 +1294,6 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 				id INT,
 				name VARCHAR(100)
 			)`,
-			expectedIndexCount: 0,
 		},
 		{
 			name: "Table with PRIMARY KEY and UNIQUE only",

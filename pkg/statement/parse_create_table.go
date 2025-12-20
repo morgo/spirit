@@ -1085,7 +1085,7 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 
 		// Add appropriate keyword based on constraint type
 		switch constraint.Tp {
-		case ast.ConstraintUniq, ast.ConstraintUniqKey:
+		case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
 			sb.WriteString("ADD UNIQUE INDEX")
 		case ast.ConstraintFulltext:
 			sb.WriteString("ADD FULLTEXT INDEX")
