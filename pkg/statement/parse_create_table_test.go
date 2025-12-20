@@ -1756,3 +1756,38 @@ func TestGetMissingSecondaryIndexes_ErrorCases(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveSecondaryIndexes_ErrorCases(t *testing.T) {
+	testCases := []struct {
+		name        string
+		createTable string
+	}{
+		{
+			name:        "Invalid SQL syntax",
+			createTable: "INVALID SQL",
+		},
+		{
+			name:        "Empty string",
+			createTable: "",
+		},
+		{
+			name:        "Not a CREATE TABLE statement",
+			createTable: "SELECT * FROM users",
+		},
+		{
+			name:        "Incomplete CREATE TABLE",
+			createTable: "CREATE TABLE",
+		},
+		{
+			name:        "CREATE TABLE with syntax error",
+			createTable: "CREATE TABLE users (id INT PRIMARY KEY,)",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RemoveSecondaryIndexes(tc.createTable)
+			assert.Error(t, err, "Expected error for invalid CREATE TABLE statement")
+		})
+	}
+}
