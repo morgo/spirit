@@ -986,7 +986,7 @@ func stringPtr(s string) *string {
 }
 
 // RemoveSecondaryIndexes takes a CREATE TABLE statement and returns a modified version
-// without secondary indexes (regular INDEX only). PRIMARY KEY, UNIQUE, FULLTEXT, and SPATIAL
+// without secondary indexes (regular INDEX only). PRIMARY KEY, UNIQUE, and FULLTEXT
 // indexes are preserved.
 func RemoveSecondaryIndexes(createStmt string) (string, error) {
 	ct, err := ParseCreateTable(createStmt)
