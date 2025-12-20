@@ -873,7 +873,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	}
 
 	// Restore secondary indexes if they were deferred during table creation.
-	// This is always called (not conditional on DeferSecondaryIndexCreation) to handle
+	// This is always called (not conditional on DeferSecondaryIndexes) to handle
 	// checkpoint resume scenarios where indexes may have been deferred in a previous run.
 	r.status.Set(status.RestoreSecondaryIndexes)
 	if err := r.restoreSecondaryIndexes(ctx); err != nil {
