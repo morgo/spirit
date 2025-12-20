@@ -984,3 +984,156 @@ func (constraints Constraints) ByName(name string) *Constraint {
 func stringPtr(s string) *string {
 	return &s
 }
+
+// RemoveSecondaryIndexes takes a CREATE TABLE statement and returns a modified version
+// without secondary indexes (regular INDEX only). PRIMARY KEY, UNIQUE, FULLTEXT, and SPATIAL
+// indexes are preserved.
+func RemoveSecondaryIndexes(createStmt string) (string, error) {
+	ct, err := ParseCreateTable(createStmt)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse CREATE TABLE: %w", err)
+	}
+
+	// Filter out regular INDEX entries from the constraints
+	filteredConstraints := make([]*ast.Constraint, 0)
+	for _, constraint := range ct.Raw.Constraints {
+		// Keep everything except regular INDEX
+		switch constraint.Tp {
+		case ast.ConstraintKey, ast.ConstraintIndex:
+			// Skip regular indexes
+			continue
+		default:
+			// Keep PRIMARY KEY, UNIQUE, FULLTEXT, SPATIAL, etc.
+			filteredConstraints = append(filteredConstraints, constraint)
+		}
+	}
+
+	// Update the AST with filtered constraints
+	ct.Raw.Constraints = filteredConstraints
+
+	// Restore the modified AST back to SQL
+	var sb strings.Builder
+	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+	if err := ct.Raw.Restore(rCtx); err != nil {
+		return "", fmt.Errorf("failed to restore CREATE TABLE: %w", err)
+	}
+
+	return sb.String(), nil
+}
+
+// GetMissingSecondaryIndexes compares two CREATE TABLE statements (source and target)
+// and returns an ALTER TABLE statement that adds any missing secondary indexes.
+// Returns an empty string if no indexes need to be added.
+// Considers UNIQUE, FULLTEXT, and regular INDEX types. PRIMARY KEY is excluded as it's fundamental to table structure.
+// Note: SPATIAL indexes are not currently supported by the TiDB parser constraint types used in this implementation.
+func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName string) (string, error) {
+	// Parse both CREATE TABLE statements
+	sourceCT, err := ParseCreateTable(sourceCreateTable)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse source CREATE TABLE: %w", err)
+	}
+
+	targetCT, err := ParseCreateTable(targetCreateTable)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse target CREATE TABLE: %w", err)
+	}
+
+	// Build a map of existing indexes on the target (all secondary indexes)
+	targetIndexes := make(map[string]bool)
+	for _, constraint := range targetCT.Raw.Constraints {
+		// Skip PRIMARY KEY, but include all other index types
+		if constraint.Tp == ast.ConstraintPrimaryKey {
+			continue
+		}
+		targetIndexes[constraint.Name] = true
+	}
+
+	// Find missing indexes from source
+	var missingIndexes []*ast.Constraint
+	for _, constraint := range sourceCT.Raw.Constraints {
+		// Consider all secondary indexes (UNIQUE, FULLTEXT, and regular INDEX)
+		// Skip only PRIMARY KEY as it's fundamental to table structure
+		if constraint.Tp == ast.ConstraintPrimaryKey {
+			continue
+		}
+		// Include: UNIQUE, FULLTEXT, and regular INDEX
+		// Note: SPATIAL indexes are not currently supported by the TiDB parser constraint types
+		if constraint.Tp != ast.ConstraintKey && constraint.Tp != ast.ConstraintIndex &&
+			constraint.Tp != ast.ConstraintUniq && constraint.Tp != ast.ConstraintFulltext {
+			continue
+		}
+
+		// Check if this index exists on target
+		if !targetIndexes[constraint.Name] {
+			missingIndexes = append(missingIndexes, constraint)
+		}
+	}
+
+	// If no missing indexes, return empty string
+	if len(missingIndexes) == 0 {
+		return "", nil
+	}
+
+	// Build a single ALTER TABLE statement with all missing indexes
+	var alterClauses []string
+	for _, constraint := range missingIndexes {
+		var sb strings.Builder
+
+		// Add appropriate keyword based on constraint type
+		switch constraint.Tp {
+		case ast.ConstraintUniq, ast.ConstraintUniqKey:
+			sb.WriteString("ADD UNIQUE INDEX")
+		case ast.ConstraintFulltext:
+			sb.WriteString("ADD FULLTEXT INDEX")
+		default: // ast.ConstraintKey, ast.ConstraintIndex
+			sb.WriteString("ADD INDEX")
+		}
+
+		// Add index name if present
+		if constraint.Name != "" {
+			sb.WriteString(fmt.Sprintf(" `%s`", constraint.Name))
+		}
+
+		// Add columns
+		sb.WriteString(" (")
+		for i, key := range constraint.Keys {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("`%s`", key.Column.Name.String()))
+			// Add length if specified
+			if key.Length > 0 {
+				sb.WriteString(fmt.Sprintf("(%d)", key.Length))
+			}
+		}
+		sb.WriteString(")")
+
+		// Add index options if present
+		if constraint.Option != nil {
+			opt := constraint.Option
+
+			// Add USING clause
+			if opt.Tp != ast.IndexTypeInvalid && opt.Tp.String() != "" {
+				sb.WriteString(" USING " + opt.Tp.String())
+			}
+
+			// Add KEY_BLOCK_SIZE
+			if opt.KeyBlockSize > 0 {
+				sb.WriteString(fmt.Sprintf(" KEY_BLOCK_SIZE=%d", opt.KeyBlockSize))
+			}
+
+			// Add COMMENT
+			if opt.Comment != "" {
+				sb.WriteString(fmt.Sprintf(" COMMENT '%s'", opt.Comment))
+			}
+
+			// Add VISIBLE/INVISIBLE
+			if opt.Visibility == ast.IndexVisibilityInvisible {
+				sb.WriteString(" INVISIBLE")
+			}
+		}
+		alterClauses = append(alterClauses, sb.String())
+	}
+	// Combine all ADD INDEX clauses into a single ALTER TABLE statement
+	return fmt.Sprintf("ALTER TABLE `%s` %s", tableName, strings.Join(alterClauses, ", ")), nil
+}
