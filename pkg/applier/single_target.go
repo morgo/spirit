@@ -15,12 +15,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-const (
-	chunkletSize        = 1000 // Number of rows per chunklet
-	defaultBufferSize   = 128  // Size of the shared buffer channel for chunklets
-	defaultWriteWorkers = 40   // Number of write workers
-)
-
 // SingleTargetApplier applies rows to a single target database.
 // It internally splits rows into chunklets for optimal batching and tracks
 // completion to invoke callbacks when all chunklets for a set of rows are done.
@@ -53,16 +47,12 @@ type SingleTargetApplier struct {
 	stateMutex sync.Mutex
 }
 
-// rowData represents a single row with all its column values
-type rowData struct {
-	values []any
-}
-
-// chunklet represents a small batch of rows (up to 1000 rows) for internal processing
+// chunklet represents a small batch of rows for internal processing
+// Limited by either chunkletMaxRows or chunkletMaxSize, whichever is reached first
 type chunklet struct {
 	workID int64        // ID of the parent work
 	chunk  *table.Chunk // Original chunk for column info
-	rows   []rowData    // Up to 1000 rows of data
+	rows   []rowData    // Batch of rows limited by row count or size
 }
 
 // chunkletCompletion represents a completed chunklet
@@ -152,29 +142,30 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 		rowDataList[i] = rowData{values: row}
 	}
 
-	// Calculate how many chunklets we'll create
-	totalChunklets := (len(rows) + chunkletSize - 1) / chunkletSize
+	// Split into chunklets based on both row count and size thresholds
+	// Then convert row batches into chunklets with metadata
+	rowBatches := splitRowsIntoChunklets(rowDataList)
+	chunklets := make([]chunklet, len(rowBatches))
+	for i, batch := range rowBatches {
+		chunklets[i] = chunklet{
+			workID: workID,
+			chunk:  chunk,
+			rows:   batch,
+		}
+	}
 
 	// Register the pending work
 	a.pendingMutex.Lock()
 	a.pendingWork[workID] = &pendingWork{
 		callback:           callback,
-		totalChunklets:     totalChunklets,
+		totalChunklets:     len(chunklets),
 		completedChunklets: 0,
 		totalAffectedRows:  0,
 	}
 	a.pendingMutex.Unlock()
 
-	// Split into chunklets and send to buffer
-	for i := 0; i < len(rowDataList); i += chunkletSize {
-		end := min(i+chunkletSize, len(rowDataList))
-
-		chunkletData := chunklet{
-			workID: workID,
-			chunk:  chunk,
-			rows:   rowDataList[i:end],
-		}
-
+	// Send chunklets to buffer
+	for _, chunkletData := range chunklets {
 		select {
 		case a.chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
@@ -296,7 +287,7 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context) {
 	}
 }
 
-// writeChunklet writes a single chunklet (up to 1000 rows)
+// writeChunklet writes a single chunklet (up to chunkletMaxRows or chunkletMaxSize)
 func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData chunklet) (int64, error) {
 	if len(chunkletData.rows) == 0 {
 		return 0, nil
