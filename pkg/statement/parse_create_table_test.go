@@ -1255,7 +1255,6 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 	testCases := []struct {
 		name                string
 		sql                 string
-		expectedIndexCount  int // Expected number of indexes after removal
 		shouldKeepPrimary   bool
 		shouldKeepUnique    bool
 		shouldKeepFulltext  bool
