@@ -39,7 +39,7 @@ func (s State) String() string {
 	case ApplyChangeset:
 		return "applyChangeset"
 	case RestoreSecondaryIndexes:
-		return "reapplySecondaryIndexes"
+		return "restoreSecondaryIndexes"
 	case AnalyzeTable:
 		return "analyzeTable"
 	case Checksum:
