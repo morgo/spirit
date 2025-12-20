@@ -1058,8 +1058,12 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 		}
 		// Include: UNIQUE, FULLTEXT, and regular INDEX
 		// Note: SPATIAL indexes are not currently supported by the TiDB parser constraint types
-		if constraint.Tp != ast.ConstraintKey && constraint.Tp != ast.ConstraintIndex &&
-			constraint.Tp != ast.ConstraintUniq && constraint.Tp != ast.ConstraintFulltext {
+		if constraint.Tp != ast.ConstraintKey &&
+			constraint.Tp != ast.ConstraintIndex &&
+			constraint.Tp != ast.ConstraintUniq &&
+			constraint.Tp != ast.ConstraintUniqKey &&
+			constraint.Tp != ast.ConstraintUniqIndex &&
+			constraint.Tp != ast.ConstraintFulltext {
 			continue
 		}
 
