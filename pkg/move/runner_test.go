@@ -14,8 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// testMoveWithConcurrentWrites reproduces the "not all changes flushed" error
-// that occurs during cutover when there are lots of concurrent writes.
+// TestMoveWithConcurrentWrites verifies move behavior under lots of concurrent
+// writes, exercising both deferred and non-deferred secondary indexes and
+// reproducing the "not all changes flushed" error seen during cutover.
 func TestMoveWithConcurrentWrites(t *testing.T) {
 	testMoveWithConcurrentWrites(t, false)
 	testMoveWithConcurrentWrites(t, true)
