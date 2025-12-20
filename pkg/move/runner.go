@@ -774,17 +774,15 @@ func (r *Runner) restoreSecondaryIndexes(ctx context.Context) error {
 		"targetCount", len(r.targets))
 
 	// Process each host group in parallel using errgroup
-	// Note: in this context "indices" means the target indices in r.targets
-	// not indexes to be added to tables. Basically we run parallel per hostname,
-	// but within this hostname it runs the tasks sequentially. We then
-	// wait for all host groups to complete.
 	g, gctx := errgroup.WithContext(ctx)
 	for host, targetIndices := range hostGroups {
-		g.Go(func(h string, indices []int) func() error {
-			return func() error {
-				return r.restoreIndexesForTargets(gctx, h, indices)
-			}
-		}(host, targetIndices))
+		// Shadow loop variables to avoid closure capture issues.
+		host := host
+		targetIndices := targetIndices
+
+		g.Go(func() error {
+			return r.restoreIndexesForTargets(gctx, host, targetIndices)
+		})
 	}
 
 	// Wait for all host groups to complete

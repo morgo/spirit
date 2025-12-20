@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
@@ -1128,7 +1129,7 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 
 			// Add COMMENT
 			if opt.Comment != "" {
-				sb.WriteString(fmt.Sprintf(" COMMENT '%s'", opt.Comment))
+				sb.WriteString(fmt.Sprintf(" COMMENT '%s'", sqlescape.EscapeString(opt.Comment)))
 			}
 
 			// Add VISIBLE/INVISIBLE

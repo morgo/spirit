@@ -1634,6 +1634,78 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			tableName:   "users",
 			expectEmpty: true,
 		},
+		{
+			name: "Index comment with special characters requiring SQL escaping",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				INDEX idx_name (name) COMMENT 'User''s name index with "quotes" and backslash: \\'
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'User\\'s name index with \\\"quotes\\\" and backslash: \\\\'",
+		},
+		{
+			name: "Index comment with SQL injection attempt",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				INDEX idx_email (email) COMMENT 'Email index''; DROP TABLE users; --'
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_email` (`email`) COMMENT 'Email index\\'; DROP TABLE users; --'",
+		},
+		{
+			name:              "Index comment with newline and carriage return",
+			sourceCreateTable: "CREATE TABLE users (\n\tid INT PRIMARY KEY,\n\tname VARCHAR(100),\n\tINDEX idx_name (name) COMMENT 'Line 1\nLine 2\rLine 3'\n)",
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'Line 1\\nLine 2\\rLine 3'",
+		},
+		{
+			name:              "Index comment with null byte (should be escaped)",
+			sourceCreateTable: "CREATE TABLE users (\n\tid INT PRIMARY KEY,\n\tdata VARCHAR(100),\n\tINDEX idx_data (data) COMMENT 'Data\x00null'\n)",
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				data VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_data` (`data`) COMMENT 'Data\\0null'",
+		},
+		{
+			name:              "Index comment with Ctrl-Z character",
+			sourceCreateTable: "CREATE TABLE users (\n\tid INT PRIMARY KEY,\n\tdata VARCHAR(100),\n\tINDEX idx_data (data) COMMENT 'Data\x1aCtrlZ'\n)",
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				data VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_data` (`data`) COMMENT 'Data\\ZCtrlZ'",
+		},
+		{
+			name: "Index comment with multiple special characters",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				INDEX idx_name (name) COMMENT 'Test: apostrophe'' and "quotes" and backslash\\'
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'Test: apostrophe\\' and \\\"quotes\\\" and backslash\\\\'",
+		},
 	}
 
 	for _, tc := range testCases {
