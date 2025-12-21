@@ -182,8 +182,9 @@ func doOneWriteLoop(ctx context.Context, db *sql.DB) error {
 	}
 
 	// Do some cached reads
+	var rows *sql.Rows
 	for range 10 {
-		rows, err := trx.QueryContext(ctx, `SELECT id, x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at FROM xfers WHERE x_token = ?`, xtoken)
+		rows, err = trx.QueryContext(ctx, `SELECT id, x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at FROM xfers WHERE x_token = ?`, xtoken)
 		if err != nil {
 			return err
 		}

@@ -78,8 +78,8 @@ func (c *CutOver) Run(ctx context.Context) error {
 			"attempt", i+1,
 			"max_retries", c.dbConfig.MaxRetries,
 		)
-		// if specified we will use the test cutover for failure injection.
-		// But typically we use the default algorithm of rename under lock.
+		// if specified in c.config[0], we will use the test cutover for failure injection.
+		// we don't need to exhaustively check all configs.
 		if len(c.config) > 0 && c.config[0].useTestCutover {
 			err = c.partialRenameForTest(ctx)
 		} else {
