@@ -279,9 +279,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	cutoverCfg := []*cutoverConfig{}
 	for _, change := range r.changes {
 		cutoverCfg = append(cutoverCfg, &cutoverConfig{
-			table:        change.table,
-			newTable:     change.newTable,
-			oldTableName: change.oldTableName(),
+			table:          change.table,
+			newTable:       change.newTable,
+			oldTableName:   change.oldTableName(),
+			useTestCutover: r.migration.useTestCutover, // indicates we want the test cutover
 		})
 	}
 	cutover, err := NewCutOver(r.db, cutoverCfg, r.replClient, r.dbConfig, r.logger)

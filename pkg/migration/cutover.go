@@ -22,9 +22,10 @@ type CutOver struct {
 }
 
 type cutoverConfig struct {
-	table        *table.TableInfo
-	newTable     *table.TableInfo
-	oldTableName string
+	table          *table.TableInfo
+	newTable       *table.TableInfo
+	oldTableName   string
+	useTestCutover bool
 }
 
 // NewCutOver contains the logic to perform the final cut over. It can cutover multiple tables
@@ -77,7 +78,13 @@ func (c *CutOver) Run(ctx context.Context) error {
 			"attempt", i+1,
 			"max_retries", c.dbConfig.MaxRetries,
 		)
-		err = c.algorithmRenameUnderLock(ctx)
+		// if specified we will use the test cutover for failure injection.
+		// But typically we use the default algorithm of rename under lock.
+		if len(c.config) > 0 && c.config[0].useTestCutover {
+			err = c.partialRenameForTest(ctx)
+		} else {
+			err = c.algorithmRenameUnderLock(ctx)
+		}
 		if err != nil {
 			c.logger.Warn("cutover failed",
 				"error", err.Error(),
@@ -95,8 +102,6 @@ func (c *CutOver) Run(ctx context.Context) error {
 // As of MySQL 8.0.13, you can rename tables locked with a LOCK TABLES statement
 // https://dev.mysql.com/worklog/task/?id=9826
 func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
-	// Lock the source table in a trx
-	// so the connection is not used by others
 	tablesToLock := []*table.TableInfo{}
 	renameFragments := []string{}
 	for _, cfg := range c.config {
@@ -107,6 +112,12 @@ func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
 			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedName, cfg.table.QuotedName),
 		)
 	}
+	return c.executeRenameUnderLock(ctx, tablesToLock, renameFragments)
+}
+
+// executeRenameUnderLock is the shared implementation for performing renames under a table lock.
+// It handles locking, binlog flushing, and executing the rename statement.
+func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*table.TableInfo, renameFragments []string) error {
 	tableLock, err := dbconn.NewTableLock(ctx, c.db, tablesToLock, c.dbConfig, c.logger)
 	if err != nil {
 		return err
@@ -121,4 +132,29 @@ func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
 
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
 	return tableLock.ExecUnderLock(ctx, renameStatement)
+}
+
+// partialRenameForTest performs a partial cutover (only renames original table to _old)
+// This is intended for testing the atomicity/consistency of the cutover.
+func (c *CutOver) partialRenameForTest(ctx context.Context) error {
+	tablesToLock := []*table.TableInfo{}
+	renameFragments := []string{}
+
+	// Build the same locks and rename fragments as the normal algorithm,
+	// but only include the first rename (original -> _old)
+	for _, cfg := range c.config {
+		tablesToLock = append(tablesToLock, cfg.table, cfg.newTable)
+		oldQuotedName := fmt.Sprintf("`%s`.`%s`", cfg.table.SchemaName, cfg.oldTableName)
+		// Only add the first rename: original table -> _old
+		// Intentionally skip the second rename: _new -> original
+		renameFragments = append(renameFragments,
+			fmt.Sprintf("%s TO %s", cfg.table.QuotedName, oldQuotedName),
+		)
+	}
+	// Execute the partial rename using the same code path
+	if err := c.executeRenameUnderLock(ctx, tablesToLock, renameFragments); err != nil {
+		return err
+	}
+	// Intentionally return an error to simulate a partial cutover failure
+	return errors.New("intentional partial cutover failure for testing")
 }
