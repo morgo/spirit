@@ -76,6 +76,11 @@ func TestPartitioningSyntax(t *testing.T) {
 
 func TestVarbinary(t *testing.T) {
 	t.Parallel()
+	testVarbinary(t, false)
+	testVarbinary(t, true)
+}
+
+func testVarbinary(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS varbinaryt1, _varbinaryt1_new`)
 	table := `CREATE TABLE varbinaryt1 (
 		uuid varbinary(40) NOT NULL,
@@ -87,13 +92,14 @@ func TestVarbinary(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "varbinaryt1",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "varbinaryt1",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)                // everything is specified correctly.
 	assert.NoError(t, m.Run(t.Context())) // varbinary is compatible.
@@ -104,6 +110,11 @@ func TestVarbinary(t *testing.T) {
 // TestDataFromBadSqlMode tests that data previously inserted like 0000-00-00 can still be migrated.
 func TestDataFromBadSqlMode(t *testing.T) {
 	t.Parallel()
+	testDataFromBadSqlMode(t, false)
+	testDataFromBadSqlMode(t, true)
+}
+
+func testDataFromBadSqlMode(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS badsqlt1, _badsqlt1_new`)
 	table := `CREATE TABLE badsqlt1 (
 		id int not null primary key auto_increment,
@@ -115,13 +126,14 @@ func TestDataFromBadSqlMode(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "badsqlt1",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "badsqlt1",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)                // everything is specified correctly.
 	assert.NoError(t, m.Run(t.Context())) // pk is compatible.
@@ -158,6 +170,11 @@ func TestChangeDatatypeNoData(t *testing.T) {
 
 func TestChangeDatatypeDataLoss(t *testing.T) {
 	t.Parallel()
+	testChangeDatatypeDataLoss(t, false)
+	//testChangeDatatypeDataLoss(t, true) // currently panics.
+}
+
+func testChangeDatatypeDataLoss(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS cdatalossmytable`)
 	table := `CREATE TABLE cdatalossmytable (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -170,13 +187,14 @@ func TestChangeDatatypeDataLoss(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "cdatalossmytable",
-		Alter:    "CHANGE b b INT", //nolint: dupword
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "cdatalossmytable",
+		Alter:                          "CHANGE b b INT", //nolint: dupword
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)              // everything is specified correctly.
 	assert.Error(t, m.Run(t.Context())) // value 'b' can no convert cleanly to int.
@@ -547,6 +565,11 @@ func TestBadAlter(t *testing.T) {
 // The generated number of chunks should also be very low because of prefetching.
 func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	t.Parallel()
+	testChangeDatatypeLossyNoAutoInc(t, false)
+	//testChangeDatatypeLossyNoAutoInc(t, true) // doesn't time out quickly.
+}
+
+func testChangeDatatypeLossyNoAutoInc(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange2`)
 	table := `CREATE TABLE lossychange2 (
 					id BIGINT NOT NULL,
@@ -561,13 +584,14 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "lossychange2",
-		Alter:    "CHANGE COLUMN id id INT NOT NULL auto_increment", //nolint: dupword
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "lossychange2",
+		Alter:                          "CHANGE COLUMN id id INT NOT NULL auto_increment", //nolint: dupword
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -583,6 +607,11 @@ func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 // given the current stored data set does not cause errors.
 func TestChangeDatatypeLossless(t *testing.T) {
 	t.Parallel()
+	testChangeDatatypeLossless(t, false)
+	testChangeDatatypeLossless(t, true)
+}
+
+func testChangeDatatypeLossless(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange3`)
 	table := `CREATE TABLE lossychange3 (
 				id BIGINT NOT NULL AUTO_INCREMENT,
@@ -597,13 +626,14 @@ func TestChangeDatatypeLossless(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "lossychange3",
-		Alter:    "CHANGE COLUMN b b varchar(200) NOT NULL", //nolint: dupword
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "lossychange3",
+		Alter:                          "CHANGE COLUMN b b varchar(200) NOT NULL", //nolint: dupword
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -621,6 +651,10 @@ func TestChangeDatatypeLossless(t *testing.T) {
 
 func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 	t.Parallel()
+	testChangeDatatypeLossyFailEarly(t, false)
+	//testChangeDatatypeLossyFailEarly(t, true)
+}
+func testChangeDatatypeLossyFailEarly(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lossychange4`)
 	table := `CREATE TABLE lossychange4 (
 				id BIGINT NOT NULL AUTO_INCREMENT,
@@ -635,13 +669,14 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "lossychange4",
-		Alter:    "CHANGE COLUMN b b varchar(255) NOT NULL", //nolint: dupword
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "lossychange4",
+		Alter:                          "CHANGE COLUMN b b varchar(255) NOT NULL", //nolint: dupword
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -654,6 +689,11 @@ func TestChangeDatatypeLossyFailEarly(t *testing.T) {
 // duplicate errors from a resume, and a constraint violation. So what we do is:
 // 0) *FORCE* checksum to be enabled (regardless now, its always on)
 func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
+	testAddUniqueIndexChecksumEnabled(t, false)
+	testAddUniqueIndexChecksumEnabled(t, true)
+}
+
+func testAddUniqueIndexChecksumEnabled(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniqmytable`)
 	table := `CREATE TABLE uniqmytable (
 				id int(11) NOT NULL AUTO_INCREMENT,
@@ -670,13 +710,14 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "uniqmytable",
-		Alter:    "ADD UNIQUE INDEX b (b)",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "uniqmytable",
+		Alter:                          "ADD UNIQUE INDEX b (b)",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -687,13 +728,14 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS _uniqmytable_chkpnt`)                   // make sure no checkpoint exists, we need to start again.
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS _uniqmytable_new`)                      // cleanup temp table from first run
 	m2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "uniqmytable",
-		Alter:    "ADD UNIQUE INDEX b (b)",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "uniqmytable",
+		Alter:                          "ADD UNIQUE INDEX b (b)",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m2.Run(t.Context())
@@ -704,6 +746,11 @@ func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
 // Test int to bigint primary key while resuming from checkpoint.
 func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	t.Parallel()
+	testChangeIntToBigIntPKResumeFromChkPt(t, false)
+	testChangeIntToBigIntPKResumeFromChkPt(t, true)
+}
+
+func testChangeIntToBigIntPKResumeFromChkPt(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS bigintpk, _bigintpk_chkpnt, _bigintpk_new`)
 	table := `CREATE TABLE bigintpk (
 			pk int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -723,14 +770,15 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         1,
-		TargetChunkTime: 100 * time.Millisecond,
-		Table:           "bigintpk",
-		Alter:           "modify column pk bigint unsigned not null auto_increment",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		TargetChunkTime:                100 * time.Millisecond,
+		Table:                          "bigintpk",
+		Alter:                          "modify column pk bigint unsigned not null auto_increment",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 
@@ -762,13 +810,14 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	// Start a new migration with the same parameters.
 	// Let it complete.
 	m2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "bigintpk",
-		Alter:    "modify column pk bigint unsigned not null auto_increment",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "bigintpk",
+		Alter:                          "modify column pk bigint unsigned not null auto_increment",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, m2)
@@ -781,6 +830,11 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 func TestChangeNonIntPK(t *testing.T) {
 	t.Parallel()
+	testChangeNonIntPK(t, false)
+	testChangeNonIntPK(t, true)
+}
+
+func testChangeNonIntPK(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS nonintpk`)
 	table := `CREATE TABLE nonintpk (
 			pk varbinary(36) NOT NULL PRIMARY KEY,
@@ -792,13 +846,14 @@ func TestChangeNonIntPK(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "nonintpk",
-		Alter:    "CHANGE COLUMN b b VARCHAR(255) NOT NULL", //nolint: dupword
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "nonintpk",
+		Alter:                          "CHANGE COLUMN b b VARCHAR(255) NOT NULL", //nolint: dupword
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -807,6 +862,13 @@ func TestChangeNonIntPK(t *testing.T) {
 }
 
 func TestCheckpoint(t *testing.T) {
+	testCheckpoint(t, false)
+	// The test type asserts for the buffered copier.
+	// It will need fixing.
+	//testCheckpoint(t, true)
+}
+
+func testCheckpoint(t *testing.T, enableBoffered bool) {
 	tbl := `CREATE TABLE cpt1 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -824,13 +886,14 @@ func TestCheckpoint(t *testing.T) {
 
 	preSetup := func() *Runner {
 		r, err := NewRunner(&Migration{
-			Host:     cfg.Addr,
-			Username: cfg.User,
-			Password: &cfg.Passwd,
-			Database: cfg.DBName,
-			Threads:  2,
-			Table:    "cpt1",
-			Alter:    "ENGINE=InnoDB",
+			Host:                           cfg.Addr,
+			Username:                       cfg.User,
+			Password:                       &cfg.Passwd,
+			Database:                       cfg.DBName,
+			Threads:                        2,
+			Table:                          "cpt1",
+			Alter:                          "ENGINE=InnoDB",
+			EnableExperimentalBufferedCopy: enableBoffered,
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, "initial", r.status.Get().String())
@@ -949,6 +1012,11 @@ func TestCheckpoint(t *testing.T) {
 
 func TestCheckpointRestore(t *testing.T) {
 	t.Parallel()
+	testCheckpointRestore(t, false)
+	testCheckpointRestore(t, true)
+}
+
+func testCheckpointRestore(t *testing.T, enableBuffered bool) {
 	tbl := `CREATE TABLE cpt2 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -960,13 +1028,14 @@ func TestCheckpointRestore(t *testing.T) {
 	testutils.RunSQL(t, tbl)
 
 	r, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "cpt2",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "cpt2",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "initial", r.status.Get().String())
@@ -1004,13 +1073,14 @@ func TestCheckpointRestore(t *testing.T) {
 	assert.NoError(t, r.Close())
 
 	r2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "cpt2",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "cpt2",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = r2.Run(t.Context())
@@ -1022,6 +1092,13 @@ func TestCheckpointRestore(t *testing.T) {
 // https://github.com/block/spirit/issues/381
 func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	t.Parallel()
+	testCheckpointRestoreBinaryPK(t, false)
+	// The test type asserts for the buffered copier.
+	// It will need fixing.
+	//testCheckpointRestoreBinaryPK(t, true)
+}
+
+func testCheckpointRestoreBinaryPK(t *testing.T, enableBuffered bool) {
 	ctx := t.Context()
 	tbl := `CREATE TABLE binarypk (
  main_id varbinary(16) NOT NULL,
@@ -1041,13 +1118,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024))) from binarypk a JOIN binarypk b JOIN binarypk c LIMIT 10000;`)
 
 	r, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    "binarypk",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "binarypk",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "initial", r.status.Get().String())
@@ -1078,13 +1156,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	// Try and resume and then check if we used a checkpoint
 	// for resuming.
 	r2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "binarypk",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "binarypk",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = r2.Run(t.Context())
@@ -1278,6 +1357,13 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 // be making to the table between chunks. It is effectively an
 // end-to-end test with concurrent operations on the table.
 func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
+	testE2EBinlogSubscribingCompositeKey(t, false)
+	// The test type asserts for the buffered copier.
+	// It will need fixing.
+	//testE2EBinlogSubscribingCompositeKey(t, true)
+}
+
+func testE2EBinlogSubscribingCompositeKey(t *testing.T, enableBuffered bool) {
 	tbl := `CREATE TABLE e2et1 (
 		id1 int NOT NULL,
 		id2 int not null,
@@ -1378,13 +1464,14 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	(1194,1),(1195,1),(1196,1),(1197,1),(1198,1),(1199,1),(1200,1);`)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "e2et1",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "e2et1",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	defer m.Close()
@@ -1471,6 +1558,13 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 
 func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	t.Parallel()
+	testE2EBinlogSubscribingNonCompositeKey(t, false)
+	// The test type asserts for the buffered copier.
+	// It will need fixing.
+	//testE2EBinlogSubscribingNonCompositeKey(t, true)
+}
+
+func testE2EBinlogSubscribingNonCompositeKey(t *testing.T, enableBuffered bool) {
 	tbl := `CREATE TABLE e2et2 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		pad int NOT NULL default 0)`
@@ -1485,13 +1579,14 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	testutils.RunSQL(t, `insert into e2et2 (id) values (3)`)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "e2et2",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "e2et2",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	defer m.Close()
@@ -1640,6 +1735,11 @@ func TestForRemainingTableArtifacts(t *testing.T) {
 
 func TestDropColumn(t *testing.T) {
 	t.Parallel()
+	testDropColumn(t, false)
+	testDropColumn(t, true)
+}
+
+func testDropColumn(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS dropcol, _dropcol_new`)
 	table := `CREATE TABLE dropcol (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -1655,13 +1755,14 @@ func TestDropColumn(t *testing.T) {
 	assert.NoError(t, err)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "dropcol",
-		Alter:    "DROP COLUMN b, ENGINE=InnoDB", // need both to ensure it is not instant!
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "dropcol",
+		Alter:                          "DROP COLUMN b, ENGINE=InnoDB", // need both to ensure it is not instant!
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	assert.NoError(t, m.Run(t.Context()))
@@ -1688,6 +1789,11 @@ func TestDefaultPort(t *testing.T) {
 
 func TestNullToNotNull(t *testing.T) {
 	t.Parallel()
+	testNullToNotNull(t, false)
+	//testNullToNotNull(t, true)
+}
+
+func testNullToNotNull(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS autodatetime`)
 	table := `CREATE TABLE autodatetime (
 		id INT NOT NULL AUTO_INCREMENT,
@@ -1700,13 +1806,14 @@ func TestNullToNotNull(t *testing.T) {
 	assert.NoError(t, err)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "autodatetime",
-		Alter:    "modify column created_at datetime(3) not null default current_timestamp(3)",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "autodatetime",
+		Alter:                          "modify column created_at datetime(3) not null default current_timestamp(3)",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -1717,6 +1824,11 @@ func TestNullToNotNull(t *testing.T) {
 
 func TestChunkerPrefetching(t *testing.T) {
 	t.Parallel()
+	testChunkerPrefetching(t, false)
+	testChunkerPrefetching(t, true)
+}
+
+func testChunkerPrefetching(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS prefetchtest`)
 	table := `CREATE TABLE prefetchtest (
 		id BIGINT NOT NULL AUTO_INCREMENT,
@@ -1748,13 +1860,14 @@ func TestChunkerPrefetching(t *testing.T) {
 	assert.NoError(t, err)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "prefetchtest",
-		Alter:    "engine=innodb",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "prefetchtest",
+		Alter:                          "engine=innodb",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -1763,6 +1876,11 @@ func TestChunkerPrefetching(t *testing.T) {
 }
 
 func TestTpConversion(t *testing.T) {
+	t.Parallel()
+	testTpConversion(t, false)
+	testTpConversion(t, true)
+}
+func testTpConversion(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS tpconvert")
 	testutils.RunSQL(t, `CREATE TABLE tpconvert (
 	id bigint NOT NULL AUTO_INCREMENT primary key,
@@ -1805,6 +1923,7 @@ func TestTpConversion(t *testing.T) {
 		MODIFY COLUMN deactivated_at TIMESTAMP(6) NULL,
 		MODIFY COLUMN intasstring INT NULL DEFAULT NULL
 		`,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -1814,6 +1933,11 @@ func TestTpConversion(t *testing.T) {
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
 	t.Parallel()
+	testResumeFromCheckpointE2E(t, false)
+	testResumeFromCheckpointE2E(t, true)
+}
+
+func testResumeFromCheckpointE2E(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS chkpresumetest, _chkpresumetest_old, _chkpresumetest_chkpnt`)
 	table := `CREATE TABLE chkpresumetest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -1821,7 +1945,6 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 		PRIMARY KEY (id)
 	)`
 	testutils.RunSQL(t, table)
-	migration := &Migration{}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -1834,16 +1957,17 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	alterSQL := "ADD INDEX(pad);"
 	// use as slow as possible here: we want the copy to be still running
 	// when we kill it once we have a checkpoint saved.
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 1
-	migration.Table = "chkpresumetest"
-	migration.Alter = alterSQL
-	migration.TargetChunkTime = 100 * time.Millisecond
-
-	runner, err := NewRunner(migration)
+	runner, err := NewRunner(&Migration{
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "chkpresumetest",
+		Alter:                          alterSQL,
+		TargetChunkTime:                100 * time.Millisecond,
+		EnableExperimentalBufferedCopy: enableBuffered,
+	})
 	assert.NoError(t, err)
 
 	go func() {
@@ -1873,17 +1997,17 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO chkpresumetest (pad) SELECT RANDOM_BYTES(1024) FROM chkpresumetest LIMIT 1000")
 	// Start a new migration with the same parameters.
 	// Let it complete.
-	newmigration := &Migration{}
-	newmigration.Host = cfg.Addr
-	newmigration.Username = cfg.User
-	newmigration.Password = &cfg.Passwd
-	newmigration.Database = cfg.DBName
-	newmigration.Threads = 4
-	newmigration.Table = "chkpresumetest"
-	newmigration.Alter = alterSQL
-	newmigration.TargetChunkTime = 5 * time.Second
-
-	m, err := NewRunner(newmigration)
+	m, err := NewRunner(&Migration{
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "chkpresumetest",
+		Alter:                          alterSQL,
+		TargetChunkTime:                5 * time.Second,
+		EnableExperimentalBufferedCopy: enableBuffered,
+	})
 	assert.NoError(t, err)
 	assert.NotNil(t, m)
 
@@ -1895,6 +2019,11 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 
 func TestResumeFromCheckpointE2ECompositeVarcharPK(t *testing.T) {
 	t.Parallel()
+	testResumeFromCheckpointE2ECompositeVarcharPK(t, false)
+	testResumeFromCheckpointE2ECompositeVarcharPK(t, true)
+}
+
+func testResumeFromCheckpointE2ECompositeVarcharPK(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS compositevarcharpk, _compositevarcharpk_chkpnt`)
 	testutils.RunSQL(t, `CREATE TABLE compositevarcharpk (
   token varchar(128) NOT NULL,
@@ -1926,14 +2055,15 @@ FROM compositevarcharpk a WHERE version='1'`)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	migration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         1,
-		Table:           "compositevarcharpk",
-		Alter:           "ENGINE=InnoDB",
-		TargetChunkTime: 100 * time.Millisecond,
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "compositevarcharpk",
+		Alter:                          "ENGINE=InnoDB",
+		TargetChunkTime:                100 * time.Millisecond,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	}
 	runner, err := NewRunner(migration)
 	assert.NoError(t, err)
@@ -1962,14 +2092,15 @@ FROM compositevarcharpk a WHERE version='1'`)
 	assert.NoError(t, runner.Close())
 
 	newmigration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		Table:           "compositevarcharpk",
-		Alter:           "ENGINE=InnoDB",
-		TargetChunkTime: 5 * time.Second,
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "compositevarcharpk",
+		Alter:                          "ENGINE=InnoDB",
+		TargetChunkTime:                5 * time.Second,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	}
 	m2, err := NewRunner(newmigration)
 	assert.NoError(t, err)
@@ -1983,6 +2114,11 @@ FROM compositevarcharpk a WHERE version='1'`)
 
 func TestResumeFromCheckpointStrict(t *testing.T) {
 	t.Parallel()
+	testResumeFromCheckpointStrict(t, false)
+	testResumeFromCheckpointStrict(t, true)
+}
+
+func testResumeFromCheckpointStrict(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS resumestricttest, _resumestricttest_old, _resumestricttest_chkpnt`)
 	table := `CREATE TABLE resumestricttest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -2004,15 +2140,16 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	alterSQL := "ADD INDEX(pad);"
 
 	migration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         1,
-		Table:           "resumestricttest",
-		Alter:           alterSQL,
-		TargetChunkTime: 100 * time.Millisecond,
-		Strict:          true,
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "resumestricttest",
+		Alter:                          alterSQL,
+		TargetChunkTime:                100 * time.Millisecond,
+		Strict:                         true,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	}
 
 	// Kick off a migration with --strict enabled and let it run until the first checkpoint is available
@@ -2052,15 +2189,16 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	// since the --alter doesn't match what is recorded in the checkpoint table
 
 	migrationB := &Migration{
-		Host:            migration.Host,
-		Username:        migration.Username,
-		Password:        migration.Password,
-		Database:        migration.Database,
-		Threads:         migration.Threads,
-		Table:           migration.Table,
-		Alter:           "ENGINE=INNODB",
-		TargetChunkTime: migration.TargetChunkTime,
-		Strict:          migration.Strict,
+		Host:                           migration.Host,
+		Username:                       migration.Username,
+		Password:                       migration.Password,
+		Database:                       migration.Database,
+		Threads:                        migration.Threads,
+		Table:                          migration.Table,
+		Alter:                          "ENGINE=INNODB",
+		TargetChunkTime:                migration.TargetChunkTime,
+		Strict:                         migration.Strict,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	}
 
 	runner, err = NewRunner(migrationB)
@@ -2093,6 +2231,14 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 // values that contain single quotes are escaped correctly
 // by the repl feed applier, the copier and checksum.
 func TestE2ERogueValues(t *testing.T) {
+	t.Parallel()
+	testE2ERogueValues(t, false)
+	// The test type asserts for the buffered copier.
+	// It will need fixing.
+	//testE2ERogueValues(t, true)
+}
+
+func testE2ERogueValues(t *testing.T, enableBuffered bool) {
 	// table cointains a reserved word too.
 	tbl := "CREATE TABLE e2erogue ( `datetime` varbinary(40) NOT NULL,`col2` int NOT NULL  default 0, primary key (`datetime`, `col2`))"
 	cfg, err := mysql.ParseDSN(testutils.DSN())
@@ -2190,13 +2336,14 @@ func TestE2ERogueValues(t *testing.T) {
 	("1192 \". ",1),("1193 \". ",1),("1194 \". ",1),("1195 \". ",1),("119\"\"6 \". ",1),("1197 \". ",1),("1198 \". ",1),("1199 \". ",1),("1200 \". ",1);`)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "e2erogue",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "e2erogue",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	defer m.Close()
@@ -2270,6 +2417,11 @@ func TestE2ERogueValues(t *testing.T) {
 
 func TestPartitionedTable(t *testing.T) {
 	t.Parallel()
+	testPartitionedTable(t, false)
+	testPartitionedTable(t, true)
+}
+
+func testPartitionedTable(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS part1, _part1_new`)
 	table := `CREATE TABLE part1 (
 			id bigint(20) NOT NULL AUTO_INCREMENT,
@@ -2299,13 +2451,14 @@ func TestPartitionedTable(t *testing.T) {
 	assert.NoError(t, err)
 
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "part1",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "part1",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)                // everything is specified.
 	assert.NoError(t, m.Run(t.Context())) // should work.
@@ -2326,6 +2479,13 @@ func TestPartitionedTable(t *testing.T) {
 // - If this is done correctly, then on resume the DELETE will no longer be ignored.
 func TestResumeFromCheckpointPhantom(t *testing.T) {
 	t.Parallel()
+	testResumeFromCheckpointPhantom(t, false)
+	// The test type asserts for the buffered copier.
+	// It will need fixing.
+	//testResumeFromCheckpointPhantom(t, true)
+}
+
+func testResumeFromCheckpointPhantom(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS phantomtest, _phantomtest_old, _phantomtest_chkpnt`)
 	tbl := `CREATE TABLE phantomtest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -2342,14 +2502,15 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM phantomtest a, phantomtest b, phantomtest c LIMIT 100000")
 
 	m, err := NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		Table:           "phantomtest",
-		Alter:           "ENGINE=InnoDB",
-		TargetChunkTime: 100 * time.Millisecond,
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "phantomtest",
+		Alter:                          "ENGINE=InnoDB",
+		TargetChunkTime:                100 * time.Millisecond,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -2413,14 +2574,15 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	// changes before starting the copier.
 	ctx = t.Context()
 	m, err = NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		Table:           "phantomtest",
-		Alter:           "ENGINE=InnoDB",
-		TargetChunkTime: 100 * time.Millisecond,
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "phantomtest",
+		Alter:                          "ENGINE=InnoDB",
+		TargetChunkTime:                100 * time.Millisecond,
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -2452,6 +2614,12 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 
 func TestVarcharE2E(t *testing.T) {
 	t.Parallel()
+
+	testVarcharE2E(t, false)
+	testVarcharE2E(t, true)
+}
+
+func testVarcharE2E(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS varchart1`)
 	table := `CREATE TABLE varchart1 (
 				pk varchar(255) NOT NULL,
@@ -2468,13 +2636,14 @@ func TestVarcharE2E(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	m, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "varchart1",
-		Alter:    "ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		Table:                          "varchart1",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
@@ -2758,14 +2927,18 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	assert.NoError(t, m.Close())
 }
 
+// TestResumeFromCheckpointE2EWithManualSentinel is similar to TestResumeFromCheckpointE2E
+// but it adds a sentinel table created after the migration begins and is interrupted.
+// The migration itself runs with DeferCutOver=false
+// so we test to make sure a sentinel table created manually by the operator
+// blocks cutover.
 func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	t.Parallel()
-	// This test is similar to TestResumeFromCheckpointE2E but it adds a sentinel table
-	// created after the migration begins and is interrupted.
-	// The migration itself runs with DeferCutOver=false
-	// so we test to make sure a sentinel table created manually by the operator
-	// blocks cutover.
+	testResumeFromCheckpointE2EWithManualSentinel(t, false)
+	//testResumeFromCheckpointE2EWithManualSentinel(t, true)
+}
 
+func testResumeFromCheckpointE2EWithManualSentinel(t *testing.T, enableBuffered bool) {
 	dbName := testutils.CreateUniqueTestDatabase(t)
 	tableName := `resume_checkpoint_e2e_w_sentinel`
 	tableInfo := table.TableInfo{SchemaName: dbName, TableName: tableName}
@@ -2778,7 +2951,6 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 		PRIMARY KEY (id)
 	)`, tableName)
 	testutils.RunSQLInDatabase(t, dbName, table)
-	migration := &Migration{}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -2791,18 +2963,19 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	alterSQL := "ADD INDEX(pad);"
 	// use as slow as possible here: we want the copy to be still running
 	// when we kill it once we have a checkpoint saved.
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = dbName
-	migration.Threads = 1
-	migration.Table = tableName
-	migration.Alter = alterSQL
-	migration.TargetChunkTime = 100 * time.Millisecond
-	migration.DeferCutOver = false
-	migration.RespectSentinel = true
-
-	runner, err := NewRunner(migration)
+	runner, err := NewRunner(&Migration{
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       dbName,
+		Threads:                        1,
+		Table:                          tableName,
+		Alter:                          alterSQL,
+		TargetChunkTime:                10 * time.Second,
+		DeferCutOver:                   false,
+		RespectSentinel:                true,
+		EnableExperimentalBufferedCopy: enableBuffered,
+	})
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -2846,19 +3019,19 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s LIMIT 1000", tableName, tableName))
 	// Start a new migration with the same parameters.
 	// Let it complete.
-	newmigration := &Migration{}
-	newmigration.Host = cfg.Addr
-	newmigration.Username = cfg.User
-	newmigration.Password = &cfg.Passwd
-	newmigration.Database = dbName
-	newmigration.Threads = 4
-	newmigration.Table = tableName
-	newmigration.Alter = alterSQL
-	newmigration.TargetChunkTime = 5 * time.Second
-	newmigration.DeferCutOver = false
-	newmigration.RespectSentinel = true
-
-	m, err := NewRunner(newmigration)
+	m, err := NewRunner(&Migration{
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       dbName,
+		Threads:                        1,
+		Table:                          tableName,
+		Alter:                          alterSQL,
+		TargetChunkTime:                5 * time.Second,
+		DeferCutOver:                   false,
+		RespectSentinel:                true,
+		EnableExperimentalBufferedCopy: enableBuffered,
+	})
 	assert.NoError(t, err)
 	assert.NotNil(t, m)
 
@@ -3217,6 +3390,11 @@ func TestTrailingSemicolon(t *testing.T) {
 }
 func TestAlterExtendVarcharE2E(t *testing.T) {
 	t.Parallel()
+	testAlterExtendVarcharE2E(t, false)
+	testAlterExtendVarcharE2E(t, true)
+}
+
+func testAlterExtendVarcharE2E(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1extendvarchar, _t1extendvarchar_new`)
 	table := `CREATE TABLE t1extendvarchar (
 		id int not null primary key auto_increment,
@@ -3243,12 +3421,13 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 
 	for _, attempt := range alters {
 		m, err := NewRunner(&Migration{
-			Host:      cfg.Addr,
-			Username:  cfg.User,
-			Password:  &cfg.Passwd,
-			Database:  cfg.DBName,
-			Threads:   1,
-			Statement: attempt.Statement,
+			Host:                           cfg.Addr,
+			Username:                       cfg.User,
+			Password:                       &cfg.Passwd,
+			Database:                       cfg.DBName,
+			Threads:                        1,
+			Statement:                      attempt.Statement,
+			EnableExperimentalBufferedCopy: enableBuffered,
 		})
 		require.NoError(t, err)
 		err = m.Run(t.Context())
@@ -3263,6 +3442,11 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 
 func TestMigrationCancelledFromTableModification(t *testing.T) {
 	t.Parallel()
+	testMigrationCancelledFromTableModification(t, false)
+	testMigrationCancelledFromTableModification(t, true)
+}
+
+func testMigrationCancelledFromTableModification(t *testing.T, enableBuffered bool) {
 	// This test covers the case where a migration is running
 	// and the user modifies the table (e.g. with another ALTER).
 	// The migration should detect this and cancel itself.
@@ -3284,13 +3468,14 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	assert.NoError(t, err)
 
 	m, err := NewRunner(&Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         1,
-		TargetChunkTime: 100 * time.Millisecond, // weak performance at copying.
-		Statement:       "ALTER TABLE t1modification ENGINE=InnoDB",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		TargetChunkTime:                100 * time.Millisecond, // weak performance at copying.
+		Statement:                      "ALTER TABLE t1modification ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
 	})
 	require.NoError(t, err)
 

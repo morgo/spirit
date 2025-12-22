@@ -243,31 +243,43 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 
 func TestGeneratedColumns(t *testing.T) {
 	t.Parallel()
+	testGeneratedColumns(t, false)
+	testGeneratedColumns(t, true)
+}
+
+func testGeneratedColumns(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1generated, _t1generated_new`)
 	table := `CREATE TABLE t1generated (
 	 id int not null primary key auto_increment,
-    b int not null,
-    c int GENERATED ALWAYS AS  (b + 1)
+	 b int not null,
+	 c int GENERATED ALWAYS AS  (b + 1),
+	 d int
 	)`
 	testutils.RunSQL(t, table)
-	migration := &Migration{}
+	testutils.RunSQL(t, `insert into t1generated (b, d) values (1, 10), (2, 20), (3, 30)`)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
-
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 1
-	migration.Table = "t1generated"
-	migration.Alter = "ENGINE=InnoDB"
-
+	migration := &Migration{
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "t1generated",
+		Alter:                          "ENGINE=InnoDB",
+		EnableExperimentalBufferedCopy: enableBuffered,
+	}
 	err = migration.Run()
 	assert.NoError(t, err)
 }
 
 func TestStoredGeneratedColumns(t *testing.T) {
 	t.Parallel()
+	testStoredGeneratedColumns(t, false)
+	testStoredGeneratedColumns(t, true)
+}
+
+func testStoredGeneratedColumns(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1stored, _t1stored_new`)
 	table := `CREATE TABLE t1stored (
   id bigint NOT NULL AUTO_INCREMENT,
@@ -278,32 +290,34 @@ func TestStoredGeneratedColumns(t *testing.T) {
   s2 tinyint(1) GENERATED ALWAYS AS (if((p1 is not null),1,NULL)) STORED,
   s3 tinyint(1) GENERATED ALWAYS AS (if((p2 is not null),1,NULL)) STORED,
   s4 tinyint(1) GENERATED ALWAYS AS (if((pa <> p2),1,NULL)) STORED,
+  p3 int not null,
   PRIMARY KEY (id)
 );`
 	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, `INSERT INTO t1stored (pa, p1, p2)
+	testutils.RunSQL(t, `INSERT INTO t1stored (pa, p1, p2, p3)
 VALUES
-(1, 1, 1),
-(1, NULL, 1),
-(1, 1, NULL),
-(1, NULL, NULL),
-(1, 1, 0),
-(1, 0, 1),
-(1, 0, 0),
-(1, NULL, 0),
-(1, 0, NULL),
-(1, NULL, NULL),
-(NULL, NULL, NULL)
+(1, 1, 1, 99),
+(1, NULL, 1, 98),
+(1, 1, NULL, 97),
+(1, NULL, NULL, 96),
+(1, 1, 0, 95),
+(1, 0, 1, 94),
+(1, 0, 0, 93),
+(1, NULL, 0, 92),
+(1, 0, NULL, 91),
+(1, NULL, NULL, 90),
+(NULL, NULL, NULL, 89)
 `)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
 	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        2,
+		EnableExperimentalBufferedCopy: enableBuffered,
 		Statement: `ALTER TABLE t1stored
 MODIFY COLUMN s4 TINYINT(1)
 GENERATED ALWAYS AS (
@@ -330,6 +344,11 @@ type testcase struct {
 // without an intermediate cast.
 func TestBinaryChecksum(t *testing.T) {
 	t.Parallel()
+	testBinaryChecksum(t, false)
+	testBinaryChecksum(t, true)
+}
+
+func testBinaryChecksum(t *testing.T, enableBuffered bool) {
 	tests := []testcase{
 		{"binary(50)", "varbinary(100)"},
 		{"binary(50)", "binary(100)"},
@@ -359,6 +378,7 @@ func TestBinaryChecksum(t *testing.T) {
 		migration.Database = cfg.DBName
 		migration.Threads = 1
 		migration.Table = "t1varbin"
+		migration.EnableExperimentalBufferedCopy = enableBuffered
 		migration.Alter = fmt.Sprintf("CHANGE b b %s not null", test.NewType) //nolint: dupword
 		err = migration.Run()
 		assert.NoError(t, err)
@@ -370,6 +390,11 @@ func TestBinaryChecksum(t *testing.T) {
 // checksum correctly against their multi-byte utf8mb4 representations
 func TestConvertCharset(t *testing.T) {
 	t.Parallel()
+	testConvertCharset(t, false)
+	//testConvertCharset(t, true)
+}
+
+func testConvertCharset(t *testing.T, enableBuffered bool) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1charset, _t1charset_new`)
 	table := `CREATE TABLE t1charset (
 	 id int not null primary key auto_increment,
@@ -387,6 +412,7 @@ func TestConvertCharset(t *testing.T) {
 	migration.Threads = 1
 	migration.Table = "t1charset"
 	migration.Alter = "CONVERT TO CHARACTER SET UTF8MB4"
+	migration.EnableExperimentalBufferedCopy = enableBuffered
 	err = migration.Run()
 	assert.NoError(t, err)
 
