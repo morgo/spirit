@@ -101,6 +101,8 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 		TargetChunkTime: 100 * time.Millisecond,
 		Threads:         2,
 		CreateSentinel:  false,
+		WriteThreads:    2,
+		WriteBatchSize:  1000,
 	}
 
 	// Run move - this should succeed even with concurrent writes

@@ -10,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBufferedMap(t *testing.T) {
@@ -90,13 +91,15 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 		KeyRange: "0",
 		Config:   cfg,
 	}
+	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger),
+		Applier:                    applier,
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -144,13 +147,15 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 		KeyRange: "0",
 		Config:   cfg,
 	}
+	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger),
+		Applier:                    applier,
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))

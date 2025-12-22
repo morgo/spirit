@@ -73,15 +73,13 @@ type shardedChunkletCompletion struct {
 
 // NewShardedApplier creates a new ShardedApplier with multiple target databases.
 //
-// Parameters:
-//   - targets: Slice of Target structs containing DB and key range for each shard
-//   - dbConfig: Database configuration
-//   - logger: Logger instance
-//
 // The sharding column and hash function are configured per-table in the TableInfo.ShardingColumn
 // and TableInfo.HashFunc fields. This allows different tables to use different sharding keys
 // in multi-table migrations.
-func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*ShardedApplier, error) {
+func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	shards := make([]*shardTarget, len(targets))
 	for i, target := range targets {
 		// Parse the key range
@@ -97,8 +95,8 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 			chunkletBuffer:      make(chan shardedChunklet, defaultBufferSize),
 			chunkletCompletions: make(chan shardedChunkletCompletion, defaultBufferSize),
 			writeWorkersCount:   defaultWriteWorkers / int32(len(targets)), // Divide workers among shards
-			logger:              logger,
-			dbConfig:            dbConfig,
+			logger:              cfg.Logger,
+			dbConfig:            cfg.DBConfig,
 		}
 		// Ensure at least 1 worker per shard
 		if shards[i].writeWorkersCount < 1 {
@@ -119,7 +117,7 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 
 	// Log the parsed key ranges for debugging
 	for i, shard := range shards {
-		logger.Info("parsed key range for shard",
+		cfg.Logger.Info("parsed key range for shard",
 			"shardID", i,
 			"keyRange", targets[i].KeyRange,
 			"start", fmt.Sprintf("0x%016x", shard.keyRange.start),
@@ -129,8 +127,8 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 	return &ShardedApplier{
 		shards:      shards,
 		targets:     targets,
-		dbConfig:    dbConfig,
-		logger:      logger,
+		dbConfig:    cfg.DBConfig,
+		logger:      cfg.Logger,
 		pendingWork: make(map[int64]*pendingWork),
 	}, nil
 }

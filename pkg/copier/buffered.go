@@ -112,7 +112,9 @@ func (c *buffered) StartTime() time.Time {
 func (c *buffered) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	c.Lock()
 	c.startTime = time.Now()
+	c.Unlock()
 	go c.estimateRowsPerSecondLoop(ctx) // estimate rows while copying
 
 	// Start the applier

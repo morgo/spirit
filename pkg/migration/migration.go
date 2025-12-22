@@ -50,6 +50,8 @@ type Migration struct {
 	// Experimental features
 	// These are no longer hidden, we document them.
 	EnableExperimentalBufferedCopy bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
+	WriteThreads                   int  `name:"write-threads" help:"How many write threads to use when using the buffered copier." optional:"" default:"40"`
+	WriteChunkSize                 int  `name:"write-chunk-size" help:"How many rows to write in each batch when using the buffered copier." optional:"" default:"1000"`
 
 	EnableExperimentalLinting bool     `name:"enable-experimental-linting" help:"Enable experimental linting checks before running migration" optional:"" default:"false"`
 	EnableExperimentalLinters []string `name:"enable-experimental-linters" help:"Experimental linters to enable (default \"all\")" optional:""`

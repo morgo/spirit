@@ -59,7 +59,7 @@ func mySQLTypeToDatumTp(mysqlTp string) datumTp {
 
 func NewDatum(val any, tp datumTp) Datum {
 	var err error
-	switch tp { //nolint:exhaustive
+	switch tp {
 	case signedType:
 		// We expect the value to be an int64, but it could be an int.
 		// Anything else we attempt to convert it
@@ -173,7 +173,7 @@ func NewDatumFromValue(value any, mysqlType string) Datum {
 			// prepend a special marker to force it
 			s := string(b)
 			// Only add marker if it's valid UTF-8 and doesn't start with "0x"
-			if utf8.ValidString(s) && !(len(s) > 2 && s[0:2] == "0x") {
+			if utf8.ValidString(s) && (len(s) <= 2 || s[0:2] != "0x") {
 				// Prepend a special marker that's invalid UTF-8
 				// Use a sequence that's very unlikely to appear in real data
 				value = "\xFF\xFF\xFE" + s

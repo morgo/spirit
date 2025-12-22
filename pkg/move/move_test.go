@@ -56,6 +56,8 @@ func TestBasicMove(t *testing.T) {
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 5 * time.Second,
 		Threads:         4,
+		WriteThreads:    2,
+		WriteBatchSize:  1000,
 		CreateSentinel:  false,
 	}
 	assert.NoError(t, move.Run())
@@ -107,6 +109,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 100 * time.Millisecond,
 		Threads:         1,
+		WriteThreads:    2,
+		WriteBatchSize:  1000,
 	}
 	r, err := NewRunner(move)
 	assert.NoError(t, err)
@@ -205,6 +209,8 @@ func TestEmptyDatabaseMove(t *testing.T) {
 		TargetChunkTime: 5 * time.Second,
 		Threads:         4,
 		CreateSentinel:  false,
+		WriteThreads:    2,
+		WriteBatchSize:  1000,
 	}
 
 	runner, err := NewRunner(move)

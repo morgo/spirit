@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,12 +34,43 @@ func mkIniFile(t *testing.T, content string) *os.File {
 	return tmpFile
 }
 
+var (
+	isRBRTestRunnerCached bool
+	isRBRTestRunnerOnce   sync.Once
+)
+
+func isMinimalRBRTestRunner(t *testing.T) bool {
+	// Check if we are in the minimal RBR test runner.
+	// we use this to skip certain tests.
+	isRBRTestRunnerOnce.Do(func() {
+		cfg, err := mysql.ParseDSN(testutils.DSN())
+		require.NoError(t, err)
+		db, err := sql.Open("mysql", cfg.FormatDSN())
+		require.NoError(t, err)
+		defer db.Close()
+		var binlogRowImage, binlogRowValueOptions string
+		err = db.QueryRowContext(t.Context(),
+			`SELECT 
+		@@global.binlog_row_image,
+		@@global.binlog_row_value_options`).Scan(
+			&binlogRowImage,
+			&binlogRowValueOptions,
+		)
+		require.NoError(t, err)
+		if binlogRowImage != "FULL" || binlogRowValueOptions != "" {
+			isRBRTestRunnerCached = true
+		}
+	})
+	return isRBRTestRunnerCached
+}
+
 func TestMain(m *testing.M) {
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
 	sentinelCheckInterval = 100 * time.Millisecond
 	sentinelWaitLimit = 10 * time.Second
 	goleak.VerifyTestMain(m)
+	// Run the test.
 	os.Exit(m.Run())
 }
 
@@ -243,8 +275,15 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 
 func TestGeneratedColumns(t *testing.T) {
 	t.Parallel()
-	testGeneratedColumns(t, false)
-	testGeneratedColumns(t, true)
+	t.Run("unbuffered", func(t *testing.T) {
+		testGeneratedColumns(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		if isMinimalRBRTestRunner(t) {
+			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+		}
+		testGeneratedColumns(t, true)
+	})
 }
 
 func testGeneratedColumns(t *testing.T, enableBuffered bool) {
@@ -268,6 +307,8 @@ func testGeneratedColumns(t *testing.T, enableBuffered bool) {
 		Table:                          "t1generated",
 		Alter:                          "ENGINE=InnoDB",
 		EnableExperimentalBufferedCopy: enableBuffered,
+		WriteThreads:                   2,
+		WriteChunkSize:                 1000,
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
@@ -275,8 +316,15 @@ func testGeneratedColumns(t *testing.T, enableBuffered bool) {
 
 func TestStoredGeneratedColumns(t *testing.T) {
 	t.Parallel()
-	testStoredGeneratedColumns(t, false)
-	testStoredGeneratedColumns(t, true)
+	t.Run("unbuffered", func(t *testing.T) {
+		testStoredGeneratedColumns(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		if isMinimalRBRTestRunner(t) {
+			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+		}
+		testStoredGeneratedColumns(t, true)
+	})
 }
 
 func testStoredGeneratedColumns(t *testing.T, enableBuffered bool) {
@@ -294,6 +342,7 @@ func testStoredGeneratedColumns(t *testing.T, enableBuffered bool) {
   PRIMARY KEY (id)
 );`
 	testutils.RunSQL(t, table)
+	//nolint: dupword
 	testutils.RunSQL(t, `INSERT INTO t1stored (pa, p1, p2, p3)
 VALUES
 (1, 1, 1, 99),
@@ -318,6 +367,8 @@ VALUES
 		Database:                       cfg.DBName,
 		Threads:                        2,
 		EnableExperimentalBufferedCopy: enableBuffered,
+		WriteThreads:                   2,
+		WriteChunkSize:                 1000,
 		Statement: `ALTER TABLE t1stored
 MODIFY COLUMN s4 TINYINT(1)
 GENERATED ALWAYS AS (
@@ -344,8 +395,15 @@ type testcase struct {
 // without an intermediate cast.
 func TestBinaryChecksum(t *testing.T) {
 	t.Parallel()
-	testBinaryChecksum(t, false)
-	testBinaryChecksum(t, true)
+	t.Run("unbuffered", func(t *testing.T) {
+		testBinaryChecksum(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		if isMinimalRBRTestRunner(t) {
+			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+		}
+		testBinaryChecksum(t, true)
+	})
 }
 
 func testBinaryChecksum(t *testing.T, enableBuffered bool) {
@@ -379,6 +437,8 @@ func testBinaryChecksum(t *testing.T, enableBuffered bool) {
 		migration.Threads = 1
 		migration.Table = "t1varbin"
 		migration.EnableExperimentalBufferedCopy = enableBuffered
+		migration.WriteChunkSize = 1000
+		migration.WriteThreads = 2
 		migration.Alter = fmt.Sprintf("CHANGE b b %s not null", test.NewType) //nolint: dupword
 		err = migration.Run()
 		assert.NoError(t, err)
@@ -390,8 +450,16 @@ func testBinaryChecksum(t *testing.T, enableBuffered bool) {
 // checksum correctly against their multi-byte utf8mb4 representations
 func TestConvertCharset(t *testing.T) {
 	t.Parallel()
-	testConvertCharset(t, false)
-	//testConvertCharset(t, true)
+	t.Run("unbuffered", func(t *testing.T) {
+		testConvertCharset(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		t.Skip("failing test")
+		if isMinimalRBRTestRunner(t) {
+			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+		}
+		testConvertCharset(t, true)
+	})
 }
 
 func testConvertCharset(t *testing.T, enableBuffered bool) {
@@ -413,6 +481,8 @@ func testConvertCharset(t *testing.T, enableBuffered bool) {
 	migration.Table = "t1charset"
 	migration.Alter = "CONVERT TO CHARACTER SET UTF8MB4"
 	migration.EnableExperimentalBufferedCopy = enableBuffered
+	migration.WriteChunkSize = 1000
+	migration.WriteThreads = 2
 	err = migration.Run()
 	assert.NoError(t, err)
 

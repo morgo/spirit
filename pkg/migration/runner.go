@@ -475,11 +475,19 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 			return errors.New("buffered copy is not yet supported for multi-table migrations")
 		}
 		// Create a SingleTargetApplier for the buffered copier
-		appl = applier.NewSingleTargetApplier(
+		appl, err = applier.NewSingleTargetApplier(
 			applier.Target{DB: r.db},
-			r.dbConfig,
-			r.logger,
+			&applier.ApplierConfig{
+				ChunkletMaxRows: r.migration.WriteChunkSize,
+				ChunkletMaxSize: 1024 * 1024,
+				Threads:         r.migration.WriteThreads,
+				Logger:          r.logger,
+				DBConfig:        r.dbConfig,
+			},
 		)
+		if err != nil {
+			return fmt.Errorf("failed to create applier for buffered copier: %w", err)
+		}
 	}
 
 	// Create copier with the prepared chunker

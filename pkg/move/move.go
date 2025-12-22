@@ -12,8 +12,11 @@ type Move struct {
 	SourceDSN       string        `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
 	TargetDSN       string        `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
 	TargetChunkTime time.Duration `name:"target-chunk-time" help:"How long each chunk should take to copy" default:"5s"`
-	Threads         int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
+	Threads         int           `name:"threads" help:"How many read threads to copy in parallel" default:"2"`
 	CreateSentinel  bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
+
+	WriteThreads   int `name:"write-threads" help:"How many write threads to use when applying changes to the target." default:"40"`
+	WriteBatchSize int `name:"write-batch-size" help:"How many rows to write in each batch when applying changes to the target." default:"1000"`
 
 	// SourceTables optionally specifies a list of tables to move.
 	// If empty, all tables in the source database will be moved.
