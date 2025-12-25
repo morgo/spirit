@@ -71,7 +71,10 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 		if err != nil {
 			return nil, err
 		}
-		maxVal := NewDatum(upperVal, t.chunkPtr.Tp)
+		maxVal, err := NewDatum(upperVal, t.chunkPtr.Tp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create datum from upperVal: %w", err)
+		}
 		t.chunkPtr = maxVal
 
 		// If the difference between min and max is less than
@@ -206,7 +209,11 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	// Because this chunker only supports single-column primary keys,
 	// we can safely set the checkpointHighPtr as a single value like this.
 	// For high watermark, use the type of old table, not the new one.
-	t.checkpointHighPtr = NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp) // set the high pointer.
+	checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp) // set the high pointer.
+	if err != nil {
+		return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
+	}
+	t.checkpointHighPtr = checkpointHighPtr
 	chunk, err := newChunkFromJSON(t.Ti, cp)
 	if err != nil {
 		return err
@@ -517,7 +524,12 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key0 any) bool {
 	if t.finalChunkSent {
 		return false // we're done, so everything is below.
 	}
-	keyDatum := NewDatum(key0, t.chunkPtr.Tp)
+	keyDatum, err := NewDatum(key0, t.chunkPtr.Tp)
+	if err != nil {
+		// If we can't convert the key, return false to be safe (don't discard the row)
+		t.logger.Error("failed to create datum in KeyAboveHighWatermark", "key", key0, "error", err)
+		return false
+	}
 
 	// If there is a checkpoint high pointer, first verify that
 	// the key is above it. If it's not above it, we return FALSE
@@ -548,8 +560,18 @@ func (t *chunkerOptimistic) KeyBelowLowWatermark(key0 any) bool {
 
 	// We are in the regular state, so we can compare the watermark's
 	// upperBound to the key to decide what to return.
-	keyDatum := NewDatum(key0, t.chunkPtr.Tp)
-	watermarkDatum := NewDatum(t.watermark.UpperBound.Value[0].Val, t.chunkPtr.Tp)
+	keyDatum, err := NewDatum(key0, t.chunkPtr.Tp)
+	if err != nil {
+		// If we can't convert the key, return false to be safe (assume it's not below watermark)
+		t.logger.Error("failed to create keyDatum in KeyBelowLowWatermark", "key", key0, "error", err)
+		return false
+	}
+	watermarkDatum, err := NewDatum(t.watermark.UpperBound.Value[0].Val, t.chunkPtr.Tp)
+	if err != nil {
+		// If we can't convert the watermark, return false to be safe
+		t.logger.Error("failed to create watermarkDatum in KeyBelowLowWatermark", "error", err)
+		return false
+	}
 	return watermarkDatum.GreaterThan(keyDatum)
 }
 

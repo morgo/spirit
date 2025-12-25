@@ -322,7 +322,11 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
-			values = append(values, table.NewDatumFromValue(value, columnType).String())
+			datum, err := table.NewDatumFromValue(value, columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -372,6 +376,8 @@ func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
 			// If there was an error, invoke callback immediately
 			if completion.err != nil {
 				callback := pending.callback
+				// Remove the work from pending map before invoking callback
+				delete(a.pendingWork, completion.workID)
 				a.pendingMutex.Unlock()
 				callback(0, completion.err)
 				continue
@@ -500,7 +506,11 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 			}
 			// The value appended here will be escaped
 			// by calling String() on the Datum
-			values = append(values, table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType).String())
+			datum, err := table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}

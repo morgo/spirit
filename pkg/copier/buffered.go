@@ -33,7 +33,8 @@ type buffered struct {
 	chunker          table.Chunker
 	concurrency      int
 	rowsPerSecond    uint64
-	isInvalid        bool
+	chunksProcessed  atomic.Uint64 // Number of chunks sent to applier (for testing early exit)
+	isInvalid        atomic.Bool
 	startTime        time.Time
 	throttler        throttler.Throttler
 	dbConfig         *dbconn.DBConfig
@@ -95,12 +96,10 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 }
 
 func (c *buffered) isHealthy(ctx context.Context) bool {
-	c.Lock()
-	defer c.Unlock()
 	if ctx.Err() != nil {
 		return false
 	}
-	return !c.isInvalid
+	return !c.isInvalid.Load()
 }
 
 func (c *buffered) StartTime() time.Time {
@@ -146,6 +145,9 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = closeErr
 	}
 
+	if c.isInvalid.Load() {
+		return fmt.Errorf("copy failed due to earlier errors")
+	}
 	return err
 }
 
@@ -218,6 +220,9 @@ func (c *buffered) readWorker(ctx context.Context) error {
 			c.setInvalid()
 			return fmt.Errorf("failed to apply rows: %w", err)
 		}
+
+		// Track that we processed this chunk (for testing early exit behavior)
+		c.chunksProcessed.Add(1)
 	}
 
 	c.logger.Info("readWorker exiting main loop")
@@ -225,9 +230,8 @@ func (c *buffered) readWorker(ctx context.Context) error {
 }
 
 func (c *buffered) setInvalid() {
-	c.Lock()
-	defer c.Unlock()
-	c.isInvalid = true
+	c.logger.Warn("##### setInvalid called!")
+	c.isInvalid.Store(true)
 }
 
 func (c *buffered) SetThrottler(throttler throttler.Throttler) {

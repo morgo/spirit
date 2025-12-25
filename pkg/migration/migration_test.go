@@ -454,7 +454,6 @@ func TestConvertCharset(t *testing.T) {
 		testConvertCharset(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		t.Skip("failing test")
 		if isMinimalRBRTestRunner(t) {
 			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
 		}
@@ -470,32 +469,36 @@ func testConvertCharset(t *testing.T, enableBuffered bool) {
 	) charset=latin1`
 	testutils.RunSQL(t, table)
 	testutils.RunSQL(t, `insert into t1charset values (null, 'à'), (null, '€')`)
-	migration := &Migration{}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 1
-	migration.Table = "t1charset"
-	migration.Alter = "CONVERT TO CHARACTER SET UTF8MB4"
-	migration.EnableExperimentalBufferedCopy = enableBuffered
-	migration.WriteChunkSize = 1000
-	migration.WriteThreads = 2
+	migration := &Migration{
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "t1charset",
+		Alter:                          "CONVERT TO CHARACTER SET UTF8MB4",
+		EnableExperimentalBufferedCopy: enableBuffered,
+		WriteChunkSize:                 1000,
+		WriteThreads:                   2,
+	}
 	err = migration.Run()
 	assert.NoError(t, err)
 
 	// Because utf8mb4 is the superset, it doesn't matter that that's
 	// what the checksum casts to. We should be able to convert back as well.
 	migration = &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    "t1charset",
-		Alter:    "CONVERT TO CHARACTER SET latin1",
+		Host:                           cfg.Addr,
+		Username:                       cfg.User,
+		Password:                       &cfg.Passwd,
+		Database:                       cfg.DBName,
+		Threads:                        1,
+		Table:                          "t1charset",
+		Alter:                          "CONVERT TO CHARACTER SET latin1",
+		EnableExperimentalBufferedCopy: enableBuffered,
+		WriteChunkSize:                 1000,
+		WriteThreads:                   2,
 	}
 	err = migration.Run()
 	assert.NoError(t, err)

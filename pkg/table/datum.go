@@ -57,7 +57,7 @@ func mySQLTypeToDatumTp(mysqlTp string) datumTp {
 	return unknownType
 }
 
-func NewDatum(val any, tp datumTp) Datum {
+func NewDatum(val any, tp datumTp) (Datum, error) {
 	var err error
 	switch tp {
 	case signedType:
@@ -71,7 +71,7 @@ func NewDatum(val any, tp datumTp) Datum {
 		default:
 			val, err = strconv.ParseInt(fmt.Sprint(val), 10, 64)
 			if err != nil {
-				panic("could not convert datum to int64")
+				return Datum{}, fmt.Errorf("could not convert datum to int64: value=%v, error=%w", val, err)
 			}
 		}
 	case unsignedType:
@@ -91,7 +91,7 @@ func NewDatum(val any, tp datumTp) Datum {
 		default:
 			val, err = strconv.ParseUint(fmt.Sprint(val), 10, 64)
 			if err != nil {
-				panic("could not convert datum to uint64")
+				return Datum{}, fmt.Errorf("could not convert datum to uint64: value=%v, error=%w", val, err)
 			}
 		}
 	case binaryType, unknownType, jsonType:
@@ -109,7 +109,7 @@ func NewDatum(val any, tp datumTp) Datum {
 	return Datum{
 		Val: val,
 		Tp:  tp,
-	}
+	}, nil
 }
 
 func datumValFromString(val string, tp datumTp) (any, error) {
@@ -153,10 +153,10 @@ func newDatumFromMySQL(val string, mysqlTp string) (Datum, error) {
 // NewDatumFromValue creates a Datum from a value and MySQL column type.
 // This is useful for converting values from the database driver (which may be []byte, int, string, etc.)
 // into a Datum that can be formatted as SQL.
-func NewDatumFromValue(value any, mysqlType string) Datum {
+func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 	if value == nil {
 		tp := mySQLTypeToDatumTp(mysqlType)
-		return NewNilDatum(tp)
+		return NewNilDatum(tp), nil
 	}
 
 	tp := mySQLTypeToDatumTp(mysqlType)

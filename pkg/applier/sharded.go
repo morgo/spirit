@@ -400,7 +400,11 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
-			values = append(values, table.NewDatumFromValue(value, columnType).String())
+			datum, err := table.NewDatumFromValue(value, columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -481,6 +485,8 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 			// If there was an error, invoke callback immediately
 			if completion.err != nil {
 				callback := pending.callback
+				// Remove the work from pending map before invoking callback
+				delete(a.pendingWork, completion.workID)
 				a.pendingMutex.Unlock()
 				callback(0, completion.err)
 				continue
@@ -712,7 +718,12 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 						results <- result{err: fmt.Errorf("column %s not found in table info", col)}
 						return
 					}
-					values = append(values, table.NewDatumFromValue(value, columnType).String())
+					datum, err := table.NewDatumFromValue(value, columnType)
+					if err != nil {
+						results <- result{err: fmt.Errorf("failed to convert value to datum for column %s: %w", col, err)}
+						return
+					}
+					values = append(values, datum.String())
 				}
 				valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 			}
