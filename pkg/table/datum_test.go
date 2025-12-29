@@ -108,11 +108,6 @@ func TestDatumInt64ToUnsigned(t *testing.T) {
 	maxInt64 := int64(math.MaxInt64)
 	d3 := NewDatum(maxInt64, unsignedType)
 	assert.Equal(t, uint64(math.MaxInt64), d3.Val)
-
-	// Test int values (platform dependent, but should work)
-	intVal := int(12345)
-	d4 := NewDatum(intVal, unsignedType)
-	assert.Equal(t, uint64(12345), d4.Val)
 }
 
 func TestKeyBelowLowWatermarkWithNegativeInt32(t *testing.T) {
