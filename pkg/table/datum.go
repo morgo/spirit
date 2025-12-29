@@ -70,6 +70,8 @@ func NewDatum(val any, tp datumTp) Datum {
 			// We need to reinterpret the bits as unsigned.
 			val = uint64(uint32(v))
 		case int64:
+			// For int64, a direct cast to uint64 is safe because both are 64-bit types
+			// and the underlying bit pattern is preserved without additional sign extension.
 			val = uint64(v)
 		default:
 			val, err = strconv.ParseUint(fmt.Sprint(val), 10, 64)
