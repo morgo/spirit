@@ -115,7 +115,7 @@ func TestDatumInt64ToUnsigned(t *testing.T) {
 	assert.Equal(t, uint64(12345), d4.Val)
 }
 
-func TestInt32KeyBelowLowWatermark(t *testing.T) {
+func TestKeyBelowLowWatermarkWithNegativeInt32(t *testing.T) {
 	ti := &TableInfo{
 		SchemaName:        "test",
 		TableName:         "t1",
