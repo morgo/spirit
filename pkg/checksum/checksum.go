@@ -73,6 +73,7 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 			fixDifferences: config.FixDifferences,
 			maxRetries:     config.MaxRetries,
 			applier:        config.Applier,
+			builder:        &MySQLQueryBuilder{},
 		}, nil
 	}
 	return &SingleChecker{
@@ -85,4 +86,20 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 		fixDifferences: config.FixDifferences,
 		maxRetries:     config.MaxRetries,
 	}, nil
+}
+
+// NewPostgresTargetChecker creates a new checker for cross-database checksums
+func NewPostgresTargetChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *CheckerConfig) *DistributedChecker {
+	return &DistributedChecker{
+		concurrency:    config.Concurrency,
+		feed:           feed,
+		db:             db,
+		applier:        config.Applier,
+		chunker:        chunker,
+		dbConfig:       config.DBConfig,
+		logger:         config.Logger,
+		fixDifferences: config.FixDifferences,
+		maxRetries:     config.MaxRetries,
+		builder:        &PostgreSQLQueryBuilder{},
+	}
 }

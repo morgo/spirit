@@ -1,0 +1,63 @@
+version: "1.0"
+
+sync:
+  name: "production-to-analytics"
+  
+  source:
+    dsn: "user:pass@tcp(mysql.prod.example.com:3306)/production"
+    tls:
+      mode: "preferred"
+      ca_cert: "/path/to/ca.pem"
+  
+  target:
+    type: "postgresql"
+    dsn: "postgres://user:pass@pg.analytics.example.com:5432/analytics"
+  
+  projections:
+    - name: "users_sync"
+      source_table: "users"
+      target_table: "users"
+      query: |
+        SELECT
+          user_id,
+          email,
+          name,
+          created_at,
+          updated_at
+        FROM users
+      primary_key: ["user_id"]
+      type_mappings:
+        created_at: "TIMESTAMP WITH TIME ZONE"
+        updated_at: "TIMESTAMP WITH TIME ZONE"
+    
+    - name: "orders_sync"
+      source_table: "orders"
+      target_table: "orders"
+      query: |
+        SELECT
+          order_id,
+          user_id,
+          total_amount,
+          status,
+          created_at
+        FROM orders
+      primary_key: ["order_id"]
+  
+  checksum:
+    enabled: true
+    interval: "1h"
+    max_retries: 3
+  
+  performance:
+    threads: 4
+    target_chunk_time: "5s"
+    max_replication_lag: "10s"
+  
+  checkpoint:
+    interval: "1m"
+    table: "_spirit_sync_checkpoint"
+  
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"

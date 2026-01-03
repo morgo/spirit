@@ -22,6 +22,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// DistributedChecker performs checksums across multiple targets
+// Supports both same-database (MySQL-to-MySQL) and cross-database (MySQL-to-PostgreSQL) checksums
 type DistributedChecker struct {
 	sync.Mutex
 	concurrency      int
@@ -40,6 +42,7 @@ type DistributedChecker struct {
 	differencesFound atomic.Uint64
 	recopyLock       sync.Mutex
 	maxRetries       int
+	builder          queryBuilder
 }
 
 var _ Checker = (*DistributedChecker)(nil)
@@ -56,29 +59,26 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 
-	// Query source
-	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		c.intersectColumns(chunk),
-		chunk.Table.QuotedName,
-		chunk.String(),
-	)
-	var sourceChecksum int64
+	// Build and execute source query
+	sourceQuery := c.builder.sourceQuery(chunk)
+	var sourceChecksum sql.NullInt64
 	var sourceCount uint64
-	err = srcTrx.QueryRow(source).Scan(&sourceChecksum, &sourceCount)
+	err = srcTrx.QueryRow(sourceQuery).Scan(&sourceChecksum, &sourceCount)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to query source checksum: %w", err)
+	}
+
+	// Handle NULL checksum (empty result set)
+	sourceChecksumVal := int64(0)
+	if sourceChecksum.Valid {
+		sourceChecksumVal = sourceChecksum.Int64
 	}
 
 	// Query all targets and aggregate results
-	targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		c.intersectColumns(chunk),
-		chunk.NewTable.QuotedName,
-		chunk.String(),
-	)
-
-	// Aggregate checksums and counts from all targets
 	var aggregatedChecksum int64 = 0
 	var aggregatedCount uint64 = 0
+
+	targetQuery := c.builder.targetQuery(chunk)
 
 	for i, targetTrxPool := range c.targetTrxPools {
 		targetTrx, err := targetTrxPool.Get()
@@ -87,28 +87,32 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 		}
 		defer targetTrxPool.Put(targetTrx)
 
-		var targetChecksum int64
+		var targetChecksum sql.NullInt64
 		var targetCount uint64
 		err = targetTrx.QueryRow(targetQuery).Scan(&targetChecksum, &targetCount)
 		if err != nil {
 			return fmt.Errorf("failed to query target %d: %w", i, err)
 		}
 
+		// Handle NULL checksum
+		targetChecksumVal := int64(0)
+		if targetChecksum.Valid {
+			targetChecksumVal = targetChecksum.Int64
+		}
+
 		// Aggregate: XOR the checksums, sum the counts
-		aggregatedChecksum ^= targetChecksum
+		aggregatedChecksum ^= targetChecksumVal
 		aggregatedCount += targetCount
 
-		c.logger.Debug("target checksum", "targetID", i, "checksum", targetChecksum, "count", targetCount)
+		c.logger.Debug("target checksum", "targetID", i, "checksum", targetChecksumVal, "count", targetCount)
 	}
 
-	c.logger.Debug("aggregated checksum", "checksum", aggregatedChecksum, "count", aggregatedCount)
+	c.logger.Debug("aggregated checksum", "sourceChecksum", sourceChecksumVal, "targetChecksum", aggregatedChecksum, "sourceCount", sourceCount, "targetCount", aggregatedCount)
 
-	if sourceChecksum != aggregatedChecksum {
-		// The checksums do not match, so we first need
-		// to inspect closely and report on the differences.
+	if sourceChecksumVal != aggregatedChecksum || sourceCount != aggregatedCount {
 		c.differencesFound.Add(1)
 		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(),
-			"sourceChecksum", sourceChecksum, "targetChecksum", aggregatedChecksum,
+			"sourceChecksum", sourceChecksumVal, "targetChecksum", aggregatedChecksum,
 			"sourceCount", sourceCount, "targetCount", aggregatedCount)
 
 		// For distributed case, we can't easily inspect differences across multiple targets
@@ -154,8 +158,10 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	defer c.recopyLock.Unlock()
 
 	// Step 1: Delete all rows in the chunk range from all targets
-	// This ensures we remove any extra rows that shouldn't be there
-	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.NewTable.QuotedName, chunk.String())
+	// Use the query builder to format table name and where clause
+	tableName := c.builder.formatTableName(chunk.NewTable.QuotedName)
+	whereClause := c.builder.formatWhereClause(chunk.String())
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", tableName, whereClause)
 
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
@@ -298,7 +304,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// Lock tables on all targets
 	var targetTableLocks []*dbconn.TableLock
 	for i, target := range targets {
-		targetLock, err := dbconn.NewTableLock(ctx, target.DB, writeTables, c.dbConfig, c.logger)
+		targetLock, err := dbconn.NewExtendedTableLock(ctx, target.DB, writeTables, c.dbConfig, c.builder.targetType(), c.logger)
 		if err != nil {
 			// Clean up any locks we've already acquired
 			for _, lock := range targetTableLocks {
@@ -471,21 +477,4 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		return err1
 	}
 	return nil
-}
-
-// intersectColumns is similar to utils.IntersectColumns, but it
-// wraps an IFNULL(), ISNULL() and cast operation around the columns.
-// The cast is to c.newTable type.
-func (c *DistributedChecker) intersectColumns(chunk *table.Chunk) string {
-	var intersection []string
-	for _, col := range chunk.Table.NonGeneratedColumns {
-		for _, col2 := range chunk.NewTable.NonGeneratedColumns {
-			if col == col2 {
-				// Column exists in both, so we add intersection wrapped in
-				// IFNULL, ISNULL and CAST.
-				intersection = append(intersection, "IFNULL("+chunk.NewTable.WrapCastType(col)+",''), ISNULL(`"+col+"`)")
-			}
-		}
-	}
-	return strings.Join(intersection, ", ")
 }

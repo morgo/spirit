@@ -13,28 +13,61 @@ type TableLock struct {
 	tables  []*table.TableInfo
 	lockTxn *sql.Tx
 	logger  *slog.Logger
+	driver  string // "mysql" or "postgresql"
 }
 
-// NewTableLock creates a new server wide lock on multiple tables.
-// i.e. LOCK TABLES .. WRITE.
+// NewTableLock creates a new server wide lock on multiple tables for MySQL.
+// For MySQL: LOCK TABLES .. WRITE
 // It uses a short timeout and *does not retry*. The caller is expected to retry,
 // which gives it a chance to first do things like catch up on replication apply
 // before it does the next attempt.
 //
-// Setting config.ForceKill=true is recommended, since it will more or less ensure
+// Setting config.ForceKill=true is recommended for MySQL, since it will more or less ensure
 // that the lock acquisition is successful by killing long-running queries that are
 // blocking our lock acquisition after we have waited for 90% of our configured
 // LockWaitTimeout.
+//
+// For cross-database locking (e.g., PostgreSQL), use NewExtendedTableLock() instead.
 func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger) (*TableLock, error) {
+	return NewExtendedTableLock(ctx, db, tables, config, "mysql", logger)
+}
+
+// NewExtendedTableLock creates a new server wide lock on multiple tables.
+// For MySQL: LOCK TABLES .. WRITE
+// For PostgreSQL: LOCK TABLE .. IN EXCLUSIVE MODE
+// It uses a short timeout and *does not retry*. The caller is expected to retry,
+// which gives it a chance to first do things like catch up on replication apply
+// before it does the next attempt.
+//
+// Setting config.ForceKill=true is recommended for MySQL, since it will more or less ensure
+// that the lock acquisition is successful by killing long-running queries that are
+// blocking our lock acquisition after we have waited for 90% of our configured
+// LockWaitTimeout. (Note: ForceKill is not supported for PostgreSQL)
+func NewExtendedTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, dbType string, logger *slog.Logger) (*TableLock, error) {
 	var err error
 	var lockTxn *sql.Tx
-	var lockStmt = "LOCK TABLES "
-	// Build the LOCK TABLES statement
-	for idx, tbl := range tables {
-		if idx > 0 {
-			lockStmt += ", "
+	var lockStmt string
+
+	// Build the appropriate LOCK statement based on dbType
+	if dbType == "postgresql" || dbType == "postgres" {
+		// PostgreSQL: LOCK TABLE table1, table2 IN EXCLUSIVE MODE
+		lockStmt = "LOCK TABLE "
+		for idx, tbl := range tables {
+			if idx > 0 {
+				lockStmt += ", "
+			}
+			lockStmt += tbl.TableName // PostgreSQL uses unquoted lowercase identifiers
 		}
-		lockStmt += "`" + tbl.TableName + "` WRITE"
+		lockStmt += " IN EXCLUSIVE MODE"
+	} else {
+		// MySQL: LOCK TABLES table1 WRITE, table2 WRITE
+		lockStmt = "LOCK TABLES "
+		for idx, tbl := range tables {
+			if idx > 0 {
+				lockStmt += ", "
+			}
+			lockStmt += "`" + tbl.TableName + "` WRITE"
+		}
 	}
 
 	// Try and acquire the lock. No retries are permitted here.
@@ -78,6 +111,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 		tables:  tables,
 		lockTxn: lockTxn,
 		logger:  logger,
+		driver:  dbType,
 	}, nil
 }
 
@@ -97,11 +131,17 @@ func (s *TableLock) ExecUnderLock(ctx context.Context, stmts ...string) error {
 
 // Close closes the table lock
 func (s *TableLock) Close() error {
-	_, err := s.lockTxn.Exec("UNLOCK TABLES")
-	if err != nil {
-		return err
+	// For MySQL, we need to explicitly UNLOCK TABLES
+	// For PostgreSQL, locks are automatically released on transaction end
+	if s.driver == "mysql" {
+		_, err := s.lockTxn.Exec("UNLOCK TABLES")
+		if err != nil {
+			return err
+		}
 	}
-	err = s.lockTxn.Rollback()
+
+	// Rollback the transaction to release locks
+	err := s.lockTxn.Rollback()
 	if err != nil {
 		return err
 	}
