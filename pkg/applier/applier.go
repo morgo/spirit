@@ -3,6 +3,8 @@ package applier
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
@@ -76,4 +78,45 @@ type Applier interface {
 type LogicalRow struct {
 	IsDeleted bool
 	RowImage  []any
+}
+
+type ApplierConfig struct {
+	Threads         int // number of write threads
+	ChunkletMaxRows int
+	ChunkletMaxSize int
+	Logger          *slog.Logger
+	DBConfig        *dbconn.DBConfig
+}
+
+// NewApplierDefaultConfig returns a default config for the applier.
+func NewApplierDefaultConfig() *ApplierConfig {
+	return &ApplierConfig{
+		Threads:         defaultWriteThreads,
+		ChunkletMaxRows: chunkletSize, // will be renamed soon.
+		ChunkletMaxSize: 1024 * 1024,  // will be supported soon.
+		Logger:          slog.Default(),
+		DBConfig:        dbconn.NewDBConfig(),
+	}
+}
+
+// Validate checks the ApplierConfig for required fields.
+func (cfg *ApplierConfig) Validate() error {
+	if cfg.DBConfig == nil {
+		return errors.New("dbConfig must be non-nil")
+	}
+	if cfg.Logger == nil {
+		return errors.New("logger must be non-nil")
+	}
+	// We can set defaults for other fields.
+	// If they are not set its not important.
+	if cfg.Threads <= 0 {
+		cfg.Threads = defaultWriteThreads
+	}
+	if cfg.ChunkletMaxRows <= 0 {
+		cfg.ChunkletMaxRows = chunkletSize
+	}
+	if cfg.ChunkletMaxSize <= 0 {
+		cfg.ChunkletMaxSize = 1024 * 1024
+	}
+	return nil
 }

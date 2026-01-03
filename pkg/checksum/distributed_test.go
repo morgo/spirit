@@ -12,6 +12,7 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFixCorruptWithApplier(t *testing.T) {
@@ -50,7 +51,9 @@ func TestFixCorruptWithApplier(t *testing.T) {
 		KeyRange: "0",
 		Config:   destDB,
 	}
-	applier := applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger)
+	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
 	// Start the applier so its workers can process async Apply calls
 	feed := repl.NewClient(src, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
 		Logger:                     logger,

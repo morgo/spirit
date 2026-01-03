@@ -56,13 +56,15 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client) {
 		KeyRange: "0",
 		Config:   cfg,
 	}
+	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	assert.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
 		TargetBatchTime:            time.Second,
 		ServerID:                   NewServerID(),
 		UseExperimentalBufferedMap: true,
-		Applier:                    applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), logger),
+		Applier:                    applier,
 	})
 	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
 	assert.NoError(t, client.Run(t.Context()))

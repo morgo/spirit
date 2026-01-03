@@ -3,13 +3,11 @@ package applier
 import (
 	"context"
 	"database/sql"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -65,13 +63,13 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create applier
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Start the applier
 	err = applier.Start(t.Context())
@@ -181,13 +179,13 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create applier
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
@@ -239,13 +237,13 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create applier
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
@@ -314,13 +312,13 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create applier
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
@@ -406,13 +404,13 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create applier
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Delete keys 2 and 4
 	keysToDelete := []string{
@@ -479,13 +477,13 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Delete with empty keys
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
@@ -521,13 +519,13 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create applier
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Upsert rows: update id=1, insert id=3
 	upsertRows := []LogicalRow{
@@ -599,13 +597,13 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Upsert with deleted rows mixed in
 	upsertRows := []LogicalRow{
@@ -656,13 +654,13 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Upsert with empty rows
 	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, []LogicalRow{}, nil)
@@ -692,13 +690,13 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Create a cancellable context
 	cancelCtx, cancel := context.WithCancel(t.Context())
@@ -758,13 +756,13 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
@@ -817,13 +815,13 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	err = targetTable.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	dbConfig := dbconn.NewDBConfig()
 	tar := Target{
 		DB:       targetDB,
 		Config:   target,
 		KeyRange: "0",
 	}
-	applier := NewSingleTargetApplier(tar, dbConfig, slog.Default())
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
 
 	// Start the applier
 	err = applier.Start(t.Context())

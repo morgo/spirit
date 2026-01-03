@@ -18,7 +18,7 @@ import (
 const (
 	chunkletSize        = 1000 // Number of rows per chunklet
 	defaultBufferSize   = 128  // Size of the shared buffer channel for chunklets
-	defaultWriteWorkers = 40   // Number of write workers
+	defaultWriteThreads = 2    // Number of write workers
 )
 
 // SingleTargetApplier applies rows to a single target database.
@@ -81,16 +81,19 @@ type pendingWork struct {
 }
 
 // NewSingleTargetApplier creates a new SingleTargetApplier
-func NewSingleTargetApplier(target Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) *SingleTargetApplier {
+func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApplier, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return &SingleTargetApplier{
 		target:              target,
-		dbConfig:            dbConfig,
-		logger:              logger,
+		dbConfig:            cfg.DBConfig,
+		logger:              cfg.Logger,
 		chunkletBuffer:      make(chan chunklet, defaultBufferSize),
 		chunkletCompletions: make(chan chunkletCompletion, defaultBufferSize),
 		pendingWork:         make(map[int64]*pendingWork),
-		writeWorkersCount:   defaultWriteWorkers,
-	}
+		writeWorkersCount:   int32(cfg.Threads),
+	}, nil
 }
 
 // Start initializes the applier's async write workers and begins processing

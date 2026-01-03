@@ -928,7 +928,14 @@ func (r *Runner) Cancel() {
 func (r *Runner) createApplier() (applier.Applier, error) {
 	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
 		// Single target - use SingleTargetApplier
-		appl := applier.NewSingleTargetApplier(r.targets[0], r.dbConfig, r.logger)
+		appl, err := applier.NewSingleTargetApplier(r.targets[0], &applier.ApplierConfig{
+			DBConfig: r.dbConfig,
+			Logger:   r.logger,
+			Threads:  r.move.WriteThreads,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SingleTargetApplier: %w", err)
+		}
 		r.logger.Info("Created SingleTargetApplier")
 		return appl, nil
 	}
@@ -939,8 +946,11 @@ func (r *Runner) createApplier() (applier.Applier, error) {
 	// Create the ShardedApplier
 	appl, err := applier.NewShardedApplier(
 		r.targets,
-		r.dbConfig,
-		r.logger,
+		&applier.ApplierConfig{
+			DBConfig: r.dbConfig,
+			Logger:   r.logger,
+			Threads:  r.move.WriteThreads,
+		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ShardedApplier: %w", err)
