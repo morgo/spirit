@@ -13,6 +13,7 @@ type Move struct {
 	TargetDSN             string        `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
 	TargetChunkTime       time.Duration `name:"target-chunk-time" help:"How long each chunk should take to copy" default:"5s"`
 	Threads               int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
+	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target" default:"2"`
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 

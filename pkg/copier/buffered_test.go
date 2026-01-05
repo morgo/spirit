@@ -1,7 +1,6 @@
 package copier
 
 import (
-	"log/slog"
 	"testing"
 
 	"github.com/block/spirit/pkg/applier"
@@ -37,7 +36,8 @@ func TestBufferedCopier(t *testing.T) {
 		DB:       db,
 		KeyRange: "0",
 	}
-	cfg.Applier = applier.NewSingleTargetApplier(target, dbconn.NewDBConfig(), slog.Default())
+	cfg.Applier, err = applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
 
@@ -94,7 +94,8 @@ func TestBufferedCopierCharsetConversion(t *testing.T) {
 
 	cfg := NewCopierDefaultConfig()
 	cfg.UseExperimentalBufferedCopier = true
-	cfg.Applier = applier.NewSingleTargetApplier(applier.Target{DB: db}, dbconn.NewDBConfig(), slog.Default())
+	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
+	assert.NoError(t, err)
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
 

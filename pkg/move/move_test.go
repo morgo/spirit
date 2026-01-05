@@ -55,7 +55,8 @@ func TestBasicMove(t *testing.T) {
 		SourceDSN:       sourceDSN,
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 5 * time.Second,
-		Threads:         4,
+		Threads:         2,
+		WriteThreads:    2,
 		CreateSentinel:  false,
 	}
 	assert.NoError(t, move.Run())

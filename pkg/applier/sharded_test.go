@@ -3,12 +3,10 @@ package applier
 import (
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 
-	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -91,16 +89,11 @@ func TestShardedApplierIntegration(t *testing.T) {
 	// Create ShardedApplier with key ranges
 	// Shard 0: "-80" (0x0000000000000000 - 0x7fffffffffffffff)
 	// Shard 1: "80-" (0x8000000000000000 - 0xffffffffffffffff)
-	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"}, // Lower half of key space
 		{DB: target2DB, KeyRange: "80-"}, // Upper half of key space
 	}
-	applier, err := NewShardedApplier(
-		targets,
-		dbConfig,
-		slog.Default(),
-	)
+	applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
 	// Start the applier
@@ -295,16 +288,11 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create ShardedApplier
-	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(
-		targets,
-		dbConfig,
-		slog.Default(),
-	)
+	applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
 	// Delete keys by PRIMARY KEY (id=2 and id=4)
@@ -382,12 +370,11 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	targetTable.ShardingColumn = "user_id"
 	targetTable.HashFunc = evenOddHasher
 
-	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+	applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
 	// Delete with empty keys
@@ -459,16 +446,11 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	err = target1Table.SetInfo(ctx)
 	require.NoError(t, err)
 	// Create ShardedApplier
-	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"}, // Even user_ids
 		{DB: target2DB, KeyRange: "80-"}, // Odd user_ids
 	}
-	applier, err := NewShardedApplier(
-		targets,
-		dbConfig,
-		slog.Default(),
-	)
+	applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
 	// Upsert rows:
@@ -605,12 +587,11 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	targetTable.ShardingColumn = "user_id"
 	targetTable.HashFunc = evenOddHasher
 
-	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+	applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
 	// Upsert with deleted rows mixed in
@@ -666,8 +647,6 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 	require.NoError(t, err)
 	defer target2DB.Close()
 
-	dbConfig := dbconn.NewDBConfig()
-
 	// Test case 1: Overlapping ranges "-80" and "40-c0"
 	// "-80" covers 0x0000000000000000 to 0x8000000000000000 (exclusive)
 	// "40-c0" covers 0x4000000000000000 to 0xc000000000000000 (exclusive)
@@ -677,7 +656,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target1DB, KeyRange: "-80"},
 			{DB: target2DB, KeyRange: "40-c0"},
 		}
-		_, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		_, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 		assert.Error(t, err, "Should error on overlapping key ranges")
 		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
@@ -691,7 +670,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target1DB, KeyRange: "40-80"},
 			{DB: target2DB, KeyRange: "60-a0"},
 		}
-		_, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		_, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 		assert.Error(t, err, "Should error on overlapping key ranges")
 		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
@@ -704,7 +683,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target1DB, KeyRange: "-80"},
 			{DB: target2DB, KeyRange: "80-"},
 		}
-		applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 		assert.NoError(t, err, "Should not error on non-overlapping key ranges")
 		assert.NotNil(t, applier)
 	})
@@ -726,7 +705,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target2DB, KeyRange: "40-80"},
 			{DB: target3DB, KeyRange: "60-"},
 		}
-		_, err = NewShardedApplier(targets, dbConfig, slog.Default())
+		_, err = NewShardedApplier(targets, NewApplierDefaultConfig())
 		assert.Error(t, err, "Should error when any two shards overlap")
 		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
@@ -747,7 +726,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target2DB, KeyRange: "40-80"},
 			{DB: target3DB, KeyRange: "80-"},
 		}
-		applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+		applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 		assert.NoError(t, err, "Should not error on adjacent non-overlapping ranges")
 		assert.NotNil(t, applier)
 	})
@@ -790,12 +769,11 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	targetTable.ShardingColumn = "user_id"
 	targetTable.HashFunc = evenOddHasher
 
-	dbConfig := dbconn.NewDBConfig()
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
 		{DB: target2DB, KeyRange: "80-"},
 	}
-	applier, err := NewShardedApplier(targets, dbConfig, slog.Default())
+	applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
 	// Upsert with empty rows
