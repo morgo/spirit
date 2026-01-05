@@ -253,8 +253,8 @@ func TestStatisticsUpdate(t *testing.T) {
 	testutils.RunSQL(t, `insert into statsupdate values (1, 'a'), (2, 'b'), (3, 'c')`)
 
 	t1 := &TableInfo{
-		minValue:          NewDatum(1, signedType),
-		maxValue:          NewDatum(1000000, signedType),
+		minValue:          Datum{Val: int64(1), Tp: signedType},
+		maxValue:          Datum{Val: int64(1000000), Tp: signedType},
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "statsupdate",

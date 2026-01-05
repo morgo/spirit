@@ -132,7 +132,11 @@ func jsonStrings2Datums(ti *TableInfo, keys []string, vals []string) ([]Datum, e
 	datums := make([]Datum, len(keys))
 	for i, str := range vals {
 		tp := ti.datumTp(keys[i])
-		datums[i] = NewDatum(str, tp)
+		datum, err := NewDatum(str, tp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create datum for key %s: %w", keys[i], err)
+		}
+		datums[i] = datum
 	}
 	return datums, nil
 }

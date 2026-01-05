@@ -12,8 +12,8 @@ import (
 
 func TestOptimisticChunkerBasic(t *testing.T) {
 	t1 := &TableInfo{
-		minValue:          NewDatum(1, signedType),
-		maxValue:          NewDatum(1000000, signedType),
+		minValue:          Datum{Val: int64(1), Tp: signedType},
+		maxValue:          Datum{Val: int64(1000000), Tp: signedType},
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "t1",
@@ -74,8 +74,8 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 
 func TestLowWatermark(t *testing.T) {
 	t1 := newTableInfo4Test("test", "t1")
-	t1.minValue = NewDatum(1, signedType)
-	t1.maxValue = NewDatum(1000000, signedType)
+	t1.minValue = Datum{Val: int64(1), Tp: signedType}
+	t1.maxValue = Datum{Val: int64(1000000), Tp: signedType}
 	t1.EstimatedRows = 1000000
 	t1.KeyColumns = []string{"id"}
 	t1.keyColumnsMySQLTp = []string{"bigint"}
@@ -183,8 +183,8 @@ func TestLowWatermark(t *testing.T) {
 
 func TestOptimisticDynamicChunking(t *testing.T) {
 	t1 := newTableInfo4Test("test", "t1")
-	t1.minValue = NewDatum(1, signedType)
-	t1.maxValue = NewDatum(1000000, signedType)
+	t1.minValue = Datum{Val: int64(1), Tp: signedType}
+	t1.maxValue = Datum{Val: int64(1000000), Tp: signedType}
 	t1.EstimatedRows = 1000000
 	t1.KeyColumns = []string{"id"}
 	t1.keyColumnsMySQLTp = []string{"bigint"}
@@ -250,8 +250,8 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 
 	// Start everything over again as t2.
 	t2 := newTableInfo4Test("test", "t1")
-	t2.minValue = NewDatum(1, signedType)
-	t2.maxValue = NewDatum(1000000, signedType)
+	t2.minValue = Datum{Val: int64(1), Tp: signedType}
+	t2.maxValue = Datum{Val: int64(1000000), Tp: signedType}
 	t2.EstimatedRows = 1000000
 	t2.KeyColumns = []string{"id"}
 	t2.keyColumnsMySQLTp = []string{"bigint"}
@@ -329,8 +329,8 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 func TestOptimisticChunkerReset(t *testing.T) {
 	// Create a table info for testing
 	t1 := &TableInfo{
-		minValue:          NewDatum(1, signedType),
-		maxValue:          NewDatum(1000000, signedType),
+		minValue:          Datum{Val: int64(1), Tp: signedType},
+		maxValue:          Datum{Val: int64(1000000), Tp: signedType},
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "t1",
