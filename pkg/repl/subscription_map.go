@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type mapChange struct {
+	isDelete    bool
+	originalKey []any // preserve original typed key for watermark comparison
+}
+
 type deltaMap struct {
 	sync.Mutex // protects the subscription from changes.
 
@@ -21,7 +26,7 @@ type deltaMap struct {
 	table    *table.TableInfo
 	newTable *table.TableInfo
 
-	changes map[string]bool // delta map, for memory comparable PKs
+	changes map[string]mapChange // delta map, for memory comparable PKs
 
 	watermarkOptimization bool
 	chunker               table.Chunker
@@ -53,7 +58,7 @@ func (s *deltaMap) HasChanged(key, _ []any, deleted bool) {
 		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
-	s.changes[utils.HashKey(key)] = deleted
+	s.changes[utils.HashKey(key)] = mapChange{isDelete: deleted, originalKey: key}
 }
 
 func (s *deltaMap) createDeleteStmt(deleteKeys []string) statement {
@@ -105,17 +110,17 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 	var i int64
 	allChangesFlushed = true // assume all changes are flushed unless we find some that are not.
 	target := atomic.LoadInt64(&s.c.targetBatchSize)
-	for key, isDelete := range s.changes {
-		unhashedKey := utils.UnhashKey(key)
+	for key, change := range s.changes {
 		// Check low watermark only if the optimization is enabled
-		if s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(unhashedKey[0]) {
-			s.c.logger.Debug("key not below watermark", "key", unhashedKey[0])
+		// Use originalKey to preserve typed values for watermark comparison
+		if s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
 		}
 		i++
 		keysFlushed = append(keysFlushed, key) // we are going to flush this key either way.
-		if isDelete {
+		if change.isDelete {
 			deleteKeys = append(deleteKeys, key)
 		} else {
 			replaceKeys = append(replaceKeys, key)
