@@ -60,6 +60,67 @@ func TestBufferedCopier(t *testing.T) {
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 }
 
+// TestBufferedCopierCharsetConversion tests that the buffered copier
+// handles charset conversions correctly.
+//
+// In the unbuffered copier, we don't really have to worry about this because
+// MySQL can infer source and dest charset from the INSERT.. SELECT
+// and do any conversion that is required.
+//
+// In the buffered copier, we need to set the connection charset to utf8mb4.
+// For this test, what this means is that on *read* of charsetsrc, the characters
+// will be converted from latin1 to utf8mb4 by the MySQL server. We then insert
+// into charsetdst as utf8mb4 characters.
+//
+// In the reverse direction (utf8mb4 -> latin1) the server knows that the client
+// is in utf8mb4 and is able to convert on insert to match the tables requirements.
+func TestBufferedCopierCharsetConversion(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS charsetsrc, charsetdst")
+	testutils.RunSQL(t, "CREATE TABLE charsetsrc (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, b VARCHAR(100) NOT NULL) CHARSET=latin1")
+	testutils.RunSQL(t, "CREATE TABLE charsetdst (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, b VARCHAR(100) NOT NULL) CHARSET=utf8mb4")
+
+	// Insert rows with special characters that exist in latin1
+	// 'à' (U+00E0) and '€' (U+20AC) are both valid in latin1
+	testutils.RunSQL(t, "INSERT INTO charsetsrc VALUES (NULL, 'à'), (NULL, '€')")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	t1 := table.NewTableInfo(db, "test", "charsetsrc")
+	assert.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "charsetdst")
+	assert.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg := NewCopierDefaultConfig()
+	cfg.UseExperimentalBufferedCopier = true
+	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
+	assert.NoError(t, err)
+	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
+	assert.NoError(t, err)
+
+	assert.NoError(t, chunker.Open())
+
+	copier, err := NewCopier(db, chunker, cfg)
+	assert.NoError(t, err)
+
+	// The copy should succeed because we set the connection charset to utf8mb4
+	// On read from the src it will be converted from latin1 to utf8mb4
+	err = copier.Run(t.Context())
+	assert.NoError(t, err, "Charset conversion from latin1 to utf8mb4 should succeed")
+
+	// Reverse the copy to show the other direction works too
+	// Start by emptying the "src" table, which is our intended destination.
+	testutils.RunSQL(t, "TRUNCATE TABLE charsetsrc")
+	chunker, err = table.NewChunker(t2, t1, cfg.TargetChunkTime, cfg.Logger)
+	assert.NoError(t, err)
+	copier, err = NewCopier(db, chunker, cfg)
+	assert.NoError(t, err)
+	assert.NoError(t, chunker.Open())
+	err = copier.Run(t.Context())
+	assert.NoError(t, err, "Charset conversion from utf8mb4 to latin1 should succeed")
+}
+
 // TestBufferedCopierDataTypeConversionError tests that the buffered copier
 // returns an error when data cannot be converted to the target column type,
 // and that it stops processing additional chunks after encountering the error.
@@ -114,48 +175,4 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM datatypedst").Scan(&copiedRows)
 	require.NoError(t, err)
 	require.Equal(t, 0, copiedRows, "No rows should have been copied to destination table due to conversion error")
-}
-
-// TestBufferedCopierCharsetConversion tests that the buffered copier
-// handles charset conversions correctly, similar to TestConvertCharset.
-// This test ensures that charset conversion issues are handled consistently
-// between buffered and unbuffered copiers.
-func TestBufferedCopierCharsetConversion(t *testing.T) {
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS charsetsrc, charsetdst")
-	testutils.RunSQL(t, "CREATE TABLE charsetsrc (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, b VARCHAR(100) NOT NULL) CHARSET=latin1")
-	testutils.RunSQL(t, "CREATE TABLE charsetdst (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, b VARCHAR(100) NOT NULL) CHARSET=utf8mb4")
-
-	// Insert rows with special characters that exist in latin1
-	// 'à' (U+00E0) and '€' (U+20AC) are both valid in latin1
-	testutils.RunSQL(t, "INSERT INTO charsetsrc VALUES (NULL, 'à'), (NULL, '€')")
-
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer db.Close()
-
-	t1 := table.NewTableInfo(db, "test", "charsetsrc")
-	assert.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "charsetdst")
-	assert.NoError(t, t2.SetInfo(t.Context()))
-
-	cfg := NewCopierDefaultConfig()
-	cfg.UseExperimentalBufferedCopier = true
-	target := applier.Target{
-		DB:       db,
-		KeyRange: "0",
-	}
-	cfg.Applier, err = applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	require.NoError(t, err)
-	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
-	assert.NoError(t, err)
-
-	assert.NoError(t, chunker.Open())
-
-	copier, err := NewCopier(db, chunker, cfg)
-	assert.NoError(t, err)
-
-	// The copy should succeed because we set the connection charset to utf8mb4
-	// On read from the src it will be converted from latin1 to utf8mb4
-	err = copier.Run(t.Context())
-	assert.NoError(t, err, "Charset conversion from latin1 to utf8mb4 should succeed")
 }

@@ -10,7 +10,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestBufferedMap(t *testing.T) {
@@ -31,23 +30,23 @@ func TestBufferedMap(t *testing.T) {
 	assert.Equal(t, 1, sub.Length())
 
 	// Check the logical row structure
-	assert.False(t, sub.changes["1"].IsDeleted)
-	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].RowImage)
+	assert.False(t, sub.changes["1"].logicalRow.IsDeleted)
+	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].logicalRow.RowImage)
 
 	// Now delete the row.
 	testutils.RunSQL(t, "DELETE FROM subscription_test WHERE id = 1")
 	assert.NoError(t, client.BlockWait(t.Context()))
 
-	assert.True(t, sub.changes["1"].IsDeleted)
-	assert.Equal(t, []any(nil), sub.changes["1"].RowImage)
+	assert.True(t, sub.changes["1"].logicalRow.IsDeleted)
+	assert.Equal(t, []any(nil), sub.changes["1"].logicalRow.RowImage)
 
 	// Now insert 2 more rows:
 	testutils.RunSQL(t, "INSERT INTO subscription_test (id, name) VALUES (2, 'test2'), (3, 'test3')")
 	assert.NoError(t, client.BlockWait(t.Context()))
 
 	assert.Equal(t, 3, sub.Length())
-	assert.False(t, sub.changes["2"].IsDeleted)
-	assert.False(t, sub.changes["3"].IsDeleted)
+	assert.False(t, sub.changes["2"].logicalRow.IsDeleted)
+	assert.False(t, sub.changes["3"].logicalRow.IsDeleted)
 
 	// Now flush the changes.
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
@@ -92,7 +91,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 		Config:   cfg,
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,
@@ -148,7 +147,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 		Config:   cfg,
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,

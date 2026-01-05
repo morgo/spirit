@@ -16,7 +16,6 @@ func TestNewDSN(t *testing.T) {
 	resp, err := newDSN(dsn, NewDBConfig())
 	assert.NoError(t, err)
 	assert.Equal(t, "root:password@tcp(127.0.0.1:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=utf8mb4&collation=utf8mb4_bin&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
-
 	// With interpolate on.
 	config := NewDBConfig()
 	config.InterpolateParams = true

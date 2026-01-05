@@ -12,7 +12,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func setupTestTables(t *testing.T, t1, t2 string) (*table.TableInfo, *table.TableInfo) {
@@ -58,7 +57,7 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client) {
 		Config:   cfg,
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:                     logger,
 		Concurrency:                4,

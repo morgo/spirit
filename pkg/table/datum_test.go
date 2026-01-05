@@ -1,9 +1,11 @@
 package table
 
 import (
+	"log/slog"
 	"math"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -94,6 +96,71 @@ func TestDatumInt32ToUnsigned(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(3454523340), d5.Val)
 	assert.Equal(t, "3454523340", d5.String())
+}
+
+func TestDatumInt64ToUnsigned(t *testing.T) {
+	// Test that int64 values are correctly converted to unsigned uint64
+	// This simulates MySQL binlog sending unsigned BIGINT columns as signed int64
+
+	// Positive int64 value
+	positiveInt64 := int64(123456789012345)
+	d1, err := NewDatum(positiveInt64, unsignedType)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(123456789012345), d1.Val)
+	assert.Equal(t, "123456789012345", d1.String())
+
+	// Negative int64 value (large unsigned value)
+	// -1 as int64 = max uint64
+	negativeInt64 := int64(-1)
+	d2, err := NewDatum(negativeInt64, unsignedType)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(negativeInt64), d2.Val)
+	assert.Equal(t, uint64(math.MaxUint64), d2.Val)
+
+	// Edge case: int64 max value
+	maxInt64 := int64(math.MaxInt64)
+	d3, err := NewDatum(maxInt64, unsignedType)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(math.MaxInt64), d3.Val)
+}
+
+func TestKeyBelowLowWatermarkWithNegativeInt32(t *testing.T) {
+	ti := &TableInfo{
+		SchemaName:        "test",
+		TableName:         "t1",
+		QuotedName:        "`test`.`t1`",
+		KeyColumns:        []string{"id"},
+		keyColumnsMySQLTp: []string{"int unsigned"},
+		KeyIsAutoInc:      true,
+		minValue:          Datum{Val: uint64(0), Tp: unsignedType},
+		maxValue:          Datum{Val: uint64(1000), Tp: unsignedType},
+	}
+
+	// Create the optimistic chunker directly
+	chk := &chunkerOptimistic{
+		Ti:            ti,
+		ChunkerTarget: 100 * time.Millisecond,
+		logger:        slog.Default(),
+		watermark: &Chunk{
+			UpperBound: &Boundary{Value: []Datum{{Val: uint64(100), Tp: unsignedType}}},
+			LowerBound: &Boundary{Value: []Datum{{Val: uint64(0), Tp: unsignedType}}},
+		},
+		// We need chunkPtr to have a type for NewDatum call
+		chunkPtr: Datum{Val: uint64(0), Tp: unsignedType},
+	}
+
+	// KeyBelowLowWatermark receives the original typed value
+	// Value arrives as int32(-12345) (representing a large unsigned int)
+	// 4294954951 as uint32 is -12345 as int32
+	originalVal := int32(-12345)
+
+	// KeyBelowLowWatermark should correctly handle int32 values for unsigned columns
+	// The int32 will be reinterpreted as uint32, giving us 4294954951
+	// Since 4294954951 > 100 (watermark), it should return false
+	assert.NotPanics(t, func() {
+		result := chk.KeyBelowLowWatermark(originalVal)
+		assert.False(t, result, "4294954951 should not be below watermark of 100")
+	}, "KeyBelowLowWatermark should handle int32 values for unsigned columns")
 }
 
 // TestNewDatumFromValue tests that NewDatumFromValue properly handles various MySQL types

@@ -3,6 +3,7 @@ package copier
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -146,7 +147,7 @@ func (c *buffered) Run(ctx context.Context) error {
 	}
 
 	if c.isInvalid.Load() {
-		return fmt.Errorf("copy failed due to earlier errors")
+		return errors.New("copy failed due to earlier errors")
 	}
 	return err
 }

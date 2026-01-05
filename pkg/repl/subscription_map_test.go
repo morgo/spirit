@@ -35,7 +35,7 @@ func TestSubscriptionDeltaMap(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 
 	// Test initial state
@@ -89,7 +89,7 @@ func TestFlushWithLock(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 
 	// Insert test data
@@ -146,11 +146,11 @@ func TestFlushWithoutLock(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 
 	// Insert test data
-	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES 
+	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
 		(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4')`)
 
 	// Add multiple changes to test batch processing
@@ -196,7 +196,7 @@ func TestConcurrentKeyChanges(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 
 	// Run concurrent key changes
@@ -248,7 +248,7 @@ func TestKeyChangedOverwrite(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 
 	// Test overwriting the same key multiple times
@@ -302,7 +302,7 @@ func TestKeyChangedEdgeCases(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 		chunker:  mockChunker,
 	}
 
@@ -353,7 +353,7 @@ func TestKeyChangedNilAndEmpty(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 
 	// Test with empty string key
@@ -398,7 +398,7 @@ func TestKeyAboveWatermark(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 		chunker:  mockChunker,
 	}
 
@@ -448,7 +448,7 @@ func TestKeyBelowWatermarkMock(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 		chunker:  mockChunker,
 	}
 

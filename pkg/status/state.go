@@ -19,6 +19,7 @@ const (
 	CopyRows
 	WaitingOnSentinelTable
 	ApplyChangeset // first mass apply
+	RestoreSecondaryIndexes
 	AnalyzeTable
 	Checksum
 	PostChecksum // second mass apply
@@ -37,6 +38,8 @@ func (s State) String() string {
 		return "waitingOnSentinelTable"
 	case ApplyChangeset:
 		return "applyChangeset"
+	case RestoreSecondaryIndexes:
+		return "restoreSecondaryIndexes"
 	case AnalyzeTable:
 		return "analyzeTable"
 	case Checksum:

@@ -94,13 +94,9 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 			keyRange:            kr,
 			chunkletBuffer:      make(chan shardedChunklet, defaultBufferSize),
 			chunkletCompletions: make(chan shardedChunkletCompletion, defaultBufferSize),
-			writeWorkersCount:   defaultWriteWorkers / int32(len(targets)), // Divide workers among shards
+			writeWorkersCount:   int32(cfg.Threads), // threads are not "divided" per shard, but are each shard. This is documented in pkg/move/move.go:WriteThreads.
 			logger:              cfg.Logger,
 			dbConfig:            cfg.DBConfig,
-		}
-		// Ensure at least 1 worker per shard
-		if shards[i].writeWorkersCount < 1 {
-			shards[i].writeWorkersCount = 1
 		}
 	}
 
@@ -229,11 +225,23 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		shardRows[shardID] = append(shardRows[shardID], rowData{values: row})
 	}
 
-	// Count total chunklets across all shards
-	totalChunklets := 0
-	for _, rows := range shardRows {
-		if len(rows) > 0 {
-			totalChunklets += (len(rows) + chunkletSize - 1) / chunkletSize
+	// Split rows into chunklets based on both row count and size thresholds
+	var allChunklets []shardedChunklet
+	for shardID, rows := range shardRows {
+		if len(rows) == 0 {
+			continue
+		}
+
+		// Use shared helper to split rows into chunklets
+		// Then convert row batches into sharded chunklets with metadata
+		rowBatches := splitRowsIntoChunklets(rows)
+		for _, batch := range rowBatches {
+			allChunklets = append(allChunklets, shardedChunklet{
+				workID:  workID,
+				shardID: shardID,
+				chunk:   chunk,
+				rows:    batch,
+			})
 		}
 	}
 
@@ -241,37 +249,20 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	a.pendingMutex.Lock()
 	a.pendingWork[workID] = &pendingWork{
 		callback:           callback,
-		totalChunklets:     totalChunklets,
+		totalChunklets:     len(allChunklets),
 		completedChunklets: 0,
 		totalAffectedRows:  0,
 	}
 	a.pendingMutex.Unlock()
 
-	// Send chunklets to each shard
-	for shardID, rows := range shardRows {
-		if len(rows) == 0 {
-			continue
-		}
-
-		// Split into chunklets and send to the shard's buffer
-		for i := 0; i < len(rows); i += chunkletSize {
-			end := min(i+chunkletSize, len(rows))
-
-			chunkletData := shardedChunklet{
-				workID:  workID,
-				shardID: shardID,
-				chunk:   chunk,
-				rows:    rows[i:end],
-			}
-
-			select {
-			case a.shards[shardID].chunkletBuffer <- chunkletData:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+	// Send chunklets to their respective shard buffers
+	for _, chunkletData := range allChunklets {
+		select {
+		case a.shards[chunkletData.shardID].chunkletBuffer <- chunkletData:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
-
 	return nil
 }
 
