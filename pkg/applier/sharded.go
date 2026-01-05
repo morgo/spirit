@@ -94,7 +94,7 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 			keyRange:            kr,
 			chunkletBuffer:      make(chan shardedChunklet, defaultBufferSize),
 			chunkletCompletions: make(chan shardedChunkletCompletion, defaultBufferSize),
-			writeWorkersCount:   int32(max(1, cfg.Threads/len(targets))), // Divide workers among shards, minimum 1
+			writeWorkersCount:   int32(cfg.Threads), // threads are not "divided" per shard, but are each shard. This is documented in pkg/move/move.go:WriteThreads.
 			logger:              cfg.Logger,
 			dbConfig:            cfg.DBConfig,
 		}
