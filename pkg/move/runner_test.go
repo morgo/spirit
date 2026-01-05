@@ -14,9 +14,15 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestMoveWithConcurrentWrites reproduces the "not all changes flushed" error
-// that occurs during cutover when there are lots of concurrent writes.
+// TestMoveWithConcurrentWrites verifies move behavior under lots of concurrent
+// writes, exercising both deferred and non-deferred secondary indexes and
+// reproducing the "not all changes flushed" error seen during cutover.
 func TestMoveWithConcurrentWrites(t *testing.T) {
+	testMoveWithConcurrentWrites(t, false)
+	testMoveWithConcurrentWrites(t, true)
+}
+
+func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -96,11 +102,12 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 
 	// Run the move operation
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		CreateSentinel:  false,
+		SourceDSN:             sourceDSN,
+		TargetDSN:             targetDSN,
+		TargetChunkTime:       100 * time.Millisecond,
+		Threads:               2,
+		CreateSentinel:        false,
+		DeferSecondaryIndexes: deferSecondaryIndexes,
 	}
 
 	// Run move - this should succeed even with concurrent writes
