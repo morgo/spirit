@@ -77,6 +77,9 @@ type shardedChunkletCompletion struct {
 // and TableInfo.HashFunc fields. This allows different tables to use different sharding keys
 // in multi-table migrations.
 func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	shards := make([]*shardTarget, len(targets))
 	for i, target := range targets {
 		// Parse the key range
@@ -91,13 +94,9 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 			keyRange:            kr,
 			chunkletBuffer:      make(chan shardedChunklet, defaultBufferSize),
 			chunkletCompletions: make(chan shardedChunkletCompletion, defaultBufferSize),
-			writeWorkersCount:   defaultWriteThreads / int32(len(targets)), // Divide workers among shards
+			writeWorkersCount:   int32(max(1, cfg.Threads/len(targets))), // Divide workers among shards, minimum 1
 			logger:              cfg.Logger,
 			dbConfig:            cfg.DBConfig,
-		}
-		// Ensure at least 1 worker per shard
-		if shards[i].writeWorkersCount < 1 {
-			shards[i].writeWorkersCount = 1
 		}
 	}
 

@@ -16,7 +16,7 @@ const (
 	chunkletMaxRows     = 1000        // Maximum number of rows per chunklet
 	chunkletMaxSize     = 1024 * 1024 // Maximum size in bytes per chunklet (1 MiB)
 	defaultBufferSize   = 128         // Size of the shared buffer channel for chunklets
-	defaultWriteThreads = 40          // Number of write workers
+	defaultWriteWorkers = 40          // Number of write workers
 )
 
 // Target represents a shard target with its database connection, configuration, and key range.
@@ -99,7 +99,7 @@ type ApplierConfig struct {
 // NewApplierDefaultConfig returns a default config for the applier.
 func NewApplierDefaultConfig() *ApplierConfig {
 	return &ApplierConfig{
-		Threads:         defaultWriteThreads,
+		Threads:         defaultWriteWorkers,
 		ChunkletMaxRows: chunkletMaxRows, // will be renamed soon.
 		ChunkletMaxSize: 1024 * 1024,     // will be supported soon.
 		Logger:          slog.Default(),
@@ -118,7 +118,7 @@ func (cfg *ApplierConfig) Validate() error {
 	// We can set defaults for other fields.
 	// If they are not set its not important.
 	if cfg.Threads <= 0 {
-		cfg.Threads = defaultWriteThreads
+		cfg.Threads = defaultWriteWorkers
 	}
 	if cfg.ChunkletMaxRows <= 0 {
 		cfg.ChunkletMaxRows = chunkletMaxRows
