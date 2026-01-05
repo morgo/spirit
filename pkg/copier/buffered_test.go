@@ -94,7 +94,8 @@ func TestBufferedCopierCharsetConversion(t *testing.T) {
 
 	cfg := NewCopierDefaultConfig()
 	cfg.UseExperimentalBufferedCopier = true
-	cfg.Applier = applier.NewSingleTargetApplier(applier.Target{DB: db}, dbconn.NewDBConfig(), slog.Default())
+	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
+	assert.NoError(t, err)
 	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
 	assert.NoError(t, err)
 
