@@ -1249,3 +1249,545 @@ func BenchmarkComprehensiveParsing(b *testing.B) {
 		_ = ct.GetTableOptions()
 	}
 }
+
+// TestRemoveSecondaryIndexes tests the RemoveSecondaryIndexes function
+func TestRemoveSecondaryIndexes(t *testing.T) {
+	testCases := []struct {
+		name                string
+		sql                 string
+		shouldKeepPrimary   bool
+		shouldKeepUnique    bool
+		shouldKeepFulltext  bool
+		shouldRemoveRegular bool
+	}{
+		{
+			name: "Table with all index types",
+			sql: `CREATE TABLE test_all (
+				id INT,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				description TEXT,
+				PRIMARY KEY (id),
+				UNIQUE KEY uk_email (email),
+				INDEX idx_name (name),
+				FULLTEXT idx_description (description)
+			)`,
+			shouldKeepPrimary:   true,
+			shouldKeepUnique:    true,
+			shouldKeepFulltext:  true,
+			shouldRemoveRegular: true,
+		},
+		{
+			name: "Table with only regular indexes",
+			sql: `CREATE TABLE test_regular (
+				id INT,
+				name VARCHAR(100),
+				email VARCHAR(255),
+				INDEX idx_name (name),
+				INDEX idx_email (email)
+			)`,
+			shouldRemoveRegular: true,
+		},
+		{
+			name: "Table with no indexes",
+			sql: `CREATE TABLE test_no_indexes (
+				id INT,
+				name VARCHAR(100)
+			)`,
+		},
+		{
+			name: "Table with PRIMARY KEY and UNIQUE only",
+			sql: `CREATE TABLE test_pk_unique (
+				id INT PRIMARY KEY,
+				email VARCHAR(255) UNIQUE
+			)`,
+			shouldKeepPrimary: true,
+			shouldKeepUnique:  true,
+		},
+		{
+			name: "Complex table with multiple index types",
+			sql: `CREATE TABLE test_complex (
+				id BIGINT PRIMARY KEY AUTO_INCREMENT,
+				uuid CHAR(36) NOT NULL,
+				name VARCHAR(255) NOT NULL,
+				description TEXT,
+				content TEXT,
+				email VARCHAR(255),
+				status VARCHAR(50),
+				created_at TIMESTAMP,
+				
+				UNIQUE KEY uk_uuid (uuid),
+				INDEX idx_name (name),
+				INDEX idx_status (status) INVISIBLE,
+				INDEX idx_created (created_at) USING BTREE,
+				FULLTEXT idx_description (description),
+				FULLTEXT idx_content (content) WITH PARSER ngram
+			)`,
+			shouldKeepPrimary:   true,
+			shouldKeepUnique:    true,
+			shouldKeepFulltext:  true,
+			shouldRemoveRegular: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Get original indexes using GetIndexes() which includes column-level indexes
+			originalCT, err := ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+			originalIndexes := originalCT.GetIndexes()
+
+			// Remove secondary indexes
+			modifiedSQL, err := RemoveSecondaryIndexes(tc.sql)
+			require.NoError(t, err)
+			require.NotEmpty(t, modifiedSQL)
+
+			// Parse the modified SQL
+			modifiedCT, err := ParseCreateTable(modifiedSQL)
+			require.NoError(t, err)
+			modifiedIndexes := modifiedCT.GetIndexes()
+
+			// Check that regular indexes were removed
+			if tc.shouldRemoveRegular {
+				for _, idx := range originalIndexes {
+					if idx.Type == "INDEX" {
+						// This index should not be in the modified list
+						found := false
+						for _, modIdx := range modifiedIndexes {
+							if modIdx.Name == idx.Name {
+								found = true
+								break
+							}
+						}
+						assert.False(t, found, "Regular index %s should have been removed", idx.Name)
+					}
+				}
+			}
+
+			// Check that PRIMARY KEY is kept
+			if tc.shouldKeepPrimary {
+				foundPrimary := false
+				for _, idx := range modifiedIndexes {
+					if idx.Type == "PRIMARY KEY" {
+						foundPrimary = true
+						break
+					}
+				}
+				assert.True(t, foundPrimary, "PRIMARY KEY should be kept")
+			}
+
+			// Check that UNIQUE indexes are kept
+			if tc.shouldKeepUnique {
+				originalUniqueCount := 0
+				modifiedUniqueCount := 0
+				for _, idx := range originalIndexes {
+					if idx.Type == "UNIQUE" {
+						originalUniqueCount++
+					}
+				}
+				for _, idx := range modifiedIndexes {
+					if idx.Type == "UNIQUE" {
+						modifiedUniqueCount++
+					}
+				}
+				assert.Equal(t, originalUniqueCount, modifiedUniqueCount, "UNIQUE indexes should be kept")
+			}
+
+			// Check that FULLTEXT indexes are kept
+			if tc.shouldKeepFulltext {
+				originalFulltextCount := 0
+				modifiedFulltextCount := 0
+				for _, idx := range originalIndexes {
+					if idx.Type == "FULLTEXT" {
+						originalFulltextCount++
+					}
+				}
+				for _, idx := range modifiedIndexes {
+					if idx.Type == "FULLTEXT" {
+						modifiedFulltextCount++
+					}
+				}
+				assert.Equal(t, originalFulltextCount, modifiedFulltextCount, "FULLTEXT indexes should be kept")
+			}
+
+			// Verify the modified SQL is valid by checking it can be parsed
+			assert.NotEmpty(t, modifiedSQL)
+			assert.Contains(t, modifiedSQL, "CREATE TABLE")
+		})
+	}
+}
+
+func TestGetMissingSecondaryIndexes(t *testing.T) {
+	testCases := []struct {
+		name              string
+		sourceCreateTable string
+		targetCreateTable string
+		tableName         string
+		expectedAlter     string
+		expectEmpty       bool
+		expectError       bool
+	}{
+		{
+			name: "No missing indexes - target has all indexes",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				INDEX idx_email (email),
+				INDEX idx_name (name)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				INDEX idx_email (email),
+				INDEX idx_name (name)
+			)`,
+			tableName:   "users",
+			expectEmpty: true,
+		},
+		{
+			name: "Single missing index",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				INDEX idx_email (email),
+				INDEX idx_name (name)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				INDEX idx_email (email)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`)",
+		},
+		{
+			name: "Multiple missing indexes",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				status VARCHAR(50),
+				INDEX idx_email (email),
+				INDEX idx_name (name),
+				INDEX idx_status (status)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				status VARCHAR(50)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_email` (`email`), ADD INDEX `idx_name` (`name`), ADD INDEX `idx_status` (`status`)",
+		},
+		{
+			name: "Missing index with options",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				INDEX idx_name (name) USING BTREE COMMENT 'Name index' INVISIBLE
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) USING BTREE COMMENT 'Name index' INVISIBLE",
+		},
+		{
+			name: "Composite index missing",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				first_name VARCHAR(100),
+				last_name VARCHAR(100),
+				INDEX idx_name (first_name, last_name)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				first_name VARCHAR(100),
+				last_name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`first_name`, `last_name`)",
+		},
+		{
+			name: "Prefix index missing",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				description TEXT,
+				INDEX idx_description (description(100))
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				description TEXT
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_description` (`description`(100))",
+		},
+		{
+			name: "PRIMARY KEY ignored, regular index detected",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				PRIMARY KEY (id),
+				UNIQUE KEY uk_email (email),
+				INDEX idx_name (name)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				PRIMARY KEY (id),
+				UNIQUE KEY uk_email (email)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`)",
+		},
+		{
+			name: "Missing UNIQUE index",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				UNIQUE KEY uk_email (email),
+				INDEX idx_name (name)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				INDEX idx_name (name)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD UNIQUE INDEX `uk_email` (`email`)",
+		},
+		{
+			name: "Missing FULLTEXT index",
+			sourceCreateTable: `CREATE TABLE articles (
+				id INT PRIMARY KEY,
+				content TEXT,
+				name VARCHAR(100),
+				FULLTEXT idx_content (content),
+				INDEX idx_name (name)
+			)`,
+			targetCreateTable: `CREATE TABLE articles (
+				id INT PRIMARY KEY,
+				content TEXT,
+				name VARCHAR(100),
+				INDEX idx_name (name)
+			)`,
+			tableName:     "articles",
+			expectedAlter: "ALTER TABLE `articles` ADD FULLTEXT INDEX `idx_content` (`content`)",
+		},
+		{
+			name: "Multiple missing index types (UNIQUE, FULLTEXT, regular INDEX)",
+			sourceCreateTable: `CREATE TABLE mixed (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				content TEXT,
+				name VARCHAR(100),
+				UNIQUE KEY uk_email (email),
+				FULLTEXT idx_content (content),
+				INDEX idx_name (name)
+			)`,
+			targetCreateTable: `CREATE TABLE mixed (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				content TEXT,
+				name VARCHAR(100)
+			)`,
+			tableName:     "mixed",
+			expectedAlter: "ALTER TABLE `mixed` ADD UNIQUE INDEX `uk_email` (`email`), ADD FULLTEXT INDEX `idx_content` (`content`), ADD INDEX `idx_name` (`name`)",
+		},
+		{
+			name: "No indexes on either table",
+			sourceCreateTable: `CREATE TABLE simple (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			targetCreateTable: `CREATE TABLE simple (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:   "simple",
+			expectEmpty: true,
+		},
+		{
+			name: "Target has more indexes than source",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				INDEX idx_email (email)
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				name VARCHAR(100),
+				INDEX idx_email (email),
+				INDEX idx_name (name)
+			)`,
+			tableName:   "users",
+			expectEmpty: true,
+		},
+		{
+			name: "Index comment with special characters requiring SQL escaping",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				INDEX idx_name (name) COMMENT 'User''s name index with "quotes" and backslash: \\'
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'User\\'s name index with \\\"quotes\\\" and backslash: \\\\'",
+		},
+		{
+			name: "Index comment with SQL injection attempt",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255),
+				INDEX idx_email (email) COMMENT 'Email index''; DROP TABLE users; --'
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				email VARCHAR(255)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_email` (`email`) COMMENT 'Email index\\'; DROP TABLE users; --'",
+		},
+		{
+			name:              "Index comment with newline and carriage return",
+			sourceCreateTable: "CREATE TABLE users (\n\tid INT PRIMARY KEY,\n\tname VARCHAR(100),\n\tINDEX idx_name (name) COMMENT 'Line 1\nLine 2\rLine 3'\n)",
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'Line 1\\nLine 2\\rLine 3'",
+		},
+		{
+			name:              "Index comment with null byte (should be escaped)",
+			sourceCreateTable: "CREATE TABLE users (\n\tid INT PRIMARY KEY,\n\tdata VARCHAR(100),\n\tINDEX idx_data (data) COMMENT 'Data\x00null'\n)",
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				data VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_data` (`data`) COMMENT 'Data\\0null'",
+		},
+		{
+			name:              "Index comment with Ctrl-Z character",
+			sourceCreateTable: "CREATE TABLE users (\n\tid INT PRIMARY KEY,\n\tdata VARCHAR(100),\n\tINDEX idx_data (data) COMMENT 'Data\x1aCtrlZ'\n)",
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				data VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_data` (`data`) COMMENT 'Data\\ZCtrlZ'",
+		},
+		{
+			name: "Index comment with multiple special characters",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				INDEX idx_name (name) COMMENT 'Test: apostrophe'' and "quotes" and backslash\\'
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				name VARCHAR(100)
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'Test: apostrophe\\' and \\\"quotes\\\" and backslash\\\\'",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := GetMissingSecondaryIndexes(tc.sourceCreateTable, tc.targetCreateTable, tc.tableName)
+
+			if tc.expectError {
+				assert.Error(t, err)
+				return
+			}
+
+			assert.NoError(t, err)
+
+			if tc.expectEmpty {
+				assert.Empty(t, result, "Expected empty result but got: %s", result)
+			} else {
+				assert.Equal(t, tc.expectedAlter, result)
+			}
+		})
+	}
+}
+
+func TestGetMissingSecondaryIndexes_ErrorCases(t *testing.T) {
+	testCases := []struct {
+		name              string
+		sourceCreateTable string
+		targetCreateTable string
+		tableName         string
+	}{
+		{
+			name:              "Invalid source CREATE TABLE",
+			sourceCreateTable: "INVALID SQL",
+			targetCreateTable: "CREATE TABLE users (id INT PRIMARY KEY)",
+			tableName:         "users",
+		},
+		{
+			name:              "Invalid target CREATE TABLE",
+			sourceCreateTable: "CREATE TABLE users (id INT PRIMARY KEY)",
+			targetCreateTable: "INVALID SQL",
+			tableName:         "users",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := GetMissingSecondaryIndexes(tc.sourceCreateTable, tc.targetCreateTable, tc.tableName)
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestRemoveSecondaryIndexes_ErrorCases(t *testing.T) {
+	testCases := []struct {
+		name        string
+		createTable string
+	}{
+		{
+			name:        "Invalid SQL syntax",
+			createTable: "INVALID SQL",
+		},
+		{
+			name:        "Empty string",
+			createTable: "",
+		},
+		{
+			name:        "Not a CREATE TABLE statement",
+			createTable: "SELECT * FROM users",
+		},
+		{
+			name:        "Incomplete CREATE TABLE",
+			createTable: "CREATE TABLE",
+		},
+		{
+			name:        "CREATE TABLE with syntax error",
+			createTable: "CREATE TABLE users (id INT PRIMARY KEY,)",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RemoveSecondaryIndexes(tc.createTable)
+			assert.Error(t, err, "Expected error for invalid CREATE TABLE statement")
+		})
+	}
+}

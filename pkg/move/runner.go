@@ -15,11 +15,13 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/repl"
+	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -243,9 +245,8 @@ func (r *Runner) validateExistingTargetTable(ctx context.Context, target applier
 }
 
 // createTargetTables creates tables on all targets.
-// For now, we require that the target is identical to the source.
-// In future, we may create the target with secondary indexes disabled,
-// and re-add them after.
+// If DeferSecondaryIndexes is enabled, tables are created without secondary indexes.
+// Secondary indexes will be added later by restoreSecondaryIndexes() before cutover.
 // This function skips tables that already exist (they were validated by checkTargetEmpty).
 func (r *Runner) createTargetTables(ctx context.Context) error {
 	for _, t := range r.sourceTables {
@@ -255,6 +256,18 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 		if err := row.Scan(&tbl, &createStmt); err != nil {
 			return err
 		}
+
+		// If DeferSecondaryIndexes is enabled, remove secondary indexes from CREATE TABLE
+		// We don't have to track what these indexes were: we'll just recreate them later
+		// from the source table.
+		if r.move.DeferSecondaryIndexes {
+			var err error
+			createStmt, err = statement.RemoveSecondaryIndexes(createStmt)
+			if err != nil {
+				return fmt.Errorf("failed to remove secondary indexes from CREATE TABLE for %s: %w", t.TableName, err)
+			}
+		}
+
 		// Execute the create statement on all targets.
 		for i, target := range r.targets {
 			// Check if table already exists
@@ -282,7 +295,9 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 			r.logger.Info("created table on target",
 				"table", t.TableName,
 				"target", i,
-				"database", target.Config.DBName)
+				"database", target.Config.DBName,
+				"deferred_indexes", r.move.DeferSecondaryIndexes,
+			)
 		}
 	}
 	return nil
@@ -724,6 +739,11 @@ func (r *Runner) Status() string {
 			time.Since(r.startTime).Round(time.Second),
 			time.Since(r.checker.StartTime()).Round(time.Second),
 		)
+	case status.RestoreSecondaryIndexes:
+		return fmt.Sprintf("migration status: state=%s total-time=%s",
+			r.status.Get().String(),
+			time.Since(r.startTime).Round(time.Second),
+		)
 	default:
 		return ""
 	}
@@ -731,6 +751,110 @@ func (r *Runner) Status() string {
 
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// restoreSecondaryIndexes restores any secondary indexes that were deferred during table creation.
+// This function is always called (regardless of DeferSecondaryIndexes flag) to handle
+// checkpoint resume scenarios. It uses statement.GetMissingSecondaryIndexes to compare source and target
+// schemas and generate a single ALTER TABLE statement for all missing indexes per table.
+// Targets are processed in parallel, grouped by hostname to avoid overloading any single MySQL instance.
+func (r *Runner) restoreSecondaryIndexes(ctx context.Context) error {
+	r.logger.Info("Checking for deferred secondary indexes to restore")
+
+	// Group targets by hostname to enable parallel processing across different hosts
+	// while avoiding overloading any single MySQL instance
+	hostGroups := make(map[string][]int) // hostname -> []targetIdx
+	for idx, target := range r.targets {
+		host := target.Config.Addr // e.g., "host:3306"
+		hostGroups[host] = append(hostGroups[host], idx)
+	}
+
+	r.logger.Info("Parallelizing index restoration across hosts",
+		"hostCount", len(hostGroups),
+		"targetCount", len(r.targets))
+
+	// Process each host group in parallel using errgroup
+	g, gctx := errgroup.WithContext(ctx)
+	for host, targetIndices := range hostGroups {
+		// Shadow loop variables to avoid closure capture issues.
+		host, targetIndices := host, targetIndices //nolint: copyloopvar
+		g.Go(func() error {
+			return r.restoreIndexesForTargets(gctx, host, targetIndices)
+		})
+	}
+
+	// Wait for all host groups to complete
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	r.logger.Info("Completed restoring all secondary indexes")
+	return nil
+}
+
+// restoreIndexesForTargets restores secondary indexes for a group of targets on the same host.
+// This is called as part of parallel processing in restoreSecondaryIndexes.
+func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targetIndices []int) error {
+	r.logger.Debug("Starting index restoration for host",
+		"host", host,
+		"targetCount", len(targetIndices))
+	// For each source table, compare with targets on this host and restore missing indexes
+	for _, tbl := range r.sourceTables {
+		// Get CREATE TABLE statement from source
+		var sourceCreateStmt string
+		row := r.source.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", tbl.TableName))
+		var tableName string
+		if err := row.Scan(&tableName, &sourceCreateStmt); err != nil {
+			return fmt.Errorf("failed to get CREATE TABLE for source %s: %w", tbl.TableName, err)
+		}
+
+		// Process each target on this host sequentially
+		// We re-evaluate what is missing per-target, because in resume scenarios we could have a failure
+		// in this restore function. We need to be able to pick up where we left off,
+		// which includes that some work may already be complete.
+		for _, targetIdx := range targetIndices {
+			target := r.targets[targetIdx]
+
+			// Get CREATE TABLE statement from target
+			var targetCreateStmt, targetTableName string
+			targetRow := target.DB.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", tbl.TableName))
+			if err := targetRow.Scan(&targetTableName, &targetCreateStmt); err != nil {
+				return fmt.Errorf("failed to get CREATE TABLE for target %d table %s: %w", targetIdx, tbl.TableName, err)
+			}
+
+			// Compare and get ALTER TABLE statement for missing indexes
+			alterStmt, err := statement.GetMissingSecondaryIndexes(sourceCreateStmt, targetCreateStmt, tbl.TableName)
+			if err != nil {
+				return fmt.Errorf("failed to compare indexes for table %s (target %d): %w", tbl.TableName, targetIdx, err)
+			}
+
+			// If no missing indexes, skip this target
+			// this is going to be typical for most cases.
+			if alterStmt == "" {
+				r.logger.Debug("no missing secondary indexes",
+					"table", tbl.TableName,
+					"target", targetIdx,
+					"database", target.Config.DBName,
+					"host", host)
+				continue
+			}
+
+			r.logger.Info("restoring secondary indexes",
+				"table", tbl.TableName,
+				"target", targetIdx,
+				"database", target.Config.DBName,
+				"host", host,
+				"stmt", alterStmt)
+
+			// Execute the ALTER TABLE statement to add all missing indexes at once
+			if _, err := target.DB.ExecContext(ctx, alterStmt); err != nil {
+				return fmt.Errorf("failed to restore indexes on target %d (host %s): %w", targetIdx, host, err)
+			}
+		}
+	}
+	r.logger.Debug("Completed index restoration for host",
+		"host", host,
+		"targetCount", len(targetIndices))
+	return nil
 }
 
 func (r *Runner) prepareForCutover(ctx context.Context) error {
@@ -741,6 +865,14 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	r.replClient.StopPeriodicFlush()
 	r.status.Set(status.ApplyChangeset)
 	if err := r.replClient.Flush(ctx); err != nil {
+		return err
+	}
+
+	// Restore secondary indexes if they were deferred during table creation.
+	// This is always called (not conditional on DeferSecondaryIndexes) to handle
+	// checkpoint resume scenarios where indexes may have been deferred in a previous run.
+	r.status.Set(status.RestoreSecondaryIndexes)
+	if err := r.restoreSecondaryIndexes(ctx); err != nil {
 		return err
 	}
 
