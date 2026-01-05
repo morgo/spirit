@@ -30,23 +30,23 @@ func TestBufferedMap(t *testing.T) {
 	assert.Equal(t, 1, sub.Length())
 
 	// Check the logical row structure
-	assert.False(t, sub.changes["1"].IsDeleted)
-	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].RowImage)
+	assert.False(t, sub.changes["1"].logicalRow.IsDeleted)
+	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].logicalRow.RowImage)
 
 	// Now delete the row.
 	testutils.RunSQL(t, "DELETE FROM subscription_test WHERE id = 1")
 	assert.NoError(t, client.BlockWait(t.Context()))
 
-	assert.True(t, sub.changes["1"].IsDeleted)
-	assert.Equal(t, []any(nil), sub.changes["1"].RowImage)
+	assert.True(t, sub.changes["1"].logicalRow.IsDeleted)
+	assert.Equal(t, []any(nil), sub.changes["1"].logicalRow.RowImage)
 
 	// Now insert 2 more rows:
 	testutils.RunSQL(t, "INSERT INTO subscription_test (id, name) VALUES (2, 'test2'), (3, 'test3')")
 	assert.NoError(t, client.BlockWait(t.Context()))
 
 	assert.Equal(t, 3, sub.Length())
-	assert.False(t, sub.changes["2"].IsDeleted)
-	assert.False(t, sub.changes["3"].IsDeleted)
+	assert.False(t, sub.changes["2"].logicalRow.IsDeleted)
+	assert.False(t, sub.changes["3"].logicalRow.IsDeleted)
 
 	// Now flush the changes.
 	allFlushed, err := sub.Flush(t.Context(), false, nil)

@@ -189,7 +189,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		c.subscriptions[subKey] = &bufferedMap{
 			table:    currentTable,
 			newTable: newTable,
-			changes:  make(map[string]applier.LogicalRow),
+			changes:  make(map[string]bufferedChange),
 			c:        c,
 			chunker:  chunker,
 			applier:  c.applier,
@@ -200,7 +200,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	c.subscriptions[subKey] = &deltaMap{
 		table:    currentTable,
 		newTable: newTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 		c:        c,
 		chunker:  chunker,
 	}
