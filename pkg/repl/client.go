@@ -22,14 +22,7 @@ import (
 )
 
 const (
-	// binlogTrivialThreshold is the number of changes below which we can move on from Flush()
-	// and start the final cutover steps. This acknowledges that we won't be able to get to zero,
-	// so this is a number that is "close enough". It is possible 1K might not be reached immediately,
-	// in which it is fine if cutover doesn't occur to a couple of hours later as we exit peak.
-	// This is a tradeoff that we need to make, since if the number is too high, during cutover,
-	// we could timeout because the flush under lock has to take less than 30 seconds (DefaultTimeout).
-	// This is because we don't want to hold locks for any longer!
-	binlogTrivialThreshold = 1000
+	binlogTrivialThreshold = 10000
 	// DefaultBatchSize is the number of rows in each batched REPLACE/DELETE statement.
 	// Larger is better, but we need to keep the run-time of the statement well below
 	// dbconn.maximumLockTime so that it doesn't prevent copy-row tasks from failing.
@@ -412,7 +405,7 @@ func (c *Client) readStream(ctx context.Context) {
 		var err error
 
 		// If streamer is nil (such as after a failed recreation), treat it as an error
-		// This will then trigger the recreation
+		// This will then trigger the recreation in c.recreateStreamer()
 		if c.streamer == nil {
 			err = errors.New("binlog streamer is nil, cannot read events")
 		} else {
@@ -435,6 +428,13 @@ func (c *Client) readStream(ctx context.Context) {
 			if consecutiveErrors >= maxConsecutiveErrors {
 				recreateAttempts++
 				c.logger.Warn("Too many consecutive errors, attempting to recreate streamer", "consecutive_errors", consecutiveErrors, "attempt", recreateAttempts, "max_attempts", maxRecreateAttempts)
+
+				// Reset consecutiveErrors BEFORE attempting recreation.
+				// If recreation fails and sets c.streamer = nil, we'll accumulate 5 fresh errors
+				// (from the nil streamer check above) before this block triggers again.
+				// Without this reset, consecutiveErrors would stay >= 5 and we'd immediately
+				// retry recreation on every iteration, causing rapid retries with exponential backoff.
+				consecutiveErrors = 0
 
 				// Check if we've exceeded the maximum number of recreation attempts
 				if recreateAttempts >= maxRecreateAttempts {
@@ -467,8 +467,7 @@ func (c *Client) readStream(ctx context.Context) {
 						backoffDuration = maxBackoffDuration
 					}
 				} else {
-					// Successfully recreated, reset counters
-					consecutiveErrors = 0
+					// Successfully recreated, reset recreation attempts and backoff
 					recreateAttempts = 0
 					backoffDuration = initialBackoffDuration
 				}
