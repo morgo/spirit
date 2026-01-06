@@ -47,7 +47,7 @@ func TestNoopThrottler(t *testing.T) {
 	throttler.currentLag = 1 * time.Second
 	throttler.lagTolerance = 2 * time.Second
 	assert.False(t, throttler.IsThrottled())
-	assert.NoError(t, throttler.UpdateLag())
+	assert.NoError(t, throttler.UpdateLag(t.Context()))
 	throttler.BlockWait()
 	throttler.lagTolerance = 100 * time.Millisecond
 	assert.True(t, throttler.IsThrottled())

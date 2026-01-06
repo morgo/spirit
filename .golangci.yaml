@@ -4,6 +4,11 @@ run:
 linters:
   default: all
   disable:
+    - wsl_v5 # drives me crazy
+    - noinlineerr # don't agree with this one
+    - unqueryvet # maybe makes sense for a user app, not spirit
+    - funcorder # maybe worth looking at later, not that useful
+    - godoclint # maybe worth looking at later, not that useful
     - cyclop
     - depguard
     - dupl

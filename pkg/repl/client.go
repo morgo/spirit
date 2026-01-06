@@ -321,7 +321,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		}
 		c.cfg.TLSConfig = tlsConfig
 	}
-	if dbconn.IsMySQL84(c.db) { // handle MySQL 8.4
+	if dbconn.IsMySQL84(ctx, c.db) { // handle MySQL 8.4
 		c.isMySQL84 = true
 	}
 	// Determine where to start the sync from.

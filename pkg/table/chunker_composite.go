@@ -16,6 +16,7 @@ import (
 
 type chunkerComposite struct {
 	sync.Mutex
+
 	Ti             *TableInfo
 	NewTi          *TableInfo // Destination table info
 	chunkSize      uint64
@@ -153,6 +154,7 @@ func (t *chunkerComposite) isFirstChunk() bool {
 // nextQueryToDatums executes the prefetch query which returns 1 row-max.
 // The columns in this result are then converted to Datums and returned
 func (t *chunkerComposite) nextQueryToDatums(query string) ([]Datum, error) {
+	//nolint: noctx // too much refactoring to add context here
 	rows, err := t.Ti.db.Query(query)
 	if err != nil {
 		return nil, err

@@ -27,6 +27,6 @@ func (t *Noop) IsThrottled() bool {
 func (t *Noop) BlockWait() {
 }
 
-func (t *Noop) UpdateLag() error {
+func (t *Noop) UpdateLag(ctx context.Context) error {
 	return nil
 }

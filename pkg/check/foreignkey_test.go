@@ -29,14 +29,14 @@ func TestHasForeignKey(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 
-	_, err = db.Exec(`drop table if exists customers, customer_contacts`)
+	_, err = db.ExecContext(t.Context(), `drop table if exists customers, customer_contacts`)
 	assert.NoError(t, err)
 	sql := `CREATE TABLE customers (
 		id INT NOT NULL,
 		name VARCHAR(255) NOT NULL,
 		PRIMARY KEY (id)
 	);`
-	_, err = db.Exec(sql)
+	_, err = db.ExecContext(t.Context(), sql)
 	assert.NoError(t, err)
 	sql = `CREATE TABLE customer_contacts (
 		id INT NOT NULL,
@@ -49,7 +49,7 @@ func TestHasForeignKey(t *testing.T) {
 		ON DELETE CASCADE  
 		ON UPDATE CASCADE  
 	);`
-	_, err = db.Exec(sql)
+	_, err = db.ExecContext(t.Context(), sql)
 	assert.NoError(t, err)
 
 	// Under this model, both customers and customer_contacts are said to have foreign keys.
@@ -66,7 +66,7 @@ func TestHasForeignKey(t *testing.T) {
 	err = hasForeignKeysCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err) // already has foreign keys.
 
-	_, err = db.Exec(`drop table if exists customer_contacts`)
+	_, err = db.ExecContext(t.Context(), `drop table if exists customer_contacts`)
 	assert.NoError(t, err)
 	r.Table.TableName = "customers"
 	r.Statement = statement.MustNew("ALTER TABLE customers ENGINE=innodb")[0]

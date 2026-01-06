@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 
 	"github.com/block/spirit/pkg/table"
 )
@@ -202,15 +204,8 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 				"threshold", TransactionWeightThreshold)
 			continue // Skip transactions that are too heavy
 		}
-		// Check if this PID is already in the unique list
-		found := false
-		for _, pid := range uniquePids {
-			if pid == lock.PID {
-				found = true
-				break
-			}
-		}
-		if !found {
+		// Check if this PID is already in the unique list using slices.Contains
+		if !slices.Contains(uniquePids, lock.PID) {
 			uniquePids = append(uniquePids, lock.PID)
 		}
 	}
@@ -293,6 +288,7 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 	if len(tables) == 0 {
 		return "", nil
 	}
+	var builder strings.Builder
 	for i, tableInfo := range tables {
 		if tableInfo == nil {
 			logger.Warn("skipping nil table info in IN list")
@@ -304,13 +300,13 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 				"table", tableInfo.TableName)
 			continue // Skip tables with empty schema or name
 		}
-		inList += "(?,?)"
+		builder.WriteString("(?,?)")
 		params = append(params, tableInfo.SchemaName, tableInfo.TableName)
 		if i < len(tables)-1 {
-			inList += ","
+			builder.WriteString(",")
 		}
 	}
-	return inList, params
+	return builder.String(), params
 }
 
 // slicesToInList is useful when you have a slice of items and you want to create an IN clause for a SQL query.
@@ -320,12 +316,13 @@ func sliceToInList[S ~[]E, E any](items S) (inList string, inParams []any) {
 	if len(items) == 0 {
 		return "", nil
 	}
+	var builder strings.Builder
 	for i := range items {
-		inList += "?"
+		builder.WriteString("?")
 		inParams = append(inParams, items[i])
 		if i < len(items)-1 {
-			inList += ","
+			builder.WriteString(",")
 		}
 	}
-	return inList, inParams
+	return builder.String(), inParams
 }

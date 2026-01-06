@@ -230,7 +230,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 		allFlushed, err := sub.Flush(t.Context(), true, lock)
 		assert.NoError(t, err)
 		assert.True(t, allFlushed)
-		lock.Close()
+		lock.Close(t.Context())
 
 		// Verify the results
 		var count int

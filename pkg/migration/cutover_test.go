@@ -76,10 +76,10 @@ func TestCutOver(t *testing.T) {
 	// and t1_old has 2 row.
 	// Verify that t2 has one row.
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM cutovert1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cutovert1").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, count)
-	err = db.QueryRow("SELECT COUNT(*) FROM _cutovert1_old").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _cutovert1_old").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count)
 }
@@ -143,7 +143,7 @@ func TestMDLLockFails(t *testing.T) {
 	// This will not fail the table lock but it will fail the rename.
 	trx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	assert.NoError(t, err)
-	_, err = trx.Exec("LOCK TABLES mdllocks READ")
+	_, err = trx.ExecContext(t.Context(), "LOCK TABLES mdllocks READ")
 	assert.NoError(t, err)
 
 	// Start the cutover. It will retry in a loop and fail

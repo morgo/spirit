@@ -328,6 +328,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		// First try with TLS
 		db, err := sql.Open("mysql", dsn)
 		if err == nil {
+			//nolint: noctx // requires too much refactoring
 			if err := db.Ping(); err == nil {
 				// TLS connection successful
 				return db, nil
@@ -350,6 +351,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to open fallback %s connection: %w", connectionType, err)
 		}
+		//nolint: noctx // requires too much refactoring
 		if err := db.Ping(); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("[%s-CONNECTION-FALLBACK] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)
@@ -362,6 +364,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s connection: %w", connectionType, err)
 	}
+	//nolint: noctx // requires too much refactoring
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("[%s-CONNECTION] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)

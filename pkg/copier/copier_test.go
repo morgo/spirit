@@ -241,10 +241,9 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 	assert.NoError(t, t2.SetInfo(t.Context()))
 	wg1, wg2 := sync.WaitGroup{}, sync.WaitGroup{}
 	wg1.Add(1)
-	wg2.Add(1)
 	// Lock table t2 for 2 seconds.
 	// This should be enough to retry, but it will eventually be successful.
-	go func() {
+	wg2.Go(func() {
 		tx, err := db.BeginTx(t.Context(), nil)
 		assert.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "SELECT a,b,c FROM lockt2 WHERE a = 1 FOR UPDATE")
@@ -253,8 +252,7 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 		time.Sleep(2 * time.Second)
 		err = tx.Rollback()
 		assert.NoError(t, err)
-		wg2.Done()
-	}()
+	})
 	wg1.Wait()
 	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
 	assert.NoError(t, err)
@@ -293,8 +291,7 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 	// TODO: can we use a channel instead here to notify cleanup can be done?
 	wg1, wg2 := sync.WaitGroup{}, sync.WaitGroup{}
 	wg1.Add(1)
-	wg2.Add(1)
-	go func() {
+	wg2.Go(func() {
 		tx, err := db.BeginTx(t.Context(), nil)
 		assert.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "SELECT a,b,c FROM lock2t2 WHERE a = 1 FOR UPDATE")
@@ -303,9 +300,7 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		err = tx.Rollback()
 		assert.NoError(t, err)
-		wg2.Done()
-	}()
-
+	})
 	wg1.Wait() // Wait only for the lock to be acquired.
 	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
 	assert.NoError(t, err)

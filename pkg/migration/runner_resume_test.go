@@ -605,7 +605,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	defer db.Close()
 	for {
 		var rowCount int
-		err = db.QueryRow(`SELECT count(*) from _chkpresumetest_chkpnt`).Scan(&rowCount)
+		err = db.QueryRowContext(t.Context(), `SELECT count(*) from _chkpresumetest_chkpnt`).Scan(&rowCount)
 		if err != nil {
 			continue // table does not exist yet
 		}
@@ -697,7 +697,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 	defer db.Close()
 	for {
 		var rowCount int
-		err = db.QueryRow(`SELECT count(*) from _compositevarcharpk_chkpnt`).Scan(&rowCount)
+		err = db.QueryRowContext(t.Context(), `SELECT count(*) from _compositevarcharpk_chkpnt`).Scan(&rowCount)
 		if err != nil {
 			continue // table does not exist yet
 		}
@@ -781,7 +781,7 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	defer db.Close()
 	for {
 		var rowCount int
-		err = db.QueryRow(`SELECT count(*) from _resumestricttest_chkpnt`).Scan(&rowCount)
+		err = db.QueryRowContext(t.Context(), `SELECT count(*) from _resumestricttest_chkpnt`).Scan(&rowCount)
 		if err != nil {
 			continue // table does not exist yet
 		}
@@ -926,7 +926,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	assert.NoError(t, m.DumpCheckpoint(ctx))
 	// assert there is a checkpoint
 	var rowCount int
-	err = m.db.QueryRow(`SELECT count(*) from _phantomtest_chkpnt`).Scan(&rowCount)
+	err = m.db.QueryRowContext(ctx, `SELECT count(*) from _phantomtest_chkpnt`).Scan(&rowCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, rowCount)
 
@@ -1035,7 +1035,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	defer db.Close()
 	for {
 		var rowCount int
-		err = db.QueryRow(fmt.Sprintf(`SELECT count(*) from _%s_chkpnt`, tableName)).Scan(&rowCount)
+		err = db.QueryRowContext(t.Context(), fmt.Sprintf(`SELECT count(*) from _%s_chkpnt`, tableName)).Scan(&rowCount)
 		if err != nil {
 			continue // table does not exist yet
 		}

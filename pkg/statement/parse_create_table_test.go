@@ -334,7 +334,7 @@ func BenchmarkParseCreateTable(b *testing.B) {
 
 	b.ResetTimer()
 
-	for range b.N {
+	for b.Loop() {
 		ct, err := ParseCreateTable(sql)
 		if err != nil {
 			b.Fatal(err)
@@ -1237,7 +1237,7 @@ func BenchmarkComprehensiveParsing(b *testing.B) {
 
 	b.ResetTimer()
 
-	for range b.N {
+	for b.Loop() {
 		ct, err := ParseCreateTable(complexSQL)
 		if err != nil {
 			b.Fatal(err)

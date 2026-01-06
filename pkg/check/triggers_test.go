@@ -15,20 +15,20 @@ func TestHasTriggers(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 
-	_, err = db.Exec(`drop table if exists account`)
+	_, err = db.ExecContext(t.Context(), `drop table if exists account`)
 	assert.NoError(t, err)
-	_, err = db.Exec(`drop trigger if exists ins_sum`)
+	_, err = db.ExecContext(t.Context(), `drop trigger if exists ins_sum`)
 	assert.NoError(t, err)
 	sql := `CREATE TABLE account (
 		acct_num INT,
 		amount DECIMAL (10,2),
 		PRIMARY KEY (acct_num)
 	);`
-	_, err = db.Exec(sql)
+	_, err = db.ExecContext(t.Context(), sql)
 	assert.NoError(t, err)
 	sql = `CREATE TRIGGER ins_sum BEFORE INSERT ON account
 		FOR EACH ROW SET @sum = @sum + NEW.amount;`
-	_, err = db.Exec(sql)
+	_, err = db.ExecContext(t.Context(), sql)
 	assert.NoError(t, err)
 
 	r := Resources{
@@ -40,7 +40,7 @@ func TestHasTriggers(t *testing.T) {
 	err = hasTriggersCheck(t.Context(), r, slog.Default())
 	assert.ErrorContains(t, err, "tables with triggers associated are not supported") // already has a trigger associated.
 
-	_, err = db.Exec(`drop trigger if exists ins_sum`)
+	_, err = db.ExecContext(t.Context(), `drop trigger if exists ins_sum`)
 	assert.NoError(t, err)
 	err = hasTriggersCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err) // no longer said to have trigger associated.

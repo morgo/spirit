@@ -295,7 +295,7 @@ func TestKeyColumnsValuesExtraction(t *testing.T) {
 	var id, age int
 	var name string
 
-	err = db.QueryRow("SELECT * FROM `test`.`colvaluest1` ORDER BY id DESC LIMIT 1").Scan(&id, &name, &age)
+	err = db.QueryRowContext(t.Context(), "SELECT * FROM `test`.`colvaluest1` ORDER BY id DESC LIMIT 1").Scan(&id, &name, &age)
 	assert.NoError(t, err)
 
 	row := []any{id, name, age}

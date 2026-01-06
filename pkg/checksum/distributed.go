@@ -24,6 +24,7 @@ import (
 
 type DistributedChecker struct {
 	sync.Mutex
+
 	concurrency      int
 	feed             *repl.Client
 	db               *sql.DB
@@ -64,7 +65,7 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 	)
 	var sourceChecksum int64
 	var sourceCount uint64
-	err = srcTrx.QueryRow(source).Scan(&sourceChecksum, &sourceCount)
+	err = srcTrx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount)
 	if err != nil {
 		return err
 	}
@@ -89,7 +90,7 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 
 		var targetChecksum int64
 		var targetCount uint64
-		err = targetTrx.QueryRow(targetQuery).Scan(&targetChecksum, &targetCount)
+		err = targetTrx.QueryRowContext(ctx, targetQuery).Scan(&targetChecksum, &targetCount)
 		if err != nil {
 			return fmt.Errorf("failed to query target %d: %w", i, err)
 		}
@@ -293,7 +294,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to lock source tables: %w", err)
 	}
-	defer sourceTableLock.Close()
+	defer sourceTableLock.Close(ctx)
 
 	// Lock tables on all targets
 	var targetTableLocks []*dbconn.TableLock
@@ -302,7 +303,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		if err != nil {
 			// Clean up any locks we've already acquired
 			for _, lock := range targetTableLocks {
-				lock.Close()
+				lock.Close(ctx)
 			}
 			return fmt.Errorf("failed to lock tables on target %d: %w", i, err)
 		}
@@ -310,7 +311,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	}
 	defer func() {
 		for _, lock := range targetTableLocks {
-			lock.Close()
+			lock.Close(ctx)
 		}
 	}()
 
