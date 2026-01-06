@@ -429,8 +429,8 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 
 	assert.NoError(t, r.checksum(t.Context()))       // run the checksum, the original Run is blocked on sentinel.
 	assert.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
+	assert.NoError(t, r.Close())                     // close the run first to avoid race conditions.
 	cancel()                                         // unblock the original waiting on sentinel.
-	assert.NoError(t, r.Close())                     // close the run.
 
 	// drop the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, `DROP TABLE _spirit_sentinel`)
@@ -613,9 +613,9 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 			break
 		}
 	}
-	// Between cancelFunc() and Close() every resource is freed.
-	runner.cancelFunc()
+	// Close() before cancelFunc() to avoid race conditions.
 	assert.NoError(t, runner.Close())
+	runner.cancelFunc()
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO chkpresumetest (pad) SELECT RANDOM_BYTES(1024) FROM chkpresumetest LIMIT 1000")
@@ -705,9 +705,9 @@ FROM compositevarcharpk a WHERE version='1'`)
 			break
 		}
 	}
-	// Between cancel and Close() every resource is freed.
-	cancel()
+	// Close() before cancel() to avoid race conditions.
 	assert.NoError(t, runner.Close())
+	cancel()
 
 	newmigration := &Migration{
 		Host:            cfg.Addr,
@@ -789,9 +789,9 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 			break
 		}
 	}
-	// Between cancel and Close() every resource is freed.
-	cancel()
+	// Close() before cancel() to avoid race conditions.
 	assert.NoError(t, runner.Close())
+	cancel()
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM resumestricttest LIMIT 1000")
@@ -1052,9 +1052,9 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 			break
 		}
 	}
-	// Between cancel and Close() every resource is freed.
-	cancel()
+	// Close() before cancel() to avoid race conditions.
 	assert.NoError(t, runner.Close())
+	cancel()
 
 	// Manually create the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _spirit_sentinel (id int unsigned primary key)")
