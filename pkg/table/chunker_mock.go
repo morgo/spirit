@@ -201,15 +201,23 @@ func (m *MockChunker) Next() (*Chunk, error) {
 
 	// Create a chunk
 	_ = fmt.Sprintf("%s_chunk_%d", m.tableName, m.nextCalls)
+	lowerDatum, err := NewDatum(m.currentPosition, unsignedType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create lower bound datum: %w", err)
+	}
+	upperDatum, err := NewDatum(m.currentPosition+m.chunkSize, unsignedType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upper bound datum: %w", err)
+	}
 	chunk := &Chunk{
 		Table:     m.tableInfo,
 		ChunkSize: m.chunkSize,
 		LowerBound: &Boundary{
-			Value:     []Datum{NewDatum(m.currentPosition, unsignedType)},
+			Value:     []Datum{lowerDatum},
 			Inclusive: true,
 		},
 		UpperBound: &Boundary{
-			Value:     []Datum{NewDatum(m.currentPosition+m.chunkSize, unsignedType)},
+			Value:     []Datum{upperDatum},
 			Inclusive: false,
 		},
 	}
