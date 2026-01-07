@@ -13,9 +13,10 @@ const (
 	UNKNOWN byte = iota
 	COUNTER
 	GAUGE
+)
 
-	SinkTimeout = 1 * time.Second
-
+const (
+	SinkTimeout                      = 1 * time.Second
 	ChunkProcessingTimeMetricName    = "chunk_processing_time"
 	ChunkLogicalRowsCountMetricName  = "chunk_num_logical_rows"
 	ChunkAffectedRowsCountMetricName = "chunk_num_affected_rows"

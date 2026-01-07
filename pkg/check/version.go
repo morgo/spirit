@@ -14,7 +14,7 @@ func init() {
 	registerCheck("version", versionCheck, ScopePreRun)
 }
 
-func versionCheck(_ context.Context, r Resources, _ *slog.Logger) error {
+func versionCheck(ctx context.Context, r Resources, _ *slog.Logger) error {
 	// Use the go-sql-driver/mysql.Config to properly escape the DSN
 	// For version check, we try to connect without specifying a database first,
 	// but if that fails due to permissions, we can still check the version
@@ -40,19 +40,19 @@ func versionCheck(_ context.Context, r Resources, _ *slog.Logger) error {
 	// This ensures that we first return an error like
 	// connection refused if the host is unreachable,
 	// rather than "MySQL 8.0 is required."
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	if !isMySQL8(db) {
+	if !isMySQL8(ctx, db) {
 		return errors.New("MySQL 8.0 is required")
 	}
 	return nil
 }
 
 // isMySQL8 returns true if we can positively identify this as mysql 8
-func isMySQL8(db *sql.DB) bool {
+func isMySQL8(ctx context.Context, db *sql.DB) bool {
 	var version string
-	if err := db.QueryRow("select substr(version(), 1, 1)").Scan(&version); err != nil {
+	if err := db.QueryRowContext(ctx, "select substr(version(), 1, 1)").Scan(&version); err != nil {
 		return false // can't tell
 	}
 	return version == "8"

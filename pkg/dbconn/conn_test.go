@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"testing"
@@ -55,14 +56,14 @@ func TestNewConn(t *testing.T) {
 
 	db, err = New(testutils.DSN(), NewDBConfig())
 	assert.NoError(t, err)
-	if db != nil {
-		defer db.Close()
+	assert.NotNil(t, db)
+	defer db.Close()
+	for range 10 {
 		var resp int
-		err = db.QueryRow("SELECT 1").Scan(&resp)
+		err = db.QueryRowContext(t.Context(), "SELECT 1").Scan(&resp)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, resp)
 	}
-
 	// New on syntactically valid but won't respond to ping.
 	db, err = New("root:wrongpassword@tcp(127.0.0.1)/doesnotexist", NewDBConfig())
 	assert.Error(t, err)
@@ -87,17 +88,17 @@ func TestNewConnRejectsReadOnlyConnections(t *testing.T) {
 	db, err = New(testutils.DSN(), config)
 	assert.NoError(t, err)
 	defer db.Close()
-	_, err = db.Exec("set session transaction_read_only = 1")
+	_, err = db.ExecContext(context.Background(), "set session transaction_read_only = 1")
 	assert.NoError(t, err)
 
 	// This would error, but `database/sql` automatically retries on a
 	// new connection which is not read-only, and eventually succeed.
 	// See also: rejectReadOnly test in `go-sql-driver/mysql`: https://github.com/go-sql-driver/mysql/blob/52c1917d99904701db2b0e4f14baffa948009cd7/driver_test.go#L2270-L2301
-	_, err = db.Exec("insert into conn_read_only values (1, 2, 3)")
+	_, err = db.ExecContext(context.Background(), "insert into conn_read_only values (1, 2, 3)")
 	assert.NoError(t, err)
 
 	var count int
-	err = db.QueryRow("select count(*) from conn_read_only where a = 1").Scan(&count)
+	err = db.QueryRowContext(context.Background(), "select count(*) from conn_read_only where a = 1").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count)
 }

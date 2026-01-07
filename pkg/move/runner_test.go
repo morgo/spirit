@@ -90,11 +90,9 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Start write threads
 	for range numThreads {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			concurrentWriteThread(ctx, sourceDB, &writeCount, &errorCount)
-		}()
+		})
 	}
 
 	// Give the writers a moment to start

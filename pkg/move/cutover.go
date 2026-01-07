@@ -78,7 +78,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tableLock.Close()
+	defer tableLock.Close(ctx)
 
 	// We don't use FlushUnderLock: that's for within the same server.
 	// We use a regular flush. No new changes will arrive because of the table lock.

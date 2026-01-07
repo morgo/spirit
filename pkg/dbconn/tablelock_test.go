@@ -36,7 +36,7 @@ func TestTableLock(t *testing.T) {
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
 	assert.Error(t, err)
 
-	assert.NoError(t, lock1.Close())
+	assert.NoError(t, lock1.Close(t.Context()))
 }
 
 func TestExecUnderLock(t *testing.T) {
@@ -110,12 +110,12 @@ func TestTableLockMultiple(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Release the lock
-	assert.NoError(t, lock1.Close())
+	assert.NoError(t, lock1.Close(t.Context()))
 
 	// Verify we can now acquire individual locks
 	lock2, err := NewTableLock(t.Context(), db, []*table.TableInfo{tables[0]}, testConfig(), slog.Default())
 	assert.NoError(t, err)
-	assert.NoError(t, lock2.Close())
+	assert.NoError(t, lock2.Close(t.Context()))
 
 	// Clean up
 	err = Exec(t.Context(), db, "DROP TABLE testlock1, _testlock1_new, testlock2, _testlock2_new, testlock3, _testlock3_new")
@@ -133,14 +133,14 @@ func TestTableLockFail(t *testing.T) {
 	assert.NoError(t, err)
 
 	// We acquire an exclusive lock first, so the tablelock should fail.
-	trx, err := db.Begin()
+	trx, err := db.BeginTx(t.Context(), nil)
 	assert.NoError(t, err)
 	defer func() {
 		err := trx.Rollback()
 		assert.NoError(t, err, "Failed to rollback transaction")
 	}()
 
-	_, err = trx.Exec("LOCK TABLES test.testlockfail WRITE")
+	_, err = trx.ExecContext(t.Context(), "LOCK TABLES test.testlockfail WRITE")
 	assert.NoError(t, err)
 
 	// Try to get a table lock - this should fail since we already have an exclusive lock

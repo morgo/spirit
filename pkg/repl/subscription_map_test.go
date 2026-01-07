@@ -108,7 +108,7 @@ func TestFlushWithLock(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, allFlushed)
 
-	lock.Close()
+	lock.Close(t.Context())
 
 	// Verify the changes were applied
 	var count int

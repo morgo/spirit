@@ -24,6 +24,7 @@ import (
 
 type SingleChecker struct {
 	sync.Mutex
+
 	concurrency      int
 	feed             *repl.Client
 	db               *sql.DB
@@ -62,11 +63,11 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	)
 	var sourceChecksum, targetChecksum int64
 	var sourceCount, targetCount uint64
-	err = trx.QueryRow(source).Scan(&sourceChecksum, &sourceCount)
+	err = trx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount)
 	if err != nil {
 		return err
 	}
-	err = trx.QueryRow(target).Scan(&targetChecksum, &targetCount)
+	err = trx.QueryRowContext(ctx, target).Scan(&targetChecksum, &targetCount)
 	if err != nil {
 		return err
 	}
@@ -75,7 +76,7 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		// to inspect closely and report on the differences.
 		c.differencesFound.Add(1)
 		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
-		if err := c.inspectDifferences(trx, chunk); err != nil {
+		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
 			return err
 		}
 		// Are we allowed to fix the differences? If not, return an error.
@@ -106,10 +107,10 @@ func (c *SingleChecker) GetProgress() string {
 
 // inspectDifferences looks at the chunk and tries to find differences.
 // For cross-database scenarios, it queries each database separately and compares in memory.
-func (c *SingleChecker) inspectDifferences(trx *sql.Tx, chunk *table.Chunk) error {
+func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chunk *table.Chunk) error {
 	c.logger.Info("inspecting differences for chunk", "chunk", chunk.String())
 
-	sourceRows, err := trx.Query(fmt.Sprintf(queryTemplate,
+	sourceRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		c.intersectColumns(chunk),
 		strings.Join(chunk.Table.KeyColumns, ", "),
 		chunk.Table.QuotedName,
@@ -133,7 +134,7 @@ func (c *SingleChecker) inspectDifferences(trx *sql.Tx, chunk *table.Chunk) erro
 		return fmt.Errorf("error iterating source rows: %w", err)
 	}
 
-	targetRows, err := trx.Query(fmt.Sprintf(queryTemplate,
+	targetRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		c.intersectColumns(chunk),
 		strings.Join(chunk.NewTable.KeyColumns, ", "),
 		chunk.NewTable.QuotedName,
@@ -313,7 +314,7 @@ func (c *SingleChecker) initConnPool(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tableLock.Close()
+	defer tableLock.Close(ctx)
 	// We only have a reader, so flush the read connection.
 	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
 		return err

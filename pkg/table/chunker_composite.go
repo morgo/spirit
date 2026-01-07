@@ -16,6 +16,7 @@ import (
 
 type chunkerComposite struct {
 	sync.Mutex
+
 	Ti             *TableInfo
 	NewTi          *TableInfo // Destination table info
 	chunkSize      uint64
@@ -153,6 +154,7 @@ func (t *chunkerComposite) isFirstChunk() bool {
 // nextQueryToDatums executes the prefetch query which returns 1 row-max.
 // The columns in this result are then converted to Datums and returned
 func (t *chunkerComposite) nextQueryToDatums(query string) ([]Datum, error) {
+	//nolint: noctx // too much refactoring to add context here
 	rows, err := t.Ti.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -187,7 +189,11 @@ func (t *chunkerComposite) nextQueryToDatums(query string) ([]Datum, error) {
 	var datums []Datum
 	for i, name := range columnNames {
 		newVal := reflect.ValueOf(columns[i]).Interface().(sql.RawBytes)
-		datums = append(datums, NewDatum(string(newVal), t.Ti.datumTp(name)))
+		datum, err := NewDatum(string(newVal), t.Ti.datumTp(name))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create datum for column %s: %w", name, err)
+		}
+		datums = append(datums, datum)
 	}
 	return datums, nil
 }

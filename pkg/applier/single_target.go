@@ -313,7 +313,11 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
-			values = append(values, utils.EscapeMySQLType(columnType, value))
+			datum, err := table.NewDatumFromValue(value, columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -363,6 +367,8 @@ func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
 			// If there was an error, invoke callback immediately
 			if completion.err != nil {
 				callback := pending.callback
+				// Remove the work from pending map before invoking callback
+				delete(a.pendingWork, completion.workID)
 				a.pendingMutex.Unlock()
 				callback(0, completion.err)
 				continue
@@ -472,27 +478,30 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 		if logicalRow.IsDeleted {
 			continue // Skip deleted rows
 		}
-
-		// Convert the row image to a VALUES clause, but only for intersected columns
+		// Convert the row image to a VALUES clause
 		var values []string
 		for i, colIndex := range intersectedColumns {
 			if colIndex >= len(logicalRow.RowImage) {
 				return 0, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.RowImage))
 			}
-			value := logicalRow.RowImage[colIndex]
-			if value == nil {
-				values = append(values, "NULL")
-			} else {
-				// Get the column type for proper escaping
-				if i >= len(columnNames) {
-					return 0, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
-				}
-				columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
-				if !ok {
-					return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
-				}
-				values = append(values, utils.EscapeMySQLType(columnType, value))
+			// In order to create a datum we need to know the MySQL type,
+			// which we can get from the source table. We just do an initial
+			// safety check to ensure the column index exists in the list
+			// of column names.
+			if i >= len(columnNames) {
+				return 0, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
 			}
+			columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
+			if !ok {
+				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+			}
+			// The value appended here will be escaped
+			// by calling String() on the Datum
+			datum, err := table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
