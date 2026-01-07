@@ -3,6 +3,7 @@
 package testutils
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -53,7 +54,7 @@ func CreateUniqueTestDatabase(t *testing.T) string {
 		defer db.Close()
 
 		// Create the database
-		_, err = db.Exec("CREATE DATABASE IF NOT EXISTS " + dbName)
+		_, err = db.ExecContext(t.Context(), "CREATE DATABASE IF NOT EXISTS "+dbName)
 		assert.NoError(t, err)
 
 		// Register cleanup to drop the database
@@ -61,7 +62,7 @@ func CreateUniqueTestDatabase(t *testing.T) string {
 			db, err := sql.Open("mysql", rootDSN)
 			assert.NoError(t, err)
 			defer db.Close()
-			_, err = db.Exec("DROP DATABASE IF EXISTS " + dbName)
+			_, err = db.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
 			assert.NoError(t, err)
 		})
 	}
@@ -75,7 +76,7 @@ func RunSQLInDatabase(t *testing.T, dbName, stmt string) {
 	db, err := sql.Open("mysql", dsn)
 	assert.NoError(t, err)
 	defer db.Close()
-	_, err = db.Exec(stmt)
+	_, err = db.ExecContext(t.Context(), stmt)
 	assert.NoError(t, err)
 }
 
@@ -84,6 +85,6 @@ func RunSQL(t *testing.T, stmt string) {
 	db, err := sql.Open("mysql", DSN())
 	assert.NoError(t, err)
 	defer db.Close()
-	_, err = db.Exec(stmt)
+	_, err = db.ExecContext(t.Context(), stmt)
 	assert.NoError(t, err)
 }

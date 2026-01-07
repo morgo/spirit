@@ -13,6 +13,7 @@ import (
 
 type chunkerOptimistic struct {
 	sync.Mutex
+
 	Ti                *TableInfo
 	NewTi             *TableInfo // Destination table info
 	chunkSize         uint64
@@ -59,6 +60,7 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
 		key, t.Ti.QuotedName, key, key, t.chunkSize,
 	)
+	//nolint: noctx // too much refactoring to add context here
 	rows, err := t.Ti.db.Query(query, t.chunkPtr.String())
 	if err != nil {
 		return nil, err

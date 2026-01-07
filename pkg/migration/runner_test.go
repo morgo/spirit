@@ -1090,7 +1090,7 @@ func TestForRemainingTableArtifacts(t *testing.T) {
 	defer db.Close()
 	stmt := `SELECT GROUP_CONCAT(table_name) FROM information_schema.tables where table_schema='test' and table_name LIKE '%remainingtbl%' ORDER BY table_name;`
 	var tables string
-	assert.NoError(t, db.QueryRow(stmt).Scan(&tables))
+	assert.NoError(t, db.QueryRowContext(t.Context(), stmt).Scan(&tables))
 	assert.Equal(t, "remainingtbl", tables)
 }
 
@@ -1555,7 +1555,7 @@ func TestSkipDropAfterCutover(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
 	var tableCount int
-	err = m.db.QueryRow(sql).Scan(&tableCount)
+	err = m.db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, tableCount)
 	assert.NoError(t, m.Close())
@@ -1592,7 +1592,7 @@ func TestDropAfterCutover(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
 	var tableCount int
-	err = m.db.QueryRow(sql).Scan(&tableCount)
+	err = m.db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, tableCount)
 	assert.NoError(t, m.Close())
@@ -1633,14 +1633,12 @@ func TestDeferCutOver(t *testing.T) {
 		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		err = m.Run(t.Context())
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
-	}()
+	})
 
 	// While it's waiting, check the Progress.
 	for m.status.Get() != status.WaitingOnSentinelTable {
@@ -1652,7 +1650,7 @@ func TestDeferCutOver(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, newName)
 	var tableCount int
-	err = m.db.QueryRow(sql).Scan(&tableCount)
+	err = m.db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, tableCount)
 	assert.NoError(t, m.Close())
@@ -1707,7 +1705,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 		sql := fmt.Sprintf(
 			`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 			WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`, dbName, sentinelTableName)
-		err = db.QueryRow(sql).Scan(&rowCount)
+		err = db.QueryRowContext(t.Context(), sql).Scan(&rowCount)
 		assert.NoError(t, err)
 		if rowCount > 0 {
 			break
@@ -1724,7 +1722,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
 	var tableCount int
-	err = db.QueryRow(sql).Scan(&tableCount)
+	err = db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, tableCount)
 	assert.NoError(t, m.Close())
@@ -1793,7 +1791,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
 	var tableCount int
-	err = db.QueryRow(sql).Scan(&tableCount)
+	err = db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, tableCount)
 	assert.NoError(t, m.Close())
@@ -1838,7 +1836,7 @@ func TestForNonInstantBurn(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 	var version string
-	err = db.QueryRow(`SELECT version()`).Scan(&version)
+	err = db.QueryRowContext(t.Context(), `SELECT version()`).Scan(&version)
 	assert.NoError(t, err)
 	if version == "8.0.28" {
 		t.Skip("Skiping this test for MySQL 8.0.28")
@@ -1856,7 +1854,7 @@ func TestForNonInstantBurn(t *testing.T) {
 		assert.NoError(t, err)
 		defer db.Close()
 		var rowVersions int
-		err = db.QueryRow(`SELECT total_row_versions FROM INFORMATION_SCHEMA.INNODB_TABLES where name='test/instantburn'`).Scan(&rowVersions)
+		err = db.QueryRowContext(t.Context(), `SELECT total_row_versions FROM INFORMATION_SCHEMA.INNODB_TABLES where name='test/instantburn'`).Scan(&rowVersions)
 		assert.NoError(t, err)
 		return rowVersions
 	}
@@ -2017,9 +2015,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	assert.NoError(t, err)
 	defer m.Close()
 	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		// Shadow err to avoid a data race
 		err := m.Run(t.Context())
 		assert.Error(t, err)
@@ -2028,7 +2024,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
 		}
-	}()
+	})
 
 	// While it's waiting, start another run and confirm it fails.
 	time.Sleep(1 * time.Second)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ var (
 
 type TableInfo struct {
 	sync.Mutex
+
 	db                          *sql.DB
 	EstimatedRows               uint64 // used by the composite chunker for Max
 	SchemaName                  string
@@ -175,6 +177,7 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 // DescIndex describes the columns in an index.
 func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 	cols := []string{}
+	//nolint: noctx // too much refactoring to add context here
 	rows, err := t.db.Query("SELECT column_name FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND index_name=? ORDER BY seq_in_index",
 		t.SchemaName,
 		t.TableName,
@@ -249,10 +252,8 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 	if len(t.KeyColumns) == 0 || len(t.keyDatums) == 0 {
 		return errors.New("please call setInfo() first")
 	}
-	for _, tp := range t.keyDatums {
-		if tp == unknownType {
-			return ErrUnsupportedPKType
-		}
+	if slices.Contains(t.keyDatums, unknownType) {
+		return ErrUnsupportedPKType
 	}
 	return nil
 }

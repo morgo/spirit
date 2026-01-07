@@ -9,6 +9,7 @@ import (
 
 type MySQL80Replica struct {
 	Repl
+
 	isClosed atomic.Bool
 }
 
@@ -45,7 +46,7 @@ var _ Throttler = &MySQL80Replica{}
 // We only check the replica every 5 seconds, and typically allow up to 120s
 // of replica lag, which is a lot.
 func (l *MySQL80Replica) Open(ctx context.Context) error {
-	if err := l.UpdateLag(); err != nil {
+	if err := l.UpdateLag(ctx); err != nil {
 		return err
 	}
 	go func() {
@@ -59,7 +60,7 @@ func (l *MySQL80Replica) Open(ctx context.Context) error {
 				if l.isClosed.Load() {
 					return
 				}
-				if err := l.UpdateLag(); err != nil {
+				if err := l.UpdateLag(ctx); err != nil {
 					l.logger.Error("error getting lag", "error", err)
 				}
 			}
@@ -75,9 +76,9 @@ func (l *MySQL80Replica) Close() error {
 
 // UpdateLag is a MySQL 8.0+ implementation of lag that is a better approximation than "seconds_behind_source".
 // It requires performance_schema to be enabled.
-func (l *MySQL80Replica) UpdateLag() error {
+func (l *MySQL80Replica) UpdateLag(ctx context.Context) error {
 	var newLagValue int64
-	if err := l.replica.QueryRow(MySQL8LagQuery).Scan(&newLagValue); err != nil {
+	if err := l.replica.QueryRowContext(ctx, MySQL8LagQuery).Scan(&newLagValue); err != nil {
 		return errors.New("could not check replication lag, check that this is a MySQL 8.0 replica, and that performance_schema is enabled")
 	}
 	atomic.StoreInt64(&l.currentLagInMs, newLagValue)

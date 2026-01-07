@@ -19,10 +19,10 @@ func TestPrivileges(t *testing.T) {
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
 
-	_, err = db.Exec("DROP USER IF EXISTS testprivsuser")
+	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsuser")
 	assert.NoError(t, err)
 
-	_, err = db.Exec("CREATE USER testprivsuser")
+	_, err = db.ExecContext(t.Context(), "CREATE USER testprivsuser")
 	assert.NoError(t, err)
 
 	config, err = mysql.ParseDSN(testutils.DSN())
@@ -39,13 +39,13 @@ func TestPrivileges(t *testing.T) {
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err) // privileges fail, since user has nothing granted.
 
-	_, err = db.Exec("GRANT ALL ON test.* TO testprivsuser")
+	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testprivsuser")
 	assert.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err) // still not enough, needs replication client
 
-	_, err = db.Exec("GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsuser")
+	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsuser")
 	assert.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
@@ -56,20 +56,20 @@ func TestPrivileges(t *testing.T) {
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err)
 
-	_, err = db.Exec("GRANT SELECT on `performance_schema`.* TO testprivsuser")
+	_, err = db.ExecContext(t.Context(), "GRANT SELECT on `performance_schema`.* TO testprivsuser")
 	assert.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err) // still not enough, needs connection_admin
 
-	_, err = db.Exec("GRANT CONNECTION_ADMIN ON *.* TO testprivsuser")
+	_, err = db.ExecContext(t.Context(), "GRANT CONNECTION_ADMIN ON *.* TO testprivsuser")
 	assert.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err) // still not enough, needs PROCESS
 	t.Log(err)
 
-	_, err = db.Exec("GRANT PROCESS ON *.* TO testprivsuser")
+	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testprivsuser")
 	assert.NoError(t, err)
 
 	// Reconnect before checking again.

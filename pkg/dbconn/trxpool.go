@@ -15,6 +15,7 @@ import (
 
 type TrxPool struct {
 	sync.Mutex
+
 	trxs []*sql.Tx
 }
 
