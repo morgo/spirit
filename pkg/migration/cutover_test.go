@@ -269,11 +269,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// Start write threads
 	for range numThreads {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			migrationConcurrentWriteThread(ctx, db, &writeCount, &errorCount)
-		}()
+		})
 	}
 
 	// Give the writers a moment to start
@@ -313,9 +311,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// The partial cutover should have renamed t1concurrent to _t1concurrent_old
 	// Let's verify both tables exist
 	var oldTableExists, newTableExists bool
-	err = db.QueryRow("SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_old'").Scan(&oldTableExists)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_old'").Scan(&oldTableExists)
 	assert.NoError(t, err)
-	err = db.QueryRow("SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_new'").Scan(&newTableExists)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_new'").Scan(&newTableExists)
 	assert.NoError(t, err)
 
 	assert.True(t, oldTableExists, "The _old table should exist after partial cutover")
@@ -324,10 +322,10 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// Now verify that the old table (_old) and the new table (_new) have identical checksums
 	// This proves that all changes were captured correctly up to the point of cutover
 	var oldChecksum, newChecksum string
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(CONCAT_WS(',', id, x_token, cents, currency, s_token, r_token, version, IFNULL(c1,''), IFNULL(c2,''), IFNULL(c3,''), IFNULL(t1,''), IFNULL(t2,''), IFNULL(t3,''), IFNULL(b1,''), IFNULL(b2,''), created_at, updated_at))) FROM _t1concurrent_old").Scan(&oldChecksum)
+	err = db.QueryRowContext(ctx, "SELECT BIT_XOR(CRC32(CONCAT_WS(',', id, x_token, cents, currency, s_token, r_token, version, IFNULL(c1,''), IFNULL(c2,''), IFNULL(c3,''), IFNULL(t1,''), IFNULL(t2,''), IFNULL(t3,''), IFNULL(b1,''), IFNULL(b2,''), created_at, updated_at))) FROM _t1concurrent_old").Scan(&oldChecksum)
 	assert.NoError(t, err)
 
-	err = db.QueryRow("SELECT BIT_XOR(CRC32(CONCAT_WS(',', id, x_token, cents, currency, s_token, r_token, version, IFNULL(c1,''), IFNULL(c2,''), IFNULL(c3,''), IFNULL(t1,''), IFNULL(t2,''), IFNULL(t3,''), IFNULL(b1,''), IFNULL(b2,''), created_at, updated_at))) FROM _t1concurrent_new").Scan(&newChecksum)
+	err = db.QueryRowContext(ctx, "SELECT BIT_XOR(CRC32(CONCAT_WS(',', id, x_token, cents, currency, s_token, r_token, version, IFNULL(c1,''), IFNULL(c2,''), IFNULL(c3,''), IFNULL(t1,''), IFNULL(t2,''), IFNULL(t3,''), IFNULL(b1,''), IFNULL(b2,''), created_at, updated_at))) FROM _t1concurrent_new").Scan(&newChecksum)
 	assert.NoError(t, err)
 
 	t.Logf("Old table checksum: %s, New table checksum: %s", oldChecksum, newChecksum)
@@ -335,9 +333,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// Also verify row counts match
 	var oldCount, newCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM _t1concurrent_old").Scan(&oldCount)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM _t1concurrent_old").Scan(&oldCount)
 	assert.NoError(t, err)
-	err = db.QueryRow("SELECT COUNT(*) FROM _t1concurrent_new").Scan(&newCount)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM _t1concurrent_new").Scan(&newCount)
 	assert.NoError(t, err)
 
 	t.Logf("Old table count: %d, New table count: %d", oldCount, newCount)
