@@ -214,7 +214,7 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	assert.NoError(t, client.AddSubscription(t1, t2, nil))
-	if dbconn.IsMySQL84(db) { // handle MySQL 8.4
+	if dbconn.IsMySQL84(t.Context(), db) { // handle MySQL 8.4
 		client.isMySQL84 = true
 	}
 	pos, err := client.getCurrentBinlogPosition(t.Context())
@@ -613,7 +613,7 @@ func TestCompositePKUpdate(t *testing.T) {
 		(1, 300, 3, 'message 3'),
 		(2, 100, 4, 'message 4'),
 		(2, 200, 5, 'message 5')`)
-	testutils.RunSQL(t, `INSERT INTO composite_pk_dst (organization_id, from_id, id, message, created_at) 
+	testutils.RunSQL(t, `INSERT INTO composite_pk_dst (organization_id, from_id, id, message, created_at)
 		SELECT organization_id, from_id, id, message, created_at FROM composite_pk_src`)
 
 	// Set up table info
@@ -714,7 +714,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 	client.subscriptions[EncodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
@@ -733,15 +733,15 @@ func TestAllChangesFlushed(t *testing.T) {
 		c:        client,
 		table:    srcTable,
 		newTable: dstTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 	}
 	client.subscriptions["test2"] = sub2
 	sub2.HasChanged([]any{2}, nil, false)
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
 	// Test 6: Clear changes but keep positions different - should still be considered flushed
-	sub.changes = make(map[string]bool)
-	sub2.changes = make(map[string]bool)
+	sub.changes = make(map[string]mapChange)
+	sub2.changes = make(map[string]mapChange)
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed when no pending changes, even with positions different")
 
 	// Test 7: Align positions and verify still flushed

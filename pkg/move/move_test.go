@@ -55,13 +55,18 @@ func TestBasicMove(t *testing.T) {
 		SourceDSN:       sourceDSN,
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 5 * time.Second,
-		Threads:         4,
+		Threads:         2,
+		WriteThreads:    2,
 		CreateSentinel:  false,
 	}
 	assert.NoError(t, move.Run())
 }
-
 func TestResumeFromCheckpointE2E(t *testing.T) {
+	testResumeFromCheckpointE2E(t, false)
+	testResumeFromCheckpointE2E(t, true)
+}
+
+func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -103,10 +108,11 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	defer db.Close()
 	// test
 	move := &Move{
-		SourceDSN:       sourceDSN,
-		TargetDSN:       targetDSN,
-		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         1,
+		SourceDSN:             sourceDSN,
+		TargetDSN:             targetDSN,
+		TargetChunkTime:       100 * time.Millisecond,
+		Threads:               1,
+		DeferSecondaryIndexes: deferSecondaryIndexes,
 	}
 	r, err := NewRunner(move)
 	assert.NoError(t, err)

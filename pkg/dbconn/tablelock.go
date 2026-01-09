@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/block/spirit/pkg/table"
@@ -28,14 +29,16 @@ type TableLock struct {
 func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger) (*TableLock, error) {
 	var err error
 	var lockTxn *sql.Tx
-	var lockStmt = "LOCK TABLES "
+	var builder strings.Builder
+	builder.WriteString("LOCK TABLES ")
 	// Build the LOCK TABLES statement
 	for idx, tbl := range tables {
 		if idx > 0 {
-			lockStmt += ", "
+			builder.WriteString(", ")
 		}
-		lockStmt += "`" + tbl.TableName + "` WRITE"
+		builder.WriteString("`" + tbl.TableName + "` WRITE")
 	}
+	lockStmt := builder.String()
 
 	// Try and acquire the lock. No retries are permitted here.
 	lockTxn, pid, err := BeginStandardTrx(ctx, db, nil)
@@ -96,8 +99,8 @@ func (s *TableLock) ExecUnderLock(ctx context.Context, stmts ...string) error {
 }
 
 // Close closes the table lock
-func (s *TableLock) Close() error {
-	_, err := s.lockTxn.Exec("UNLOCK TABLES")
+func (s *TableLock) Close(ctx context.Context) error {
+	_, err := s.lockTxn.ExecContext(ctx, "UNLOCK TABLES")
 	if err != nil {
 		return err
 	}

@@ -84,35 +84,35 @@ func TestExpandRowConstructorComparison(t *testing.T) {
 	assert.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` >= 2))",
 		expandRowConstructorComparison([]string{"a", "b"},
 			OpGreaterEqual,
-			[]Datum{NewDatum(1, signedType), NewDatum(2, signedType)}))
+			[]Datum{{Val: 1, Tp: signedType}, {Val: 2, Tp: signedType}}))
 
 	assert.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` > 2))",
 		expandRowConstructorComparison([]string{"a", "b"},
 			OpGreaterThan,
-			[]Datum{NewDatum(1, signedType), NewDatum(2, signedType)}))
+			[]Datum{{Val: 1, Tp: signedType}, {Val: 2, Tp: signedType}}))
 
 	assert.Equal(t, "((`a` > \"PENDING\")\n OR (`a` = \"PENDING\" AND `b` > 2))",
 		expandRowConstructorComparison([]string{"a", "b"},
 			OpGreaterThan,
-			[]Datum{NewDatum("PENDING", binaryType), NewDatum(2, signedType)}))
+			[]Datum{{Val: "PENDING", Tp: binaryType}, {Val: 2, Tp: signedType}}))
 
 	assert.Equal(t, "((`id1` > 2)\n OR (`id1` = 2 AND `id2` > 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` > 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` >= 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpGreaterEqual,
-			[]Datum{NewDatum(2, signedType), NewDatum(2, signedType), NewDatum(4, signedType), NewDatum(5, signedType)}))
+			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 
 	assert.Equal(t, "((`id1` < 2)\n OR (`id1` = 2 AND `id2` < 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` < 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` <= 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpLessEqual,
-			[]Datum{NewDatum(2, signedType), NewDatum(2, signedType), NewDatum(4, signedType), NewDatum(5, signedType)}))
+			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 
 	assert.Equal(t, "((`id1` < 2)\n OR (`id1` = 2 AND `id2` < 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` < 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` < 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpLessThan,
-			[]Datum{NewDatum(2, signedType), NewDatum(2, signedType), NewDatum(4, signedType), NewDatum(5, signedType)}))
+			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 
 	assert.Equal(t, "((`id1` > 2)\n OR (`id1` = 2 AND `id2` > 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` > 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` > 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpGreaterThan,
-			[]Datum{NewDatum(2, signedType), NewDatum(2, signedType), NewDatum(4, signedType), NewDatum(5, signedType)}))
+			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 }

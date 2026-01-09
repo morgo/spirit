@@ -833,7 +833,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		r.changes[0].stmt.Schema, r.checkpointTableName())
 	var copierWatermark, binlogName, statement, checksumWatermark string
 	var id, binlogPos int
-	err := r.db.QueryRow(query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement)
+	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
 		return fmt.Errorf("could not read from table '%s', err:%v", r.checkpointTableName(), err)
 	}

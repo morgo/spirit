@@ -3,6 +3,7 @@ package copier
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -33,7 +34,7 @@ type buffered struct {
 	chunker          table.Chunker
 	concurrency      int
 	rowsPerSecond    uint64
-	isInvalid        bool
+	isInvalid        atomic.Bool
 	startTime        time.Time
 	throttler        throttler.Throttler
 	dbConfig         *dbconn.DBConfig
@@ -95,12 +96,10 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 }
 
 func (c *buffered) isHealthy(ctx context.Context) bool {
-	c.Lock()
-	defer c.Unlock()
 	if ctx.Err() != nil {
 		return false
 	}
-	return !c.isInvalid
+	return !c.isInvalid.Load()
 }
 
 func (c *buffered) StartTime() time.Time {
@@ -112,7 +111,9 @@ func (c *buffered) StartTime() time.Time {
 func (c *buffered) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	c.Lock()
 	c.startTime = time.Now()
+	c.Unlock()
 	go c.estimateRowsPerSecondLoop(ctx) // estimate rows while copying
 
 	// Start the applier
@@ -144,6 +145,9 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = closeErr
 	}
 
+	if c.isInvalid.Load() {
+		return errors.New("copy failed due to earlier errors")
+	}
 	return err
 }
 
@@ -223,9 +227,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 }
 
 func (c *buffered) setInvalid() {
-	c.Lock()
-	defer c.Unlock()
-	c.isInvalid = true
+	c.isInvalid.Store(true)
 }
 
 func (c *buffered) SetThrottler(throttler throttler.Throttler) {

@@ -17,7 +17,7 @@ type Throttler interface {
 	Close() error
 	IsThrottled() bool
 	BlockWait()
-	UpdateLag() error
+	UpdateLag(ctx context.Context) error
 }
 
 // NewReplicationThrottler returns a Throttler that is appropriate for the

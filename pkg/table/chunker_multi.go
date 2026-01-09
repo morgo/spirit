@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 )
@@ -12,6 +13,7 @@ import (
 // to the chunker that has made the least progress
 type multiChunker struct {
 	sync.Mutex
+
 	chunkers map[string]Chunker // map of table name to chunker for quick lookup
 	isOpen   bool
 }
@@ -174,11 +176,9 @@ func (m *multiChunker) Feedback(chunk *Chunk, duration time.Duration, actualRows
 	// Find the chunker that handles this table
 	for _, chunker := range m.chunkers {
 		tables := chunker.Tables()
-		for _, table := range tables {
-			if table == chunk.Table {
-				chunker.Feedback(chunk, duration, actualRows)
-				return
-			}
+		if slices.Contains(tables, chunk.Table) {
+			chunker.Feedback(chunk, duration, actualRows)
+			return
 		}
 	}
 }

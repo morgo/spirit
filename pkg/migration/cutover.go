@@ -122,7 +122,7 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	if err != nil {
 		return err
 	}
-	defer tableLock.Close()
+	defer tableLock.Close(ctx)
 	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
 		return err
 	}

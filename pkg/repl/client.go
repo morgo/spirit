@@ -189,7 +189,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		c.subscriptions[subKey] = &bufferedMap{
 			table:    currentTable,
 			newTable: newTable,
-			changes:  make(map[string]applier.LogicalRow),
+			changes:  make(map[string]bufferedChange),
 			c:        c,
 			chunker:  chunker,
 			applier:  c.applier,
@@ -200,7 +200,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	c.subscriptions[subKey] = &deltaMap{
 		table:    currentTable,
 		newTable: newTable,
-		changes:  make(map[string]bool),
+		changes:  make(map[string]mapChange),
 		c:        c,
 		chunker:  chunker,
 	}
@@ -321,7 +321,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		}
 		c.cfg.TLSConfig = tlsConfig
 	}
-	if dbconn.IsMySQL84(c.db) { // handle MySQL 8.4
+	if dbconn.IsMySQL84(ctx, c.db) { // handle MySQL 8.4
 		c.isMySQL84 = true
 	}
 	// Determine where to start the sync from.

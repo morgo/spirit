@@ -73,15 +73,13 @@ type shardedChunkletCompletion struct {
 
 // NewShardedApplier creates a new ShardedApplier with multiple target databases.
 //
-// Parameters:
-//   - targets: Slice of Target structs containing DB and key range for each shard
-//   - dbConfig: Database configuration
-//   - logger: Logger instance
-//
 // The sharding column and hash function are configured per-table in the TableInfo.ShardingColumn
 // and TableInfo.HashFunc fields. This allows different tables to use different sharding keys
 // in multi-table migrations.
-func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*ShardedApplier, error) {
+func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	shards := make([]*shardTarget, len(targets))
 	for i, target := range targets {
 		// Parse the key range
@@ -96,13 +94,9 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 			keyRange:            kr,
 			chunkletBuffer:      make(chan shardedChunklet, defaultBufferSize),
 			chunkletCompletions: make(chan shardedChunkletCompletion, defaultBufferSize),
-			writeWorkersCount:   defaultWriteWorkers / int32(len(targets)), // Divide workers among shards
-			logger:              logger,
-			dbConfig:            dbConfig,
-		}
-		// Ensure at least 1 worker per shard
-		if shards[i].writeWorkersCount < 1 {
-			shards[i].writeWorkersCount = 1
+			writeWorkersCount:   int32(cfg.Threads), // threads are not "divided" per shard, but are each shard. This is documented in pkg/move/move.go:WriteThreads.
+			logger:              cfg.Logger,
+			dbConfig:            cfg.DBConfig,
 		}
 	}
 
@@ -119,7 +113,7 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 
 	// Log the parsed key ranges for debugging
 	for i, shard := range shards {
-		logger.Info("parsed key range for shard",
+		cfg.Logger.Info("parsed key range for shard",
 			"shardID", i,
 			"keyRange", targets[i].KeyRange,
 			"start", fmt.Sprintf("0x%016x", shard.keyRange.start),
@@ -129,8 +123,8 @@ func NewShardedApplier(targets []Target, dbConfig *dbconn.DBConfig, logger *slog
 	return &ShardedApplier{
 		shards:      shards,
 		targets:     targets,
-		dbConfig:    dbConfig,
-		logger:      logger,
+		dbConfig:    cfg.DBConfig,
+		logger:      cfg.Logger,
 		pendingWork: make(map[int64]*pendingWork),
 	}, nil
 }
@@ -231,11 +225,23 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		shardRows[shardID] = append(shardRows[shardID], rowData{values: row})
 	}
 
-	// Count total chunklets across all shards
-	totalChunklets := 0
-	for _, rows := range shardRows {
-		if len(rows) > 0 {
-			totalChunklets += (len(rows) + chunkletSize - 1) / chunkletSize
+	// Split rows into chunklets based on both row count and size thresholds
+	var allChunklets []shardedChunklet
+	for shardID, rows := range shardRows {
+		if len(rows) == 0 {
+			continue
+		}
+
+		// Use shared helper to split rows into chunklets
+		// Then convert row batches into sharded chunklets with metadata
+		rowBatches := splitRowsIntoChunklets(rows)
+		for _, batch := range rowBatches {
+			allChunklets = append(allChunklets, shardedChunklet{
+				workID:  workID,
+				shardID: shardID,
+				chunk:   chunk,
+				rows:    batch,
+			})
 		}
 	}
 
@@ -243,37 +249,20 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	a.pendingMutex.Lock()
 	a.pendingWork[workID] = &pendingWork{
 		callback:           callback,
-		totalChunklets:     totalChunklets,
+		totalChunklets:     len(allChunklets),
 		completedChunklets: 0,
 		totalAffectedRows:  0,
 	}
 	a.pendingMutex.Unlock()
 
-	// Send chunklets to each shard
-	for shardID, rows := range shardRows {
-		if len(rows) == 0 {
-			continue
-		}
-
-		// Split into chunklets and send to the shard's buffer
-		for i := 0; i < len(rows); i += chunkletSize {
-			end := min(i+chunkletSize, len(rows))
-
-			chunkletData := shardedChunklet{
-				workID:  workID,
-				shardID: shardID,
-				chunk:   chunk,
-				rows:    rows[i:end],
-			}
-
-			select {
-			case a.shards[shardID].chunkletBuffer <- chunkletData:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+	// Send chunklets to their respective shard buffers
+	for _, chunkletData := range allChunklets {
+		select {
+		case a.shards[chunkletData.shardID].chunkletBuffer <- chunkletData:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
-
 	return nil
 }
 
@@ -385,6 +374,10 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		return 0, nil
 	}
 
+	// Create a context with timeout for the entire operation
+	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
+	defer cancel()
+
 	// Get the intersected column names
 	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
 	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
@@ -402,7 +395,11 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
-			values = append(values, utils.EscapeMySQLType(columnType, value))
+			datum, err := table.NewDatumFromValue(value, columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -483,6 +480,8 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 			// If there was an error, invoke callback immediately
 			if completion.err != nil {
 				callback := pending.callback
+				// Remove the work from pending map before invoking callback
+				delete(a.pendingWork, completion.workID)
 				a.pendingMutex.Unlock()
 				callback(0, completion.err)
 				continue
@@ -527,16 +526,18 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 // For this reason we can't extract the vindex value, and must instead broadcast
 // the deletes to all shards. The vindex value is considered immutable, and we will
 // error if it changes on an update.
-func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
+//
+// Note: the sharded applier does not allow any transformations!
+// The targetTable argument is intentionally ignored.
+// This also means that table names between source and target must be the same.
+func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
-
-	// In move operations, targetTable may be nil because there isn't a single target table.
-	// In this case, use sourceTable since the schema is the same.
-	if targetTable == nil {
-		targetTable = sourceTable
-	}
+	// Create a context with timeout for the entire operation
+	// This prevents hanging indefinitely if shards are unresponsive
+	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
+	defer cancel()
 
 	// Convert hashed keys to row value constructor format
 	var pkValues []string
@@ -547,24 +548,21 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 	// Build DELETE statement
 	// Use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
-	tableName := fmt.Sprintf("`%s`", targetTable.TableName)
-	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-		tableName,
+	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE (%s) IN (%s)",
+		sourceTable.TableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		strings.Join(pkValues, ","),
 	)
 
 	// Execute deletes on all shards in parallel (broadcast)
-	var totalAffected int64
-	var mu sync.Mutex
-	var errGroup error
-
-	var wg sync.WaitGroup
+	type result struct {
+		affected int64
+		err      error
+	}
+	results := make(chan result, len(a.shards))
+	defer close(results)
 	for _, shard := range a.shards {
-		wg.Add(1)
 		go func(shard *shardTarget) {
-			defer wg.Done()
-
 			var affected int64
 			var err error
 			// Execute under lock if provided
@@ -582,18 +580,23 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 					err = fmt.Errorf("failed to execute delete on shard %d: %w", shard.shardID, err)
 				}
 			}
-
-			mu.Lock()
-			if err != nil && errGroup == nil {
-				errGroup = err
-			}
-			totalAffected += affected
-			mu.Unlock()
+			results <- result{affected: affected, err: err}
 		}(shard)
 	}
-	wg.Wait()
-	if errGroup != nil {
-		return 0, errGroup
+
+	// Collect results from all shards
+	var totalAffected int64
+	var errs []error
+	for range len(a.shards) {
+		res := <-results
+		if res.err != nil {
+			errs = append(errs, res.err)
+		} else {
+			totalAffected += res.affected
+		}
+	}
+	if len(errs) > 0 {
+		return 0, errors.Join(errs...)
 	}
 	return totalAffected, nil
 }
@@ -612,16 +615,18 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTabl
 //
 // This is likely not too big of a limitation, as Vitess itself recommends that vindex columns be immutable.
 // If it turns out to be a problem, we can revisit tracking by other columns later.
-func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+//
+// Note: the sharded applier does not allow any transformations!
+// The targetTable argument is intentionally ignored.
+// This also means that table names between source and target must be the same.
+func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
 
-	// In move operations, targetTable may be nil because there isn't a single target table.
-	// In this case, use sourceTable since the schema is the same.
-	if targetTable == nil {
-		targetTable = sourceTable
-	}
+	// Create a context with timeout for the entire operation
+	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
+	defer cancel()
 
 	if sourceTable.ShardingColumn == "" {
 		return 0, errors.New("ShardingColumn not configured in TableInfo")
@@ -630,25 +635,22 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 		return 0, errors.New("HashFunc not configured in TableInfo")
 	}
 
-	// Find the ordinal position of the sharding column within NonGeneratedColumns
-	// (since RowImage is structured according to NonGeneratedColumns)
-	shardingOrdinal := -1
-	for i, col := range sourceTable.NonGeneratedColumns {
-		if col == sourceTable.ShardingColumn {
-			shardingOrdinal = i
-			break
-		}
-	}
+	// Find the ordinal position of the sharding column within ALL columns
+	// (since RowImage from binlog contains ALL columns, including generated ones)
+	shardingOrdinal := slices.Index(sourceTable.Columns, sourceTable.ShardingColumn)
 	if shardingOrdinal == -1 {
-		return 0, fmt.Errorf("sharding column %s not found in non-generated columns", sourceTable.ShardingColumn)
+		return 0, fmt.Errorf("sharding column %s not found in columns", sourceTable.ShardingColumn)
 	}
 
-	// Get the intersected column indices
-	var intersectedColumns []int
-	for i, sourceCol := range sourceTable.NonGeneratedColumns {
-		if slices.Contains(targetTable.NonGeneratedColumns, sourceCol) {
-			intersectedColumns = append(intersectedColumns, i)
+	// Build a map from NonGeneratedColumns to their indices in the full Columns list
+	// This is needed because RowImage contains ALL columns, but we only INSERT non-generated ones
+	var nonGeneratedIndices []int
+	for _, col := range sourceTable.NonGeneratedColumns {
+		idx := slices.Index(sourceTable.Columns, col)
+		if idx == -1 {
+			return 0, fmt.Errorf("non-generated column %s not found in columns", col)
 		}
+		nonGeneratedIndices = append(nonGeneratedIndices, idx)
 	}
 
 	// Group rows by shard
@@ -686,85 +688,70 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 	}
 
 	// Execute upserts on each shard in parallel
-	var totalAffected int64
-	var mu sync.Mutex
-	var errGroup error
+	type result struct {
+		affected int64
+		err      error
+	}
+	shardsToCopy := len(a.shards)
+	results := make(chan result, shardsToCopy)
+	defer close(results)
 
-	var wg sync.WaitGroup
+	// Build column list for the upsert statement
+	columnList := table.QuoteColumns(sourceTable.NonGeneratedColumns)
+
 	for shardID, rows := range shardRows {
 		if len(rows) == 0 {
+			shardsToCopy--
 			continue
 		}
-
-		wg.Add(1)
 		go func(sid int, r []LogicalRow) {
-			defer wg.Done()
-
-			// Build the upsert statement for this shard
-			columnList := utils.IntersectNonGeneratedColumns(sourceTable, targetTable)
-			columnNames := utils.IntersectNonGeneratedColumnsAsSlice(sourceTable, targetTable)
-
 			// Build the VALUES clause
 			var valuesClauses []string
 			for _, logicalRow := range r {
 				var values []string
-				for i, colIndex := range intersectedColumns {
-					if colIndex >= len(logicalRow.RowImage) {
-						mu.Lock()
-						if errGroup == nil {
-							errGroup = fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.RowImage))
-						}
-						mu.Unlock()
+				for i, colIdx := range nonGeneratedIndices {
+					if colIdx >= len(logicalRow.RowImage) {
+						results <- result{err: fmt.Errorf("column index %d exceeds row image length %d", colIdx, len(logicalRow.RowImage))}
 						return
 					}
-					value := logicalRow.RowImage[colIndex]
-					if value == nil {
-						values = append(values, "NULL")
-					} else {
-						if i >= len(columnNames) {
-							mu.Lock()
-							if errGroup == nil {
-								errGroup = fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
-							}
-							mu.Unlock()
-							return
-						}
-						columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
-						if !ok {
-							mu.Lock()
-							if errGroup == nil {
-								errGroup = fmt.Errorf("column %s not found in table info", columnNames[i])
-							}
-							mu.Unlock()
-							return
-						}
-						values = append(values, utils.EscapeMySQLType(columnType, value))
+					value := logicalRow.RowImage[colIdx]
+					col := sourceTable.NonGeneratedColumns[i]
+					columnType, ok := sourceTable.GetColumnMySQLType(col)
+					if !ok {
+						results <- result{err: fmt.Errorf("column %s not found in table info", col)}
+						return
 					}
+					datum, err := table.NewDatumFromValue(value, columnType)
+					if err != nil {
+						results <- result{err: fmt.Errorf("failed to convert value to datum for column %s: %w", col, err)}
+						return
+					}
+					values = append(values, datum.String())
 				}
 				valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 			}
 
-			// Build the ON DUPLICATE KEY UPDATE clause
+			// Build the ON DUPLICATE KEY UPDATE clause (all non-PK columns)
 			var updateClauses []string
-			for _, col := range targetTable.NonGeneratedColumns {
-				isPrimaryKey := slices.Contains(targetTable.KeyColumns, col)
-				if !isPrimaryKey && slices.Contains(sourceTable.NonGeneratedColumns, col) {
+			for _, col := range sourceTable.NonGeneratedColumns {
+				if !slices.Contains(sourceTable.KeyColumns, col) {
 					updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
 				}
 			}
 
 			// Use just the table name, not the fully qualified name, because
 			// the database connection (shard.writeDB) already determines which database to write to
-			tableName := fmt.Sprintf("`%s`", targetTable.TableName)
-			upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-				tableName,
+			upsertStmt := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+				sourceTable.TableName,
 				columnList,
 				strings.Join(valuesClauses, ", "),
 				strings.Join(updateClauses, ", "),
 			)
-
-			a.logger.Debug("executing upsert on shard", "shardID", sid, "rowCount", len(valuesClauses), "table", targetTable.TableName)
-
+			a.logger.Debug("executing upsert on shard",
+				"shardID", sid,
+				"rowCount", len(valuesClauses),
+				"table", sourceTable.TableName,
+			)
 			var affected int64
 			var err error
 
@@ -782,22 +769,24 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, targetTabl
 					err = fmt.Errorf("failed to execute upsert on shard %d: %w", sid, err)
 				}
 			}
-
-			mu.Lock()
-			if err != nil && errGroup == nil {
-				errGroup = err
-			}
-			totalAffected += affected
-			mu.Unlock()
+			results <- result{affected: affected, err: err}
 		}(shardID, rows)
 	}
 
-	wg.Wait()
-
-	if errGroup != nil {
-		return 0, errGroup
+	// Collect results from shards that have work
+	var totalAffected int64
+	var errs []error
+	for range shardsToCopy {
+		res := <-results
+		if res.err != nil {
+			errs = append(errs, res.err)
+		} else {
+			totalAffected += res.affected
+		}
 	}
-
+	if len(errs) > 0 {
+		return 0, errors.Join(errs...)
+	}
 	return totalAffected, nil
 }
 

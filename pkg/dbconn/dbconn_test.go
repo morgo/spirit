@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"os"
@@ -25,7 +26,7 @@ func getVariable(trx *sql.Tx, name string, sessionScope bool) (string, error) {
 	if sessionScope {
 		scope = "SESSION"
 	}
-	err := trx.QueryRow("SELECT @@" + scope + "." + name).Scan(&value)
+	err := trx.QueryRowContext(context.Background(), "SELECT @@"+scope+"."+name).Scan(&value)
 	return value, err
 }
 
@@ -35,7 +36,7 @@ func TestLockWaitTimeouts(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 
-	trx, err := db.Begin() // not strictly required.
+	trx, err := db.BeginTx(context.Background(), nil) // not strictly required.
 	assert.NoError(t, err)
 
 	lockWaitTimeout, err := getVariable(trx, "lock_wait_timeout", true)
@@ -82,10 +83,11 @@ func TestRetryableTrx(t *testing.T) {
 	config.InnodbLockWaitTimeout = 1
 	db, err = New(testutils.DSN(), config)
 	assert.NoError(t, err)
+	defer db.Close()
 
-	trx, err := db.Begin()
+	trx, err := db.BeginTx(t.Context(), nil)
 	assert.NoError(t, err)
-	_, err = trx.Exec("SELECT * FROM test.dbexec WHERE id = 1 FOR UPDATE")
+	_, err = trx.ExecContext(t.Context(), "SELECT * FROM test.dbexec WHERE id = 1 FOR UPDATE")
 	assert.NoError(t, err)
 	go func() {
 		time.Sleep(2 * time.Second)
@@ -103,9 +105,9 @@ func TestRetryableTrx(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 
-	trx, err = db.Begin()
+	trx, err = db.BeginTx(t.Context(), nil)
 	assert.NoError(t, err)
-	_, err = trx.Exec("SELECT * FROM test.dbexec WHERE id = 2 FOR UPDATE")
+	_, err = trx.ExecContext(t.Context(), "SELECT * FROM test.dbexec WHERE id = 2 FOR UPDATE")
 	assert.NoError(t, err)
 	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 2") // this will fail, since it times out and exhausts retries.
 	assert.Error(t, err)
@@ -130,10 +132,10 @@ func TestForceExec(t *testing.T) {
 	err = ti.SetInfo(t.Context())
 	assert.NoError(t, err)
 
-	trx, err := db.Begin()
+	trx, err := db.BeginTx(t.Context(), nil)
 	assert.NoError(t, err)
-	defer trx.Rollback()                            //nolint: errcheck
-	_, err = trx.Exec("SELECT * FROM requires_mdl") // just a select, nothing else.
+	defer trx.Rollback()                                                //nolint: errcheck
+	_, err = trx.ExecContext(t.Context(), "SELECT * FROM requires_mdl") // just a select, nothing else.
 	assert.NoError(t, err)
 
 	// Under a normal exec applying an instant change will fail due to MDL timeout
@@ -154,7 +156,7 @@ func TestStandardTrx(t *testing.T) {
 	trx, connID, err := BeginStandardTrx(t.Context(), db, nil)
 	assert.NoError(t, err)
 	var observedConnID int
-	err = trx.QueryRow("SELECT connection_id()").Scan(&observedConnID)
+	err = trx.QueryRowContext(t.Context(), "SELECT connection_id()").Scan(&observedConnID)
 	assert.NoError(t, err)
 	assert.Equal(t, connID, observedConnID)
 }

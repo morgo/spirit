@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"testing"
@@ -15,32 +16,31 @@ func TestNewDSN(t *testing.T) {
 	dsn := "root:password@tcp(127.0.0.1:3306)/test"
 	resp, err := newDSN(dsn, NewDBConfig())
 	assert.NoError(t, err)
-	assert.Equal(t, "root:password@tcp(127.0.0.1:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=binary&collation=binary&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
-
+	assert.Equal(t, "root:password@tcp(127.0.0.1:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=utf8mb4&collation=utf8mb4_bin&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
 	// With interpolate on.
 	config := NewDBConfig()
 	config.InterpolateParams = true
 	resp, err = newDSN(dsn, config)
 	assert.NoError(t, err)
-	assert.Equal(t, "root:password@tcp(127.0.0.1:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=binary&collation=binary&rejectReadOnly=true&interpolateParams=true&allowNativePasswords=true", resp)
+	assert.Equal(t, "root:password@tcp(127.0.0.1:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=utf8mb4&collation=utf8mb4_bin&rejectReadOnly=true&interpolateParams=true&allowNativePasswords=true", resp)
 
 	// Also with TLS for non-RDS hosts (now includes tls=custom)
 	dsn = "root:password@tcp(mydbhost.internal:3306)/test"
 	resp, err = newDSN(dsn, NewDBConfig())
 	assert.NoError(t, err)
-	assert.Equal(t, "root:password@tcp(mydbhost.internal:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=binary&collation=binary&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
+	assert.Equal(t, "root:password@tcp(mydbhost.internal:3306)/test?tls=custom&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=utf8mb4&collation=utf8mb4_bin&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
 
 	// However, if it is RDS - it will be changed to use rds bundle.
 	dsn = "root:password@tcp(tern-001.cluster-ro-ckxxxxxxvm.us-west-2.rds.amazonaws.com)/test"
 	resp, err = newDSN(dsn, NewDBConfig())
 	assert.NoError(t, err)
-	assert.Equal(t, "root:password@tcp(tern-001.cluster-ro-ckxxxxxxvm.us-west-2.rds.amazonaws.com)/test?tls=rds&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=binary&collation=binary&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
+	assert.Equal(t, "root:password@tcp(tern-001.cluster-ro-ckxxxxxxvm.us-west-2.rds.amazonaws.com)/test?tls=rds&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=utf8mb4&collation=utf8mb4_bin&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
 
 	// This is with optional port too
 	dsn = "root:password@tcp(tern-001.cluster-ro-ckxxxxxxvm.us-west-2.rds.amazonaws.com:12345)/test"
 	resp, err = newDSN(dsn, NewDBConfig())
 	assert.NoError(t, err)
-	assert.Equal(t, "root:password@tcp(tern-001.cluster-ro-ckxxxxxxvm.us-west-2.rds.amazonaws.com:12345)/test?tls=rds&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=binary&collation=binary&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
+	assert.Equal(t, "root:password@tcp(tern-001.cluster-ro-ckxxxxxxvm.us-west-2.rds.amazonaws.com:12345)/test?tls=rds&sql_mode=%22%22&time_zone=%22%2B00%3A00%22&innodb_lock_wait_timeout=3&lock_wait_timeout=30&range_optimizer_max_mem_size=0&transaction_isolation=%22read-committed%22&charset=utf8mb4&collation=utf8mb4_bin&rejectReadOnly=true&interpolateParams=false&allowNativePasswords=true", resp)
 
 	// Invalid DSN, can't parse.
 	dsn = "invalid"
@@ -56,14 +56,14 @@ func TestNewConn(t *testing.T) {
 
 	db, err = New(testutils.DSN(), NewDBConfig())
 	assert.NoError(t, err)
-	if db != nil {
-		defer db.Close()
+	assert.NotNil(t, db)
+	defer db.Close()
+	for range 10 {
 		var resp int
-		err = db.QueryRow("SELECT 1").Scan(&resp)
+		err = db.QueryRowContext(t.Context(), "SELECT 1").Scan(&resp)
 		assert.NoError(t, err)
 		assert.Equal(t, 1, resp)
 	}
-
 	// New on syntactically valid but won't respond to ping.
 	db, err = New("root:wrongpassword@tcp(127.0.0.1)/doesnotexist", NewDBConfig())
 	assert.Error(t, err)
@@ -88,17 +88,17 @@ func TestNewConnRejectsReadOnlyConnections(t *testing.T) {
 	db, err = New(testutils.DSN(), config)
 	assert.NoError(t, err)
 	defer db.Close()
-	_, err = db.Exec("set session transaction_read_only = 1")
+	_, err = db.ExecContext(context.Background(), "set session transaction_read_only = 1")
 	assert.NoError(t, err)
 
 	// This would error, but `database/sql` automatically retries on a
 	// new connection which is not read-only, and eventually succeed.
 	// See also: rejectReadOnly test in `go-sql-driver/mysql`: https://github.com/go-sql-driver/mysql/blob/52c1917d99904701db2b0e4f14baffa948009cd7/driver_test.go#L2270-L2301
-	_, err = db.Exec("insert into conn_read_only values (1, 2, 3)")
+	_, err = db.ExecContext(context.Background(), "insert into conn_read_only values (1, 2, 3)")
 	assert.NoError(t, err)
 
 	var count int
-	err = db.QueryRow("select count(*) from conn_read_only where a = 1").Scan(&count)
+	err = db.QueryRowContext(context.Background(), "select count(*) from conn_read_only where a = 1").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, count)
 }

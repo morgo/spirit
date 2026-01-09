@@ -27,20 +27,36 @@ type Datum struct {
 }
 
 func mySQLTypeToDatumTp(mysqlTp string) datumTp {
-	switch removeWidth(mysqlTp) {
-	case "int", "bigint", "smallint", "tinyint":
+	// Normalize to uppercase and remove width specifications
+	normalized := strings.ToUpper(removeWidth(mysqlTp))
+
+	// Extract base type (remove size specifications like (255))
+	baseType := normalized
+	if idx := strings.Index(normalized, "("); idx != -1 {
+		baseType = normalized[:idx]
+	}
+
+	switch baseType {
+	case "INT", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT":
 		return signedType
-	case "int unsigned", "bigint unsigned", "smallint unsigned", "tinyint unsigned":
+	case "INT UNSIGNED", "BIGINT UNSIGNED", "SMALLINT UNSIGNED", "TINYINT UNSIGNED", "MEDIUMINT UNSIGNED":
 		return unsignedType
-	case "varbinary", "blob", "binary": // no varchar, char, text
+	case "FLOAT", "DOUBLE", "DECIMAL":
+		// Treat floats as unknownType so they get formatted as-is
+		return unknownType
+	case "VARBINARY", "BLOB", "BINARY", "LONGBLOB", "MEDIUMBLOB", "TINYBLOB":
 		return binaryType
+	case "VARCHAR", "CHAR", "TEXT", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "JSON":
+		return unknownType
+	case "DATETIME", "TIMESTAMP", "DATE", "TIME":
+		return unknownType
 	}
 	return unknownType
 }
 
-func NewDatum(val any, tp datumTp) Datum {
+func NewDatum(val any, tp datumTp) (Datum, error) {
 	var err error
-	switch tp { //nolint:exhaustive
+	switch tp {
 	case signedType:
 		// We expect the value to be an int64, but it could be an int.
 		// Anything else we attempt to convert it
@@ -52,7 +68,7 @@ func NewDatum(val any, tp datumTp) Datum {
 		default:
 			val, err = strconv.ParseInt(fmt.Sprint(val), 10, 64)
 			if err != nil {
-				panic("could not convert datum to int64")
+				return Datum{}, fmt.Errorf("could not convert datum to int64: value=%v, error=%w", val, err)
 			}
 		}
 	case unsignedType:
@@ -69,17 +85,32 @@ func NewDatum(val any, tp datumTp) Datum {
 			// MySQL binlog sometimes sends unsigned int columns as signed int32.
 			// We need to reinterpret the bits as unsigned.
 			val = uint64(uint32(v))
+		case int64:
+			// For int64, a direct cast to uint64 is safe because both are 64-bit types
+			// and the underlying bit pattern is preserved without additional sign extension.
+			val = uint64(v)
 		default:
 			val, err = strconv.ParseUint(fmt.Sprint(val), 10, 64)
 			if err != nil {
-				panic("could not convert datum to uint64")
+				return Datum{}, fmt.Errorf("could not convert datum to uint64: value=%v, error=%w", val, err)
 			}
+		}
+	case binaryType, unknownType:
+		// For binary and unknown types, convert to string if not already
+		switch v := val.(type) {
+		case string:
+			// Already a string, keep as-is
+		case []byte:
+			val = string(v)
+		default:
+			// Convert other types to string using fmt.Sprint
+			val = fmt.Sprint(v)
 		}
 	}
 	return Datum{
 		Val: val,
 		Tp:  tp,
-	}
+	}, nil
 }
 
 func datumValFromString(val string, tp datumTp) (any, error) {
@@ -118,6 +149,45 @@ func newDatumFromMySQL(val string, mysqlTp string) (Datum, error) {
 		Val: sVal,
 		Tp:  tp,
 	}, nil
+}
+
+// NewDatumFromValue creates a Datum from a value and MySQL column type.
+// This is useful for converting values from the database driver (which may be []byte, int, string, etc.)
+// into a Datum that can be formatted as SQL.
+func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
+	if value == nil {
+		tp := mySQLTypeToDatumTp(mysqlType)
+		return NewNilDatum(tp), nil
+	}
+
+	tp := mySQLTypeToDatumTp(mysqlType)
+
+	// Convert []byte to string for non-numeric types
+	if b, ok := value.([]byte); ok {
+		switch tp {
+		case signedType, unsignedType:
+			// For numeric types, convert []byte to string then parse
+			value = string(b)
+		case binaryType:
+			// For binary types, we want to always hex encode
+			// If the data is valid UTF-8 and doesn't already trigger hex encoding,
+			// prepend a special marker to force it
+			s := string(b)
+			// Only add marker if it's valid UTF-8 and doesn't start with "0x"
+			if utf8.ValidString(s) && (len(s) <= 2 || s[0:2] != "0x") {
+				// Prepend a special marker that's invalid UTF-8
+				// Use a sequence that's very unlikely to appear in real data
+				value = "\xFF\xFF\xFE" + s
+			} else {
+				value = s
+			}
+		default:
+			// For unknown types (text, datetime, json, etc), convert to string
+			value = string(b)
+		}
+	}
+
+	return NewDatum(value, tp)
 }
 
 func NewNilDatum(tp datumTp) Datum {
@@ -194,12 +264,18 @@ func (d Datum) String() string {
 		return fmt.Sprintf("%v", d.Val)
 	}
 	s, ok := d.Val.(string)
-	if ok && d.IsBinaryString() {
-		return fmt.Sprintf("0x%x", s)
-	} else if ok {
-		return "\"" + sqlescape.EscapeString(s) + "\""
+	if !ok {
+		panic("can not convert datum to string")
 	}
-	panic("can not convert datum to string")
+	// Check if it should be hex encoded
+	if d.IsBinaryString() {
+		// If the string starts with our marker (\xFF\xFF\xFE), strip it before hex encoding
+		if len(s) >= 3 && s[0] == '\xFF' && s[1] == '\xFF' && s[2] == '\xFE' {
+			return fmt.Sprintf("0x%x", s[3:])
+		}
+		return fmt.Sprintf("0x%x", s)
+	}
+	return "\"" + sqlescape.EscapeString(s) + "\""
 }
 
 // IsNumeric checks if it's signed or unsigned
@@ -209,10 +285,14 @@ func (d Datum) IsNumeric() bool {
 
 func (d Datum) IsBinaryString() bool {
 	s, ok := d.Val.(string)
-	// ok is true and it's not a valid utf8 string OR the first 2 characters of s are 0x
-	// this is because we *must* encode 0x strings like they are binary because
-	// otherwise it can cause corruption on restoring JSON.
-	return ok && (!utf8.ValidString(s) || (len(s) > 2 && s[0:2] == "0x"))
+	if !ok {
+		return false
+	}
+	// Hex encode if:
+	// 1. Starts with null byte (our marker for forced hex encoding)
+	// 2. Not valid UTF-8
+	// 3. Starts with "0x" (to avoid corruption when restoring JSON)
+	return (len(s) > 0 && s[0] == '\x00') || !utf8.ValidString(s) || (len(s) > 2 && s[0:2] == "0x")
 }
 
 func (d Datum) IsNil() bool {

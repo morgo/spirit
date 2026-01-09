@@ -281,8 +281,8 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	ops = append(ops, fmt.Sprintf("%s=%s", "transaction_isolation", url.QueryEscape(`"read-committed"`)))
 	// go driver options, should set:
 	// character_set_client, character_set_connection, character_set_results
-	ops = append(ops, fmt.Sprintf("%s=%s", "charset", "binary"))
-	ops = append(ops, fmt.Sprintf("%s=%s", "collation", "binary"))
+	ops = append(ops, fmt.Sprintf("%s=%s", "charset", "utf8mb4"))
+	ops = append(ops, fmt.Sprintf("%s=%s", "collation", "utf8mb4_bin"))
 	// So that we recycle the connection if we inadvertently connect to an old primary which is now a read only replica.
 	// This behaviour has been observed during blue/green upgrades and failover on AWS Aurora.
 	// See also: https://github.com/go-sql-driver/mysql?tab=readme-ov-file#rejectreadonly
@@ -328,6 +328,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		// First try with TLS
 		db, err := sql.Open("mysql", dsn)
 		if err == nil {
+			//nolint: noctx // requires too much refactoring
 			if err := db.Ping(); err == nil {
 				// TLS connection successful
 				return db, nil
@@ -350,6 +351,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		if err != nil {
 			return nil, fmt.Errorf("failed to open fallback %s connection: %w", connectionType, err)
 		}
+		//nolint: noctx // requires too much refactoring
 		if err := db.Ping(); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("[%s-CONNECTION-FALLBACK] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)
@@ -362,6 +364,7 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s connection: %w", connectionType, err)
 	}
+	//nolint: noctx // requires too much refactoring
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("[%s-CONNECTION] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), err)

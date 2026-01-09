@@ -15,12 +15,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-const (
-	chunkletSize        = 1000 // Number of rows per chunklet
-	defaultBufferSize   = 128  // Size of the shared buffer channel for chunklets
-	defaultWriteWorkers = 40   // Number of write workers
-)
-
 // SingleTargetApplier applies rows to a single target database.
 // It internally splits rows into chunklets for optimal batching and tracks
 // completion to invoke callbacks when all chunklets for a set of rows are done.
@@ -53,16 +47,12 @@ type SingleTargetApplier struct {
 	stateMutex sync.Mutex
 }
 
-// rowData represents a single row with all its column values
-type rowData struct {
-	values []any
-}
-
-// chunklet represents a small batch of rows (up to 1000 rows) for internal processing
+// chunklet represents a small batch of rows for internal processing
+// Limited by either chunkletMaxRows or chunkletMaxSize, whichever is reached first
 type chunklet struct {
 	workID int64        // ID of the parent work
 	chunk  *table.Chunk // Original chunk for column info
-	rows   []rowData    // Up to 1000 rows of data
+	rows   []rowData    // Batch of rows limited by row count or size
 }
 
 // chunkletCompletion represents a completed chunklet
@@ -81,16 +71,19 @@ type pendingWork struct {
 }
 
 // NewSingleTargetApplier creates a new SingleTargetApplier
-func NewSingleTargetApplier(target Target, dbConfig *dbconn.DBConfig, logger *slog.Logger) *SingleTargetApplier {
+func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApplier, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return &SingleTargetApplier{
 		target:              target,
-		dbConfig:            dbConfig,
-		logger:              logger,
+		dbConfig:            cfg.DBConfig,
+		logger:              cfg.Logger,
 		chunkletBuffer:      make(chan chunklet, defaultBufferSize),
 		chunkletCompletions: make(chan chunkletCompletion, defaultBufferSize),
 		pendingWork:         make(map[int64]*pendingWork),
-		writeWorkersCount:   defaultWriteWorkers,
-	}
+		writeWorkersCount:   int32(cfg.Threads),
+	}, nil
 }
 
 // Start initializes the applier's async write workers and begins processing
@@ -152,29 +145,30 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 		rowDataList[i] = rowData{values: row}
 	}
 
-	// Calculate how many chunklets we'll create
-	totalChunklets := (len(rows) + chunkletSize - 1) / chunkletSize
+	// Split into chunklets based on both row count and size thresholds
+	// Then convert row batches into chunklets with metadata
+	rowBatches := splitRowsIntoChunklets(rowDataList)
+	chunklets := make([]chunklet, len(rowBatches))
+	for i, batch := range rowBatches {
+		chunklets[i] = chunklet{
+			workID: workID,
+			chunk:  chunk,
+			rows:   batch,
+		}
+	}
 
 	// Register the pending work
 	a.pendingMutex.Lock()
 	a.pendingWork[workID] = &pendingWork{
 		callback:           callback,
-		totalChunklets:     totalChunklets,
+		totalChunklets:     len(chunklets),
 		completedChunklets: 0,
 		totalAffectedRows:  0,
 	}
 	a.pendingMutex.Unlock()
 
-	// Split into chunklets and send to buffer
-	for i := 0; i < len(rowDataList); i += chunkletSize {
-		end := min(i+chunkletSize, len(rowDataList))
-
-		chunkletData := chunklet{
-			workID: workID,
-			chunk:  chunk,
-			rows:   rowDataList[i:end],
-		}
-
+	// Send chunklets to buffer
+	for _, chunkletData := range chunklets {
 		select {
 		case a.chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
@@ -296,7 +290,7 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context) {
 	}
 }
 
-// writeChunklet writes a single chunklet (up to 1000 rows)
+// writeChunklet writes a single chunklet (up to chunkletMaxRows or chunkletMaxSize)
 func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData chunklet) (int64, error) {
 	if len(chunkletData.rows) == 0 {
 		return 0, nil
@@ -319,7 +313,11 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
-			values = append(values, utils.EscapeMySQLType(columnType, value))
+			datum, err := table.NewDatumFromValue(value, columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -369,6 +367,8 @@ func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
 			// If there was an error, invoke callback immediately
 			if completion.err != nil {
 				callback := pending.callback
+				// Remove the work from pending map before invoking callback
+				delete(a.pendingWork, completion.workID)
 				a.pendingMutex.Unlock()
 				callback(0, completion.err)
 				continue
@@ -478,27 +478,30 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 		if logicalRow.IsDeleted {
 			continue // Skip deleted rows
 		}
-
-		// Convert the row image to a VALUES clause, but only for intersected columns
+		// Convert the row image to a VALUES clause
 		var values []string
 		for i, colIndex := range intersectedColumns {
 			if colIndex >= len(logicalRow.RowImage) {
 				return 0, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.RowImage))
 			}
-			value := logicalRow.RowImage[colIndex]
-			if value == nil {
-				values = append(values, "NULL")
-			} else {
-				// Get the column type for proper escaping
-				if i >= len(columnNames) {
-					return 0, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
-				}
-				columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
-				if !ok {
-					return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
-				}
-				values = append(values, utils.EscapeMySQLType(columnType, value))
+			// In order to create a datum we need to know the MySQL type,
+			// which we can get from the source table. We just do an initial
+			// safety check to ensure the column index exists in the list
+			// of column names.
+			if i >= len(columnNames) {
+				return 0, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
 			}
+			columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
+			if !ok {
+				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+			}
+			// The value appended here will be escaped
+			// by calling String() on the Datum
+			datum, err := table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType)
+			if err != nil {
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}

@@ -15,7 +15,7 @@ func TestTrxPool(t *testing.T) {
 	defer db.Close()
 
 	// Test database connectivity before proceeding
-	err = db.Ping()
+	err = db.PingContext(t.Context())
 	assert.NoError(t, err)
 
 	config := NewDBConfig()
@@ -46,10 +46,10 @@ func TestTrxPool(t *testing.T) {
 	trx2, err := pool.Get()
 	assert.NoError(t, err)
 	var count int
-	err = trx1.QueryRow("SELECT COUNT(*) FROM test.trxpool WHERE id = 3").Scan(&count)
+	err = trx1.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test.trxpool WHERE id = 3").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, count)
-	err = trx2.QueryRow("SELECT COUNT(*) FROM test.trxpool WHERE id = 3").Scan(&count)
+	err = trx2.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test.trxpool WHERE id = 3").Scan(&count)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, count)
 
