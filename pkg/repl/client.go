@@ -495,7 +495,15 @@ func (c *Client) readStream(ctx context.Context) {
 			// Rotate event, update the current log name.
 			rotateEvent := ev.Event.(*replication.RotateEvent)
 			currentLogName = string(rotateEvent.NextLogName)
-			c.logger.Debug("Binlog rotated to", "log_name", currentLogName)
+			// For RotateEvent, we must use rotateEvent.Position (the position in the NEW log)
+			// not ev.Header.LogPos (which is the position in the OLD log).
+			// Update position immediately and skip the generic position update at the end.
+			c.setBufferedPos(mysql.Position{
+				Name: currentLogName,
+				Pos:  uint32(rotateEvent.Position),
+			})
+			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", rotateEvent.Position)
+			continue
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
