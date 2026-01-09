@@ -5,7 +5,7 @@ go 1.25.3
 require (
 	github.com/alecthomas/kong v0.7.1
 	github.com/go-ini/ini v1.67.0
-	github.com/go-mysql-org/go-mysql v1.13.1-0.20251223004254-a07c974ef5a3
+	github.com/go-mysql-org/go-mysql v1.13.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/uuid v1.6.0
 	github.com/pingcap/errors v0.11.5-0.20250523034308-74f78ae071ee
