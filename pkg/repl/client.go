@@ -535,10 +535,19 @@ func (c *Client) readStream(ctx context.Context) {
 		}
 		// Update the buffered position
 		// under a mutex.
-		c.setBufferedPos(mysql.Position{
-			Name: currentLogName,
-			Pos:  ev.Header.LogPos,
-		})
+		// Only update if LogPos > 0 (some events like FormatDescriptionEvent have LogPos=0)
+		// and only if the position is moving forward (to avoid going backwards after rotation)
+		if ev.Header.LogPos > 0 {
+			newPos := mysql.Position{
+				Name: currentLogName,
+				Pos:  ev.Header.LogPos,
+			}
+			currentPos := c.getBufferedPos()
+			// Only update if the new position is ahead of the current position
+			if newPos.Compare(currentPos) > 0 {
+				c.setBufferedPos(newPos)
+			}
+		}
 	}
 }
 

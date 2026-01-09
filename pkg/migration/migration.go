@@ -62,6 +62,9 @@ type Migration struct {
 	// the sentinel name is shared. Basically it will be true here, but false
 	// in the tests unless we set it explicitly true.
 	RespectSentinel bool `name:"respect-sentinel" help:"Look for sentinel table to exist and block if it does" optional:"" default:"true" hidden:""`
+
+	// useTestCutover is a test-only cutover
+	useTestCutover bool
 }
 
 func (m *Migration) Run() error {
