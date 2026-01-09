@@ -405,7 +405,7 @@ func (c *Client) readStream(ctx context.Context) {
 		var err error
 
 		// If streamer is nil (such as after a failed recreation), treat it as an error
-		// This will then trigger the recreation in c.recreateStreamer()
+		// This will then trigger the recreation
 		if c.streamer == nil {
 			err = errors.New("binlog streamer is nil, cannot read events")
 		} else {
@@ -428,13 +428,6 @@ func (c *Client) readStream(ctx context.Context) {
 			if consecutiveErrors >= maxConsecutiveErrors {
 				recreateAttempts++
 				c.logger.Warn("Too many consecutive errors, attempting to recreate streamer", "consecutive_errors", consecutiveErrors, "attempt", recreateAttempts, "max_attempts", maxRecreateAttempts)
-
-				// Reset consecutiveErrors BEFORE attempting recreation.
-				// If recreation fails and sets c.streamer = nil, we'll accumulate 5 fresh errors
-				// (from the nil streamer check above) before this block triggers again.
-				// Without this reset, consecutiveErrors would stay >= 5 and we'd immediately
-				// retry recreation on every iteration, causing rapid retries with exponential backoff.
-				consecutiveErrors = 0
 
 				// Check if we've exceeded the maximum number of recreation attempts
 				if recreateAttempts >= maxRecreateAttempts {
@@ -467,7 +460,8 @@ func (c *Client) readStream(ctx context.Context) {
 						backoffDuration = maxBackoffDuration
 					}
 				} else {
-					// Successfully recreated, reset recreation attempts and backoff
+					// Successfully recreated, reset counters
+					consecutiveErrors = 0
 					recreateAttempts = 0
 					backoffDuration = initialBackoffDuration
 				}
