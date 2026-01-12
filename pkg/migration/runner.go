@@ -137,17 +137,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
 	// The copier and checker will use Threads to limit N tasks concurrently,
-	// but we also set it at the DB pool level with +1. Because the copier and
+	// but we also set it at the DB pool level with +2. Because the copier and
 	// the replication applier use the same pool, it allows for some natural throttling
 	// of the copier if the replication applier is lagging. Because it's +1 it
 	// means that the replication applier can always make progress immediately,
 	// and does not need to wait for free slots from the copier *until* it needs
 	// copy in more than 1 thread.
-	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
+	r.dbConfig.MaxOpenConnections = r.migration.Threads + 2
 	if r.migration.EnableExperimentalBufferedCopy {
-		// Buffered has many more connections because it fans out x8 more write threads
-		// Plus it has read threads. Set this high and figure it out later.
-		r.dbConfig.MaxOpenConnections = 100
+		// Buffered has many more connections because it fans out read and write.
+		// Currently in the migration runner we don't have a writeThreads config,
+		// so we just need to make sure we add the default here.
+		r.dbConfig.MaxOpenConnections += 2 /* applier.defaultWriteWorkers*/
 	}
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -959,14 +960,6 @@ func (r *Runner) initChunkers() error {
 // checksum creates the checksum which opens the read view
 func (r *Runner) checksum(ctx context.Context) error {
 	r.status.Set(status.Checksum)
-
-	// The checksum keeps the pool threads open, so we need to extend
-	// by more than +1 on threads as we did previously. We have:
-	// - background flushing
-	// - checkpoint thread
-	// - checksum "replaceChunk" DB connections
-	// Handle a case just in the tests not having a dbConfig
-	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
 
 	// Run the checksum with internal retry logic
 	if err := r.checker.Run(ctx); err != nil {
