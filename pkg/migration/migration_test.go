@@ -339,6 +339,7 @@ func testStoredGeneratedColumns(t *testing.T, enableBuffered bool) {
   PRIMARY KEY (id)
 );`
 	testutils.RunSQL(t, table)
+	//nolint: dupword
 	testutils.RunSQL(t, `INSERT INTO t1stored (pa, p1, p2, p3)
 VALUES
 (1, 1, 1, 99),
