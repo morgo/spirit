@@ -69,7 +69,11 @@ type Client struct {
 	syncer   *replication.BinlogSyncer
 	streamer *replication.BinlogStreamer
 
-	// The DB connection is used for queries like SHOW MASTER STATUS
+	// poolDB is the worker pool connection used for subscription flushes (data operations).
+	// It is shared with copier/applier and respects the thread limit.
+	poolDB *sql.DB
+	// db is a dedicated single connection for binlog control queries that must never block.
+	// It is used for SHOW MASTER STATUS, SHOW BINARY LOGS, FLUSH BINARY LOGS, etc.
 	db       *sql.DB
 	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
@@ -111,11 +115,14 @@ type Client struct {
 }
 
 // NewClient creates a new Client instance.
-func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
+// poolDB is the worker pool connection shared with copier/applier (respects thread limit).
+// db is a dedicated single connection for binlog control queries (never blocks).
+func NewClient(poolDB *sql.DB, db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
+		poolDB:                     poolDB,
 		db:                         db,
 		dbConfig:                   config.DBConfig,
 		host:                       host,
@@ -278,6 +285,7 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	if c.isMySQL84 {
 		binlogPosStmt = "SHOW BINARY LOG STATUS"
 	}
+	// Use dedicated management connection for control queries to avoid blocking on worker pool exhaustion
 	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
 		return mysql.Position{}, err

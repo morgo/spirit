@@ -149,6 +149,9 @@ func testCheckpoint(t *testing.T, enableBuffered bool) {
 		assert.Equal(t, "initial", r.status.Get().String())
 		// Usually we would call r.Run() but we want to step through
 		// the migration process manually.
+		// Set up both connections: poolDB for worker operations and db for management
+		r.poolDB, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+		assert.NoError(t, err)
 		r.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 		assert.NoError(t, err)
 		r.dbConfig = dbconn.NewDBConfig()
@@ -298,6 +301,9 @@ func testCheckpointRestore(t *testing.T, enableBuffered bool) {
 	assert.Equal(t, "initial", r.status.Get().String())
 	// Usually we would call r.Run() but we want to step through
 	// the migration process manually.
+	// Set up both connections: poolDB for worker operations and db for management
+	r.poolDB, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
 	r.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	r.dbConfig = dbconn.NewDBConfig()
@@ -391,6 +397,8 @@ func testCheckpointRestoreBinaryPK(t *testing.T, enableBuffered bool) {
 	assert.Equal(t, "initial", r.status.Get().String())
 	// Usually we would call r.Run() but we want to step through
 	// the migration process manually.
+	r.poolDB, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
 	r.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	r.dbConfig = dbconn.NewDBConfig()
@@ -563,6 +571,9 @@ func testCheckpointDifferentRestoreOptions(t *testing.T, enableBuffered bool) {
 		assert.Equal(t, "initial", m.status.Get().String())
 		// Usually we would call m.Run() but we want to step through
 		// the migration process manually.
+		// Set up both connections: poolDB for worker operations and db for management
+		m.poolDB, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+		assert.NoError(t, err)
 		m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 		assert.NoError(t, err)
 		m.dbConfig = dbconn.NewDBConfig()
@@ -1009,6 +1020,9 @@ func testResumeFromCheckpointPhantom(t *testing.T, enableBuffered bool) {
 	ctx, cancel := context.WithCancel(t.Context())
 
 	// Do the initial setup.
+	// Set up both connections: poolDB for worker operations and db for management
+	m.poolDB, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	m.dbConfig = dbconn.NewDBConfig()
@@ -1077,6 +1091,9 @@ func testResumeFromCheckpointPhantom(t *testing.T, enableBuffered bool) {
 		Alter:                          "ENGINE=InnoDB",
 		TargetChunkTime:                100 * time.Millisecond,
 	})
+	assert.NoError(t, err)
+	// Set up both connections: poolDB for worker operations and db for management
+	m.poolDB, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)

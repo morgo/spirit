@@ -414,7 +414,7 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	r.logger.Info("Setting up repl client")
-	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
+	r.replClient = repl.NewClient(r.source, r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
 		Logger:                     r.logger,
 		Concurrency:                r.move.Threads,
 		TargetBatchTime:            r.move.TargetChunkTime,
