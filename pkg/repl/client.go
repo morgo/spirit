@@ -357,28 +357,47 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	return nil
 }
 
-// recreateStreamer recreates the binlog streamer from the current buffered position
+// recreateStreamer recreates the binlog streamer from the current buffered position.
+// When we recreate the syncer, the parser's table map is lost. MySQL only sends
+// TableMapEvents once per connection, so when we resume from a mid-stream position,
+// we won't have the table metadata needed to decode RowsEvents.
+//
+// To handle this, we start from the beginning of the current binlog file (position 4)
+// to ensure we receive all TableMapEvents. We then skip events until we reach our
+// target resume position.
 func (c *Client) recreateStreamer() error {
-	c.logger.Warn("Recreating binlog streamer from position", "position", c.getBufferedPos())
-
-	if c.syncer != nil {
-		c.syncer.Close()
-	}
-
-	// Create new syncer and streamer
-	// Start from the current buffered position
-	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	startPos := c.getBufferedPos()
 	if startPos.Name == "" {
 		// If no buffered position, use flushed position
 		startPos = c.flushedPos
 	}
+
+	c.logger.Warn("Recreating binlog streamer from position", "position", startPos)
+
+	// Close the existing syncer completely
+	if c.syncer != nil {
+		c.syncer.Close()
+	}
+
+	// Start from the beginning of the current binlog file to get fresh TableMapEvents.
+	// This ensures the parser receives all necessary table metadata before processing
+	// RowsEvents at our target position.
+	fileStartPos := mysql.Position{
+		Name: startPos.Name,
+		Pos:  4, // Binlog files always start at position 4
+	}
+
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	var err error
-	c.streamer, err = c.syncer.StartSync(startPos)
+	c.streamer, err = c.syncer.StartSync(fileStartPos)
 	if err != nil {
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
 	}
-	c.logger.Info("Successfully recreated binlog streamer from position", "position", startPos)
+
+	c.logger.Info("Successfully recreated binlog streamer",
+		"file_start_position", fileStartPos,
+		"target_position", startPos,
+		"note", "will process events from file start to rebuild table map")
 	return nil
 }
 
