@@ -17,6 +17,7 @@ services:
       --ssl=OFF
       --skip-ssl
       --bind-address=0.0.0.0
+      --innodb-redo-log-capacity=2G
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       timeout: 20s

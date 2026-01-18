@@ -2,4 +2,4 @@ services:
   mysql:
     image: mysql:8.0.33
     ports: [ '8033:3306' ]
-    command: --binlog-row-image=MINIMAL
+    command: --binlog-row-image=MINIMAL --innodb-redo-log-capacity=2G

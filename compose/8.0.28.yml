@@ -3,3 +3,4 @@ services:
     image: mysql:8.0.28
     platform: linux/amd64
     ports: [ '8028:3306' ]
+    command: --innodb-log-file-size=512M

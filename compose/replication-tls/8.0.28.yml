@@ -3,7 +3,9 @@ services:
     image: mysql:8.0.28
     platform: linux/amd64
     ports: [ '8028:3306' ]
+    command: --server-id=1 --log-bin=mysql-bin --gtid-mode=on --enforce-gtid-consistency=on --innodb-log-file-size=512M
   mysql_replica:
     image: mysql:8.0.28
     platform: linux/amd64
     ports: [ '8128:3306' ]
+    command: --server-id=2 --relay-log=mysql-relay-bin --gtid-mode=on --enforce-gtid-consistency=on --innodb-log-file-size=512M

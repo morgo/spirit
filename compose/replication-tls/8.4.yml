@@ -2,6 +2,8 @@ services:
   mysql:
     image: mysql:8.4
     ports: [ '8040:3306' ]
+    command: --server-id=1 --log-bin=mysql-bin --gtid-mode=on --enforce-gtid-consistency=on --innodb-redo-log-capacity=2G
   mysql_replica:
     image: mysql:8.4
     ports: [ '8141:3306' ]
+    command: --server-id=2 --relay-log=mysql-relay-bin --gtid-mode=on --enforce-gtid-consistency=on --innodb-redo-log-capacity=2G

@@ -18,7 +18,7 @@ services:
     volumes:
       - mysql-data-dir:/var/lib/mysql
       - ../bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
-    command: --server-id=1 --log-bin=mysql-bin --gtid-mode=on --enforce-gtid-consistency=on
+    command: --server-id=1 --log-bin=mysql-bin --gtid-mode=on --enforce-gtid-consistency=on --innodb-redo-log-capacity=2G
 
   mysql_replica:
     image: mysql:8.0.33
@@ -39,7 +39,7 @@ services:
       - mysql-replica-data-dir:/var/lib/mysql
       - ./init-ci-replica.sql:/docker-entrypoint-initdb.d/init-ci-replica.sql
       - ./replication_health_check.sh:/replication_health_check.sh
-    command: --server-id=2 --relay-log=mysql-relay-bin --gtid-mode=on --enforce-gtid-consistency=on
+    command: --server-id=2 --relay-log=mysql-relay-bin --gtid-mode=on --enforce-gtid-consistency=on --innodb-redo-log-capacity=2G
     depends_on:
       mysql:
         condition: service_healthy
