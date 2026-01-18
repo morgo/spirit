@@ -16,9 +16,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Wait until we are at least copying rows
+// before we dump a checkpoint, then wait for first
+// successful checkpoint.
+func waitForCheckpoint(t *testing.T, runner *Runner) {
+	t.Helper()
+	for runner.status.Get() < status.CopyRows {
+		time.Sleep(time.Millisecond)
+	}
+	for {
+		err := runner.DumpCheckpoint(t.Context())
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Test int to bigint primary key while resuming from checkpoint.
 func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS bigintpk, _bigintpk_chkpnt, _bigintpk_new`)
 	table := `CREATE TABLE bigintpk (
 			pk int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -54,20 +70,9 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 		err := m.Run(ctx)
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
-	// Wait until we are at least copying rows
-	// before we dump a checkpoint.
-	for m.status.Get() != status.CopyRows {
-		time.Sleep(10 * time.Millisecond)
-	}
-	// The checkpoint may fail initially because of watermark
-	// not ready, wait for the first successful one.
-	for {
-		err = m.DumpCheckpoint(t.Context())
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+
+	waitForCheckpoint(t, m)
+
 	// Between cancel and Close() every resource is freed.
 	assert.NoError(t, m.Close())
 	cancel()
@@ -309,7 +314,6 @@ func TestCheckpointRestore(t *testing.T) {
 
 // https://github.com/block/spirit/issues/381
 func TestCheckpointRestoreBinaryPK(t *testing.T) {
-	t.Parallel()
 	ctx := t.Context()
 	tbl := `CREATE TABLE binarypk (
  main_id varbinary(16) NOT NULL,
@@ -382,8 +386,6 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 }
 
 func TestCheckpointResumeDuringChecksum(t *testing.T) {
-	t.Parallel()
-
 	// Create unique database for this test
 	dbName := testutils.CreateUniqueTestDatabase(t)
 
@@ -458,7 +460,6 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 }
 
 func TestCheckpointDifferentRestoreOptions(t *testing.T) {
-	t.Parallel()
 	tbl := `CREATE TABLE cpt1difft1 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -561,7 +562,6 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS chkpresumetest, _chkpresumetest_old, _chkpresumetest_chkpnt`)
 	table := `CREATE TABLE chkpresumetest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -599,20 +599,8 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
-	// wait until a checkpoint is saved (which means copy is in progress)
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer db.Close()
-	for {
-		var rowCount int
-		err = db.QueryRowContext(t.Context(), `SELECT count(*) from _chkpresumetest_chkpnt`).Scan(&rowCount)
-		if err != nil {
-			continue // table does not exist yet
-		}
-		if rowCount > 0 {
-			break
-		}
-	}
+	waitForCheckpoint(t, runner)
+
 	// Close() before cancelFunc() to avoid race conditions.
 	assert.NoError(t, runner.Close())
 	runner.cancelFunc()
@@ -642,7 +630,6 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2ECompositeVarcharPK(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS compositevarcharpk, _compositevarcharpk_chkpnt`)
 	testutils.RunSQL(t, `CREATE TABLE compositevarcharpk (
   token varchar(128) NOT NULL,
@@ -691,20 +678,8 @@ FROM compositevarcharpk a WHERE version='1'`)
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
-	// wait until a checkpoint is saved (which means copy is in progress)
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer db.Close()
-	for {
-		var rowCount int
-		err = db.QueryRowContext(t.Context(), `SELECT count(*) from _compositevarcharpk_chkpnt`).Scan(&rowCount)
-		if err != nil {
-			continue // table does not exist yet
-		}
-		if rowCount > 0 {
-			break
-		}
-	}
+	waitForCheckpoint(t, runner)
+
 	// Close() before cancel() to avoid race conditions.
 	assert.NoError(t, runner.Close())
 	cancel()
@@ -730,7 +705,6 @@ FROM compositevarcharpk a WHERE version='1'`)
 }
 
 func TestResumeFromCheckpointStrict(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS resumestricttest, _resumestricttest_old, _resumestricttest_chkpnt`)
 	table := `CREATE TABLE resumestricttest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -775,20 +749,8 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
-	// wait until a checkpoint is saved (which means copy is in progress)
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer db.Close()
-	for {
-		var rowCount int
-		err = db.QueryRowContext(t.Context(), `SELECT count(*) from _resumestricttest_chkpnt`).Scan(&rowCount)
-		if err != nil {
-			continue // table does not exist yet
-		}
-		if rowCount > 0 {
-			break
-		}
-	}
+	waitForCheckpoint(t, runner)
+
 	// Close() before cancel() to avoid race conditions.
 	assert.NoError(t, runner.Close())
 	cancel()
@@ -850,7 +812,6 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 // - When resuming from checkpoint, we need to initialize the high watermark from a SELECT MAX(key) FROM the _new table.
 // - If this is done correctly, then on resume the DELETE will no longer be ignored.
 func TestResumeFromCheckpointPhantom(t *testing.T) {
-	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS phantomtest, _phantomtest_old, _phantomtest_chkpnt`)
 	tbl := `CREATE TABLE phantomtest (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -976,7 +937,6 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 }
 
 func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
-	t.Parallel()
 	// This test is similar to TestResumeFromCheckpointE2E but it adds a sentinel table
 	// created after the migration begins and is interrupted.
 	// The migration itself runs with DeferCutOver=false
@@ -1029,29 +989,14 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
-	// wait until a checkpoint is saved (which means copy is in progress)
-	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer db.Close()
-	for {
-		var rowCount int
-		err = db.QueryRowContext(t.Context(), fmt.Sprintf(`SELECT count(*) from _%s_chkpnt`, tableName)).Scan(&rowCount)
-		if err != nil {
-			continue // table does not exist yet
-		}
-		if rowCount > 0 {
-			// Test that it's not possible to acquire metadata lock with name
-			// as tablename while the migration is running.
-			lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(),
-				lockTables, dbconn.NewDBConfig(), slog.Default())
-			assert.Error(t, err)
-			if lock != nil {
-				assert.ErrorContains(t, err, fmt.Sprintf("could not acquire metadata lock for %s, lock is held by another connection", lock.GetLockName()))
-			}
-			assert.Nil(t, lock)
-			break
-		}
-	}
+	waitForCheckpoint(t, runner)
+
+	// Test that it's not possible to acquire metadata lock with name
+	// as tablename while the migration is running.
+	lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
+	assert.Error(t, err)
+	assert.Nil(t, lock)
+
 	// Close() before cancel() to avoid race conditions.
 	assert.NoError(t, runner.Close())
 	cancel()
