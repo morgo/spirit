@@ -22,7 +22,6 @@ services:
       --log-bin=mysql-bin
       --gtid-mode=on
       --enforce-gtid-consistency=on
-      --innodb-redo-log-capacity=2G
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       timeout: 20s
@@ -52,7 +51,6 @@ services:
       --gtid-mode=on
       --enforce-gtid-consistency=on
       --read-only=ON
-      --innodb-redo-log-capacity=2G
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       timeout: 20s

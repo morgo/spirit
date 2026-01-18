@@ -17,7 +17,6 @@ services:
     volumes:
       - mysql-standalone-data-dir:/var/lib/mysql
       - ./bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
-    command: --innodb-redo-log-capacity=2G
 
   test:
     build:
