@@ -82,7 +82,6 @@ func TestFlushWithLock(t *testing.T) {
 	defer poolDB.Close()
 
 	client := &Client{
-		poolDB:          poolDB,
 		db:              db,
 		logger:          slog.Default(),
 		concurrency:     2,
@@ -144,7 +143,6 @@ func TestFlushWithoutLock(t *testing.T) {
 	defer poolDB.Close()
 
 	client := &Client{
-		poolDB:          poolDB,
 		db:              db,
 		logger:          slog.Default(),
 		concurrency:     2,
