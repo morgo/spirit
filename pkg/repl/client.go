@@ -87,6 +87,7 @@ type Client struct {
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
+	initialFile string         // initial binlog file from Run(), used to prevent unsafe recreation
 
 	statisticsLock  sync.Mutex
 	targetBatchTime time.Duration
@@ -216,14 +217,9 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 }
 
 // getBufferedPos returns the buffered position under a mutex.
-// If bufferedPos has no name (not yet set), it falls back to flushedPos.
 func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
-	if c.bufferedPos.Name == "" {
-		// If no buffered position, use flushed position
-		return c.flushedPos
-	}
 	return c.bufferedPos
 }
 
@@ -336,6 +332,12 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
+	// set buffered to the initial flushed value +
+	// also record the initial binlog file to prevent unsafe recreation
+	// if we rotate to a new file during the migration
+	c.bufferedPos = c.flushedPos
+	c.initialFile = c.flushedPos.Name
+
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
@@ -349,28 +351,54 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	return nil
 }
 
-// recreateStreamer recreates the binlog streamer from the current buffered position
+// recreateStreamer recreates the binlog streamer from the current buffered position.
+// When we recreate the syncer, the parser's table map is lost. MySQL only sends
+// TableMapEvents once per connection, so when we resume from a mid-stream position,
+// we won't have the table metadata needed to decode RowsEvents.
+//
+// To handle this safely, we check if the binlog has rotated since we started:
+// - Same file as initial: error
+// - Different file: Safely recreate and resume from position 4.
 func (c *Client) recreateStreamer() error {
-	c.logger.Warn("Recreating binlog streamer from position", "position", c.getBufferedPos())
+	c.Lock()
+	defer c.Unlock()
 
+	// Close the existing syncer completely
+	// Since we can't do anything with it.
 	if c.syncer != nil {
 		c.syncer.Close()
 	}
 
-	// Create new syncer and streamer
-	// Start from the current buffered position
-	c.syncer = replication.NewBinlogSyncer(c.cfg)
-	startPos := c.getBufferedPos()
-	if startPos.Name == "" {
-		// If no buffered position, use flushed position
-		startPos = c.flushedPos
+	if c.bufferedPos.Name == c.initialFile {
+		// If the binlog has not rotated since we started, we cannot safely recreate.
+		// This is because there might be a replay error that is not idempotent.
+		// i.e. the table was modified twice, and we see earlier row events.
+		//
+		// We don't have this after the migration starts because we watch and do not
+		// allow any DDL events on the tables we are changing.
+		return fmt.Errorf("cannot recreate streamer: binlog has not rotated from %s since start", c.initialFile)
 	}
+
+	// Still on the same binlog file we started with.
+	// Safe to replay from position 4 because the subscription data structures
+	// (deltaMap, bufferedMap, deltaQueue) are idempotent - reprocessing events
+	// will simply overwrite previous state with the same value.
+	newStartPos := mysql.Position{
+		Name: c.bufferedPos.Name,
+		Pos:  4, // Binlog files always start at position 4
+	}
+	c.logger.Info("Recreating from file start (same file as initial)",
+		"file", c.bufferedPos.Name,
+		"previous_position", c.bufferedPos.Pos,
+		"new_start_position", newStartPos,
+	)
+
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	var err error
-	c.streamer, err = c.syncer.StartSync(startPos)
+	c.streamer, err = c.syncer.StartSync(newStartPos)
 	if err != nil {
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
 	}
-	c.logger.Info("Successfully recreated binlog streamer from position", "position", startPos)
 	return nil
 }
 
