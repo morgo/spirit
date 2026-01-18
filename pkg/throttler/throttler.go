@@ -16,7 +16,7 @@ type Throttler interface {
 	Open(ctx context.Context) error
 	Close() error
 	IsThrottled() bool
-	BlockWait()
+	BlockWait(ctx context.Context)
 	UpdateLag(ctx context.Context) error
 }
 

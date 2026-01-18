@@ -22,8 +22,17 @@ func (t *Test) IsThrottled() bool {
 	return true
 }
 
-func (t *Test) BlockWait() {
-	time.Sleep(time.Second)
+func (t *Test) BlockWait(ctx context.Context) {
+	// Use a timer with context cancellation for interruptible sleep
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		return
+	}
 }
 
 func (t *Test) UpdateLag(ctx context.Context) error {
