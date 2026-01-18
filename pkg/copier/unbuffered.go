@@ -40,7 +40,7 @@ var _ Copier = (*Unbuffered)(nil)
 // CopyChunk copies a chunk from the table to the newTable.
 // it is public so it can be used in tests incrementally.
 func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
-	c.throttler.BlockWait()
+	c.throttler.BlockWait(ctx)
 	startTime := time.Now()
 	// INSERT INGORE because we can have duplicate rows in the chunk because in
 	// resuming from checkpoint we will be re-applying some of the previous executed work.

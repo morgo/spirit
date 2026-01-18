@@ -156,7 +156,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 	c.logger.Debug("readWorker started", "isRead", c.chunker.IsRead())
 
 	for !c.chunker.IsRead() && c.isHealthy(ctx) {
-		c.throttler.BlockWait()
+		c.throttler.BlockWait(ctx)
 
 		c.logger.Debug("readWorker calling chunker.Next()")
 		chunk, err := c.chunker.Next()

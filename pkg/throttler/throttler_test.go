@@ -33,7 +33,7 @@ func TestThrottlerInterface(t *testing.T) {
 	assert.NoError(t, throttler.Open(t.Context()))
 
 	time.Sleep(50 * time.Millisecond)        // make sure the throttler loop can calculate.
-	throttler.BlockWait()                    // wait for catch up (there's no activity)
+	throttler.BlockWait(t.Context())         // wait for catch up (there's no activity)
 	assert.False(t, throttler.IsThrottled()) // there's a race, but its unlikely to be throttled
 
 	assert.NoError(t, throttler.Close())
@@ -48,7 +48,7 @@ func TestNoopThrottler(t *testing.T) {
 	throttler.lagTolerance = 2 * time.Second
 	assert.False(t, throttler.IsThrottled())
 	assert.NoError(t, throttler.UpdateLag(t.Context()))
-	throttler.BlockWait()
+	throttler.BlockWait(t.Context())
 	throttler.lagTolerance = 100 * time.Millisecond
 	assert.True(t, throttler.IsThrottled())
 	assert.NoError(t, throttler.Close())

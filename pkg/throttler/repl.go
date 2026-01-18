@@ -1,6 +1,7 @@
 package throttler
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"sync/atomic"
@@ -21,13 +22,23 @@ func (l *Repl) IsThrottled() bool {
 }
 
 // BlockWait blocks until the lag is within the tolerance, or up to 60s
-// to allow some progress to be made.
-func (l *Repl) BlockWait() {
+// to allow some progress to be made. It respects context cancellation.
+func (l *Repl) BlockWait(ctx context.Context) {
+	timer := time.NewTimer(blockWaitInterval)
+	defer timer.Stop()
+
 	for range 60 {
 		if atomic.LoadInt64(&l.currentLagInMs) < l.lagTolerance.Milliseconds() {
 			return
 		}
-		time.Sleep(blockWaitInterval)
+
+		timer.Reset(blockWaitInterval)
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			// Continue checking
+		}
 	}
 	l.logger.Warn("lag monitor timed out", "lag_ms", atomic.LoadInt64(&l.currentLagInMs), "tolerance", l.lagTolerance)
 }
