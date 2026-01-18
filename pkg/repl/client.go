@@ -69,11 +69,7 @@ type Client struct {
 	syncer   *replication.BinlogSyncer
 	streamer *replication.BinlogStreamer
 
-	// poolDB is the worker pool connection used for subscription flushes (data operations).
-	// It is shared with copier/applier and respects the thread limit.
-	poolDB *sql.DB
-	// db is a dedicated single connection for binlog control queries that must never block.
-	// It is used for SHOW MASTER STATUS, SHOW BINARY LOGS, FLUSH BINARY LOGS, etc.
+	// The DB connection is used for queries like SHOW MASTER STATUS
 	db       *sql.DB
 	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
@@ -91,6 +87,7 @@ type Client struct {
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
+	initialFile string         // initial binlog file from Run(), used to prevent unsafe recreation
 
 	statisticsLock  sync.Mutex
 	targetBatchTime time.Duration
@@ -115,14 +112,11 @@ type Client struct {
 }
 
 // NewClient creates a new Client instance.
-// poolDB is the worker pool connection shared with copier/applier (respects thread limit).
-// db is a dedicated single connection for binlog control queries (never blocks).
-func NewClient(poolDB *sql.DB, db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
+func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
-		poolDB:                     poolDB,
 		db:                         db,
 		dbConfig:                   config.DBConfig,
 		host:                       host,
@@ -223,14 +217,9 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 }
 
 // getBufferedPos returns the buffered position under a mutex.
-// If bufferedPos has no name (not yet set), it falls back to flushedPos.
 func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
-	if c.bufferedPos.Name == "" {
-		// If no buffered position, use flushed position
-		return c.flushedPos
-	}
 	return c.bufferedPos
 }
 
@@ -285,7 +274,6 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	if c.isMySQL84 {
 		binlogPosStmt = "SHOW BINARY LOG STATUS"
 	}
-	// Use dedicated management connection for control queries to avoid blocking on worker pool exhaustion
 	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
 		return mysql.Position{}, err
@@ -344,6 +332,12 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
+	// set buffered to the initial flushed value +
+	// also record the initial binlog file to prevent unsafe recreation
+	// if we rotate to a new file during the migration
+	c.bufferedPos = c.flushedPos
+	c.initialFile = c.flushedPos.Name
+
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
@@ -362,42 +356,49 @@ func (c *Client) Run(ctx context.Context) (err error) {
 // TableMapEvents once per connection, so when we resume from a mid-stream position,
 // we won't have the table metadata needed to decode RowsEvents.
 //
-// To handle this, we start from the beginning of the current binlog file (position 4)
-// to ensure we receive all TableMapEvents. We then skip events until we reach our
-// target resume position.
+// To handle this safely, we check if the binlog has rotated since we started:
+// - Same file as initial: error
+// - Different file: Safely recreate and resume from position 4.
 func (c *Client) recreateStreamer() error {
-	startPos := c.getBufferedPos()
-	if startPos.Name == "" {
-		// If no buffered position, use flushed position
-		startPos = c.flushedPos
-	}
-
-	c.logger.Warn("Recreating binlog streamer from position", "position", startPos)
+	c.Lock()
+	defer c.Unlock()
 
 	// Close the existing syncer completely
+	// Since we can't do anything with it.
 	if c.syncer != nil {
 		c.syncer.Close()
 	}
 
-	// Start from the beginning of the current binlog file to get fresh TableMapEvents.
-	// This ensures the parser receives all necessary table metadata before processing
-	// RowsEvents at our target position.
-	fileStartPos := mysql.Position{
-		Name: startPos.Name,
+	if c.bufferedPos.Name == c.initialFile {
+		// If the binlog has not rotated since we started, we cannot safely recreate.
+		// This is because there might be a replay error that is not idempotent.
+		// i.e. the table was modified twice, and we see earlier row events.
+		//
+		// We don't have this after the migration starts because we watch and do not
+		// allow any DDL events on the tables we are changing.
+		return fmt.Errorf("cannot recreate streamer: binlog has not rotated from %s since start", c.initialFile)
+	}
+
+	// Still on the same binlog file we started with.
+	// Safe to replay from position 4 because the subscription data structures
+	// (deltaMap, bufferedMap, deltaQueue) are idempotent - reprocessing events
+	// will simply overwrite previous state with the same value.
+	newStartPos := mysql.Position{
+		Name: c.bufferedPos.Name,
 		Pos:  4, // Binlog files always start at position 4
 	}
+	c.logger.Info("Recreating from file start (same file as initial)",
+		"file", c.bufferedPos.Name,
+		"previous_position", c.bufferedPos.Pos,
+		"new_start_position", newStartPos,
+	)
 
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	var err error
-	c.streamer, err = c.syncer.StartSync(fileStartPos)
+	c.streamer, err = c.syncer.StartSync(newStartPos)
 	if err != nil {
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
 	}
-
-	c.logger.Info("Successfully recreated binlog streamer",
-		"file_start_position", fileStartPos,
-		"target_position", startPos,
-		"note", "will process events from file start to rebuild table map")
 	return nil
 }
 

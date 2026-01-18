@@ -206,19 +206,18 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 		}
 	}()
 
-	// We always apply the threshold since in this path ForceKill is always true.
-	threshold := time.Duration(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
-	timer := time.AfterFunc(threshold, func() {
+	// The threshold is hardcoded to be at least 0.9 seconds. This should be the minimum anyway,
+	// since the minimum LockWaitTimeout=1 second
+	threshold := max(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier, 0.9)
+	duration := time.Duration(threshold) * time.Second
+	timer := time.AfterFunc(duration, func() {
 		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
 		if err != nil {
 			return // just return, we can't do much more here
 		}
 	})
 	_, err = trx.ExecContext(ctx, sqlescape.MustEscapeSQL(stmt, args...))
-	// Stop the timer immediately after the DDL completes to prevent it from
-	// firing and killing connections from the same migration if it falls through
-	// to the full copy path (e.g., when INSTANT DDL fails).
-	timer.Stop()
+	timer.Stop() // Stop the timer immediately after the DDL completes
 	return err
 }
 

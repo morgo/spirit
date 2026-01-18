@@ -802,9 +802,7 @@ func TestMaxRecreateAttemptsPanic(t *testing.T) {
 
 func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	if err != nil {
-		t.Skipf("MySQL not available: %v", err)
-	}
+	require.NoError(t, err)
 	defer db.Close()
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS panic_test_t1, panic_test_t2")
@@ -830,6 +828,10 @@ func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
 	})
 	require.NoError(t, client.AddSubscription(t1, t2, nil))
 	require.NoError(t, client.Run(t.Context()))
+
+	// Ensure we are no longer on the initial binary log.
+	_, err = db.ExecContext(t.Context(), "FLUSH BINARY LOGS")
+	require.NoError(t, err)
 
 	// Give the connection time to settle
 	time.Sleep(200 * time.Millisecond)
