@@ -214,8 +214,11 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 			return // just return, we can't do much more here
 		}
 	})
-	defer timer.Stop()
 	_, err = trx.ExecContext(ctx, sqlescape.MustEscapeSQL(stmt, args...))
+	// Stop the timer immediately after the DDL completes to prevent it from
+	// firing and killing connections from the same migration if it falls through
+	// to the full copy path (e.g., when INSTANT DDL fails).
+	timer.Stop()
 	return err
 }
 
