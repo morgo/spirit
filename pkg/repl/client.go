@@ -22,7 +22,13 @@ import (
 )
 
 const (
-	binlogTrivialThreshold = 10000
+	// binlogTrivialThreshold is the number of pending changes below which
+	// flushing is considered up to date. We can never quite get to zero, so we have
+	// to allow a certain number:
+	//   - Too low: we never get to cutover
+	//   - Too high: we take too long to cutover and might timeout, since we will only
+	//     ever hold the tablelock for 30s max (DefaultTimeout)
+	binlogTrivialThreshold = 1000
 	// DefaultBatchSize is the number of rows in each batched REPLACE/DELETE statement.
 	// Larger is better, but we need to keep the run-time of the statement well below
 	// dbconn.maximumLockTime so that it doesn't prevent copy-row tasks from failing.
