@@ -364,7 +364,8 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 		if err := c.runChecksum(ctx); err != nil {
 			// This is really not expected to fail, since if there are differences
 			// it will run the resolver and report the differences in DifferencesFound().
-			return err
+			c.logger.Error("checksum encountered an error", "error", err)
+			continue
 		}
 
 		// If we are here, the checksum passed.

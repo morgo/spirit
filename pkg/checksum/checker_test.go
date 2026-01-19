@@ -251,7 +251,9 @@ func TestCorruptChecksum(t *testing.T) {
 
 	checker, err := NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
-	err = checker.Run(t.Context())
+	singleChecker, ok := checker.(*SingleChecker)
+	assert.True(t, ok, "checker is not of type *SingleChecker")
+	err = singleChecker.runChecksum(t.Context())
 	assert.ErrorContains(t, err, "checksum mismatch")
 }
 
@@ -291,13 +293,19 @@ func TestBoundaryCases(t *testing.T) {
 
 	checker, err := NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
-	assert.Error(t, checker.Run(t.Context()))
+	// Type assert to *SingleChecker to access runChecksum
+	singleChecker, ok := checker.(*SingleChecker)
+	assert.True(t, ok, "checker is not of type *SingleChecker")
+	assert.Error(t, singleChecker.runChecksum(t.Context()))
 
 	// UPDATE t1 to also be NULL
 	testutils.RunSQL(t, "UPDATE checkert1 SET c = NULL")
 	checker, err = NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
-	assert.NoError(t, checker.Run(t.Context()))
+	// Type assert to *SingleChecker to access runChecksum
+	singleChecker, ok = checker.(*SingleChecker)
+	assert.True(t, ok, "checker is not of type *SingleChecker")
+	assert.NoError(t, singleChecker.runChecksum(t.Context()))
 }
 
 func TestChangeDataTypeDatetime(t *testing.T) {
