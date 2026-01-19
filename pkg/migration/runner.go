@@ -297,7 +297,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	if err := cutover.Run(ctx); err != nil {
-		return err
+		return fmt.Errorf("cutover failed: %w", err)
 	}
 	if !r.migration.SkipDropAfterCutover {
 		for _, change := range r.changes {
@@ -958,7 +958,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 			// Overwrite the error if we think it's because of a unique index addition
 			return errors.New("checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
 		}
-		return err
+		return fmt.Errorf("checksum failed: %w", err)
 	}
 
 	// A long checksum extends the binlog deltas
