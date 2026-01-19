@@ -77,10 +77,6 @@ func TestFlushDeltaQueue(t *testing.T) {
 	assert.NoError(t, err)
 	defer db.Close()
 
-	poolDB, err := dbconn.New(testutils.DSN(), dbConfig)
-	assert.NoError(t, err)
-	defer poolDB.Close()
-
 	t.Run("empty queue", func(t *testing.T) {
 		client := &Client{
 			db:              db,
