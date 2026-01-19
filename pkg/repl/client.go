@@ -52,10 +52,12 @@ const (
 	backoffMultiplier = 2
 )
 
-// These are really consts, but set to var for testing.
 var (
 	// maxRecreateAttempts is the maximum number of streamer recreation attempts before panic.
+	// This is really a const, but set to var for testing.
 	maxRecreateAttempts = 10
+
+	errRefuseToRecreateStreamer = errors.New("refuse to recreate streamer: binlog has not rotated since start")
 )
 
 type Client struct {
@@ -87,6 +89,7 @@ type Client struct {
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
+	initialFile string         // initial binlog file from Run(), used to prevent unsafe recreation
 
 	statisticsLock  sync.Mutex
 	targetBatchTime time.Duration
@@ -216,14 +219,9 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 }
 
 // getBufferedPos returns the buffered position under a mutex.
-// If bufferedPos has no name (not yet set), it falls back to flushedPos.
 func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
-	if c.bufferedPos.Name == "" {
-		// If no buffered position, use flushed position
-		return c.flushedPos
-	}
 	return c.bufferedPos
 }
 
@@ -336,6 +334,12 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
+	// set buffered to the initial flushed value +
+	// also record the initial binlog file to prevent unsafe recreation
+	// if we rotate to a new file during the migration
+	c.bufferedPos = c.flushedPos
+	c.initialFile = c.flushedPos.Name
+
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
@@ -349,28 +353,66 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	return nil
 }
 
-// recreateStreamer recreates the binlog streamer from the current buffered position
+// recreateStreamer recreates the binlog streamer from the current buffered position.
+// When we recreate the syncer, the parser's table map is lost. MySQL only sends
+// TableMapEvents once per connection, so when we resume from a mid-stream position,
+// we won't have the table metadata needed to decode RowsEvents.
+//
+// To handle this safely, we check if the binlog has rotated since we started:
+// - Same file as initial: error
+// - Different file: Safely recreate and resume from position 4.
 func (c *Client) recreateStreamer() error {
-	c.logger.Warn("Recreating binlog streamer from position", "position", c.getBufferedPos())
+	c.Lock()
+	defer c.Unlock()
 
+	c.logger.Info("recreateStreamer called",
+		"buffered_position", c.bufferedPos,
+		"initial_file", c.initialFile,
+		"syncer_exists", c.syncer != nil,
+		"streamer_exists", c.streamer != nil)
+
+	if c.bufferedPos.Name == c.initialFile {
+		// If the binlog has not rotated since we started, we cannot safely recreate.
+		// This is because there might be a replay error that is not idempotent.
+		// i.e. the table was modified twice, and we see earlier row events.
+		//
+		// We don't have this after the migration starts because we watch and do not
+		// allow any DDL events on the tables we are changing.
+		return errRefuseToRecreateStreamer
+	}
+
+	// Close the existing syncer completely
+	// Since we can't do anything with it.
 	if c.syncer != nil {
 		c.syncer.Close()
 	}
 
-	// Create new syncer and streamer
-	// Start from the current buffered position
-	c.syncer = replication.NewBinlogSyncer(c.cfg)
-	startPos := c.getBufferedPos()
-	if startPos.Name == "" {
-		// If no buffered position, use flushed position
-		startPos = c.flushedPos
+	// Still on the same binlog file we started with.
+	// Safe to replay from position 4 because the subscription data structures
+	// (deltaMap, bufferedMap, deltaQueue) are idempotent - reprocessing events
+	// will simply overwrite previous state with the same value.
+	newStartPos := mysql.Position{
+		Name: c.bufferedPos.Name,
+		Pos:  4, // Binlog files always start at position 4
 	}
+	c.logger.Info("Recreating streamer from file start",
+		"file", c.bufferedPos.Name,
+		"previous_position", c.bufferedPos.Pos,
+		"new_start_position", newStartPos,
+		"initial_file", c.initialFile,
+		"has_rotated", c.bufferedPos.Name != c.initialFile,
+	)
+
+	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	var err error
-	c.streamer, err = c.syncer.StartSync(startPos)
+	c.streamer, err = c.syncer.StartSync(newStartPos)
 	if err != nil {
+		c.logger.Error("Failed to start binlog streamer in recreateStreamer",
+			"error", err,
+			"position", newStartPos,
+			"config", fmt.Sprintf("host=%s:%d user=%s", c.cfg.Host, c.cfg.Port, c.cfg.User))
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
 	}
-	c.logger.Info("Successfully recreated binlog streamer from position", "position", startPos)
 	return nil
 }
 
@@ -389,6 +431,7 @@ func (c *Client) readStream(ctx context.Context) {
 	recreateAttempts := 0
 	backoffDuration := initialBackoffDuration
 	lastErrorTime := time.Time{}
+	var recentErrors []string // Track recent errors for debugging
 
 	c.logger.Debug("readStream started for binlog position", "position", startPos, "log_name", currentLogName)
 
@@ -422,17 +465,49 @@ func (c *Client) readStream(ctx context.Context) {
 			consecutiveErrors++
 			currentTime := time.Now()
 
+			// Track recent errors for debugging (keep last 20)
+			errorMsg := fmt.Sprintf("[%s] %v", currentTime.Format("15:04:05.000"), err)
+			recentErrors = append(recentErrors, errorMsg)
+			if len(recentErrors) > 20 {
+				recentErrors = recentErrors[1:]
+			}
+
 			c.logger.Error("error reading binlog stream", "consecutive_errors", consecutiveErrors, "error", err, "current_position", c.getBufferedPos())
 
 			// If we've had too many consecutive errors, try to recreate the streamer
 			if consecutiveErrors >= maxConsecutiveErrors {
 				recreateAttempts++
-				c.logger.Warn("Too many consecutive errors, attempting to recreate streamer", "consecutive_errors", consecutiveErrors, "attempt", recreateAttempts, "max_attempts", maxRecreateAttempts)
+
+				// Get current state information for debugging
+				currentPos := c.getBufferedPos()
+				c.Lock()
+				initialFile := c.initialFile
+				streamerIsNil := c.streamer == nil
+				c.Unlock()
+
+				c.logger.Warn("Too many consecutive errors, attempting to recreate streamer",
+					"consecutive_errors", consecutiveErrors,
+					"attempt", recreateAttempts,
+					"max_attempts", maxRecreateAttempts,
+					"current_position", currentPos,
+					"initial_file", initialFile,
+					"streamer_is_nil", streamerIsNil,
+					"backoff_duration", backoffDuration)
 
 				// Check if we've exceeded the maximum number of recreation attempts
 				if recreateAttempts >= maxRecreateAttempts {
-					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up",
-						recreateAttempts, c.getBufferedPos()))
+					// Log comprehensive debugging information before panicking
+					c.logger.Error("PANIC: Failed to recreate binlog streamer, dumping debug info",
+						"total_attempts", recreateAttempts,
+						"current_position", currentPos,
+						"initial_file", initialFile,
+						"start_position", startPos,
+						"recent_errors", recentErrors,
+						"streamer_is_nil", streamerIsNil,
+						"is_closed", c.isClosed.Load())
+
+					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, initial file: %s, giving up. Recent errors: %v",
+						recreateAttempts, currentPos, initialFile, recentErrors))
 				}
 
 				// Apply exponential backoff
@@ -451,8 +526,9 @@ func (c *Client) readStream(ctx context.Context) {
 				if recreateErr := c.recreateStreamer(); recreateErr != nil {
 					c.logger.Error("Failed to recreate streamer", "error", recreateErr)
 
-					// Set streamer to nil so next iteration will trigger recreation
-					c.streamer = nil
+					if recreateErr != errRefuseToRecreateStreamer {
+						c.streamer = nil // Set streamer to nil so next iteration will trigger recreation
+					}
 
 					// Increase backoff duration for next attempt
 					backoffDuration *= backoffMultiplier

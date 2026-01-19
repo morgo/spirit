@@ -64,7 +64,8 @@ type Migration struct {
 	RespectSentinel bool `name:"respect-sentinel" help:"Look for sentinel table to exist and block if it does" optional:"" default:"true" hidden:""`
 
 	// useTestCutover is a test-only cutover
-	useTestCutover bool
+	useTestCutover   bool
+	useTestThrottler bool
 }
 
 func (m *Migration) Run() error {
