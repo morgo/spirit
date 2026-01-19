@@ -1,0 +1,71 @@
+// Package check provides various configuration and health checks
+// that can be run for move operations.
+package check
+
+import (
+	"context"
+	"database/sql"
+	"log/slog"
+	"sync"
+
+	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/table"
+	"github.com/go-sql-driver/mysql"
+)
+
+// ScopeFlag scopes a check
+type ScopeFlag uint8
+
+const (
+	ScopeNone      ScopeFlag = 0
+	ScopePreRun    ScopeFlag = 1 << 0
+	ScopePreflight ScopeFlag = 1 << 1
+	ScopePostSetup ScopeFlag = 1 << 2
+	ScopeTesting   ScopeFlag = 1 << 3
+)
+
+// Resources contains the resources needed for move checks
+type Resources struct {
+	SourceDB       *sql.DB
+	SourceConfig   *mysql.Config
+	Targets        []applier.Target
+	SourceTables   []*table.TableInfo
+	CreateSentinel bool
+	// For PreRun checks (before DB connections established)
+	SourceDSN string
+	TargetDSN string
+}
+
+type check struct {
+	callback func(context.Context, Resources, *slog.Logger) error
+	scope    ScopeFlag
+}
+
+var (
+	checks map[string]check
+	lock   sync.Mutex
+)
+
+// registerCheck registers a check (callback func) and a scope (aka time) that it is expected to be run
+func registerCheck(name string, callback func(context.Context, Resources, *slog.Logger) error, scope ScopeFlag) {
+	lock.Lock()
+	defer lock.Unlock()
+	if checks == nil {
+		checks = make(map[string]check)
+	}
+	checks[name] = check{callback: callback, scope: scope}
+}
+
+// RunChecks runs all checks that are registered for the given scope
+func RunChecks(ctx context.Context, r Resources, logger *slog.Logger, scope ScopeFlag) error {
+	for _, check := range checks {
+		if check.scope&scope == 0 {
+			continue
+		}
+		err := check.callback(ctx, r, logger)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}

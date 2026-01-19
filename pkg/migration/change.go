@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/block/spirit/pkg/check"
+	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"

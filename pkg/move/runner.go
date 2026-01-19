@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
@@ -394,6 +395,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 func (r *Runner) setup(ctx context.Context) error {
 	var err error
+
+	// Run preflight checks on the source database
+	r.logger.Info("Running preflight checks")
+	if err := r.runChecks(ctx, check.ScopePreflight); err != nil {
+		return err
+	}
+
 	// Fetch a list of tables from the source.
 	r.logger.Info("Fetching source table list")
 	if r.sourceTables, err = r.getTables(ctx, r.source); err != nil {
@@ -753,6 +761,19 @@ func (r *Runner) Status() string {
 
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// runChecks wraps around check.RunChecks and adds the context of this move operation
+func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
+	return check.RunChecks(ctx, check.Resources{
+		SourceDB:       r.source,
+		SourceConfig:   r.sourceConfig,
+		Targets:        r.targets,
+		SourceTables:   r.sourceTables,
+		CreateSentinel: r.move.CreateSentinel,
+		SourceDSN:      r.move.SourceDSN,
+		TargetDSN:      r.move.TargetDSN,
+	}, r.logger, scope)
 }
 
 // restoreSecondaryIndexes restores any secondary indexes that were deferred during table creation.
