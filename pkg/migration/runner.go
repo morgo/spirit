@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
@@ -466,6 +467,25 @@ func (r *Runner) checkpointTableName() string {
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
+	// Create an applier if using buffered copy or buffered replication
+	var appl applier.Applier
+	if r.migration.EnableExperimentalBufferedCopy {
+		// For now, we only support single-table migrations with buffered copy
+		if len(r.changes) > 1 {
+			return errors.New("buffered copy is not yet supported for multi-table migrations")
+		}
+		// Create a SingleTargetApplier for the buffered copier
+		appl, err = applier.NewSingleTargetApplier(
+			applier.Target{DB: r.db},
+			&applier.ApplierConfig{
+				Logger:   r.logger,
+				DBConfig: r.dbConfig,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create applier for buffered copier: %w", err)
+		}
+	}
 	// Create copier with the prepared chunker
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:                   r.migration.Threads,
@@ -475,6 +495,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		MetricsSink:                   r.metricsSink,
 		DBConfig:                      r.dbConfig,
 		UseExperimentalBufferedCopier: r.migration.EnableExperimentalBufferedCopy,
+		Applier:                       appl,
 	})
 	if err != nil {
 		return err
@@ -489,6 +510,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		OnDDL:           r.ddlNotification,
 		ServerID:        repl.NewServerID(),
 		DBConfig:        r.dbConfig, // Pass database configuration to replication client
+		Applier:         appl,
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.

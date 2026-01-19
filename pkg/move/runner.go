@@ -551,6 +551,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
 	r.dbConfig.ForceKill = true // in move we always use force kill; it's new code.
+	// Buffered copier needs more connections due to parallel read/write workers
+	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
 	r.logger.Warn("the move command is experimental and not yet safe for production use.")
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	if err != nil {
