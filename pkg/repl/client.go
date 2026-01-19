@@ -62,8 +62,6 @@ var (
 	// maxRecreateAttempts is the maximum number of streamer recreation attempts before panic.
 	// This is really a const, but set to var for testing.
 	maxRecreateAttempts = 10
-
-	errRefuseToRecreateStreamer = errors.New("refuse to recreate streamer: binlog has not rotated since start")
 )
 
 type Client struct {
@@ -95,7 +93,6 @@ type Client struct {
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
-	initialFile string         // initial binlog file from Run(), used to prevent unsafe recreation
 
 	statisticsLock  sync.Mutex
 	targetBatchTime time.Duration
@@ -276,6 +273,13 @@ func (c *Client) GetDeltaLen() int {
 }
 
 func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, error) {
+	// We rotate the binary log before we start, so we can always safely just resume
+	// by reopening the binary log file at Position 4. This is required to get the table map.
+	// Why we need to recreate the syncer just after it is created is a mystery to me, but
+	// we seem to have this issue in tests sometimes.
+	if _, err := c.db.ExecContext(ctx, `FLUSH BINARY LOGS`); err != nil {
+		return mysql.Position{}, fmt.Errorf("failed to flush binary logs: %w", err)
+	}
 	var binlogFile, fake string
 	var binlogPos uint32
 	var binlogPosStmt = "SHOW MASTER STATUS"
@@ -340,12 +344,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
 	}
-	// set buffered to the initial flushed value +
-	// also record the initial binlog file to prevent unsafe recreation
-	// if we rotate to a new file during the migration
-	c.bufferedPos = c.flushedPos
-	c.initialFile = c.flushedPos.Name
-
+	c.bufferedPos = c.flushedPos // set buffered to the initial flushed value
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
@@ -373,19 +372,8 @@ func (c *Client) recreateStreamer() error {
 
 	c.logger.Info("recreateStreamer called",
 		"buffered_position", c.bufferedPos,
-		"initial_file", c.initialFile,
 		"syncer_exists", c.syncer != nil,
 		"streamer_exists", c.streamer != nil)
-
-	if c.bufferedPos.Name == c.initialFile {
-		// If the binlog has not rotated since we started, we cannot safely recreate.
-		// This is because there might be a replay error that is not idempotent.
-		// i.e. the table was modified twice, and we see earlier row events.
-		//
-		// We don't have this after the migration starts because we watch and do not
-		// allow any DDL events on the tables we are changing.
-		return errRefuseToRecreateStreamer
-	}
 
 	// Close the existing syncer completely
 	// Since we can't do anything with it.
@@ -405,8 +393,6 @@ func (c *Client) recreateStreamer() error {
 		"file", c.bufferedPos.Name,
 		"previous_position", c.bufferedPos.Pos,
 		"new_start_position", newStartPos,
-		"initial_file", c.initialFile,
-		"has_rotated", c.bufferedPos.Name != c.initialFile,
 	)
 
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
@@ -486,18 +472,12 @@ func (c *Client) readStream(ctx context.Context) {
 
 				// Get current state information for debugging
 				currentPos := c.getBufferedPos()
-				c.Lock()
-				initialFile := c.initialFile
-				streamerIsNil := c.streamer == nil
-				c.Unlock()
 
 				c.logger.Warn("Too many consecutive errors, attempting to recreate streamer",
 					"consecutive_errors", consecutiveErrors,
 					"attempt", recreateAttempts,
 					"max_attempts", maxRecreateAttempts,
 					"current_position", currentPos,
-					"initial_file", initialFile,
-					"streamer_is_nil", streamerIsNil,
 					"backoff_duration", backoffDuration)
 
 				// Check if we've exceeded the maximum number of recreation attempts
@@ -506,14 +486,12 @@ func (c *Client) readStream(ctx context.Context) {
 					c.logger.Error("PANIC: Failed to recreate binlog streamer, dumping debug info",
 						"total_attempts", recreateAttempts,
 						"current_position", currentPos,
-						"initial_file", initialFile,
 						"start_position", startPos,
 						"recent_errors", recentErrors,
-						"streamer_is_nil", streamerIsNil,
 						"is_closed", c.isClosed.Load())
 
-					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, initial file: %s, giving up. Recent errors: %v",
-						recreateAttempts, currentPos, initialFile, recentErrors))
+					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up. Recent errors: %v",
+						recreateAttempts, currentPos, recentErrors))
 				}
 
 				// Apply exponential backoff
@@ -531,10 +509,6 @@ func (c *Client) readStream(ctx context.Context) {
 				// Try to recreate the streamer
 				if recreateErr := c.recreateStreamer(); recreateErr != nil {
 					c.logger.Error("Failed to recreate streamer", "error", recreateErr)
-
-					if recreateErr != errRefuseToRecreateStreamer {
-						c.streamer = nil // Set streamer to nil so next iteration will trigger recreation
-					}
 
 					// Increase backoff duration for next attempt
 					backoffDuration *= backoffMultiplier
