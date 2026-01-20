@@ -107,7 +107,7 @@ func TestTargetStateCheck(t *testing.T) {
 		}
 		err := targetStateCheck(t.Context(), r, slog.Default())
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "contains 1 rows")
+		assert.Contains(t, err.Error(), "is not empty")
 	})
 
 	// Test 4: Target with mismatched schema should fail

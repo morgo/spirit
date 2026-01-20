@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -74,14 +75,16 @@ func targetStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 // in the migrations directory before data is moved.
 func validateExistingTargetTable(ctx context.Context, target applier.Target, tableName string, targetIndex int, sourceTable *table.TableInfo, logger *slog.Logger) error {
 	// Check 1: Table must have zero rows
-	var rowCount int64
-	err := target.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", target.Config.DBName, tableName)).Scan(&rowCount)
-	if err != nil {
-		return fmt.Errorf("failed to check row count for table '%s' on target %d: %w", tableName, targetIndex, err)
+	// Use LIMIT 1 instead of COUNT(*) for performance - we only need to know if there's at least one row
+	var hasRows int
+	err := target.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM `%s`.`%s` LIMIT 1", target.Config.DBName, tableName)).Scan(&hasRows)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check if table '%s' on target %d is empty: %w", tableName, targetIndex, err)
 	}
-	if rowCount > 0 {
-		return fmt.Errorf("table '%s' already exists on target %d (%s) and contains %d rows; move-tables requires target tables to be empty to prevent data loss. Please drop the table or use a different target",
-			tableName, targetIndex, target.Config.DBName, rowCount)
+	if err == nil {
+		// Found at least one row - table is not empty
+		return fmt.Errorf("table '%s' already exists on target %d (%s) and is not empty; move-tables requires target tables to be empty to prevent data loss. Please drop the table or use a different target",
+			tableName, targetIndex, target.Config.DBName)
 	}
 
 	// Check 2: Schema must match source exactly
@@ -105,7 +108,6 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 		"table", tableName,
 		"target", targetIndex,
 		"database", target.Config.DBName,
-		"rows", rowCount,
 		"columns", len(targetTable.Columns))
 
 	return nil
