@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/block/spirit/pkg/check"
+	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/go-ini/ini"

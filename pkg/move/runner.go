@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
@@ -151,97 +152,6 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		return nil, errors.New("could not find all SourceTables in the source database")
 	}
 	return tables, rows.Err()
-}
-
-// checkTargetEmpty checks that the target database is ready for the move operation.
-// If SourceTables is specified, it checks that those specific tables don't exist in the target,
-// OR if they do exist, they must be empty (zero rows) and have matching schema to the source.
-// If SourceTables is not specified, it checks that the target database is completely empty.
-func (r *Runner) checkTargetEmpty(ctx context.Context) error {
-	for i, target := range r.targets {
-		rows, err := target.DB.QueryContext(ctx, "SHOW TABLES")
-		if err != nil {
-			return fmt.Errorf("failed to check target %d: %w", i, err)
-		}
-		defer rows.Close()
-		var tableName string
-		var existingTables []string
-		for rows.Next() {
-			if err := rows.Scan(&tableName); err != nil {
-				return fmt.Errorf("failed to scan table name on target %d: %w", i, err)
-			}
-			if r.sourceTableMap != nil && !r.sourceTableMap[tableName] {
-				// We are only copying specific tables, but this table
-				// found is not one of them, so we can ignore and continue.
-				continue
-			}
-			existingTables = append(existingTables, tableName)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-
-		// If there are existing tables, validate they are empty and have matching schema
-		if len(existingTables) > 0 {
-			for _, tableName := range existingTables {
-				if err := r.validateExistingTargetTable(ctx, target, tableName, i); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// validateExistingTargetTable checks that an existing table in the target database
-// is empty (zero rows) and has a schema that matches the source table.
-// This allows move-tables to work with pre-created tables, which is necessary
-// for declarative schema management workflows where tables must be tracked
-// in the migrations directory before data is moved.
-func (r *Runner) validateExistingTargetTable(ctx context.Context, target applier.Target, tableName string, targetIndex int) error {
-	// Check 1: Table must have zero rows
-	var rowCount int64
-	err := target.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", target.Config.DBName, tableName)).Scan(&rowCount)
-	if err != nil {
-		return fmt.Errorf("failed to check row count for table '%s' on target %d: %w", tableName, targetIndex, err)
-	}
-	if rowCount > 0 {
-		return fmt.Errorf("table '%s' already exists on target %d (%s) and contains %d rows; move-tables requires target tables to be empty to prevent data loss. Please drop the table or use a different target",
-			tableName, targetIndex, target.Config.DBName, rowCount)
-	}
-
-	// Check 2: Schema must match source exactly
-	// Find the source table info
-	var sourceTable *table.TableInfo
-	for _, src := range r.sourceTables {
-		if src.TableName == tableName {
-			sourceTable = src
-			break
-		}
-	}
-	if sourceTable == nil {
-		return nil // exists on target only is fine.
-	}
-
-	// Get target table info and compare columns
-	targetTable := table.NewTableInfo(target.DB, target.Config.DBName, tableName)
-	if err := targetTable.SetInfo(ctx); err != nil {
-		return fmt.Errorf("failed to get table info for target %d table '%s': %w", targetIndex, tableName, err)
-	}
-
-	if !slices.Equal(sourceTable.Columns, targetTable.Columns) {
-		return fmt.Errorf("table '%s' exists on target %d (%s) but schema does not match source; column mismatch detected. Please ensure the table schema matches exactly or drop the table",
-			tableName, targetIndex, target.Config.DBName)
-	}
-
-	r.logger.Info("validated existing target table",
-		"table", tableName,
-		"target", targetIndex,
-		"database", target.Config.DBName,
-		"rows", rowCount,
-		"columns", len(targetTable.Columns))
-
-	return nil
 }
 
 // createTargetTables creates tables on all targets.
@@ -394,6 +304,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 func (r *Runner) setup(ctx context.Context) error {
 	var err error
+
+	// Run preflight checks on the source database
+	r.logger.Info("Running preflight checks")
+	if err := r.runChecks(ctx, check.ScopePreflight); err != nil {
+		return err
+	}
+
 	// Fetch a list of tables from the source.
 	r.logger.Info("Fetching source table list")
 	if r.sourceTables, err = r.getTables(ctx, r.source); err != nil {
@@ -424,25 +341,22 @@ func (r *Runner) setup(ctx context.Context) error {
 		DBConfig:                   r.dbConfig,
 	})
 
-	r.logger.Info("Checking target database state")
-
-	err = r.checkTargetEmpty(ctx)
-	if err != nil {
-		// checkTargetEmpty returns an error if:
-		// 1. Tables exist that don't match our criteria (non-empty or schema mismatch)
-		// 2. There are tables we can't validate
-		// In either case, try to resume from checkpoint as a fallback.
-		// The checkpoint is on the source (not target) because reshards are 1:N and the
-		// source is always guaranteed to be singular.
-		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return fmt.Errorf("target database validation failed and could not resume from checkpoint: %v", err)
+	// Run post-setup checks
+	if err = r.runChecks(ctx, check.ScopePostSetup); err != nil {
+		// The checks returned an error, which could just mean that tables exist on the target.
+		// So we can switch tactics and check if these artifacts pass the tests
+		// to resume from checkpoint instead.
+		if resumeErr := r.runChecks(ctx, check.ScopeResume); resumeErr != nil {
+			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%v, resume_error=%v", err, resumeErr)
 		}
-		r.logger.Info("Resumed move from existing checkpoint")
+		// We pass the pre-check for resume, so attempt it
+		if err := r.resumeFromCheckpoint(ctx); err != nil {
+			return fmt.Errorf("resume validation passed but checkpoint resume failed: %v", err)
+		}
+		r.logger.Info("Successfully resumed move from existing checkpoint")
 		return nil
 	}
-
-	// Target is ready: it is either empty or has valid
-	// pre-existing empty tables with matching schema
+	// The post-setup checks returned no errors so we can proceed with new copy
 	return r.newCopy(ctx)
 }
 
@@ -753,6 +667,19 @@ func (r *Runner) Status() string {
 
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// runChecks wraps around check.RunChecks and adds the context of this move operation
+func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
+	return check.RunChecks(ctx, check.Resources{
+		SourceDB:       r.source,
+		SourceConfig:   r.sourceConfig,
+		Targets:        r.targets,
+		SourceTables:   r.sourceTables,
+		CreateSentinel: r.move.CreateSentinel,
+		SourceDSN:      r.move.SourceDSN,
+		TargetDSN:      r.move.TargetDSN,
+	}, r.logger, scope)
 }
 
 // restoreSecondaryIndexes restores any secondary indexes that were deferred during table creation.

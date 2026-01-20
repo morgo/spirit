@@ -25,7 +25,9 @@ func TestMain(m *testing.M) {
 }
 
 func TestBasicMove(t *testing.T) {
-	settingsCheck(t)
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -67,7 +69,9 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 }
 
 func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
-	settingsCheck(t)
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -177,7 +181,9 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 // TestEmptyDatabaseMove tests that a move operation succeeds when the source database has no tables.
 // This is a valid scenario for shard splits where an empty shard needs to be split.
 func TestEmptyDatabaseMove(t *testing.T) {
-	settingsCheck(t)
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
@@ -226,29 +232,4 @@ func TestEmptyDatabaseMove(t *testing.T) {
 
 	// Clean up
 	runner.Close()
-}
-
-// settingsCheck checks that the database settings are appropriate for running moves.
-// Move is not supported unless there is full binlog images, etc. but in CI
-// we have some tests and features that do not require this.
-func settingsCheck(t *testing.T) {
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	assert.NoError(t, err)
-	defer db.Close()
-
-	var binlogRowImage, binlogRowValueOptions string
-	err = db.QueryRowContext(t.Context(),
-		`SELECT 
-		@@global.binlog_row_image,
-		@@global.binlog_row_value_options`).Scan(
-		&binlogRowImage,
-		&binlogRowValueOptions,
-	)
-	assert.NoError(t, err)
-	if binlogRowImage != "FULL" || binlogRowValueOptions != "" {
-		t.Skip("Skipping test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-	}
 }

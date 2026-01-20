@@ -12,11 +12,11 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/block/spirit/pkg/applier"
-	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"

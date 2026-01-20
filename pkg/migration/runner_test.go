@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/block/spirit/pkg/check"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
