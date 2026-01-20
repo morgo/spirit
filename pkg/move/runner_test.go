@@ -18,12 +18,14 @@ import (
 // writes, exercising both deferred and non-deferred secondary indexes and
 // reproducing the "not all changes flushed" error seen during cutover.
 func TestMoveWithConcurrentWrites(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
 	testMoveWithConcurrentWrites(t, false)
 	testMoveWithConcurrentWrites(t, true)
 }
 
 func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
-	settingsCheck(t)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 

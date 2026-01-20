@@ -11,6 +11,10 @@ import (
 )
 
 func TestConfigurationCheck(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
+
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer db.Close()

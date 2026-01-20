@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func DSN() string {
@@ -87,4 +90,34 @@ func RunSQL(t *testing.T, stmt string) {
 	defer db.Close()
 	_, err = db.ExecContext(t.Context(), stmt)
 	assert.NoError(t, err)
+}
+
+var (
+	isRBRTestRunnerCached bool
+	isRBRTestRunnerOnce   sync.Once
+)
+
+func IsMinimalRBRTestRunner(t *testing.T) bool {
+	// Check if we are in the minimal RBR test runner.
+	// we use this to skip certain tests.
+	isRBRTestRunnerOnce.Do(func() {
+		cfg, err := mysql.ParseDSN(DSN())
+		require.NoError(t, err)
+		db, err := sql.Open("mysql", cfg.FormatDSN())
+		require.NoError(t, err)
+		defer db.Close()
+		var binlogRowImage, binlogRowValueOptions string
+		err = db.QueryRowContext(t.Context(),
+			`SELECT
+		@@global.binlog_row_image,
+		@@global.binlog_row_value_options`).Scan(
+			&binlogRowImage,
+			&binlogRowValueOptions,
+		)
+		require.NoError(t, err)
+		if binlogRowImage != "FULL" || binlogRowValueOptions != "" {
+			isRBRTestRunnerCached = true
+		}
+	})
+	return isRBRTestRunnerCached
 }

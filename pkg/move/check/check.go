@@ -21,7 +21,8 @@ const (
 	ScopePreRun    ScopeFlag = 1 << 0
 	ScopePreflight ScopeFlag = 1 << 1
 	ScopePostSetup ScopeFlag = 1 << 2
-	ScopeTesting   ScopeFlag = 1 << 3
+	ScopeResume    ScopeFlag = 1 << 3
+	ScopeTesting   ScopeFlag = 1 << 4
 )
 
 // Resources contains the resources needed for move checks

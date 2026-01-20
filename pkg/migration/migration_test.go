@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -32,36 +31,6 @@ func mkIniFile(t *testing.T, content string) *os.File {
 	require.NoError(t, err)
 
 	return tmpFile
-}
-
-var (
-	isRBRTestRunnerCached bool
-	isRBRTestRunnerOnce   sync.Once
-)
-
-func isMinimalRBRTestRunner(t *testing.T) bool {
-	// Check if we are in the minimal RBR test runner.
-	// we use this to skip certain tests.
-	isRBRTestRunnerOnce.Do(func() {
-		cfg, err := mysql.ParseDSN(testutils.DSN())
-		require.NoError(t, err)
-		db, err := sql.Open("mysql", cfg.FormatDSN())
-		require.NoError(t, err)
-		defer db.Close()
-		var binlogRowImage, binlogRowValueOptions string
-		err = db.QueryRowContext(t.Context(),
-			`SELECT
-		@@global.binlog_row_image,
-		@@global.binlog_row_value_options`).Scan(
-			&binlogRowImage,
-			&binlogRowValueOptions,
-		)
-		require.NoError(t, err)
-		if binlogRowImage != "FULL" || binlogRowValueOptions != "" {
-			isRBRTestRunnerCached = true
-		}
-	})
-	return isRBRTestRunnerCached
 }
 
 func TestMain(m *testing.M) {
@@ -278,7 +247,7 @@ func TestGeneratedColumns(t *testing.T) {
 		testGeneratedColumns(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if isMinimalRBRTestRunner(t) {
+		if testutils.IsMinimalRBRTestRunner(t) {
 			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
 		}
 		testGeneratedColumns(t, true)
@@ -317,7 +286,7 @@ func TestStoredGeneratedColumns(t *testing.T) {
 		testStoredGeneratedColumns(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if isMinimalRBRTestRunner(t) {
+		if testutils.IsMinimalRBRTestRunner(t) {
 			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
 		}
 		testStoredGeneratedColumns(t, true)
@@ -394,7 +363,7 @@ func TestBinaryChecksum(t *testing.T) {
 		testBinaryChecksum(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if isMinimalRBRTestRunner(t) {
+		if testutils.IsMinimalRBRTestRunner(t) {
 			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
 		}
 		testBinaryChecksum(t, true)
@@ -448,7 +417,7 @@ func TestConvertCharset(t *testing.T) {
 		testConvertCharset(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if isMinimalRBRTestRunner(t) {
+		if testutils.IsMinimalRBRTestRunner(t) {
 			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
 		}
 		testConvertCharset(t, true)
