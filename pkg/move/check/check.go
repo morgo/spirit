@@ -17,12 +17,11 @@ import (
 type ScopeFlag uint8
 
 const (
-	ScopeNone      ScopeFlag = 0
-	ScopePreRun    ScopeFlag = 1 << 0
-	ScopePreflight ScopeFlag = 1 << 1
-	ScopePostSetup ScopeFlag = 1 << 2
-	ScopeResume    ScopeFlag = 1 << 3
-	ScopeTesting   ScopeFlag = 1 << 4
+	ScopeNone ScopeFlag = iota
+	ScopePreRun
+	ScopePreflight
+	ScopePostSetup
+	ScopeResume
 )
 
 // Resources contains the resources needed for move checks
