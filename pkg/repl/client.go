@@ -156,20 +156,19 @@ func NewServerID() uint32 {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// Fallback to nanosecond-based generation if crypto/rand fails (should never happen)
-		return uint32(time.Now().UnixNano()%4294966295) + 1001
+		rangeSize := int64(^uint32(0) - 1000)
+		return uint32(time.Now().UnixNano()%rangeSize) + 1001
 	}
-	// Convert bytes to uint32, mix with counter, and ensure it's in valid range
+	// Convert bytes to uint32, mix with counter, and map to valid range
 	randomPart := binary.BigEndian.Uint32(b[:])
 	counterPart := serverIDCounter.Add(1)
 
 	// XOR the random and counter parts for better distribution
-	// Then ensure we're in the range 1001 to max uint32
 	result := randomPart ^ counterPart
 
-	// Ensure result is at least 1001
-	if result < 1001 {
-		result = result + 1001
-	}
+	// Map result into the range [1001, max uint32]
+	// Use modulo to constrain to the valid range, then add 1001
+	result = (result % (^uint32(0) - 1000)) + 1001
 
 	return result
 }

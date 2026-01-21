@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -863,20 +864,29 @@ func TestNewServerIDConcurrent(t *testing.T) {
 	// Channel to collect all generated IDs
 	idChan := make(chan uint32, numGoroutines*idsPerGoroutine)
 
+	// Use sync.WaitGroup to ensure all goroutines complete
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
 	// Start multiple goroutines generating IDs concurrently
 	for range numGoroutines {
 		go func() {
+			defer wg.Done()
 			for range idsPerGoroutine {
 				idChan <- NewServerID()
 			}
 		}()
 	}
 
+	// Wait for all goroutines to complete, then close the channel
+	go func() {
+		wg.Wait()
+		close(idChan)
+	}()
+
 	// Collect all IDs
 	ids := make(map[uint32]bool)
-	for range numGoroutines * idsPerGoroutine {
-		id := <-idChan
-
+	for id := range idChan {
 		// Verify ID is in expected range (at least 1001)
 		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 
