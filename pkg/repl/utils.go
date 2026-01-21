@@ -38,6 +38,14 @@ func EncodeSchemaTable(schema, table string) string {
 	return schema + "." + table
 }
 
+func DecodeSchemaTable(encoded string) (string, string) {
+	parts := strings.SplitN(encoded, ".", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
 // getTableIdentity extracts the schema and table name from an AST node that has table information
 func getTableIdentity(defaultSchema string, node ast.Node) (string, string) {
 	var schema, table string

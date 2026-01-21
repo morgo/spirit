@@ -22,7 +22,6 @@ const (
 	ScopePreflight
 	ScopePostSetup
 	ScopeResume
-	ScopeCutover
 )
 
 // Resources contains the resources needed for move checks

@@ -344,6 +344,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		Concurrency:                r.move.Threads,
 		TargetBatchTime:            r.move.TargetChunkTime,
 		OnDDL:                      r.ddlNotification,
+		OnDDLDisableFiltering:      true,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
 		Applier:                    r.applier, // Use the shared applier
@@ -586,13 +587,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	r.logger.Info("Checksum completed successfully, starting cutover")
-	r.status.Set(status.CutOver)
-	// Run any checks that need to be done pre-cutover.
-	// This includes checking for new tables created on the source during the move.
-	if err := r.runChecks(ctx, check.ScopeCutover); err != nil {
-		return err
-	}
 	// Create a cutover.
+	r.status.Set(status.CutOver)
 	cutover, err := NewCutOver(r.source, r.sourceTables, r.cutoverFunc, r.replClient, r.dbConfig, r.logger)
 	if err != nil {
 		return err
@@ -630,7 +626,8 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // tableChangeNotification is called as a goroutine.
 // Any schema changes to the source tables will be sent to a channel
 // that this function reads from. For move operations, we monitor all
-// tables on the source connection for changes.
+// tables on the source connection for changes, this means we need
+// to do filtering for relevance.
 func (r *Runner) tableChangeNotification(ctx context.Context) {
 	defer r.replClient.SetDDLNotificationChannel(nil)
 	for {
@@ -645,10 +642,20 @@ func (r *Runner) tableChangeNotification(ctx context.Context) {
 				return
 			}
 
-			// The table names are filtered from the replication stream
-			// before they are sent here, so we know it's one of our tables.
-			// Because there has been an external change,
-			// we now have to cancel our work :(
+			// Decode the tablename and see if it is relevant.
+			schema, table := repl.DecodeSchemaTable(tbl)
+			if schema != r.sourceConfig.DBName {
+				continue // not our database
+			}
+			if len(r.move.SourceTables) > 0 {
+				// If r.move.SourceTables is not-empty, it means we only care about these
+				// tables. If it is empty it means we care about any table in the schema.
+				if !slices.Contains(r.move.SourceTables, table) {
+					continue // not one of our tables
+				}
+			}
+			// We have a DDL change on one of our tables!
+			// Either in the database we are observing, or in the list of tables we care about.
 			r.status.Set(status.ErrCleanup)
 			// Write this to the logger, so it can be captured by the initiator.
 			r.logger.Error("table definition changed during move operation",
