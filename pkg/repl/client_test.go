@@ -851,3 +851,50 @@ func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
 	// If we reach here, test failed - no panic occurred
 	t.Fatal("Expected panic did not occur")
 }
+
+// TestNewServerIDConcurrent tests that NewServerID generates unique IDs even when called concurrently.
+// This is a regression test for the issue where using time.Now().Unix() as a seed caused collisions
+// when multiple clients were created within the same second. This is *only* an issue for tests,
+// but the serverIDs need to be unique to prevent MySQL disconnecting the sessions.
+func TestNewServerIDConcurrent(t *testing.T) {
+	const numGoroutines = 100
+	const idsPerGoroutine = 100
+
+	// Channel to collect all generated IDs
+	idChan := make(chan uint32, numGoroutines*idsPerGoroutine)
+
+	// Start multiple goroutines generating IDs concurrently
+	for range numGoroutines {
+		go func() {
+			for range idsPerGoroutine {
+				idChan <- NewServerID()
+			}
+		}()
+	}
+
+	// Collect all IDs
+	ids := make(map[uint32]bool)
+	for range numGoroutines * idsPerGoroutine {
+		id := <-idChan
+
+		// Verify ID is in expected range (at least 1001)
+		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
+
+		// Check for duplicates
+		if ids[id] {
+			t.Errorf("Duplicate ServerID generated: %d", id)
+		}
+		ids[id] = true
+	}
+
+	// Verify we got the expected number of unique IDs
+	assert.Len(t, ids, numGoroutines*idsPerGoroutine, "Should have generated unique IDs")
+}
+
+// TestNewServerIDRange tests that NewServerID always returns values in the expected range.
+func TestNewServerIDRange(t *testing.T) {
+	for range 1000 {
+		id := NewServerID()
+		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
+	}
+}

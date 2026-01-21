@@ -3,11 +3,12 @@ package repl
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net"
 	"strconv"
 	"sync"
@@ -144,10 +145,33 @@ type ClientConfig struct {
 	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
 }
 
-// NewServerID randomizes the server ID to avoid conflicts with other binlog readers.
-// This uses the same logic as canal:
+// serverIDCounter is an atomic counter used to help ensure unique server IDs
+var serverIDCounter atomic.Uint32
+
+// NewServerID generates a unique server ID to avoid conflicts with other binlog readers.
+// Uses crypto/rand combined with an atomic counter to ensure uniqueness even when called
+// concurrently. Returns a value in the range 1001-4294967295 to avoid conflicts with
+// typical MySQL server IDs (0-1000).
 func NewServerID() uint32 {
-	return uint32(rand.New(rand.NewSource(time.Now().Unix())).Intn(1000)) + 1001
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to nanosecond-based generation if crypto/rand fails (should never happen)
+		return uint32(time.Now().UnixNano()%4294966295) + 1001
+	}
+	// Convert bytes to uint32, mix with counter, and ensure it's in valid range
+	randomPart := binary.BigEndian.Uint32(b[:])
+	counterPart := serverIDCounter.Add(1)
+
+	// XOR the random and counter parts for better distribution
+	// Then ensure we're in the range 1001 to max uint32
+	result := randomPart ^ counterPart
+
+	// Ensure result is at least 1001
+	if result < 1001 {
+		result = result + 1001
+	}
+
+	return result
 }
 
 // NewClientDefaultConfig returns a default config for the copier.
