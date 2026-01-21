@@ -82,8 +82,10 @@ type Client struct {
 
 	// onDDL is a channel that is used to notify of
 	// any schema changes. It will send any changes,
-	// and the caller is expected to filter it.
-	onDDL chan string
+	// and the caller is expected to filter it if
+	// onDDLDisableFiltering=true
+	onDDL                 chan string
+	onDDLDisableFiltering bool
 
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
@@ -128,6 +130,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		concurrency:                config.Concurrency,
 		subscriptions:              make(map[string]Subscription),
 		onDDL:                      config.OnDDL,
+		onDDLDisableFiltering:      config.OnDDLDisableFiltering,
 		serverID:                   config.ServerID,
 		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
 		applier:                    config.Applier,
@@ -139,6 +142,7 @@ type ClientConfig struct {
 	Concurrency                int
 	Logger                     *slog.Logger
 	OnDDL                      chan string
+	OnDDLDisableFiltering      bool
 	ServerID                   uint32
 	UseExperimentalBufferedMap bool
 	Applier                    applier.Applier
@@ -632,22 +636,24 @@ func (c *Client) processDDLNotification(encodedTable string) {
 	if c.onDDL == nil {
 		return // no one is listening for DDL events
 	}
-	// Check if the encodedTable matches any of our subscriptions.
-	matchFound := false
-	for _, sub := range c.subscriptions {
-		for _, tsub := range sub.Tables() { // currentTable, newTable
-			tName := EncodeSchemaTable(tsub.SchemaName, tsub.TableName)
-			if encodedTable == tName {
-				matchFound = true
-				break
+	if !c.onDDLDisableFiltering {
+		// Check if the encodedTable matches any of our subscriptions.
+		// This is the default behavior.
+		matchFound := false
+		for _, sub := range c.subscriptions {
+			for _, tsub := range sub.Tables() { // currentTable, newTable
+				tName := EncodeSchemaTable(tsub.SchemaName, tsub.TableName)
+				if encodedTable == tName {
+					matchFound = true
+					break
+				}
 			}
 		}
+		// If there is no matchFound, we don't send the notification.
+		if !matchFound {
+			return
+		}
 	}
-	// If there is no matchFound, we don't send the notification.
-	if !matchFound {
-		return
-	}
-
 	// Use non-blocking send to prevent deadlock
 	select {
 	case c.onDDL <- encodedTable:

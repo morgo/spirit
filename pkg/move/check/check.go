@@ -59,7 +59,7 @@ func registerCheck(name string, callback func(context.Context, Resources, *slog.
 // RunChecks runs all checks that are registered for the given scope
 func RunChecks(ctx context.Context, r Resources, logger *slog.Logger, scope ScopeFlag) error {
 	for _, check := range checks {
-		if check.scope&scope == 0 {
+		if check.scope != scope {
 			continue
 		}
 		err := check.callback(ctx, r, logger)

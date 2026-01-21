@@ -51,6 +51,7 @@ type Runner struct {
 	copier            copier.Copier
 	checker           checksum.Checker
 	checksumWatermark string
+	ddlNotification   chan string
 
 	// Track some key statistics.
 	startTime                time.Time
@@ -78,8 +79,14 @@ func (r *Runner) Close() error {
 	if r.copyChunker != nil {
 		r.copyChunker.Close()
 	}
+	// Set the DDL notification channel to nil before closing it
+	// to prevent race conditions where another goroutine might try to send to it
 	if r.replClient != nil {
+		r.replClient.SetDDLNotificationChannel(nil)
 		r.replClient.Close()
+	}
+	if r.ddlNotification != nil {
+		close(r.ddlNotification)
 	}
 	for _, target := range r.targets {
 		target.DB.Close()
@@ -304,6 +311,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 func (r *Runner) setup(ctx context.Context) error {
 	var err error
+	r.ddlNotification = make(chan string, 1)
 
 	// Run preflight checks on the source database
 	r.logger.Info("Running preflight checks")
@@ -335,6 +343,8 @@ func (r *Runner) setup(ctx context.Context) error {
 		Logger:                     r.logger,
 		Concurrency:                r.move.Threads,
 		TargetBatchTime:            r.move.TargetChunkTime,
+		OnDDL:                      r.ddlNotification,
+		OnDDLDisableFiltering:      true,
 		ServerID:                   repl.NewServerID(),
 		UseExperimentalBufferedMap: true,
 		Applier:                    r.applier, // Use the shared applier
@@ -576,7 +586,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.prepareForCutover(ctx); err != nil {
 		return err
 	}
-
 	r.logger.Info("Checksum completed successfully, starting cutover")
 	// Create a cutover.
 	r.status.Set(status.CutOver)
@@ -608,10 +617,63 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
 	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
-	//go r.tableChangeNotification(ctx)
+	go r.tableChangeNotification(ctx)
 
 	// Start go routines for checkpointing and dumping status
 	status.WatchTask(ctx, r, r.logger)
+}
+
+// tableChangeNotification is called as a goroutine.
+// Any schema changes to the source tables will be sent to a channel
+// that this function reads from. For move operations, we monitor all
+// tables on the source connection for changes, this means we need
+// to do filtering for relevance.
+func (r *Runner) tableChangeNotification(ctx context.Context) {
+	defer r.replClient.SetDDLNotificationChannel(nil)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case tbl, ok := <-r.ddlNotification:
+			if !ok {
+				return // channel was closed
+			}
+			if r.status.Get() >= status.CutOver {
+				return
+			}
+
+			// Decode the tablename and see if it is relevant.
+			schema, table := repl.DecodeSchemaTable(tbl)
+			if schema != r.sourceConfig.DBName {
+				continue // not our database
+			}
+			if len(r.move.SourceTables) > 0 {
+				// If r.move.SourceTables is not-empty, it means we only care about these
+				// tables. If it is empty it means we care about any table in the schema.
+				if !slices.Contains(r.move.SourceTables, table) {
+					continue // not one of our tables
+				}
+			}
+			// We have a DDL change on one of our tables!
+			// Either in the database we are observing, or in the list of tables we care about.
+			r.status.Set(status.ErrCleanup)
+			// Write this to the logger, so it can be captured by the initiator.
+			r.logger.Error("table definition changed during move operation",
+				"table", tbl,
+			)
+			// Invalidate the checkpoint, so we don't try to resume.
+			// If we don't do this, the move will permanently be blocked from proceeding.
+			// Letting it start again is the better choice.
+			if r.checkpointTable != nil {
+				if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
+					r.logger.Error("could not remove checkpoint",
+						"error", err,
+					)
+				}
+			}
+			r.cancelFunc() // cancel the move context
+		}
+	}
 }
 
 func (r *Runner) Status() string {

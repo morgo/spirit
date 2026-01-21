@@ -111,6 +111,161 @@ func TestEncodeSchemaTable(t *testing.T) {
 	}
 }
 
+func TestDecodeSchemaTable(t *testing.T) {
+	tests := []struct {
+		name           string
+		encoded        string
+		expectedSchema string
+		expectedTable  string
+	}{
+		{
+			name:           "basic case",
+			encoded:        "test.users",
+			expectedSchema: "test",
+			expectedTable:  "users",
+		},
+		{
+			name:           "schema with underscore",
+			encoded:        "test_db.users",
+			expectedSchema: "test_db",
+			expectedTable:  "users",
+		},
+		{
+			name:           "table with underscore",
+			encoded:        "test.user_data",
+			expectedSchema: "test",
+			expectedTable:  "user_data",
+		},
+		{
+			name:           "both with underscores",
+			encoded:        "my_schema.my_table",
+			expectedSchema: "my_schema",
+			expectedTable:  "my_table",
+		},
+		{
+			name:           "empty schema",
+			encoded:        ".users",
+			expectedSchema: "",
+			expectedTable:  "users",
+		},
+		{
+			name:           "empty table",
+			encoded:        "test.",
+			expectedSchema: "test",
+			expectedTable:  "",
+		},
+		{
+			name:           "both empty",
+			encoded:        ".",
+			expectedSchema: "",
+			expectedTable:  "",
+		},
+		{
+			name:           "no separator - returns empty strings",
+			encoded:        "users",
+			expectedSchema: "",
+			expectedTable:  "",
+		},
+		{
+			name:           "empty string - returns empty strings",
+			encoded:        "",
+			expectedSchema: "",
+			expectedTable:  "",
+		},
+		{
+			name:           "multiple dots - only splits on first",
+			encoded:        "schema.table.with.dots",
+			expectedSchema: "schema",
+			expectedTable:  "table.with.dots",
+		},
+		{
+			name:           "schema with hyphen",
+			encoded:        "my-schema.users",
+			expectedSchema: "my-schema",
+			expectedTable:  "users",
+		},
+		{
+			name:           "table with hyphen",
+			encoded:        "test.my-table",
+			expectedSchema: "test",
+			expectedTable:  "my-table",
+		},
+		{
+			name:           "numeric schema and table",
+			encoded:        "db123.table456",
+			expectedSchema: "db123",
+			expectedTable:  "table456",
+		},
+		{
+			name:           "special characters",
+			encoded:        "schema$1.table#2",
+			expectedSchema: "schema$1",
+			expectedTable:  "table#2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema, table := DecodeSchemaTable(tt.encoded)
+			assert.Equal(t, tt.expectedSchema, schema, "schema mismatch")
+			assert.Equal(t, tt.expectedTable, table, "table mismatch")
+		})
+	}
+}
+
+func TestEncodeDecodeSchemaTableRoundTrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		table  string
+	}{
+		{
+			name:   "basic case",
+			schema: "test",
+			table:  "users",
+		},
+		{
+			name:   "with underscores",
+			schema: "test_db",
+			table:  "user_data",
+		},
+		{
+			name:   "empty schema",
+			schema: "",
+			table:  "users",
+		},
+		{
+			name:   "empty table",
+			schema: "test",
+			table:  "",
+		},
+		{
+			name:   "both empty",
+			schema: "",
+			table:  "",
+		},
+		{
+			name:   "with hyphens",
+			schema: "my-schema",
+			table:  "my-table",
+		},
+		{
+			name:   "numeric names",
+			schema: "db123",
+			table:  "table456",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded := EncodeSchemaTable(tt.schema, tt.table)
+			schema, table := DecodeSchemaTable(encoded)
+			assert.Equal(t, tt.schema, schema, "schema should match after round trip")
+			assert.Equal(t, tt.table, table, "table should match after round trip")
+		})
+	}
+}
+
 func TestExtractTablesFromDDLStmts(t *testing.T) {
 	tests := []struct {
 		name          string

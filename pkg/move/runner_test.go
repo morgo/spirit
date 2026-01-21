@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,19 +25,18 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 }
 
 func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	sourceDSN := testutils.DSNForDatabase("source_concurrent")
+	targetDSN := testutils.DSNForDatabase("dest_concurrent")
 
-	src := cfg.Clone()
-	src.DBName = "source_concurrent"
-	dest := cfg.Clone()
-	dest.DBName = "dest_concurrent"
-
-	sourceDSN := src.FormatDSN()
-	targetDSN := dest.FormatDSN()
+	// Clean up both databases to ensure a fresh start for each test run
+	// This is necessary because the test is called twice (with different deferSecondaryIndexes values)
+	// and the targetStateCheck validates that target tables are empty
+	t.Logf("Cleaning up databases for deferSecondaryIndexes=%v", deferSecondaryIndexes)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_concurrent`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_concurrent`)
 
 	// Setup source database with a table similar to the load test
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_concurrent`)
+	t.Logf("Creating source database")
 	testutils.RunSQL(t, `CREATE DATABASE source_concurrent`)
 	testutils.RunSQL(t, `CREATE TABLE source_concurrent.xfers (
 		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
@@ -68,13 +66,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`)
 
 	// Setup target database
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	assert.NoError(t, err)
-	defer db.Close()
-	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_concurrent")
-	assert.NoError(t, err)
-	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_concurrent")
-	assert.NoError(t, err)
+	testutils.RunSQL(t, `CREATE DATABASE dest_concurrent`)
 
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
@@ -202,4 +194,115 @@ func doOneWriteLoop(ctx context.Context, db *sql.DB) error {
 	}
 
 	return trx.Commit()
+}
+
+// TestMoveWithNewTableCreation verifies that creating a new table in the source database
+// during a move operation causes the move to be cancelled immediately via table notification.
+func TestMoveWithNewTableCreation(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
+
+	sourceDSN := testutils.DSNForDatabase("source_newtable")
+	targetDSN := testutils.DSNForDatabase("dest_newtable")
+
+	// Clean up both databases to ensure a fresh start
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_newtable`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_newtable`)
+
+	// Setup source database with a table
+	t.Logf("Creating source database")
+	testutils.RunSQL(t, `CREATE DATABASE source_newtable`)
+	testutils.RunSQL(t, `CREATE TABLE source_newtable.xfers (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		x_token VARCHAR(36) NOT NULL,
+		cents INT NOT NULL,
+		currency VARCHAR(3) NOT NULL,
+		s_token VARCHAR(36) NOT NULL,
+		r_token VARCHAR(36) NOT NULL,
+		version INT NOT NULL DEFAULT 1,
+		c1 VARCHAR(20),
+		c2 VARCHAR(200),
+		c3 VARCHAR(10),
+		t1 DATETIME,
+		t2 DATETIME,
+		t3 DATETIME,
+		b1 TINYINT,
+		b2 TINYINT,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		UNIQUE KEY idx_x_token (x_token),
+		KEY idx_s_token (s_token),
+		KEY idx_r_token (r_token)
+	)`)
+
+	// Insert more initial data to slow down the move operation
+	// This gives us more time for the table creation to happen during the move
+	testutils.RunSQL(t, `INSERT INTO source_newtable.xfers (x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
+		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`)
+
+	// Add many more rows to make the copy phase take longer
+	// Use a cross join to quickly generate many rows
+	//nolint: dupword
+	testutils.RunSQL(t, `INSERT INTO source_newtable.xfers (x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
+		SELECT UUID(), 100, 'USD', UUID(), UUID(), 1, NOW(), NOW()
+		FROM source_newtable.xfers a
+		CROSS JOIN source_newtable.xfers b
+		LIMIT 10000`)
+
+	// Setup target database
+	testutils.RunSQL(t, `CREATE DATABASE dest_newtable`)
+
+	// Open connection to source for concurrent writes
+	sourceDB, err := sql.Open("mysql", sourceDSN)
+	assert.NoError(t, err)
+	defer sourceDB.Close()
+
+	// Start concurrent write load
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var writeCount atomic.Int64
+	var errorCount atomic.Int64
+	numThreads := 2
+
+	// Start write threads
+	for range numThreads {
+		wg.Go(func() {
+			concurrentWriteThread(ctx, sourceDB, &writeCount, &errorCount)
+		})
+	}
+
+	// Give the writers a moment to start
+	// it has a sentinel so it will never complete accidentally
+	time.Sleep(100 * time.Millisecond)
+	move := Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		CreateSentinel:  true,
+	}
+	wg.Go(func() {
+		err = move.Run()
+		// The error is context canceled, which is not that useful.
+		// But the problem is written to the log as:
+		// ERROR table definition changed during move operation table=source_newtable.new_table
+		// This is clear enough.
+		assert.Error(t, err, "Move should fail when a new table is created")
+	})
+
+	// Give the move a moment to start
+	time.Sleep(100 * time.Millisecond)
+
+	// create a table which will break the move operation
+	testutils.RunSQL(t, `CREATE TABLE source_newtable.new_table (
+			id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+			data VARCHAR(255)
+		)`)
+
+	// Stop the write threads
+	cancel()
+	wg.Wait()
 }
