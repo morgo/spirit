@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,19 +25,18 @@ func TestMoveWithConcurrentWrites(t *testing.T) {
 }
 
 func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	sourceDSN := testutils.DSNForDatabase("source_concurrent")
+	targetDSN := testutils.DSNForDatabase("dest_concurrent")
 
-	src := cfg.Clone()
-	src.DBName = "source_concurrent"
-	dest := cfg.Clone()
-	dest.DBName = "dest_concurrent"
-
-	sourceDSN := src.FormatDSN()
-	targetDSN := dest.FormatDSN()
+	// Clean up both databases to ensure a fresh start for each test run
+	// This is necessary because the test is called twice (with different deferSecondaryIndexes values)
+	// and the targetStateCheck validates that target tables are empty
+	t.Logf("Cleaning up databases for deferSecondaryIndexes=%v", deferSecondaryIndexes)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_concurrent`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_concurrent`)
 
 	// Setup source database with a table similar to the load test
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_concurrent`)
+	t.Logf("Creating source database")
 	testutils.RunSQL(t, `CREATE DATABASE source_concurrent`)
 	testutils.RunSQL(t, `CREATE TABLE source_concurrent.xfers (
 		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
@@ -68,13 +66,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`)
 
 	// Setup target database
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	assert.NoError(t, err)
-	defer db.Close()
-	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_concurrent")
-	assert.NoError(t, err)
-	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_concurrent")
-	assert.NoError(t, err)
+	testutils.RunSQL(t, `CREATE DATABASE dest_concurrent`)
 
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)

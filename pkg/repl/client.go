@@ -613,6 +613,9 @@ func (c *Client) processDDLNotification(encodedTable string) {
 	matchFound := false
 	for _, sub := range c.subscriptions {
 		for _, tsub := range sub.Tables() { // currentTable, newTable
+			if tsub == nil {
+				continue // skip nil tables (can happen in move operations)
+			}
 			tName := EncodeSchemaTable(tsub.SchemaName, tsub.TableName)
 			if encodedTable == tName {
 				matchFound = true
