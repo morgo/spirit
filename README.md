@@ -2,10 +2,9 @@
 
 Spirit is a _reimplementation_ of the schema change tool [gh-ost](https://github.com/github/gh-ost).
 
-It works very similar to gh-ost except:
+It is similar to gh-ost except:
 - It only supports MySQL 8.0 and higher
 - It is multi-threaded in both the row-copying and the binlog applying phase
-- It supports resume-from-checkpoint
 
 The goal of Spirit is to apply schema changes much faster than gh-ost. This makes it unsuitable in the following scenarios:
 - You require read replicas to be less than 10s behind the writer
@@ -51,15 +50,17 @@ While Spirit does not support read-replicas, it still tries to keep replication 
 
 ### Attempt Instant DDL
 
-Spirit will attempt to use MySQL 8.0's `INSTANT` DDL assertion before applying the change itself. If the DDL change supports it, `INSTANT DDL` is a very fast operation and only requires a metadata change. Spirit also automatically detects operations that use the `INPLACE` algorithm but only modify metadata and executes those directly rater than using Spirit's copy mechanism.
+Spirit will attempt to use MySQL 8.0's `INSTANT` DDL assertion before applying the change itself. If the DDL change supports it, `INSTANT DDL` is a very fast operation and only requires a metadata change. Spirit also automatically detects operations that use the `INPLACE` algorithm but only modify metadata and executes those directly rather than using Spirit's copy mechanism.
 
-**Note:** This feature has been contributed to `gh-ost` by the same authors of Spirit. It is disabled by default, and [only in the master branch](https://github.com/github/gh-ost/blob/master/doc/command-line-flags.md#attempt-instant-ddl).
+**Note:** [This feature](https://github.com/github/gh-ost/blob/master/doc/command-line-flags.md#attempt-instant-ddl) has been contributed to `gh-ost` by the same authors of Spirit. It is disabled by default.
 
 ### Resume from Checkpoint
 
 Spirit periodically saves the progress of a schema change to an internal checkpoint table. If the migration is interrupted, it can be resumed with only about the last minute of progress lost. There are no flags required to enable this feature; it will apply automatically provided that Spirit is invoked with an identical `ALTER` statement and the required binary logs are still available.
 
 When you consider that many migrations are best measured in _days_, this feature can save you a lot of lost work and improves the predictability of large-table schema migrations.
+
+**Note:** [This feature](https://github.com/github/gh-ost/blob/master/doc/resume.md) is now available in gh-ost.
 
 ## Atomic Multi-table changes
 
@@ -89,7 +90,7 @@ For a non-idle table, the performance delta is even greater. Consider the follow
 | finch.balances (800MB/1M rows), idle load    | 28.720s  | 11.197s |
 | finch.balances (800MB/1M rows), during bench | 2:50m+   | ~15-18s |
 
-This scenario is kind of a worse case for gh-ost since it prioritizes replication over row-copying and the benchmark never lets up. The spirit time also includes a checksum.
+This scenario is kind of a worst case for gh-ost since it prioritizes replication over row-copying and the benchmark never lets up. The spirit time also includes a checksum.
 
 ## Unsupported Features
 
