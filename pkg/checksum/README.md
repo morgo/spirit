@@ -9,6 +9,7 @@ Checksums validate data consistency between two tables. During schema changes, t
 - **Automatic repair**: When inconsistencies are detected, the checksum automatically repairs differences by recopying affected chunks.
 - **Parallel execution**: Checksums process chunks concurrently across multiple threads for efficient handling of large tables.
 - **Consistent snapshot**: A brief table lock establishes a consistent snapshot before being released. The checksum remains immune to concurrent modifications during execution.
+- **Server-side execution**: The checksum computation is pushed down to MySQL, with each chunk returning only a CRC32 value and row count to Spirit. This minimizes network overhead and is significantly more efficient than approaches that extract all data for client-side comparison.
 
 ## Why Checksums Matter
 
