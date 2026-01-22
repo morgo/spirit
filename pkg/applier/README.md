@@ -1,6 +1,6 @@
 # Appliers
 
-Appliers are responsible for writing rows to one or more target(s) and are utilized by the copier/subscription components to send changes to an underlying target database.
+Appliers are responsible for writing rows to one or more target(s) and are utilized by the copier/subscription components.
 
 - **SingleTargetApplier**: For standard (non-sharded) migrations to a single target database.
 - **ShardedApplier**: For migrations to Vitess-style sharded databases, where rows are distributed across multiple targets based on a hash function.
