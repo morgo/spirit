@@ -32,8 +32,8 @@ func mySQLTypeToDatumTp(mysqlTp string) datumTp {
 
 	// Extract base type (remove size specifications like (255))
 	baseType := normalized
-	if idx := strings.Index(normalized, "("); idx != -1 {
-		baseType = normalized[:idx]
+	if before, _, found := strings.Cut(normalized, "("); found {
+		baseType = before
 	}
 
 	switch baseType {
