@@ -48,7 +48,8 @@ const (
 			performance_schema.metadata_locks ml join performance_schema.threads t on ml.owner_thread_id=t.thread_id
 		where
 			ml.object_type='table' AND
-			ml.lock_type IN ('SHARED_NO_READ_WRITE', 'SHARED_READ_ONLY') `
+			ml.lock_type IN ('SHARED_NO_READ_WRITE', 'SHARED_READ_ONLY') AND
+			t.processlist_id IS NOT NULL `
 
 	LongRunningEventQuery = `SELECT
     t.processlist_id,
@@ -72,7 +73,7 @@ FROM
         ON etc.thread_id = ml.owner_thread_id
     LEFT JOIN information_schema.innodb_trx trx
 		ON t.processlist_id = trx.trx_mysql_thread_id
-WHERE 1 `
+WHERE t.processlist_id IS NOT NULL `
 
 	processIDClause  = " AND t.processlist_id NOT IN (CONNECTION_ID() %s) "
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s) "
