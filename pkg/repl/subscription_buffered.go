@@ -110,8 +110,8 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 		// Check low watermark only if the optimization is enabled AND we're not under lock.
 		// When underLock=true (during cutover), we must flush all changes regardless of watermark.
 		// Use originalKey to preserve typed values for watermark comparison.
-		// Note: bufferedMap has inverted logic - KeyBelowLowWatermark returns true
-		// for keys that are still being copied, so we skip flushing them.
+		// In bufferedMap, we use the low-watermark check to defer flushing keys that are
+		// still being copied (KeyBelowLowWatermark returns true), so this condition skips them.
 		if !underLock && s.watermarkOptimizationEnabled() && s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
 			s.c.logger.Debug("key below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
