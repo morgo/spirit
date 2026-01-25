@@ -8,16 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
-
-	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
-
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/go-sql-driver/mysql"
-
+	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 func mkPtr[T any](t T) *T {
