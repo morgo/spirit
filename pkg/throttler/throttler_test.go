@@ -1,6 +1,7 @@
 package throttler
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"os"
@@ -52,4 +53,33 @@ func TestNoopThrottler(t *testing.T) {
 	throttler.lagTolerance = 100 * time.Millisecond
 	assert.True(t, throttler.IsThrottled())
 	assert.NoError(t, throttler.Close())
+}
+
+func TestMockThrottler(t *testing.T) {
+	throttler := &Mock{}
+
+	// Test Open and Close
+	assert.NoError(t, throttler.Open(t.Context()))
+	assert.NoError(t, throttler.Close())
+
+	// Test IsThrottled always returns true
+	assert.True(t, throttler.IsThrottled())
+
+	// Test UpdateLag returns no error
+	assert.NoError(t, throttler.UpdateLag(t.Context()))
+
+	// Test BlockWait sleeps for approximately 1 second
+	start := time.Now()
+	throttler.BlockWait(t.Context())
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, 1*time.Second)
+	assert.Less(t, elapsed, 1100*time.Millisecond) // allow 100ms tolerance
+
+	// Test BlockWait respects context cancellation
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // cancel immediately
+	start = time.Now()
+	throttler.BlockWait(ctx)
+	elapsed = time.Since(start)
+	assert.Less(t, elapsed, 100*time.Millisecond) // should return almost immediately
 }
