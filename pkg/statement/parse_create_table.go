@@ -924,9 +924,9 @@ func extractPrecisionScaleFromTypeString(typeStr string) (int, int) {
 		end := strings.Index(typeStr, ")")
 		if start < end && start != -1 && end != -1 {
 			paramStr := typeStr[start+1 : end]
-			if commaIdx := strings.Index(paramStr, ","); commaIdx != -1 {
-				precisionStr := strings.TrimSpace(paramStr[:commaIdx])
-				scaleStr := strings.TrimSpace(paramStr[commaIdx+1:])
+			if precisionStr, scaleStr, found := strings.Cut(paramStr, ","); found {
+				precisionStr = strings.TrimSpace(precisionStr)
+				scaleStr = strings.TrimSpace(scaleStr)
 
 				var precision, scale int
 				if n, err := fmt.Sscanf(precisionStr, "%d", &precision); n == 1 && err == nil {
