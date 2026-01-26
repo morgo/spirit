@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 type CutOver struct {
@@ -122,7 +123,7 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	if err != nil {
 		return err
 	}
-	defer tableLock.Close(ctx)
+	defer utils.CloseAndLogWithContext(ctx, tableLock)
 	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
 		return err
 	}

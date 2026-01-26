@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -118,7 +119,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 				if err != nil {
 					return
 				}
-				defer warningRes.Close()
+				defer utils.CloseAndLog(warningRes)
 				var level, message string
 				var code int
 				for warningRes.Next() {

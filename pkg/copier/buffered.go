@@ -62,7 +62,7 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 	if err != nil {
 		return nil, fmt.Errorf("failed to query chunk data: %w", err)
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	// Get column count for scanning
 	columns, err := rows.Columns()

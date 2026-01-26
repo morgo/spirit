@@ -8,6 +8,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,13 +18,12 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
+	defer utils.CloseAndLog(tempFile)
 
 	// Write test certificate data
 	certData := generateTestCertForTLS(t)
 	_, err = tempFile.Write(certData)
 	require.NoError(t, err)
-	require.NoError(t, tempFile.Close())
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -119,7 +119,7 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 
 			runner, err := NewRunner(migration)
 			require.NoError(t, err)
-			defer runner.Close()
+			defer utils.CloseAndLog(runner)
 
 			// Initialize DB config to simulate real usage
 			runner.dbConfig = dbconn.NewDBConfig()
@@ -144,12 +144,11 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
+	defer utils.CloseAndLog(tempFile)
 
 	certData := generateTestCertForTLS(t)
 	_, err = tempFile.Write(certData)
 	require.NoError(t, err)
-	require.NoError(t, tempFile.Close())
 
 	testCases := []struct {
 		name        string
@@ -217,7 +216,7 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 			} // Create a mock database connection for testing
 			db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 			require.NoError(t, err)
-			defer db.Close()
+			defer utils.CloseAndLog(db)
 
 			// Create replication client
 			client := repl.NewClient(db, tc.host, "user", "pass", clientConfig)
@@ -244,12 +243,11 @@ func TestReplicaTLSIntegration(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
+	defer utils.CloseAndLog(tempFile)
 
 	certData := generateTestCertForTLS(t)
 	_, err = tempFile.Write(certData)
 	require.NoError(t, err)
-	require.NoError(t, tempFile.Close())
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -271,7 +269,7 @@ func TestReplicaTLSIntegration(t *testing.T) {
 
 	runner, err := NewRunner(migration)
 	require.NoError(t, err)
-	defer runner.Close()
+	defer utils.CloseAndLog(runner)
 
 	// Initialize the runner's DB config (normally done in Run())
 	runner.dbConfig = dbconn.NewDBConfig()

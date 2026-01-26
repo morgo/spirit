@@ -8,6 +8,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,7 @@ import (
 func createTempCertFile(t *testing.T) string {
 	tempFile, err := os.CreateTemp(t.TempDir(), "test_cert_*.pem")
 	require.NoError(t, err)
-	defer tempFile.Close()
+	defer utils.CloseAndLog(tempFile)
 
 	// Write minimal certificate content
 	_, err = tempFile.WriteString("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n")
@@ -151,7 +152,7 @@ func TestReplicaTLSIntegrationScenarios(t *testing.T) {
 			// Create runner to test TLS configuration
 			runner, err := NewRunner(migration)
 			require.NoError(t, err)
-			defer runner.Close()
+			defer utils.CloseAndLog(runner)
 
 			// Initialize DB config
 			runner.dbConfig = dbconn.NewDBConfig()
@@ -281,7 +282,7 @@ func TestTLSConfigurationFlow(t *testing.T) {
 			// Create runner and verify TLS configuration flows correctly
 			runner, err := NewRunner(tc.migration)
 			require.NoError(t, err)
-			defer runner.Close()
+			defer utils.CloseAndLog(runner)
 
 			// Test that runner initializes with correct TLS config
 			assert.Equal(t, tc.migration.TLSMode, runner.migration.TLSMode,
@@ -367,7 +368,7 @@ func TestTLSErrorHandling(t *testing.T) {
 			} else {
 				assert.NoError(t, err, test.description)
 				if err == nil {
-					defer runner.Close()
+					defer utils.CloseAndLog(runner)
 				}
 			}
 		})
@@ -411,6 +412,6 @@ func TestConcurrentTLSConfiguration(t *testing.T) {
 
 	// Clean up
 	for _, runner := range runners {
-		runner.Close()
+		utils.CloseAndLog(runner)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/assert"
@@ -110,7 +111,7 @@ func TestMetadataLockLength(t *testing.T) {
 
 	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	assert.NoError(t, err)
-	defer mdl.Close()
+	defer utils.CloseAndLog(mdl)
 
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), empty, NewDBConfig(), logger)
 	assert.ErrorContains(t, err, "no tables provided for metadata lock")

@@ -65,7 +65,11 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
 	if rows.Next() {
 		minVal := t.chunkPtr
 		var upperVal int64

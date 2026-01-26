@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"github.com/block/spirit/pkg/utils"
 	"log/slog"
 	"testing"
 
@@ -18,7 +19,7 @@ func testConfig() *DBConfig {
 func TestTableLock(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS testlock, _testlock_new")
 	assert.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testlock (id INT NOT NULL PRIMARY KEY, colb int)")
@@ -42,7 +43,7 @@ func TestTableLock(t *testing.T) {
 func TestExecUnderLock(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS testunderlock, _testunderlock_new")
 	assert.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testunderlock (id INT NOT NULL PRIMARY KEY, colb int)")
@@ -65,7 +66,7 @@ func TestExecUnderLock(t *testing.T) {
 func TestTableLockMultiple(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Create multiple test tables
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS testlock1, _testlock1_new, testlock2, _testlock2_new, testlock3, _testlock3_new")
@@ -125,7 +126,7 @@ func TestTableLockMultiple(t *testing.T) {
 func TestTableLockFail(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS test.testlockfail")
 	assert.NoError(t, err)

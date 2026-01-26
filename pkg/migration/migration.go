@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 
 	"github.com/pingcap/tidb/pkg/parser"
 )
@@ -72,7 +73,7 @@ func (m *Migration) Run() error {
 	if err != nil {
 		return err
 	}
-	defer migration.Close()
+	defer utils.CloseAndLog(migration)
 	if err := migration.runChecks(context.TODO(), check.ScopePreRun); err != nil {
 		return err
 	}

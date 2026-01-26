@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"github.com/block/spirit/pkg/utils"
 	"log/slog"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 func TestBufferedMap(t *testing.T) {
 	db, client := setupBufferedTest(t)
 	defer client.Close()
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Insert into srcTable.
 	testutils.RunSQL(t, "INSERT INTO subscription_test (id, name) VALUES (1, 'test')")
@@ -104,7 +105,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 
 	defer client.Close()
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "INSERT INTO subscription_test (id, name, extracol) VALUES (1, 'whatever', JSON_ARRAY(1,2,3))")
 	assert.NoError(t, err)
@@ -160,7 +161,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 
 	defer client.Close()
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	// Insert into srcTable various illegal values.
 	// This includes quotes, backslashes, and nulls.
 	// Also test with a string that includes a null byte.

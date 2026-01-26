@@ -8,6 +8,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,11 +27,11 @@ func TestResumeStateCheck(t *testing.T) {
 
 	sourceDB, err := sql.Open("mysql", testutils.DSNForDatabase("resume_src"))
 	assert.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	targetDB, err := sql.Open("mysql", testutils.DSNForDatabase("resume_tgt"))
 	assert.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create a test table on source
 	_, err = sourceDB.ExecContext(t.Context(), "CREATE TABLE resume_src.test_table (id int not null primary key auto_increment, name VARCHAR(100))")
@@ -177,7 +178,7 @@ func TestResumeStateCheck(t *testing.T) {
 
 		targetDB2, err := sql.Open("mysql", testutils.DSNForDatabase("resume_tgt2"))
 		require.NoError(t, err)
-		defer targetDB2.Close()
+		defer utils.CloseAndLog(targetDB2)
 
 		// Recreate first target table with correct schema
 		_, err = targetDB.ExecContext(t.Context(), "DROP TABLE IF EXISTS resume_tgt.test_table")
@@ -223,7 +224,7 @@ func TestResumeStateCheck(t *testing.T) {
 
 		targetDB3, err := sql.Open("mysql", testutils.DSNForDatabase("resume_tgt3"))
 		require.NoError(t, err)
-		defer targetDB3.Close()
+		defer utils.CloseAndLog(targetDB3)
 
 		targetConfig3 := &mysql.Config{
 			DBName: "resume_tgt3",

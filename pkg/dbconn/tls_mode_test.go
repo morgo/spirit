@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -146,7 +147,7 @@ func TestNewDSNWithTLSModes(t *testing.T) {
 	// Create a temporary certificate file
 	tempFile, err := os.CreateTemp(t.TempDir(), "test_cert_*.pem")
 	require.NoError(t, err)
-	defer tempFile.Close()
+	defer utils.CloseAndLog(tempFile)
 
 	_, err = tempFile.Write(testCert)
 	require.NoError(t, err)
@@ -355,13 +356,13 @@ func TestVERIFY_CACertificateTrustLogic(t *testing.T) {
 	// Create temporary files for both CAs
 	companyCertFile, err := os.CreateTemp(t.TempDir(), "company_ca_*.pem")
 	require.NoError(t, err)
-	defer companyCertFile.Close()
+	defer utils.CloseAndLog(companyCertFile)
 	_, err = companyCertFile.Write(companyCA)
 	require.NoError(t, err)
 
 	otherCertFile, err := os.CreateTemp(t.TempDir(), "other_ca_*.pem")
 	require.NoError(t, err)
-	defer otherCertFile.Close()
+	defer utils.CloseAndLog(otherCertFile)
 	_, err = otherCertFile.Write(otherCA)
 	require.NoError(t, err)
 
@@ -420,7 +421,7 @@ func TestVERIFY_CAHostnameFlexibility(t *testing.T) {
 
 	tempFile, err := os.CreateTemp(t.TempDir(), "test_cert_*.pem")
 	require.NoError(t, err)
-	defer tempFile.Close()
+	defer utils.CloseAndLog(tempFile)
 	_, err = tempFile.Write(testCert)
 	require.NoError(t, err)
 
@@ -507,7 +508,7 @@ func TestCertificateAuthorityPrecedence(t *testing.T) {
 
 	customCertFile, err := os.CreateTemp(t.TempDir(), "custom_cert_*.pem")
 	require.NoError(t, err)
-	defer customCertFile.Close()
+	defer utils.CloseAndLog(customCertFile)
 	_, err = customCertFile.Write(testCert)
 	require.NoError(t, err)
 
@@ -643,7 +644,7 @@ func TestPREFERREDModeDSNGeneration(t *testing.T) {
 	// Create a temporary certificate file
 	tempFile, err := os.CreateTemp(t.TempDir(), "test_cert_*.pem")
 	require.NoError(t, err)
-	defer tempFile.Close()
+	defer utils.CloseAndLog(tempFile)
 
 	_, err = tempFile.Write(testCert)
 	require.NoError(t, err)
@@ -811,7 +812,7 @@ func TestPREFERREDModeIntegration(t *testing.T) {
 	// Create temporary certificate file
 	tempFile, err := os.CreateTemp(t.TempDir(), "test_cert_*.pem")
 	require.NoError(t, err)
-	defer tempFile.Close()
+	defer utils.CloseAndLog(tempFile)
 
 	_, err = tempFile.Write(testCert)
 	require.NoError(t, err)

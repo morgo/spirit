@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -12,7 +13,7 @@ import (
 func createTempCertFile(t *testing.T) string {
 	tempFile, err := os.CreateTemp(t.TempDir(), "test_cert_*.pem")
 	require.NoError(t, err)
-	defer tempFile.Close()
+	defer utils.CloseAndLog(tempFile)
 
 	// Write minimal certificate content
 	_, err = tempFile.WriteString("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n")

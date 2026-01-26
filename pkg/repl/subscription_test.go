@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"github.com/block/spirit/pkg/utils"
 	"database/sql"
 	"log/slog"
 	"testing"
@@ -21,7 +22,7 @@ func setupTestTables(t *testing.T, t1, t2 string) (*table.TableInfo, *table.Tabl
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	srcTable := table.NewTableInfo(db, "test", "subscription_test")
 	dstTable := table.NewTableInfo(db, "test", "_subscription_test_new")

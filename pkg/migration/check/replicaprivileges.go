@@ -2,6 +2,8 @@ package check
 
 import (
 	"context"
+
+	"github.com/block/spirit/pkg/utils"
 	"log/slog"
 
 	"github.com/block/spirit/pkg/throttler"
@@ -24,7 +26,7 @@ func replicaPrivilegeCheck(ctx context.Context, r Resources, logger *slog.Logger
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	_, err = scanToMap(rows)
 	return err
 }

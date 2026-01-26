@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/block/spirit/pkg/utils"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
@@ -25,7 +26,7 @@ func hasForeignKeysCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	if rows.Next() {
 		return errors.New("tables with existing foreign key constraints are not supported")
 	}

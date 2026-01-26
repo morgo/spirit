@@ -1,6 +1,7 @@
 package dbconn
 
 import (
+	"github.com/block/spirit/pkg/utils"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -26,7 +27,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create DB connection: %v", err)
 	}
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	n := 2
 

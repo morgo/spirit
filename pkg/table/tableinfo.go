@@ -130,7 +130,11 @@ func (t *TableInfo) setIndexes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
 	t.Indexes = []string{}
 	for rows.Next() {
 		var name string
@@ -153,7 +157,11 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
 	t.Columns = []string{}
 	t.NonGeneratedColumns = []string{}
 	t.columnsMySQLTps = make(map[string]string)
@@ -186,7 +194,11 @@ func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
 	for rows.Next() {
 		var col string
 		if err := rows.Scan(&col); err != nil {
@@ -210,7 +222,11 @@ func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
 	t.KeyColumns = []string{}
 	for rows.Next() {
 		var col string

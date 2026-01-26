@@ -2,6 +2,8 @@ package check
 
 import (
 	"context"
+
+	"github.com/block/spirit/pkg/utils"
 	"database/sql"
 	"errors"
 	"log/slog"
@@ -21,7 +23,7 @@ func replicaHealth(ctx context.Context, r Resources, logger *slog.Logger) error 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	status, err := scanToMap(rows)
 	if err != nil {
 		return err

@@ -12,7 +12,9 @@ func TestEnhanceDSNWithTLS(t *testing.T) {
 	// Create a temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
+	defer func() {
+		_ = os.Remove(tempFile.Name())
+	}()
 
 	// Write some test certificate data
 	certData := generateTestCertForMode(t)
@@ -246,8 +248,9 @@ func TestAddTLSParametersToDSN(t *testing.T) {
 	// Create a temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
-
+	defer func() {
+		_ = os.Remove(tempFile.Name())
+	}()
 	// Write some test certificate data
 	certData := generateTestCertForMode(t)
 	_, err = tempFile.Write(certData)
@@ -307,7 +310,9 @@ func TestEnhanceDSNWithTLS_Integration(t *testing.T) {
 	// This test verifies the integration between DSN enhancement and actual connection creation
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
+	defer func() {
+		_ = os.Remove(tempFile.Name())
+	}()
 
 	certData := generateTestCertForMode(t)
 	_, err = tempFile.Write(certData)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
@@ -75,10 +76,10 @@ func TestPrivileges(t *testing.T) {
 	// Reconnect before checking again.
 	// There seems to be a race in MySQL where privileges don't show up immediately
 	// That this can work around.
-	lowPrivDB.Close()
+	assert.NoError(t, lowPrivDB.Close())
 	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
-	defer lowPrivDB.Close()
+	defer utils.CloseAndLog(lowPrivDB)
 	r.DB = lowPrivDB
 
 	err = privilegesCheck(t.Context(), r, slog.Default())

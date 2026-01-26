@@ -11,7 +11,9 @@ import (
 func TestBasicUsage(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS asserty_test`)
 	table := `CREATE TABLE asserty_test (

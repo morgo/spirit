@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/utils"
+
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
@@ -184,7 +186,7 @@ func TestRenameInMySQL80(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS renamet1, _renamet1_new`)
 	table := `CREATE TABLE renamet1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
@@ -215,7 +217,7 @@ func TestUniqueOnNonUniqueData(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniquet1, _uniquet1_new`)
 	testutils.RunSQL(t, `CREATE TABLE uniquet1 (id int not null primary key auto_increment, b int not null, pad1 varbinary(1024));`)
 	testutils.RunSQL(t, `INSERT INTO uniquet1 SELECT NULL, 1, RANDOM_BYTES(1024) from dual;`)
@@ -751,8 +753,7 @@ port = 5678
 tls-mode = VERIFY_IDENTITY
 tls-ca = /path/from/file
 `)
-	defer os.Remove(tmpFile.Name())
-	require.NoError(t, tmpFile.Close())
+	defer utils.CloseAndLog(tmpFile)
 
 	migration := &Migration{
 		Host:               "cli-host:1234",
@@ -787,8 +788,7 @@ port = 5678
 tls-mode = REQUIRED
 tls-ca = /path/to/cert
 `)
-	defer os.Remove(tmpFile.Name())
-	require.NoError(t, tmpFile.Close())
+	defer utils.CloseAndLog(tmpFile)
 
 	migration := &Migration{
 		Table:    "testtable",
@@ -816,7 +816,9 @@ database = filedb
 tls-mode = VERIFY_IDENTITY
 tls-ca = /path/to/another/ca
 `)
-	defer os.Remove(tmpFile.Name())
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -841,7 +843,9 @@ func TestMigrationParamsIniFileOnlyUserSpecifiedInFile(t *testing.T) {
 	tmpFile := mkIniFile(t, `[client]
 user = fileuser
 `)
-	defer os.Remove(tmpFile.Name())
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -868,7 +872,9 @@ func TestMigrationParamsIniFileOnlyPasswordSpecifiedInFile(t *testing.T) {
 	tmpFile := mkIniFile(t, `[client]
 password = filepass
 `)
-	defer os.Remove(tmpFile.Name())
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -895,7 +901,7 @@ func TestMigrationParamsIniFileEmptyPasswordPassedThrough(t *testing.T) {
 	tmpFile := mkIniFile(t, `[client]
 password =
 `)
-	defer os.Remove(tmpFile.Name())
+	// File will be cleaned up by t.TempDir()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -922,7 +928,7 @@ func TestMigrationParamsIniFileEmptyPasswordOverridenByCommandLine(t *testing.T)
 	tmpFile := mkIniFile(t, `[client]
 password =
 `)
-	defer os.Remove(tmpFile.Name())
+	// File will be cleaned up by t.TempDir()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -950,7 +956,7 @@ func TestMigrationParamsIniFileOnlyPortUsedFromFile(t *testing.T) {
 	tmpFile := mkIniFile(t, `[client]
 port=1234
 `)
-	defer os.Remove(tmpFile.Name())
+	// File will be cleaned up by t.TempDir()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -978,7 +984,7 @@ func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
 	// Test with empty client section
 	tmpFile := mkIniFile(t, `[client]
 `)
-	defer os.Remove(tmpFile.Name())
+	// File will be cleaned up by t.TempDir()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -1008,7 +1014,7 @@ func TestMigrationParamsIniFileHasNoClientSection(t *testing.T) {
 user = mysqluser
 password = mysqlpass
 `)
-	defer os.Remove(tmpFile.Name())
+	// File will be cleaned up by t.TempDir()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{

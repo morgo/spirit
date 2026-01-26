@@ -54,8 +54,9 @@ func CreateUniqueTestDatabase(t *testing.T) string {
 
 		db, err := sql.Open("mysql", rootDSN)
 		assert.NoError(t, err)
-		defer db.Close()
-
+		defer func() {
+			_ = db.Close()
+		}()
 		// Create the database
 		_, err = db.ExecContext(t.Context(), "CREATE DATABASE IF NOT EXISTS "+dbName)
 		assert.NoError(t, err)
@@ -64,7 +65,9 @@ func CreateUniqueTestDatabase(t *testing.T) string {
 		t.Cleanup(func() {
 			db, err := sql.Open("mysql", rootDSN)
 			assert.NoError(t, err)
-			defer db.Close()
+			defer func() {
+				_ = db.Close()
+			}()
 			_, err = db.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
 			assert.NoError(t, err)
 		})
@@ -78,7 +81,9 @@ func RunSQLInDatabase(t *testing.T, dbName, stmt string) {
 	dsn := DSNForDatabase(dbName)
 	db, err := sql.Open("mysql", dsn)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 	_, err = db.ExecContext(t.Context(), stmt)
 	assert.NoError(t, err)
 }
@@ -87,7 +92,9 @@ func RunSQL(t *testing.T, stmt string) {
 	t.Helper()
 	db, err := sql.Open("mysql", DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 	_, err = db.ExecContext(t.Context(), stmt)
 	assert.NoError(t, err)
 }
@@ -105,7 +112,9 @@ func IsMinimalRBRTestRunner(t *testing.T) bool {
 		require.NoError(t, err)
 		db, err := sql.Open("mysql", cfg.FormatDSN())
 		require.NoError(t, err)
-		defer db.Close()
+		defer func() {
+			_ = db.Close()
+		}()
 		var binlogRowImage, binlogRowValueOptions string
 		err = db.QueryRowContext(t.Context(),
 			`SELECT
