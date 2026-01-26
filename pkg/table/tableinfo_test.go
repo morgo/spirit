@@ -117,7 +117,9 @@ func TestDiscoveryUInt(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	t1 := NewTableInfo(db, "test", "discoveryuintt1")
@@ -148,7 +150,9 @@ func TestDiscoveryNoKeyColumnsOrNoTable(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	t1 := NewTableInfo(db, "test", "discoverynokeyst1")
@@ -184,7 +188,9 @@ func TestDiscoveryBalancesTable(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	t1 := NewTableInfo(db, "test", "balances")
@@ -217,7 +223,9 @@ func TestDiscoveryCompositeNonComparable(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	t1 := NewTableInfo(db, "test", "compnoncomparable")
@@ -238,7 +246,9 @@ func TestDiscoveryCompositeComparable(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	t1 := NewTableInfo(db, "test", "compcomparable")
@@ -253,7 +263,9 @@ func TestStatisticsUpdate(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS statsupdate`)
@@ -291,7 +303,9 @@ func TestKeyColumnsValuesExtraction(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS colvaluest1`)
@@ -337,7 +351,9 @@ func TestDiscoveryGeneratedCols(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
 	}()
 
 	t1 := NewTableInfo(db, "test", "generatedcolst1")

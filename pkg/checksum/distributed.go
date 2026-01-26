@@ -343,11 +343,15 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		if err != nil {
 			// Clean up any pools we've already created
 			if c.trxPool != nil {
-				_ = c.trxPool.Close()
+				if err2 := c.trxPool.Close(); err2 != nil {
+					c.logger.Error("failed to close source transaction pool", "error", err2)
+				}
 			}
 			for j := range i {
 				if c.targetTrxPools[j] != nil {
-					_ = c.targetTrxPools[j].Close()
+					if err2 := c.targetTrxPools[j].Close(); err2 != nil {
+						c.logger.Error("failed to close target transaction pool", "targetIndex", j, "error", err2)
+					}
 				}
 			}
 			return fmt.Errorf("failed to create transaction pool for target %d: %w", i, err)
