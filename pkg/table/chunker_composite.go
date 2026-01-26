@@ -481,16 +481,68 @@ func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
 	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), atomic.LoadUint64(&t.Ti.EstimatedRows)
 }
 
-// KeyAboveHighWatermark is not yet supported for composite chunker.
+// KeyAboveHighWatermark checks if a key is above the high watermark (chunkPtr).
+// This optimization works with any comparable type in key[0] (first column of composite key).
+// Note: Watermark optimizations are disabled before checksum phase (see runner.go),
+// so there is no risk of checksum corruption even if collation comparison differs slightly.
 // See: https://github.com/block/spirit/issues/479
 func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
-	return false
+	t.Lock()
+	defer t.Unlock()
+
+	// If we haven't started copying yet, be conservative: don't discard anything
+	// Unlike the optimistic chunker (auto-increment), composite keys can have
+	// new rows inserted anywhere in the key space, not just at the "end"
+	if len(t.chunkPtrs) == 0 {
+		return false
+	}
+
+	// If we've sent the final chunk, nothing is above
+	if t.finalChunkSent {
+		return false
+	}
+
+	// Convert key0 to Datum for comparison
+	keyDatum, err := NewDatum(key0, t.chunkPtrs[0].Tp)
+	if err != nil {
+		// If we can't convert the key, return false to be safe (don't discard the row)
+		t.logger.Error("failed to create datum in KeyAboveHighWatermark", "key", key0, "error", err)
+		return false
+	}
+
+	// Check if key is greater than or equal to the current chunkPtr[0]
+	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
 }
 
-// KeyBelowLowWatermark is not yet supported for composite chunker.
+// KeyBelowLowWatermark checks if a key is below the low watermark.
+// This optimization works with any comparable type in key[0] (first column of composite key).
+// Note: Watermark optimizations are disabled before checksum phase (see runner.go),
+// so there is no risk of checksum corruption even if collation comparison differs slightly.
 // See: https://github.com/block/spirit/issues/479
 func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
-	return true
+	t.Lock()
+	defer t.Unlock()
+
+	// If we've sent the final chunk, everything is below
+	if t.finalChunkSent {
+		return true
+	}
+
+	// If watermark isn't ready yet, return false (not below)
+	if t.watermark == nil || t.watermark.UpperBound == nil || len(t.watermark.UpperBound.Value) == 0 {
+		return false
+	}
+
+	// Convert key0 to Datum for comparison
+	keyDatum, err := NewDatum(key0, t.watermark.UpperBound.Value[0].Tp)
+	if err != nil {
+		// If we can't convert the key, return false to be safe (assume it's not below watermark)
+		t.logger.Error("failed to create keyDatum in KeyBelowLowWatermark", "key", key0, "error", err)
+		return false
+	}
+
+	// Key is below watermark if watermark.UpperBound[0] > key
+	return t.watermark.UpperBound.Value[0].GreaterThan(keyDatum)
 }
 
 // SetKey allows you to chunk on a secondary index, and not the primary key.

@@ -771,3 +771,276 @@ func TestCompositeChunkerReset(t *testing.T) {
 	assert.NoError(t, chunker2.Close())
 	assert.NoError(t, chunker.Close())
 }
+
+// TestCompositeChunkerWatermarkOptimizations tests KeyAboveHighWatermark and KeyBelowLowWatermark
+// for composite chunker with numeric first column.
+func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositewatermarkopt_t1")
+	testutils.RunSQL(t, `CREATE TABLE compositewatermarkopt_t1 (
+		a int NOT NULL,
+		b int NOT NULL,
+		c int NOT NULL,
+		PRIMARY KEY (a,b,c)
+	)`)
+	// Insert test data using JOIN pattern like other tests
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkopt_t1 (a, b, c) SELECT 1, 1, 1 FROM dual`)
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkopt_t1 (a, b, c) SELECT 1, a.b+b.b, 1 FROM compositewatermarkopt_t1 a JOIN compositewatermarkopt_t1 b LIMIT 1000`)
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkopt_t1 (a, b, c) SELECT 2, a.b+b.b, 1 FROM compositewatermarkopt_t1 a JOIN compositewatermarkopt_t1 b LIMIT 1000`)
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkopt_t1 (a, b, c) SELECT 3, a.b+b.b, 1 FROM compositewatermarkopt_t1 a JOIN compositewatermarkopt_t1 b LIMIT 1000`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	tbl := NewTableInfo(db, "test", "compositewatermarkopt_t1")
+	assert.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	assert.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+
+	// Before opening, everything is above high watermark
+	assert.True(t, comp.KeyAboveHighWatermark(1))
+	assert.True(t, comp.KeyAboveHighWatermark(100))
+	assert.False(t, comp.KeyBelowLowWatermark(1)) // watermark not ready
+
+	assert.NoError(t, comp.Open())
+
+	// After opening but before first chunk, key=1 should still be above
+	assert.True(t, comp.KeyAboveHighWatermark(1))
+	assert.False(t, comp.KeyBelowLowWatermark(1))
+
+	// Get first chunk for tenant_id=1
+	chunk1, err := comp.Next()
+	assert.NoError(t, err)
+	assert.NotNil(t, chunk1)
+
+	// After dispatching first chunk:
+	// - Keys at or above chunkPtr[0] should be above high watermark
+	// - Keys below watermark should return false until feedback is given
+	// First chunk has no LowerBound, use UpperBound instead
+	assert.Nil(t, chunk1.LowerBound)
+	assert.NotNil(t, chunk1.UpperBound)
+	val1 := int(chunk1.UpperBound.Value[0].Val.(int64))
+	assert.Equal(t, 1, val1)
+
+	// Key for a < 1 should not be above
+	assert.False(t, comp.KeyAboveHighWatermark(0))
+
+	// Key for a >= chunkPtr should be above high watermark
+	assert.True(t, comp.KeyAboveHighWatermark(val1))
+	assert.True(t, comp.KeyAboveHighWatermark(val1+1))
+
+	// Nothing is below low watermark yet (no feedback given)
+	assert.False(t, comp.KeyBelowLowWatermark(1))
+
+	// Provide feedback to bump watermark
+	comp.Feedback(chunk1, 100*time.Millisecond, 1000)
+
+	// Now a=1 should be below low watermark
+	assert.True(t, comp.KeyBelowLowWatermark(1))
+	assert.False(t, comp.KeyBelowLowWatermark(2)) // a=2 not yet copied
+	assert.False(t, comp.KeyBelowLowWatermark(3))
+
+	// Get second chunk
+	chunk2, err := comp.Next()
+	assert.NoError(t, err)
+
+	// Provide feedback for chunk2
+	comp.Feedback(chunk2, 100*time.Millisecond, 1000)
+
+	// Keys up to chunk2's upper bound should now be below watermark
+	val2 := int(chunk2.UpperBound.Value[0].Val.(int64))
+	assert.True(t, comp.KeyBelowLowWatermark(1))
+	assert.True(t, comp.KeyBelowLowWatermark(val2))
+
+	// Exhaust remaining chunks
+	for {
+		chunk, err := comp.Next()
+		assert.NoError(t, err)
+		if chunk == nil {
+			break
+		}
+		comp.Feedback(chunk, 100*time.Millisecond, 1000)
+	}
+
+	// After final chunk is sent, everything should be below, nothing above
+	assert.False(t, comp.KeyAboveHighWatermark(1))
+	assert.False(t, comp.KeyAboveHighWatermark(100))
+	assert.True(t, comp.KeyBelowLowWatermark(1))
+	assert.True(t, comp.KeyBelowLowWatermark(100))
+
+	assert.NoError(t, comp.Close())
+}
+
+// TestCompositeChunkerWatermarkNonNumeric tests that watermark optimizations
+// work correctly with non-numeric (VARCHAR) first columns.
+// Since watermark optimizations are disabled before checksum (see runner.go),
+// there's no risk of corruption even if collation comparison differs slightly.
+func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositewatermarknn_t1")
+	testutils.RunSQL(t, `CREATE TABLE compositewatermarknn_t1 (
+		a varchar(40) NOT NULL,
+		b int NOT NULL,
+		PRIMARY KEY (a,b)
+	)`)
+	// Insert test data using JOIN pattern with predictable VARCHAR values
+	testutils.RunSQL(t, `INSERT INTO compositewatermarknn_t1 (a, b) SELECT 'aaa', 1 FROM dual`)
+	testutils.RunSQL(t, `INSERT INTO compositewatermarknn_t1 (a, b) SELECT CONCAT('key', LPAD(a.b+b.b, 5, '0')), a.b+b.b FROM compositewatermarknn_t1 a JOIN compositewatermarknn_t1 b LIMIT 100`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	tbl := NewTableInfo(db, "test", "compositewatermarknn_t1")
+	assert.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	assert.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+
+	assert.NoError(t, comp.Open())
+
+	// Get first chunk
+	chunk1, err := comp.Next()
+	assert.NoError(t, err)
+	assert.NotNil(t, chunk1)
+
+	// For VARCHAR keys, the optimization should work (not fall back to conservative)
+	// Test with a key that's clearly above the first chunk's upper bound
+	upperVal := chunk1.UpperBound.Value[0].Val.(string)
+	assert.False(t, comp.KeyAboveHighWatermark("aaa")) // Below upper bound
+	assert.True(t, comp.KeyAboveHighWatermark("zzz"))  // Above upper bound
+
+	// KeyBelowLowWatermark should work with VARCHAR comparison
+	comp.Feedback(chunk1, 100*time.Millisecond, 100)
+	watermarkUpper := comp.watermark.UpperBound.Value[0].Val.(string)
+	assert.True(t, comp.KeyBelowLowWatermark("aaa"))      // Below watermark
+	assert.False(t, comp.KeyBelowLowWatermark("zzzzzzz")) // Above watermark
+
+	// Verify the watermark value is what we expect
+	assert.Equal(t, upperVal, watermarkUpper)
+
+	assert.NoError(t, comp.Close())
+}
+
+// TestCompositeChunkerWatermarkDateTime tests that watermark optimizations
+// work correctly with DATETIME first columns.
+// Since watermark optimizations are disabled before checksum (see runner.go),
+// there's no risk of corruption even if temporal comparison differs slightly.
+func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositewatermarkdt_t1")
+	testutils.RunSQL(t, `CREATE TABLE compositewatermarkdt_t1 (
+		created_at DATETIME NOT NULL,
+		event_id int NOT NULL,
+		PRIMARY KEY (created_at, event_id)
+	)`)
+	// Insert test data using JOIN pattern with predictable DATETIME values
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkdt_t1 (created_at, event_id) SELECT '2024-01-01 00:00:00', 1 FROM dual`)
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkdt_t1 (created_at, event_id) 
+		SELECT DATE_ADD('2024-01-01 00:00:00', INTERVAL (a.event_id + b.event_id) HOUR), a.event_id + b.event_id 
+		FROM compositewatermarkdt_t1 a JOIN compositewatermarkdt_t1 b LIMIT 100`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	tbl := NewTableInfo(db, "test", "compositewatermarkdt_t1")
+	assert.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	assert.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+
+	assert.NoError(t, comp.Open())
+
+	// Get first chunk
+	chunk1, err := comp.Next()
+	assert.NoError(t, err)
+	assert.NotNil(t, chunk1)
+
+	// For DATETIME keys, the optimization should work
+	// Test with timestamps that are clearly above/below the first chunk's upper bound
+	upperVal := chunk1.UpperBound.Value[0].Val.(string)
+	assert.False(t, comp.KeyAboveHighWatermark("2024-01-01 00:00:00")) // Below upper bound
+	assert.True(t, comp.KeyAboveHighWatermark("2025-12-31 23:59:59"))  // Above upper bound
+
+	// KeyBelowLowWatermark should work with DATETIME comparison
+	comp.Feedback(chunk1, 100*time.Millisecond, 100)
+	watermarkUpper := comp.watermark.UpperBound.Value[0].Val.(string)
+	assert.True(t, comp.KeyBelowLowWatermark("2024-01-01 00:00:00"))  // Below watermark
+	assert.False(t, comp.KeyBelowLowWatermark("2025-12-31 23:59:59")) // Above watermark
+
+	// Verify the watermark value is what we expect
+	assert.Equal(t, upperVal, watermarkUpper)
+
+	assert.NoError(t, comp.Close())
+}
+
+// TestCompositeChunkerWatermarkWithOutOfOrderCompletion tests that watermark
+// correctly handles out-of-order chunk completion.
+func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositewatermarkooo_t1")
+	testutils.RunSQL(t, `CREATE TABLE compositewatermarkooo_t1 (
+		a int NOT NULL primary key
+	)`)
+	// Insert test data using JOIN pattern
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkooo_t1 (a) SELECT 1 FROM dual`)
+	testutils.RunSQL(t, `INSERT INTO compositewatermarkooo_t1 (a) SELECT a.a * 2 + b.a FROM compositewatermarkooo_t1 a JOIN compositewatermarkooo_t1 b LIMIT 3000`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer db.Close()
+
+	tbl := NewTableInfo(db, "test", "compositewatermarkooo_t1")
+	assert.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	assert.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+
+	assert.NoError(t, comp.Open())
+
+	// Get three chunks
+	chunk1, err := comp.Next()
+	assert.NoError(t, err)
+	chunk2, err := comp.Next()
+	assert.NoError(t, err)
+	chunk3, err := comp.Next()
+	assert.NoError(t, err)
+
+	// Simulate out-of-order completion: chunk2, then chunk1, then chunk3
+
+	// Complete chunk2 first (out of order)
+	comp.Feedback(chunk2, 100*time.Millisecond, 1000)
+
+	// Watermark should still be nil because chunk1 hasn't completed
+	assert.Nil(t, comp.watermark)
+
+	// Keys in chunk1 range should not be below watermark yet
+	chunk1Lower := int(chunk1.LowerBound.Value[0].Val.(int64))
+	assert.False(t, comp.KeyBelowLowWatermark(chunk1Lower))
+
+	// Complete chunk1 (aligns with nil watermark)
+	comp.Feedback(chunk1, 100*time.Millisecond, 1000)
+
+	// Now watermark should advance through both chunk1 and chunk2 (cascade)
+	assert.NotNil(t, comp.watermark)
+	chunk2Upper := int(chunk2.UpperBound.Value[0].Val.(int64))
+
+	// Keys up to chunk2's upper bound should now be below watermark
+	assert.True(t, comp.KeyBelowLowWatermark(chunk1Lower))
+	assert.True(t, comp.KeyBelowLowWatermark(chunk2Upper-1))
+
+	// chunk3 range should not be below yet
+	chunk3Lower := int(chunk3.LowerBound.Value[0].Val.(int64))
+	assert.False(t, comp.KeyBelowLowWatermark(chunk3Lower))
+
+	// Complete chunk3
+	comp.Feedback(chunk3, 100*time.Millisecond, 1000)
+
+	// Now chunk3 range should be below watermark
+	assert.True(t, comp.KeyBelowLowWatermark(chunk3Lower))
+
+	assert.NoError(t, comp.Close())
+}

@@ -734,6 +734,11 @@ func TestChangeNonIntPK(t *testing.T) {
 // to step through the table while subscribing to changes that we will
 // be making to the table between chunks. It is effectively an
 // end-to-end test with concurrent operations on the table.
+//
+// This test validates KeyAboveHighWatermark optimization for composite chunker:
+// - Composite keys with numeric first column (id1) now support the optimization
+// - Events with id1 >= high watermark are discarded (will be copied later)
+// - Events with id1 < high watermark are kept and applied
 func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	tbl := `CREATE TABLE e2et1 (
 		id1 int NOT NULL,
@@ -882,10 +887,10 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	// Now insert some data.
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (1002, 2)`)
 
-	// The composite chunker does not support keyAboveHighWatermark
-	// so it will show up as a delta.
+	// The composite chunker NOW supports keyAboveHighWatermark for numeric first column
+	// so this event will be discarded (id1=1002 >= chunkPtr[0]=1001)
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-	assert.Equal(t, 1, m.replClient.GetDeltaLen())
+	assert.Equal(t, 0, m.replClient.GetDeltaLen())
 
 	// Second chunk
 	chunk, err = m.copyChunker.Next()
@@ -899,12 +904,14 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	// because it is within chunk size range of the second chunk.
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (5, 2)`)
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-	assert.Equal(t, 2, m.replClient.GetDeltaLen())
+	// With KeyAboveHighWatermark, id1=5 < chunkPtr[0]=1001, so it's NOT discarded
+	assert.Equal(t, 1, m.replClient.GetDeltaLen())
 
 	testutils.RunSQL(t, `delete from e2et1 where id1 = 1`)
 	assert.False(t, m.copyChunker.KeyAboveHighWatermark(1))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-	assert.Equal(t, 3, m.replClient.GetDeltaLen())
+	// id1=1 is below high watermark (1 < 1001), so it's kept
+	assert.Equal(t, 2, m.replClient.GetDeltaLen())
 
 	// Some data is inserted later, even though the last chunk is done.
 	// We still care to pick it up because it could be inserted during checkpoint.
