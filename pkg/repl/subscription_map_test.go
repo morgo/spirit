@@ -7,6 +7,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,7 +76,7 @@ func TestFlushWithLock(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	client := &Client{
 		db:              db,
@@ -108,7 +109,7 @@ func TestFlushWithLock(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, allFlushed)
 
-	lock.Close(t.Context())
+	assert.NoError(t, lock.Close(t.Context()))
 
 	// Verify the changes were applied
 	var count int
@@ -132,7 +133,7 @@ func TestFlushWithoutLock(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	client := &Client{
 		db:              db,

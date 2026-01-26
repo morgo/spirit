@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
@@ -25,7 +26,7 @@ func TestThrottlerInterface(t *testing.T) {
 	}
 	db, err := sql.Open("mysql", replicaDSN)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	//	NewReplicationThrottler will attach either MySQL 8.0 or MySQL 5.7 throttler
 	loopInterval = 1 * time.Millisecond

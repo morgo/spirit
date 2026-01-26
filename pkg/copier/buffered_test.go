@@ -7,6 +7,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +23,7 @@ func TestBufferedCopier(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "bufferedt1")
@@ -85,7 +86,7 @@ func TestBufferedCopierCharsetConversion(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "charsetsrc")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -142,7 +143,7 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "datatypesrc")
 	assert.NoError(t, t1.SetInfo(t.Context()))

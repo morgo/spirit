@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -38,7 +39,7 @@ func targetStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 		if err != nil {
 			return fmt.Errorf("failed to check target %d: %w", i, err)
 		}
-		defer rows.Close()
+		defer utils.CloseAndLog(rows)
 
 		var tableName string
 		var existingTables []string

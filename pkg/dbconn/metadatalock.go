@@ -84,7 +84,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	// Acquire all locks or return an error immediately
 	logger.Info("attempting to acquire metadata lock")
 	if err = getLocks(); err != nil {
-		mdl.db.Close() // close if we are not returning an MDL.
+		_ = mdl.db.Close() // close if we are not returning an MDL.
 		return nil, err
 	}
 	for _, lockName := range mdl.lockNames {
@@ -109,7 +109,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				case mdl.closeCh <- mdl.db.Close():
 				default:
 					// If no one is listening, just close the connection anyway
-					mdl.db.Close()
+					_ = mdl.db.Close()
 				}
 				return
 			case <-ticker.C:

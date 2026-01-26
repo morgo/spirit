@@ -20,7 +20,11 @@ func TestCompositeChunker(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "composite")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -40,7 +44,11 @@ func TestOptimisticChunker(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "optimistic")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -62,7 +70,11 @@ func TestNewCompositeChunker(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "composite")
 	assert.NoError(t, t1.SetInfo(t.Context()))

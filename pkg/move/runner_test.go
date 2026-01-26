@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
@@ -71,7 +72,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
 	assert.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load
 	ctx, cancel := context.WithCancel(t.Context())
@@ -125,7 +126,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 
 	targetDB, err := sql.Open("mysql", targetDSN)
 	assert.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_concurrent.xfers").Scan(&targetCount)
 	assert.NoError(t, err)
 
@@ -190,7 +191,9 @@ func doOneWriteLoop(ctx context.Context, db *sql.DB) error {
 		if rows.Err() != nil {
 			return rows.Err()
 		}
-		rows.Close() //nolint: sqlclosecheck
+		if err := rows.Close(); err != nil {
+			return err
+		}
 	}
 
 	return trx.Commit()
@@ -256,7 +259,7 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
 	assert.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load
 	ctx, cancel := context.WithCancel(t.Context())

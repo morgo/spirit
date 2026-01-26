@@ -159,7 +159,11 @@ func (t *chunkerComposite) nextQueryToDatums(query string) ([]Datum, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.logger.Error("failed to close rows", "error", err)
+		}
+	}()
 	columnNames, err := rows.Columns()
 	if err != nil {
 		return nil, err

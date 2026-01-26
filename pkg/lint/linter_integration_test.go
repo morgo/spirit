@@ -6,6 +6,7 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,7 +30,7 @@ func getCreateTableStatement(t *testing.T, db *sql.DB, tableName string) *statem
 func TestAllowCharsetIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table with allowed charset (utf8mb4) - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS charset_test_allowed`)
@@ -91,7 +92,7 @@ func TestAllowCharsetIntegration(t *testing.T) {
 func TestAllowEngineIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table with allowed engine (InnoDB) - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS engine_test_allowed`)
@@ -137,7 +138,7 @@ func TestAllowEngineIntegration(t *testing.T) {
 func TestHasFKIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table without foreign keys - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS fk_test_no_fk`)
@@ -177,7 +178,7 @@ func TestHasFKIntegration(t *testing.T) {
 func TestHasFloatIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table without float columns - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS float_test_no_float`)
@@ -224,7 +225,7 @@ func TestHasFloatIntegration(t *testing.T) {
 func TestInvisibleIndexIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	linter := &InvisibleIndexBeforeDropLinter{}
 
@@ -283,7 +284,7 @@ func TestMultipleAlterIntegration(t *testing.T) {
 func TestNameCaseIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table with lowercase name - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS lowercase_table`)
@@ -317,7 +318,7 @@ func TestNameCaseIntegration(t *testing.T) {
 func TestPrimaryKeyTypeIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table with BIGINT UNSIGNED primary key - should pass
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS pk_test_bigint_unsigned`)
@@ -379,7 +380,7 @@ func TestUnsafeIntegration(t *testing.T) {
 func TestZeroDateIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	linter := &ZeroDateLinter{}
 
@@ -470,7 +471,7 @@ func TestZeroDateIntegration(t *testing.T) {
 func TestAutoIncCapacityIntegration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test 1: Table with low auto_increment value - should pass (below 85% threshold)
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS autoinc_test_low`)

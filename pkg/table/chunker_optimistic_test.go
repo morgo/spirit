@@ -276,7 +276,11 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 func TestOptimisticPrefetchChunking(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS tprefetch`)
 	table := `CREATE TABLE tprefetch (

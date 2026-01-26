@@ -89,7 +89,11 @@ func TestMultiChunkerProgressBasedSelection(t *testing.T) {
 
 	chunker := NewMultiChunker(mock1, mock2, mock3)
 	require.NoError(t, chunker.Open())
-	defer chunker.Close()
+	defer func() {
+		if err := chunker.Close(); err != nil {
+			t.Logf("failed to close chunker: %v", err)
+		}
+	}()
 
 	t.Run("SelectLowestProgress", func(t *testing.T) {
 		// Set different progress levels
@@ -179,7 +183,11 @@ func TestMultiChunkerFeedbackRouting(t *testing.T) {
 	mock2 := NewMockChunker("table2", 2000)
 	chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
 	require.NoError(t, chunker.Open())
-	defer chunker.Close()
+	defer func() {
+		if err := chunker.Close(); err != nil {
+			t.Logf("failed to close chunker: %v", err)
+		}
+	}()
 
 	// Get chunks from different tables
 	mock1.SimulateProgress(0.0)
@@ -332,7 +340,11 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 		mock1.SetNextError(errors.New("next failed"))
 		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
 		require.NoError(t, chunker.Open())
-		defer chunker.Close()
+		defer func() {
+			if err := chunker.Close(); err != nil {
+				t.Logf("failed to close chunker: %v", err)
+			}
+		}()
 
 		_, err := chunker.Next()
 		assert.Error(t, err)
@@ -380,7 +392,11 @@ func TestMultiChunkerDeterministicBehavior(t *testing.T) {
 
 		for i := range 3 {
 			chunker, mock1, mock2, mock3 := createTestScenario()
-			defer chunker.Close()
+			defer func() {
+				if err := chunker.Close(); err != nil {
+					t.Logf("failed to close chunker: %v", err)
+				}
+			}()
 
 			// Set identical progress states
 			mock1.SimulateProgress(0.1) // 10%
@@ -569,7 +585,11 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock2 := NewMockChunker("table2", 2000) // Lower progress table
 		chunker := NewMultiChunker(mock1, mock2)
 		require.NoError(t, chunker.Open())
-		defer chunker.Close()
+		defer func() {
+			if err := chunker.Close(); err != nil {
+				t.Logf("failed to close chunker: %v", err)
+			}
+		}()
 
 		// Simulate the stalling scenario: table1 at 95.34%, table2 at 90%
 		mock1.SimulateProgress(0.9534) // 95.34% - this was getting starved
@@ -598,7 +618,11 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock3 := NewMockChunker("table3", 500)  // This would never be selected
 		chunker := NewMultiChunker(mock1, mock2, mock3)
 		require.NoError(t, chunker.Open())
-		defer chunker.Close()
+		defer func() {
+			if err := chunker.Close(); err != nil {
+				t.Logf("failed to close chunker: %v", err)
+			}
+		}()
 
 		// Set table1 to high progress, others to low progress
 		mock1.SimulateProgress(0.95) // 95% - should NOT be selected
@@ -626,7 +650,11 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock3 := NewMockChunker("table3", 500)
 		chunker := NewMultiChunker(mock1, mock2, mock3)
 		require.NoError(t, chunker.Open())
-		defer chunker.Close()
+		defer func() {
+			if err := chunker.Close(); err != nil {
+				t.Logf("failed to close chunker: %v", err)
+			}
+		}()
 
 		// Mark first two chunkers as complete
 		mock1.MarkAsComplete()
@@ -647,7 +675,11 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock2 := NewMockChunker("table2", 2000)
 		chunker := NewMultiChunker(mock1, mock2)
 		require.NoError(t, chunker.Open())
-		defer chunker.Close()
+		defer func() {
+			if err := chunker.Close(); err != nil {
+				t.Logf("failed to close chunker: %v", err)
+			}
+		}()
 
 		// Mark all chunkers as complete
 		mock1.MarkAsComplete()
@@ -666,7 +698,11 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock3 := NewMockChunker("table3", 1000) // Medium table
 		chunker := NewMultiChunker(mock1, mock2, mock3)
 		require.NoError(t, chunker.Open())
-		defer chunker.Close()
+		defer func() {
+			if err := chunker.Close(); err != nil {
+				t.Logf("failed to close chunker: %v", err)
+			}
+		}()
 
 		// Set all to equal progress (0%)
 		mock1.SimulateProgress(0.0)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 type Move struct {
@@ -36,7 +37,7 @@ func (m *Move) Run() error {
 	if err != nil {
 		return err
 	}
-	defer move.Close()
+	defer utils.CloseAndLog(move)
 	if err := move.Run(context.TODO()); err != nil {
 		return err
 	}

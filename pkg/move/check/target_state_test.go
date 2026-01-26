@@ -8,6 +8,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,11 +27,11 @@ func TestTargetStateCheck(t *testing.T) {
 
 	sourceDB, err := sql.Open("mysql", testutils.DSNForDatabase("state_src"))
 	assert.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	targetDB, err := sql.Open("mysql", testutils.DSNForDatabase("state_tgt"))
 	assert.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create a test table on source
 	_, err = sourceDB.ExecContext(t.Context(), "CREATE TABLE state_src.test_table (id int not null primary key auto_increment, name VARCHAR(100))")

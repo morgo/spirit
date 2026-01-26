@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/throttler"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -24,7 +25,7 @@ func replicaPrivilegeCheck(ctx context.Context, r Resources, logger *slog.Logger
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	_, err = scanToMap(rows)
 	return err
 }

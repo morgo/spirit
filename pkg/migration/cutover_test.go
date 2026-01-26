@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
@@ -40,7 +41,7 @@ func TestCutOver(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	assert.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "cutovert1")
@@ -113,7 +114,7 @@ func TestMDLLockFails(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "mdllocks")
 	assert.NoError(t, t1.SetInfo(t.Context())) // required to extract PK.
@@ -161,7 +162,7 @@ func TestMDLLockFails(t *testing.T) {
 func TestInvalidOptions(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	logger := slog.Default()
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS invalid_t1, _invalid_t1_new`)
@@ -256,7 +257,7 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// Open connection for concurrent writes
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Start concurrent write load
 	ctx, cancel := context.WithCancel(t.Context())
@@ -399,7 +400,9 @@ func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB) error {
 		if rows.Err() != nil {
 			return rows.Err()
 		}
-		rows.Close() //nolint: sqlclosecheck
+		if err = rows.Close(); err != nil {
+			return err
+		}
 	}
 	return trx.Commit()
 }

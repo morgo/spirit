@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
 )
@@ -34,7 +35,7 @@ func TestLockWaitTimeouts(t *testing.T) {
 	config := NewDBConfig()
 	db, err := New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	trx, err := db.BeginTx(context.Background(), nil) // not strictly required.
 	assert.NoError(t, err)
@@ -53,7 +54,7 @@ func TestRetryableTrx(t *testing.T) {
 	config := NewDBConfig()
 	db, err := New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS test.dbexec")
 	assert.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE test.dbexec (id INT NOT NULL PRIMARY KEY, colb int)")
@@ -83,7 +84,7 @@ func TestRetryableTrx(t *testing.T) {
 	config.InnodbLockWaitTimeout = 1
 	db, err = New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	trx, err := db.BeginTx(t.Context(), nil)
 	assert.NoError(t, err)
@@ -103,7 +104,7 @@ func TestRetryableTrx(t *testing.T) {
 	config.MaxRetries = 2
 	db, err = New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	trx, err = db.BeginTx(t.Context(), nil)
 	assert.NoError(t, err)
@@ -120,7 +121,7 @@ func TestForceExec(t *testing.T) {
 	config.LockWaitTimeout = 1 // as short as possible.
 	db, err := New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS requires_mdl")
 	assert.NoError(t, err)
@@ -151,7 +152,7 @@ func TestStandardTrx(t *testing.T) {
 	config := NewDBConfig()
 	db, err := New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	trx, connID, err := BeginStandardTrx(t.Context(), db, nil)
 	assert.NoError(t, err)

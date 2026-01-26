@@ -12,6 +12,7 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
@@ -204,7 +205,7 @@ func TestCheckpoint(t *testing.T) {
 	// from checkpoint again.
 
 	r = preSetup()
-	defer r.Close()
+	defer utils.CloseAndLog(r)
 	// Start the binary log feed just before copy rows starts.
 	// replClient.Run() is already called in resumeFromCheckpoint.
 	assert.NoError(t, r.resumeFromCheckpoint(t.Context()))
@@ -461,7 +462,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	assert.NoError(t, err)
 	err = r2.Run(t.Context())
 	assert.NoError(t, err)
-	defer r2.Close()
+	defer utils.CloseAndLog(r2)
 	assert.True(t, r2.usedResumeFromCheckpoint)
 }
 
