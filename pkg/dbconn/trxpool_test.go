@@ -6,7 +6,6 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-
 	"github.com/stretchr/testify/assert"
 )
 

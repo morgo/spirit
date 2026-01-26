@@ -1,12 +1,12 @@
 package lint
 
 import (
-	"github.com/block/spirit/pkg/utils"
 	"database/sql"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

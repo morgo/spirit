@@ -1,7 +1,6 @@
 package dbconn
 
 import (
-	"github.com/block/spirit/pkg/utils"
 	"context"
 	"database/sql"
 	"log/slog"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
 )

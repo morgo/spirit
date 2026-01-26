@@ -1,7 +1,6 @@
 package migration
 
 import (
-	"github.com/block/spirit/pkg/utils"
 	"context"
 	"database/sql"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )

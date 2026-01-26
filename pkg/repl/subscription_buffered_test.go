@@ -1,7 +1,6 @@
 package repl
 
 import (
-	"github.com/block/spirit/pkg/utils"
 	"log/slog"
 	"testing"
 	"time"
@@ -9,6 +8,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )

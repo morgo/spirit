@@ -1,7 +1,6 @@
 package dbconn
 
 import (
-	"github.com/block/spirit/pkg/utils"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 

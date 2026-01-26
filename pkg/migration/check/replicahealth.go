@@ -2,11 +2,11 @@ package check
 
 import (
 	"context"
-
-	"github.com/block/spirit/pkg/utils"
 	"database/sql"
 	"errors"
 	"log/slog"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {

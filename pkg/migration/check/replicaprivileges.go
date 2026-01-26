@@ -2,11 +2,10 @@ package check
 
 import (
 	"context"
-
-	"github.com/block/spirit/pkg/utils"
 	"log/slog"
 
 	"github.com/block/spirit/pkg/throttler"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
