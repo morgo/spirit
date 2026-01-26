@@ -9,6 +9,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
@@ -16,7 +17,7 @@ import (
 func TestBufferedMap(t *testing.T) {
 	db, client := setupBufferedTest(t)
 	defer client.Close()
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Insert into srcTable.
 	testutils.RunSQL(t, "INSERT INTO subscription_test (id, name) VALUES (1, 'test')")
@@ -105,7 +106,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 
 	defer client.Close()
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "INSERT INTO subscription_test (id, name, extracol) VALUES (1, 'whatever', JSON_ARRAY(1,2,3))")
 	assert.NoError(t, err)
@@ -161,7 +162,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 
 	defer client.Close()
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	// Insert into srcTable various illegal values.
 	// This includes quotes, backslashes, and nulls.
 	// Also test with a string that includes a null byte.
@@ -214,7 +215,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
@@ -305,7 +306,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	// Create a table lock for underLock=true flush
 	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
 	assert.NoError(t, err)
-	defer lock.Close(t.Context())
+	defer utils.CloseAndLogWithContext(t.Context(), lock)
 
 	// Flush with underLock=true
 	// This is the critical test: ALL changes should be flushed, including keys 1, 3, 4 which are below watermark
@@ -343,7 +344,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())

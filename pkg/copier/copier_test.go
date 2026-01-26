@@ -10,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"go.uber.org/goleak"
 
 	"github.com/block/spirit/pkg/table"
@@ -45,7 +46,7 @@ func TestCopier(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "copiert1")
@@ -83,7 +84,7 @@ func TestThrottler(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "throttlert1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -117,7 +118,7 @@ func TestCopierUniqueDestination(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "copieruniqt1")
@@ -149,7 +150,7 @@ func TestCopierLossyDataTypeConversion(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "datatpt1")
@@ -176,7 +177,7 @@ func TestCopierNullToNotNullConversion(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "null2notnullt1")
@@ -203,7 +204,7 @@ func TestSQLModeAllowZeroInvalidDates(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "invaliddt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -233,7 +234,7 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "lockt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -277,7 +278,7 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	require.Equal(t, config.MaxOpenConnections, db.Stats().MaxOpenConnections)
 	require.Equal(t, 0, db.Stats().InUse)
 
@@ -314,7 +315,7 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 func TestCopierValidation(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	// Test that NewCopier fails with nil chunker
 	_, err = NewCopier(db, nil, NewCopierDefaultConfig())
@@ -330,7 +331,7 @@ func TestCopierFromCheckpoint(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "copierchkpt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -376,7 +377,7 @@ func TestRangeOptimizationMustApply(t *testing.T) {
 	config.RangeOptimizerMaxMemSize = 1024 // 1KB
 	db, err := dbconn.New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "rangeoptimizertest")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -394,7 +395,7 @@ func TestRangeOptimizationMustApply(t *testing.T) {
 	// Now create a new DB config, which should default to be unlimited.
 	db2, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db2.Close()
+	defer utils.CloseAndLog(db2)
 	testutils.RunSQL(t, "TRUNCATE _rangeoptimizertest_new")
 	chunker2, err := table.NewChunker(t1, t1new, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
 	assert.NoError(t, err)

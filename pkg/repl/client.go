@@ -18,6 +18,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 )
@@ -764,7 +765,7 @@ func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 	if err != nil {
 		return true // if we can't get the logs, its already impossible
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	var logname, size, encrypted string
 	for rows.Next() {
 		if err := rows.Scan(&logname, &size, &encrypted); err != nil {

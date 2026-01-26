@@ -30,7 +30,11 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "composite_binary_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -131,7 +135,11 @@ func TestCompositeChunkerBinary(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "composite_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -207,7 +215,11 @@ func TestCompositeChunkerInt(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "compositeint_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -266,7 +278,11 @@ func TestCompositeLowWatermark(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO compositewatermark_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositewatermark_t1 a JOIN compositewatermark_t1 b JOIN compositewatermark_t1 c LIMIT 10000`)
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "compositewatermark_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -394,7 +410,11 @@ func TestCompositeSmallTable(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "compositesmall_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -434,7 +454,11 @@ func TestSetKey(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	// Test SetKey with PrimaryKey
 	t1 := NewTableInfo(db, "test", "setkey_t1")
@@ -566,7 +590,11 @@ func TestSetKeyCompositeKeyMerge(t *testing.T) {
 		)`)
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	t1 := NewTableInfo(db, "test", "setkeycomposite_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -597,7 +625,11 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	// Create table info and chunker
 	t1 := NewTableInfo(db, "test", "compositereset_t1")

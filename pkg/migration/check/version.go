@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -36,7 +37,7 @@ func versionCheck(ctx context.Context, r Resources, _ *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	// This ensures that we first return an error like
 	// connection refused if the host is unreachable,
 	// rather than "MySQL 8.0 is required."

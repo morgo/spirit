@@ -8,6 +8,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -75,7 +76,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 	dbConfig.MaxOpenConnections = 32
 	db, err := dbconn.New(testutils.DSN(), dbConfig)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t.Run("empty queue", func(t *testing.T) {
 		client := &Client{
@@ -143,7 +144,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 		// Verify specific IDs
 		rows, err := db.QueryContext(t.Context(), "SELECT id FROM _subscription_test_new ORDER BY id")
 		assert.NoError(t, err)
-		defer rows.Close()
+		defer utils.CloseAndLog(rows)
 
 		var ids []int
 		for rows.Next() {
@@ -230,7 +231,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 		allFlushed, err := sub.Flush(t.Context(), true, lock)
 		assert.NoError(t, err)
 		assert.True(t, allFlushed)
-		lock.Close(t.Context())
+		assert.NoError(t, lock.Close(t.Context()))
 
 		// Verify the results
 		var count int
@@ -345,7 +346,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 		// Verify final state
 		rows, err := db.QueryContext(t.Context(), "SELECT id FROM _subscription_test_new ORDER BY id")
 		assert.NoError(t, err)
-		defer rows.Close()
+		defer utils.CloseAndLog(rows)
 
 		var ids []int
 		for rows.Next() {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +27,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create DB connection: %v", err)
 	}
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	n := 2
 

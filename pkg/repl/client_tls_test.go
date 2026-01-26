@@ -14,7 +14,6 @@ func TestClientTLSConfiguration(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
 
 	// Write test certificate data
 	certData := generateTestCert(t)

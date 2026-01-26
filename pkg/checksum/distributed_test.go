@@ -10,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,10 +37,10 @@ func TestFixCorruptWithApplier(t *testing.T) {
 
 	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer src.Close()
+	defer utils.CloseAndLog(src)
 	dest, err := dbconn.New(destDB.FormatDSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer dest.Close()
+	defer utils.CloseAndLog(dest)
 
 	t1 := table.NewTableInfo(src, "test", "corruptt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))

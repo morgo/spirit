@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -26,7 +27,7 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	for rows.Next() {
 		var grant string
 		if err := rows.Scan(&grant); err != nil {

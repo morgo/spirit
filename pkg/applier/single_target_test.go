@@ -31,13 +31,13 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	source.DBName = "single_source"
 	sourceDB, err := sql.Open("mysql", source.FormatDSN())
 	require.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	target := base.Clone()
 	target.DBName = "single_target"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create test table
 	createTableSQL := `
@@ -128,7 +128,7 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	// Verify specific rows
 	rows, err := targetDB.QueryContext(t.Context(), "SELECT id, name, value FROM test_table ORDER BY id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	expected := []struct {
 		id    int64
@@ -167,7 +167,7 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 	target.DBName = "single_empty_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
@@ -225,7 +225,7 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	target.DBName = "single_large_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`
@@ -300,7 +300,7 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	target.DBName = "single_concurrent_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, batch INT, value INT)`
@@ -388,7 +388,7 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 	target.DBName = "single_delete_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
@@ -431,7 +431,7 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 	// Verify specific rows remain
 	rows, err := targetDB.QueryContext(t.Context(), "SELECT id, name FROM test_table ORDER BY id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	expected := []struct {
 		id   int64
@@ -467,7 +467,7 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	target.DBName = "single_delete_empty_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
 	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
@@ -503,7 +503,7 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 	target.DBName = "single_upsert_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	// Create test table
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100), value INT)`
@@ -548,7 +548,7 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 	// Verify data
 	rows, err := targetDB.QueryContext(t.Context(), "SELECT id, name, value FROM test_table ORDER BY id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	expected := []struct {
 		id    int64
@@ -587,7 +587,7 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 	target.DBName = "single_upsert_deleted_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`
 	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
@@ -644,7 +644,7 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	target.DBName = "single_upsert_empty_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
 	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
@@ -680,7 +680,7 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	target.DBName = "single_cancel_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`
 	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
@@ -746,7 +746,7 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	target.DBName = "single_timeout_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
 	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
@@ -805,7 +805,7 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	target.DBName = "single_lifecycle_test"
 	targetDB, err := sql.Open("mysql", target.FormatDSN())
 	require.NoError(t, err)
-	defer targetDB.Close()
+	defer utils.CloseAndLog(targetDB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY)`
 	_, err = targetDB.ExecContext(t.Context(), createTableSQL)

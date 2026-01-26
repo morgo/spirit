@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
-
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -57,7 +57,7 @@ func TestNewConn(t *testing.T) {
 	db, err = New(testutils.DSN(), NewDBConfig())
 	assert.NoError(t, err)
 	assert.NotNil(t, db)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	for range 10 {
 		var resp int
 		err = db.QueryRowContext(t.Context(), "SELECT 1").Scan(&resp)
@@ -75,7 +75,7 @@ func TestNewConnRejectsReadOnlyConnections(t *testing.T) {
 	db, err := New(testutils.DSN(), NewDBConfig())
 	assert.NoError(t, err)
 	if db != nil {
-		db.Close()
+		utils.CloseAndLog(db)
 	}
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS conn_read_only")
@@ -87,7 +87,7 @@ func TestNewConnRejectsReadOnlyConnections(t *testing.T) {
 	config.MaxOpenConnections = 1
 	db, err = New(testutils.DSN(), config)
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	_, err = db.ExecContext(context.Background(), "set session transaction_read_only = 1")
 	assert.NoError(t, err)
 

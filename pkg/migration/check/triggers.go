@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -18,7 +20,7 @@ func hasTriggersCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	if rows.Next() {
 		return errors.New("tables with triggers associated are not supported")
 	}

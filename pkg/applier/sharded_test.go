@@ -37,19 +37,19 @@ func TestShardedApplierIntegration(t *testing.T) {
 	source.DBName = "sharded_source"
 	sourceDB, err := sql.Open("mysql", source.FormatDSN())
 	require.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	target1 := base.Clone()
 	target1.DBName = "sharded_target1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "sharded_target2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	// Create test table in source
 	createTableSQL := `
@@ -175,7 +175,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 	// Verify which rows went where
 	rows, err := target1DB.QueryContext(t.Context(), "SELECT user_id FROM users ORDER BY user_id")
 	require.NoError(t, err)
-	defer func() { _ = rows.Close() }()
+	defer utils.CloseAndLog(rows)
 	var shard0UserIDs []int64
 	for rows.Next() {
 		var userID int64
@@ -188,7 +188,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 
 	rows, err = target2DB.QueryContext(t.Context(), "SELECT user_id FROM users ORDER BY user_id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 	var shard1UserIDs []int64
 	for rows.Next() {
 		var userID int64
@@ -230,19 +230,19 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 	source.DBName = "sharded_delete_source"
 	sourceDB, err := sql.Open("mysql", source.FormatDSN())
 	require.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	target1 := base.Clone()
 	target1.DBName = "sharded_delete_target1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "sharded_delete_target2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	// Create test table
 	createTableSQL := `
@@ -317,7 +317,7 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 		// Verify the correct rows remain
 		rows, err := db.QueryContext(t.Context(), "SELECT id FROM users ORDER BY id")
 		require.NoError(t, err)
-		defer func() { _ = rows.Close() }()
+		defer utils.CloseAndLog(rows)
 		var ids []int64
 		for rows.Next() {
 			var id int64
@@ -347,13 +347,13 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	target1.DBName = "sharded_delete_empty_test1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "sharded_delete_empty_test2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, user_id INT)`
 	ctx := t.Context()
@@ -399,19 +399,19 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	source.DBName = "sharded_upsert_source"
 	sourceDB, err := sql.Open("mysql", source.FormatDSN())
 	require.NoError(t, err)
-	defer sourceDB.Close()
+	defer utils.CloseAndLog(sourceDB)
 
 	target1 := base.Clone()
 	target1.DBName = "sharded_upsert_target1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "sharded_upsert_target2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	// Create test table
 	createTableSQL := `
@@ -489,7 +489,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 
 	rows, err := target1DB.QueryContext(t.Context(), "SELECT id, user_id, name, value FROM users ORDER BY id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	shard0Expected := []struct {
 		id, userID, value int64
@@ -521,7 +521,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 
 	rows, err = target2DB.QueryContext(t.Context(), "SELECT id, user_id, name, value FROM users ORDER BY id")
 	require.NoError(t, err)
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	shard1Expected := []struct {
 		id, userID, value int64
@@ -564,13 +564,13 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	target1.DBName = "sharded_upsert_deleted_test1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "sharded_upsert_deleted_test2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, user_id INT, name VARCHAR(100))`
 	ctx := t.Context()
@@ -639,13 +639,13 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 	target1.DBName = "overlap_test1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "overlap_test2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	// Test case 1: Overlapping ranges "-80" and "40-c0"
 	// "-80" covers 0x0000000000000000 to 0x8000000000000000 (exclusive)
@@ -698,7 +698,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 		target3.DBName = "overlap_test1" // Reuse existing DB
 		target3DB, err := sql.Open("mysql", target3.FormatDSN())
 		require.NoError(t, err)
-		defer target3DB.Close()
+		defer utils.CloseAndLog(target3DB)
 
 		targets := []Target{
 			{DB: target1DB, KeyRange: "-40"},
@@ -719,7 +719,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 		target3.DBName = "overlap_test1" // Reuse existing DB
 		target3DB, err := sql.Open("mysql", target3.FormatDSN())
 		require.NoError(t, err)
-		defer target3DB.Close()
+		defer utils.CloseAndLog(target3DB)
 
 		targets := []Target{
 			{DB: target1DB, KeyRange: "-40"},
@@ -746,13 +746,13 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	target1.DBName = "sharded_upsert_empty_test1"
 	target1DB, err := sql.Open("mysql", target1.FormatDSN())
 	require.NoError(t, err)
-	defer target1DB.Close()
+	defer utils.CloseAndLog(target1DB)
 
 	target2 := base.Clone()
 	target2.DBName = "sharded_upsert_empty_test2"
 	target2DB, err := sql.Open("mysql", target2.FormatDSN())
 	require.NoError(t, err)
-	defer target2DB.Close()
+	defer utils.CloseAndLog(target2DB)
 
 	createTableSQL := `CREATE TABLE test_table (id INT PRIMARY KEY, user_id INT)`
 	ctx := t.Context()

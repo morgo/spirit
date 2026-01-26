@@ -10,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
@@ -30,7 +31,7 @@ func TestBasicChecksum(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "basic_checksum")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -69,7 +70,7 @@ func TestBasicValidation(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "basic_validation")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -124,7 +125,7 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "uniqfailuret1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -167,7 +168,7 @@ func TestFixCorrupt(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "fixcorruption_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -225,7 +226,7 @@ func TestCorruptChecksum(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "chkpcorruptt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -267,7 +268,7 @@ func TestBoundaryCases(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "checkert1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -345,7 +346,7 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "tdatetime")
 	assert.NoError(t, t1.SetInfo(t.Context()))
@@ -383,7 +384,7 @@ func TestFromWatermark(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "tfromwatermark")
 	assert.NoError(t, t1.SetInfo(t.Context()))

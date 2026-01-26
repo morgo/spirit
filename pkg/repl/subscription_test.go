@@ -10,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 )
@@ -21,7 +22,7 @@ func setupTestTables(t *testing.T, t1, t2 string) (*table.TableInfo, *table.Tabl
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	srcTable := table.NewTableInfo(db, "test", "subscription_test")
 	dstTable := table.NewTableInfo(db, "test", "_subscription_test_new")

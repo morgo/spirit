@@ -7,6 +7,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,7 +76,7 @@ func TestFlushWithLock(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	client := &Client{
 		db:              db,
@@ -108,7 +109,7 @@ func TestFlushWithLock(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, allFlushed)
 
-	lock.Close(t.Context())
+	assert.NoError(t, lock.Close(t.Context()))
 
 	// Verify the changes were applied
 	var count int
@@ -132,7 +133,7 @@ func TestFlushWithoutLock(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	client := &Client{
 		db:              db,
@@ -496,7 +497,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	client := &Client{
 		db:              db,
@@ -567,7 +568,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// Create a table lock for underLock=true flush
 	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
 	assert.NoError(t, err)
-	defer lock.Close(t.Context())
+	defer utils.CloseAndLogWithContext(t.Context(), lock)
 
 	// Flush with underLock=true
 	// This is the critical test: ALL changes should be flushed, including key 5 which is not below watermark
@@ -603,7 +604,7 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 
 	client := &Client{
 		db:              db,

@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
@@ -109,7 +110,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	assert.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_resume")
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	// test
 	move := &Move{
 		SourceDSN:             sourceDSN,
@@ -158,7 +159,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	r.cancelFunc()
 	assert.NoError(t, r.source.Close())
 	assert.NoError(t, r.targets[0].DB.Close())
-	r.Close()
+	assert.NoError(t, r.Close())
 
 	// Alter the definition of target.t1 just to be difficult.
 	// This will prevent resume.
@@ -174,7 +175,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
 	assert.NoError(t, err)
-	defer r.Close()
+	defer utils.CloseAndLog(r)
 	assert.NoError(t, r.Run(t.Context()))
 }
 
@@ -231,5 +232,5 @@ func TestEmptyDatabaseMove(t *testing.T) {
 	assert.True(t, cutoverCalled, "Cutover function should have been called")
 
 	// Clean up
-	runner.Close()
+	assert.NoError(t, runner.Close())
 }

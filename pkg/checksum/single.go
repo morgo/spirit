@@ -119,7 +119,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	if err != nil {
 		return fmt.Errorf("failed to query source rows: %w", err)
 	}
-	defer sourceRows.Close()
+	defer utils.CloseAndLog(sourceRows)
 
 	// Build map of source checksums
 	sourceChecksums := make(map[string]string) // pk -> checksum
@@ -143,7 +143,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	if err != nil {
 		return fmt.Errorf("failed to query target rows: %w", err)
 	}
-	defer targetRows.Close()
+	defer utils.CloseAndLog(targetRows)
 
 	// Build map of target checksums and compare
 	targetChecksums := make(map[string]string) // pk -> checksum
@@ -314,7 +314,7 @@ func (c *SingleChecker) initConnPool(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tableLock.Close(ctx)
+	defer utils.CloseAndLogWithContext(ctx, tableLock)
 	// We only have a reader, so flush the read connection.
 	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
 		return err

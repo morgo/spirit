@@ -20,6 +20,7 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
+	"github.com/block/spirit/pkg/utils"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
@@ -77,7 +78,9 @@ func NewRunner(m *Move) (*Runner, error) {
 
 func (r *Runner) Close() error {
 	if r.copyChunker != nil {
-		r.copyChunker.Close()
+		if err := r.copyChunker.Close(); err != nil {
+			return err
+		}
 	}
 	// Set the DDL notification channel to nil before closing it
 	// to prevent race conditions where another goroutine might try to send to it
@@ -89,7 +92,9 @@ func (r *Runner) Close() error {
 		close(r.ddlNotification)
 	}
 	for _, target := range r.targets {
-		target.DB.Close()
+		if err := target.DB.Close(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -102,7 +107,7 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	// Build a map of source tables if filtering is requested
 	if len(r.move.SourceTables) > 0 {
@@ -482,7 +487,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer r.source.Close()
+	defer utils.CloseAndLog(r.source)
 
 	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
 	if err != nil {
@@ -884,7 +889,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 	if err := r.checksumChunker.Open(); err != nil {
 		return err
 	}
-	defer r.checksumChunker.Close()
+	defer utils.CloseAndLog(r.checksumChunker)
 
 	// Perform a checksum operation
 	var err error

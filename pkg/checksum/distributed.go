@@ -19,6 +19,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -179,7 +180,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	if err != nil {
 		return fmt.Errorf("failed to query chunk data: %w", err)
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	// Collect all rows
 	var rowData [][]any
@@ -294,7 +295,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to lock source tables: %w", err)
 	}
-	defer sourceTableLock.Close(ctx)
+	defer utils.CloseAndLogWithContext(ctx, sourceTableLock)
 
 	// Lock tables on all targets
 	var targetTableLocks []*dbconn.TableLock
@@ -303,7 +304,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		if err != nil {
 			// Clean up any locks we've already acquired
 			for _, lock := range targetTableLocks {
-				lock.Close(ctx)
+				utils.CloseAndLogWithContext(ctx, lock)
 			}
 			return fmt.Errorf("failed to lock tables on target %d: %w", i, err)
 		}
@@ -311,7 +312,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	}
 	defer func() {
 		for _, lock := range targetTableLocks {
-			lock.Close(ctx)
+			utils.CloseAndLogWithContext(ctx, lock)
 		}
 	}()
 
@@ -342,11 +343,15 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		if err != nil {
 			// Clean up any pools we've already created
 			if c.trxPool != nil {
-				c.trxPool.Close()
+				if err2 := c.trxPool.Close(); err2 != nil {
+					c.logger.Error("failed to close source transaction pool", "error", err2)
+				}
 			}
 			for j := range i {
 				if c.targetTrxPools[j] != nil {
-					c.targetTrxPools[j].Close()
+					if err2 := c.targetTrxPools[j].Close(); err2 != nil {
+						c.logger.Error("failed to close target transaction pool", "targetIndex", j, "error", err2)
+					}
 				}
 			}
 			return fmt.Errorf("failed to create transaction pool for target %d: %w", i, err)

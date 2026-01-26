@@ -17,6 +17,7 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -843,7 +844,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 		Alter:    "ENGINE=InnoDB",
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer utils.CloseAndLog(m)
 	assert.Equal(t, "initial", m.status.Get().String())
 	assert.Equal(t, status.Progress{CurrentState: status.Initial, Summary: ""}, m.Progress())
 
@@ -853,7 +854,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	m.dbConfig = dbconn.NewDBConfig()
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	assert.NoError(t, err)
-	defer m.db.Close()
+	defer utils.CloseAndLog(m.db)
 	// Get Table Info
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
@@ -950,7 +951,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 		Alter:    "ENGINE=InnoDB",
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer utils.CloseAndLog(m)
 	assert.Equal(t, "initial", m.status.Get().String())
 
 	// Usually we would call m.Run() but we want to step through
@@ -959,7 +960,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	m.startTime = time.Now()
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	assert.NoError(t, err)
-	defer m.db.Close()
+	defer utils.CloseAndLog(m.db)
 	// Get Table Info
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
@@ -1087,7 +1088,7 @@ func TestForRemainingTableArtifacts(t *testing.T) {
 	// but no _remainingtbl_new table or _remainingtbl_chkpnt table.
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	stmt := `SELECT GROUP_CONCAT(table_name) FROM information_schema.tables where table_schema='test' and table_name LIKE '%remainingtbl%' ORDER BY table_name;`
 	var tables string
 	assert.NoError(t, db.QueryRowContext(t.Context(), stmt).Scan(&tables))
@@ -1378,7 +1379,7 @@ func TestE2ERogueValues(t *testing.T) {
 		Alter:    "ENGINE=InnoDB",
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer utils.CloseAndLog(m)
 	assert.Equal(t, "initial", m.status.Get().String())
 
 	// Usually we would call m.Run() but we want to step through
@@ -1387,7 +1388,7 @@ func TestE2ERogueValues(t *testing.T) {
 	m.startTime = time.Now()
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	assert.NoError(t, err)
-	defer m.db.Close()
+	defer utils.CloseAndLog(m.db)
 	// Get Table Info
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
 	err = m.changes[0].table.SetInfo(t.Context())
@@ -1699,7 +1700,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 	// wait until the sentinel table exists
 	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	for {
 		var rowCount int
 		sql := fmt.Sprintf(
@@ -1767,7 +1768,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	// wait until the sentinel table exists
 	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	for m.status.Get() != status.WaitingOnSentinelTable {
 	}
 	assert.NoError(t, err)
@@ -1776,7 +1777,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	for range 4 {
 		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
 		time.Sleep(1 * time.Second)
-		m.replClient.Flush(t.Context())
+		assert.NoError(t, m.replClient.Flush(t.Context()))
 		newBinlogPos := m.replClient.GetBinlogApplyPosition()
 		assert.Equal(t, 1, newBinlogPos.Compare(binlogPos))
 		binlogPos = newBinlogPos
@@ -1817,7 +1818,7 @@ func TestPreRunChecksE2E(t *testing.T) {
 	assert.NoError(t, err)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	err = m.runChecks(t.Context(), check.ScopePreRun)
 	assert.NoError(t, err)
 }
@@ -1834,7 +1835,7 @@ func TestForNonInstantBurn(t *testing.T) {
 	assert.NoError(t, err)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer utils.CloseAndLog(db)
 	var version string
 	err = db.QueryRowContext(t.Context(), `SELECT version()`).Scan(&version)
 	assert.NoError(t, err)
@@ -1852,7 +1853,7 @@ func TestForNonInstantBurn(t *testing.T) {
 		// Check that the number of total_row_versions is Zero (i'e doesn't burn)
 		db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 		assert.NoError(t, err)
-		defer db.Close()
+		defer utils.CloseAndLog(db)
 		var rowVersions int
 		err = db.QueryRowContext(t.Context(), `SELECT total_row_versions FROM INFORMATION_SCHEMA.INNODB_TABLES where name='test/instantburn'`).Scan(&rowVersions)
 		assert.NoError(t, err)
@@ -1875,7 +1876,7 @@ func TestForNonInstantBurn(t *testing.T) {
 		Alter:    "add newcol2 int",
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer utils.CloseAndLog(m)
 	err = m.Run(t.Context())
 	assert.NoError(t, err)
 
@@ -2013,7 +2014,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		RespectSentinel:      true,
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer utils.CloseAndLog(m)
 	wg := sync.WaitGroup{}
 	wg.Go(func() {
 		// Shadow err to avoid a data race
@@ -2040,7 +2041,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	err = m2.Run(t.Context())
-	defer m2.Close()
+	defer utils.CloseAndLog(m2)
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "could not acquire metadata lock")
 	wg.Wait()

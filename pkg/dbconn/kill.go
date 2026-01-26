@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 // We want to be able to kill locking transactions that prevent us from acquiring locks
@@ -162,7 +163,7 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	var locks []LockDetail
 	for rows.Next() {
@@ -246,7 +247,7 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 		logger.Error("failed to query table locks", "error", err)
 		return nil, err
 	}
-	defer rows.Close()
+	defer utils.CloseAndLog(rows)
 
 	var locks []*LockDetail
 	for rows.Next() {
