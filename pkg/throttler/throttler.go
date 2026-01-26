@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-var (
-	loopInterval = 5 * time.Second
-)
-
 type Throttler interface {
 	Open(ctx context.Context) error
 	Close() error
@@ -20,16 +16,12 @@ type Throttler interface {
 	UpdateLag(ctx context.Context) error
 }
 
-// NewReplicationThrottler returns a Throttler that is appropriate for the
-// current replica. It will return a MySQL80Replica throttler if the version is detected
-// as 8.0, and a MySQL57Replica throttler otherwise.
-// It returns an error if querying for either fails, i.e. it might not be a valid DB connection.
+// NewReplicationThrottler returns a Throttler for MySQL 8.0+ replicas.
+// It uses performance_schema to monitor replication lag.
 func NewReplicationThrottler(replica *sql.DB, lagTolerance time.Duration, logger *slog.Logger) (Throttler, error) {
-	return &MySQL80Replica{
-		Repl: Repl{
-			replica:      replica,
-			lagTolerance: lagTolerance,
-			logger:       logger,
-		},
+	return &Replica{
+		replica:      replica,
+		lagTolerance: lagTolerance,
+		logger:       logger,
 	}, nil
 }

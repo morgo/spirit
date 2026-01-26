@@ -2,15 +2,24 @@ package throttler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"log/slog"
 	"sync/atomic"
 	"time"
 )
 
-type MySQL80Replica struct {
-	Repl
+var (
+	blockWaitInterval = 1 * time.Second
+	loopInterval      = 5 * time.Second
+)
 
-	isClosed atomic.Bool
+type Replica struct {
+	replica        *sql.DB
+	lagTolerance   time.Duration
+	currentLagInMs int64
+	logger         *slog.Logger
+	isClosed       atomic.Bool
 }
 
 // MySQL8LagQuery is a query that is used to get the lag between the source and the replica.
@@ -38,14 +47,14 @@ const MySQL8LagQuery = `WITH applier_latency AS (
    SELECT IFNULL(IF(queue_status='IDLE',0,CEIL(GREATEST(applier_latency_ms, queue_latency_ms))),0) as lagMs FROM applier_latency, queue_latency
 `
 
-var _ Throttler = &MySQL80Replica{}
+var _ Throttler = &Replica{}
 
 // Open starts the lag monitor. This is not gh-ost. The lag monitor is primitive
 // because the requirement is only for DR, and not for up-to-date read-replicas.
 // Because chunk-sizes are typically 500ms, getting fine-grained metrics is not realistic.
 // We only check the replica every 5 seconds, and typically allow up to 120s
 // of replica lag, which is a lot.
-func (l *MySQL80Replica) Open(ctx context.Context) error {
+func (l *Replica) Open(ctx context.Context) error {
 	if err := l.UpdateLag(ctx); err != nil {
 		return err
 	}
@@ -69,14 +78,40 @@ func (l *MySQL80Replica) Open(ctx context.Context) error {
 	return nil
 }
 
-func (l *MySQL80Replica) Close() error {
+func (l *Replica) Close() error {
 	l.isClosed.Store(true)
 	return nil
 }
 
+func (l *Replica) IsThrottled() bool {
+	return atomic.LoadInt64(&l.currentLagInMs) >= l.lagTolerance.Milliseconds()
+}
+
+// BlockWait blocks until the lag is within the tolerance, or up to 60s
+// to allow some progress to be made. It respects context cancellation.
+func (l *Replica) BlockWait(ctx context.Context) {
+	timer := time.NewTimer(blockWaitInterval)
+	defer timer.Stop()
+
+	for range 60 {
+		if atomic.LoadInt64(&l.currentLagInMs) < l.lagTolerance.Milliseconds() {
+			return
+		}
+
+		timer.Reset(blockWaitInterval)
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			// Continue checking
+		}
+	}
+	l.logger.Warn("lag monitor timed out", "lag_ms", atomic.LoadInt64(&l.currentLagInMs), "tolerance", l.lagTolerance)
+}
+
 // UpdateLag is a MySQL 8.0+ implementation of lag that is a better approximation than "seconds_behind_source".
 // It requires performance_schema to be enabled.
-func (l *MySQL80Replica) UpdateLag(ctx context.Context) error {
+func (l *Replica) UpdateLag(ctx context.Context) error {
 	var newLagValue int64
 	if err := l.replica.QueryRowContext(ctx, MySQL8LagQuery).Scan(&newLagValue); err != nil {
 		return errors.New("could not check replication lag, check that this is a MySQL 8.0 replica, and that performance_schema is enabled")
