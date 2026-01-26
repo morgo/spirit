@@ -5,24 +5,24 @@ import (
 	"time"
 )
 
-type Test struct {
+type Mock struct {
 }
 
-var _ Throttler = &Test{}
+var _ Throttler = &Mock{}
 
-func (t *Test) Open(_ context.Context) error {
+func (t *Mock) Open(_ context.Context) error {
 	return nil
 }
 
-func (t *Test) Close() error {
+func (t *Mock) Close() error {
 	return nil
 }
 
-func (t *Test) IsThrottled() bool {
+func (t *Mock) IsThrottled() bool {
 	return true
 }
 
-func (t *Test) BlockWait(ctx context.Context) {
+func (t *Mock) BlockWait(ctx context.Context) {
 	// Use a timer with context cancellation for interruptible sleep
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
@@ -35,6 +35,6 @@ func (t *Test) BlockWait(ctx context.Context) {
 	}
 }
 
-func (t *Test) UpdateLag(ctx context.Context) error {
+func (t *Mock) UpdateLag(ctx context.Context) error {
 	return nil
 }

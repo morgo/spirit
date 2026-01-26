@@ -589,7 +589,7 @@ func (r *Runner) newMigration(ctx context.Context) error {
 func (r *Runner) setupThrottler(ctx context.Context) error {
 	if r.migration.useTestThrottler {
 		// We are in tests, add a throttler that always throttles.
-		r.throttler = &throttler.Test{}
+		r.throttler = &throttler.Mock{}
 		r.copier.SetThrottler(r.throttler)
 		return r.throttler.Open(ctx)
 	}
