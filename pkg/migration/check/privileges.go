@@ -2,8 +2,6 @@ package check
 
 import (
 	"context"
-
-	"github.com/block/spirit/pkg/utils"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +9,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {

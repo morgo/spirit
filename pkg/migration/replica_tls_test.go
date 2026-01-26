@@ -18,12 +18,12 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer utils.CloseAndLog(tempFile)
 
 	// Write test certificate data
 	certData := generateTestCertForTLS(t)
 	_, err = tempFile.Write(certData)
 	require.NoError(t, err)
+	require.NoError(t, tempFile.Close())
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -144,11 +144,11 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer utils.CloseAndLog(tempFile)
 
 	certData := generateTestCertForTLS(t)
 	_, err = tempFile.Write(certData)
 	require.NoError(t, err)
+	require.NoError(t, tempFile.Close())
 
 	testCases := []struct {
 		name        string
@@ -243,11 +243,11 @@ func TestReplicaTLSIntegration(t *testing.T) {
 	// Create temporary certificate file for testing
 	tempFile, err := os.CreateTemp(t.TempDir(), "test-cert-*.pem")
 	require.NoError(t, err)
-	defer utils.CloseAndLog(tempFile)
 
 	certData := generateTestCertForTLS(t)
 	_, err = tempFile.Write(certData)
 	require.NoError(t, err)
+	require.NoError(t, tempFile.Close())
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)

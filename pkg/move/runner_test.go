@@ -191,7 +191,9 @@ func doOneWriteLoop(ctx context.Context, db *sql.DB) error {
 		if rows.Err() != nil {
 			return rows.Err()
 		}
-		utils.CloseAndLog(rows) //nolint: sqlclosecheck
+		if err := rows.Close(); err != nil {
+			return err
+		}
 	}
 
 	return trx.Commit()

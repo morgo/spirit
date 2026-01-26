@@ -812,9 +812,6 @@ database = filedb
 tls-mode = VERIFY_IDENTITY
 tls-ca = /path/to/another/ca
 `)
-	defer func() {
-		_ = os.Remove(tmpFile.Name())
-	}()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -839,9 +836,6 @@ func TestMigrationParamsIniFileOnlyUserSpecifiedInFile(t *testing.T) {
 	tmpFile := mkIniFile(t, `[client]
 user = fileuser
 `)
-	defer func() {
-		_ = os.Remove(tmpFile.Name())
-	}()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
@@ -868,9 +862,6 @@ func TestMigrationParamsIniFileOnlyPasswordSpecifiedInFile(t *testing.T) {
 	tmpFile := mkIniFile(t, `[client]
 password = filepass
 `)
-	defer func() {
-		_ = os.Remove(tmpFile.Name())
-	}()
 	require.NoError(t, tmpFile.Close())
 
 	migration := &Migration{
