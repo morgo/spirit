@@ -182,7 +182,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 		chunk.String(),
 	)
 
-	c.logger.Info("reading chunk data for recopy", "chunk", chunk.String(), "query", query, "table", chunk.Table.QuotedName)
+	c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "query", query, "table", chunk.Table.QuotedName)
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to query chunk data: %w", err)

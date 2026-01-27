@@ -22,6 +22,7 @@ import (
 //
 // It includes a generated column to ensure that generated columns are handled correctly
 // and a reserved name column: `values` which stores an email address.
+// The generated column appears before the sharding column to test column order handling.
 func TestShardedMove(t *testing.T) {
 	if testutils.IsMinimalRBRTestRunner(t) {
 		t.Skip("Skipping test for minimal RBR test runner")
@@ -45,7 +46,7 @@ func TestShardedMove(t *testing.T) {
 	// Create source database with test data
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_sharded`)
 	testutils.RunSQL(t, `CREATE DATABASE source_sharded`)
-	testutils.RunSQL(t, "CREATE TABLE source_sharded.users (id INT PRIMARY KEY, user_id INT NOT NULL,name VARCHAR(255) NOT NULL, name_reversed VARCHAR(255) AS (REVERSE(name)) STORED, `values` VARCHAR(255) NOT NULL, KEY idx_user_id (user_id))")
+	testutils.RunSQL(t, "CREATE TABLE source_sharded.users (id INT PRIMARY KEY, name_reversed VARCHAR(255) AS (REVERSE(name)) STORED, user_id INT NOT NULL,name VARCHAR(255) NOT NULL, `values` VARCHAR(255) NOT NULL, KEY idx_user_id (user_id))")
 
 	// Insert test data - we'll use user_id as the sharding column
 	// Insert enough rows to ensure both shards get data
