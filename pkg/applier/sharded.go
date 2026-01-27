@@ -39,6 +39,7 @@ type ShardedApplier struct {
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
 	stopped    atomic.Bool // Track if Stop() has been called
+	started    atomic.Bool // Track if Start() has been called
 }
 
 // shardTarget represents a single shard with its own connection, key range, and workers
@@ -130,10 +131,30 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 }
 
 // Start initializes all shard workers and begins processing
+// This method is idempotent and can restart the applier after Stop() is called.
 func (a *ShardedApplier) Start(ctx context.Context) error {
+	// Check if already started to prevent double-start
+	if a.started.Load() && !a.stopped.Load() {
+		a.logger.Info("ShardedApplier already started, skipping")
+		return nil
+	}
+
+	// If previously stopped, we need to reinitialize channels
+	if a.stopped.Load() {
+		a.logger.Info("restarting ShardedApplier after previous stop")
+		for _, shard := range a.shards {
+			shard.chunkletBuffer = make(chan shardedChunklet, defaultBufferSize)
+			shard.chunkletCompletions = make(chan shardedChunkletCompletion, defaultBufferSize)
+			shard.writeWorkersFinished = 0
+			shard.workerIDCounter = 0
+		}
+		a.stopped.Store(false)
+	}
+
 	workerCtx, cancelFunc := context.WithCancel(ctx)
 	a.cancelFunc = cancelFunc
 
+	a.started.Store(true)
 	a.logger.Info("starting ShardedApplier", "shardCount", len(a.shards))
 
 	// Start workers for each shard

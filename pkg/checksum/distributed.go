@@ -72,9 +72,11 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 	}
 
 	// Query all targets and aggregate results
-	targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+	// Note: In move operations, chunk.NewTable is nil. We use the same tablename across all shards,
+	// so we can just use chunk.Table to get it.
+	targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM `%s` WHERE %s",
 		c.intersectColumns(chunk),
-		chunk.NewTable.QuotedName,
+		chunk.Table.TableName,
 		chunk.String(),
 	)
 
@@ -157,11 +159,13 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 
 	// Step 1: Delete all rows in the chunk range from all targets
 	// This ensures we remove any extra rows that shouldn't be there
-	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.NewTable.QuotedName, chunk.String())
+	// Note: In move operations, chunk.NewTable is nil. We use the same tablename across all shards,
+	// so we can just use chunk.Table to get it.
+	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE %s", chunk.Table.TableName, chunk.String())
 
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
-		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String())
+		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String(), "table", chunk.Table.TableName)
 		_, err := dbconn.RetryableTransaction(ctx, target.DB, false, c.dbConfig, deleteStmt)
 		if err != nil {
 			return fmt.Errorf("failed to delete chunk from target %d: %w", i, err)
@@ -169,13 +173,16 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	}
 
 	// Step 2: Read all rows from the source chunk
+	// Use NonGeneratedColumns because the applier expects non-generated columns only.
+	// This ensures the column ordinals match when the applier extracts the sharding column.
+	columnList := strings.Join(chunk.Table.NonGeneratedColumns, ", ")
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
-		strings.Join(chunk.Table.Columns, ", "),
+		columnList,
 		chunk.Table.QuotedName,
 		chunk.String(),
 	)
 
-	c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String())
+	c.logger.Info("reading chunk data for recopy", "chunk", chunk.String(), "query", query, "table", chunk.Table.QuotedName)
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to query chunk data: %w", err)
@@ -185,8 +192,8 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// Collect all rows
 	var rowData [][]any
 	for rows.Next() {
-		values := make([]any, len(chunk.Table.Columns))
-		valuePtrs := make([]any, len(chunk.Table.Columns))
+		values := make([]any, len(chunk.Table.NonGeneratedColumns))
+		valuePtrs := make([]any, len(chunk.Table.NonGeneratedColumns))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
