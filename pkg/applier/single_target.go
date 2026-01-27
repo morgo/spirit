@@ -275,18 +275,11 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context) {
 			// Write chunklet
 			affectedRows, err := a.writeChunklet(ctx, chunkletData)
 
-			// Send completion - but check context first to avoid sending on closed channel
+			// Send completion
 			completion := chunkletCompletion{
 				workID:       chunkletData.workID,
 				affectedRows: affectedRows,
 				err:          err,
-			}
-
-			// Try to send completion, but bail out if context is done
-			select {
-			case <-ctx.Done():
-				return
-			default:
 			}
 
 			select {
