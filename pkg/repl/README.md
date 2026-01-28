@@ -8,10 +8,10 @@ Each table tracked is represented by a `subscription`, with three main implement
 
 ### Delta Map
 
-The delta map is the preferred subscription type and is selected for tables with memory-comparable primary keys (integers, strings, fixed-length types, etc.). It uses a hash map to track changes:
+The delta map is the preferred subscription type and is selected for tables with memory-comparable primary keys (integers, binary strings, etc.). It uses a map to track changes:
 
 **How it works:**
-- Maintains a map of `primaryKeyHash -> (isDelete, originalKey)`
+- Maintains a map of `primaryKey -> (isDelete, originalKey)`
 - Multiple changes to the same row are automatically deduplicated (only the final state is stored)
 - Flushes changes in parallel across multiple threads
 - Uses `REPLACE INTO ... SELECT` to apply changes efficiently
@@ -20,11 +20,12 @@ The delta map is the preferred subscription type and is selected for tables with
 - **Excellent deduplication**: If a row is modified 100 times, only one REPLACE operation is performed
 - **Parallel flushing**: Independent keys can be written concurrently for maximum throughput
 - **Memory efficient**: Only stores the latest state for each key
-- **Watermark optimization**: Supports both `KeyAboveHighWatermark` and `KeyBelowLowWatermark` optimizations
+- **Watermark optimization (when supported by the chunker)**: Can skip ranges of keys using both `KeyAboveHighWatermark` and `KeyBelowLowWatermark`
 
 **Limitations:**
 - Requires memory-comparable primary keys (no VARCHAR, FLOAT etc.)
-- Watermark optimization depends on the chunker implementing `KeyAboveHighWatermark` correctly (see [issue #479](https://github.com/block/spirit/issues/479))
+- Watermark optimizations are only effective when the selected chunker implements both `KeyAboveHighWatermark` and `KeyBelowLowWatermark` (e.g., the optimistic chunker for single-column `AUTO_INCREMENT` primary keys)
+- For composite or non-auto-increment primary keys (which use the composite chunker), both watermark methods currently return stub values, so these optimizations are effectively disabled (see [issue #479](https://github.com/block/spirit/issues/479))
 
 **Example scenario:**
 ```
@@ -108,11 +109,11 @@ The copier maintains a "watermark" representing its progress. The replication cl
 - **Low watermark**: Skip changes for rows that are currently being copied (avoid races with the copier, which may cause deadlocks/lock waits)
 
 ```go
-if chunker.KeyAboveHighWatermark(key) {
+if chunker.KeyAboveHighWatermark(key[0]) {
     return  // Skip, copier will handle this
 }
 
-if !chunker.KeyBelowLowWatermark(key) {
+if !chunker.KeyBelowLowWatermark(key[0]) {
     continue  // Skip, copier is actively working on this range
 }
 ```
