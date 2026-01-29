@@ -111,9 +111,10 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 	allChangesFlushed = true // assume all changes are flushed unless we find some that are not.
 	target := atomic.LoadInt64(&s.c.targetBatchSize)
 	for key, change := range s.changes {
-		// Check low watermark only if the optimization is enabled
+		// Check low watermark only if the optimization is enabled AND we're not under lock.
+		// When underLock=true (during cutover), we must flush all changes regardless of watermark.
 		// Use originalKey to preserve typed values for watermark comparison
-		if s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+		if !underLock && s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
 			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
