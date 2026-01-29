@@ -19,6 +19,8 @@ import (
 // It internally splits rows into chunklets for optimal batching and tracks
 // completion to invoke callbacks when all chunklets for a set of rows are done.
 type SingleTargetApplier struct {
+	sync.Mutex
+
 	target   Target
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
@@ -42,9 +44,8 @@ type SingleTargetApplier struct {
 	wg         sync.WaitGroup
 
 	// State management to make Start/Stop idempotent
-	started    bool
-	stopped    bool
-	stateMutex sync.Mutex
+	started bool
+	stopped bool
 }
 
 // chunklet represents a small batch of rows for internal processing
@@ -90,8 +91,8 @@ func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApp
 // This does not control the synchronous methods like UpsertRows/DeleteKeys
 // This method is idempotent - calling it multiple times is safe.
 func (a *SingleTargetApplier) Start(ctx context.Context) error {
-	a.stateMutex.Lock()
-	defer a.stateMutex.Unlock()
+	a.Lock()
+	defer a.Unlock()
 
 	// If already started, return without error
 	if a.started {
@@ -112,6 +113,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	workerCtx, cancelFunc := context.WithCancel(ctx)
 	a.cancelFunc = cancelFunc
 
+	a.started = true
 	a.logger.Info("starting SingleTargetApplier", "writeWorkers", a.writeWorkersCount)
 
 	// Start write workers
@@ -124,7 +126,6 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.wg.Add(1)
 	go a.feedbackCoordinator(workerCtx)
 
-	a.started = true
 	return nil
 }
 
@@ -212,11 +213,11 @@ func (a *SingleTargetApplier) Wait(ctx context.Context) error {
 // which can continue after Stop() is called.
 // This method is idempotent - calling it multiple times is safe.
 func (a *SingleTargetApplier) Stop() error {
-	a.stateMutex.Lock()
-	defer a.stateMutex.Unlock()
+	a.Lock()
 
 	// If already stopped or never started, return without error
 	if a.stopped || !a.started {
+		a.Unlock()
 		a.logger.Debug("SingleTargetApplier already stopped or never started, skipping")
 		return nil
 	}
@@ -231,9 +232,12 @@ func (a *SingleTargetApplier) Stop() error {
 	// Close the chunklet buffer to signal no more work
 	close(a.chunkletBuffer)
 
-	// Mark as stopped before waiting to avoid deadlock
+	// Mark as stopped before releasing lock
 	a.stopped = true
 	a.started = false
+
+	// Release the lock before waiting for workers to finish
+	a.Unlock()
 
 	// Wait for all workers to finish
 	a.wg.Wait()

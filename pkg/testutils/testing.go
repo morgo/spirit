@@ -130,3 +130,25 @@ func IsMinimalRBRTestRunner(t *testing.T) bool {
 	})
 	return isRBRTestRunnerCached
 }
+
+// EvenOddHasher is a test hash function that shards assuming -80 and 80- shards.
+// even goes to -80, odd goes to 80-
+func EvenOddHasher(colAny any) (uint64, error) {
+	col, ok := colAny.(int64)
+	if !ok {
+		return 0, fmt.Errorf("expected int64 for sharding column, got %T", colAny)
+	}
+	// Simple hash: map even user_ids to lower half, odd to upper half
+	// This simulates a hash function that distributes across the full uint64 space
+	var hash uint64
+	if col%2 == 0 {
+		// Even user_ids map to 0x0000000000000000 - + the int
+		// Use a simple formula that keeps us in the lower half
+		hash = uint64(col)
+	} else {
+		// Odd user_ids map to 0x8000000000000000 + the int.
+		// Start from the midpoint and add a small offset
+		hash = 0x8000000000000000 + uint64(col)
+	}
+	return hash, nil
+}
