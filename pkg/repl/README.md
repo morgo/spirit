@@ -56,9 +56,9 @@ The delta queue is a fallback for tables with non-memory-comparable primary keys
 
 **Example scenario:**
 ```
-Binlog events:  INSERT(id=1), UPDATE(id=1), DELETE(id=2), UPDATE(id=1)
-Delta queue:    [INSERT(1), UPDATE(1), DELETE(2), UPDATE(1)]
-Applied:        REPLACE INTO ... WHERE id IN (1); DELETE FROM ... WHERE id=2; REPLACE INTO ... WHERE id=1;
+Binlog events:  INSERT(k="abc"), UPDATE(k="def"), DELETE(k="def"), UPDATE(k="abc")
+Delta queue:    [("abc", REPLACE), ("def" REPLACE), ("def", DELETE), ("abc", REPLACE)]
+Applied:        REPLACE INTO ... WHERE k IN ("abc", "def"); DELETE FROM ... WHERE k="def"; REPLACE INTO ... WHERE k="abc";
 ```
 
 **Performance note:** The delta queue is significantly worse performing than the other two implementations. It should only be used when the primary key type makes the delta map impossible. It is so bad in fact, that in the future it is worth considering disabling it and relying on the checksum to catch issues. See [issue #475](https://github.com/block/spirit/issues/475).
