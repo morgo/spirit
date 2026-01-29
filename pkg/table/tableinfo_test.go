@@ -412,3 +412,42 @@ func TestGetColumnOrdinal(t *testing.T) {
 	assert.Equal(t, -1, ordinal)
 	assert.ErrorContains(t, err, "column nonexistent not found in table testtable")
 }
+
+func TestGetNonGeneratedColumnOrdinal(t *testing.T) {
+	// Create a TableInfo with generated columns
+	t1 := NewTableInfo(nil, "test", "testtable")
+	// All columns including generated ones
+	t1.Columns = []string{"id", "name", "name_reversed", "age", "email"}
+	// Only non-generated columns (name_reversed is generated)
+	t1.NonGeneratedColumns = []string{"id", "name", "age", "email"}
+
+	// Test finding existing non-generated columns
+	// Note: ordinals are relative to NonGeneratedColumns, not Columns
+	ordinal, err := t1.GetNonGeneratedColumnOrdinal("id")
+	assert.NoError(t, err)
+	assert.Equal(t, 0, ordinal, "id should be at position 0 in NonGeneratedColumns")
+
+	ordinal, err = t1.GetNonGeneratedColumnOrdinal("name")
+	assert.NoError(t, err)
+	assert.Equal(t, 1, ordinal, "name should be at position 1 in NonGeneratedColumns")
+
+	ordinal, err = t1.GetNonGeneratedColumnOrdinal("age")
+	assert.NoError(t, err)
+	assert.Equal(t, 2, ordinal, "age should be at position 2 in NonGeneratedColumns (skipping name_reversed)")
+
+	ordinal, err = t1.GetNonGeneratedColumnOrdinal("email")
+	assert.NoError(t, err)
+	assert.Equal(t, 3, ordinal, "email should be at position 3 in NonGeneratedColumns")
+
+	// Test finding a generated column (should fail)
+	ordinal, err = t1.GetNonGeneratedColumnOrdinal("name_reversed")
+	assert.Error(t, err)
+	assert.Equal(t, -1, ordinal)
+	assert.ErrorContains(t, err, "column name_reversed not found in non-generated columns of table testtable")
+
+	// Test finding non-existent column
+	ordinal, err = t1.GetNonGeneratedColumnOrdinal("nonexistent")
+	assert.Error(t, err)
+	assert.Equal(t, -1, ordinal)
+	assert.ErrorContains(t, err, "column nonexistent not found in non-generated columns of table testtable")
+}

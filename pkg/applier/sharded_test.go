@@ -2,7 +2,6 @@ package applier
 
 import (
 	"database/sql"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -80,7 +79,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 
 	// Configure vindex on source table
 	sourceTable.ShardingColumn = "user_id"
-	sourceTable.HashFunc = evenOddHasher
+	sourceTable.HashFunc = testutils.EvenOddHasher
 
 	shard1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = shard1Table.SetInfo(ctx)
@@ -281,7 +280,7 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 
 	// Configure vindex on source table
 	sourceTable.ShardingColumn = "user_id"
-	sourceTable.HashFunc = evenOddHasher
+	sourceTable.HashFunc = testutils.EvenOddHasher
 
 	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = target1Table.SetInfo(ctx)
@@ -368,7 +367,7 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 
 	// Configure vindex on target table
 	targetTable.ShardingColumn = "user_id"
-	targetTable.HashFunc = evenOddHasher
+	targetTable.HashFunc = testutils.EvenOddHasher
 
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
@@ -440,7 +439,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 
 	// Configure vindex on source table
 	sourceTable.ShardingColumn = "user_id"
-	sourceTable.HashFunc = evenOddHasher
+	sourceTable.HashFunc = testutils.EvenOddHasher
 
 	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
 	err = target1Table.SetInfo(ctx)
@@ -585,7 +584,7 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 
 	// Configure vindex on target table
 	targetTable.ShardingColumn = "user_id"
-	targetTable.HashFunc = evenOddHasher
+	targetTable.HashFunc = testutils.EvenOddHasher
 
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
@@ -767,7 +766,7 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 
 	// Configure vindex on target table
 	targetTable.ShardingColumn = "user_id"
-	targetTable.HashFunc = evenOddHasher
+	targetTable.HashFunc = testutils.EvenOddHasher
 
 	targets := []Target{
 		{DB: target1DB, KeyRange: "-80"},
@@ -780,26 +779,4 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, []LogicalRow{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), affectedRows)
-}
-
-// evenOddHasher is a test hash function that shards assuming -80 and 80- shards.
-// even goes to -80, odd goes to 80-
-func evenOddHasher(colAny any) (uint64, error) {
-	col, ok := colAny.(int64)
-	if !ok {
-		return 0, fmt.Errorf("expected int64 for sharding column, got %T", colAny)
-	}
-	// Simple hash: map even user_ids to lower half, odd to upper half
-	// This simulates a hash function that distributes across the full uint64 space
-	var hash uint64
-	if col%2 == 0 {
-		// Even user_ids map to 0x0000000000000000 - + the int
-		// Use a simple formula that keeps us in the lower half
-		hash = uint64(col)
-	} else {
-		// Odd user_ids map to 0x8000000000000000 + the int.
-		// Start from the midpoint and add a small offset
-		hash = 0x8000000000000000 + uint64(col)
-	}
-	return hash, nil
 }
