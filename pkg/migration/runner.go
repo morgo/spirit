@@ -248,6 +248,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	// The watermark optimizations can prevent some keys from being flushed,
 	// which would cause flushedPos to not advance, leading to a mismatch
 	// with bufferedPos and causing AllChangesFlushed() to return false.
+	// Note: this line is not strictly required for correctness, since
+	// FlushUnderLock() will now ignore watermark optimizations explicitly,
+	// but having the non-underlock flushes also disable these optimizations
+	// is cleaner.
 	r.replClient.SetWatermarkOptimization(false)
 
 	// r.waitOnSentinel may return an error if there is
