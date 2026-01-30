@@ -76,7 +76,7 @@ The following is a simplification of what we use ourselves:
 ```go
 func (sm *Spirit) Execute(ctx context.Context, m *ExecutableTask) error {
 	startTime := time.Now()
-	runner, err := spirit.NewRunner(&spirit.Migration{
+	runner, err := migration.NewRunner(&migration.Migration{
 		Host:              m.Cluster.Host,
 		Username:          m.Cluster.Username,
 		Password:          &m.Cluster.Password,
