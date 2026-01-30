@@ -51,7 +51,7 @@ The following are common **data lock** issues:
 
 * Data locks are required *on the specific rows* when applying changes from the replication client. This is similar to the copier, except we use a combination of `DELETE` and `REPLACE .. SELECT`.
 
-* The copier and replication client conflict with each-other and deadlock. This only happens when the PK is a non auto-increment INT/BIGINT, see [issue #479](https://github.com/block/spirit/issues/479).
+* The copier and replication client conflict with each other and deadlock. This only happens when the PK is a non auto-increment INT/BIGINT, see [issue #479](https://github.com/block/spirit/issues/479).
 
 In future, we may recommend using `--enable-experimental-buffered-copy` for cases where there are hot rows, or high probability of contention with data locks. Because of its different design, it only requires data locks on the `_new` table, which effectively prevents all of the data lock contention.
 
