@@ -30,11 +30,11 @@ There is one replication client for all changes, and a subscription is added for
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The copier and [replication client](repl/README.md) are running in parallel during step 3. The only hard requirement is that the replication client starts before the copier so we can ensure that all changes are tracked.
+The copier and [replication client](../repl/README.md) are running in parallel during step 3. The only hard requirement is that the replication client starts before the copier so we can ensure that all changes are tracked.
 
 The copier is essentially a dirty-copy, in that each chunk does not correctly keep track of changes being made. This is reconciled via the replication client, which is able to detect any changes that have been made, and apply them to the new table consistently.
 
-Once copying is complete, a [checksum process](checksum/README.md) is started. This ensures that all data has safely made it to the new table, and it is safe to cutover.
+Once copying is complete, a [checksum process](../checksum/README.md) is started. This ensures that all data has safely made it to the new table, and it is safe to cutover.
 
 ## What parts of the process are locking?
 
