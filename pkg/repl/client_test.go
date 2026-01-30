@@ -898,9 +898,9 @@ func TestNewServerIDConcurrent(t *testing.T) {
 		// Verify ID is in expected range (at least 1001)
 		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 
-		// Track duplicates
+		// Track duplicates - count every occurrence beyond the first
 		ids[id]++
-		if ids[id] == 2 {
+		if ids[id] > 1 {
 			duplicateCount++
 			if firstDuplicate == 0 {
 				firstDuplicate = id
