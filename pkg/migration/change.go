@@ -59,12 +59,9 @@ func (c *change) alterNewTable(ctx context.Context) error {
 	}
 
 	// Preserve AUTO_INCREMENT value from the original table AFTER the ALTER.
-	// This is critical because:
-	// 1. CREATE TABLE LIKE doesn't copy the AUTO_INCREMENT table option
-	// 2. ALTER TABLE with ALGORITHM=COPY can reset AUTO_INCREMENT
-	// 3. For empty tables, INSERT SELECT won't trigger MySQL's automatic adjustment
-	// 4. New inserts can happen during the copy phase, so AUTO_INCREMENT must be
-	//    set before copying begins to ensure correct sequence.
+	// CREATE TABLE LIKE doesn't copy AUTO_INCREMENT, and ALTER with ALGORITHM=COPY
+	// can reset it. For empty tables, INSERT SELECT won't trigger MySQL's automatic
+	// adjustment, so we explicitly set it to prevent new inserts from restarting at 1.
 	return c.preserveAutoIncrement(ctx)
 }
 
