@@ -482,7 +482,8 @@ func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
 }
 
 // KeyAboveHighWatermark checks if a key is above the high watermark (chunkPtr).
-// This optimization works with any comparable type in key[0] (first column of composite key).
+// This optimization works with comparable types in key[0] (first column): numeric, string, temporal.
+// Binary types (VARBINARY, BLOB, BINARY) use conservative behavior (always return false).
 // Note: Watermark optimizations are disabled before checksum phase (see runner.go),
 // so there is no risk of checksum corruption even if collation comparison differs slightly.
 // See: https://github.com/block/spirit/issues/479
@@ -490,15 +491,21 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 
-	// If we haven't started copying yet, be conservative: don't discard anything
-	// Unlike the optimistic chunker (auto-increment), composite keys can have
-	// new rows inserted anywhere in the key space, not just at the "end"
+	// If we haven't dispatched any chunks yet (chunkPtrs is empty),
+	// return true (everything is "above" - don't filter anything)
+	// This ensures rows aren't incorrectly discarded before chunking starts
 	if len(t.chunkPtrs) == 0 {
-		return false
+		return true
 	}
 
 	// If we've sent the final chunk, nothing is above
 	if t.finalChunkSent {
+		return false
+	}
+
+	// Binary types (VARBINARY, BLOB, BINARY) should use conservative behavior
+	// because binary string comparisons may not match MySQL's semantics
+	if t.chunkPtrs[0].Tp == binaryType {
 		return false
 	}
 
@@ -511,11 +518,13 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	}
 
 	// Check if key is greater than or equal to the current chunkPtr[0]
-	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
+	// Use CompareGreaterThanOrEqual which supports all types (numeric, string, temporal)
+	return keyDatum.CompareGreaterThanOrEqual(t.chunkPtrs[0])
 }
 
 // KeyBelowLowWatermark checks if a key is below the low watermark.
-// This optimization works with any comparable type in key[0] (first column of composite key).
+// This optimization works with comparable types in key[0] (first column): numeric, string, temporal.
+// Binary types (VARBINARY, BLOB, BINARY) use conservative behavior (always return true, buffer everything).
 // Note: Watermark optimizations are disabled before checksum phase (see runner.go),
 // so there is no risk of checksum corruption even if collation comparison differs slightly.
 // See: https://github.com/block/spirit/issues/479
@@ -533,6 +542,12 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 		return false
 	}
 
+	// Binary types (VARBINARY, BLOB, BINARY) should use conservative behavior
+	// Return true (buffer everything) because binary comparisons may not be reliable
+	if t.watermark.UpperBound.Value[0].Tp == binaryType {
+		return true
+	}
+
 	// Convert key0 to Datum for comparison
 	keyDatum, err := NewDatum(key0, t.watermark.UpperBound.Value[0].Tp)
 	if err != nil {
@@ -542,7 +557,8 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	}
 
 	// Key is below watermark if watermark.UpperBound[0] > key
-	return t.watermark.UpperBound.Value[0].GreaterThan(keyDatum)
+	// Use CompareGreaterThan which supports all types (numeric, string, temporal)
+	return t.watermark.UpperBound.Value[0].CompareGreaterThan(keyDatum)
 }
 
 // SetKey allows you to chunk on a secondary index, and not the primary key.

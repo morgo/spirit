@@ -812,15 +812,17 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 
 	// Get first chunk for tenant_id=1
 	chunk1, err := comp.Next()
-	assert.NoError(t, err)
-	assert.NotNil(t, chunk1)
+	require.NoError(t, err)
+	require.NotNil(t, chunk1)
 
 	// After dispatching first chunk:
 	// - Keys at or above chunkPtr[0] should be above high watermark
 	// - Keys below watermark should return false until feedback is given
 	// First chunk has no LowerBound, use UpperBound instead
-	assert.Nil(t, chunk1.LowerBound)
-	assert.NotNil(t, chunk1.UpperBound)
+	require.Nil(t, chunk1.LowerBound)
+	require.NotNil(t, chunk1.UpperBound, "chunk1.UpperBound should not be nil")
+	require.NotEmpty(t, chunk1.UpperBound.Value, "chunk1.UpperBound.Value should not be empty")
+	require.NotNil(t, chunk1.UpperBound.Value[0].Val, "chunk1.UpperBound.Value[0].Val should not be nil")
 	val1 := int(chunk1.UpperBound.Value[0].Val.(int64))
 	assert.Equal(t, 1, val1)
 
@@ -903,8 +905,10 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 
 	// Get first chunk
 	chunk1, err := comp.Next()
-	assert.NoError(t, err)
-	assert.NotNil(t, chunk1)
+	require.NoError(t, err)
+	require.NotNil(t, chunk1)
+	require.NotNil(t, chunk1.UpperBound, "chunk1.UpperBound should not be nil")
+	require.NotEmpty(t, chunk1.UpperBound.Value, "chunk1.UpperBound.Value should not be empty")
 
 	// For VARCHAR keys, the optimization should work (not fall back to conservative)
 	// Test with a key that's clearly above the first chunk's upper bound
@@ -956,8 +960,10 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 
 	// Get first chunk
 	chunk1, err := comp.Next()
-	assert.NoError(t, err)
-	assert.NotNil(t, chunk1)
+	require.NoError(t, err)
+	require.NotNil(t, chunk1)
+	require.NotNil(t, chunk1.UpperBound, "chunk1.UpperBound should not be nil")
+	require.NotEmpty(t, chunk1.UpperBound.Value, "chunk1.UpperBound.Value should not be empty")
 
 	// For DATETIME keys, the optimization should work
 	// Test with timestamps that are clearly above/below the first chunk's upper bound
@@ -1003,11 +1009,14 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 
 	// Get three chunks
 	chunk1, err := comp.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, chunk1)
 	chunk2, err := comp.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, chunk2)
 	chunk3, err := comp.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, chunk3)
 
 	// Simulate out-of-order completion: chunk2, then chunk1, then chunk3
 
@@ -1018,6 +1027,8 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 	assert.Nil(t, comp.watermark)
 
 	// Keys in chunk1 range should not be below watermark yet
+	require.NotNil(t, chunk1.LowerBound, "chunk1.LowerBound should not be nil for non-first chunk")
+	require.NotEmpty(t, chunk1.LowerBound.Value, "chunk1.LowerBound.Value should not be empty")
 	chunk1Lower := int(chunk1.LowerBound.Value[0].Val.(int64))
 	assert.False(t, comp.KeyBelowLowWatermark(chunk1Lower))
 
@@ -1025,7 +1036,9 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 	comp.Feedback(chunk1, 100*time.Millisecond, 1000)
 
 	// Now watermark should advance through both chunk1 and chunk2 (cascade)
-	assert.NotNil(t, comp.watermark)
+	require.NotNil(t, comp.watermark)
+	require.NotNil(t, chunk2.UpperBound, "chunk2.UpperBound should not be nil")
+	require.NotEmpty(t, chunk2.UpperBound.Value, "chunk2.UpperBound.Value should not be empty")
 	chunk2Upper := int(chunk2.UpperBound.Value[0].Val.(int64))
 
 	// Keys up to chunk2's upper bound should now be below watermark
@@ -1033,6 +1046,8 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 	assert.True(t, comp.KeyBelowLowWatermark(chunk2Upper-1))
 
 	// chunk3 range should not be below yet
+	require.NotNil(t, chunk3.LowerBound, "chunk3.LowerBound should not be nil")
+	require.NotEmpty(t, chunk3.LowerBound.Value, "chunk3.LowerBound.Value should not be empty")
 	chunk3Lower := int(chunk3.LowerBound.Value[0].Val.(int64))
 	assert.False(t, comp.KeyBelowLowWatermark(chunk3Lower))
 
