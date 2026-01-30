@@ -66,24 +66,43 @@ func (c *change) alterNewTable(ctx context.Context) error {
 }
 
 func (c *change) preserveAutoIncrement(ctx context.Context) error {
-	var autoIncValue sql.NullInt64
+	// Get AUTO_INCREMENT from the original table.
+	var originalAutoInc sql.NullInt64
 	err := c.runner.db.QueryRowContext(ctx,
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		c.table.SchemaName, c.table.TableName).Scan(&autoIncValue)
+		c.table.SchemaName, c.table.TableName).Scan(&originalAutoInc)
 	if err != nil {
-		return fmt.Errorf("failed to get AUTO_INCREMENT value: %w", err)
+		return fmt.Errorf("failed to get AUTO_INCREMENT value from original table: %w", err)
 	}
 
-	// Only set AUTO_INCREMENT if the original table has one (> 1)
-	if autoIncValue.Valid && autoIncValue.Int64 > 1 {
-		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n AUTO_INCREMENT = %?",
-			c.newTable.SchemaName, c.newTable.TableName, autoIncValue.Int64); err != nil {
-			return fmt.Errorf("failed to set AUTO_INCREMENT on new table: %w", err)
-		}
-		c.runner.logger.Info("preserved AUTO_INCREMENT value",
-			"table", c.table.TableName,
-			"auto_increment", autoIncValue.Int64)
+	// If the original table doesn't have a meaningful AUTO_INCREMENT, nothing to preserve.
+	if !originalAutoInc.Valid || originalAutoInc.Int64 <= 1 {
+		return nil
 	}
+
+	// Get AUTO_INCREMENT from the new table to detect if it was explicitly set by the ALTER.
+	var newTableAutoInc sql.NullInt64
+	err = c.runner.db.QueryRowContext(ctx,
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+		c.newTable.SchemaName, c.newTable.TableName).Scan(&newTableAutoInc)
+	if err != nil {
+		return fmt.Errorf("failed to get AUTO_INCREMENT value from new table: %w", err)
+	}
+
+	// Only override AUTO_INCREMENT on the new table if it doesn't appear to have been explicitly set
+	// (that is, it's NULL or <= 1). This avoids clobbering a user-specified AUTO_INCREMENT in the ALTER.
+	if newTableAutoInc.Valid && newTableAutoInc.Int64 > 1 {
+		// Respect the explicitly configured AUTO_INCREMENT on the new table.
+		return nil
+	}
+
+	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n AUTO_INCREMENT = %?",
+		c.newTable.SchemaName, c.newTable.TableName, originalAutoInc.Int64); err != nil {
+		return fmt.Errorf("failed to set AUTO_INCREMENT on new table: %w", err)
+	}
+	c.runner.logger.Info("preserved AUTO_INCREMENT value",
+		"table", c.table.TableName,
+		"auto_increment", originalAutoInc.Int64)
 	return nil
 }
 
