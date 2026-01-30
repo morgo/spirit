@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -53,7 +54,40 @@ func (c *change) alterNewTable(ctx context.Context) error {
 	}
 	// Call GetInfo on the table again, since the columns
 	// might have changed and this will affect the row copiers intersect func.
-	return c.newTable.SetInfo(ctx)
+	if err := c.newTable.SetInfo(ctx); err != nil {
+		return err
+	}
+
+	// Preserve AUTO_INCREMENT value from the original table AFTER the ALTER.
+	// This is critical because:
+	// 1. CREATE TABLE LIKE doesn't copy the AUTO_INCREMENT table option
+	// 2. ALTER TABLE with ALGORITHM=COPY can reset AUTO_INCREMENT
+	// 3. For empty tables, INSERT SELECT won't trigger MySQL's automatic adjustment
+	// 4. New inserts can happen during the copy phase, so AUTO_INCREMENT must be
+	//    set before copying begins to ensure correct sequence.
+	return c.preserveAutoIncrement(ctx)
+}
+
+func (c *change) preserveAutoIncrement(ctx context.Context) error {
+	var autoIncValue sql.NullInt64
+	err := c.runner.db.QueryRowContext(ctx,
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+		c.table.SchemaName, c.table.TableName).Scan(&autoIncValue)
+	if err != nil {
+		return fmt.Errorf("failed to get AUTO_INCREMENT value: %w", err)
+	}
+
+	// Only set AUTO_INCREMENT if the original table has one (> 1)
+	if autoIncValue.Valid && autoIncValue.Int64 > 1 {
+		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n AUTO_INCREMENT = %?",
+			c.newTable.SchemaName, c.newTable.TableName, autoIncValue.Int64); err != nil {
+			return fmt.Errorf("failed to set AUTO_INCREMENT on new table: %w", err)
+		}
+		c.runner.logger.Info("preserved AUTO_INCREMENT value",
+			"table", c.table.TableName,
+			"auto_increment", autoIncValue.Int64)
+	}
+	return nil
 }
 
 func (c *change) dropOldTable(ctx context.Context) error {
