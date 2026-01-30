@@ -67,13 +67,13 @@ Any open transactions will have shared metadata locks on any of the tables that 
 
 The _fix_ for Spirit, is that we now have the option to `--force-kill` the specific connections that are blocking it from acquiring an exclusive lock. This feature is not enabled by default, but we are using it and likely will change the default at some point.
 
-## Using Spirit `migration` as golang package
+## Using Spirit `migration` as a Go package
 
-I will assume that similar to our use-case, you are probably wrapping some sort of automation around Spirit. If this automation is written in go, I would encourage you to use the Spirit API and not the CLI executable.
+I will assume that similar to our use-case, you are probably wrapping some sort of automation around Spirit. If this automation is written in Go, I would encourage you to use the Spirit API and not the CLI executable.
 
 The following is a simplification of what we use ourselves:
 
-```golang
+```go
 func (sm *Spirit) Execute(ctx context.Context, m *ExecutableTask) error {
 	startTime := time.Now()
 	runner, err := spirit.NewRunner(&spirit.Migration{
