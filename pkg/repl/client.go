@@ -112,6 +112,7 @@ type Client struct {
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
 	useExperimentalBufferedMap bool // for testing new subscription type
+	flushedBinlogs             int  // for testing binlog flushing frequency
 }
 
 // NewClient creates a new Client instance.
@@ -302,6 +303,7 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	if _, err := c.db.ExecContext(ctx, `FLUSH BINARY LOGS`); err != nil {
 		return mysql.Position{}, fmt.Errorf("failed to flush binary logs: %w", err)
 	}
+	c.flushedBinlogs++
 	var binlogFile, fake string
 	var binlogPos uint32
 	var binlogPosStmt = "SHOW MASTER STATUS"
@@ -966,6 +968,7 @@ func (c *Client) BlockWait(ctx context.Context) error {
 				if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
 					return err // it could be context cancelled, return it
 				}
+				c.flushedBinlogs++
 			}
 			prevPos = currPos
 			first = false

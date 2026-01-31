@@ -440,21 +440,40 @@ func TestBlockWait(t *testing.T) {
 
 	// We wait up to 10s to receive changes
 	// This should typically be quick.
+	client.flushedBinlogs = 0 // reset count
+	start := time.Now()
 	assert.NoError(t, client.BlockWait(t.Context()))
+	// after the first call to getCurrentBinlogPosition
+	// the client should not flush binary logs more than once per second
+	target := int(time.Since(start).Seconds()) + 1
+	assert.LessOrEqual(t, client.flushedBinlogs, target)
 
 	// Insert into t1.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (1, 2, 3)")
-	assert.NoError(t, client.Flush(t.Context()))                              // apply the changes (not required, they only need to be received for block wait to unblock)
-	assert.NoError(t, client.BlockWait(t.Context()))                          // should be quick still.
+	assert.NoError(t, client.Flush(t.Context())) // apply the changes (not required, they only need to be received for block wait to unblock)
+	client.flushedBinlogs = 0                    // reset count
+	start = time.Now()
+	assert.NoError(t, client.BlockWait(t.Context())) // should be quick still.
+	target = int(time.Since(start).Seconds()) + 1
+	assert.LessOrEqual(t, client.flushedBinlogs, target)
+
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (2, 2, 3)") // don't apply changes.
-	assert.NoError(t, client.BlockWait(t.Context()))                          // should be quick because apply not required.
+	client.flushedBinlogs = 0
+	start = time.Now()
+	assert.NoError(t, client.BlockWait(t.Context())) // should be quick because apply not required.
+	target = int(time.Since(start).Seconds()) + 1
+	assert.LessOrEqual(t, client.flushedBinlogs, target)
 
 	testutils.RunSQL(t, "ANALYZE TABLE blockwaitt1")
 	testutils.RunSQL(t, "ANALYZE TABLE blockwaitt1")
 
 	// We wait up to 10s again.
 	// although it should be quick.
+	client.flushedBinlogs = 0
+	start = time.Now()
 	assert.NoError(t, client.BlockWait(t.Context()))
+	target = int(time.Since(start).Seconds()) + 1
+	assert.LessOrEqual(t, client.flushedBinlogs, target)
 }
 
 func TestDDLNotification(t *testing.T) {
