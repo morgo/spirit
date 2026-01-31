@@ -65,6 +65,51 @@ func TestE2ENullAlterEmpty(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestE2EExplicitAutoIncrementInAlter(t *testing.T) {
+	t.Parallel()
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1explicit_autoinc, _t1explicit_autoinc_new`)
+
+	// Create table with AUTO_INCREMENT=1000
+	table := `CREATE TABLE t1explicit_autoinc (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	) ENGINE=InnoDB AUTO_INCREMENT=1000`
+	testutils.RunSQL(t, table)
+
+	migration := &Migration{}
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	migration.Host = cfg.Addr
+	migration.Username = cfg.User
+	migration.Password = &cfg.Passwd
+	migration.Database = cfg.DBName
+	migration.Threads = 2
+	migration.Table = "t1explicit_autoinc"
+	// User explicitly sets AUTO_INCREMENT=5000 in the ALTER
+	migration.Alter = "ADD COLUMN test_col VARCHAR(255), AUTO_INCREMENT=5000"
+
+	err = migration.Run()
+	require.NoError(t, err)
+
+	// Connect to database to verify results
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	// Verify that new inserts start from 5000
+	// Note: We use INSERT behavior rather than information_schema.TABLES because
+	// InnoDB may cache AUTO_INCREMENT values and information_schema may show stale data.
+	testutils.RunSQL(t, "INSERT INTO t1explicit_autoinc (name) VALUES ('test')")
+	var insertedID int64
+	err = db.QueryRow("SELECT MAX(id) FROM t1explicit_autoinc").Scan(&insertedID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5000), insertedID, "User-specified AUTO_INCREMENT=5000 should be preserved, first insert should get ID 5000")
+}
+
 func TestMissingAlter(t *testing.T) {
 	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1missing, _t1missing_new`)

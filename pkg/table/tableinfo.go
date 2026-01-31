@@ -391,3 +391,16 @@ func (t *TableInfo) GetColumnOrdinal(columnName string) (int, error) {
 	}
 	return -1, fmt.Errorf("column %s not found in table %s", columnName, t.TableName)
 }
+
+// GetNonGeneratedColumnOrdinal returns the ordinal position (0-indexed) of a column by name
+// within the NonGeneratedColumns slice. This is useful when working with row data that only
+// contains non-generated columns (e.g., from SELECT statements that exclude generated columns).
+// Returns an error if the column is not found or if it's a generated column.
+func (t *TableInfo) GetNonGeneratedColumnOrdinal(columnName string) (int, error) {
+	for i, col := range t.NonGeneratedColumns {
+		if col == columnName {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("column %s not found in non-generated columns of table %s", columnName, t.TableName)
+}

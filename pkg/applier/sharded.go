@@ -25,6 +25,8 @@ import (
 // and TableInfo.HashFunc fields. This allows different tables to use different sharding keys
 // in multi-table migrations.
 type ShardedApplier struct {
+	sync.Mutex
+
 	shards   []*shardTarget
 	targets  []Target // Original target configurations
 	dbConfig *dbconn.DBConfig
@@ -38,7 +40,10 @@ type ShardedApplier struct {
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
-	stopped    atomic.Bool // Track if Stop() has been called
+
+	// State management to make Start/Stop idempotent
+	stopped bool
+	started bool
 }
 
 // shardTarget represents a single shard with its own connection, key range, and workers
@@ -130,10 +135,33 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 }
 
 // Start initializes all shard workers and begins processing
+// This method is idempotent and can restart the applier after Stop() is called.
 func (a *ShardedApplier) Start(ctx context.Context) error {
+	a.Lock()
+	defer a.Unlock()
+
+	// If already started, return without error
+	if a.started {
+		a.logger.Info("ShardedApplier already started, skipping")
+		return nil
+	}
+
+	// If previously stopped, we need to reinitialize channels
+	if a.stopped {
+		a.logger.Info("restarting ShardedApplier after previous stop")
+		for _, shard := range a.shards {
+			shard.chunkletBuffer = make(chan shardedChunklet, defaultBufferSize)
+			shard.chunkletCompletions = make(chan shardedChunkletCompletion, defaultBufferSize)
+			shard.writeWorkersFinished = 0
+			shard.workerIDCounter = 0
+		}
+		a.stopped = false
+	}
+
 	workerCtx, cancelFunc := context.WithCancel(ctx)
 	a.cancelFunc = cancelFunc
 
+	a.started = true
 	a.logger.Info("starting ShardedApplier", "shardCount", len(a.shards))
 
 	// Start workers for each shard
@@ -174,8 +202,10 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 
 	a.logger.Info("Apply called", "rowCount", len(rows), "shardingColumn", shardingColumn, "table", chunk.Table.TableName)
 
-	// Find the ordinal position of the sharding column
-	shardingOrdinal, err := chunk.Table.GetColumnOrdinal(shardingColumn)
+	// Find the ordinal position of the sharding column within non-generated columns.
+	// This is important because the rows passed to Apply() only contain non-generated columns
+	// (they come from SELECT queries that exclude generated columns).
+	shardingOrdinal, err := chunk.Table.GetNonGeneratedColumnOrdinal(shardingColumn)
 	if err != nil {
 		return err
 	}
@@ -294,9 +324,12 @@ func (a *ShardedApplier) Wait(ctx context.Context) error {
 
 // Stop signals the applier to shut down gracefully
 func (a *ShardedApplier) Stop() error {
-	// Check if already stopped to prevent double-close panic
-	if !a.stopped.CompareAndSwap(false, true) {
-		a.logger.Debug("Stop called but applier already stopped, skipping")
+	a.Lock()
+
+	// If already stopped or never started, return without error
+	if a.stopped || !a.started {
+		a.Unlock()
+		a.logger.Debug("ShardedApplier already stopped or never started, skipping")
 		return nil
 	}
 
@@ -311,7 +344,16 @@ func (a *ShardedApplier) Stop() error {
 		close(shard.chunkletBuffer)
 	}
 
+	// Mark as stopped before releasing lock
+	a.stopped = true
+	a.started = false
+
+	// Release the lock before waiting for workers to finish
+	a.Unlock()
+
+	// Wait for all workers to finish
 	a.wg.Wait()
+
 	a.logger.Debug("ShardedApplier stopped")
 	return nil
 }
