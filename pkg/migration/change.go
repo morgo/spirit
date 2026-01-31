@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -53,7 +54,56 @@ func (c *change) alterNewTable(ctx context.Context) error {
 	}
 	// Call GetInfo on the table again, since the columns
 	// might have changed and this will affect the row copiers intersect func.
-	return c.newTable.SetInfo(ctx)
+	if err := c.newTable.SetInfo(ctx); err != nil {
+		return err
+	}
+
+	// Preserve AUTO_INCREMENT value from the original table AFTER the ALTER.
+	// CREATE TABLE LIKE doesn't copy AUTO_INCREMENT, and ALTER with ALGORITHM=COPY
+	// can reset it. For empty tables, INSERT SELECT won't trigger MySQL's automatic
+	// adjustment, so we explicitly set it to prevent new inserts from restarting at 1.
+	return c.preserveAutoIncrement(ctx)
+}
+
+func (c *change) preserveAutoIncrement(ctx context.Context) error {
+	// Get AUTO_INCREMENT from the original table.
+	var originalAutoInc sql.NullInt64
+	err := c.runner.db.QueryRowContext(ctx,
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+		c.table.SchemaName, c.table.TableName).Scan(&originalAutoInc)
+	if err != nil {
+		return fmt.Errorf("failed to get AUTO_INCREMENT value from original table: %w", err)
+	}
+
+	// If the original table doesn't have a meaningful AUTO_INCREMENT, nothing to preserve.
+	if !originalAutoInc.Valid || originalAutoInc.Int64 <= 1 {
+		return nil
+	}
+
+	// Get AUTO_INCREMENT from the new table to detect if it was explicitly set by the ALTER.
+	var newTableAutoInc sql.NullInt64
+	err = c.runner.db.QueryRowContext(ctx,
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+		c.newTable.SchemaName, c.newTable.TableName).Scan(&newTableAutoInc)
+	if err != nil {
+		return fmt.Errorf("failed to get AUTO_INCREMENT value from new table: %w", err)
+	}
+
+	// Only override AUTO_INCREMENT on the new table if it doesn't appear to have been explicitly set.
+	// If the new table's AUTO_INCREMENT is different from the original, the user explicitly changed it.
+	if newTableAutoInc.Valid && newTableAutoInc.Int64 > 1 && newTableAutoInc.Int64 != originalAutoInc.Int64 {
+		// Respect the explicitly configured AUTO_INCREMENT on the new table.
+		return nil
+	}
+
+	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n AUTO_INCREMENT = %?",
+		c.newTable.SchemaName, c.newTable.TableName, originalAutoInc.Int64); err != nil {
+		return fmt.Errorf("failed to set AUTO_INCREMENT on new table: %w", err)
+	}
+	c.runner.logger.Info("preserved AUTO_INCREMENT value",
+		"table", c.table.TableName,
+		"auto_increment", originalAutoInc.Int64)
+	return nil
 }
 
 func (c *change) dropOldTable(ctx context.Context) error {
