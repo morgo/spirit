@@ -89,9 +89,9 @@ func (c *change) preserveAutoIncrement(ctx context.Context) error {
 		return fmt.Errorf("failed to get AUTO_INCREMENT value from new table: %w", err)
 	}
 
-	// Only override AUTO_INCREMENT on the new table if it doesn't appear to have been explicitly set
-	// (that is, it's NULL or <= 1). This avoids clobbering a user-specified AUTO_INCREMENT in the ALTER.
-	if newTableAutoInc.Valid && newTableAutoInc.Int64 > 1 {
+	// Only override AUTO_INCREMENT on the new table if it doesn't appear to have been explicitly set.
+	// If the new table's AUTO_INCREMENT is different from the original, the user explicitly changed it.
+	if newTableAutoInc.Valid && newTableAutoInc.Int64 > 1 && newTableAutoInc.Int64 != originalAutoInc.Int64 {
 		// Respect the explicitly configured AUTO_INCREMENT on the new table.
 		return nil
 	}
