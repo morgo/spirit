@@ -240,8 +240,8 @@ The ETA adapts to changing conditions like throttling, system load, or chunk siz
 The copier emits metrics for each chunk:
 
 - **`chunk_processing_time`** (gauge): Time in milliseconds to process the chunk
-- **`chunk_logical_rows_count`** (counter): Number of rows in the chunk range (may include gaps)
-- **`chunk_affected_rows_count`** (counter): Actual number of rows copied
+- **`chunk_num_logical_rows`** (counter): Number of rows in the chunk range (may include gaps)
+- **`chunk_num_affected_rows`** (counter): Actual number of rows copied
 
 These metrics help monitor copy performance and identify bottlenecks.
 
