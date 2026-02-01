@@ -171,21 +171,22 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		}
 		c.logger.Debug("readWorker got chunk", "chunk", chunk.String())
 
-		readStart := time.Now()
+		// Start timing from the beginning of the chunk processing (read + write)
+		chunkStartTime := time.Now()
 		rows, err := c.readChunkData(ctx, chunk)
 		if err != nil {
 			c.setInvalid()
 			return fmt.Errorf("failed to read chunk data: %w", err)
 		}
-		readTime := time.Since(readStart)
 
 		// Handle empty chunks immediately
 		if len(rows) == 0 {
+			totalTime := time.Since(chunkStartTime)
 			c.logger.Debug("readWorker chunk is empty, sending immediate feedback", "chunk", chunk.String())
-			c.chunker.Feedback(chunk, readTime, 0)
+			c.chunker.Feedback(chunk, totalTime, 0)
 
 			// Send metrics for empty chunk
-			err := c.sendMetrics(ctx, readTime, chunk.ChunkSize, 0)
+			err := c.sendMetrics(ctx, totalTime, chunk.ChunkSize, 0)
 			if err != nil {
 				c.logger.Error("error sending metrics for empty chunk", "error", err)
 			}
@@ -205,11 +206,13 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 			c.logger.Debug("applier callback invoked", "chunk", chunk.String(), "affectedRows", affectedRows)
 
-			// Send feedback to chunker
-			c.chunker.Feedback(chunk, readTime, uint64(affectedRows))
+			// Calculate total time from read start to callback completion (read + write)
+			// Send feedback to chunker with total processing time
+			totalTime := time.Since(chunkStartTime)
+			c.chunker.Feedback(chunk, totalTime, uint64(affectedRows))
 
-			// Send metrics
-			metricsErr := c.sendMetrics(ctx, readTime, chunk.ChunkSize, uint64(affectedRows))
+			// Send metrics with total processing time
+			metricsErr := c.sendMetrics(ctx, totalTime, chunk.ChunkSize, uint64(affectedRows))
 			if metricsErr != nil {
 				c.logger.Error("error sending metrics from copier", "error", metricsErr)
 			}

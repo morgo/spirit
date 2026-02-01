@@ -110,8 +110,26 @@ type CopierConfig struct {
 ### Basic Example (Unbuffered)
 
 ```go
+// Create TableInfo for source and target tables
+sourceTable := table.NewTableInfo(db, "mydb", "mytable")
+if err := sourceTable.SetInfo(ctx); err != nil {
+    return err
+}
+targetTable := table.NewTableInfo(db, "mydb", "_mytable_new")
+if err := targetTable.SetInfo(ctx); err != nil {
+    return err
+}
+
 // Create a chunker for the table
-chunker := table.NewChunker(table, newTable, targetChunkTime, slog.Default())
+chunker, err := table.NewChunker(sourceTable, targetTable, targetChunkTime, slog.Default())
+if err != nil {
+    return err
+}
+
+// Open the chunker before use
+if err := chunker.Open(); err != nil {
+    return err
+}
 
 // Create copier with default config
 config := copier.NewCopierDefaultConfig()
