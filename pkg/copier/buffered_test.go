@@ -239,20 +239,13 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	require.NoError(t, err)
 	stubApplier.realApplier = realApplier
 
-	// Set our stub applier in the config
+	// Set our stub applier and concurrency in the config
 	cfg.Applier = stubApplier
+	cfg.Concurrency = 1 // Single worker for predictable behavior
 
-	// Create the buffered copier directly
-	copier := &buffered{
-		db:          db,
-		applier:     stubApplier,
-		chunker:     wrappedChunker,
-		concurrency: 1, // Single worker for predictable behavior
-		throttler:   cfg.Throttler,
-		dbConfig:    cfg.DBConfig,
-		logger:      cfg.Logger,
-		metricsSink: cfg.MetricsSink,
-	}
+	// Create the copier via the public constructor to match production configuration
+	copier, err := NewCopier(db, wrappedChunker, cfg)
+	require.NoError(t, err)
 
 	// Run the copier
 	err = copier.Run(t.Context())
