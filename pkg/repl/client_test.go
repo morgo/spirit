@@ -455,9 +455,9 @@ func TestBlockWait(t *testing.T) {
 			default:
 				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
 				testutils.RunSQL(t, insert)
+				i++
 				time.Sleep(100 * time.Nanosecond)
 			}
-			i++
 		}
 	}()
 	time.Sleep(3 * time.Second) // should be enough for BlockWait to block for 1 iteration before catching up, but not guaranteed
