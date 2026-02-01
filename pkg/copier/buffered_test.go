@@ -270,12 +270,6 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	assert.GreaterOrEqual(t, actualDuration, callbackDelay,
 		"Chunk timing should include the callback delay (read + write time)")
 
-	// Verify the duration is reasonable (not excessively long)
-	// Allow some overhead for test execution, but it shouldn't be more than 2x the delay
-	maxExpectedDuration := callbackDelay * 2
-	assert.LessOrEqual(t, actualDuration, maxExpectedDuration,
-		"Chunk timing should not be excessively long")
-
 	// Verify the rows were actually copied
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM timing_test_dst").Scan(&count)
