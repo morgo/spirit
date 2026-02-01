@@ -197,22 +197,26 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 		// Send rows to applier with callback
 		// The callback will be invoked when all rows are safely flushed
+		// Capture the loop variables to avoid data race when callback executes asynchronously
+		capturedChunk := chunk
+		capturedStartTime := chunkStartTime
 		callback := func(affectedRows int64, err error) {
 			if err != nil {
-				c.logger.Error("applier callback received error", "chunk", chunk.String(), "error", err)
+				c.logger.Error("applier callback received error", "chunk", capturedChunk.String(), "error", err)
 				c.setInvalid()
 				return
 			}
 
-			c.logger.Debug("applier callback invoked", "chunk", chunk.String(), "affectedRows", affectedRows)
+			c.logger.Debug("applier callback invoked", "chunk", capturedChunk.String(), "affectedRows", affectedRows)
 
 			// Calculate total time from read start to callback completion (read + write)
+			totalTime := time.Since(capturedStartTime)
+
 			// Send feedback to chunker with total processing time
-			totalTime := time.Since(chunkStartTime)
-			c.chunker.Feedback(chunk, totalTime, uint64(affectedRows))
+			c.chunker.Feedback(capturedChunk, totalTime, uint64(affectedRows))
 
 			// Send metrics with total processing time
-			metricsErr := c.sendMetrics(ctx, totalTime, chunk.ChunkSize, uint64(affectedRows))
+			metricsErr := c.sendMetrics(ctx, totalTime, capturedChunk.ChunkSize, uint64(affectedRows))
 			if metricsErr != nil {
 				c.logger.Error("error sending metrics from copier", "error", metricsErr)
 			}
