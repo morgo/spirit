@@ -185,7 +185,6 @@ applierConfig := applier.NewApplierDefaultConfig()
 
 target := applier.Target{
     DB: targetDB,
-    // Config:   applierConfig,
     // KeyRange: keyRange, // populate as appropriate for your use case
 }
 
@@ -213,7 +212,7 @@ if err := copier.Run(ctx); err != nil {
 
 ### Chunker Integration
 
-The copier is tightly integrated with `pkg/table/chunker`:
+The copier is tightly integrated with the chunker in `pkg/table` (see `pkg/table/chunker.go` and related files):
 
 1. **Chunk Requests**: The copier calls `chunker.Next()` to get the next chunk to process.
 2. **Feedback Loop**: After processing each chunk, the copier calls `chunker.Feedback(chunk, processingTime, affectedRows)`.
