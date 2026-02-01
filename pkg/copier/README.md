@@ -230,7 +230,7 @@ The copier provides sophisticated ETA estimation:
 1. **Warmup Period**: Returns "TBD" for the first minute to allow for stabilization
 2. **Rate Calculation**: Every 10 seconds, calculates rows/second based on progress
 3. **Remaining Time**: Divides remaining rows by current rate
-4. **Historical Comparison**: Tracks recent estimates and shows if ETA is improving or worsening (e.g., "2h30m (↓15m)" means ETA decreased by 15 minutes since last check)
+4. **Historical Comparison**: Tracks ETA history at 1-hour increments and shows whether it is improving or worsening (e.g., "2h30m (-15m from 1h ago)" means the ETA decreased by 15 minutes compared to an hour ago)
 5. **Nearly Complete**: Returns "DUE" when >99.99% complete
 
 The ETA adapts to changing conditions like throttling, system load, or chunk size adjustments.
