@@ -5,7 +5,7 @@ The copier package is responsible for copying rows from a source table to a targ
 ## Design Philosophy
 
 The copier was designed to be **simple and reliable**. It delegates the complexity of:
-- **Chunking strategy** to `pkg/table/chunker`
+- **Chunking strategy** to `pkg/table` (see `table.Chunker` and `table.NewChunker`)
 - **Throttling decisions** to `pkg/throttler`
 - **Change application** (for buffered mode) to `pkg/applier`
 
