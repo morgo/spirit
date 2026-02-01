@@ -456,7 +456,6 @@ func TestBlockWait(t *testing.T) {
 				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
 				testutils.RunSQL(t, insert)
 				i++
-				time.Sleep(100 * time.Nanosecond)
 			}
 		}
 	}()
