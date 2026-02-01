@@ -217,7 +217,7 @@ Both implementations fail fast on errors:
 - Any error during chunk processing sets an `isInvalid` flag
 - The flag causes all workers to stop requesting new chunks
 - The error is returned from `Run()`
-- No automatic retries at the copier level (retries happen in `dbconn.RetryableTransaction`)
+- No automatic retries at the copier level (writes use `dbconn.RetryableTransaction` for retries)
 
 ### ETA Estimation
 
