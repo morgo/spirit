@@ -52,6 +52,8 @@ const (
 	maxBackoffDuration = time.Minute
 	// Backoff multiplier
 	backoffMultiplier = 2
+	// Sleep time between position checks in BlockWait
+	blockWaitSleep = 100 * time.Millisecond
 )
 
 var (
@@ -111,7 +113,8 @@ type Client struct {
 	logger     *slog.Logger
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
-	useExperimentalBufferedMap bool // for testing new subscription type
+	useExperimentalBufferedMap bool         // for testing new subscription type
+	flushedBinlogs             atomic.Int64 // for testing binlog flushing frequency
 }
 
 // NewClient creates a new Client instance.
@@ -950,19 +953,33 @@ func (c *Client) BlockWait(ctx context.Context) error {
 	c.logger.Info("waiting to catch up to source position", "target_position", targetPos, "current_position", c.getBufferedPos())
 	timer := time.NewTimer(DefaultTimeout)
 	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
+
+	prevPos := c.getBufferedPos()
+	first := true
 	for {
 		select {
 		case <-timer.C:
 			return fmt.Errorf("timed out waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 		default:
-			if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
-				return err // it could be context cancelled, return it
+			currPos := c.getBufferedPos()
+			if currPos.Compare(prevPos) <= 0 && !first {
+				// we skip flushing on the first iteration because c.getCurrentBinlogPosition already flushes the binary log
+
+				c.logger.Debug("buffered position has not advanced, flushing binary logs")
+				if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
+					return err // it could be context cancelled, return it
+				}
+				c.flushedBinlogs.Add(1)
 			}
+			prevPos = currPos
+			first = false
+
 			if c.getBufferedPos().Compare(targetPos) >= 0 {
 				return nil // we are up to date!
 			}
+
 			// We are not caught up yet, so we need to wait.
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(blockWaitSleep)
 		}
 	}
 }
