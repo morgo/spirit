@@ -185,7 +185,6 @@ applierConfig := applier.NewApplierDefaultConfig()
 
 target := applier.Target{
     DB: targetDB,
-    // Config:   applierConfig,
     // KeyRange: keyRange, // populate as appropriate for your use case
 }
 
