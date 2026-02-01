@@ -260,9 +260,17 @@ func (c *Unbuffered) Run(ctx context.Context) error {
         g.Go(func() error {
             chunk, err := c.chunker.Next()
             if err != nil {
+                if err == table.ErrTableIsRead {
+                    return nil
+                }
+                c.setInvalid(true)
                 return err
             }
-            return c.CopyChunk(errGrpCtx, chunk)
+            if err := c.CopyChunk(errGrpCtx, chunk); err != nil {
+                c.setInvalid(true)
+                return err
+            }
+            return nil
         })
     }
     
