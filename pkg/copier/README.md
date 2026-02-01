@@ -161,13 +161,17 @@ for {
 
 ```go
 // Create applier for buffered mode
-applier := applier.NewSingleTargetApplier(
-    targetDB,
-    table,
-    newTable,
-    applierConfig,
-)
+target := applier.Target{
+    // populate target fields as appropriate for your use case
+    DB:    targetDB,
+    Table: newTable,
+}
 
+applierConfig := &applier.ApplierConfig{
+    // populate applier configuration fields as needed
+}
+
+applier := applier.NewSingleTargetApplier(target, applierConfig)
 // Create copier with buffered mode
 config := copier.NewCopierDefaultConfig()
 config.UseExperimentalBufferedCopier = true
