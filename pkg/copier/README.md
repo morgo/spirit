@@ -111,7 +111,7 @@ type CopierConfig struct {
 
 ```go
 // Create a chunker for the table
-chunker := table.NewChunker(db, table, newTable, targetChunkTime)
+chunker := table.NewChunker(table, newTable, targetChunkTime, slog.Default())
 
 // Create copier with default config
 config := copier.NewCopierDefaultConfig()
