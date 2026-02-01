@@ -225,6 +225,7 @@ Each `Column` provides detailed information:
 
 ```go
 type Column struct {
+    Raw        *ast.ColumnDef    // Raw AST node from parser
     Name       string
     Type       string            // "int", "varchar", "decimal", etc.
     Length     *int              // For VARCHAR(100), Length = 100
@@ -241,6 +242,7 @@ type Column struct {
     Comment    *string
     Charset    *string
     Collation  *string
+    Options    map[string]string // Additional column options
 }
 ```
 
@@ -261,14 +263,16 @@ Each `Index` provides:
 
 ```go
 type Index struct {
+    Raw          *ast.Constraint   // Raw AST node from parser
     Name         string
-    Type         string            // "PRIMARY KEY", "UNIQUE", "INDEX", "FULLTEXT"
+    Type         string            // "PRIMARY KEY", "UNIQUE", "INDEX", "FULLTEXT", "SPATIAL"
     Columns      []string
     Invisible    *bool
-    Using        *string           // "BTREE", "HASH", etc.
+    Using        *string           // "BTREE", "HASH", "RTREE"
     Comment      *string
     KeyBlockSize *uint64
     ParserName   *string           // For FULLTEXT indexes
+    Options      map[string]string // Additional index options
 }
 ```
 
@@ -290,12 +294,14 @@ Each `Constraint` represents CHECK or FOREIGN KEY constraints:
 
 ```go
 type Constraint struct {
+    Raw        *ast.Constraint      // Raw AST node from parser
     Name       string
     Type       string                // "CHECK", "FOREIGN KEY"
     Columns    []string
     Expression *string               // For CHECK constraints
     References *ForeignKeyReference  // For FOREIGN KEY constraints
     Definition *string               // Full constraint definition
+    Options    map[string]any        // Additional constraint options
 }
 ```
 
