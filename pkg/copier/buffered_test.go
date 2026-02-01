@@ -225,7 +225,11 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	}
 
 	// Create a stub applier that introduces a controlled delay
-	callbackDelay := 100 * time.Millisecond
+	// Use a large delay (500ms) to ensure it's significantly larger than any expected
+	// read time, even on slow CI runners. This prevents false positives where a slow
+	// read could satisfy the timing assertion even if the copier reverted to reporting
+	// read-only time.
+	callbackDelay := 500 * time.Millisecond
 	stubApplier := &delayedCallbackApplier{
 		realApplier: nil, // We'll set this after creating it
 		delay:       callbackDelay,
@@ -247,8 +251,11 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	copier, err := NewCopier(db, wrappedChunker, cfg)
 	require.NoError(t, err)
 
-	// Run the copier
-	err = copier.Run(t.Context())
+	// Run the copier with a context that won't timeout during the delay
+	// We need to ensure the context lives long enough for the callback delay
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err = copier.Run(ctx)
 	assert.NoError(t, err)
 
 	// Get feedback calls from the wrapped chunker
@@ -324,18 +331,13 @@ func (d *delayedCallbackApplier) Start(ctx context.Context) error {
 func (d *delayedCallbackApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback applier.ApplyCallback) error {
 	// Wrap the callback to add delay
 	wrappedCallback := func(affectedRows int64, err error) {
-		// Introduce delay to simulate write time, but respect context cancellation.
-		timer := time.NewTimer(d.delay)
-		defer timer.Stop()
-
-		select {
-		case <-ctx.Done():
-			// Context cancelled before delay elapsed; propagate the cancellation error.
-			callback(affectedRows, ctx.Err())
-		case <-timer.C:
-			// Delay completed; invoke the original callback.
-			callback(affectedRows, err)
-		}
+		// Introduce delay to simulate write time.
+		// We use time.Sleep instead of a timer with context cancellation because
+		// we want to simulate a real write operation that takes time to complete,
+		// not one that can be canceled mid-flight. This ensures the test accurately
+		// measures the full duration including the simulated write time.
+		time.Sleep(d.delay)
+		callback(affectedRows, err)
 	}
 
 	// Call the real applier with the wrapped callback
