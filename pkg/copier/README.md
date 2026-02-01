@@ -121,6 +121,7 @@ if err := targetTable.SetInfo(ctx); err != nil {
 }
 
 // Create a chunker for the table
+targetChunkTime := 30 * time.Second
 chunker, err := table.NewChunker(sourceTable, targetTable, targetChunkTime, slog.Default())
 if err != nil {
     return err
