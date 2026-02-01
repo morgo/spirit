@@ -319,21 +319,31 @@ type PartitionOptions struct {
 
 ### RemoveSecondaryIndexes
 
-Removes secondary indexes from a CREATE TABLE statement:
+Removes regular secondary indexes from a CREATE TABLE statement while preserving PRIMARY KEY, UNIQUE, and FULLTEXT indexes:
 
 ```go
 original := `CREATE TABLE t1 (
     id INT PRIMARY KEY,
     email VARCHAR(255) UNIQUE,
     name VARCHAR(100),
-    INDEX idx_name (name)
+    description TEXT,
+    INDEX idx_name (name),
+    FULLTEXT idx_description (description)
 )`
 
 modified, err := statement.RemoveSecondaryIndexes(original)
-// Result: CREATE TABLE with PRIMARY KEY and UNIQUE, but without idx_name
+// Result: CREATE TABLE with PRIMARY KEY, UNIQUE, and FULLTEXT preserved, but without idx_name
 ```
 
-This functionality is used by move tables operations to defer secondary index creation. PRIMARY KEY and UNIQUE indexes are preserved because they're essential to table structure.
+**What's Preserved:**
+- PRIMARY KEY (fundamental to table structure)
+- UNIQUE indexes (enforce data integrity constraints)
+- FULLTEXT indexes (different index type with special requirements)
+
+**What's Removed:**
+- Regular INDEX (non-unique secondary indexes)
+
+This functionality is used by move tables operations to defer regular index creation until after data is copied, improving copy performance.
 
 ### GetMissingSecondaryIndexes
 
