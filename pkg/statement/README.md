@@ -79,7 +79,7 @@ stmts, err := statement.New("ALTER TABLE t1 ADD COLUMN c INT")
 - Normalizes ALTER clauses (adds backticks, standardizes formatting)
 - Supports fully qualified table names (`schema.table`)
 - Can parse multiple ALTER statements in one call
-- Validates that ALGORITHM and LOCK clauses are not present (Spirit manages these)
+- Parses ALGORITHM and LOCK clauses but does not reject them; callers should invoke `AlterContainsUnsupportedClause` on the resulting `AbstractStatement` if they need to enforce that these clauses are not present (Spirit manages these)
 
 ### CREATE TABLE
 
@@ -305,7 +305,7 @@ For partitioned tables, `PartitionOptions` provides:
 
 ```go
 type PartitionOptions struct {
-    Type         string                // "RANGE", "LIST", "HASH", "KEY"
+    Type         string                // "RANGE", "LIST", "HASH", "KEY", "SYSTEM_TIME"
     Expression   *string               // For HASH and RANGE
     Columns      []string              // For KEY, RANGE COLUMNS, LIST COLUMNS
     Linear       bool
@@ -418,6 +418,7 @@ for _, stmt := range stmts {
 
 ```go
 // Get canonical CREATE TABLE from database
+var tableName string
 var createStmt string
 err := db.QueryRow("SHOW CREATE TABLE users").Scan(&tableName, &createStmt)
 if err != nil {
