@@ -464,7 +464,7 @@ func TestBlockWait(t *testing.T) {
 	client.flushedBinlogs.Store(0)
 	assert.NoError(t, client.BlockWait(t.Context()))
 	cancel()
-	assert.LessOrEqual(t, client.flushedBinlogs.Load(), int64(0))
+	assert.Equal(t, int64(0), client.flushedBinlogs.Load())
 
 	// Insert into t1.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (1, 2, 3)")
