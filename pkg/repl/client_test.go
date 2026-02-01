@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -415,15 +416,18 @@ func TestBlockWait(t *testing.T) {
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS blockwaitt1, blockwaitt2, _blockwaitt1_chkpnt")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS blockwaitt1, blockwaitt2, blockwaitt3, _blockwaitt1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE blockwaitt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 	testutils.RunSQL(t, "CREATE TABLE blockwaitt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 	testutils.RunSQL(t, "CREATE TABLE _blockwaitt1_chkpnt (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE blockwaitt3 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
 	t1 := table.NewTableInfo(db, "test", "blockwaitt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "blockwaitt2")
 	assert.NoError(t, t2.SetInfo(t.Context()))
+	t3 := table.NewTableInfo(db, "test", "blockwaitt3")
+	assert.NoError(t, t3.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
@@ -438,42 +442,43 @@ func TestBlockWait(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
-	// We wait up to 10s to receive changes
-	// This should typically be quick.
-	client.flushedBinlogs = 0 // reset count
-	start := time.Now()
+	// We test that BlockWait does not flush the binlog if the buffered position is advancing by
+	// 1. kicking off a go-routine that inserts into an unrelated table
+	// 2. verifying that flushedBinlogs is still 0 at the end of BlockWait
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		i := 1
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
+				testutils.RunSQL(t, insert)
+				time.Sleep(100 * time.Nanosecond)
+			}
+			i++
+		}
+	}()
+	time.Sleep(3 * time.Second) // should be enough for BlockWait to block for 1 iteration before catching up, but not guaranteed
+	client.flushedBinlogs.Store(0)
 	assert.NoError(t, client.BlockWait(t.Context()))
-	// after the first call to getCurrentBinlogPosition
-	// the client should not flush binary logs more than once per second
-	target := int(time.Since(start).Seconds()) + 1
-	assert.LessOrEqual(t, client.flushedBinlogs, target)
+	cancel()
+	assert.LessOrEqual(t, client.flushedBinlogs.Load(), int64(0))
 
 	// Insert into t1.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (1, 2, 3)")
-	assert.NoError(t, client.Flush(t.Context())) // apply the changes (not required, they only need to be received for block wait to unblock)
-	client.flushedBinlogs = 0                    // reset count
-	start = time.Now()
-	assert.NoError(t, client.BlockWait(t.Context())) // should be quick still.
-	target = int(time.Since(start).Seconds()) + 1
-	assert.LessOrEqual(t, client.flushedBinlogs, target)
-
+	assert.NoError(t, client.Flush(t.Context()))                              // apply the changes (not required, they only need to be received for block wait to unblock)
+	assert.NoError(t, client.BlockWait(t.Context()))                          // should be quick still.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (2, 2, 3)") // don't apply changes.
-	client.flushedBinlogs = 0
-	start = time.Now()
-	assert.NoError(t, client.BlockWait(t.Context())) // should be quick because apply not required.
-	target = int(time.Since(start).Seconds()) + 1
-	assert.LessOrEqual(t, client.flushedBinlogs, target)
+	assert.NoError(t, client.BlockWait(t.Context()))                          // should be quick because apply not required.
 
 	testutils.RunSQL(t, "ANALYZE TABLE blockwaitt1")
 	testutils.RunSQL(t, "ANALYZE TABLE blockwaitt1")
 
 	// We wait up to 10s again.
 	// although it should be quick.
-	client.flushedBinlogs = 0
-	start = time.Now()
 	assert.NoError(t, client.BlockWait(t.Context()))
-	target = int(time.Since(start).Seconds()) + 1
-	assert.LessOrEqual(t, client.flushedBinlogs, target)
 }
 
 func TestDDLNotification(t *testing.T) {
