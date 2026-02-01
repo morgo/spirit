@@ -79,7 +79,7 @@ stmts, err := statement.New("ALTER TABLE t1 ADD COLUMN c INT")
 - Normalizes ALTER clauses (adds backticks, standardizes formatting)
 - Supports fully qualified table names (`schema.table`)
 - Can parse multiple ALTER statements in one call
-- Validates that ALGORITHM and LOCK clauses are not present (Spirit manages these)
+- Parses ALGORITHM and LOCK clauses but does not reject them; callers should invoke `AlterContainsUnsupportedClause` on the resulting `AbstractStatement` if they need to enforce that these clauses are not present (Spirit manages these)
 
 ### CREATE TABLE
 
