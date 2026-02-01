@@ -408,6 +408,7 @@ for _, stmt := range stmts {
 
 ```go
 // Get canonical CREATE TABLE from database
+var tableName string
 var createStmt string
 err := db.QueryRow("SHOW CREATE TABLE users").Scan(&tableName, &createStmt)
 if err != nil {
