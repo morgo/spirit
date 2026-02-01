@@ -97,7 +97,7 @@ type CopierConfig struct {
 ### Configuration Options
 
 - **`Concurrency`** (default: 4): Number of parallel workers copying chunks. Higher values increase throughput but also increase load on MySQL.
-- **`TargetChunkTime`** (default: 1000ms): Target time for processing each chunk. The chunker uses this with feedback to dynamically adjust chunk sizes.
+- **`TargetChunkTime`** (default: 1000ms): Recommended target time for processing each chunk. This field is not read by `NewCopier` directly; instead, pass it to `table.NewChunker(...)` (or your chunker implementation) so the chunker can use feedback to dynamically adjust chunk sizes.
 - **`Throttler`** (default: `Noop`): Controls when copying should pause to protect system health. See `pkg/throttler` for implementations.
 - **`Logger`** (default: `slog.Default()`): Structured logger for debugging and monitoring.
 - **`MetricsSink`** (default: `NoopSink`): Destination for metrics like chunk processing time and row counts.
