@@ -161,21 +161,24 @@ for {
 
 ```go
 // Create applier for buffered mode
+applierConfig := applier.NewApplierDefaultConfig()
+// customize applierConfig.Logger, applierConfig.DBConfig, and other fields as needed
+
 target := applier.Target{
-    // populate target fields as appropriate for your use case
-    DB:    targetDB,
-    Table: newTable,
+    DB: targetDB,
+    // Config:   applierConfig,
+    // KeyRange: keyRange, // populate as appropriate for your use case
 }
 
-applierConfig := &applier.ApplierConfig{
-    // populate applier configuration fields as needed
+rowApplier, err := applier.NewSingleTargetApplier(target, applierConfig)
+if err != nil {
+    return err
 }
 
-applier := applier.NewSingleTargetApplier(target, applierConfig)
 // Create copier with buffered mode
 config := copier.NewCopierDefaultConfig()
 config.UseExperimentalBufferedCopier = true
-config.Applier = applier
+config.Applier = rowApplier
 
 copier, err := copier.NewCopier(sourceDB, chunker, config)
 if err != nil {
