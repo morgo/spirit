@@ -331,10 +331,18 @@ func (d *delayedCallbackApplier) Start(ctx context.Context) error {
 func (d *delayedCallbackApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback applier.ApplyCallback) error {
 	// Wrap the callback to add delay
 	wrappedCallback := func(affectedRows int64, err error) {
-		// Introduce delay to simulate write time
-		time.Sleep(d.delay)
-		// Invoke the original callback
-		callback(affectedRows, err)
+		// Introduce delay to simulate write time, but respect context cancellation.
+		timer := time.NewTimer(d.delay)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			// Context cancelled before delay elapsed; propagate the cancellation error.
+			callback(affectedRows, ctx.Err())
+		case <-timer.C:
+			// Delay completed; invoke the original callback.
+			callback(affectedRows, err)
+		}
 	}
 
 	// Call the real applier with the wrapped callback
