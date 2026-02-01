@@ -975,11 +975,9 @@ func (c *Client) BlockWait(ctx context.Context) error {
 			first = false
 
 			if c.getBufferedPos().Compare(targetPos) >= 0 {
-				fmt.Println("[BlockWait] exiting....")
 				return nil // we are up to date!
 			}
 
-			fmt.Println("[BlockWait] still need to catch up, next iter...")
 			// We are not caught up yet, so we need to wait.
 			time.Sleep(blockWaitSleep)
 		}
