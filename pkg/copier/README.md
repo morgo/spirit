@@ -227,7 +227,7 @@ Both copier implementations use goroutines for parallel chunk processing:
 
 **Unbuffered:**
 - Uses `errgroup.WithContext()` with a concurrency limit
-- Each goroutine requests a chunk, copies it, and repeats
+- Schedules one goroutine per chunk: each goroutine copies a single chunk and returns
 - Stops on first error
 
 **Buffered:**
