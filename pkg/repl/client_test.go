@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -415,15 +416,18 @@ func TestBlockWait(t *testing.T) {
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS blockwaitt1, blockwaitt2, _blockwaitt1_chkpnt")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS blockwaitt1, blockwaitt2, blockwaitt3, _blockwaitt1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE blockwaitt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 	testutils.RunSQL(t, "CREATE TABLE blockwaitt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 	testutils.RunSQL(t, "CREATE TABLE _blockwaitt1_chkpnt (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE blockwaitt3 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
 	t1 := table.NewTableInfo(db, "test", "blockwaitt1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "blockwaitt2")
 	assert.NoError(t, t2.SetInfo(t.Context()))
+	t3 := table.NewTableInfo(db, "test", "blockwaitt3")
+	assert.NoError(t, t3.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
@@ -438,9 +442,28 @@ func TestBlockWait(t *testing.T) {
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
-	// We wait up to 10s to receive changes
-	// This should typically be quick.
+	// We test that BlockWait does not flush the binlog if the buffered position is advancing by
+	// 1. kicking off a go-routine that inserts into an unrelated table
+	// 2. verifying that flushedBinlogs is still 0 at the end of BlockWait
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		i := 1
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
+				testutils.RunSQL(t, insert)
+				i++
+			}
+		}
+	}()
+	time.Sleep(3 * time.Second) // should be enough for BlockWait to block for 1 iteration before catching up, but not guaranteed
+	client.flushedBinlogs.Store(0)
 	assert.NoError(t, client.BlockWait(t.Context()))
+	cancel()
+	assert.Equal(t, int64(0), client.flushedBinlogs.Load())
 
 	// Insert into t1.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (1, 2, 3)")
