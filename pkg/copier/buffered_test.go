@@ -214,7 +214,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	cfg.UseExperimentalBufferedCopier = true
 
 	// Create a real chunker (we need real chunk metadata for the copier)
-	realChunker, err := table.NewChunker(t1, t2, 1000, cfg.Logger)
+	realChunker, err := table.NewChunker(t1, t2, 1000*time.Millisecond, cfg.Logger)
 	require.NoError(t, err)
 	assert.NoError(t, realChunker.Open())
 
