@@ -470,9 +470,9 @@ if err := stmt.AlterContainsUnsupportedClause(); err != nil {
 
 // Check for UNIQUE index
 if err := stmt.AlterContainsAddUnique(); err == nil {
-    fmt.Println("Safe to add index")
+    fmt.Println("No UNIQUE index detected")
 } else {
-    fmt.Println("Adding UNIQUE index - may fail if duplicates exist")
+    fmt.Println("UNIQUE index detected - may fail if duplicates exist")
 }
 ```
 
