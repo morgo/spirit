@@ -305,7 +305,7 @@ For partitioned tables, `PartitionOptions` provides:
 
 ```go
 type PartitionOptions struct {
-    Type         string                // "RANGE", "LIST", "HASH", "KEY"
+    Type         string                // "RANGE", "LIST", "HASH", "KEY", "SYSTEM_TIME"
     Expression   *string               // For HASH and RANGE
     Columns      []string              // For KEY, RANGE COLUMNS, LIST COLUMNS
     Linear       bool
