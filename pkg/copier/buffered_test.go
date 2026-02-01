@@ -1,7 +1,10 @@
 package copier
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -176,4 +179,190 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM datatypedst").Scan(&copiedRows)
 	require.NoError(t, err)
 	require.Equal(t, 0, copiedRows, "No rows should have been copied to destination table due to conversion error")
+}
+
+// TestBufferedCopierChunkTimingIncludesCallbackDelay verifies that the chunk timing
+// reported to chunker.Feedback() and sendMetrics includes the async write phase
+// (via the applier callback) instead of only the read time.
+//
+// This test addresses the behavioral change where chunk timing now includes both:
+// 1. The time to read the chunk data from the source
+// 2. The time for the applier to flush the data (measured via callback invocation)
+//
+// The test uses a stub applier that introduces a controlled delay before invoking
+// the callback, and a mock chunker to capture the duration passed to Feedback().
+func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// Create test tables
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS timing_test_src, timing_test_dst")
+	testutils.RunSQL(t, "CREATE TABLE timing_test_src (id INT NOT NULL PRIMARY KEY, data VARCHAR(100))")
+	testutils.RunSQL(t, "CREATE TABLE timing_test_dst (id INT NOT NULL PRIMARY KEY, data VARCHAR(100))")
+
+	// Insert test data - enough for one chunk
+	testutils.RunSQL(t, "INSERT INTO timing_test_src VALUES (1, 'test1'), (2, 'test2'), (3, 'test3')")
+
+	t1 := table.NewTableInfo(db, "test", "timing_test_src")
+	assert.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "timing_test_dst")
+	assert.NoError(t, t2.SetInfo(t.Context()))
+
+	// Create copier config first so we can use its logger
+	cfg := NewCopierDefaultConfig()
+	cfg.UseExperimentalBufferedCopier = true
+
+	// Create a real chunker (we need real chunk metadata for the copier)
+	realChunker, err := table.NewChunker(t1, t2, 1000, cfg.Logger)
+	require.NoError(t, err)
+	assert.NoError(t, realChunker.Open())
+
+	// Wrap it to capture feedback calls
+	wrappedChunker := &feedbackCapturingChunker{
+		Chunker:       realChunker,
+		feedbackCalls: make([]feedbackCall, 0),
+	}
+
+	// Create a stub applier that introduces a controlled delay
+	callbackDelay := 100 * time.Millisecond
+	stubApplier := &delayedCallbackApplier{
+		realApplier: nil, // We'll set this after creating it
+		delay:       callbackDelay,
+	}
+
+	// Create the real applier
+	realApplier, err := applier.NewSingleTargetApplier(
+		applier.Target{DB: db, KeyRange: "0"},
+		applier.NewApplierDefaultConfig(),
+	)
+	require.NoError(t, err)
+	stubApplier.realApplier = realApplier
+
+	// Set our stub applier in the config
+	cfg.Applier = stubApplier
+
+	// Create the buffered copier directly
+	copier := &buffered{
+		db:          db,
+		applier:     stubApplier,
+		chunker:     wrappedChunker,
+		concurrency: 1, // Single worker for predictable behavior
+		throttler:   cfg.Throttler,
+		dbConfig:    cfg.DBConfig,
+		logger:      cfg.Logger,
+		metricsSink: cfg.MetricsSink,
+	}
+
+	// Run the copier
+	err = copier.Run(t.Context())
+	assert.NoError(t, err)
+
+	// Get feedback calls from the wrapped chunker
+	feedbackCalls := wrappedChunker.GetFeedbackCalls()
+	require.Len(t, feedbackCalls, 1, "Expected exactly one feedback call for one chunk")
+
+	// Verify the duration includes the callback delay
+	// The total time should be: read time + callback delay
+	// We can't precisely measure read time, but we know it should be much less than the delay
+	// So the total should be at least the callback delay
+	actualDuration := feedbackCalls[0].duration
+	assert.GreaterOrEqual(t, actualDuration, callbackDelay,
+		"Chunk timing should include the callback delay (read + write time)")
+
+	// Verify the duration is reasonable (not excessively long)
+	// Allow some overhead for test execution, but it shouldn't be more than 2x the delay
+	maxExpectedDuration := callbackDelay * 2
+	assert.LessOrEqual(t, actualDuration, maxExpectedDuration,
+		"Chunk timing should not be excessively long")
+
+	// Verify the rows were actually copied
+	var count int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM timing_test_dst").Scan(&count)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, count, "All rows should be copied")
+}
+
+// feedbackCall captures the parameters passed to chunker.Feedback()
+type feedbackCall struct {
+	chunk      *table.Chunk
+	duration   time.Duration
+	actualRows uint64
+	timestamp  time.Time
+}
+
+// feedbackCapturingChunker wraps a real chunker to capture Feedback() calls
+type feedbackCapturingChunker struct {
+	table.Chunker
+	feedbackCalls []feedbackCall
+	mu            sync.Mutex
+}
+
+func (f *feedbackCapturingChunker) Feedback(chunk *table.Chunk, duration time.Duration, actualRows uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.feedbackCalls = append(f.feedbackCalls, feedbackCall{
+		chunk:      chunk,
+		duration:   duration,
+		actualRows: actualRows,
+		timestamp:  time.Now(),
+	})
+
+	// Call the underlying chunker's Feedback
+	f.Chunker.Feedback(chunk, duration, actualRows)
+}
+
+func (f *feedbackCapturingChunker) GetFeedbackCalls() []feedbackCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	result := make([]feedbackCall, len(f.feedbackCalls))
+	copy(result, f.feedbackCalls)
+	return result
+}
+
+// delayedCallbackApplier is a stub applier that wraps a real applier
+// and introduces a controlled delay before invoking the callback.
+// This simulates the async write phase taking time.
+type delayedCallbackApplier struct {
+	realApplier applier.Applier
+	delay       time.Duration
+}
+
+func (d *delayedCallbackApplier) Start(ctx context.Context) error {
+	return d.realApplier.Start(ctx)
+}
+
+func (d *delayedCallbackApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback applier.ApplyCallback) error {
+	// Wrap the callback to add delay
+	wrappedCallback := func(affectedRows int64, err error) {
+		// Introduce delay to simulate write time
+		time.Sleep(d.delay)
+		// Invoke the original callback
+		callback(affectedRows, err)
+	}
+
+	// Call the real applier with the wrapped callback
+	return d.realApplier.Apply(ctx, chunk, rows, wrappedCallback)
+}
+
+func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
+	return d.realApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, lock)
+}
+
+func (d *delayedCallbackApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []applier.LogicalRow, lock *dbconn.TableLock) (int64, error) {
+	return d.realApplier.UpsertRows(ctx, sourceTable, targetTable, rows, lock)
+}
+
+func (d *delayedCallbackApplier) Wait(ctx context.Context) error {
+	return d.realApplier.Wait(ctx)
+}
+
+func (d *delayedCallbackApplier) Stop() error {
+	return d.realApplier.Stop()
+}
+
+func (d *delayedCallbackApplier) GetTargets() []applier.Target {
+	return d.realApplier.GetTargets()
 }
