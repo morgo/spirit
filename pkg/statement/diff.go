@@ -35,6 +35,10 @@ func (ct *CreateTable) Diff(target *CreateTable) ([]*AbstractStatement, error) {
 	tableOptionClauses := ct.diffTableOptions(target)
 	alterClauses = append(alterClauses, tableOptionClauses...)
 
+	// 5. Diff partition options
+	partitionClauses := ct.diffPartitionOptions(target)
+	alterClauses = append(alterClauses, partitionClauses...)
+
 	// If no changes, return nil
 	if len(alterClauses) == 0 {
 		return nil, nil
@@ -47,7 +51,7 @@ func (ct *CreateTable) Diff(target *CreateTable) ([]*AbstractStatement, error) {
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(alterStmt, "", "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse generated ALTER statement: %w", err)
+		return nil, fmt.Errorf("failed to parse generated ALTER statement: %w (SQL: %s)", err, alterStmt)
 	}
 
 	if len(stmtNodes) != 1 {
@@ -79,35 +83,10 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 		targetColumns[target.Columns[i].Name] = &target.Columns[i]
 	}
 
-	// Check for PRIMARY KEY changes (inline column-level PRIMARY KEY)
-	// We need to handle these before column modifications
-	var pkDropped bool
-	var pkAdded bool
-	var pkColumn string
-
-	for _, sourceCol := range ct.Columns {
-		targetCol, exists := targetColumns[sourceCol.Name]
-		if exists && sourceCol.PrimaryKey && !targetCol.PrimaryKey {
-			// PRIMARY KEY was removed from this column
-			pkDropped = true
-			pkColumn = sourceCol.Name
-			break
-		}
-	}
-
-	for _, targetCol := range target.Columns {
-		sourceCol, exists := sourceColumns[targetCol.Name]
-		if exists && !sourceCol.PrimaryKey && targetCol.PrimaryKey {
-			// PRIMARY KEY was added to this column
-			pkAdded = true
-			pkColumn = targetCol.Name
-			break
-		}
-	}
-
-	// Handle PRIMARY KEY drops first
-	if pkDropped {
-		clauses = append(clauses, "DROP PRIMARY KEY")
+	// Handle PRIMARY KEY changes (inline column-level PRIMARY KEY)
+	pkDropClause, pkAddClause, pkDropped, pkColumn := ct.diffPrimaryKey(target, sourceColumns, targetColumns)
+	if pkDropClause != "" {
+		clauses = append(clauses, pkDropClause)
 	}
 
 	// Collect DROP operations and sort by name for deterministic output
@@ -120,84 +99,31 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
 
-	// Collect MODIFY and ADD operations in target order (for positioning)
-	// We need to preserve target order for AFTER clauses to work correctly
-
-	// First pass: identify which columns need explicit positioning
+	// Determine which columns need explicit positioning
 	// A column needs explicit positioning if:
-	// 1. It's a new column (ADD)
-	// 2. Its position changed relative to existing columns (not just due to ADD/DROP)
-	// 3. The previous column was explicitly repositioned (cascading effect)
-	needsExplicitPosition := make(map[string]bool)
+	// 1. It's a new column (ADD) - always needs position
+	// 2. Its previous column changed (explicit reorder)
+	needsExplicitPosition := ct.calculateColumnPositioning(target, sourceColumns, targetColumns)
+
+	// Generate the ALTER clauses in target order
 	var prevColumn string
-	for _, targetCol := range target.Columns {
-		_, existsInSource := sourceColumns[targetCol.Name]
-
-		if !existsInSource {
-			// New column always needs explicit positioning
-			needsExplicitPosition[targetCol.Name] = true
-		} else {
-			// Check if position changed
-			sourcePrevCol := getPreviousColumn(ct.Columns, targetCol.Name)
-
-			// Check if this is an implicit or explicit position change
-			_, prevColExistedInSource := sourceColumns[prevColumn]
-			_, sourcePrevColStillExists := targetColumns[sourcePrevCol]
-
-			implicitChange := false
-			if prevColumn == "" && sourcePrevCol == "" {
-				// Both first, no real change
-				implicitChange = true
-			} else if prevColumn != "" && !prevColExistedInSource {
-				// Previous column is new, position change is implicit
-				implicitChange = true
-			} else if sourcePrevCol != "" && !sourcePrevColStillExists {
-				// Previous column was dropped, position change is implicit
-				implicitChange = true
-			} else if prevColumn == sourcePrevCol {
-				// Same previous column, check if we need cascading
-				// Cascading only happens if the previous column moved to FIRST position
-				// (because that changes the absolute position of all following columns)
-				if prevColumn != "" && needsExplicitPosition[prevColumn] && prevColExistedInSource {
-					// Check if the previous column moved to FIRST
-					sourcePrevOfPrev := getPreviousColumn(ct.Columns, prevColumn)
-					if sourcePrevOfPrev != "" {
-						// Previous column was NOT first in source, but is now first in target
-						// So this column needs explicit positioning
-						needsExplicitPosition[targetCol.Name] = true
-					}
-				}
-				implicitChange = true
-			} else {
-				// Explicit reorder - previous column changed and both exist
-				implicitChange = false
-			}
-
-			if !implicitChange {
-				needsExplicitPosition[targetCol.Name] = true
-			}
-		}
-
-		prevColumn = targetCol.Name
-	}
-
-	// Second pass: generate the ALTER clauses
-	prevColumn = ""
-	for _, targetCol := range target.Columns {
+	for i, targetCol := range target.Columns {
 		sourceCol, existsInSource := sourceColumns[targetCol.Name]
 
 		if !existsInSource {
 			// ADD new column
 			clause := fmt.Sprintf("ADD COLUMN %s", formatColumnDefinition(&targetCol))
-			// Add positioning
+			// Add positioning - only if not at the end
+			isLastColumn := i == len(target.Columns)-1
 			if prevColumn == "" {
 				clause += " FIRST"
-			} else {
+			} else if !isLastColumn {
 				clause += fmt.Sprintf(" AFTER `%s`", prevColumn)
 			}
+			// If it's the last column, omit AFTER clause (implicit)
 			clauses = append(clauses, clause)
 		} else {
-			// Skip modification if only PRIMARY KEY changed (already handled above)
+			// Skip modification if only PRIMARY KEY changed (already handled in diffIndexes)
 			// When PRIMARY KEY is dropped, nullability change is implicit, so skip it
 			pkOnlyChange := sourceCol.PrimaryKey != targetCol.PrimaryKey &&
 				columnsEqualIgnorePK(sourceCol, &targetCol)
@@ -207,7 +133,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			pkDroppedNullabilityChange := pkDropped &&
 				sourceCol.Name == pkColumn &&
 				sourceCol.PrimaryKey && !targetCol.PrimaryKey &&
-				sourceCol.Nullable == false && targetCol.Nullable == true
+				!sourceCol.Nullable && targetCol.Nullable
 
 			// MODIFY existing column if:
 			// 1. Column definition changed (and not just PK-related changes)
@@ -232,11 +158,117 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	}
 
 	// Handle PRIMARY KEY adds last
-	if pkAdded {
-		clauses = append(clauses, fmt.Sprintf("ADD PRIMARY KEY (`%s`)", pkColumn))
+	if pkAddClause != "" {
+		clauses = append(clauses, pkAddClause)
 	}
 
 	return clauses
+}
+
+// calculateColumnPositioning determines which columns need explicit positioning (FIRST/AFTER).
+// Returns a map of column names that need explicit positioning.
+func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceColumns, targetColumns map[string]*Column) map[string]bool {
+	needsExplicitPosition := make(map[string]bool)
+
+	var prevColumn string
+	for _, targetCol := range target.Columns {
+		_, existsInSource := sourceColumns[targetCol.Name]
+
+		if !existsInSource {
+			// New columns always need explicit positioning
+			needsExplicitPosition[targetCol.Name] = true
+		} else {
+			// Existing column - check if its position changed
+			sourcePrevCol := getPreviousColumn(ct.Columns, targetCol.Name)
+
+			// Check if this is an implicit or explicit position change
+			_, prevColExistedInSource := sourceColumns[prevColumn]
+			_, sourcePrevColStillExists := targetColumns[sourcePrevCol]
+
+			implicitChange := false
+			if prevColumn == "" && sourcePrevCol == "" {
+				// Both first, no real change
+				implicitChange = true
+			} else if prevColumn != "" && !prevColExistedInSource {
+				// Previous column is new, position change is implicit
+				implicitChange = true
+			} else if sourcePrevCol != "" && !sourcePrevColStillExists {
+				// Previous column was dropped, position change is implicit
+				implicitChange = true
+			} else if prevColumn == sourcePrevCol {
+				// Same previous column, check if we need cascading
+				// Cascading happens if the previous column was repositioned
+				if prevColumn != "" && needsExplicitPosition[prevColumn] && prevColExistedInSource {
+					// Previous column was repositioned, so this column needs repositioning too
+					needsExplicitPosition[targetCol.Name] = true
+				}
+				implicitChange = true
+			} else {
+				// Explicit reorder - previous column changed and both exist
+				implicitChange = false
+			}
+
+			if !implicitChange {
+				needsExplicitPosition[targetCol.Name] = true
+			}
+		}
+
+		prevColumn = targetCol.Name
+	}
+
+	return needsExplicitPosition
+}
+
+// diffPrimaryKey handles PRIMARY KEY changes between source and target tables.
+// Returns: dropClause, addClause, pkDropped (bool), pkColumn (string)
+func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, targetColumns map[string]*Column) (string, string, bool, string) {
+	var dropClause, addClause string
+	var pkDropped bool
+	var pkColumn string
+
+	// Check if there's a table-level PK in source or target
+	sourcePKIndex := ct.getPrimaryKeyIndex()
+	targetPKIndex := target.getPrimaryKeyIndex()
+
+	// Check for inline PK removal (column-level PRIMARY KEY)
+	for _, sourceCol := range ct.Columns {
+		targetCol, exists := targetColumns[sourceCol.Name]
+		if exists && sourceCol.PrimaryKey && !targetCol.PrimaryKey {
+			// PRIMARY KEY was removed from this column (inline PK)
+			// But only drop it if there's no table-level PK in target
+			// (if target has table-level PK, diffIndexes will handle the transition)
+			if targetPKIndex == nil {
+				pkDropped = true
+				pkColumn = sourceCol.Name
+				dropClause = "DROP PRIMARY KEY"
+				break
+			}
+		}
+	}
+
+	// Check for inline PK addition (column-level PRIMARY KEY)
+	for _, targetCol := range target.Columns {
+		sourceCol, exists := sourceColumns[targetCol.Name]
+		if exists && !sourceCol.PrimaryKey && targetCol.PrimaryKey {
+			// PRIMARY KEY was added to this column (inline PK)
+			// Add it if:
+			// 1. There's no table-level PK in source (inline PK -> inline PK transition), OR
+			// 2. Source has table-level PK and target has inline PK (table-level -> inline transition)
+			if sourcePKIndex == nil || (sourcePKIndex != nil && targetPKIndex == nil) {
+				pkColumn = targetCol.Name
+				addClause = fmt.Sprintf("ADD PRIMARY KEY (`%s`)", pkColumn)
+				break
+			}
+		}
+	}
+
+	// Special case: Table-level PK -> inline PK transition
+	// We need to drop the table-level PK before adding the inline PK
+	if sourcePKIndex != nil && targetPKIndex == nil && addClause != "" {
+		dropClause = "DROP PRIMARY KEY"
+	}
+
+	return dropClause, addClause, pkDropped, pkColumn
 }
 
 // diffIndexes compares indexes and returns ALTER clauses for differences
@@ -256,6 +288,39 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 
 	// Collect DROP operations and sort by name for deterministic output
 	var dropClauses []string
+
+	// Handle inline PK <-> table-level PK transitions
+	targetPKIndex := target.getPrimaryKeyIndex()
+
+	// Track if we've already added a DROP PRIMARY KEY
+	pkDropAdded := false
+
+	// Check if source has inline PK (column-level PRIMARY KEY)
+	sourceHasInlinePK := false
+	for _, col := range ct.Columns {
+		if col.PrimaryKey {
+			sourceHasInlinePK = true
+			break
+		}
+	}
+
+	// Check if target has inline PK
+	targetHasInlinePK := false
+	for _, col := range target.Columns {
+		if col.PrimaryKey {
+			targetHasInlinePK = true
+			break
+		}
+	}
+
+	if sourceHasInlinePK && targetPKIndex != nil {
+		// Inline PK -> table-level PK: drop the inline PK
+		dropClauses = append(dropClauses, "DROP PRIMARY KEY")
+		pkDropAdded = true
+	}
+	// Note: Table-level PK -> inline PK is handled in diffColumns to ensure correct order
+	// (DROP PRIMARY KEY must come before ADD PRIMARY KEY)
+
 	for i := range ct.Indexes {
 		sourceIdx := &ct.Indexes[i]
 		targetIdx, existsInTarget := targetIndexes[sourceIdx.Name]
@@ -263,14 +328,22 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 		if !existsInTarget {
 			// Index removed completely
 			if sourceIdx.Type == "PRIMARY KEY" {
-				dropClauses = append(dropClauses, "DROP PRIMARY KEY")
+				// Skip if target has inline PK (handled in diffColumns)
+				if !targetHasInlinePK && !pkDropAdded {
+					dropClauses = append(dropClauses, "DROP PRIMARY KEY")
+					pkDropAdded = true
+				}
 			} else {
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX `%s`", sourceIdx.Name))
 			}
 		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 			// Index exists but changed (and not just visibility) - need to drop and re-add
 			if sourceIdx.Type == "PRIMARY KEY" {
-				dropClauses = append(dropClauses, "DROP PRIMARY KEY")
+				// Only add if not already added above
+				if !pkDropAdded {
+					dropClauses = append(dropClauses, "DROP PRIMARY KEY")
+					pkDropAdded = true
+				}
 			} else {
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX `%s`", sourceIdx.Name))
 			}
@@ -450,59 +523,6 @@ func (to *TableOptions) getRowFormat() *string {
 	return to.RowFormat
 }
 
-// columnsEqual checks if two columns are equal
-func columnsEqual(a, b *Column) bool {
-	if a.Name != b.Name {
-		return false
-	}
-	if a.Type != b.Type {
-		return false
-	}
-	if !intPtrEqual(a.Length, b.Length) {
-		return false
-	}
-	if !intPtrEqual(a.Precision, b.Precision) {
-		return false
-	}
-	if !intPtrEqual(a.Scale, b.Scale) {
-		return false
-	}
-	if !boolPtrEqual(a.Unsigned, b.Unsigned) {
-		return false
-	}
-	if a.Nullable != b.Nullable {
-		return false
-	}
-	if !stringPtrEqual(a.Default, b.Default) {
-		return false
-	}
-	if a.AutoInc != b.AutoInc {
-		return false
-	}
-	if a.PrimaryKey != b.PrimaryKey {
-		return false
-	}
-	if a.Unique != b.Unique {
-		return false
-	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
-		return false
-	}
-	if !stringPtrEqual(a.Charset, b.Charset) {
-		return false
-	}
-	if !stringPtrEqual(a.Collation, b.Collation) {
-		return false
-	}
-	if !slices.Equal(a.EnumValues, b.EnumValues) {
-		return false
-	}
-	if !slices.Equal(a.SetValues, b.SetValues) {
-		return false
-	}
-	return true
-}
-
 // columnsEqualWithContext checks if two columns are equal, considering table context for charset/collation
 // If a column's charset is nil, it inherits from the table. If it's explicitly set to the same as the table,
 // it's considered equal to nil (no explicit charset needed).
@@ -646,7 +666,12 @@ func indexesEqual(a, b *Index) bool {
 	if a.Type != b.Type {
 		return false
 	}
-	if !slices.Equal(a.Columns, b.Columns) {
+	// Compare using ColumnList if available, otherwise fall back to Columns
+	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
+		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
+			return false
+		}
+	} else if !slices.Equal(a.Columns, b.Columns) {
 		return false
 	}
 	if !boolPtrEqual(a.Invisible, b.Invisible) {
@@ -669,7 +694,12 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 	if a.Type != b.Type {
 		return false
 	}
-	if !slices.Equal(a.Columns, b.Columns) {
+	// Compare using ColumnList if available, otherwise fall back to Columns
+	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
+		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
+			return false
+		}
+	} else if !slices.Equal(a.Columns, b.Columns) {
 		return false
 	}
 	// Skip Invisible comparison
@@ -677,6 +707,33 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 		return false
 	}
 	if !stringPtrEqual(a.Comment, b.Comment) {
+		return false
+	}
+	return true
+}
+
+// indexColumnListsEqual checks if two index column lists are equal
+func indexColumnListsEqual(a, b []IndexColumn) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !indexColumnsEqual(&a[i], &b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// indexColumnsEqual checks if two index columns are equal
+func indexColumnsEqual(a, b *IndexColumn) bool {
+	if a.Name != b.Name {
+		return false
+	}
+	if !stringPtrEqual(a.Expression, b.Expression) {
+		return false
+	}
+	if !intPtrEqual(a.Length, b.Length) {
 		return false
 	}
 	return true
@@ -705,6 +762,13 @@ func constraintsEqual(a, b *Constraint) bool {
 			return false
 		}
 		if !slices.Equal(a.References.Columns, b.References.Columns) {
+			return false
+		}
+		// Compare ON DELETE and ON UPDATE actions
+		if !stringPtrEqual(a.References.OnDelete, b.References.OnDelete) {
+			return false
+		}
+		if !stringPtrEqual(a.References.OnUpdate, b.References.OnUpdate) {
 			return false
 		}
 	}
@@ -813,10 +877,27 @@ func formatAddIndex(idx *Index) string {
 		parts = append(parts, fmt.Sprintf("ADD INDEX `%s`", idx.Name))
 	}
 
-	// Columns
+	// Columns - use ColumnList if available for full details (prefix, expressions)
 	var columns []string
-	for _, col := range idx.Columns {
-		columns = append(columns, fmt.Sprintf("`%s`", col))
+	if len(idx.ColumnList) > 0 {
+		for _, col := range idx.ColumnList {
+			if col.Expression != nil {
+				// Expression index (functional index) - needs double parentheses
+				columns = append(columns, fmt.Sprintf("(%s)", *col.Expression))
+			} else {
+				// Regular column reference
+				colStr := fmt.Sprintf("`%s`", col.Name)
+				if col.Length != nil {
+					colStr += fmt.Sprintf("(%d)", *col.Length)
+				}
+				columns = append(columns, colStr)
+			}
+		}
+	} else {
+		// Fall back to simple column names
+		for _, col := range idx.Columns {
+			columns = append(columns, fmt.Sprintf("`%s`", col))
+		}
 	}
 	parts = append(parts, fmt.Sprintf("(%s)", strings.Join(columns, ", ")))
 
@@ -858,18 +939,32 @@ func formatAddConstraint(constr *Constraint) string {
 		for _, col := range constr.References.Columns {
 			refColumns = append(refColumns, fmt.Sprintf("`%s`", col))
 		}
+
+		var fkClause string
 		if constr.Name != "" {
-			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT `%s` FOREIGN KEY (%s) REFERENCES `%s` (%s)",
+			fkClause = fmt.Sprintf("ADD CONSTRAINT `%s` FOREIGN KEY (%s) REFERENCES `%s` (%s)",
 				constr.Name,
 				strings.Join(columns, ", "),
 				constr.References.Table,
-				strings.Join(refColumns, ", ")))
+				strings.Join(refColumns, ", "))
 		} else {
-			parts = append(parts, fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES `%s` (%s)",
+			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES `%s` (%s)",
 				strings.Join(columns, ", "),
 				constr.References.Table,
-				strings.Join(refColumns, ", ")))
+				strings.Join(refColumns, ", "))
 		}
+
+		// Add ON DELETE clause if present
+		if constr.References.OnDelete != nil {
+			fkClause += fmt.Sprintf(" ON DELETE %s", *constr.References.OnDelete)
+		}
+
+		// Add ON UPDATE clause if present
+		if constr.References.OnUpdate != nil {
+			fkClause += fmt.Sprintf(" ON UPDATE %s", *constr.References.OnUpdate)
+		}
+
+		parts = append(parts, fkClause)
 	}
 
 	return strings.Join(parts, " ")
@@ -919,6 +1014,16 @@ func getPreviousColumn(columns []Column, name string) string {
 	return ""
 }
 
+// getPrimaryKeyIndex returns the PRIMARY KEY index if it exists (table-level PK), nil otherwise
+func (ct *CreateTable) getPrimaryKeyIndex() *Index {
+	for i := range ct.Indexes {
+		if ct.Indexes[i].Type == "PRIMARY KEY" {
+			return &ct.Indexes[i]
+		}
+	}
+	return nil
+}
+
 // needsQuotes determines if a default value needs to be quoted
 func needsQuotes(value string) bool {
 	// Common SQL functions/expressions that don't need quotes
@@ -931,10 +1036,357 @@ func needsQuotes(value string) bool {
 	}
 
 	// If it looks like a number, don't quote it
-	if _, err := fmt.Sscanf(value, "%f", new(float64)); err == nil {
-		return true // Actually, we should quote strings that look like numbers if they came as strings
+	var f float64
+	if _, err := fmt.Sscanf(value, "%f", &f); err == nil {
+		// Successfully parsed as a number - check that we consumed the whole string
+		// to avoid partial matches like "123abc"
+		formatted := fmt.Sprintf("%v", f)
+		// For integers, formatted will be like "123.0" but value might be "123"
+		// So we need to handle both integer and float formats
+		if value == formatted {
+			return false
+		}
+		// Try integer format
+		var i int64
+		if _, err := fmt.Sscanf(value, "%d", &i); err == nil && fmt.Sprintf("%d", i) == value {
+			return false
+		}
+		// Try negative float
+		if strings.Contains(value, ".") || strings.Contains(value, "e") || strings.Contains(value, "E") {
+			// It's a float-like string, check if it parses completely
+			if strings.TrimSpace(value) == value {
+				return false
+			}
+		}
 	}
 
-	// Default to quoting
+	// Default to quoting (for strings)
 	return true
+}
+
+// diffPartitionOptions compares partition options and returns ALTER clauses for differences
+func (ct *CreateTable) diffPartitionOptions(target *CreateTable) []string {
+	var clauses []string
+
+	sourcePartition := ct.Partition
+	targetPartition := target.Partition
+
+	// Case 1: No partitioning in either table - no changes
+	if sourcePartition == nil && targetPartition == nil {
+		return clauses
+	}
+
+	// Case 2: Remove partitioning (source has partitioning, target doesn't)
+	if sourcePartition != nil && targetPartition == nil {
+		clauses = append(clauses, "REMOVE PARTITIONING")
+		return clauses
+	}
+
+	// Case 3: Add partitioning (source doesn't have partitioning, target does)
+	if sourcePartition == nil && targetPartition != nil {
+		partitionClause := formatPartitionOptions(targetPartition)
+		clauses = append(clauses, partitionClause)
+		return clauses
+	}
+
+	// Case 4: Both have partitioning - check if they're different
+	if !partitionOptionsEqual(sourcePartition, targetPartition) {
+		// Special case: For HASH/KEY partitions where only the partition count changed
+		// (no explicit definitions), we can use ADD PARTITION or COALESCE PARTITION
+		if isCountOnly, countDiff := isPartitionCountOnlyChange(sourcePartition, targetPartition); isCountOnly {
+			if countDiff > 0 {
+				// Increasing partition count - use ADD PARTITION
+				clauses = append(clauses, fmt.Sprintf("ADD PARTITION PARTITIONS %d", countDiff))
+			} else {
+				// Decreasing partition count - use COALESCE PARTITION
+				clauses = append(clauses, fmt.Sprintf("COALESCE PARTITION %d", -countDiff))
+			}
+			return clauses
+		}
+
+		// For all other partition changes, we need to use REMOVE PARTITIONING + PARTITION BY
+		// However, this cannot be done in a single ALTER statement.
+		// For now, we'll generate the clauses but note that this will fail to parse.
+		// A future enhancement would be to support multiple ALTER statements.
+		clauses = append(clauses, "REMOVE PARTITIONING")
+		partitionClause := formatPartitionOptions(targetPartition)
+		clauses = append(clauses, partitionClause)
+	}
+
+	return clauses
+}
+
+// isPartitionCountOnlyChange checks if only the partition count changed for HASH/KEY partitions
+// Returns true if this is a count-only change, along with the difference in count
+func isPartitionCountOnlyChange(source, target *PartitionOptions) (bool, int) {
+	// Must be same partition type
+	if source.Type != target.Type {
+		return false, 0
+	}
+
+	// Only applies to HASH and KEY partitions
+	if source.Type != "HASH" && source.Type != "KEY" {
+		return false, 0
+	}
+
+	// Must have same expression/columns
+	if !stringPtrEqual(source.Expression, target.Expression) {
+		return false, 0
+	}
+	if !slices.Equal(source.Columns, target.Columns) {
+		return false, 0
+	}
+
+	// Must have same linear flag
+	if source.Linear != target.Linear {
+		return false, 0
+	}
+
+	// Both must not have explicit definitions (just partition count)
+	if len(source.Definitions) > 0 || len(target.Definitions) > 0 {
+		return false, 0
+	}
+
+	// Only the partition count differs
+	if source.Partitions == target.Partitions {
+		return false, 0
+	}
+
+	return true, int(target.Partitions) - int(source.Partitions)
+}
+
+// partitionOptionsEqual checks if two partition options are equal
+func partitionOptionsEqual(a, b *PartitionOptions) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	// Compare partition type
+	if a.Type != b.Type {
+		return false
+	}
+
+	// Compare expression (for HASH and RANGE)
+	if !stringPtrEqual(a.Expression, b.Expression) {
+		return false
+	}
+
+	// Compare columns (for KEY, RANGE COLUMNS, LIST COLUMNS)
+	if !slices.Equal(a.Columns, b.Columns) {
+		return false
+	}
+
+	// Compare linear flag
+	if a.Linear != b.Linear {
+		return false
+	}
+
+	// Compare number of partitions (for HASH/KEY without explicit definitions)
+	if a.Partitions != b.Partitions {
+		return false
+	}
+
+	// Compare partition definitions
+	if len(a.Definitions) != len(b.Definitions) {
+		return false
+	}
+
+	for i := range a.Definitions {
+		if !partitionDefinitionEqual(&a.Definitions[i], &b.Definitions[i]) {
+			return false
+		}
+	}
+
+	// Compare subpartitioning
+	if !subPartitionOptionsEqual(a.SubPartition, b.SubPartition) {
+		return false
+	}
+
+	return true
+}
+
+// partitionDefinitionEqual checks if two partition definitions are equal
+func partitionDefinitionEqual(a, b *PartitionDefinition) bool {
+	if a.Name != b.Name {
+		return false
+	}
+
+	// Compare partition values
+	if !partitionValuesEqual(a.Values, b.Values) {
+		return false
+	}
+
+	// Compare comment
+	if !stringPtrEqual(a.Comment, b.Comment) {
+		return false
+	}
+
+	// Compare engine
+	if !stringPtrEqual(a.Engine, b.Engine) {
+		return false
+	}
+
+	return true
+}
+
+// partitionValuesEqual checks if two partition values are equal
+func partitionValuesEqual(a, b *PartitionValues) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	if a.Type != b.Type {
+		return false
+	}
+
+	if len(a.Values) != len(b.Values) {
+		return false
+	}
+
+	// Compare values - this is a simple comparison that may need refinement
+	// for complex value types
+	for i := range a.Values {
+		if fmt.Sprintf("%v", a.Values[i]) != fmt.Sprintf("%v", b.Values[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// subPartitionOptionsEqual checks if two subpartition options are equal
+func subPartitionOptionsEqual(a, b *SubPartitionOptions) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	if a.Type != b.Type {
+		return false
+	}
+
+	if !stringPtrEqual(a.Expression, b.Expression) {
+		return false
+	}
+
+	if !slices.Equal(a.Columns, b.Columns) {
+		return false
+	}
+
+	if a.Linear != b.Linear {
+		return false
+	}
+
+	if a.Count != b.Count {
+		return false
+	}
+
+	return true
+}
+
+// formatPartitionOptions formats partition options for ALTER TABLE
+func formatPartitionOptions(partOpts *PartitionOptions) string {
+	var parts []string
+
+	// Start with PARTITION BY
+	parts = append(parts, "PARTITION BY")
+
+	// Add LINEAR keyword if applicable
+	if partOpts.Linear {
+		parts = append(parts, "LINEAR")
+	}
+
+	// Add partition type
+	parts = append(parts, partOpts.Type)
+
+	// Add expression or columns based on partition type
+	switch partOpts.Type {
+	case "HASH":
+		if partOpts.Expression != nil {
+			parts = append(parts, fmt.Sprintf("(%s)", *partOpts.Expression))
+		} else if len(partOpts.Columns) > 0 {
+			// HASH can also use column names directly
+			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+		}
+	case "KEY":
+		if len(partOpts.Columns) > 0 {
+			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+		} else {
+			// KEY() with empty columns uses primary key
+			parts = append(parts, "()")
+		}
+	case "RANGE":
+		if partOpts.Expression != nil {
+			parts = append(parts, fmt.Sprintf("(%s)", *partOpts.Expression))
+		} else if len(partOpts.Columns) > 0 {
+			// RANGE COLUMNS
+			parts[len(parts)-1] = "RANGE COLUMNS"
+			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+		}
+	case "LIST":
+		if len(partOpts.Columns) > 0 {
+			// LIST COLUMNS
+			parts[len(parts)-1] = "LIST COLUMNS"
+			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+		}
+	}
+
+	// Add number of partitions if specified and no explicit definitions
+	if partOpts.Partitions > 0 && len(partOpts.Definitions) == 0 {
+		parts = append(parts, fmt.Sprintf("PARTITIONS %d", partOpts.Partitions))
+	}
+
+	// Add partition definitions if present
+	if len(partOpts.Definitions) > 0 {
+		var defParts []string
+		for _, def := range partOpts.Definitions {
+			defParts = append(defParts, formatPartitionDefinition(&def))
+		}
+		parts = append(parts, fmt.Sprintf("(%s)", strings.Join(defParts, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// formatPartitionDefinition formats a single partition definition
+func formatPartitionDefinition(def *PartitionDefinition) string {
+	var parts []string
+
+	// Partition name
+	parts = append(parts, fmt.Sprintf("PARTITION `%s`", def.Name))
+
+	// Values clause
+	if def.Values != nil {
+		switch def.Values.Type {
+		case "LESS_THAN":
+			var values []string
+			for _, v := range def.Values.Values {
+				values = append(values, fmt.Sprintf("%v", v))
+			}
+			parts = append(parts, fmt.Sprintf("VALUES LESS THAN (%s)", strings.Join(values, ", ")))
+		case "IN":
+			var values []string
+			for _, v := range def.Values.Values {
+				// Handle string values that need quoting
+				if str, ok := v.(string); ok {
+					values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(str)))
+				} else {
+					values = append(values, fmt.Sprintf("%v", v))
+				}
+			}
+			parts = append(parts, fmt.Sprintf("VALUES IN (%s)", strings.Join(values, ", ")))
+		case "MAXVALUE":
+			parts = append(parts, "VALUES LESS THAN MAXVALUE")
+		}
+	}
+
+	return strings.Join(parts, " ")
 }

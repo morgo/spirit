@@ -363,7 +363,7 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 			);`,
 			expected: &PartitionOptions{
 				Type:       "RANGE",
-				Expression: stringPtr("year"),
+				Expression: stringPtr("YEAR(`sale_date`)"),
 				Partitions: 2,
 				Definitions: []PartitionDefinition{
 					{
@@ -390,8 +390,8 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 			) PARTITION BY HASH(id) PARTITIONS 4;`,
 			expected: &PartitionOptions{
 				Type:       "HASH",
+				Expression: stringPtr("`id`"),
 				Partitions: 4,
-				// Note: Expression might be nil if TiDB parser doesn't expose it for simple cases
 			},
 		},
 		{

@@ -51,12 +51,20 @@ type Column struct {
 	Options    map[string]string `json:"options,omitempty"`
 }
 
+// IndexColumn represents a column or expression in an index
+type IndexColumn struct {
+	Name       string  `json:"name,omitempty"`       // Column name (empty for expression indexes)
+	Expression *string `json:"expression,omitempty"` // Expression for functional indexes
+	Length     *int    `json:"length,omitempty"`     // Prefix length for string columns
+}
+
 // Index represents an index definition
 type Index struct {
 	Raw          *ast.Constraint   `json:"-"`
 	Name         string            `json:"name"`
-	Type         string            `json:"type"` // PRIMARY, UNIQUE, INDEX, FULLTEXT, SPATIAL
-	Columns      []string          `json:"columns"`
+	Type         string            `json:"type"`                  // PRIMARY, UNIQUE, INDEX, FULLTEXT, SPATIAL
+	Columns      []string          `json:"columns"`               // Deprecated: use ColumnList for full details
+	ColumnList   []IndexColumn     `json:"column_list,omitempty"` // Full column specifications including prefix/expression
 	Invisible    *bool             `json:"invisible,omitempty"`
 	Using        *string           `json:"using,omitempty"` // BTREE, HASH, RTREE
 	Comment      *string           `json:"comment,omitempty"`
@@ -88,8 +96,10 @@ type HasName interface {
 
 // ForeignKeyReference represents a foreign key reference
 type ForeignKeyReference struct {
-	Table   string   `json:"table"`
-	Columns []string `json:"columns"`
+	Table    string   `json:"table"`
+	Columns  []string `json:"columns"`
+	OnDelete *string  `json:"on_delete,omitempty"`
+	OnUpdate *string  `json:"on_update,omitempty"`
 }
 
 // TableOptions represents table-level options
@@ -480,10 +490,11 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 // parseIndex converts a constraint to an Index struct
 func (ct *CreateTable) parseIndex(constraint *ast.Constraint) Index {
 	index := Index{
-		Raw:     constraint,
-		Name:    constraint.Name,
-		Columns: ct.parseIndexColumns(constraint.Keys),
-		Options: make(map[string]string),
+		Raw:        constraint,
+		Name:       constraint.Name,
+		Columns:    ct.parseIndexColumns(constraint.Keys),
+		ColumnList: ct.parseIndexColumnList(constraint.Keys),
+		Options:    make(map[string]string),
 	}
 
 	switch constraint.Tp {
@@ -569,15 +580,36 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 	case ast.ConstraintForeignKey:
 		constr.Type = "FOREIGN KEY"
 		if constraint.Refer != nil {
-			constr.References = &ForeignKeyReference{
+			fkRef := &ForeignKeyReference{
 				Table:   constraint.Refer.Table.Name.String(),
 				Columns: ct.parseIndexColumns(constraint.Refer.IndexPartSpecifications),
 			}
+
+			// Parse ON DELETE action (check if ReferOpt is non-empty)
+			if constraint.Refer.OnDelete != nil && constraint.Refer.OnDelete.ReferOpt.String() != "" {
+				onDelete := constraint.Refer.OnDelete.ReferOpt.String()
+				fkRef.OnDelete = &onDelete
+			}
+
+			// Parse ON UPDATE action (check if ReferOpt is non-empty)
+			if constraint.Refer.OnUpdate != nil && constraint.Refer.OnUpdate.ReferOpt.String() != "" {
+				onUpdate := constraint.Refer.OnUpdate.ReferOpt.String()
+				fkRef.OnUpdate = &onUpdate
+			}
+
+			constr.References = fkRef
+
 			// Generate definition string
 			definition := fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 				strings.Join(constr.Columns, ", "),
 				constr.References.Table,
 				strings.Join(constr.References.Columns, ", "))
+			if fkRef.OnDelete != nil {
+				definition += fmt.Sprintf(" ON DELETE %s", *fkRef.OnDelete)
+			}
+			if fkRef.OnUpdate != nil {
+				definition += fmt.Sprintf(" ON UPDATE %s", *fkRef.OnUpdate)
+			}
 			constr.Definition = &definition
 		}
 	}
@@ -597,6 +629,38 @@ func (ct *CreateTable) parseIndexColumns(keys []*ast.IndexPartSpecification) []s
 		if key.Column != nil {
 			columns = append(columns, key.Column.Name.String())
 		}
+	}
+
+	return columns
+}
+
+// parseIndexColumnList extracts full column specifications including prefix lengths and expressions
+func (ct *CreateTable) parseIndexColumnList(keys []*ast.IndexPartSpecification) []IndexColumn {
+	columns := make([]IndexColumn, 0, len(keys))
+	for _, key := range keys {
+		col := IndexColumn{}
+
+		// Check if this is a column reference or an expression
+		if key.Column != nil {
+			// Regular column reference
+			col.Name = key.Column.Name.String()
+
+			// Add prefix length if specified
+			if key.Length > 0 {
+				length := int(key.Length)
+				col.Length = &length
+			}
+		} else if key.Expr != nil {
+			// Expression index (functional index)
+			var sb strings.Builder
+			rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+			if err := key.Expr.Restore(rCtx); err == nil {
+				expr := sb.String()
+				col.Expression = &expr
+			}
+		}
+
+		columns = append(columns, col)
 	}
 
 	return columns
@@ -698,14 +762,13 @@ func (ct *CreateTable) parsePartitionOptions(partition *ast.PartitionOptions) *P
 
 	// Parse expression for HASH and RANGE
 	if partition.Expr != nil {
-		// Check if it's a function call first
-		if funcExpr, ok := partition.Expr.(*ast.FuncCallExpr); ok {
-			// For function calls, use the function name as the expression
-			funcName := funcExpr.FnName.L
-			partOpts.Expression = &funcName
+		// Restore the full expression using the AST
+		var sb strings.Builder
+		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+		if err := partition.Expr.Restore(rCtx); err == nil {
+			expr := sb.String()
+			partOpts.Expression = &expr
 		}
-		// For simple column references in HASH/KEY partitions, we don't set Expression
-		// The column reference is implicit in the partition type
 	}
 
 	// Parse column names for KEY, RANGE COLUMNS, LIST COLUMNS

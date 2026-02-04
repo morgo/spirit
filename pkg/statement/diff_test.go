@@ -25,7 +25,19 @@ func TestDiff(t *testing.T) {
 			name:     "AddColumn",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `b` int(11) NULL",
+		},
+		{
+			name:     "AddColumnInMiddle",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT)",
 			expected: "ALTER TABLE `t1` ADD COLUMN `b` int(11) NULL AFTER `id`",
+		},
+		{
+			name:     "AddColumnAtEnd",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `c` int(11) NULL",
 		},
 		{
 			name:     "DropColumn",
@@ -43,7 +55,7 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderColumn",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (c INT, a INT, b INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int(11) NULL FIRST, MODIFY COLUMN `a` int(11) NULL AFTER `c`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int(11) NULL FIRST, MODIFY COLUMN `a` int(11) NULL AFTER `c`, MODIFY COLUMN `b` int(11) NULL AFTER `a`",
 		},
 		{
 			name:     "AddIndex",
@@ -115,7 +127,7 @@ func TestDiff(t *testing.T) {
 			name:     "ColumnCommentRogueValues2",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(50) DEFAULT "O'Brien")`,
-			expected: "ALTER TABLE `t1` ADD COLUMN `name` varchar(50) NULL DEFAULT 'O\\'\\'Brien' AFTER `id`",
+			expected: "ALTER TABLE `t1` ADD COLUMN `name` varchar(50) NULL DEFAULT 'O\\'\\'Brien'",
 		},
 
 		{
@@ -158,7 +170,7 @@ func TestDiff(t *testing.T) {
 			name:     "MultipleChanges",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c VARCHAR(50))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), d INT, INDEX idx_d (d))",
-			expected: "ALTER TABLE `t1` DROP COLUMN `c`, MODIFY COLUMN `b` varchar(100) NULL, ADD COLUMN `d` int(11) NULL AFTER `b`, ADD INDEX `idx_d` (`d`)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `c`, MODIFY COLUMN `b` varchar(100) NULL, ADD COLUMN `d` int(11) NULL, ADD INDEX `idx_d` (`d`)",
 		},
 		{
 			name:     "DefaultValueFunction_NOW",
@@ -187,19 +199,19 @@ func TestDiff(t *testing.T) {
 			description TEXT,
 			INDEX idx_name (name)
 		)`,
-			expected: "ALTER TABLE `products` DROP COLUMN `old_column`, MODIFY COLUMN `name` varchar(200) NOT NULL, MODIFY COLUMN `price` decimal(12,4) NULL, ADD COLUMN `description` text NULL AFTER `price`, ADD INDEX `idx_name` (`name`)",
+			expected: "ALTER TABLE `products` DROP COLUMN `old_column`, MODIFY COLUMN `name` varchar(200) NOT NULL, MODIFY COLUMN `price` decimal(12,4) NULL, ADD COLUMN `description` text NULL, ADD INDEX `idx_name` (`name`)",
 		},
 		{
 			name:     "VirtualColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50), full_name VARCHAR(101) AS (CONCAT(first_name, ' ', last_name)) VIRTUAL)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `full_name` varchar(101) NULL AFTER `last_name`",
+			expected: "ALTER TABLE `t1` ADD COLUMN `full_name` varchar(101) NULL",
 		},
 		{
 			name:     "StoredColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2), tax_rate DECIMAL(5,4))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2), tax_rate DECIMAL(5,4), total DECIMAL(10,2) AS (price * (1 + tax_rate)) STORED)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `total` decimal(10,2) NULL AFTER `tax_rate`",
+			expected: "ALTER TABLE `t1` ADD COLUMN `total` decimal(10,2) NULL",
 		},
 		{
 			name:     "Timestamps1",
@@ -239,7 +251,9 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`) COMMENT 'name index'",
 		},
 
-		// Fulltext and Spatial Indexes
+		// Fulltext indexes
+		// Note: Spatial indexes can not be supported, because the TiDB parser does not support them.
+		// i.e. GEOMETRY, POINT, LINESTRING, and other spatial column types.
 		{
 			name:     "AddFulltextIndex",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT)",
@@ -301,7 +315,7 @@ func TestDiff(t *testing.T) {
 			name:     "ChangeAutoIncrement",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) AUTO_INCREMENT=1",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) AUTO_INCREMENT=100",
-			expected: "", // currently not supported: this is intentional for now.
+			expected: "", // note: this is intentional; we don't propagate AUTO_INCREMENT to the diff.
 		},
 		// Composite Primary Key
 		{
@@ -388,6 +402,267 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, data JSON)",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `data` json NULL",
 		},
+
+		// Partitioned Tables
+		{
+			name:     "AddRangePartition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATE) PARTITION BY RANGE (YEAR(created_at)) (PARTITION p0 VALUES LESS THAN (2020), PARTITION p1 VALUES LESS THAN (2021))",
+			expected: "ALTER TABLE `t1` PARTITION BY RANGE (YEAR(`created_at`)) (PARTITION `p0` VALUES LESS THAN (2020), PARTITION `p1` VALUES LESS THAN (2021))",
+		},
+		{
+			name:     "AddHashPartition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			expected: "ALTER TABLE `t1` PARTITION BY HASH (`user_id`) PARTITIONS 4",
+		},
+		{
+			name:     "AddKeyPartition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100)) PARTITION BY KEY(id) PARTITIONS 4",
+			expected: "ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 4",
+		},
+		{
+			name:     "AddListPartition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, region VARCHAR(50))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, region VARCHAR(50)) PARTITION BY LIST COLUMNS(region) (PARTITION pNorth VALUES IN('US', 'CA'), PARTITION pSouth VALUES IN('MX', 'BR'))",
+			expected: "ALTER TABLE `t1` PARTITION BY LIST COLUMNS (`region`) (PARTITION `pNorth` VALUES IN ('US', 'CA'), PARTITION `pSouth` VALUES IN ('MX', 'BR'))",
+		},
+		{
+			name:     "RemovePartition",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			expected: "ALTER TABLE `t1` REMOVE PARTITIONING",
+		},
+		{
+			name:     "ChangePartitionCount",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(id) PARTITIONS 8",
+			expected: "ALTER TABLE `t1` ADD PARTITION PARTITIONS 4",
+		},
+
+		// Index Column Order Changes
+		{
+			name:     "ChangeIndexColumnOrder",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, INDEX idx_abc (a, b, c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, INDEX idx_abc (b, a, c))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_abc`, ADD INDEX `idx_abc` (`b`, `a`, `c`)",
+		},
+		{
+			name:     "ChangeIndexColumnOrderUnique",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, UNIQUE INDEX idx_ab (a, b))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, UNIQUE INDEX idx_ab (b, a))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_ab`, ADD UNIQUE INDEX `idx_ab` (`b`, `a`)",
+		},
+		{
+			name:     "ChangeIndexAddColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, INDEX idx_ab (a, b))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, INDEX idx_ab (a, b, c))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_ab`, ADD INDEX `idx_ab` (`a`, `b`, `c`)",
+		},
+		{
+			name:     "ChangeIndexRemoveColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, INDEX idx_abc (a, b, c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT, INDEX idx_abc (a, b))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_abc`, ADD INDEX `idx_abc` (`a`, `b`)",
+		},
+
+		// Foreign Key with ON DELETE / ON UPDATE
+		{
+			name:     "AddForeignKeyWithOnDelete",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			name:     "AddForeignKeyWithOnUpdate",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON UPDATE CASCADE",
+		},
+		{
+			name:     "AddForeignKeyWithBothActions",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE ON UPDATE RESTRICT)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT",
+		},
+		{
+			name:     "AddForeignKeyWithSetNull",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL",
+		},
+		{
+			name:     "ChangeForeignKeyAction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			name:     "AddOnDeleteToExistingForeignKey",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+
+		// Composite Primary Key Changes
+		{
+			name:     "AddCompositePrimaryKey",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL)",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			expected: "ALTER TABLE `t1` ADD PRIMARY KEY (`a`, `b`)",
+		},
+		{
+			name:     "DropCompositePrimaryKey",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL)",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY",
+		},
+		{
+			name:     "ChangeCompositePrimaryKeyColumns",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, PRIMARY KEY (a, b))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, PRIMARY KEY (a, c))",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`, `c`)",
+		},
+		{
+			name:     "ChangeCompositePrimaryKeyOrder",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (b, a))",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`b`, `a`)",
+		},
+		{
+			name:     "ChangeSingleToCompositePrimaryKey",
+			source:   "CREATE TABLE t1 (a INT NOT NULL PRIMARY KEY, b INT NOT NULL)",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`, `b`)",
+		},
+		{
+			name:     "ChangeCompositeToSinglePrimaryKey",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL PRIMARY KEY, b INT NOT NULL)",
+			expected: "ALTER TABLE `t1` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`)",
+		},
+		{
+			name:     "CompositePrimaryKeyWithAutoIncrement",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL)",
+			target:   "CREATE TABLE t1 (a INT NOT NULL AUTO_INCREMENT, b INT NOT NULL, PRIMARY KEY (a, b))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` int(11) NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`a`, `b`)",
+		},
+
+		// Column Rename Tests - Should show as DROP + ADD (not safe to rename)
+		{
+			name:     "RenameColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, old_name VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, new_name VARCHAR(100))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `old_name`, ADD COLUMN `new_name` varchar(100) NULL",
+		},
+		{
+			name:     "RenameColumnWithData",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_name VARCHAR(100) NOT NULL DEFAULT 'unknown')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, username VARCHAR(100) NOT NULL DEFAULT 'unknown')",
+			expected: "ALTER TABLE `t1` DROP COLUMN `user_name`, ADD COLUMN `username` varchar(100) NOT NULL DEFAULT 'unknown'",
+		},
+		{
+			name:     "RenameColumnWithIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, old_col VARCHAR(100), INDEX idx_old (old_col))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, new_col VARCHAR(100), INDEX idx_new (new_col))",
+			expected: "ALTER TABLE `t1` DROP COLUMN `old_col`, ADD COLUMN `new_col` varchar(100) NULL, DROP INDEX `idx_old`, ADD INDEX `idx_new` (`new_col`)",
+		},
+
+		// Index Rename Tests - Should show as DROP + ADD (not optimized)
+		{
+			name:     "RenameIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX old_idx (name))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX new_idx (name))",
+			expected: "ALTER TABLE `t1` DROP INDEX `old_idx`, ADD INDEX `new_idx` (`name`)",
+		},
+		{
+			name:     "RenameUniqueIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), UNIQUE INDEX old_uniq (email))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), UNIQUE INDEX new_uniq (email))",
+			expected: "ALTER TABLE `t1` DROP INDEX `old_uniq`, ADD UNIQUE INDEX `new_uniq` (`email`)",
+		},
+		{
+			name:     "RenameMultiColumnIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, INDEX idx_old (a, b))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, INDEX idx_new (a, b))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_old`, ADD INDEX `idx_new` (`a`, `b`)",
+		},
+
+		// Prefix Index Tests (index with length specification)
+		{
+			name:     "AddPrefixIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT, INDEX idx_content (content(100)))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_content` (`content`(100))",
+		},
+		{
+			name:     "ChangePrefixIndexLength",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT, INDEX idx_content (content(50)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT, INDEX idx_content (content(100)))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_content`, ADD INDEX `idx_content` (`content`(100))",
+		},
+		{
+			name:     "AddPrefixToExistingIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name(50)))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD INDEX `idx_name` (`name`(50))",
+		},
+		{
+			name:     "RemovePrefixFromIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name(50)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD INDEX `idx_name` (`name`)",
+		},
+		{
+			name:     "MultiColumnPrefixIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a VARCHAR(100), b TEXT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a VARCHAR(100), b TEXT, INDEX idx_ab (a(20), b(50)))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_ab` (`a`(20), `b`(50))",
+		},
+
+		// Expression/Functional Index Tests
+		// Note: Expression indexes are not fully supported by TiDB parser for ALTER statements
+		// The parser can read them from CREATE TABLE but cannot generate valid ALTER statements
+		// These tests document the current behavior - they generate empty column lists
+		{
+			name:     "AddExpressionIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), INDEX idx_lower_email ((LOWER(email))))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_lower_email` ((LOWER(`email`)))",
+		},
+		{
+			name:     "DropExpressionIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), INDEX idx_lower_email ((LOWER(email))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_lower_email`",
+		},
+		{
+			name:     "ChangeExpressionIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), INDEX idx_email ((LOWER(email))))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), INDEX idx_email ((UPPER(email))))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_email`, ADD INDEX `idx_email` ((UPPER(`email`)))",
+		},
+		{
+			name:     "ExpressionIndexWithMultipleColumns",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50), INDEX idx_full ((CONCAT(first_name, ' ', last_name))))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_full` ((CONCAT(`first_name`, ' ', `last_name`)))",
+		},
+
+		// Mixed Index Type Changes
+		{
+			name:     "ChangeIndexTypeAndAddPrefix",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), UNIQUE INDEX idx_name (name(50)))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_name`, ADD UNIQUE INDEX `idx_name` (`name`(50))",
+		},
+		{
+			name:     "RenameAndChangePrefixLength",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT, INDEX old_idx (content(50)))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT, INDEX new_idx (content(100)))",
+			expected: "ALTER TABLE `t1` DROP INDEX `old_idx`, ADD INDEX `new_idx` (`content`(100))",
+		},
 	}
 
 	for _, tt := range tests {
@@ -420,4 +695,111 @@ func TestDiff_DifferentTableNames(t *testing.T) {
 
 	_, err = ct1.Diff(ct2)
 	assert.Error(t, err, "expected error when diffing tables with different names")
+}
+
+// TestHelperFunctions tests the helper functions used in diff.go
+func TestHelperFunctions(t *testing.T) {
+	t.Run("stringPtrEqual", func(t *testing.T) {
+		str1 := "test"
+		str2 := "test"
+		str3 := "different"
+
+		assert.True(t, stringPtrEqual(nil, nil))
+		assert.True(t, stringPtrEqual(&str1, &str2))
+		assert.False(t, stringPtrEqual(&str1, nil))
+		assert.False(t, stringPtrEqual(nil, &str1))
+		assert.False(t, stringPtrEqual(&str1, &str3))
+	})
+
+	t.Run("intPtrEqual", func(t *testing.T) {
+		int1 := 10
+		int2 := 10
+		int3 := 20
+
+		assert.True(t, intPtrEqual(nil, nil))
+		assert.True(t, intPtrEqual(&int1, &int2))
+		assert.False(t, intPtrEqual(&int1, nil))
+		assert.False(t, intPtrEqual(nil, &int1))
+		assert.False(t, intPtrEqual(&int1, &int3))
+	})
+
+	t.Run("boolPtrEqual", func(t *testing.T) {
+		bool1 := true
+		bool2 := true
+		bool3 := false
+
+		assert.True(t, boolPtrEqual(nil, nil))
+		assert.True(t, boolPtrEqual(&bool1, &bool2))
+		assert.False(t, boolPtrEqual(&bool1, nil))
+		assert.False(t, boolPtrEqual(nil, &bool1))
+		assert.False(t, boolPtrEqual(&bool1, &bool3))
+	})
+
+	t.Run("needsQuotes", func(t *testing.T) {
+		// Functions and keywords should not be quoted
+		assert.False(t, needsQuotes("NULL"))
+		assert.False(t, needsQuotes("null"))
+		assert.False(t, needsQuotes("CURRENT_TIMESTAMP"))
+		assert.False(t, needsQuotes("current_timestamp"))
+		assert.False(t, needsQuotes("NOW()"))
+		assert.False(t, needsQuotes("now()"))
+		assert.False(t, needsQuotes("CURRENT_TIMESTAMP(6)"))
+
+		// Numeric values should not be quoted
+		assert.False(t, needsQuotes("0"))
+		assert.False(t, needsQuotes("123"))
+		assert.False(t, needsQuotes("-456"))
+		assert.False(t, needsQuotes("3.14"))
+		assert.False(t, needsQuotes("-2.5"))
+
+		// String values should be quoted
+		assert.True(t, needsQuotes("active"))
+		assert.True(t, needsQuotes("hello world"))
+		assert.True(t, needsQuotes("2023-01-01 00:00:00"))
+		assert.True(t, needsQuotes(""))
+		assert.True(t, needsQuotes("O'Brien"))
+	})
+
+	t.Run("getPreviousColumn", func(t *testing.T) {
+		columns := []Column{
+			{Name: "id"},
+			{Name: "name"},
+			{Name: "email"},
+			{Name: "created_at"},
+		}
+
+		assert.Equal(t, "", getPreviousColumn(columns, "id"))
+		assert.Equal(t, "id", getPreviousColumn(columns, "name"))
+		assert.Equal(t, "name", getPreviousColumn(columns, "email"))
+		assert.Equal(t, "email", getPreviousColumn(columns, "created_at"))
+		assert.Equal(t, "", getPreviousColumn(columns, "nonexistent"))
+	})
+
+	t.Run("getPrimaryKeyIndex", func(t *testing.T) {
+		// Table with no primary key
+		ct1, err := ParseCreateTable("CREATE TABLE t1 (id INT, name VARCHAR(100))")
+		require.NoError(t, err)
+		assert.Nil(t, ct1.getPrimaryKeyIndex())
+
+		// Table with inline primary key (column-level)
+		ct2, err := ParseCreateTable("CREATE TABLE t2 (id INT PRIMARY KEY)")
+		require.NoError(t, err)
+		assert.Nil(t, ct2.getPrimaryKeyIndex()) // inline PK is not in Indexes
+
+		// Table with table-level primary key
+		ct3, err := ParseCreateTable("CREATE TABLE t3 (id INT, PRIMARY KEY (id))")
+		require.NoError(t, err)
+		pk := ct3.getPrimaryKeyIndex()
+		require.NotNil(t, pk)
+		assert.Equal(t, "PRIMARY KEY", pk.Type)
+		assert.Equal(t, []string{"id"}, pk.Columns)
+
+		// Table with composite primary key
+		ct4, err := ParseCreateTable("CREATE TABLE t4 (a INT, b INT, PRIMARY KEY (a, b))")
+		require.NoError(t, err)
+		pk = ct4.getPrimaryKeyIndex()
+		require.NotNil(t, pk)
+		assert.Equal(t, "PRIMARY KEY", pk.Type)
+		assert.Equal(t, []string{"a", "b"}, pk.Columns)
+	})
 }
