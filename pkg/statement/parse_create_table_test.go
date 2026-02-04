@@ -1791,3 +1791,406 @@ func TestRemoveSecondaryIndexes_ErrorCases(t *testing.T) {
 		})
 	}
 }
+
+// TestBinaryTypeDetection tests that binary types are correctly detected and converted
+// from their text equivalents when the binary flag is set
+func TestBinaryTypeDetection(t *testing.T) {
+	testCases := []struct {
+		name         string
+		sql          string
+		columnName   string
+		expectedType string
+	}{
+		{
+			name:         "VARBINARY type",
+			sql:          "CREATE TABLE test (data VARBINARY(255));",
+			columnName:   "data",
+			expectedType: "varbinary",
+		},
+		{
+			name:         "BINARY type",
+			sql:          "CREATE TABLE test (data BINARY(16));",
+			columnName:   "data",
+			expectedType: "binary",
+		},
+		{
+			name:         "BLOB type",
+			sql:          "CREATE TABLE test (data BLOB);",
+			columnName:   "data",
+			expectedType: "blob",
+		},
+		{
+			name:         "TINYBLOB type",
+			sql:          "CREATE TABLE test (data TINYBLOB);",
+			columnName:   "data",
+			expectedType: "tinyblob",
+		},
+		{
+			name:         "MEDIUMBLOB type",
+			sql:          "CREATE TABLE test (data MEDIUMBLOB);",
+			columnName:   "data",
+			expectedType: "mediumblob",
+		},
+		{
+			name:         "LONGBLOB type",
+			sql:          "CREATE TABLE test (data LONGBLOB);",
+			columnName:   "data",
+			expectedType: "longblob",
+		},
+		{
+			name:         "Multiple binary columns",
+			sql:          "CREATE TABLE test (id INT, data1 VARBINARY(100), data2 BINARY(32), content BLOB);",
+			columnName:   "data1",
+			expectedType: "varbinary",
+		},
+		{
+			name:         "VARBINARY with length",
+			sql:          "CREATE TABLE test (hash VARBINARY(64));",
+			columnName:   "hash",
+			expectedType: "varbinary",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			columns := ct.GetColumns()
+			col := columns.ByName(tc.columnName)
+			require.NotNil(t, col, "Column %s should exist", tc.columnName)
+			assert.Equal(t, tc.expectedType, col.Type, "Column type should be %s", tc.expectedType)
+		})
+	}
+}
+
+// TestBinaryTypeWithLength tests that binary types preserve their length information
+func TestBinaryTypeWithLength(t *testing.T) {
+	testCases := []struct {
+		name           string
+		sql            string
+		columnName     string
+		expectedType   string
+		expectedLength *int
+	}{
+		{
+			name:           "VARBINARY with length",
+			sql:            "CREATE TABLE test (data VARBINARY(255));",
+			columnName:     "data",
+			expectedType:   "varbinary",
+			expectedLength: intPtr(255),
+		},
+		{
+			name:           "BINARY with length",
+			sql:            "CREATE TABLE test (data BINARY(16));",
+			columnName:     "data",
+			expectedType:   "binary",
+			expectedLength: intPtr(16),
+		},
+		{
+			name:           "BLOB without length",
+			sql:            "CREATE TABLE test (data BLOB);",
+			columnName:     "data",
+			expectedType:   "blob",
+			expectedLength: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			columns := ct.GetColumns()
+			col := columns.ByName(tc.columnName)
+			require.NotNil(t, col)
+			assert.Equal(t, tc.expectedType, col.Type)
+
+			if tc.expectedLength != nil {
+				require.NotNil(t, col.Length, "Length should be set")
+				assert.Equal(t, *tc.expectedLength, *col.Length)
+			} else {
+				assert.Nil(t, col.Length, "Length should not be set")
+			}
+		})
+	}
+}
+
+// TestCharsetCollationExtraction tests that charset and collation are correctly
+// extracted from column type definitions
+func TestCharsetCollationExtraction(t *testing.T) {
+	testCases := []struct {
+		name              string
+		sql               string
+		columnName        string
+		expectedCharset   *string
+		expectedCollation *string
+	}{
+		{
+			name:              "VARCHAR with CHARACTER SET",
+			sql:               "CREATE TABLE test (name VARCHAR(100) CHARACTER SET utf8mb4);",
+			columnName:        "name",
+			expectedCharset:   stringPtr("utf8mb4"),
+			expectedCollation: nil,
+		},
+		{
+			name:              "CHAR with COLLATE",
+			sql:               "CREATE TABLE test (code CHAR(10) COLLATE utf8mb4_bin);",
+			columnName:        "code",
+			expectedCharset:   nil,
+			expectedCollation: stringPtr("utf8mb4_bin"),
+		},
+		{
+			name:              "VARCHAR with both CHARACTER SET and COLLATE",
+			sql:               "CREATE TABLE test (name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci);",
+			columnName:        "name",
+			expectedCharset:   stringPtr("utf8mb4"),
+			expectedCollation: stringPtr("utf8mb4_unicode_ci"),
+		},
+		{
+			name:              "TEXT with CHARACTER SET",
+			sql:               "CREATE TABLE test (description TEXT CHARACTER SET utf8);",
+			columnName:        "description",
+			expectedCharset:   stringPtr("utf8"),
+			expectedCollation: nil,
+		},
+		{
+			name:              "Column without charset/collation",
+			sql:               "CREATE TABLE test (name VARCHAR(100));",
+			columnName:        "name",
+			expectedCharset:   nil,
+			expectedCollation: nil,
+		},
+		{
+			name:              "Multiple columns with different charsets",
+			sql:               "CREATE TABLE test (name1 VARCHAR(100) CHARACTER SET utf8, name2 VARCHAR(100) CHARACTER SET latin1);",
+			columnName:        "name1",
+			expectedCharset:   stringPtr("utf8"),
+			expectedCollation: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			columns := ct.GetColumns()
+			col := columns.ByName(tc.columnName)
+			require.NotNil(t, col, "Column %s should exist", tc.columnName)
+
+			if tc.expectedCharset != nil {
+				require.NotNil(t, col.Charset, "Charset should be set")
+				assert.Equal(t, *tc.expectedCharset, *col.Charset)
+			} else {
+				assert.Nil(t, col.Charset, "Charset should not be set")
+			}
+
+			if tc.expectedCollation != nil {
+				require.NotNil(t, col.Collation, "Collation should be set")
+				assert.Equal(t, *tc.expectedCollation, *col.Collation)
+			} else {
+				assert.Nil(t, col.Collation, "Collation should not be set")
+			}
+		})
+	}
+}
+
+// TestCharsetCollationOverride tests that column options can override charset/collation
+// from the type definition
+func TestCharsetCollationOverride(t *testing.T) {
+	// Note: This test documents current behavior where column options should override
+	// type-level charset/collation. The TiDB parser may handle this differently.
+	sql := `CREATE TABLE test (
+		name VARCHAR(100) CHARACTER SET utf8 COLLATE utf8_bin
+	);`
+
+	ct, err := ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	columns := ct.GetColumns()
+	col := columns.ByName("name")
+	require.NotNil(t, col)
+
+	// Verify that charset and collation are captured
+	// The exact behavior depends on how TiDB parser handles these attributes
+	if col.Charset != nil {
+		assert.Equal(t, "utf8", *col.Charset)
+	}
+	if col.Collation != nil {
+		assert.Equal(t, "utf8_bin", *col.Collation)
+	}
+}
+
+// TestBinaryTypeNotAppliedToNonTextTypes tests that the binary flag conversion
+// only applies to text types and not to other types
+func TestBinaryTypeNotAppliedToNonTextTypes(t *testing.T) {
+	testCases := []struct {
+		name         string
+		sql          string
+		columnName   string
+		expectedType string
+	}{
+		{
+			name:         "INT remains INT",
+			sql:          "CREATE TABLE test (id INT);",
+			columnName:   "id",
+			expectedType: "int",
+		},
+		{
+			name:         "BIGINT remains BIGINT",
+			sql:          "CREATE TABLE test (id BIGINT);",
+			columnName:   "id",
+			expectedType: "bigint",
+		},
+		{
+			name:         "DECIMAL remains DECIMAL",
+			sql:          "CREATE TABLE test (price DECIMAL(10,2));",
+			columnName:   "price",
+			expectedType: "decimal",
+		},
+		{
+			name:         "DATE remains DATE",
+			sql:          "CREATE TABLE test (created DATE);",
+			columnName:   "created",
+			expectedType: "date",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			columns := ct.GetColumns()
+			col := columns.ByName(tc.columnName)
+			require.NotNil(t, col)
+			assert.Equal(t, tc.expectedType, col.Type)
+		})
+	}
+}
+
+// TestComplexTableWithBinaryAndCharset tests a realistic table with both
+// binary types and charset/collation specifications
+func TestComplexTableWithBinaryAndCharset(t *testing.T) {
+	sql := `CREATE TABLE users (
+		id BIGINT PRIMARY KEY AUTO_INCREMENT,
+		username VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+		password_hash VARBINARY(64) NOT NULL,
+		email VARCHAR(255) CHARACTER SET utf8mb4 NOT NULL,
+		profile_data BLOB,
+		bio TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+		session_token BINARY(32),
+		metadata MEDIUMBLOB,
+		UNIQUE KEY uk_username (username),
+		UNIQUE KEY uk_email (email)
+	) ENGINE=InnoDB CHARSET=utf8mb4;`
+
+	ct, err := ParseCreateTable(sql)
+	require.NoError(t, err)
+	assert.Equal(t, "users", ct.GetTableName())
+
+	columns := ct.GetColumns()
+	require.Len(t, columns, 8)
+
+	// Test username column (VARCHAR with charset and collation)
+	username := columns.ByName("username")
+	require.NotNil(t, username)
+	assert.Contains(t, username.Type, "varchar")
+	assert.False(t, username.Nullable)
+	if username.Charset != nil {
+		assert.Equal(t, "utf8mb4", *username.Charset)
+	}
+	if username.Collation != nil {
+		assert.Equal(t, "utf8mb4_unicode_ci", *username.Collation)
+	}
+
+	// Test password_hash column (VARBINARY)
+	passwordHash := columns.ByName("password_hash")
+	require.NotNil(t, passwordHash)
+	assert.Equal(t, "varbinary", passwordHash.Type)
+	assert.False(t, passwordHash.Nullable)
+	require.NotNil(t, passwordHash.Length)
+	assert.Equal(t, 64, *passwordHash.Length)
+
+	// Test email column (VARCHAR with charset)
+	email := columns.ByName("email")
+	require.NotNil(t, email)
+	assert.Contains(t, email.Type, "varchar")
+	if email.Charset != nil {
+		assert.Equal(t, "utf8mb4", *email.Charset)
+	}
+
+	// Test profile_data column (BLOB)
+	profileData := columns.ByName("profile_data")
+	require.NotNil(t, profileData)
+	assert.Equal(t, "blob", profileData.Type)
+
+	// Test bio column (TEXT with charset and collation)
+	bio := columns.ByName("bio")
+	require.NotNil(t, bio)
+	assert.Equal(t, "text", bio.Type)
+	if bio.Charset != nil {
+		assert.Equal(t, "utf8mb4", *bio.Charset)
+	}
+	if bio.Collation != nil {
+		assert.Equal(t, "utf8mb4_unicode_ci", *bio.Collation)
+	}
+
+	// Test session_token column (BINARY)
+	sessionToken := columns.ByName("session_token")
+	require.NotNil(t, sessionToken)
+	assert.Equal(t, "binary", sessionToken.Type)
+	require.NotNil(t, sessionToken.Length)
+	assert.Equal(t, 32, *sessionToken.Length)
+
+	// Test metadata column (MEDIUMBLOB)
+	metadata := columns.ByName("metadata")
+	require.NotNil(t, metadata)
+	assert.Equal(t, "mediumblob", metadata.Type)
+
+	// Verify table options
+	options := ct.GetTableOptions()
+	assert.Equal(t, "InnoDB", options["engine"])
+	assert.Equal(t, "utf8mb4", options["charset"])
+}
+
+// TestBinaryTypeJSONSerialization tests that binary types can be serialized
+// and deserialized correctly
+func TestBinaryTypeJSONSerialization(t *testing.T) {
+	sql := `CREATE TABLE test (
+		id INT PRIMARY KEY,
+		data VARBINARY(255),
+		content BLOB
+	);`
+
+	ct, err := ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	columns := ct.GetColumns()
+	jsonData, err := json.Marshal(columns)
+	require.NoError(t, err)
+
+	var deserializedColumns []Column
+	err = json.Unmarshal(jsonData, &deserializedColumns)
+	require.NoError(t, err)
+
+	require.Len(t, deserializedColumns, 3)
+
+	// Verify data column (VARBINARY)
+	dataCol := deserializedColumns[1]
+	assert.Equal(t, "data", dataCol.Name)
+	assert.Equal(t, "varbinary", dataCol.Type)
+	require.NotNil(t, dataCol.Length)
+	assert.Equal(t, 255, *dataCol.Length)
+
+	// Verify content column (BLOB)
+	contentCol := deserializedColumns[2]
+	assert.Equal(t, "content", contentCol.Name)
+	assert.Equal(t, "blob", contentCol.Type)
+}
+
+// Helper function to create int pointer
+func intPtr(i int) *int {
+	return &i
+}

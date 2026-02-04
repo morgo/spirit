@@ -356,6 +356,26 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 		Options:  make(map[string]string),
 	}
 
+	// Check if this is a binary type (VARBINARY, BLOB, etc.)
+	// The TiDB parser converts binary types to their text equivalents,
+	// so we need to check the binary flag and convert back
+	if mysql.HasBinaryFlag(col.Tp.GetFlag()) {
+		switch column.Type {
+		case "varchar":
+			column.Type = "varbinary"
+		case "char":
+			column.Type = "binary"
+		case "text":
+			column.Type = "blob"
+		case "tinytext":
+			column.Type = "tinyblob"
+		case "mediumtext":
+			column.Type = "mediumblob"
+		case "longtext":
+			column.Type = "longblob"
+		}
+	}
+
 	// Extract type information
 	typeStr := col.Tp.String()
 	if length := extractLengthFromTypeString(typeStr); length > 0 {
@@ -374,6 +394,15 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	if mysql.HasUnsignedFlag(col.Tp.GetFlag()) {
 		unsigned := true
 		column.Unsigned = &unsigned
+	}
+
+	// Extract charset and collation from the type itself
+	// (they may be overridden by column options later)
+	if charset := col.Tp.GetCharset(); charset != "" {
+		column.Charset = &charset
+	}
+	if collation := col.Tp.GetCollate(); collation != "" {
+		column.Collation = &collation
 	}
 
 	// Extract ENUM/SET permitted values
