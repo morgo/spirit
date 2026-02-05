@@ -933,6 +933,218 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.Equal(t, 0, m.db.Stats().InUse) // all connections are returned.
 }
 
+// TestE2EBinlogSubscribingCompositeKeyVarchar tests binlog subscription with composite key
+// where the first column is non-numeric (VARCHAR). This validates that KeyAboveHighWatermark
+// and KeyBelowLowWatermark optimizations work with VARCHAR keys.
+//
+// Since watermark optimizations are disabled before checksum (see runner.go), there's no risk
+// of checksum corruption even if collation comparison differs slightly between Go and MySQL.
+//
+// Expected behavior:
+// - KeyAboveHighWatermark compares VARCHAR keys and may discard events above the watermark
+// - KeyBelowLowWatermark compares VARCHAR keys and allows immediate flush for events below watermark
+// - Migration completes successfully with optimization enabled
+func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
+	t.Parallel()
+	tbl := `CREATE TABLE e2et3 (
+		session_id varchar(40) NOT NULL,
+		event_id int NOT NULL,
+		data varchar(255) NOT NULL default '',
+		PRIMARY KEY (session_id, event_id))`
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et3, _e2et3_new`)
+	testutils.RunSQL(t, tbl)
+
+	// Insert test data with UUID-based session_ids - create enough rows for chunking
+	// First batch: 5 rows with event_id=1
+	testutils.RunSQL(t, `INSERT INTO e2et3 (session_id, event_id) 
+		SELECT UUID(), 1 FROM (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t`)
+
+	// Add more rows across multiple event_ids to get ~60 rows total
+	insertRows := func(eventID int) {
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et3 (session_id, event_id) 
+			SELECT UUID(), %d FROM (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t`, eventID))
+	}
+
+	for i := 2; i <= 12; i++ {
+		insertRows(i)
+	}
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         2,
+		Table:           "e2et3",
+		Alter:           "ENGINE=InnoDB",
+		ReplicaMaxLag:   0,
+		TargetChunkTime: 50,
+	})
+	assert.NoError(t, err)
+	defer m.Close()
+
+	// Setup but don't call Run() - step through manually
+	m.startTime = time.Now()
+	m.dbConfig = dbconn.NewDBConfig()
+	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
+	assert.NoError(t, err)
+	defer m.db.Close()
+
+	// Get Table Info
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	err = m.changes[0].table.SetInfo(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m.setup(t.Context()))
+
+	// Start copying
+	m.status.Set(status.CopyRows)
+	ccopier, ok := m.copier.(*copier.Unbuffered)
+	assert.True(t, ok)
+
+	// Copy all chunks first without inserting data mid-copy
+	// This avoids "table is read" errors from BlockWait after copying is done
+	for {
+		chunk, err := m.copyChunker.Next()
+		if err == table.ErrTableIsRead {
+			break
+		}
+		assert.NoError(t, err)
+		assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+	}
+
+	// Now insert some data after all chunks are copied
+	// These events will be captured by binlog subscription
+	// Note: With random UUIDs, watermark behavior is non-deterministic
+	// (UUIDs may be above/below watermark unpredictably)
+	// so we don't assert deltaLen. Final checksum validates correctness.
+	testutils.RunSQL(t, `INSERT INTO e2et3 (session_id, event_id, data) VALUES (UUID(), 999, 'test')`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// Insert another event
+	testutils.RunSQL(t, `INSERT INTO e2et3 (session_id, event_id, data) VALUES (UUID(), 1000, 'test2')`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// Flush and complete migration
+	assert.NoError(t, m.replClient.Flush(t.Context()))
+	m.status.Set(status.ApplyChangeset)
+	m.status.Set(status.Checksum)
+	assert.NoError(t, m.checksum(t.Context()))
+	assert.Equal(t, "postChecksum", m.status.Get().String())
+
+	// All done!
+	assert.Equal(t, 0, m.db.Stats().InUse)
+}
+
+// TestE2EBinlogSubscribingCompositeKeyDateTime tests binlog subscription with composite key
+// where the first column is DATETIME. This validates that KeyAboveHighWatermark
+// and KeyBelowLowWatermark work correctly for temporal keys with optimization enabled.
+//
+// Optimization behavior:
+// - KeyAboveHighWatermark discards events above the copy position (copier hasn't reached them yet)
+// - KeyBelowLowWatermark allows immediate flush of events in already-copied regions (no buffering delay)
+// - Go string comparison is "close enough" for watermark optimizations
+// - Checksum validation ensures no data loss despite comparison differences
+//
+// Expected behavior:
+// - Some events may be discarded by watermark optimization
+// - Checksum validation catches any discrepancies and retries with optimization disabled
+// - Migration completes successfully with all data intact
+func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
+	t.Parallel()
+	tbl := `CREATE TABLE e2et4 (
+		created_at DATETIME NOT NULL,
+		event_id int NOT NULL,
+		data varchar(255) NOT NULL default '',
+		PRIMARY KEY (created_at, event_id))`
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et4, _e2et4_new`)
+	testutils.RunSQL(t, tbl)
+
+	// Helper function to insert test data for a given event_id
+	insertRows := func(eventID int) {
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et4 (created_at, event_id) 
+			SELECT DATE_ADD('2024-01-01 00:00:00', INTERVAL n*%d HOUR), %d
+			FROM (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) t`, eventID, eventID))
+	}
+
+	// Insert initial row
+	testutils.RunSQL(t, `INSERT INTO e2et4 (created_at, event_id) SELECT '2024-01-01 00:00:00', 1 FROM dual`)
+
+	// Add more rows across multiple timestamps to get ~60 rows total
+	for i := 2; i <= 12; i++ {
+		insertRows(i)
+	}
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         2,
+		Table:           "e2et4",
+		Alter:           "ENGINE=InnoDB",
+		ReplicaMaxLag:   0,
+		TargetChunkTime: 50,
+	})
+	assert.NoError(t, err)
+	defer m.Close()
+
+	// Setup but don't call Run() - step through manually
+	m.startTime = time.Now()
+	m.dbConfig = dbconn.NewDBConfig()
+	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
+	assert.NoError(t, err)
+	defer m.db.Close()
+
+	// Get Table Info
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	err = m.changes[0].table.SetInfo(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m.setup(t.Context()))
+
+	// Start copying
+	m.status.Set(status.CopyRows)
+	ccopier, ok := m.copier.(*copier.Unbuffered)
+	assert.True(t, ok)
+
+	// Copy all chunks first without inserting data mid-copy
+	// This avoids "table is read" errors from BlockWait after copying is done
+	for {
+		chunk, err := m.copyChunker.Next()
+		if err == table.ErrTableIsRead {
+			break
+		}
+		assert.NoError(t, err)
+		assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+	}
+
+	// Now insert some data after all chunks are copied
+	// These events will be captured by binlog subscription
+	// Note: Watermark optimizations may buffer or apply events depending on timing
+	// so we don't assert deltaLen. Final checksum validates correctness.
+	testutils.RunSQL(t, `INSERT INTO e2et4 (created_at, event_id, data) VALUES ('2024-01-01 01:00:00', 1000, 'early event')`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// Insert another event
+	testutils.RunSQL(t, `INSERT INTO e2et4 (created_at, event_id, data) VALUES ('2024-06-15 12:00:00', 2000, 'mid-year event')`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// Flush and complete migration
+	assert.NoError(t, m.replClient.Flush(t.Context()))
+	m.status.Set(status.ApplyChangeset)
+	m.status.Set(status.Checksum)
+	assert.NoError(t, m.checksum(t.Context()))
+	assert.Equal(t, "postChecksum", m.status.Get().String())
+
+	// All done!
+	assert.Equal(t, 0, m.db.Stats().InUse)
+}
+
 func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	t.Parallel()
 	tbl := `CREATE TABLE e2et2 (
@@ -2305,4 +2517,3 @@ func TestPasswordMasking(t *testing.T) {
 		})
 	}
 }
-
