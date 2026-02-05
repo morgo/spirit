@@ -1004,8 +1004,21 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	ccopier, ok := m.copier.(*copier.Unbuffered)
 	assert.True(t, ok)
 
-	// Copy all chunks first without inserting data mid-copy
-	// This avoids "table is read" errors from BlockWait after copying is done
+	// Copy first chunk
+	chunk, err := m.copyChunker.Next()
+	assert.NoError(t, err)
+	assert.NotNil(t, chunk)
+	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+
+	// Insert data mid-copy - simulates real-world concurrent writes
+	// Note: With random UUIDs, watermark behavior is non-deterministic
+	// (UUIDs may be above/below watermark unpredictably)
+	// so we don't assert deltaLen. Final checksum validates correctness.
+	testutils.RunSQL(t, `INSERT INTO e2et3 (session_id, event_id, data) VALUES (UUID(), 999, 'test')`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+	// Note: deltaLen not asserted - UUID comparison with watermark is non-deterministic
+
+	// Copy remaining chunks
 	for {
 		chunk, err := m.copyChunker.Next()
 		if err == table.ErrTableIsRead {
@@ -1015,17 +1028,10 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 		assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 	}
 
-	// Now insert some data after all chunks are copied
-	// These events will be captured by binlog subscription
-	// Note: With random UUIDs, watermark behavior is non-deterministic
-	// (UUIDs may be above/below watermark unpredictably)
-	// so we don't assert deltaLen. Final checksum validates correctness.
-	testutils.RunSQL(t, `INSERT INTO e2et3 (session_id, event_id, data) VALUES (UUID(), 999, 'test')`)
-	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-
-	// Insert another event
+	// Insert another event after copying completes
 	testutils.RunSQL(t, `INSERT INTO e2et3 (session_id, event_id, data) VALUES (UUID(), 1000, 'test2')`)
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+	// Note: deltaLen not asserted - UUID comparison with watermark is non-deterministic
 
 	// Flush and complete migration
 	assert.NoError(t, m.replClient.Flush(t.Context()))
@@ -1112,8 +1118,20 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 	ccopier, ok := m.copier.(*copier.Unbuffered)
 	assert.True(t, ok)
 
-	// Copy all chunks first without inserting data mid-copy
-	// This avoids "table is read" errors from BlockWait after copying is done
+	// Copy first chunk
+	chunk, err := m.copyChunker.Next()
+	assert.NoError(t, err)
+	assert.NotNil(t, chunk)
+	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+
+	// Insert data mid-copy - simulates real-world concurrent writes
+	// Note: Go string comparison for DATETIME may differ from MySQL collation
+	// so we don't assert deltaLen. Final checksum validates correctness.
+	testutils.RunSQL(t, `INSERT INTO e2et4 (created_at, event_id, data) VALUES ('2024-01-01 01:00:00', 1000, 'early event')`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+	// Note: deltaLen not asserted - DATETIME Go comparison may differ from MySQL
+
+	// Copy remaining chunks
 	for {
 		chunk, err := m.copyChunker.Next()
 		if err == table.ErrTableIsRead {
@@ -1123,16 +1141,10 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 		assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 	}
 
-	// Now insert some data after all chunks are copied
-	// These events will be captured by binlog subscription
-	// Note: Watermark optimizations may buffer or apply events depending on timing
-	// so we don't assert deltaLen. Final checksum validates correctness.
-	testutils.RunSQL(t, `INSERT INTO e2et4 (created_at, event_id, data) VALUES ('2024-01-01 01:00:00', 1000, 'early event')`)
-	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-
-	// Insert another event
+	// Insert another event after copying completes
 	testutils.RunSQL(t, `INSERT INTO e2et4 (created_at, event_id, data) VALUES ('2024-06-15 12:00:00', 2000, 'mid-year event')`)
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+	// Note: deltaLen not asserted - DATETIME Go comparison may differ from MySQL
 
 	// Flush and complete migration
 	assert.NoError(t, m.replClient.Flush(t.Context()))
