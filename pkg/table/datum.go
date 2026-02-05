@@ -300,37 +300,6 @@ func (d Datum) IsNil() bool {
 }
 
 func (d Datum) GreaterThanOrEqual(d2 Datum) bool {
-	if !d.IsNumeric() {
-		panic("not supported on binary type")
-	}
-	if d.Tp != d2.Tp {
-		panic("cannot compare different datum types")
-	}
-	if d.Tp == signedType {
-		return d.Val.(int64) >= d2.Val.(int64)
-	}
-	return d.Val.(uint64) >= d2.Val.(uint64)
-}
-
-func (d Datum) GreaterThan(d2 Datum) bool {
-	if !d.IsNumeric() {
-		panic("not supported on binary type")
-	}
-	if d.Tp != d2.Tp {
-		panic("cannot compare different datum types")
-	}
-	if d.Tp == signedType {
-		return d.Val.(int64) > d2.Val.(int64)
-	}
-	return d.Val.(uint64) > d2.Val.(uint64)
-}
-
-// CompareGreaterThanOrEqual performs a comparison between two Datum values.
-// Unlike GreaterThanOrEqual, this works with all comparable types including strings.
-// It uses Go's native comparison (lexicographic byte-by-byte comparison which is deterministic and consistent), which may differ from
-// MySQL collation but is safe for watermark optimizations since they are disabled
-// before the checksum phase.
-func (d Datum) CompareGreaterThanOrEqual(d2 Datum) bool {
 	if d.Tp != d2.Tp {
 		panic("cannot compare different datum types")
 	}
@@ -342,15 +311,16 @@ func (d Datum) CompareGreaterThanOrEqual(d2 Datum) bool {
 		return d.Val.(uint64) >= d2.Val.(uint64)
 	case binaryType, unknownType:
 		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
 		return fmt.Sprint(d.Val) >= fmt.Sprint(d2.Val)
 	default:
 		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
 	}
 }
 
-// CompareGreaterThan performs a comparison between two Datum values.
-// Unlike GreaterThan, this works with all comparable types including strings, binary, and temporal.
-func (d Datum) CompareGreaterThan(d2 Datum) bool {
+func (d Datum) GreaterThan(d2 Datum) bool {
 	if d.Tp != d2.Tp {
 		panic("cannot compare different datum types")
 	}
@@ -362,16 +332,19 @@ func (d Datum) CompareGreaterThan(d2 Datum) bool {
 		return d.Val.(uint64) > d2.Val.(uint64)
 	case binaryType, unknownType:
 		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
 		return fmt.Sprint(d.Val) > fmt.Sprint(d2.Val)
 	default:
 		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
 	}
 }
 
-// CompareLessThanOrEqual performs a comparison between two Datum values.
-// Unlike the numeric-only methods, this works with all comparable types including strings, binary, and temporal.
+// LessThanOrEqual performs a comparison between two Datum values.
+// Works with all comparable types including numeric, strings, binary, and temporal.
 // Provided for completeness.
-func (d Datum) CompareLessThanOrEqual(d2 Datum) bool {
+func (d Datum) LessThanOrEqual(d2 Datum) bool {
 	if d.Tp != d2.Tp {
 		panic("cannot compare different datum types")
 	}
@@ -383,16 +356,19 @@ func (d Datum) CompareLessThanOrEqual(d2 Datum) bool {
 		return d.Val.(uint64) <= d2.Val.(uint64)
 	case binaryType, unknownType:
 		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
 		return fmt.Sprint(d.Val) <= fmt.Sprint(d2.Val)
 	default:
 		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
 	}
 }
 
-// CompareLessThan performs a comparison between two Datum values.
-// Unlike the numeric-only methods, this works with all comparable types including strings, binary, and temporal.
+// LessThan performs a comparison between two Datum values.
+// Works with all comparable types including numeric, strings, binary, and temporal.
 // Provided for completeness.
-func (d Datum) CompareLessThan(d2 Datum) bool {
+func (d Datum) LessThan(d2 Datum) bool {
 	if d.Tp != d2.Tp {
 		panic("cannot compare different datum types")
 	}
@@ -404,6 +380,9 @@ func (d Datum) CompareLessThan(d2 Datum) bool {
 		return d.Val.(uint64) < d2.Val.(uint64)
 	case binaryType, unknownType:
 		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
 		return fmt.Sprint(d.Val) < fmt.Sprint(d2.Val)
 	default:
 		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))

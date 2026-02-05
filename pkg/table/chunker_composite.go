@@ -518,8 +518,8 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	}
 
 	// Check if key is greater than or equal to the current chunkPtr[0]
-	// Use CompareGreaterThanOrEqual which supports all types (numeric, string, temporal)
-	return keyDatum.CompareGreaterThanOrEqual(t.chunkPtrs[0])
+	// Use GreaterThanOrEqual which supports all types (numeric, string, temporal)
+	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
 }
 
 // KeyBelowLowWatermark checks if a key is below the low watermark.
@@ -557,9 +557,9 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	}
 
 	// Key is below watermark if watermark.UpperBound[0] > key
-	// Use CompareGreaterThan which supports all types (numeric, string, temporal)
+	// Use GreaterThan which supports all types (numeric, string, temporal)
 	// t.watermark.UpperBound represents the maximum value that has been safely copied in that chunk
-	return t.watermark.UpperBound.Value[0].CompareGreaterThan(keyDatum)
+	return t.watermark.UpperBound.Value[0].GreaterThan(keyDatum)
 }
 
 // SetKey allows you to chunk on a secondary index, and not the primary key.
