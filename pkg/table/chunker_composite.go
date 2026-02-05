@@ -492,8 +492,8 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	defer t.Unlock()
 
 	// If we haven't dispatched any chunks yet (chunkPtrs is empty),
-	// return true (everything is "above" - don't filter anything)
-	// This ensures rows aren't incorrectly discarded before chunking starts
+	// everything is "above" the high watermark (we haven't started copying yet)
+	// Return true to discard binlog events that are ahead of our progress
 	if len(t.chunkPtrs) == 0 {
 		return true
 	}
@@ -537,7 +537,7 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 		return true
 	}
 
-	// If watermark isn't ready yet, return false (not below)
+	// If watermark isn't ready yet, return false (nothing has been confirmed as copied yet)
 	if t.watermark == nil || t.watermark.UpperBound == nil || len(t.watermark.UpperBound.Value) == 0 {
 		return false
 	}
@@ -551,13 +551,14 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	// Convert key0 to Datum for comparison
 	keyDatum, err := NewDatum(key0, t.watermark.UpperBound.Value[0].Tp)
 	if err != nil {
-		// If we can't convert the key, return false to be safe (assume it's not below watermark)
+		// If we can't convert the key, return false (assume not below watermark)
 		t.logger.Error("failed to create keyDatum in KeyBelowLowWatermark", "key", key0, "error", err)
 		return false
 	}
 
 	// Key is below watermark if watermark.UpperBound[0] > key
 	// Use CompareGreaterThan which supports all types (numeric, string, temporal)
+	// t.watermark.UpperBound represents the maximum value that has been safely copied in that chunk
 	return t.watermark.UpperBound.Value[0].CompareGreaterThan(keyDatum)
 }
 
