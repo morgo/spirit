@@ -808,7 +808,11 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	// Verify data was inserted correctly
 	var count int
@@ -955,7 +959,11 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	// Verify data was inserted
 	var count int
@@ -1030,7 +1038,11 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	// Verify data was inserted
 	var count int
@@ -1114,7 +1126,11 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
 
 	tbl := NewTableInfo(db, "test", "compositewatermarkooo_t1")
 	assert.NoError(t, tbl.SetInfo(t.Context()))

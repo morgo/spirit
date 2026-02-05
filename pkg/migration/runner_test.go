@@ -984,14 +984,18 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 		TargetChunkTime: 50,
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer func() {
+		assert.NoError(t, m.Close())
+	}()
 
 	// Setup but don't call Run() - step through manually
 	m.startTime = time.Now()
 	m.dbConfig = dbconn.NewDBConfig()
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	assert.NoError(t, err)
-	defer m.db.Close()
+	defer func() {
+		assert.NoError(t, m.db.Close())
+	}()
 
 	// Get Table Info
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
@@ -1098,14 +1102,18 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 		TargetChunkTime: 50,
 	})
 	assert.NoError(t, err)
-	defer m.Close()
+	defer func() {
+		assert.NoError(t, m.Close())
+	}()
 
 	// Setup but don't call Run() - step through manually
 	m.startTime = time.Now()
 	m.dbConfig = dbconn.NewDBConfig()
 	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
 	assert.NoError(t, err)
-	defer m.db.Close()
+	defer func() {
+		assert.NoError(t, m.db.Close())
+	}()
 
 	// Get Table Info
 	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
