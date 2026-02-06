@@ -1155,7 +1155,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 		assert.NoError(t, rows.Scan(&name))
 		mysqlOrder = append(mysqlOrder, name)
 	}
-	rows.Close()
+	assert.NoError(t, rows.Close())
 
 	// MySQL collation order (case-insensitive): KEY/Key/key variants grouped together
 	t.Logf("MySQL collation order (first 20): %v", mysqlOrder)
