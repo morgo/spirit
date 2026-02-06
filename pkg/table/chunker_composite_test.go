@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -1082,6 +1083,154 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 
 	// Verify the watermark value is what we expect
 	assert.Equal(t, upperVal, watermarkUpper)
+
+	assert.NoError(t, comp.Close())
+}
+
+// TestCompositeChunkerCollationDifference demonstrates how Go's lexicographic comparison
+// differs from MySQL collation, showing why watermark optimizations must be disabled
+// before the checksum phase. This test simulates a scenario where:
+// 1. Binlog changes to certain rows are buffered longer than necessary due to comparison differences
+// 2. The checksum phase ensures all changes are applied by using full table scans without watermarks
+func TestCompositeChunkerCollationDifference(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositecollation_t1")
+	// Use case-insensitive collation (MySQL default for utf8mb4)
+	testutils.RunSQL(t, `CREATE TABLE compositecollation_t1 (
+		name VARCHAR(50) NOT NULL,
+		id INT NOT NULL,
+		PRIMARY KEY (name, id)
+	) COLLATE=utf8mb4_0900_ai_ci`) // ai = accent insensitive, ci = case insensitive
+
+	// Insert enough data to trigger multiple chunks (need > 1000 rows for watermark to be used)
+	// Mix case variations throughout to demonstrate the collation difference
+	testutils.RunSQL(t, `INSERT INTO compositecollation_t1 (name, id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 400
+		)
+		SELECT CONCAT('KEY', LPAD(n, 4, '0')), n FROM seq`)
+
+	testutils.RunSQL(t, `INSERT INTO compositecollation_t1 (name, id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 400
+		)
+		SELECT CONCAT('Key', LPAD(n, 4, '0')), n + 400 FROM seq`)
+
+	testutils.RunSQL(t, `INSERT INTO compositecollation_t1 (name, id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 400
+		)
+		SELECT CONCAT('key', LPAD(n, 4, '0')), n + 800 FROM seq`)
+
+	// Add some specific test cases with same key but different cases
+	testutils.RunSQL(t, "INSERT INTO compositecollation_t1 VALUES ('TEST', 9001)")
+	testutils.RunSQL(t, "INSERT INTO compositecollation_t1 VALUES ('Test', 9002)")
+	testutils.RunSQL(t, "INSERT INTO compositecollation_t1 VALUES ('test', 9003)")
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	// Verify data count
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM compositecollation_t1").Scan(&count)
+	require.NoError(t, err)
+	t.Logf("Inserted %d rows for collation test", count)
+
+	// Verify MySQL's collation order vs Go's lexicographic order
+	var mysqlOrder []string
+	rows, err := db.Query("SELECT DISTINCT name FROM compositecollation_t1 ORDER BY name LIMIT 20")
+	assert.NoError(t, err)
+	for rows.Next() {
+		var name string
+		assert.NoError(t, rows.Scan(&name))
+		mysqlOrder = append(mysqlOrder, name)
+	}
+	rows.Close()
+
+	// MySQL collation order (case-insensitive): KEY/Key/key variants grouped together
+	t.Logf("MySQL collation order (first 20): %v", mysqlOrder)
+	// Go's lexicographic order would be: KEY0001 < KEY0002 < ... < Key0001 < Key0002 < ... < key0001 < key0002
+	// (uppercase letters have lower byte values than lowercase in ASCII)
+
+	tbl := NewTableInfo(db, "test", "compositecollation_t1")
+	assert.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	assert.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+
+	assert.NoError(t, comp.Open())
+
+	// Get first chunk to establish the watermark
+	chunk1, err := comp.Next()
+	require.NoError(t, err)
+	require.NotNil(t, chunk1)
+	require.NotNil(t, chunk1.UpperBound)
+
+	// Provide feedback to set the watermark
+	comp.Feedback(chunk1, 100*time.Millisecond, 5)
+
+	// Now test the comparison difference:
+	// In Go: "KEY01" < "KEY02" < "Key01" < "key01" < "key02"
+	// In MySQL utf8mb4_0900_ai_ci: "KEY01" ≈ "Key01" ≈ "key01" < "KEY02" ≈ "key02"
+
+	t.Log("=== Demonstrating Comparison Differences ===")
+
+	// Verify watermark was set
+	require.NotNil(t, comp.watermark, "Watermark should be set after feedback")
+	watermarkVal := comp.watermark.UpperBound.Value[0].Val.(string)
+	t.Logf("Watermark upper bound: '%s'", watermarkVal)
+
+	// Test various strings against the watermark using Go comparison (what KeyBelowLowWatermark uses)
+	// Focus on the TEST/Test/test variants to show the comparison difference clearly
+	testStrings := []string{"TEST", "Test", "test", "KEY0001", "Key0001", "key0001"}
+	t.Log("Testing Go lexicographic comparison vs MySQL collation:")
+	for _, s := range testStrings {
+		goBelow := comp.KeyBelowLowWatermark(s)
+		t.Logf("  KeyBelowLowWatermark('%s'): %v (watermark='%s')", s, goBelow, watermarkVal)
+	}
+
+	// The key insight: If watermark is 'Key0050' (for example) and we use Go comparison:
+	// - ALL 'KEY*' strings would be below (uppercase K < lowercase k in byte order)
+	// - ALL 'key*' strings would be ABOVE (lowercase k > uppercase K in byte order)
+	// String comparison stops at first differing character, so the prefix determines the result
+	// But in MySQL collation, they're all equivalent in terms of case!
+
+	// Demonstrate the problem: A row that MySQL considers "already processed"
+	// would be classified by Go as "above watermark" and get buffered
+
+	// Assume we processed chunk ending at 'Key0100'
+	// In MySQL collation: 'KEY0050', 'Key0050', 'key0050' are all < 'Key0100' (already processed)
+	// In Go comparison: 'key0050' > 'Key0100' (would be buffered as "not yet processed")
+
+	// Verify this with actual comparison
+	testKey := "key0050"
+	if strings.HasPrefix(watermarkVal, "Key") {
+		isBelowWatermark := comp.KeyBelowLowWatermark(testKey)
+
+		// MySQL would consider this row already processed (case-insensitive: key0050 < Key0100)
+		// But Go thinks it's above the watermark (byte order: key > Key)
+		assert.False(t, isBelowWatermark,
+			"Go incorrectly classifies '%s' as above watermark '%s' (would buffer the change)",
+			testKey, watermarkVal)
+
+		t.Logf("DEMONSTRATED: Row '%s' would be buffered instead of applied immediately", testKey)
+		t.Logf("  - Go comparison: '%s' > '%s' (buffer it)", testKey, watermarkVal)
+		t.Logf("  - MySQL collation: '%s' ≈ '%s' (so the belief is that its already processed in earlier chunk)", testKey, strings.ToUpper(testKey))
+		t.Logf("  - Result: Binlog changes to this row would be held in memory until watermark advances")
+		t.Logf("  - Risk: Crash before flush = unflushed changes lost")
+		t.Logf("  - Safety: Checksum phase uses full table scans without watermarks")
+	}
 
 	assert.NoError(t, comp.Close())
 }

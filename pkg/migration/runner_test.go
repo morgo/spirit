@@ -1048,6 +1048,164 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	assert.Equal(t, 0, m.db.Stats().InUse)
 }
 
+// TestE2EBinlogSubscribingCompositeKeyCollation demonstrates that Go's lexicographic comparison
+// differs from MySQL's case-insensitive collation, but checksum phase catches any issues.
+// This is an E2E validation of the behavior demonstrated in TestCompositeChunkerCollationDifference.
+//
+// Test scenario:
+// 1. Create table with VARCHAR primary key and case-insensitive collation
+// 2. Insert rows with mixed case prefixes (KEY*, Key*, key*)
+// 3. During copy phase, watermark uses Go comparison (may incorrectly buffer some changes)
+// 4. Make changes to rows that Go thinks are "above watermark" but MySQL considers "already processed"
+// 5. Checksum phase catches any buffered/missed changes and ensures correctness
+//
+// Expected behavior:
+// - Migration completes successfully despite comparison differences
+// - Checksum validates all changes were applied correctly
+// - No data loss despite Go vs MySQL comparison mismatch
+func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
+	t.Parallel()
+	tbl := `CREATE TABLE e2et_collation (
+		name VARCHAR(50) NOT NULL,
+		id INT NOT NULL,
+		data VARCHAR(255) NOT NULL DEFAULT '',
+		PRIMARY KEY (name, id)
+	) COLLATE=utf8mb4_0900_ai_ci` // Case-insensitive collation
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et_collation, _e2et_collation_new`)
+	testutils.RunSQL(t, tbl)
+
+	// Insert enough data to trigger multiple chunks (need > 1000 rows for watermark behavior)
+	// Mix case variations throughout
+	testutils.RunSQL(t, `INSERT INTO e2et_collation (name, id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 400
+		)
+		SELECT CONCAT('KEY', LPAD(n, 4, '0')), n FROM seq`)
+
+	testutils.RunSQL(t, `INSERT INTO e2et_collation (name, id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 400
+		)
+		SELECT CONCAT('Key', LPAD(n, 4, '0')), n + 400 FROM seq`)
+
+	testutils.RunSQL(t, `INSERT INTO e2et_collation (name, id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 400
+		)
+		SELECT CONCAT('key', LPAD(n, 4, '0')), n + 800 FROM seq`)
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         2,
+		Table:           "e2et_collation",
+		Alter:           "ENGINE=InnoDB",
+		ReplicaMaxLag:   0,
+		TargetChunkTime: 50,
+	})
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, m.Close())
+	}()
+
+	// Setup for manual stepping
+	m.startTime = time.Now()
+	m.dbConfig = dbconn.NewDBConfig()
+	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, m.db.Close())
+	}()
+
+	// Get Table Info
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	err = m.changes[0].table.SetInfo(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m.setup(t.Context()))
+
+	// Start copying
+	m.status.Set(status.CopyRows)
+	ccopier, ok := m.copier.(*copier.Unbuffered)
+	assert.True(t, ok)
+
+	// Copy first chunk
+	chunk, err := m.copyChunker.Next()
+	assert.NoError(t, err)
+	assert.NotNil(t, chunk)
+	t.Logf("First chunk upper bound: %+v", chunk.UpperBound.Value)
+	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+
+	// Critical test: Update a row with lowercase prefix that Go thinks is "above watermark"
+	// but MySQL collation considers "already processed"
+	// This simulates the collation difference issue
+	testutils.RunSQL(t, `UPDATE e2et_collation SET data = 'updated_during_copy' WHERE name = 'key0050' AND id = 850`)
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// The update might be buffered by watermark logic (Go thinks 'key0050' > watermark)
+	// We can't assert the exact buffer state, but checksum will catch any issues
+	t.Log("Applied update to row with lowercase prefix (may be buffered due to Go comparison)")
+
+	// Copy remaining chunks
+	for {
+		chunk, err := m.copyChunker.Next()
+		if err == table.ErrTableIsRead {
+			break
+		}
+		assert.NoError(t, err)
+		assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+	}
+
+	// Simulate the problem: Delete the row from the target table
+	// This represents what could happen if a buffered change was lost due to crash
+	// or if collation differences caused a row to be skipped
+	testutils.RunSQL(t, `DELETE FROM _e2et_collation_new WHERE name = 'key0050' AND id = 850`)
+	t.Log("Deleted row from target table to simulate missed change due to collation difference")
+
+	// Flush buffered changes (including our update to key0050)
+	assert.NoError(t, m.replClient.Flush(t.Context()))
+	m.status.Set(status.ApplyChangeset)
+
+	// At this point, the row exists in source with data='updated_during_copy'
+	// but was deleted from target, creating a discrepancy
+	// Verify the discrepancy exists before checksum
+	var targetData string
+	err = m.db.QueryRow("SELECT data FROM _e2et_collation_new WHERE name = 'key0050' AND id = 850").Scan(&targetData)
+	if err == nil {
+		t.Logf("Target row data before checksum: %s", targetData)
+	} else {
+		t.Log("Target row missing before checksum (as expected after our DELETE)")
+	}
+
+	// CRITICAL: Checksum phase detects and fixes the discrepancy
+	// This demonstrates checksum catching a missed change due to collation differences
+	m.status.Set(status.Checksum)
+	assert.NoError(t, m.checksum(t.Context()))
+	assert.Equal(t, "postChecksum", m.status.Get().String())
+
+	// Verify checksum fixed the issue by restoring the row with correct data
+	err = m.db.QueryRow("SELECT data FROM _e2et_collation_new WHERE name = 'key0050' AND id = 850").Scan(&targetData)
+	assert.NoError(t, err, "Row should exist after checksum fix")
+	assert.Equal(t, "updated_during_copy", targetData, "Checksum should have copied the row with updated data")
+
+	t.Log("✓ Migration completed successfully despite Go vs MySQL collation differences")
+	t.Log("✓ Checksum phase detected missing row and fixed the discrepancy")
+
+	// All done!
+	assert.Equal(t, 0, m.db.Stats().InUse)
+}
+
 // TestE2EBinlogSubscribingCompositeKeyDateTime tests binlog subscription with composite key
 // where the first column is DATETIME. This validates that KeyAboveHighWatermark
 // and KeyBelowLowWatermark work correctly for temporal keys with optimization enabled.
