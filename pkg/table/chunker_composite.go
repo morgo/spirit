@@ -482,10 +482,12 @@ func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
 }
 
 // KeyAboveHighWatermark checks if a key is above the high watermark (chunkPtr).
-// This optimization works with comparable types in key[0] (first column): numeric, string, temporal.
-// Binary types (VARBINARY, BLOB, BINARY) use conservative behavior (always return false).
-// Note: Watermark optimizations are disabled before checksum phase (see runner.go),
-// so there is no risk of checksum corruption even if collation comparison differs slightly.
+// This optimization works with comparable types in key[0] (first column): numeric, string, binary, temporal.
+// For VARCHAR/TEXT with collations, Go's byte-order comparison may differ from MySQL's collation order
+// (e.g., 'aa' = 'AA' in utf8mb4_0900_ai_ci, or "ch" > "h" in utf8mb4_czech_ci), which can cause
+// events to be incorrectly discarded or buffered. However, checksum will fix any discrepancies.
+// Binary types use byte-order comparison matching Go, so they work correctly.
+// Note: Watermark optimizations are disabled before checksum phase (see runner.go).
 // See: https://github.com/block/spirit/issues/479
 func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
@@ -503,12 +505,6 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 		return false
 	}
 
-	// Binary types (VARBINARY, BLOB, BINARY) should use conservative behavior
-	// because binary string comparisons may not match MySQL's semantics
-	if t.chunkPtrs[0].Tp == binaryType {
-		return false
-	}
-
 	// Convert key0 to Datum for comparison
 	keyDatum, err := NewDatum(key0, t.chunkPtrs[0].Tp)
 	if err != nil {
@@ -523,10 +519,12 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 }
 
 // KeyBelowLowWatermark checks if a key is below the low watermark.
-// This optimization works with comparable types in key[0] (first column): numeric, string, temporal.
-// Binary types (VARBINARY, BLOB, BINARY) use conservative behavior (always return true, buffer everything).
-// Note: Watermark optimizations are disabled before checksum phase (see runner.go),
-// so there is no risk of checksum corruption even if collation comparison differs slightly.
+// This optimization works with comparable types in key[0] (first column): numeric, string, binary, temporal.
+// For VARCHAR/TEXT with collations, Go's byte-order comparison may differ from MySQL's collation order
+// (e.g., 'aa' = 'AA' in utf8mb4_0900_ai_ci, or "ch" > "h" in utf8mb4_czech_ci), which can cause
+// events to be incorrectly discarded or buffered with delayed flush. However, checksum will fix any discrepancies.
+// Binary types use byte-order comparison matching Go, so they work correctly.
+// Note: Watermark optimizations are disabled before checksum phase (see runner.go).
 // See: https://github.com/block/spirit/issues/479
 func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	t.Lock()
@@ -540,12 +538,6 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	// If watermark isn't ready yet, return false (nothing has been confirmed as copied yet)
 	if t.watermark == nil || t.watermark.UpperBound == nil || len(t.watermark.UpperBound.Value) == 0 {
 		return false
-	}
-
-	// Binary types (VARBINARY, BLOB, BINARY) should use conservative behavior
-	// Return true (buffer everything) because binary comparisons may not be reliable
-	if t.watermark.UpperBound.Value[0].Tp == binaryType {
-		return true
 	}
 
 	// Convert key0 to Datum for comparison

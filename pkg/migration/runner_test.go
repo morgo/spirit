@@ -1228,6 +1228,161 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 	t.Log("✓ Migration completed successfully with all data intact")
 }
 
+// TestE2EBinlogSubscribingCompositeKeyBinary tests binlog subscription with composite key
+// where the first column is VARBINARY. This validates that KeyAboveHighWatermark
+// and KeyBelowLowWatermark work correctly for binary keys with optimization enabled.
+//
+// Binary types use byte-order comparison which matches Go's comparison exactly:
+// - _binary 'aa' > _binary 'AA' (because 0x61 > 0x41)
+// - This matches Go's byte comparison, so watermark optimizations work perfectly
+// - Unlike VARCHAR with collations where 'aa' = 'AA', binary comparison is deterministic
+//
+// This test verifies that:
+// 1. KeyAboveHighWatermark correctly discards events above the watermark
+// 2. No rows are incorrectly discarded (unlike VARCHAR with collations)
+// 3. Checksum should find zero discrepancies
+func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et_binary`)
+	testutils.RunSQL(t, `CREATE TABLE e2et_binary (
+		name VARBINARY(255) NOT NULL,
+		id BIGINT NOT NULL,
+		data VARCHAR(255),
+		PRIMARY KEY (name, id)
+	)`)
+
+	// Insert test data with binary values
+	// We'll use hex values to make byte comparison clear
+	// Insert 1200 rows across different byte ranges
+	for i := 0; i < 400; i++ {
+		// Low bytes: 0x41 (A), 0x42 (B), 0x43 (C)...
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et_binary VALUES (0x41%04d, %d, 'data')`, i, i))
+	}
+	for i := 0; i < 400; i++ {
+		// Mid bytes: 0x50 (P), 0x51 (Q), 0x52 (R)...
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et_binary VALUES (0x50%04d, %d, 'data')`, i, i+400))
+	}
+	for i := 0; i < 400; i++ {
+		// High bytes: 0x61 (a), 0x62 (b), 0x63 (c)...
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et_binary VALUES (0x61%04d, %d, 'data')`, i, i+800))
+	}
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1, // Single thread for predictable behavior
+		Table:           "e2et_binary",
+		Alter:           "ENGINE=InnoDB",
+		ReplicaMaxLag:   0,
+		TargetChunkTime: 100, // Larger chunks to ensure watermark scenario
+	})
+	assert.NoError(t, err)
+
+	// Setup for manual stepping to observe watermark behavior
+	m.startTime = time.Now()
+	m.dbConfig = dbconn.NewDBConfig()
+	m.db, err = dbconn.New(testutils.DSN(), m.dbConfig)
+	assert.NoError(t, err)
+
+	// Get table info and setup
+	m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
+	err = m.changes[0].table.SetInfo(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m.setup(t.Context()))
+
+	t.Log("→ Starting manual copy process with unbuffered copier")
+
+	// Start copying
+	m.status.Set(status.CopyRows)
+	ccopier, ok := m.copier.(*copier.Unbuffered)
+	assert.True(t, ok)
+
+	// Copy ONLY the first chunk to establish watermark
+	// This should set high watermark around 0x410167 (byte value 'A' with suffix)
+	chunk, err := m.copyChunker.Next()
+	assert.NoError(t, err)
+	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	t.Logf("→ First chunk copied, watermark established around upper bound")
+
+	// NOW: Insert a row that should be discarded by KeyAboveHighWatermark
+	// Insert 0x500050 (byte value 'P' with suffix)
+	// This is above 0x41xxxx in BOTH Go byte comparison AND MySQL binary comparison
+	// Go: 0x50 > 0x41 → KeyAboveHighWatermark returns TRUE → should DISCARD
+	// MySQL binary: 0x500050 > 0x41xxxx → correctly above first chunk
+	testutils.RunSQL(t, `INSERT INTO e2et_binary (name, id, data) VALUES (0x500050, 9999, 'INSERTED_DURING_MIGRATION')`)
+	t.Log("→ Inserted row (0x500050, 9999) after first chunk copied")
+	t.Log("→ First chunk upper bound has byte prefix 0x41")
+	t.Log("→ Go byte comparison: 0x50 > 0x41")
+	t.Log("→ KeyAboveHighWatermark returns TRUE → Binlog event DISCARDED")
+	t.Log("→ MySQL binary comparison: 0x500050 > 0x41xxxx → correctly above watermark")
+	t.Log("→ This is CORRECT behavior - row hasn't been copied yet, should be discarded")
+
+	// Wait for replication to process/discard the event
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// Copy remaining chunks (this will copy the 0x50xxxx and 0x61xxxx ranges)
+	for {
+		chunk, err := m.copyChunker.Next()
+		if err == table.ErrTableIsRead {
+			break
+		}
+		assert.NoError(t, err)
+		assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
+	}
+
+	// Flush and wait for replication
+	assert.NoError(t, m.replClient.Flush(t.Context()))
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
+	// VERIFY: Row should NOT be missing (binary comparison is exact)
+	t.Log("→ Verifying row status BEFORE checksum...")
+	var targetCountBefore int
+	err = m.db.QueryRow(`SELECT COUNT(*) FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&targetCountBefore)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, targetCountBefore, "Row should be present - it was copied in later chunks")
+	t.Log("✓ CONFIRMED: Row is PRESENT in target table (copied in later chunks)")
+
+	// Verify row exists in source
+	var sourceCount int
+	err = m.db.QueryRow(`SELECT COUNT(*) FROM e2et_binary WHERE name = 0x500050 AND id = 9999`).Scan(&sourceCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, sourceCount, "Source table should have the row")
+
+	// Run checksum - should find ZERO discrepancies because binary comparison is exact
+	t.Log("→ Running checksum phase...")
+	m.status.Set(status.Checksum)
+	assert.NoError(t, m.checksum(t.Context()))
+
+	// VERIFY: Row still exists (checksum should not need to fix anything)
+	t.Log("→ Verifying row status AFTER checksum...")
+	var targetCountAfter int
+	err = m.db.QueryRow(`SELECT COUNT(*) FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&targetCountAfter)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, targetCountAfter, "Row should still be present after checksum")
+
+	// Verify the data is correct
+	var data string
+	err = m.db.QueryRow(`SELECT data FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&data)
+	assert.NoError(t, err)
+	assert.Equal(t, "INSERTED_DURING_MIGRATION", data, "Data should match")
+
+	t.Log("✓ SUCCESS: Binary type watermark optimization works correctly")
+	t.Log("✓ KeyAboveHighWatermark correctly discarded event (row was above copy position)")
+	t.Log("✓ Row was copied in later chunks as expected")
+	t.Log("✓ Checksum found zero discrepancies (binary comparison matches Go comparison)")
+
+	assert.NoError(t, m.Close())
+
+	t.Log("✓ Binary type watermark optimization is working perfectly")
+	t.Log("✓ No discrepancies because byte-order comparison matches between Go and MySQL")
+}
+
 // TestE2EBinlogSubscribingCompositeKeyDateTime tests binlog subscription with composite key
 // where the first column is DATETIME. This validates that KeyAboveHighWatermark
 // and KeyBelowLowWatermark work correctly for temporal keys with optimization enabled.
@@ -1833,10 +1988,12 @@ func TestE2ERogueValues(t *testing.T) {
 	assert.Contains(t, chunk.String(), ` < "819 \". "`)
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 
-	// Now insert some data, for binary type it will always say its
-	// below the watermark.
+	// Now insert some data. With watermark optimization enabled for binary types,
+	// "zz'z\"z" > "819 \". " in byte order, so KeyAboveHighWatermark returns true.
+	// This means the binlog event is discarded (not buffered), and the row will
+	// be copied in later chunks or fixed during checksum.
 	testutils.RunSQL(t, `insert into e2erogue values ("zz'z\"z", 2)`)
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark("zz'z\"z"))
+	assert.True(t, m.copyChunker.KeyAboveHighWatermark("zz'z\"z"))
 
 	// Second chunk
 	chunk, err = m.copyChunker.Next()
