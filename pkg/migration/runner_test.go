@@ -1988,12 +1988,18 @@ func TestE2ERogueValues(t *testing.T) {
 	assert.Contains(t, chunk.String(), ` < "819 \". "`)
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 
+	// Wait for replication to catch up and watermark to be established
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
+
 	// Now insert some data. With watermark optimization enabled for binary types,
 	// "zz'z\"z" > "819 \". " in byte order, so KeyAboveHighWatermark returns true.
 	// This means the binlog event is discarded (not buffered), and the row will
 	// be copied in later chunks or fixed during checksum.
 	testutils.RunSQL(t, `insert into e2erogue values ("zz'z\"z", 2)`)
 	assert.True(t, m.copyChunker.KeyAboveHighWatermark("zz'z\"z"))
+
+	// Wait for the binlog event to be processed/discarded
+	assert.NoError(t, m.replClient.BlockWait(t.Context()))
 
 	// Second chunk
 	chunk, err = m.copyChunker.Next()
@@ -2002,15 +2008,17 @@ func TestE2ERogueValues(t *testing.T) {
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
 
 	// Now insert some data.
-	// This should be picked up by the binlog subscription
+	// This should be picked up by the binlog subscription.
+	// Note: "zz'z\"z" was discarded (KeyAboveHighWatermark=true), not buffered,
+	// so delta count is 1 (only this insert), not 2.
 	testutils.RunSQL(t, `insert into e2erogue values (5, 2)`)
 	assert.False(t, m.copyChunker.KeyAboveHighWatermark(5))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-	assert.Equal(t, 2, m.replClient.GetDeltaLen())
+	assert.Equal(t, 1, m.replClient.GetDeltaLen())
 
 	testutils.RunSQL(t, "delete from e2erogue where `datetime` like '819%'")
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
-	assert.Equal(t, 3, m.replClient.GetDeltaLen())
+	assert.Equal(t, 2, m.replClient.GetDeltaLen())
 
 	// Now that copy rows is done, we flush the changeset until trivial.
 	// and perform the optional checksum.
