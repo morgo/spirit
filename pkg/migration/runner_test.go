@@ -3,6 +3,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -748,7 +749,13 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et1, _e2et1_new`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et1, _e2et1_new, _e2et1_old, _e2et1_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2et1, _e2et1_new, _e2et1_old, _e2et1_chkpnt`)
+	})
 	testutils.RunSQL(t, tbl)
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (1,1),(2,1),(3,1),(4,1),(5,1),(6,1),(7,1),(8,1),(9,1),(10,1),
 	(11,1),(12,1),(13,1),(14,1),(15,1),(16,1),(17,1),(18,1),(19,1),(20,1),(21,1),(22,1),(23,1),(24,1),(25,1),(26,1),
@@ -954,7 +961,13 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et3, _e2et3_new`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et3, _e2et3_new, _e2et3_old, _e2et3_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2et3, _e2et3_new, _e2et3_old, _e2et3_chkpnt`)
+	})
 	testutils.RunSQL(t, tbl)
 
 	// Insert test data with UUID-based session_ids - create enough rows for chunking
@@ -1075,7 +1088,13 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et_collation, _e2et_collation_new`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et_collation, _e2et_collation_new, _e2et_collation_old, _e2et_collation_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2et_collation, _e2et_collation_new, _e2et_collation_old, _e2et_collation_chkpnt`)
+	})
 	testutils.RunSQL(t, tbl)
 
 	// Insert enough data to trigger multiple chunks (need > 1000 rows for watermark behavior)
@@ -1242,7 +1261,13 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 // 2. No rows are incorrectly discarded (unlike VARCHAR with collations)
 // 3. Checksum should find zero discrepancies
 func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et_binary`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et_binary, _e2et_binary_new, _e2et_binary_old, _e2et_binary_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2et_binary, _e2et_binary_new, _e2et_binary_old, _e2et_binary_chkpnt`)
+	})
 	testutils.RunSQL(t, `CREATE TABLE e2et_binary (
 		name VARBINARY(255) NOT NULL,
 		id BIGINT NOT NULL,
@@ -1407,7 +1432,13 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et4, _e2et4_new`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et4, _e2et4_new, _e2et4_old, _e2et4_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2et4, _e2et4_new, _e2et4_old, _e2et4_chkpnt`)
+	})
 	testutils.RunSQL(t, tbl)
 
 	// Helper function to insert test data for a given event_id
@@ -1509,7 +1540,13 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et2, _e2et2_new`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2et2, _e2et2_new, _e2et2_old, _e2et2_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2et2, _e2et2_new, _e2et2_old, _e2et2_chkpnt`)
+	})
 	testutils.RunSQL(t, tbl)
 	testutils.RunSQL(t, `insert into e2et2 (id) values (1)`)
 	testutils.RunSQL(t, `insert into e2et2 (id) values (2)`)
@@ -1852,7 +1889,13 @@ func TestE2ERogueValues(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2erogue, _e2erogue_new`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS e2erogue, _e2erogue_new, _e2erogue_old, _e2erogue_chkpnt`)
+	// Ensure cleanup happens even if test fails - use Background context as t.Context() is canceled after test
+	t.Cleanup(func() {
+		db, _ := sql.Open("mysql", testutils.DSN())
+		defer func() { _ = db.Close() }()
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS e2erogue, _e2erogue_new, _e2erogue_old, _e2erogue_chkpnt`)
+	})
 	testutils.RunSQL(t, tbl)
 	testutils.RunSQL(t, `insert into e2erogue values ("1 \". ",1),("2 \". ",1),("3 \". ",1),("4 \". ",1),("5 \". ",1),("6 \". ",1),("7 \". ",1),("8 \". ",1),("9 \". ",1),("10 \". ",1),("11 \". ",1),("12 \". ",1),("13 \". ",1),("14 \". ",1),("15 \". ",1),("16 \". ",1),
 	("17 \". ",1),("18 \". ",1),("19 \". ",1),("'20 \". ",1),("21 \". ",1),("22 \". ",1),("23 \". ",1),("24 \". ",1),("25 \". ",1),("26 \". ",1),("27 \". ",1),("28 \". ",1),("29 \". ",1),("30 \". ",1),("31 \". ",1),
