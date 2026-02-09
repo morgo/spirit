@@ -1795,10 +1795,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	timeout := time.After(30 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	for {
-		if m.status.Get() == status.WaitingOnSentinelTable {
-			break
-		}
+	for m.status.Get() != status.WaitingOnSentinelTable {
 		select {
 		case <-ticker.C:
 			continue
