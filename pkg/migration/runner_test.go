@@ -875,7 +875,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(m)
 	assert.Equal(t, "initial", m.status.Get().String())
-	assert.Equal(t, status.Progress{CurrentState: status.Initial, Summary: ""}, m.Progress())
+	assert.Equal(t, status.Progress{CurrentState: status.Initial, Summary: "", Tables: nil}, m.Progress())
 
 	// Usually we would call m.Run() but we want to step through
 	// the migration process manually.
@@ -906,7 +906,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.NotNil(t, chunk)
 	assert.Equal(t, "((`id1` < 1001)\n OR (`id1` = 1001 AND `id2` < 1))", chunk.String())
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	assert.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1000/1200 83.33% copyRows ETA TBD"}, m.Progress())
+	assert.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1000/1200 83.33% copyRows ETA TBD", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1000, RowsTotal: 1200, IsComplete: false}}}, m.Progress())
 
 	// Now insert some data.
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (1002, 2)`)
@@ -921,7 +921,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "((`id1` > 1001)\n OR (`id1` = 1001 AND `id2` >= 1))", chunk.String())
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	assert.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1201/1200 100.08% copyRows ETA DUE"}, m.Progress())
+	assert.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1201/1200 100.08% copyRows ETA DUE", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1201, RowsTotal: 1200, IsComplete: true}}}, m.Progress())
 
 	// Now insert some data.
 	// This should be picked up by the binlog subscription
@@ -951,7 +951,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	m.dbConfig = dbconn.NewDBConfig()
 	assert.NoError(t, m.checksum(t.Context()))
 	assert.Equal(t, "postChecksum", m.status.Get().String())
-	assert.Equal(t, status.Progress{CurrentState: status.PostChecksum, Summary: "Applying Changeset Deltas=0"}, m.Progress())
+	assert.Equal(t, status.Progress{CurrentState: status.PostChecksum, Summary: "Applying Changeset Deltas=0", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1201, RowsTotal: 1200, IsComplete: true}}}, m.Progress())
 
 	// All done!
 	assert.Equal(t, 0, m.db.Stats().InUse) // all connections are returned.

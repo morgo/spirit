@@ -213,6 +213,33 @@ func (m *multiChunker) Progress() (uint64, uint64, uint64) {
 	return totalRowsCopied, totalChunksCopied, totalRowsExpected
 }
 
+// TableProgress contains progress information for a single table
+type TableProgress struct {
+	TableName  string
+	RowsCopied uint64
+	RowsTotal  uint64
+	IsComplete bool
+}
+
+// PerTableProgress returns progress for each table in the multi-chunker.
+// This is used by wrappers to show per-table progress for multi-table migrations.
+func (m *multiChunker) PerTableProgress() []TableProgress {
+	m.Lock()
+	defer m.Unlock()
+
+	result := make([]TableProgress, 0, len(m.chunkers))
+	for tableName, chunker := range m.chunkers {
+		rowsCopied, _, rowsExpected := chunker.Progress()
+		result = append(result, TableProgress{
+			TableName:  tableName,
+			RowsCopied: rowsCopied,
+			RowsTotal:  rowsExpected,
+			IsComplete: chunker.IsRead(),
+		})
+	}
+	return result
+}
+
 // OpenAtWatermark for multi-chunker. We deserialize the watermarks
 // into a map, and then call OpenAtWatermark on each child chunker
 // with the corresponding watermark. If a table doesn't have a watermark
