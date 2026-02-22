@@ -67,7 +67,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 			var answer int
 			stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
 			if err := mdl.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
-				return fmt.Errorf("could not acquire metadata lock for %s: %s", lockName, err)
+				return fmt.Errorf("could not acquire metadata lock for %s: %w", lockName, err)
 			}
 			if answer == 0 {
 				// 0 means the lock is held by another connection
