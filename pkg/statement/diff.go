@@ -249,16 +249,17 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 			_, sourcePrevColStillExists := targetColumns[sourcePrevCol]
 
 			implicitChange := false
-			if prevColumn == "" && sourcePrevCol == "" {
+			switch {
+			case prevColumn == "" && sourcePrevCol == "":
 				// Both first, no real change
 				implicitChange = true
-			} else if prevColumn != "" && !prevColExistedInSource {
+			case prevColumn != "" && !prevColExistedInSource:
 				// Previous column is new, position change is implicit
 				implicitChange = true
-			} else if sourcePrevCol != "" && !sourcePrevColStillExists {
+			case sourcePrevCol != "" && !sourcePrevColStillExists:
 				// Previous column was dropped, position change is implicit
 				implicitChange = true
-			} else if prevColumn == sourcePrevCol {
+			case prevColumn == sourcePrevCol:
 				// Same previous column, check if we need cascading
 				// Cascading happens if the previous column was repositioned
 				if prevColumn != "" && needsExplicitPosition[prevColumn] && prevColExistedInSource {
@@ -266,7 +267,7 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 					needsExplicitPosition[targetCol.Name] = true
 				}
 				implicitChange = true
-			} else {
+			default:
 				// Explicit reorder - previous column changed and both exist
 				implicitChange = false
 			}
@@ -865,27 +866,28 @@ func formatColumnDefinition(col *Column) string {
 	// Column name and type
 	typeDef := col.Type
 
-	// Handle ENUM and SET types first (they have their own format)
-	if col.Type == "enum" && len(col.EnumValues) > 0 {
+	// Determine the full type definition including length/precision/values
+	switch {
+	case col.Type == "enum" && len(col.EnumValues) > 0:
 		var values []string
 		for _, v := range col.EnumValues {
 			values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(v)))
 		}
 		typeDef = fmt.Sprintf("enum(%s)", strings.Join(values, ","))
-	} else if col.Type == "set" && len(col.SetValues) > 0 {
+	case col.Type == "set" && len(col.SetValues) > 0:
 		var values []string
 		for _, v := range col.SetValues {
 			values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(v)))
 		}
 		typeDef = fmt.Sprintf("set(%s)", strings.Join(values, ","))
-	} else if col.Precision != nil && col.Scale != nil {
+	case col.Precision != nil && col.Scale != nil:
 		// DECIMAL(precision, scale) - check Precision/Scale BEFORE Length!
 		// DECIMAL columns have both Length and Precision/Scale set, but we want Precision/Scale
 		typeDef = fmt.Sprintf("%s(%d,%d)", col.Type, *col.Precision, *col.Scale)
-	} else if col.Precision != nil {
+	case col.Precision != nil:
 		// DECIMAL(precision) or other numeric types with precision only
 		typeDef = fmt.Sprintf("%s(%d)", col.Type, *col.Precision)
-	} else if col.Length != nil {
+	case col.Length != nil:
 		// VARCHAR, CHAR, etc.
 		typeDef = fmt.Sprintf("%s(%d)", col.Type, *col.Length)
 	}
