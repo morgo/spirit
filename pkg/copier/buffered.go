@@ -161,7 +161,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		c.logger.Debug("readWorker calling chunker.Next()")
 		chunk, err := c.chunker.Next()
 		if err != nil {
-			if err == table.ErrTableIsRead {
+			if errors.Is(err, table.ErrTableIsRead) {
 				c.logger.Debug("readWorker table is read, exiting")
 				return nil
 			}

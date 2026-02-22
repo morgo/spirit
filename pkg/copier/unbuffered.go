@@ -3,6 +3,7 @@ package copier
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -97,7 +98,7 @@ func (c *Unbuffered) Run(ctx context.Context) error {
 		g.Go(func() error {
 			chunk, err := c.chunker.Next()
 			if err != nil {
-				if err == table.ErrTableIsRead {
+				if errors.Is(err, table.ErrTableIsRead) {
 					return nil
 				}
 				c.setInvalid(true)

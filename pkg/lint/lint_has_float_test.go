@@ -683,11 +683,11 @@ func TestHasFloatLinter_MultipleAlterTableStatements(t *testing.T) {
 	stmts3, err := statement.New(sql3)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
-	stmts = append(stmts, stmts3...)
+	stmts1 = append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts3...)
 
 	linter := &HasFloatLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should detect FLOAT and DOUBLE, but not INT
 	require.Len(t, violations, 2)
@@ -728,10 +728,10 @@ func TestHasFloatLinter_ComplexScenario(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine all changes
-	allChanges := append(newTableStmts, alterStmts...)
+	newTableStmts = append(newTableStmts, alterStmts...)
 
 	linter := &HasFloatLinter{}
-	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, allChanges)
+	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, newTableStmts)
 
 	// Should detect:
 	// 1. existing1.value (FLOAT)
@@ -1115,11 +1115,11 @@ func TestHasFloatLinter_AllAlterOperations(t *testing.T) {
 	changeStmts, err := statement.New(changeSQL)
 	require.NoError(t, err)
 
-	allStmts := append(addStmts, modifyStmts...)
-	allStmts = append(allStmts, changeStmts...)
+	addStmts = append(addStmts, modifyStmts...)
+	addStmts = append(addStmts, changeStmts...)
 
 	linter := &HasFloatLinter{}
-	violations := linter.Lint(nil, allStmts)
+	violations := linter.Lint(nil, addStmts)
 
 	// Should detect all three operations
 	require.Len(t, violations, 3)
@@ -1171,12 +1171,12 @@ func TestHasFloatLinter_UltraComplexScenario(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine all changes
-	allChanges := append(newTableStmts, addStmts...)
-	allChanges = append(allChanges, modifyStmts...)
-	allChanges = append(allChanges, changeStmts...)
+	newTableStmts = append(newTableStmts, addStmts...)
+	newTableStmts = append(newTableStmts, modifyStmts...)
+	newTableStmts = append(newTableStmts, changeStmts...)
 
 	linter := &HasFloatLinter{}
-	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, allChanges)
+	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, newTableStmts)
 
 	// Should detect:
 	// 1. existing1.value (FLOAT in existing table)
@@ -1228,11 +1228,11 @@ func TestHasFloatLinter_AlterTableOtherOperations(t *testing.T) {
 	stmts3, err := statement.New(sql3)
 	require.NoError(t, err)
 
-	allStmts := append(stmts1, stmts2...)
-	allStmts = append(allStmts, stmts3...)
+	stmts1 = append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts3...)
 
 	linter := &HasFloatLinter{}
-	violations := linter.Lint(nil, allStmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// These operations don't involve column types, so no violations
 	assert.Empty(t, violations)
