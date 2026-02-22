@@ -291,7 +291,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var id, binlogPos int
 	err = r.source.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
-		return fmt.Errorf("could not read from checkpoint table '%s' on source: %v", checkpointTableName, err)
+		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
 	}
 
 	r.replClient.SetFlushedPos(gomysql.Position{
@@ -362,11 +362,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		// So we can switch tactics and check if these artifacts pass the tests
 		// to resume from checkpoint instead.
 		if resumeErr := r.runChecks(ctx, check.ScopeResume); resumeErr != nil {
-			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%v, resume_error=%v", err, resumeErr)
+			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%w, resume_error=%w", err, resumeErr)
 		}
 		// We pass the pre-check for resume, so attempt it
 		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return fmt.Errorf("resume validation passed but checkpoint resume failed: %v", err)
+			return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", err)
 		}
 		r.logger.Info("Successfully resumed move from existing checkpoint")
 		return nil
@@ -686,7 +686,7 @@ func (r *Runner) Status() string {
 	if state > status.CutOver {
 		return ""
 	}
-	switch state {
+	switch state { //nolint:exhaustive
 	case status.CopyRows:
 		// Status for copy rows
 		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v",
@@ -914,7 +914,7 @@ func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
 
 func (r *Runner) Progress() status.Progress {
 	var summary string
-	switch r.status.Get() {
+	switch r.status.Get() { //nolint:exhaustive
 	case status.CopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
 			r.copier.GetProgress(),

@@ -684,7 +684,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		// a user re-running a migration with a different alter
 		// statement when a previous migration was incomplete,
 		// and all progress is lost.
-		if r.migration.Strict && err == status.ErrMismatchedAlter {
+		if r.migration.Strict && errors.Is(err, status.ErrMismatchedAlter) {
 			return err
 		}
 
@@ -867,7 +867,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var id, binlogPos int
 	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
-		return fmt.Errorf("could not read from table '%s', err:%v", r.checkpointTableName(), err)
+		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
 
 	// We need to validate that the statement matches between the checkpoint

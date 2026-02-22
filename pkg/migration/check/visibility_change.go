@@ -40,7 +40,7 @@ func AlterContainsIndexVisibility(stmt *statement.AbstractStatement) error {
 	hasNonMetadataOperation := false
 
 	for _, spec := range alterStmt.Specs {
-		switch spec.Tp {
+		switch spec.Tp { //nolint:exhaustive
 		case ast.AlterTableIndexInvisible:
 			hasIndexVisibility = true
 		case ast.AlterTableDropIndex,

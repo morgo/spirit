@@ -571,31 +571,29 @@ func (c *Client) readStream(ctx context.Context) {
 			continue
 		}
 		// Handle the event.
-		switch ev.Event.(type) {
+		switch event := ev.Event.(type) {
 		case *replication.RotateEvent:
 			// Rotate event, update the current log name.
-			rotateEvent := ev.Event.(*replication.RotateEvent)
-			currentLogName = string(rotateEvent.NextLogName)
-			// For RotateEvent, we must use rotateEvent.Position (the position in the NEW log)
+			currentLogName = string(event.NextLogName)
+			// For RotateEvent, we must use event.Position (the position in the NEW log)
 			// not ev.Header.LogPos (which is the position in the OLD log).
 			// Update position immediately and skip the generic position update at the end.
 			c.setBufferedPos(mysql.Position{
 				Name: currentLogName,
-				Pos:  uint32(rotateEvent.Position),
+				Pos:  uint32(event.Position),
 			})
-			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", rotateEvent.Position)
+			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", event.Position)
 			continue
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
-			if err = c.processRowsEvent(ev, ev.Event.(*replication.RowsEvent)); err != nil {
+			if err = c.processRowsEvent(ev, event); err != nil {
 				panic("could not process events")
 			}
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
 			// in which case we need to notify the caller.
-			queryEvent := ev.Event.(*replication.QueryEvent)
-			tables, err := extractTablesFromDDLStmts(string(queryEvent.Schema), string(queryEvent.Query))
+			tables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
 				// The parser does not understand all syntax.
 				// For example, it won't parse [CREATE|DROP] TRIGGER statements *or*
@@ -750,7 +748,7 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 				// In theory this is unreachable since we mandate a PK on tables
 				return fmt.Errorf("no primary key found for row: %#v", row)
 			}
-			switch eventType {
+			switch eventType { //nolint:exhaustive
 			case eventTypeInsert:
 				sub.HasChanged(key, row, false)
 			case eventTypeDelete:
