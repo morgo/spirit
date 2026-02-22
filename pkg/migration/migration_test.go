@@ -105,7 +105,7 @@ func TestE2EExplicitAutoIncrementInAlter(t *testing.T) {
 	// InnoDB may cache AUTO_INCREMENT values and information_schema may show stale data.
 	testutils.RunSQL(t, "INSERT INTO t1explicit_autoinc (name) VALUES ('test')")
 	var insertedID int64
-	err = db.QueryRow("SELECT MAX(id) FROM t1explicit_autoinc").Scan(&insertedID)
+	err = db.QueryRowContext(t.Context(), "SELECT MAX(id) FROM t1explicit_autoinc").Scan(&insertedID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(5000), insertedID, "User-specified AUTO_INCREMENT=5000 should be preserved, first insert should get ID 5000")
 }

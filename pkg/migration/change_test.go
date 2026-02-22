@@ -1,7 +1,6 @@
 package migration
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -78,7 +77,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 
 	// Verify table is empty but has AUTO_INCREMENT set
 	var autoIncValue sql.NullInt64
-	err = testDB.QueryRow(
+	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 		cfg.DBName, tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
@@ -86,7 +85,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	require.Equal(t, int64(2979716), autoIncValue.Int64, "AUTO_INCREMENT should be 2979716")
 
 	var rowCount int
-	err = testDB.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
+	err = testDB.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
 	require.NoError(t, err)
 	require.Equal(t, 0, rowCount, "Table should be empty")
 
@@ -103,7 +102,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(r)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	err = r.Run(ctx)
 	require.NoError(t, err)
 
@@ -116,7 +115,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 
 	// Verify the IDs are correct (should start from 2979716, not from 1)
 	var insertedIDs []int64
-	rows, err := testDB.Query(fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
+	rows, err := testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
 	require.NoError(t, err)
 	defer utils.CloseAndLog(rows)
 
@@ -131,7 +130,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	assert.Equal(t, expectedIDs, insertedIDs, "Inserted IDs should start from 2979716, not 1")
 
 	// Verify final AUTO_INCREMENT value
-	err = testDB.QueryRow(
+	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 		cfg.DBName, tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
@@ -172,7 +171,7 @@ func TestAutoIncrementWithRows(t *testing.T) {
 
 	// Verify table has rows and AUTO_INCREMENT is set
 	var autoIncValue sql.NullInt64
-	err = testDB.QueryRow(
+	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 		cfg.DBName, tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
@@ -180,13 +179,13 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	require.Equal(t, int64(2979719), autoIncValue.Int64, "AUTO_INCREMENT should be 2979719 (3 rows inserted)")
 
 	var rowCount int
-	err = testDB.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
+	err = testDB.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
 	require.NoError(t, err)
 	require.Equal(t, 3, rowCount, "Table should have 3 rows")
 
 	// Verify existing IDs
 	var existingIDs []int64
-	rows, err := testDB.Query(fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
+	rows, err := testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
 	require.NoError(t, err)
 	for rows.Next() {
 		var id int64
@@ -210,13 +209,13 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(r)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	err = r.Run(ctx)
 	require.NoError(t, err)
 
 	// Verify existing rows are preserved
 	var migratedIDs []int64
-	rows, err = testDB.Query(fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
+	rows, err = testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
 	require.NoError(t, err)
 	for rows.Next() {
 		var id int64
@@ -235,7 +234,7 @@ func TestAutoIncrementWithRows(t *testing.T) {
 
 	// Verify all IDs (existing + new)
 	var allIDs []int64
-	rows, err = testDB.Query(fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
+	rows, err = testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
 	require.NoError(t, err)
 	for rows.Next() {
 		var id int64
@@ -248,7 +247,7 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	assert.Equal(t, expectedAllIDs, allIDs, "New IDs should continue from 2979719")
 
 	// Verify final AUTO_INCREMENT
-	err = testDB.QueryRow(
+	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 		cfg.DBName, tableName).Scan(&autoIncValue)
 	require.NoError(t, err)

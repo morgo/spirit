@@ -223,20 +223,21 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 
 	case "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY":
 		// TLS with certificate selection - determine which certificate to use
-		if config.TLSCertificatePath != "" {
+		switch {
+		case config.TLSCertificatePath != "":
 			// Use custom certificate
 			if err = initCustomTLS(config); err != nil {
 				return "", err
 			}
 			configName := getTLSConfigName(config.TLSMode)
 			ops = append(ops, fmt.Sprintf("%s=%s", "tls", url.QueryEscape(configName)))
-		} else if IsRDSHost(cfg.Addr) {
+		case IsRDSHost(cfg.Addr):
 			// Use RDS certificate for RDS hosts
 			if err = initRDSTLS(); err != nil {
 				return "", err
 			}
 			ops = append(ops, fmt.Sprintf("%s=%s", "tls", url.QueryEscape(rdsTLSConfigName)))
-		} else {
+		default:
 			// Use embedded RDS bundle as fallback for non-RDS hosts
 			if err = initCustomTLS(config); err != nil {
 				return "", err
