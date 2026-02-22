@@ -470,7 +470,7 @@ func (l *RedundantIndexLinter) constraintToIndex(constraint *ast.Constraint) *st
 
 	// Determine the index type
 	var indexType string
-	switch constraint.Tp {
+	switch constraint.Tp { //nolint:exhaustive
 	case ast.ConstraintPrimaryKey:
 		indexType = "PRIMARY KEY"
 	case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:

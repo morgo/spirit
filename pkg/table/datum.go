@@ -164,7 +164,7 @@ func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 
 	// Convert []byte to string for non-numeric types
 	if b, ok := value.([]byte); ok {
-		switch tp {
+		switch tp { //nolint:exhaustive
 		case signedType, unsignedType:
 			// For numeric types, convert []byte to string then parse
 			value = string(b)

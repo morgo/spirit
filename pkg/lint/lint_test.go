@@ -16,7 +16,7 @@ type mockLinter struct {
 }
 
 func (m *mockLinter) String() string {
-	//TODO implement me
+	// TODO implement me
 	panic("implement me")
 }
 
@@ -35,7 +35,7 @@ type mockConfigurableLinter struct {
 }
 
 func (m *mockConfigurableLinter) String() string {
-	//TODO implement me
+	// TODO implement me
 	panic("implement me")
 }
 

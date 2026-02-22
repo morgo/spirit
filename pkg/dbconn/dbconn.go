@@ -62,7 +62,8 @@ func NewDBConfig() *DBConfig {
 // succeed but then there is a deadlock later on.
 func canRetryError(err error) bool {
 	var errNumber uint16
-	if val, ok := err.(*mysql.MySQLError); ok {
+	var val *mysql.MySQLError
+	if errors.As(err, &val) {
 		errNumber = val.Number
 	}
 	switch errNumber {
@@ -115,7 +116,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 				// Even though there was no ERROR we still need to inspect SHOW WARNINGS
 				// This is because many of the statements use INSERT IGNORE.
 				var warningRes *sql.Rows
-				warningRes, err = trx.QueryContext(ctx, "SHOW WARNINGS") //nolint: execinquery
+				warningRes, err = trx.QueryContext(ctx, "SHOW WARNINGS")
 				if err != nil {
 					return
 				}
@@ -131,9 +132,10 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 					// because the SQL mode has been unset. This is important
 					// because a historical value like 0000-00-00 00:00:00
 					// might exist in the table and needs to be copied.
-					if code == errFoundDuppKey && ignoreDupKeyWarnings {
+					switch {
+					case code == errFoundDuppKey && ignoreDupKeyWarnings:
 						continue // ignore duplicate key warnings
-					} else if code == errCapacityExceeded {
+					case code == errCapacityExceeded:
 						// "Memory capacity of 8388608 bytes for 'range_optimizer_max_mem_size' exceeded.
 						// Range optimization was not done for this query."
 						// i.e. the query can still execute, but it won't be efficient. Prior to
@@ -143,7 +145,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 						isFatal = true
 						err = errors.New("MySQL refused to optimize a statement because the value of 'range_optimizer_max_mem_size' is too low. Please decrease the target-chunk-time, or increase the value of 'range_optimizer_max_mem_size'")
 						return
-					} else {
+					default:
 						isFatal = true
 						err = fmt.Errorf("unsafe warning: %s", message)
 						return

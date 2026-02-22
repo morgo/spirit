@@ -258,7 +258,7 @@ func FilterByLinter(violations []Violation, linterName string) []Violation {
 
 // AlterTableTypeToString converts an AlterTableType constant to a human-readable string
 func AlterTableTypeToString(tp ast.AlterTableType) string {
-	switch tp {
+	switch tp { //nolint:exhaustive
 	case ast.AlterTableOption:
 		return "ALTER TABLE OPTION"
 	case ast.AlterTableAddColumns:
