@@ -1241,10 +1241,6 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 	}
 
 	assert.NoError(t, m.Close())
-
-	t.Log("✓ Row was initially DISCARDED by KeyAboveHighWatermark due to Go vs MySQL collation difference")
-	t.Log("✓ Checksum phase detected the missing row and fixed the discrepancy")
-	t.Log("✓ Migration completed successfully with all data intact")
 }
 
 // TestE2EBinlogSubscribingCompositeKeyBinary tests binlog subscription with composite key
