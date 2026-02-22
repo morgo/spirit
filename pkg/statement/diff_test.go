@@ -185,7 +185,7 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` varchar(36) NOT NULL DEFAULT 'uuid'",
 		},
 		{
-			name: "MultipleChanges",
+			name: "MultipleChangesComplex",
 			source: `CREATE TABLE products (
 			id INT PRIMARY KEY,
 			name VARCHAR(100),
@@ -290,7 +290,7 @@ func TestDiff(t *testing.T) {
 			name:     "ChangeEngine",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=InnoDB",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=MyISAM",
-			expected: "ALTER TABLE `t1` ENGINE=MyISAM",
+			expected: "", // ENGINE is ignored by default (NewDiffOptions)
 		},
 		{
 			name:     "ChangeCharset",
@@ -673,14 +673,14 @@ func TestDiff(t *testing.T) {
 			ct2, err := ParseCreateTable(tt.target)
 			require.NoError(t, err)
 
-			stmts, err := ct1.Diff(ct2)
+			stmt, err := ct1.Diff(ct2, nil)
 			require.NoError(t, err)
 
 			if tt.expected == "" {
-				assert.Nil(t, stmts, "expected nil for identical tables")
+				assert.Nil(t, stmt, "expected nil for identical tables")
 			} else {
-				require.Len(t, stmts, 1)
-				assert.Equal(t, tt.expected, stmts[0].Statement)
+				require.NotNil(t, stmt)
+				assert.Equal(t, tt.expected, stmt.Statement)
 			}
 		})
 	}
@@ -693,8 +693,188 @@ func TestDiff_DifferentTableNames(t *testing.T) {
 	ct2, err := ParseCreateTable("CREATE TABLE t2 (id INT PRIMARY KEY)")
 	require.NoError(t, err)
 
-	_, err = ct1.Diff(ct2)
+	_, err = ct1.Diff(ct2, nil)
 	assert.Error(t, err, "expected error when diffing tables with different names")
+}
+
+func TestDiff_DiffOptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   string
+		target   string
+		opts     *DiffOptions
+		expected string
+	}{
+		// NewDiffOptions defaults: IgnoreAutoIncrement=true, IgnoreEngine=true
+		{
+			name:     "DefaultIgnoresEngine",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=InnoDB",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=MyISAM",
+			opts:     nil, // nil uses NewDiffOptions()
+			expected: "",
+		},
+		{
+			name:     "DefaultIgnoresAutoIncrement",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) AUTO_INCREMENT=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) AUTO_INCREMENT=100",
+			opts:     nil,
+			expected: "",
+		},
+		{
+			name:     "DefaultDetectsCharset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=latin1",
+			opts:     nil,
+			expected: "ALTER TABLE `t1` DEFAULT CHARSET=latin1",
+		},
+		{
+			name:     "DefaultDetectsCollation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) COLLATE=utf8mb4_general_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) COLLATE=utf8mb4_unicode_ci",
+			opts:     nil,
+			expected: "ALTER TABLE `t1` COLLATE=utf8mb4_unicode_ci",
+		},
+		{
+			name:     "DefaultDetectsPartitioning",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			opts:     nil,
+			expected: "ALTER TABLE `t1` PARTITION BY HASH (`user_id`) PARTITIONS 4",
+		},
+
+		// Explicit IgnoreEngine=false detects engine changes
+		{
+			name:     "ExplicitDetectEngine",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=InnoDB",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=MyISAM",
+			opts:     &DiffOptions{IgnoreEngine: false},
+			expected: "ALTER TABLE `t1` ENGINE=MyISAM",
+		},
+
+		// Explicit IgnoreAutoIncrement=false detects auto_increment changes
+		{
+			name:     "ExplicitDetectAutoIncrement",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) AUTO_INCREMENT=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) AUTO_INCREMENT=100",
+			opts:     &DiffOptions{IgnoreAutoIncrement: false},
+			expected: "ALTER TABLE `t1` AUTO_INCREMENT=100",
+		},
+
+		// IgnoreCharsetCollation
+		{
+			name:     "IgnoreCharsetCollation_Charset",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=latin1",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnoreCharsetCollation_Collation",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) COLLATE=utf8mb4_general_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) COLLATE=utf8mb4_unicode_ci",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnoreCharsetCollation_Both",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) CHARSET=latin1 COLLATE=latin1_swedish_ci",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnoreCharsetCollation_StillDetectsColumnChanges",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) CHARSET=utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100)) CHARSET=latin1",
+			opts:     &DiffOptions{IgnoreCharsetCollation: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(100) NULL",
+		},
+
+		// IgnorePartitioning
+		{
+			name:     "IgnorePartitioning_Add",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			opts:     &DiffOptions{IgnorePartitioning: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnorePartitioning_Remove",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			opts:     &DiffOptions{IgnorePartitioning: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "",
+		},
+		{
+			name:     "IgnorePartitioning_StillDetectsColumnChanges",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT) PARTITION BY HASH(id) PARTITIONS 4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100)) PARTITION BY HASH(id) PARTITIONS 8",
+			opts:     &DiffOptions{IgnorePartitioning: true, IgnoreAutoIncrement: true, IgnoreEngine: true},
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(100) NULL",
+		},
+
+		// Comment and ROW_FORMAT are always compared (no ignore option)
+		{
+			name:     "CommentAlwaysDetected",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) COMMENT='test table'",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true},
+			expected: "ALTER TABLE `t1` COMMENT='test table'",
+		},
+		{
+			name:     "RowFormatAlwaysDetected",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=DYNAMIC",
+		},
+
+		// Combined: ignore everything possible, still detect column + index changes
+		{
+			name:     "IgnoreAllOptionsButDetectSchemaChanges",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100)) ENGINE=InnoDB CHARSET=utf8mb4 ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name)) ENGINE=MyISAM CHARSET=latin1 ROW_FORMAT=DYNAMIC",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true},
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`), ROW_FORMAT=DYNAMIC",
+		},
+
+		// Zero-value DiffOptions (all false) detects everything
+		{
+			name:     "ZeroValueOptsDetectsEverything",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) ENGINE=InnoDB AUTO_INCREMENT=1",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT) ENGINE=MyISAM AUTO_INCREMENT=100",
+			opts:     &DiffOptions{},
+			expected: "ALTER TABLE `t1` ENGINE=MyISAM, AUTO_INCREMENT=100",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ct1, err := ParseCreateTable(tt.source)
+			require.NoError(t, err)
+
+			ct2, err := ParseCreateTable(tt.target)
+			require.NoError(t, err)
+
+			stmt, err := ct1.Diff(ct2, tt.opts)
+			require.NoError(t, err)
+
+			if tt.expected == "" {
+				assert.Nil(t, stmt, "expected nil diff")
+			} else {
+				require.NotNil(t, stmt)
+				assert.Equal(t, tt.expected, stmt.Statement)
+			}
+		})
+	}
+}
+
+func TestNewDiffOptions(t *testing.T) {
+	opts := NewDiffOptions()
+	assert.True(t, opts.IgnoreAutoIncrement, "IgnoreAutoIncrement should default to true")
+	assert.True(t, opts.IgnoreEngine, "IgnoreEngine should default to true")
+	assert.False(t, opts.IgnoreCharsetCollation, "IgnoreCharsetCollation should default to false")
+	assert.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
 }
 
 // TestHelperFunctions tests the helper functions used in diff.go

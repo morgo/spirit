@@ -453,7 +453,6 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				} else {
 					// For non-string defaults (e.g., numeric, functions), use the raw expression
 					defaultRaw := fmt.Sprintf("%v", defaultVal)
-					fmt.Printf("defaultRaw: %s\n", defaultRaw)
 					column.Default = &defaultRaw
 				}
 			}

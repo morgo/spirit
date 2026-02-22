@@ -3,16 +3,51 @@ package statement
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/pingcap/tidb/pkg/parser"
 )
 
+// DiffOptions controls the behavior of the Diff operation.
+type DiffOptions struct {
+	// IgnoreAutoIncrement skips diffing the AUTO_INCREMENT table option.
+	// Default: true (via NewDiffOptions).
+	IgnoreAutoIncrement bool
+
+	// IgnoreEngine skips diffing the ENGINE table option.
+	// Default: true (via NewDiffOptions).
+	IgnoreEngine bool
+
+	// IgnoreCharsetCollation skips diffing CHARSET and COLLATION table options.
+	// Default: false (via NewDiffOptions).
+	IgnoreCharsetCollation bool
+
+	// IgnorePartitioning skips diffing partition options entirely.
+	// Default: false (via NewDiffOptions).
+	IgnorePartitioning bool
+}
+
+// NewDiffOptions returns DiffOptions with sensible defaults.
+// By default, AUTO_INCREMENT and ENGINE differences are ignored.
+func NewDiffOptions() *DiffOptions {
+	return &DiffOptions{
+		IgnoreAutoIncrement:    true,
+		IgnoreEngine:           true,
+		IgnoreCharsetCollation: false,
+		IgnorePartitioning:     false,
+	}
+}
+
 // Diff compares this CreateTable (source) with another CreateTable (target)
-// and returns a list of ALTER TABLE statements needed to transform source into target.
+// and returns an ALTER TABLE statement needed to transform source into target.
 // Returns nil if the tables are identical.
-func (ct *CreateTable) Diff(target *CreateTable) ([]*AbstractStatement, error) {
+// If opts is nil, NewDiffOptions() defaults are used.
+func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) (*AbstractStatement, error) {
+	if opts == nil {
+		opts = NewDiffOptions()
+	}
 	if ct.TableName != target.TableName {
 		return nil, fmt.Errorf("cannot diff tables with different names: %s vs %s", ct.TableName, target.TableName)
 	}
@@ -32,12 +67,14 @@ func (ct *CreateTable) Diff(target *CreateTable) ([]*AbstractStatement, error) {
 	alterClauses = append(alterClauses, constraintClauses...)
 
 	// 4. Diff table options
-	tableOptionClauses := ct.diffTableOptions(target)
+	tableOptionClauses := ct.diffTableOptions(target, opts)
 	alterClauses = append(alterClauses, tableOptionClauses...)
 
 	// 5. Diff partition options
-	partitionClauses := ct.diffPartitionOptions(target)
-	alterClauses = append(alterClauses, partitionClauses...)
+	if !opts.IgnorePartitioning {
+		partitionClauses := ct.diffPartitionOptions(target)
+		alterClauses = append(alterClauses, partitionClauses...)
+	}
 
 	// If no changes, return nil
 	if len(alterClauses) == 0 {
@@ -58,13 +95,11 @@ func (ct *CreateTable) Diff(target *CreateTable) ([]*AbstractStatement, error) {
 		return nil, fmt.Errorf("expected exactly one statement, got %d", len(stmtNodes))
 	}
 
-	return []*AbstractStatement{
-		{
-			Table:     ct.TableName,
-			Alter:     strings.Join(alterClauses, ", "),
-			Statement: alterStmt,
-			StmtNode:  &stmtNodes[0],
-		},
+	return &AbstractStatement{
+		Table:     ct.TableName,
+		Alter:     strings.Join(alterClauses, ", "),
+		Statement: alterStmt,
+		StmtNode:  &stmtNodes[0],
 	}, nil
 }
 
@@ -443,46 +478,58 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 	return clauses
 }
 
-// diffTableOptions compares table options and returns ALTER clauses for differences
-func (ct *CreateTable) diffTableOptions(target *CreateTable) []string {
+// diffTableOptions compares table options and returns ALTER clauses for differences.
+// The opts parameter controls which table options are compared.
+func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) []string {
 	var clauses []string
 
 	// Compare ENGINE
-	if !stringPtrEqual(ct.TableOptions.getEngine(), target.TableOptions.getEngine()) {
-		if engine := target.TableOptions.getEngine(); engine != nil {
-			clauses = append(clauses, fmt.Sprintf("ENGINE=%s", *engine))
+	if !opts.IgnoreEngine {
+		if !stringPtrEqual(ct.TableOptions.getEngine(), target.TableOptions.getEngine()) {
+			if engine := target.TableOptions.getEngine(); engine != nil {
+				clauses = append(clauses, fmt.Sprintf("ENGINE=%s", *engine))
+			}
 		}
 	}
 
-	// Compare CHARSET
-	if !stringPtrEqual(ct.TableOptions.getCharset(), target.TableOptions.getCharset()) {
-		if charset := target.TableOptions.getCharset(); charset != nil {
-			clauses = append(clauses, fmt.Sprintf("DEFAULT CHARSET=%s", *charset))
+	// Compare CHARSET and COLLATION
+	if !opts.IgnoreCharsetCollation {
+		if !stringPtrEqual(ct.TableOptions.getCharset(), target.TableOptions.getCharset()) {
+			if charset := target.TableOptions.getCharset(); charset != nil {
+				clauses = append(clauses, fmt.Sprintf("DEFAULT CHARSET=%s", *charset))
+			}
+		}
+
+		if !stringPtrEqual(ct.TableOptions.getCollation(), target.TableOptions.getCollation()) {
+			if collation := target.TableOptions.getCollation(); collation != nil {
+				clauses = append(clauses, fmt.Sprintf("COLLATE=%s", *collation))
+			}
 		}
 	}
 
-	// Compare COLLATION
-	if !stringPtrEqual(ct.TableOptions.getCollation(), target.TableOptions.getCollation()) {
-		if collation := target.TableOptions.getCollation(); collation != nil {
-			clauses = append(clauses, fmt.Sprintf("COLLATE=%s", *collation))
-		}
-	}
-
-	// Compare COMMENT
+	// Compare COMMENT (always compared — not controlled by an ignore option)
 	if !stringPtrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
 		if comment := target.TableOptions.getComment(); comment != nil {
 			clauses = append(clauses, fmt.Sprintf("COMMENT='%s'", sqlescape.EscapeString(*comment)))
 		}
 	}
 
-	// Compare ROW_FORMAT
+	// Compare ROW_FORMAT (always compared — not controlled by an ignore option)
 	if !stringPtrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
 		if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
 			clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
 		}
 	}
 
-	// Note: AUTO_INCREMENT is typically ignored in diffs (like vitess schemadiff)
+	// Compare AUTO_INCREMENT
+	// Note: AUTO_INCREMENT is ignored by default (like vitess schemadiff)
+	if !opts.IgnoreAutoIncrement {
+		if !stringPtrEqual(ct.TableOptions.getAutoIncrement(), target.TableOptions.getAutoIncrement()) {
+			if autoInc := target.TableOptions.getAutoIncrement(); autoInc != nil {
+				clauses = append(clauses, fmt.Sprintf("AUTO_INCREMENT=%s", *autoInc))
+			}
+		}
+	}
 
 	return clauses
 }
@@ -521,6 +568,14 @@ func (to *TableOptions) getRowFormat() *string {
 		return nil
 	}
 	return to.RowFormat
+}
+
+func (to *TableOptions) getAutoIncrement() *string {
+	if to == nil || to.AutoIncrement == nil {
+		return nil
+	}
+	s := strconv.FormatUint(*to.AutoIncrement, 10)
+	return &s
 }
 
 // columnsEqualWithContext checks if two columns are equal, considering table context for charset/collation
@@ -571,10 +626,10 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	targetCharset := b.Charset
 
 	// Normalize: if charset equals table charset, treat as nil
-	if sourceCharset != nil && ct.TableOptions.Charset != nil && *sourceCharset == *ct.TableOptions.Charset {
+	if sourceCharset != nil && ct.TableOptions != nil && ct.TableOptions.Charset != nil && *sourceCharset == *ct.TableOptions.Charset {
 		sourceCharset = nil
 	}
-	if targetCharset != nil && target.TableOptions.Charset != nil && *targetCharset == *target.TableOptions.Charset {
+	if targetCharset != nil && target.TableOptions != nil && target.TableOptions.Charset != nil && *targetCharset == *target.TableOptions.Charset {
 		targetCharset = nil
 	}
 
@@ -587,10 +642,10 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	targetCollation := b.Collation
 
 	// Normalize: if collation equals table collation, treat as nil
-	if sourceCollation != nil && ct.TableOptions.Collation != nil && *sourceCollation == *ct.TableOptions.Collation {
+	if sourceCollation != nil && ct.TableOptions != nil && ct.TableOptions.Collation != nil && *sourceCollation == *ct.TableOptions.Collation {
 		sourceCollation = nil
 	}
-	if targetCollation != nil && target.TableOptions.Collation != nil && *targetCollation == *target.TableOptions.Collation {
+	if targetCollation != nil && target.TableOptions != nil && target.TableOptions.Collation != nil && *targetCollation == *target.TableOptions.Collation {
 		targetCollation = nil
 	}
 
@@ -1035,29 +1090,14 @@ func needsQuotes(value string) bool {
 		return false
 	}
 
-	// If it looks like a number, don't quote it
-	var f float64
-	if _, err := fmt.Sscanf(value, "%f", &f); err == nil {
-		// Successfully parsed as a number - check that we consumed the whole string
-		// to avoid partial matches like "123abc"
-		formatted := fmt.Sprintf("%v", f)
-		// For integers, formatted will be like "123.0" but value might be "123"
-		// So we need to handle both integer and float formats
-		if value == formatted {
-			return false
-		}
-		// Try integer format
-		var i int64
-		if _, err := fmt.Sscanf(value, "%d", &i); err == nil && fmt.Sprintf("%d", i) == value {
-			return false
-		}
-		// Try negative float
-		if strings.Contains(value, ".") || strings.Contains(value, "e") || strings.Contains(value, "E") {
-			// It's a float-like string, check if it parses completely
-			if strings.TrimSpace(value) == value {
-				return false
-			}
-		}
+	// If it parses as an integer, don't quote it
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return false
+	}
+
+	// If it parses as a float, don't quote it
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return false
 	}
 
 	// Default to quoting (for strings)
