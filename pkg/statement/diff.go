@@ -41,10 +41,12 @@ func NewDiffOptions() *DiffOptions {
 }
 
 // Diff compares this CreateTable (source) with another CreateTable (target)
-// and returns an ALTER TABLE statement needed to transform source into target.
+// and returns ALTER TABLE statements needed to transform source into target.
+// Most changes produce a single statement, but some (e.g. changing partition type)
+// require multiple sequential statements.
 // Returns nil if the tables are identical.
 // If opts is nil, NewDiffOptions() defaults are used.
-func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) (*AbstractStatement, error) {
+func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*AbstractStatement, error) {
 	if opts == nil {
 		opts = NewDiffOptions()
 	}
@@ -70,21 +72,47 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) (*AbstractSt
 	tableOptionClauses := ct.diffTableOptions(target, opts)
 	alterClauses = append(alterClauses, tableOptionClauses...)
 
-	// 5. Diff partition options
+	// 5. Diff partition options — may produce additional statements
+	var additionalStatements [][]string
 	if !opts.IgnorePartitioning {
-		partitionClauses := ct.diffPartitionOptions(target)
+		partitionClauses, extraStatements := ct.diffPartitionOptions(target)
 		alterClauses = append(alterClauses, partitionClauses...)
+		additionalStatements = extraStatements
 	}
 
-	// If no changes, return nil
-	if len(alterClauses) == 0 {
+	// Build the result
+	var results []*AbstractStatement
+
+	// Primary statement (columns, indexes, constraints, table options, and simple partition changes)
+	if len(alterClauses) > 0 {
+		stmt, err := ct.buildAlterStatement(alterClauses)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, stmt)
+	}
+
+	// Additional statements (e.g. second ALTER for partition type changes)
+	for _, clauses := range additionalStatements {
+		stmt, err := ct.buildAlterStatement(clauses)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, stmt)
+	}
+
+	if len(results) == 0 {
 		return nil, nil
 	}
 
-	// Build the ALTER TABLE statement
-	alterStmt := fmt.Sprintf("ALTER TABLE `%s` %s", ct.TableName, strings.Join(alterClauses, ", "))
+	return results, nil
+}
 
-	// Parse the ALTER statement to create an AbstractStatement
+// buildAlterStatement constructs and parses an ALTER TABLE statement from clauses.
+func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement, error) {
+	alter := strings.Join(clauses, ", ")
+	alterStmt := fmt.Sprintf("ALTER TABLE `%s` %s", ct.TableName, alter)
+
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(alterStmt, "", "")
 	if err != nil {
@@ -97,7 +125,7 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) (*AbstractSt
 
 	return &AbstractStatement{
 		Table:     ct.TableName,
-		Alter:     strings.Join(alterClauses, ", "),
+		Alter:     alter,
 		Statement: alterStmt,
 		StmtNode:  &stmtNodes[0],
 	}, nil
@@ -1104,29 +1132,28 @@ func needsQuotes(value string) bool {
 	return true
 }
 
-// diffPartitionOptions compares partition options and returns ALTER clauses for differences
-func (ct *CreateTable) diffPartitionOptions(target *CreateTable) []string {
-	var clauses []string
-
+// diffPartitionOptions compares partition options and returns ALTER clauses for differences.
+// The first return value contains clauses for the primary ALTER statement.
+// The second return value contains clause sets for additional ALTER statements needed
+// when a change cannot be expressed in a single statement (e.g. changing partition type
+// requires REMOVE PARTITIONING followed by a separate PARTITION BY).
+func (ct *CreateTable) diffPartitionOptions(target *CreateTable) ([]string, [][]string) {
 	sourcePartition := ct.Partition
 	targetPartition := target.Partition
 
 	// Case 1: No partitioning in either table - no changes
 	if sourcePartition == nil && targetPartition == nil {
-		return clauses
+		return nil, nil
 	}
 
 	// Case 2: Remove partitioning (source has partitioning, target doesn't)
 	if sourcePartition != nil && targetPartition == nil {
-		clauses = append(clauses, "REMOVE PARTITIONING")
-		return clauses
+		return []string{"REMOVE PARTITIONING"}, nil
 	}
 
 	// Case 3: Add partitioning (source doesn't have partitioning, target does)
 	if sourcePartition == nil && targetPartition != nil {
-		partitionClause := formatPartitionOptions(targetPartition)
-		clauses = append(clauses, partitionClause)
-		return clauses
+		return []string{formatPartitionOptions(targetPartition)}, nil
 	}
 
 	// Case 4: Both have partitioning - check if they're different
@@ -1135,25 +1162,20 @@ func (ct *CreateTable) diffPartitionOptions(target *CreateTable) []string {
 		// (no explicit definitions), we can use ADD PARTITION or COALESCE PARTITION
 		if isCountOnly, countDiff := isPartitionCountOnlyChange(sourcePartition, targetPartition); isCountOnly {
 			if countDiff > 0 {
-				// Increasing partition count - use ADD PARTITION
-				clauses = append(clauses, fmt.Sprintf("ADD PARTITION PARTITIONS %d", countDiff))
-			} else {
-				// Decreasing partition count - use COALESCE PARTITION
-				clauses = append(clauses, fmt.Sprintf("COALESCE PARTITION %d", -countDiff))
+				return []string{fmt.Sprintf("ADD PARTITION PARTITIONS %d", countDiff)}, nil
 			}
-			return clauses
+			return []string{fmt.Sprintf("COALESCE PARTITION %d", -countDiff)}, nil
 		}
 
-		// For all other partition changes, we need to use REMOVE PARTITIONING + PARTITION BY
-		// However, this cannot be done in a single ALTER statement.
-		// For now, we'll generate the clauses but note that this will fail to parse.
-		// A future enhancement would be to support multiple ALTER statements.
-		clauses = append(clauses, "REMOVE PARTITIONING")
-		partitionClause := formatPartitionOptions(targetPartition)
-		clauses = append(clauses, partitionClause)
+		// For all other partition changes (e.g. changing partition type from HASH to RANGE),
+		// MySQL requires two separate ALTER TABLE statements:
+		// 1. REMOVE PARTITIONING
+		// 2. PARTITION BY ...
+		// The first goes into the primary statement, the second is returned as an additional statement.
+		return []string{"REMOVE PARTITIONING"}, [][]string{{formatPartitionOptions(targetPartition)}}
 	}
 
-	return clauses
+	return nil, nil
 }
 
 // isPartitionCountOnlyChange checks if only the partition count changed for HASH/KEY partitions

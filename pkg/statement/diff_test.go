@@ -673,14 +673,14 @@ func TestDiff(t *testing.T) {
 			ct2, err := ParseCreateTable(tt.target)
 			require.NoError(t, err)
 
-			stmt, err := ct1.Diff(ct2, nil)
+			stmts, err := ct1.Diff(ct2, nil)
 			require.NoError(t, err)
 
 			if tt.expected == "" {
-				assert.Nil(t, stmt, "expected nil for identical tables")
+				assert.Nil(t, stmts, "expected nil for identical tables")
 			} else {
-				require.NotNil(t, stmt)
-				assert.Equal(t, tt.expected, stmt.Statement)
+				require.Len(t, stmts, 1)
+				assert.Equal(t, tt.expected, stmts[0].Statement)
 			}
 		})
 	}
@@ -856,17 +856,33 @@ func TestDiff_DiffOptions(t *testing.T) {
 			ct2, err := ParseCreateTable(tt.target)
 			require.NoError(t, err)
 
-			stmt, err := ct1.Diff(ct2, tt.opts)
+			stmts, err := ct1.Diff(ct2, tt.opts)
 			require.NoError(t, err)
 
 			if tt.expected == "" {
-				assert.Nil(t, stmt, "expected nil diff")
+				assert.Nil(t, stmts, "expected nil diff")
 			} else {
-				require.NotNil(t, stmt)
-				assert.Equal(t, tt.expected, stmt.Statement)
+				require.Len(t, stmts, 1)
+				assert.Equal(t, tt.expected, stmts[0].Statement)
 			}
 		})
 	}
+}
+
+// TestDiff_ChangePartitionType tests the multi-statement case where changing
+// partition type requires REMOVE PARTITIONING followed by a separate PARTITION BY.
+func TestDiff_ChangePartitionType(t *testing.T) {
+	ct1, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY HASH(user_id) PARTITIONS 4")
+	require.NoError(t, err)
+
+	ct2, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT) PARTITION BY KEY(id) PARTITIONS 4")
+	require.NoError(t, err)
+
+	stmts, err := ct1.Diff(ct2, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 2, "changing partition type should produce two statements")
+	assert.Equal(t, "ALTER TABLE `t1` REMOVE PARTITIONING", stmts[0].Statement)
+	assert.Equal(t, "ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 4", stmts[1].Statement)
 }
 
 func TestNewDiffOptions(t *testing.T) {
