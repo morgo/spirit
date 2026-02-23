@@ -294,6 +294,20 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 	sourcePKIndex := ct.getPrimaryKeyIndex()
 	targetPKIndex := target.getPrimaryKeyIndex()
 
+	// Get the effective PK columns for both source and target.
+	// PK can be defined as:
+	// 1. Inline PK: column definition includes PRIMARY KEY (column.PrimaryKey = true)
+	// 2. Table-level PK: separate PRIMARY KEY (col1, col2, ...) clause (in Indexes)
+	sourcePKColumns := ct.getEffectivePrimaryKeyColumns()
+	targetPKColumns := target.getEffectivePrimaryKeyColumns()
+
+	// If the PK columns are the same (regardless of inline vs table-level representation),
+	// no change is needed. MySQL normalizes inline PK to table-level PK in SHOW CREATE TABLE,
+	// so we need to compare semantically rather than syntactically.
+	if slices.Equal(sourcePKColumns, targetPKColumns) {
+		return "", "", false, ""
+	}
+
 	// Check for inline PK removal (column-level PRIMARY KEY)
 	for _, sourceCol := range ct.Columns {
 		targetCol, exists := targetColumns[sourceCol.Name]
@@ -333,6 +347,24 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 	}
 
 	return dropClause, addClause, pkDropped, pkColumn
+}
+
+// getEffectivePrimaryKeyColumns returns the column names that make up the primary key,
+// regardless of whether it's defined inline (column PRIMARY KEY) or as table-level (PRIMARY KEY (cols)).
+func (ct *CreateTable) getEffectivePrimaryKeyColumns() []string {
+	// First check for table-level PK
+	if pk := ct.getPrimaryKeyIndex(); pk != nil {
+		return pk.Columns
+	}
+
+	// Check for inline PK (column-level)
+	for _, col := range ct.Columns {
+		if col.PrimaryKey {
+			return []string{col.Name}
+		}
+	}
+
+	return nil
 }
 
 // diffIndexes compares indexes and returns ALTER clauses for differences
@@ -377,8 +409,16 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 		}
 	}
 
-	if sourceHasInlinePK && targetPKIndex != nil {
-		// Inline PK -> table-level PK: drop the inline PK
+	// Get effective PK columns for both source and target
+	sourcePKColumns := ct.getEffectivePrimaryKeyColumns()
+	targetPKColumns := target.getEffectivePrimaryKeyColumns()
+
+	// Only handle inline PK <-> table-level PK transitions if the PK columns actually changed.
+	// If the columns are the same, the representations are semantically equivalent.
+	pkColumnsEqual := slices.Equal(sourcePKColumns, targetPKColumns)
+
+	if sourceHasInlinePK && targetPKIndex != nil && !pkColumnsEqual {
+		// Inline PK -> table-level PK with different columns: drop the inline PK
 		dropClauses = append(dropClauses, "DROP PRIMARY KEY")
 		pkDropAdded = true
 	}
@@ -422,7 +462,11 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
 		if !existsInSource {
-			// New index - add it
+			// New index - add it, but skip PRIMARY KEY if source has equivalent inline PK
+			if targetIdx.Type == "PRIMARY KEY" && pkColumnsEqual {
+				// Source has inline PK with same columns - skip adding table-level PK
+				continue
+			}
 			addClauses = append(addClauses, formatAddIndex(&targetIdx))
 		} else if !indexesEqual(sourceIdx, &targetIdx) {
 			// Index exists but changed - check if only visibility changed
@@ -632,7 +676,21 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.Nullable != b.Nullable {
 		return false
 	}
-	if !stringPtrEqual(a.Default, b.Default) {
+	// Normalize default values for nullable columns:
+	// For nullable columns, nil and "NULL" are semantically equivalent.
+	// User might write `VARCHAR(255) NULL` but MySQL outputs `VARCHAR(255) DEFAULT NULL`.
+	sourceDefault := a.Default
+	targetDefault := b.Default
+	if a.Nullable {
+		// Normalize: treat nil and "NULL" as equivalent for nullable columns
+		if sourceDefault != nil && *sourceDefault == "NULL" {
+			sourceDefault = nil
+		}
+		if targetDefault != nil && *targetDefault == "NULL" {
+			targetDefault = nil
+		}
+	}
+	if !stringPtrEqual(sourceDefault, targetDefault) {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -714,7 +772,21 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.Nullable != b.Nullable {
 		return false
 	}
-	if !stringPtrEqual(a.Default, b.Default) {
+	// Normalize default values for nullable columns:
+	// For nullable columns, nil and "NULL" are semantically equivalent.
+	// User might write `VARCHAR(255) NULL` but MySQL outputs `VARCHAR(255) DEFAULT NULL`.
+	sourceDefault := a.Default
+	targetDefault := b.Default
+	if a.Nullable {
+		// Normalize: treat nil and "NULL" as equivalent for nullable columns
+		if sourceDefault != nil && *sourceDefault == "NULL" {
+			sourceDefault = nil
+		}
+		if targetDefault != nil && *targetDefault == "NULL" {
+			targetDefault = nil
+		}
+	}
+	if !stringPtrEqual(sourceDefault, targetDefault) {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -1114,6 +1186,8 @@ func needsQuotes(value string) bool {
 	// Common SQL functions/expressions that don't need quotes
 	upper := strings.ToUpper(value)
 	if upper == "NULL" ||
+		upper == "TRUE" ||
+		upper == "FALSE" ||
 		upper == "CURRENT_TIMESTAMP" ||
 		upper == "NOW()" ||
 		strings.HasPrefix(upper, "CURRENT_TIMESTAMP(") {
