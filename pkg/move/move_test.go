@@ -150,10 +150,17 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 		assert.Error(t, err)
 	}()
 
-	// Wait for a checkpoint to be created in the target
-	// In tests this should happen in 100ms, so we wait
-	// 10x that.
-	time.Sleep(time.Second)
+	// Wait until the copier has made enough progress for a checkpoint
+	// to be written. Previously this was time.Sleep(time.Second) which
+	// was racy — if the copier hadn't completed enough chunks, the
+	// checkpoint watermark wasn't ready and no checkpoint was saved,
+	// causing checksum failures on resume.
+	for {
+		if err := r.DumpCheckpoint(t.Context()); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Now close the context, we are canceling this run.
 	r.cancelFunc()
