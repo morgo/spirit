@@ -20,10 +20,15 @@ set default role R_REPLICATION, R_THROTTLER to rsandbox@'%';
 -- using the same password.
 create user if not exists tsandbox@'%' identified with caching_sha2_password by 'msandbox';
 grant R_MIGRATOR, R_REPLICATION to tsandbox@'%';
-grant references, super, process on *.* to tsandbox@'%'; -- used in tests
+grant references, process on *.* to tsandbox@'%'; -- used in tests
+grant connection_admin, system_variables_admin on *.* to tsandbox@'%'; -- replaces SUPER, available since MySQL 8.0
 set default role R_MIGRATOR, R_REPLICATION to tsandbox@'%';
 
 flush privileges;
+
+-- Allow non-SUPER users to create triggers/functions with binary logging enabled.
+-- This replaces the SUPER privilege which was removed in MySQL 9.0.
+set persist log_bin_trust_function_creators = 1;
 
 create database if not exists test;
 

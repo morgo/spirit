@@ -21,7 +21,7 @@ func TestVersion(t *testing.T) {
 		Password: cfg.Passwd,
 	}
 	err = versionCheck(t.Context(), r, slog.Default())
-	if isMySQL8(t.Context(), db) {
+	if isMySQLSupported(t.Context(), db) {
 		assert.NoError(t, err) // all looks good of course.
 	} else {
 		assert.Error(t, err)
