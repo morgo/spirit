@@ -1096,7 +1096,7 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 
 		// Add index name if present
 		if constraint.Name != "" {
-			sb.WriteString(fmt.Sprintf(" `%s`", constraint.Name))
+			fmt.Fprintf(&sb, " `%s`", constraint.Name)
 		}
 
 		// Add columns
@@ -1105,10 +1105,10 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("`%s`", key.Column.Name.String()))
+			fmt.Fprintf(&sb, "`%s`", key.Column.Name.String())
 			// Add length if specified
 			if key.Length > 0 {
-				sb.WriteString(fmt.Sprintf("(%d)", key.Length))
+				fmt.Fprintf(&sb, "(%d)", key.Length)
 			}
 		}
 		sb.WriteString(")")
@@ -1124,12 +1124,12 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 
 			// Add KEY_BLOCK_SIZE
 			if opt.KeyBlockSize > 0 {
-				sb.WriteString(fmt.Sprintf(" KEY_BLOCK_SIZE=%d", opt.KeyBlockSize))
+				fmt.Fprintf(&sb, " KEY_BLOCK_SIZE=%d", opt.KeyBlockSize)
 			}
 
 			// Add COMMENT
 			if opt.Comment != "" {
-				sb.WriteString(fmt.Sprintf(" COMMENT '%s'", sqlescape.EscapeString(opt.Comment)))
+				fmt.Fprintf(&sb, " COMMENT '%s'", sqlescape.EscapeString(opt.Comment))
 			}
 
 			// Add VISIBLE/INVISIBLE
