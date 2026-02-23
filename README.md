@@ -132,4 +132,19 @@ We make extensive use of the TiDB parser. If a DDL statement can not be parsed b
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md).
+See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed development instructions.
+
+### Quick Start for Contributors
+
+```bash
+# Setup Git hooks for automatic linting
+make setup-hooks
+
+# Run linter (platform-independent via Docker)
+make lint
+
+# Run tests
+make test
+```
+
+The project uses Git pre-push hooks to ensure code quality. After running `make setup-hooks`, code will be automatically linted before being pushed to the remote repository.
