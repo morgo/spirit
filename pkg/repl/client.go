@@ -100,7 +100,7 @@ type Client struct {
 	timingHistory   []time.Duration
 	concurrency     int
 
-	isMySQL84 bool
+	binlogStatusStmt string // cached: "SHOW MASTER STATUS" or "SHOW BINARY LOG STATUS"
 
 	// The periodic flush lock is just used for ensuring only one periodic flush runs at a time,
 	// and when we disable it, no more periodic flushes will run. The actual flushing is protected
@@ -307,13 +307,26 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	}
 	var binlogFile, fake string
 	var binlogPos uint32
-	var binlogPosStmt = "SHOW MASTER STATUS"
-	if c.isMySQL84 {
-		binlogPosStmt = "SHOW BINARY LOG STATUS"
-	}
-	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
-	if err != nil {
-		return mysql.Position{}, err
+	// On the first call, try SHOW MASTER STATUS (works on MySQL 8.0, the most common version)
+	// and fall back to SHOW BINARY LOG STATUS (MySQL 8.2+). Cache whichever succeeds
+	// so subsequent calls don't waste a round-trip.
+	if c.binlogStatusStmt == "" {
+		err := c.db.QueryRowContext(ctx, "SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+		if err == nil {
+			c.binlogStatusStmt = "SHOW MASTER STATUS"
+		} else {
+			err = c.db.QueryRowContext(ctx, "SHOW BINARY LOG STATUS").Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+			if err == nil {
+				c.binlogStatusStmt = "SHOW BINARY LOG STATUS"
+			} else {
+				return mysql.Position{}, err
+			}
+		}
+	} else {
+		err := c.db.QueryRowContext(ctx, c.binlogStatusStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+		if err != nil {
+			return mysql.Position{}, err
+		}
 	}
 	return mysql.Position{
 		Name: binlogFile,
@@ -353,9 +366,6 @@ func (c *Client) Run(ctx context.Context) (err error) {
 			return fmt.Errorf("failed to configure TLS for binlog connection: %w", err)
 		}
 		c.cfg.TLSConfig = tlsConfig
-	}
-	if dbconn.IsMySQL84(ctx, c.db) { // handle MySQL 8.4
-		c.isMySQL84 = true
 	}
 	// Determine where to start the sync from.
 	// We default from what the current position is right
