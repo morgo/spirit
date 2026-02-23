@@ -88,6 +88,21 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `name` varchar(100) NOT NULL",
 		},
 		{
+			// NULL and DEFAULT NULL are semantically equivalent for nullable columns.
+			// User schema might say `NULL` but MySQL outputs `DEFAULT NULL`.
+			name:     "NullableColumnDefaultNormalization",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) NULL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) DEFAULT NULL)",
+			expected: "", // No changes expected - they're equivalent
+		},
+		{
+			// Implicit nullable (no NULL/NOT NULL specified) vs explicit DEFAULT NULL
+			name:     "ImplicitNullableColumnDefaultNormalization",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) DEFAULT NULL)",
+			expected: "", // No changes expected - implicit null equals DEFAULT NULL
+		},
+		{
 			name:     "TableOptions",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=InnoDB",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=InnoDB COMMENT='test table'",
@@ -363,12 +378,57 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) COLLATE utf8mb4_bin) CHARSET utf8mb4",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `name` varchar(100) COLLATE utf8mb4_bin NULL",
 		},
+		// Nil TableOptions tests - verifies no panic when TableOptions is nil
+		// This can happen when CREATE TABLE has no explicit ENGINE/CHARSET clause
+		{
+			name:     "NilTableOptions_SourceHasNoOptions",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) CHARSET utf8mb4) CHARSET utf8mb4",
+			expected: "ALTER TABLE `t1` DEFAULT CHARSET=utf8mb4",
+		},
+		{
+			name:     "NilTableOptions_TargetHasNoOptions",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) CHARSET utf8mb4) CHARSET utf8mb4",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100))",
+			expected: "", // Column charset matches table default, normalized to nil on both sides
+		},
+		{
+			name:     "NilTableOptions_BothHaveNoOptions",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100))",
+			expected: "",
+		},
+		{
+			name:     "NilTableOptions_ColumnCharsetExplicit",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) CHARSET latin1)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) CHARSET utf8mb4)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `name` varchar(100) CHARACTER SET utf8mb4 NULL",
+		},
 		// Edge Cases
 		{
 			name:     "RemoveDefault",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, status VARCHAR(20) DEFAULT 'active')",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, status VARCHAR(20))",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `status` varchar(20) NULL",
+		},
+		// Boolean Defaults - TRUE/FALSE should not be quoted
+		{
+			name:     "BooleanDefaultFalse",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL DEFAULT FALSE)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT FALSE",
+		},
+		{
+			name:     "BooleanDefaultTrue",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_active BOOL DEFAULT TRUE)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `is_active` tinyint(1) NULL DEFAULT TRUE",
+		},
+		{
+			name:     "AddBooleanColumnWithDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, is_instant BOOL DEFAULT FALSE)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `is_instant` tinyint(1) NULL DEFAULT FALSE",
 		},
 		{
 			name:     "AddColumnFirst",
@@ -587,6 +647,40 @@ func TestDiff(t *testing.T) {
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, INDEX idx_old (a, b))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, INDEX idx_new (a, b))",
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_old`, ADD INDEX `idx_new` (`a`, `b`)",
+		},
+
+		// Inline PK vs Table-level PK equivalence tests
+		// MySQL normalizes inline PK to table-level PK in SHOW CREATE TABLE output,
+		// so these should be considered equivalent (no DROP/ADD PRIMARY KEY)
+		{
+			name:     "InlinePKVsTableLevelPK_NoChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY)",
+			expected: "",
+		},
+		{
+			name:     "TableLevelPKVsInlinePK_NoChange",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, PRIMARY KEY (id))",
+			expected: "",
+		},
+		{
+			name:     "TableLevelPKWithInlinePKAddIndex",
+			source:   "CREATE TABLE t1 (id INT NOT NULL, name VARCHAR(100), PRIMARY KEY (id))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`)",
+		},
+		{
+			name:     "InlinePKWithTableLevelPKAddIndex",
+			source:   "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, name VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL, name VARCHAR(100), PRIMARY KEY (id), INDEX idx_name (name))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`)",
+		},
+		{
+			name:     "InlinePKWithAutoIncrementAddIndex",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, name VARCHAR(100), PRIMARY KEY (id))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`)",
 		},
 
 		// Prefix Index Tests (index with length specification)
