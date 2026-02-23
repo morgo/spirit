@@ -320,10 +320,10 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` COLLATE=utf8mb4_unicode_ci",
 		},
 		{
-			name:     "ChangeRowFormat",
+			name:     "ChangeRowFormatIgnoredByDefault",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
-			expected: "ALTER TABLE `t1` ROW_FORMAT=DYNAMIC",
+			expected: "",
 		},
 
 		{
@@ -907,20 +907,36 @@ func TestDiff_DiffOptions(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(100) NULL",
 		},
 
-		// Comment and ROW_FORMAT are always compared (no ignore option)
+		// Comment is always compared (no ignore option)
 		{
 			name:     "CommentAlwaysDetected",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) COMMENT='test table'",
-			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true},
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true, IgnoreRowFormat: true},
 			expected: "ALTER TABLE `t1` COMMENT='test table'",
 		},
+
+		// ROW_FORMAT is ignored by default but can be detected with IgnoreRowFormat=false
 		{
-			name:     "RowFormatAlwaysDetected",
+			name:     "RowFormatDetectedWhenNotIgnored",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
-			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true},
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true, IgnoreRowFormat: false},
 			expected: "ALTER TABLE `t1` ROW_FORMAT=DYNAMIC",
+		},
+		{
+			name:     "RowFormatIgnoredByDefault",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPACT",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=DYNAMIC",
+			opts:     nil, // nil uses NewDiffOptions() which sets IgnoreRowFormat=true
+			expected: "",
+		},
+		{
+			name:     "RowFormatDefaultToCompressed",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreRowFormat: false},
+			expected: "ALTER TABLE `t1` ROW_FORMAT=COMPRESSED",
 		},
 
 		// Combined: ignore everything possible, still detect column + index changes
@@ -928,8 +944,8 @@ func TestDiff_DiffOptions(t *testing.T) {
 			name:     "IgnoreAllOptionsButDetectSchemaChanges",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100)) ENGINE=InnoDB CHARSET=utf8mb4 ROW_FORMAT=COMPACT",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100), INDEX idx_name (name)) ENGINE=MyISAM CHARSET=latin1 ROW_FORMAT=DYNAMIC",
-			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true},
-			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`), ROW_FORMAT=DYNAMIC",
+			opts:     &DiffOptions{IgnoreAutoIncrement: true, IgnoreEngine: true, IgnoreCharsetCollation: true, IgnorePartitioning: true, IgnoreRowFormat: true},
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_name` (`name`)",
 		},
 
 		// Zero-value DiffOptions (all false) detects everything
@@ -985,6 +1001,7 @@ func TestNewDiffOptions(t *testing.T) {
 	assert.True(t, opts.IgnoreEngine, "IgnoreEngine should default to true")
 	assert.False(t, opts.IgnoreCharsetCollation, "IgnoreCharsetCollation should default to false")
 	assert.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
+	assert.True(t, opts.IgnoreRowFormat, "IgnoreRowFormat should default to true")
 }
 
 // TestHelperFunctions tests the helper functions used in diff.go
