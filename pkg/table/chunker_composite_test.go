@@ -1148,7 +1148,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 
 	// Verify MySQL's collation order vs Go's lexicographic order
 	var mysqlOrder []string
-	rows, err := db.Query("SELECT DISTINCT name FROM compositecollation_t1 ORDER BY name LIMIT 20")
+	rows, err := db.QueryContext(t.Context(), "SELECT DISTINCT name FROM compositecollation_t1 ORDER BY name LIMIT 20")
 	assert.NoError(t, err)
 	for rows.Next() {
 		var name string

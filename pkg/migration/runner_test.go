@@ -1198,7 +1198,7 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 	// VERIFY: Row is missing from target table before checksum
 	t.Log("→ Verifying row status BEFORE checksum...")
 	var targetCountBefore int
-	err = m.db.QueryRow(`SELECT COUNT(*) FROM _e2et_collation_new WHERE name = 'key0050' AND id = 9999`).Scan(&targetCountBefore)
+	err = m.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM _e2et_collation_new WHERE name = 'key0050' AND id = 9999`).Scan(&targetCountBefore)
 	assert.NoError(t, err)
 	if targetCountBefore == 0 {
 		t.Log("✓ CONFIRMED: Row is MISSING from target table (event was discarded due to collation)")
@@ -1212,7 +1212,7 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 
 	// Verify row exists in source
 	var sourceCount int
-	err = m.db.QueryRow(`SELECT COUNT(*) FROM e2et_collation WHERE name = 'key0050' AND id = 9999`).Scan(&sourceCount)
+	err = m.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM e2et_collation WHERE name = 'key0050' AND id = 9999`).Scan(&sourceCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, sourceCount, "Source table should have the row")
 
@@ -1224,13 +1224,13 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 	// VERIFY: Row now exists in target table after checksum
 	t.Log("→ Verifying row status AFTER checksum...")
 	var targetCountAfter int
-	err = m.db.QueryRow(`SELECT COUNT(*) FROM _e2et_collation_new WHERE name = 'key0050' AND id = 9999`).Scan(&targetCountAfter)
+	err = m.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM _e2et_collation_new WHERE name = 'key0050' AND id = 9999`).Scan(&targetCountAfter)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, targetCountAfter, "Target table should have the row after checksum fix")
 
 	// Verify the data is correct
 	var data string
-	err = m.db.QueryRow(`SELECT data FROM _e2et_collation_new WHERE name = 'key0050' AND id = 9999`).Scan(&data)
+	err = m.db.QueryRowContext(t.Context(), `SELECT data FROM _e2et_collation_new WHERE name = 'key0050' AND id = 9999`).Scan(&data)
 	assert.NoError(t, err)
 	assert.Equal(t, "INSERTED_DURING_MIGRATION", data, "Data should match after checksum fix")
 
