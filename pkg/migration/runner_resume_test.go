@@ -16,6 +16,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Wait until we are at least copying rows
@@ -1051,9 +1052,23 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, m)
 
-	err = m.Run(t.Context())
+	// Run the resumed migration in a goroutine. It should block on the
+	// manually-created sentinel table.
+	c := make(chan error, 1)
+	go func() {
+		c <- m.Run(t.Context())
+	}()
+
+	// Wait until the migration is blocked on the sentinel table, confirming
+	// that the manually-created sentinel is respected on resume.
+	require.Eventually(t, func() bool {
+		return m.status.Get() == status.WaitingOnSentinelTable
+	}, 30*time.Second, 100*time.Millisecond, "migration did not reach WaitingOnSentinelTable")
+
+	// Cancel instead of waiting for the full sentinelWaitLimit timeout.
+	m.Cancel()
+	err = <-c
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
 	assert.True(t, m.usedResumeFromCheckpoint)
 	assert.NoError(t, m.Close())
 }
