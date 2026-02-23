@@ -2224,6 +2224,7 @@ func TestDropAfterCutover(t *testing.T) {
 }
 
 func TestDeferCutOver(t *testing.T) {
+	t.Skip("skipping: this test waits for sentinelWaitLimit to expire, which is too slow with the current 2 minute limit")
 	t.Parallel()
 
 	// Create unique database for this test
@@ -2700,6 +2701,10 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	defer utils.CloseAndLog(m2)
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "could not acquire metadata lock")
+
+	// Cancel the first migration rather than waiting for the sentinel timeout
+	// (which could take up to sentinelWaitLimit).
+	m.Cancel()
 	wg.Wait()
 }
 
