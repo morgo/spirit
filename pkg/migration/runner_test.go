@@ -2224,7 +2224,7 @@ func TestDropAfterCutover(t *testing.T) {
 }
 
 func TestDeferCutOver(t *testing.T) {
-	t.Skip("skipping: this test waits for sentinelWaitLimit to expire, which is too slow with the current 2 minute limit")
+	t.Skip("skipping: this test waits for sentinelWaitLimit to expire, which is too slow with the current 48 hour limit")
 	t.Parallel()
 
 	// Create unique database for this test
