@@ -1038,7 +1038,7 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	// Copy remaining chunks
 	for {
 		chunk, err := m.copyChunker.Next()
-		if err == table.ErrTableIsRead {
+		if errors.Is(err, table.ErrTableIsRead) {
 			break
 		}
 		assert.NoError(t, err)
@@ -1184,7 +1184,7 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 	// Copy remaining chunks
 	for {
 		chunk, err := m.copyChunker.Next()
-		if err == table.ErrTableIsRead {
+		if errors.Is(err, table.ErrTableIsRead) {
 			break
 		}
 		assert.NoError(t, err)
@@ -1350,7 +1350,7 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 	// Copy remaining chunks (this will copy the 0x50xxxx and 0x61xxxx ranges)
 	for {
 		chunk, err := m.copyChunker.Next()
-		if err == table.ErrTableIsRead {
+		if errors.Is(err, table.ErrTableIsRead) {
 			break
 		}
 		assert.NoError(t, err)
@@ -1364,14 +1364,14 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 	// VERIFY: Row should NOT be missing (binary comparison is exact)
 	t.Log("→ Verifying row status BEFORE checksum...")
 	var targetCountBefore int
-	err = m.db.QueryRow(`SELECT COUNT(*) FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&targetCountBefore)
+	err = m.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&targetCountBefore)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, targetCountBefore, "Row should be present - it was copied in later chunks")
 	t.Log("✓ CONFIRMED: Row is PRESENT in target table (copied in later chunks)")
 
 	// Verify row exists in source
 	var sourceCount int
-	err = m.db.QueryRow(`SELECT COUNT(*) FROM e2et_binary WHERE name = 0x500050 AND id = 9999`).Scan(&sourceCount)
+	err = m.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM e2et_binary WHERE name = 0x500050 AND id = 9999`).Scan(&sourceCount)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, sourceCount, "Source table should have the row")
 
@@ -1383,13 +1383,13 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 	// VERIFY: Row still exists (checksum should not need to fix anything)
 	t.Log("→ Verifying row status AFTER checksum...")
 	var targetCountAfter int
-	err = m.db.QueryRow(`SELECT COUNT(*) FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&targetCountAfter)
+	err = m.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&targetCountAfter)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, targetCountAfter, "Row should still be present after checksum")
 
 	// Verify the data is correct
 	var data string
-	err = m.db.QueryRow(`SELECT data FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&data)
+	err = m.db.QueryRowContext(t.Context(), `SELECT data FROM _e2et_binary_new WHERE name = 0x500050 AND id = 9999`).Scan(&data)
 	assert.NoError(t, err)
 	assert.Equal(t, "INSERTED_DURING_MIGRATION", data, "Data should match")
 
@@ -1504,7 +1504,7 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 	// Copy remaining chunks
 	for {
 		chunk, err := m.copyChunker.Next()
-		if err == table.ErrTableIsRead {
+		if errors.Is(err, table.ErrTableIsRead) {
 			break
 		}
 		assert.NoError(t, err)

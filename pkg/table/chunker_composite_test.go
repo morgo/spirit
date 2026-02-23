@@ -817,12 +817,12 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 
 	// Verify data was inserted correctly
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM compositewatermarkopt_t1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM compositewatermarkopt_t1").Scan(&count)
 	require.NoError(t, err, "Failed to count rows")
 	require.Equal(t, 3000, count, "Expected 3000 total rows")
 
 	var countA1 int
-	err = db.QueryRow("SELECT COUNT(*) FROM compositewatermarkopt_t1 WHERE a = 1").Scan(&countA1)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM compositewatermarkopt_t1 WHERE a = 1").Scan(&countA1)
 	require.NoError(t, err, "Failed to count rows for a=1")
 	require.Equal(t, 1000, countA1, "Expected 1000 rows for a=1")
 
@@ -968,7 +968,7 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 
 	// Verify data was inserted
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM compositewatermarknn_t1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM compositewatermarknn_t1").Scan(&count)
 	require.NoError(t, err, "Failed to count rows")
 	require.Equal(t, 1500, count, "Expected 1500 rows")
 	t.Logf("VARCHAR test: %d rows inserted", count)
@@ -1047,7 +1047,7 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 
 	// Verify data was inserted
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM compositewatermarkdt_t1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM compositewatermarkdt_t1").Scan(&count)
 	require.NoError(t, err, "Failed to count rows")
 	require.Equal(t, 1500, count, "Expected 1500 rows")
 	t.Logf("DATETIME test: %d rows inserted", count)
@@ -1142,7 +1142,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 
 	// Verify data count
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM compositecollation_t1").Scan(&count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM compositecollation_t1").Scan(&count)
 	require.NoError(t, err)
 	t.Logf("Inserted %d rows for collation test", count)
 
