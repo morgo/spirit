@@ -100,7 +100,7 @@ type Client struct {
 	timingHistory   []time.Duration
 	concurrency     int
 
-	isMySQL84 bool
+	isMySQL80 bool
 
 	// The periodic flush lock is just used for ensuring only one periodic flush runs at a time,
 	// and when we disable it, no more periodic flushes will run. The actual flushing is protected
@@ -307,9 +307,9 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	}
 	var binlogFile, fake string
 	var binlogPos uint32
-	var binlogPosStmt = "SHOW MASTER STATUS"
-	if c.isMySQL84 {
-		binlogPosStmt = "SHOW BINARY LOG STATUS"
+	var binlogPosStmt = "SHOW BINARY LOG STATUS"
+	if c.isMySQL80 {
+		binlogPosStmt = "SHOW MASTER STATUS"
 	}
 	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
 	if err != nil {
@@ -354,8 +354,8 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		}
 		c.cfg.TLSConfig = tlsConfig
 	}
-	if dbconn.IsMySQL84(ctx, c.db) { // handle MySQL 8.4
-		c.isMySQL84 = true
+	if dbconn.IsMySQL80(ctx, c.db) { // handle MySQL 8.0
+		c.isMySQL80 = true
 	}
 	// Determine where to start the sync from.
 	// We default from what the current position is right

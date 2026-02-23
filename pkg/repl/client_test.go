@@ -216,8 +216,8 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	assert.NoError(t, client.AddSubscription(t1, t2, nil))
-	if dbconn.IsMySQL84(t.Context(), db) { // handle MySQL 8.4
-		client.isMySQL84 = true
+	if dbconn.IsMySQL80(t.Context(), db) { // handle MySQL 8.0
+		client.isMySQL80 = true
 	}
 	pos, err := client.getCurrentBinlogPosition(t.Context())
 	assert.NoError(t, err)

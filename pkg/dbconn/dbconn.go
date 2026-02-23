@@ -252,11 +252,14 @@ func BeginStandardTrx(ctx context.Context, db *sql.DB, opts *sql.TxOptions) (*sq
 	return trx, connectionID, nil
 }
 
-// IsMySQL84 returns true if the MySQL version can positively be identified as 8.4
-func IsMySQL84(ctx context.Context, db *sql.DB) bool {
+// IsMySQL80 returns true if the MySQL version can positively be identified as 8.0.
+// MySQL 8.0 requires special handling for some commands (e.g. SHOW MASTER STATUS
+// instead of SHOW BINARY LOG STATUS). All other versions (8.4, 9.x, etc.) use
+// the modern syntax.
+func IsMySQL80(ctx context.Context, db *sql.DB) bool {
 	var version string
 	if err := db.QueryRowContext(ctx, "select substr(version(), 1, 3)").Scan(&version); err != nil {
 		return false // can't tell
 	}
-	return version == "8.4"
+	return version == "8.0"
 }
