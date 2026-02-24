@@ -309,14 +309,14 @@ d int
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	migration := &Migration{
-		Host:                           cfg.Addr,
-		Username:                       cfg.User,
-		Password:                       &cfg.Passwd,
-		Database:                       cfg.DBName,
-		Threads:                        1,
-		Table:                          "t1generated",
-		Alter:                          "ENGINE=InnoDB",
-		EnableExperimentalBufferedCopy: enableBuffered,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  1,
+		Table:    "t1generated",
+		Alter:    "ENGINE=InnoDB",
+		Buffered: enableBuffered,
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
@@ -369,12 +369,12 @@ VALUES
 	assert.NoError(t, err)
 
 	migration := &Migration{
-		Host:                           cfg.Addr,
-		Username:                       cfg.User,
-		Password:                       &cfg.Passwd,
-		Database:                       cfg.DBName,
-		Threads:                        2,
-		EnableExperimentalBufferedCopy: enableBuffered,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  2,
+		Buffered: enableBuffered,
 		Statement: `ALTER TABLE t1stored
 MODIFY COLUMN s4 TINYINT(1)
 GENERATED ALWAYS AS (
@@ -436,14 +436,14 @@ func testBinaryChecksum(t *testing.T, enableBuffered bool) {
 		cfg, err := mysql.ParseDSN(testutils.DSN())
 		assert.NoError(t, err)
 		migration := &Migration{
-			Host:                           cfg.Addr,
-			Username:                       cfg.User,
-			Password:                       &cfg.Passwd,
-			Database:                       cfg.DBName,
-			Threads:                        1,
-			EnableExperimentalBufferedCopy: enableBuffered,
-			Table:                          "t1varbin",
-			Alter:                          fmt.Sprintf("CHANGE b b %s not null", test.NewType), //nolint: dupword
+			Host:     cfg.Addr,
+			Username: cfg.User,
+			Password: &cfg.Passwd,
+			Database: cfg.DBName,
+			Threads:  1,
+			Buffered: enableBuffered,
+			Table:    "t1varbin",
+			Alter:    fmt.Sprintf("CHANGE b b %s not null", test.NewType), //nolint: dupword
 		}
 		err = migration.Run()
 		assert.NoError(t, err)
@@ -477,14 +477,14 @@ func testConvertCharset(t *testing.T, enableBuffered bool) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 	migration := &Migration{
-		Host:                           cfg.Addr,
-		Username:                       cfg.User,
-		Password:                       &cfg.Passwd,
-		Database:                       cfg.DBName,
-		Threads:                        1,
-		EnableExperimentalBufferedCopy: enableBuffered,
-		Table:                          "t1charset",
-		Alter:                          "CONVERT TO CHARACTER SET UTF8MB4",
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  1,
+		Buffered: enableBuffered,
+		Table:    "t1charset",
+		Alter:    "CONVERT TO CHARACTER SET UTF8MB4",
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
@@ -492,14 +492,14 @@ func testConvertCharset(t *testing.T, enableBuffered bool) {
 	// Because utf8mb4 is the superset, it doesn't matter that that's
 	// what the checksum casts to. We should be able to convert back as well.
 	migration = &Migration{
-		Host:                           cfg.Addr,
-		Username:                       cfg.User,
-		Password:                       &cfg.Passwd,
-		Database:                       cfg.DBName,
-		Threads:                        1,
-		EnableExperimentalBufferedCopy: enableBuffered,
-		Table:                          "t1charset",
-		Alter:                          "CONVERT TO CHARACTER SET latin1",
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  1,
+		Buffered: enableBuffered,
+		Table:    "t1charset",
+		Alter:    "CONVERT TO CHARACTER SET latin1",
 	}
 	err = migration.Run()
 	assert.NoError(t, err)

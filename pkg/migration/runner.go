@@ -144,7 +144,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// and does not need to wait for free slots from the copier *until* it needs
 	// copy in more than 1 thread.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
-	if r.migration.EnableExperimentalBufferedCopy {
+	if r.migration.Buffered {
 		// Buffered has many more connections because it fans out x8 more write threads
 		// Plus it has read threads. Set this high and figure it out later.
 		r.dbConfig.MaxOpenConnections = 100
@@ -413,13 +413,13 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			ForceKill:       !r.migration.SkipForceKill,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
-			Host:                     r.migration.Host,
-			Username:                 r.migration.Username,
-			Password:                 *r.migration.Password,
-			TLSMode:                  r.migration.TLSMode,
-			TLSCertificatePath:       r.migration.TLSCertificatePath,
-			SkipDropAfterCutover:     r.migration.SkipDropAfterCutover,
-			ExperimentalBufferedCopy: r.migration.EnableExperimentalBufferedCopy,
+			Host:                 r.migration.Host,
+			Username:             r.migration.Username,
+			Password:             *r.migration.Password,
+			TLSMode:              r.migration.TLSMode,
+			TLSCertificatePath:   r.migration.TLSCertificatePath,
+			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
+			Buffered:             r.migration.Buffered,
 		}, r.logger, scope); err != nil {
 			return err
 		}
@@ -473,7 +473,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 	// Create an applier if using buffered copy or buffered replication
 	var appl applier.Applier
-	if r.migration.EnableExperimentalBufferedCopy {
+	if r.migration.Buffered {
 		// For now, we only support single-table migrations with buffered copy
 		if len(r.changes) > 1 {
 			return errors.New("buffered copy is not yet supported for multi-table migrations")
@@ -492,14 +492,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	}
 	// Create copier with the prepared chunker
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.migration.Threads,
-		TargetChunkTime:               r.migration.TargetChunkTime,
-		Throttler:                     &throttler.Noop{},
-		Logger:                        r.logger,
-		MetricsSink:                   r.metricsSink,
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: r.migration.EnableExperimentalBufferedCopy,
-		Applier:                       appl,
+		Concurrency:     r.migration.Threads,
+		TargetChunkTime: r.migration.TargetChunkTime,
+		Throttler:       &throttler.Noop{},
+		Logger:          r.logger,
+		MetricsSink:     r.metricsSink,
+		DBConfig:        r.dbConfig,
+		Applier:         appl,
 	})
 	if err != nil {
 		return err

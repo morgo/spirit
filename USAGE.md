@@ -7,29 +7,30 @@
   - [Getting Started](#getting-started)
   - [Configuration](#configuration)
     - [alter](#alter)
+    - [buffered](#buffered)
+    - [conf](#conf)
     - [database](#database)
     - [defer-cutover](#defer-cutover)
-    - [skip-force-kill](#skip-force-kill)
     - [host](#host)
     - [lock-wait-timeout](#lock-wait-timeout)
     - [password](#password)
     - [replica-dsn](#replica-dsn)
       - [Replica TLS Behavior](#replica-tls-behavior)
     - [replica-max-lag](#replica-max-lag)
+    - [skip-drop-after-cutover](#skip-drop-after-cutover)
+    - [skip-force-kill](#skip-force-kill)
     - [statement](#statement)
     - [strict](#strict)
     - [table](#table)
     - [target-chunk-time](#target-chunk-time)
     - [threads](#threads)
-    - [username](#username)
     - [tls](#tls)
       - [PREFERRED](#preferred)
       - [REQUIRED](#required)
       - [VERIFY\_CA](#verify_ca)
       - [VERIFY\_IDENTITY](#verify_identity)
+    - [username](#username)
   - [Experimental Features](#experimental-features)
-    - [enable-experimental-buffered-copy](#enable-experimental-buffered-copy)
-    - [`move` command](#move-command)
     - [native linting support](#native-linting-support)
 
 ## Getting Started
@@ -52,6 +53,22 @@ go build
 The alter table command to perform. The default value is a _null alter table_, which can be useful for testing.
 
 See also: `--statement`.
+
+### buffered
+
+- Type: Boolean
+- Default value: `false`
+
+When set to `true`, Spirit uses the buffered copy algorithm (based on [Netflix's DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)) instead of the default `INSERT IGNORE .. SELECT` approach. The buffered copier reads rows from the source table into memory and then inserts them into the new table, fanning out writes across many parallel threads. Changes from replication are also applied in a similar buffered way.
+
+The advantages of buffered copy are:
+
+- **No data locks on the source table** — the source is only read, never locked for writes. This eliminates contention between the copier and OLTP workloads on hot rows.
+- **Cross-server compatibility** — the same algorithm is used by the `move` command to copy tables between different MySQL servers.
+
+The buffered copier requires `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since it relies on reading all column values from the binary log.
+
+Note: buffered copy is not yet supported for multi-table migrations (i.e. when using `--statement` with multiple `ALTER TABLE` statements).
 
 ### conf
 
@@ -91,20 +108,6 @@ If you start a migration and realize that you forgot to set defer-cutover, worry
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
 
-### skip-force-kill
-
-- Type: Boolean
-- Default value: FALSE
-
-By default, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
-
-- It will read `performance_schema` to find only connections that are blocking a meta data lock being acquired on the migrating table.
-- It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
-- It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
-- It only starts killing transactions as it approaches the `lock-wait-timeout`. For example, if the `lock-wait-timeout` is 30 seconds, it will start killing transactions after 27 seconds.
-
-Setting `--skip-force-kill` disables this behavior. This may be useful if you do not want Spirit to kill any connections, but be aware that attempting to acquire MDL locks over and over when they are being blocked is not safe — it can bring down production systems. The force-kill behavior of _targeted killing_ is actually safer for real systems.
-
 ### host
 
 - Type: String
@@ -120,7 +123,9 @@ The host (and optional port) to use when connecting to MySQL. If no port is prov
 
 Spirit requires an exclusive metadata lock for cutover and checksum operations. The MySQL default for waiting for a metadata lock is 1 year(!), which means that if there are any long running transactions holding a shared lock on the table that prevent the exclusive lock from being acquired, new lock requests will effectively queue forever behind Spirit's exclusive lock request. To prevent Spirit causing such outages, Spirit sets the `lock_wait_timeout` to 30s by default.
 
-If you are seeing cutover or checksum lock requests failing, you may consider increasing the `lock_wait_timeout`. However, it is almost always better to investigate why you have long running transactions that are preventing Spirit from acquiring the metadata lock. A good starting point is `select * from information_schema.INNODB_TRX`.
+At 90% of the `lock-wait-timeout`, Spirit will also start killing connections by default, see [skip-force-kill](#skip-force-kill).
+
+If you can not tolerate a potential `30s` stall during cutover, consider lowering the `lock_wait_timeout`. The main downside of doing this, is the potential for more connections to be killed by the force kill operation. Before considering increasing the `lock-wait-timeout`, it is almost always better to investigate why you have long running transactions that are preventing Spirit from acquiring the metadata lock. A good starting point is `select * from information_schema.INNODB_TRX`.
 
 ### password
 
@@ -170,6 +175,27 @@ The replication throttler only affects the copy-rows operation, and does not app
 - Adjusting the configuration of your replicas to increase the parallel replication threads
 - Temporarily disabling durability on the replica (i.e. `SET GLOBAL sync_binlog=0` and `SET GLOBAL innodb_flush_log_at_trx_commit=0`)
 - Increasing the `replica-max-lag` or disabling replica lag checking temporarily
+
+### skip-drop-after-cutover
+
+- Type: Boolean
+- Default value: `false`
+
+When set to `true`, Spirit will keep the old table (renamed to `_<table>_old`) after completing the cutover instead of dropping it. This can be useful if you want to manually verify the migration before removing the old data.
+
+### skip-force-kill
+
+- Type: Boolean
+- Default value: `false`
+
+By default, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
+
+- It will read `performance_schema` to find only connections that are blocking a metadata lock being acquired on the migrating table.
+- It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
+- It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
+- It only starts killing transactions as it approaches the [lock-wait-timeout](#lock-wait-timeout). For example, if the `lock-wait-timeout` is 30 seconds, it will start killing transactions after 27 seconds.
+
+Setting `--skip-force-kill` disables this behavior. This may be useful if you do not want Spirit to kill any connections, but be aware that attempting to acquire MDL locks over and over when they are being blocked is not safe — it can bring down production systems. The force-kill behavior of _targeted killing_ is actually safer for real systems.
 
 ### statement
 
@@ -237,15 +263,8 @@ You may want to wrap `threads` in automation and set it to a percentage of the c
 
 Note that Spirit does not support dynamically adjusting the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values.
 
-### username
-
-- Type: String
-- Default value: `spirit`
-
-The username to use when connecting to MySQL.
-
-
 ### tls
+
 Spirit uses the same TLS/SSL mode options as the MySQL client, making it familiar and intuitive for users.
 
 Spirit applies TLS configuration consistently across all database connections:
@@ -370,37 +389,14 @@ spirit --tls-mode VERIFY_IDENTITY \
 ```
 **Result**: Uses embedded RDS certificate with full verification for RDS hostname.
 
+### username
+
+- Type: String
+- Default value: `spirit`
+
+The username to use when connecting to MySQL.
+
 ## Experimental Features
-
-### enable-experimental-buffered-copy
-
-**Feature Description**
-
-This feature changes how changes are copied to the new table. Rather than using `INSERT IGNORE .. SELECT` the copier instead reads the rows completely from the source table, and then inserts them into the new table (fanning out the insert into many parallel threads). Changes from replication are also applied in a similar way.
-
-This algorithm is the same as [Netflix's DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b). The advantage of buffered copies is that they do not require any locks on the source table. The algorithm is also generic, in that we intend to use it in future to implement a logical move (copy tables) between MySQL servers. In some cases it may also allow for faster schema changes, although to date the improvements have been relatively modest (and varies based on how much you are willing to overload the MySQL server).
-
-**Current Status**
-
-This feature is not feature complete. Getting in the business of reading rows and re-inserting them (vs `INSERT.. SELECT`) means that we need to add a lot of tests to handle edge cases, such as character set and datetime mangling.
-
-We also haven't technically implemented the low-watermark requirement for replication apply, which means that there is a brief race where inconsistencies can occur during copy. Thankfully, this will be detected from the final checksum, but we would rather not rely on that.
-
-Buffered changes also puts a lot more stress on the `spirit` binary in terms of CPU use and memory. Ideally we can get a good understanding on this, and ensure that there is some protection in place to prevent out of memory cases etc.
-
-There is also the risk that the buffered algorithm write threads can overwhelm a server. We need to implement a throttler that detects that the server is overloaded, and possibly some configuration over write threads.
-
-### `move` command
-
-**Feature Description**
-
-This feature provides a new top level binary `move`, which can copy whole schemas between different MySQL servers.
-
-**Current Status**
-
-This command depends strongly on buffered copy which is currently experimental. It is also missing some minor functionality.
-
-It is anticipated that `move` will need to provide some pluggable method of cutover so external metadata systems can be updated. Currently there is a cutover function which can be specified when using `move` via the API, but when using the CLI there is no user friendly way of doing this.
 
 ### native linting support
 
@@ -410,7 +406,7 @@ This feature adds native linting support to Spirit, allowing for various rules t
 
 **Current Status**
 
-This feature is partially complete. It relies on new support for parsing CREATE TABLE statements (see `pkg/statetement/parse_create_table.go`). There are so far only a few linters implemented.
+This feature is partially complete. It relies on new support for parsing CREATE TABLE statements (see `pkg/statement/parse_create_table.go`). There are so far only a few linters implemented.
 
 You can use this experimental feature via these 3 command-line options:
 

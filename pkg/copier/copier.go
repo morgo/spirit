@@ -38,14 +38,13 @@ type Copier interface {
 }
 
 type CopierConfig struct {
-	Concurrency                   int
-	TargetChunkTime               time.Duration
-	Throttler                     throttler.Throttler
-	Logger                        *slog.Logger
-	MetricsSink                   metrics.Sink
-	DBConfig                      *dbconn.DBConfig
-	UseExperimentalBufferedCopier bool
-	Applier                       applier.Applier
+	Concurrency     int
+	TargetChunkTime time.Duration
+	Throttler       throttler.Throttler
+	Logger          *slog.Logger
+	MetricsSink     metrics.Sink
+	DBConfig        *dbconn.DBConfig
+	Applier         applier.Applier
 }
 
 // NewCopierDefaultConfig returns a default config for the copier.
@@ -71,7 +70,7 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 	if config.DBConfig == nil {
 		return nil, errors.New("dbConfig must be non-nil")
 	}
-	if config.UseExperimentalBufferedCopier {
+	if config.Applier != nil {
 		return &buffered{
 			db:               db,
 			concurrency:      config.Concurrency,
