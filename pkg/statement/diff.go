@@ -27,16 +27,23 @@ type DiffOptions struct {
 	// IgnorePartitioning skips diffing partition options entirely.
 	// Default: false (via NewDiffOptions).
 	IgnorePartitioning bool
+
+	// IgnoreRowFormat skips diffing the ROW_FORMAT table option.
+	// Default: true (via NewDiffOptions).
+	// ROW_FORMAT=DYNAMIC is the InnoDB default in MySQL 8.0+, so differences
+	// between an unspecified ROW_FORMAT and an explicit DYNAMIC are cosmetic.
+	IgnoreRowFormat bool
 }
 
 // NewDiffOptions returns DiffOptions with sensible defaults.
-// By default, AUTO_INCREMENT and ENGINE differences are ignored.
+// By default, AUTO_INCREMENT, ENGINE, and ROW_FORMAT differences are ignored.
 func NewDiffOptions() *DiffOptions {
 	return &DiffOptions{
 		IgnoreAutoIncrement:    true,
 		IgnoreEngine:           true,
 		IgnoreCharsetCollation: false,
 		IgnorePartitioning:     false,
+		IgnoreRowFormat:        true,
 	}
 }
 
@@ -587,10 +594,12 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 		}
 	}
 
-	// Compare ROW_FORMAT (always compared — not controlled by an ignore option)
-	if !stringPtrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
-		if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
-			clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
+	// Compare ROW_FORMAT
+	if !opts.IgnoreRowFormat {
+		if !stringPtrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
+			if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
+				clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
+			}
 		}
 	}
 
