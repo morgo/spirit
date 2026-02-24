@@ -9,4 +9,4 @@ if [ -n "$REPLICA_DSN" ]; then
   params+=(--replica-dsn="$REPLICA_DSN")
 fi
 
-./spirit "${params[@]}"
+./spirit migrate "${params[@]}"
