@@ -65,7 +65,7 @@ Applied:        REPLACE INTO ... WHERE k IN ("abc", "def"); DELETE FROM ... WHER
 
 ### Buffered Map
 
-The buffered map is a subscription type used for move operations where source and target are on different MySQL servers. It stores full row data and uses the applier interface:
+The buffered map is a subscription type required for move operations where source and target are on different MySQL servers. It stores full row data and uses the applier interface:
 
 **How it works:**
 - Maintains a map of `primaryKeyHash -> (isDelete, fullRowData)`
