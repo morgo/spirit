@@ -28,7 +28,7 @@ MYSQL_DATABASE="spirit_test"
 echo ""
 echo "🔍 Testing TLS Mode: REQUIRED (baseline - should work)"
 echo "----------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST_IP" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -40,7 +40,7 @@ echo "----------------------------------------------------"
 echo ""
 echo "🔍 Testing TLS Mode: VERIFY_CA (should work with custom CA)"
 echo "----------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST_IP" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -53,7 +53,7 @@ echo "----------------------------------------------------------"
 echo ""
 echo "🔍 Testing TLS Mode: VERIFY_IDENTITY with IP (should work - custom cert has IP SANs)"
 echo "----------------------------------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST_IP" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -66,7 +66,7 @@ echo "--------------------------------------------------------------------------
 echo ""
 echo "🔍 Testing TLS Mode: VERIFY_IDENTITY with hostname (should work - custom cert has DNS SANs)"
 echo "----------------------------------------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST_LOCALHOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -79,7 +79,7 @@ echo "--------------------------------------------------------------------------
 echo ""
 echo "🔍 Testing TLS Mode: PREFERRED (should use TLS when available)"
 echo "-------------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST_IP" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \

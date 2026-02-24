@@ -183,7 +183,7 @@ main() {
     echo "Expected: FAILURE - Main database requires secure transport"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3420" \
       --username="root" \
       --password="rootpassword" \
@@ -212,7 +212,7 @@ main() {
     echo "Expected: FAILURE - Replica inherits REQUIRED TLS but doesn't support TLS"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail - this is the expected behavior
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3420" \
       --username="root" \
       --password="rootpassword" \
@@ -243,7 +243,7 @@ main() {
     echo "Expected: SUCCESS - PREFERRED mode should fall back to plaintext when TLS not supported"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail but expect success
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3420" \
       --username="root" \
       --password="rootpassword" \
@@ -274,7 +274,7 @@ main() {
     echo "Expected: SUCCESS - Explicit replica config overrides inheritance"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail and continue with other tests
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3420" \
       --username="root" \
       --password="rootpassword" \
@@ -304,7 +304,7 @@ main() {
     echo "Expected: SUCCESS - Replica falls back to plain text when TLS not available"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail and continue with other tests
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3420" \
       --username="root" \
       --password="rootpassword" \
@@ -334,7 +334,7 @@ main() {
     echo "Expected: FAILURE - skip-verify requires TLS support (unlike required which just demands encryption)"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail - this is the expected behavior
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3420" \
       --username="root" \
       --password="rootpassword" \

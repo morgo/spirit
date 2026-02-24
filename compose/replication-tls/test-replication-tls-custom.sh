@@ -199,7 +199,7 @@ main() {
     echo "Expected: FAILURE - Both servers enforce require_secure_transport=ON"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \
@@ -228,7 +228,7 @@ main() {
     echo "Expected: SUCCESS - TLS available with custom certificates"
     echo "Using COPY DDL to force replica connection for throttling"
     
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \
@@ -251,7 +251,7 @@ main() {
     echo "Main: VERIFY_CA TLS, Replica DSN: no explicit TLS (inherits VERIFY_CA)"
     echo "Expected: SUCCESS - CA verification with custom certificates"
     echo "Using COPY DDL to force replica connection for throttling"
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \
@@ -275,7 +275,7 @@ main() {
     echo "Expected: SUCCESS - hostname verification with proper custom certificates"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to potentially fail if certificates don't have proper SANs
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \
@@ -305,7 +305,7 @@ main() {
     echo "Main: PREFERRED TLS, Replica DSN: no explicit TLS (inherits PREFERRED)"
     echo "Expected: SUCCESS - TLS preferred with custom certificates available"
     echo "Using COPY DDL to force replica connection for throttling"
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \
@@ -329,7 +329,7 @@ main() {
     echo "Expected: FAILURE - replica tls=false should be preserved and cause connection failure"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail - this is the expected behavior
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \
@@ -359,7 +359,7 @@ main() {
     echo "Expected: SUCCESS - replica explicit TLS config should be preserved, not inherited"
     echo "Using CHANGE COLUMN DDL (proven to force table copy) for replica throttler connection testing"
     set +e  # May succeed or fail depending on certificate configuration
-    ./spirit \
+    ./spirit migrate \
       --host="localhost:3410" \
       --username="root" \
       --password="rootpassword" \

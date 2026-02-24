@@ -149,7 +149,7 @@ main() {
     echo "Main: REQUIRED TLS, Replica DSN: no explicit TLS (inherits REQUIRED)"
     echo "Expected: SUCCESS - replica inherits main TLS configuration"
     echo "Using COPY DDL to force replica connection for throttling"
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -173,7 +173,7 @@ main() {
     echo "Expected: FAILURE - Both servers enforce require_secure_transport=ON"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -201,7 +201,7 @@ main() {
     echo "Main: SKIP_VERIFY TLS, Replica DSN: no explicit TLS (inherits SKIP_VERIFY)"
     echo "Expected: SUCCESS - TLS used but certificate verification skipped"
     echo "Using COPY DDL to force replica connection for throttling"
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -224,7 +224,7 @@ main() {
     echo "Expected: MAY FAIL - Auto-generated MySQL certificates have independent CAs"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail - this is expected with auto-generated certs
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -257,7 +257,7 @@ main() {
     echo "Expected: FAILURE - MySQL's auto-generated certificates don't contain proper hostname SANs"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -285,7 +285,7 @@ main() {
     echo "Main: PREFERRED TLS, Replica DSN: no explicit TLS (inherits PREFERRED)"
     echo "Expected: SUCCESS - TLS is available, so PREFERRED mode will use it"
     echo "Using COPY DDL to force replica connection for throttling"
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -308,7 +308,7 @@ main() {
     echo "Expected: FAILURE - replica tls=false should be preserved and cause connection failure"
     echo "Using NON-INSTANT DDL to force replica connection usage"
     set +e  # Allow this to fail - this is the expected behavior
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -330,7 +330,7 @@ main() {
     echo "Expected: SUCCESS - replica explicit TLS config should be preserved, not inherited"
     echo "Using COPY DDL to force replica connection for throttling"
     set +e  # May succeed or fail depending on server configuration
-    ./spirit \
+    ./spirit migrate \
       --host="$MAIN_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
