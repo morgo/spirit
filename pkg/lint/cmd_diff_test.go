@@ -35,6 +35,7 @@ func TestDiffSchemas_AddColumn(t *testing.T) {
 	for _, ch := range changes {
 		if ch.Table == "users" {
 			foundUsersAlter = true
+			assert.Equal(t, "ALTER TABLE `users` ADD COLUMN `email` varchar(255) NULL DEFAULT NULL", ch.Statement, "expected ALTER TABLE statement for users")
 		}
 	}
 	assert.True(t, foundUsersAlter, "expected ALTER TABLE for users")
@@ -68,6 +69,7 @@ func TestDiffSchemas_NewTable(t *testing.T) {
 	for _, ch := range changes {
 		if ch.Table == "orders" {
 			foundOrdersCreate = true
+			assert.Equal(t, "CREATE TABLE `orders` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,PRIMARY KEY(`id`)) ENGINE = InnoDB DEFAULT CHARACTER SET = UTF8MB4", ch.Statement, "expected CREATE TABLE statement for orders")
 		}
 	}
 	assert.True(t, foundOrdersCreate, "expected CREATE TABLE for orders")
@@ -101,6 +103,7 @@ func TestDiffSchemas_DroppedTable(t *testing.T) {
 	for _, ch := range changes {
 		if ch.Table == "orders" {
 			foundOrdersDrop = true
+			assert.Equal(t, "DROP TABLE `orders`", ch.Statement, "expected DROP TABLE statement for orders")
 		}
 	}
 	assert.True(t, foundOrdersDrop, "expected DROP TABLE for orders")
@@ -178,7 +181,9 @@ func TestLoadAlterChanges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, changes, 2)
 	assert.Equal(t, "users", changes[0].Table)
+	assert.Contains(t, changes[0].Statement, "ALTER TABLE", "expected ALTER TABLE statement for users")
 	assert.Equal(t, "orders", changes[1].Table)
+	assert.Contains(t, changes[1].Statement, "ALTER TABLE", "expected ALTER TABLE statement for orders")
 }
 
 func TestLoadAlterChanges_InvalidSQL(t *testing.T) {
