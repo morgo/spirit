@@ -113,8 +113,7 @@ type Client struct {
 	logger     *slog.Logger
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
-	useExperimentalBufferedMap bool         // for testing new subscription type
-	flushedBinlogs             atomic.Int64 // for testing binlog flushing frequency
+	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
 // NewClient creates a new Client instance.
@@ -123,34 +122,32 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
-		db:                         db,
-		dbConfig:                   config.DBConfig,
-		host:                       host,
-		username:                   username,
-		password:                   password,
-		logger:                     config.Logger,
-		targetBatchTime:            config.TargetBatchTime,
-		targetBatchSize:            DefaultBatchSize, // initial starting value.
-		concurrency:                config.Concurrency,
-		subscriptions:              make(map[string]Subscription),
-		onDDL:                      config.OnDDL,
-		onDDLDisableFiltering:      config.OnDDLDisableFiltering,
-		serverID:                   config.ServerID,
-		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
-		applier:                    config.Applier,
+		db:                    db,
+		dbConfig:              config.DBConfig,
+		host:                  host,
+		username:              username,
+		password:              password,
+		logger:                config.Logger,
+		targetBatchTime:       config.TargetBatchTime,
+		targetBatchSize:       DefaultBatchSize, // initial starting value.
+		concurrency:           config.Concurrency,
+		subscriptions:         make(map[string]Subscription),
+		onDDL:                 config.OnDDL,
+		onDDLDisableFiltering: config.OnDDLDisableFiltering,
+		serverID:              config.ServerID,
+		applier:               config.Applier,
 	}
 }
 
 type ClientConfig struct {
-	TargetBatchTime            time.Duration
-	Concurrency                int
-	Logger                     *slog.Logger
-	OnDDL                      chan string
-	OnDDLDisableFiltering      bool
-	ServerID                   uint32
-	UseExperimentalBufferedMap bool
-	Applier                    applier.Applier
-	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
+	TargetBatchTime       time.Duration
+	Concurrency           int
+	Logger                *slog.Logger
+	OnDDL                 chan string
+	OnDDLDisableFiltering bool
+	ServerID              uint32
+	Applier               applier.Applier
+	DBConfig              *dbconn.DBConfig // Database configuration including TLS settings
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -215,8 +212,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		}
 		return nil
 	}
-	if c.useExperimentalBufferedMap {
-		c.logger.Info("Using experimental buffered map for table", "schema", currentTable.SchemaName, "table", currentTable.TableName)
+	if c.applier != nil {
 		c.subscriptions[subKey] = &bufferedMap{
 			table:    currentTable,
 			newTable: newTable,

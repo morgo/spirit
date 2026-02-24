@@ -268,14 +268,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 	// Create a copier that reads from the multi chunker and uses the shared applier.
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.move.Threads,
-		TargetChunkTime:               r.move.TargetChunkTime,
-		Logger:                        r.logger,
-		Throttler:                     &throttler.Noop{},
-		MetricsSink:                   &metrics.NoopSink{},
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: true,
-		Applier:                       r.applier, // Use the shared applier
+		Concurrency:     r.move.Threads,
+		TargetChunkTime: r.move.TargetChunkTime,
+		Logger:          r.logger,
+		Throttler:       &throttler.Noop{},
+		MetricsSink:     &metrics.NoopSink{},
+		DBConfig:        r.dbConfig,
+		Applier:         r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -345,15 +344,14 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	r.logger.Info("Setting up repl client")
 	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
-		Logger:                     r.logger,
-		Concurrency:                r.move.Threads,
-		TargetBatchTime:            r.move.TargetChunkTime,
-		OnDDL:                      r.ddlNotification,
-		OnDDLDisableFiltering:      true,
-		ServerID:                   repl.NewServerID(),
-		UseExperimentalBufferedMap: true,
-		Applier:                    r.applier, // Use the shared applier
-		DBConfig:                   r.dbConfig,
+		Logger:                r.logger,
+		Concurrency:           r.move.Threads,
+		TargetBatchTime:       r.move.TargetChunkTime,
+		OnDDL:                 r.ddlNotification,
+		OnDDLDisableFiltering: true,
+		ServerID:              repl.NewServerID(),
+		Applier:               r.applier, // Use the shared applier
+		DBConfig:              r.dbConfig,
 	})
 
 	// Run post-setup checks
@@ -424,14 +422,13 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	// Create a copier that reads from the multi chunker and uses the shared applier.
 	var err error
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.move.Threads,
-		TargetChunkTime:               r.move.TargetChunkTime,
-		Logger:                        r.logger,
-		Throttler:                     &throttler.Noop{},
-		MetricsSink:                   &metrics.NoopSink{},
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: true,
-		Applier:                       r.applier, // Use the shared applier
+		Concurrency:     r.move.Threads,
+		TargetChunkTime: r.move.TargetChunkTime,
+		Logger:          r.logger,
+		Throttler:       &throttler.Noop{},
+		MetricsSink:     &metrics.NoopSink{},
+		DBConfig:        r.dbConfig,
+		Applier:         r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -482,7 +479,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.dbConfig.ForceKill = true // in move we always use force kill; it's new code.
 	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
-	r.logger.Warn("the move command is experimental and not yet safe for production use.")
+	r.logger.Info("Starting move operation")
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	if err != nil {
 		return err

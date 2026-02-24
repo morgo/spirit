@@ -46,12 +46,12 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		// To keep the testing scope reduced for now, it is required.
 		return errors.New("binlog_row_image must be FULL or MINIMAL")
 	}
-	if r.ExperimentalBufferedCopy {
+	if r.Buffered {
 		if binlogRowImage != "FULL" {
-			return errors.New("binlog_row_image must be FULL when using experimental buffered copy because it relies on reading all columns from the binlog")
+			return errors.New("binlog_row_image must be FULL when using buffered copy because it relies on reading all columns from the binlog")
 		}
 		if binlogRowValueOptions != "" {
-			return errors.New("binlog_row_value_options must be empty when using experimental buffered copy because it relies on reading all columns from the binlog")
+			return errors.New("binlog_row_value_options must be empty when using buffered copy because it relies on reading all columns from the binlog")
 		}
 	}
 
