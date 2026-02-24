@@ -47,7 +47,7 @@ func LoadSchemaFromDSN(ctx context.Context, dsn string) ([]*statement.CreateTabl
 	var tables []*statement.CreateTable
 	for _, name := range tableNames {
 		var tbl, createStmt string
-		err := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+name+"`").Scan(&tbl, &createStmt)
+		err := db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", name)).Scan(&tbl, &createStmt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get CREATE TABLE for %s: %w", name, err)
 		}
