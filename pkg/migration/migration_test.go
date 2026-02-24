@@ -679,7 +679,7 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 		Database:  cfg.DBName,
 		Threads:   1,
 		Statement: `ALTER TABLE t1secondary ADD KEY (title) SECONDARY_ENGINE_ATTRIBUTE='{"type":"spann", "distance":"l2", "product_quantization":{"dimensions":96}}'`,
-		ForceKill: true, // this happens to be instant, tests this code path too.
+		// ForceKill is now enabled by default, and this happens to be instant, which tests this code path too.
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
@@ -706,7 +706,6 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 		Threads:         2,
 		TargetChunkTime: 2 * time.Second,
 		Statement:       strings.Join(alterStmts, "; "),
-		ForceKill:       true,
 	}
 	err = migration.Run()
 	assert.NoError(t, err)
