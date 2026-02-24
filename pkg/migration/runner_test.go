@@ -2588,14 +2588,13 @@ func TestIndexVisibility(t *testing.T) {
 
 	// Test again with visible
 	m, err = NewRunner(&Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Table:     "indexvisibility",
-		Alter:     "ALTER INDEX b VISIBLE",
-		ForceKill: true,
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  1,
+		Table:    "indexvisibility",
+		Alter:    "ALTER INDEX b VISIBLE",
 	})
 	assert.NoError(t, err)
 	err = m.Run(t.Context())

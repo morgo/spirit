@@ -39,16 +39,17 @@ type Migration struct {
 	LockWaitTimeout      time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
 	SkipDropAfterCutover bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
 	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
-	ForceKill            bool          `name:"force-kill" help:"Kill long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
+	SkipForceKill        bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
 	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected" optional:"" default:"false"`
 	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
 	// TLS Configuration
 	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:""`
 	TLSCertificatePath string `name:"tls-ca" help:"Path to custom TLS CA certificate file" optional:""`
 
-	// Experimental features
-	// These are no longer hidden, we document them.
-	EnableExperimentalBufferedCopy bool `name:"enable-experimental-buffered-copy" help:"Use the experimental buffered copier/repl applier based on the DBLog algorithm" optional:"" default:"false"`
+	// Buffered copy uses the DBLog algorithm for copying and replication applying.
+	// It reads rows from the source and inserts them into the target, rather than
+	// using INSERT IGNORE .. SELECT. This is also required for cross-server moves.
+	Buffered bool `name:"buffered" help:"Use the buffered copier based on the lock-free DBLog algorithm" optional:"" default:"false"`
 
 	EnableExperimentalLinting bool     `name:"enable-experimental-linting" help:"Enable experimental linting checks before running migration" optional:"" default:"false"`
 	EnableExperimentalLinters []string `name:"enable-experimental-linters" help:"Experimental linters to enable (default \"all\")" optional:""`

@@ -18,7 +18,7 @@ An important subtlety is that `RetryableTransaction` inspects `SHOW WARNINGS` af
 
 ## Force Kill
 
-Both `ForceExec` and `NewTableLock` implement a timer-based force-kill pattern. They wait for 90% of `LockWaitTimeout`, then query `performance_schema` to identify and kill transactions that are blocking metadata lock acquisition. This is the mechanism behind Spirit's `--force-kill` flag.
+Both `ForceExec` and `NewTableLock` implement a timer-based force-kill pattern. They wait for 90% of `LockWaitTimeout`, then query `performance_schema` to identify and kill transactions that are blocking metadata lock acquisition. This is enabled by default and can be disabled with Spirit's `--skip-force-kill` flag.
 
 There are two important safety constraints:
 

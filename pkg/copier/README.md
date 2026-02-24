@@ -35,7 +35,7 @@ The unbuffered copier uses `INSERT IGNORE INTO ... SELECT` statements to copy da
 
 The locking issue is mitigated by using smaller chunks with dynamic chunk sizing, which yields locks frequently enough to avoid blocking other queries.
 
-### Buffered Copier (Experimental)
+### Buffered Copier
 
 The buffered copier implements a producer/consumer pattern inspired by [DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b). Multiple reader goroutines extract rows from the source table and send them to an applier, which breaks them into chunklets and writes them to the target.
 
@@ -49,7 +49,7 @@ The buffered copier implements a producer/consumer pattern inspired by [DBLog](h
 - Higher network overhead between Spirit and MySQL
 - More CPU usage for serialization/deserialization
 
-**Status:** The buffered copier is functional but considered experimental. It's primarily used for move operations where cross-server copying is required. For standard schema changes, the unbuffered copier remains the default.
+**Status:** The buffered copier is considered stable. It is primarily used for move operations where cross-server copying is required, but can also be used for schema changes by passing the `--buffered` option to `spirit`.
 
 ## Interface
 
@@ -89,7 +89,6 @@ type CopierConfig struct {
     Logger                        *slog.Logger
     MetricsSink                   metrics.Sink
     DBConfig                      *dbconn.DBConfig
-    UseExperimentalBufferedCopier bool
     Applier                       applier.Applier
 }
 ```
@@ -102,8 +101,7 @@ type CopierConfig struct {
 - **`Logger`** (default: `slog.Default()`): Structured logger for debugging and monitoring.
 - **`MetricsSink`** (default: `NoopSink`): Destination for metrics like chunk processing time and row counts.
 - **`DBConfig`**: Database connection configuration including retry settings.
-- **`UseExperimentalBufferedCopier`** (default: false): Enable the buffered copier implementation.
-- **`Applier`**: Required when using the buffered copier. Handles writing rows to the target.
+- **`Applier`**: When non-nil, the buffered copier is used instead of the unbuffered copier. The applier handles writing rows to the target.
 
 ## Usage
 
@@ -193,9 +191,8 @@ if err != nil {
     return err
 }
 
-// Create copier with buffered mode
+// Create copier with buffered mode by specifying an applier
 config := copier.NewCopierDefaultConfig()
-config.UseExperimentalBufferedCopier = true
 config.Applier = rowApplier
 
 copier, err := copier.NewCopier(sourceDB, chunker, config)
