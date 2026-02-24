@@ -479,7 +479,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
 	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
-	r.logger.Info("Starting move operation")
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	if err != nil {
 		return err

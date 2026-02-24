@@ -87,7 +87,7 @@ The buffered map is a subscription type used for move operations where source an
 
 **When to use:** Primarily for move operations where `REPLACE INTO ... SELECT` cannot be used because the source and target are on different MySQL servers.
 
-**Enabling:** Set `UseBufferedMap: true` in the client config. This is automatically enabled for move operations.
+**Enabling:** Provide a non-nil `Applier` in the client config. When an applier is configured, buffered map behavior is enabled automatically, and this is set up by default for move operations.
 
 ## Features
 
