@@ -11,13 +11,14 @@
     - [conf](#conf)
     - [database](#database)
     - [defer-cutover](#defer-cutover)
-    - [force-kill](#force-kill)
     - [host](#host)
     - [lock-wait-timeout](#lock-wait-timeout)
     - [password](#password)
     - [replica-dsn](#replica-dsn)
       - [Replica TLS Behavior](#replica-tls-behavior)
     - [replica-max-lag](#replica-max-lag)
+    - [skip-drop-after-cutover](#skip-drop-after-cutover)
+    - [skip-force-kill](#skip-force-kill)
     - [statement](#statement)
     - [strict](#strict)
     - [table](#table)
@@ -107,25 +108,6 @@ If you start a migration and realize that you forgot to set defer-cutover, worry
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
 
-### force-kill
-
-- Type: Boolean
-- Default value: FALSE
-
-When set to TRUE, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
-
-- It will read `performance_schema` to find only connections that are blocking a meta data lock being acquired on the migrating table.
-- It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
-- It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
-- It only starts killing transactions as it approaches the `lock-wait-timeout`. For example, if the `lock-wait-timeout` is 30 seconds, it will start killing transactions after 27 seconds.
-
-Enabling the `force-kill` option requires spirit to be granted additional privileges:
-
-```
-GRANT SELECT ON performance_schema.* TO spirituser;
-GRANT CONNECTION_ADMIN, PROCESS ON *.* TO spirituser;
-```
-
 ### host
 
 - Type: String
@@ -141,7 +123,9 @@ The host (and optional port) to use when connecting to MySQL. If no port is prov
 
 Spirit requires an exclusive metadata lock for cutover and checksum operations. The MySQL default for waiting for a metadata lock is 1 year(!), which means that if there are any long running transactions holding a shared lock on the table that prevent the exclusive lock from being acquired, new lock requests will effectively queue forever behind Spirit's exclusive lock request. To prevent Spirit causing such outages, Spirit sets the `lock_wait_timeout` to 30s by default.
 
-If you are seeing cutover or checksum lock requests failing, you may consider increasing the `lock_wait_timeout`. However, it is almost always better to investigate why you have long running transactions that are preventing Spirit from acquiring the metadata lock. A good starting point is `select * from information_schema.INNODB_TRX`.
+At 90% of the `lock-wait-timeout`, Spirit will also start killing connections by default, see [skip-force-kill](#skip-force-kill).
+
+If you can not tolerate a potential `30s` stall during cutover, consider lowering the `lock_wait_timeout`. The main downside of doing this, is the potential for more connections to be killed by the force kill operation. Before considering increasing the `lock-wait-timeout`, it is almost always better to investigate why you have long running transactions that are preventing Spirit from acquiring the metadata lock. A good starting point is `select * from information_schema.INNODB_TRX`.
 
 ### password
 
@@ -191,6 +175,27 @@ The replication throttler only affects the copy-rows operation, and does not app
 - Adjusting the configuration of your replicas to increase the parallel replication threads
 - Temporarily disabling durability on the replica (i.e. `SET GLOBAL sync_binlog=0` and `SET GLOBAL innodb_flush_log_at_trx_commit=0`)
 - Increasing the `replica-max-lag` or disabling replica lag checking temporarily
+
+### skip-drop-after-cutover
+
+- Type: Boolean
+- Default value: `false`
+
+When set to `true`, Spirit will keep the old table (renamed to `_<table>_old`) after completing the cutover instead of dropping it. This can be useful if you want to manually verify the migration before removing the old data.
+
+### skip-force-kill
+
+- Type: Boolean
+- Default value: `false`
+
+By default, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
+
+- It will read `performance_schema` to find only connections that are blocking a metadata lock being acquired on the migrating table.
+- It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
+- It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
+- It only starts killing transactions as it approaches the [lock-wait-timeout](#lock-wait-timeout). For example, if the `lock-wait-timeout` is 30 seconds, it will start killing transactions after 27 seconds.
+
+Setting `--skip-force-kill` disables this behavior. This may be useful if you do not want Spirit to kill any connections, but be aware that attempting to acquire MDL locks over and over when they are being blocked is not safe — it can bring down production systems. The force-kill behavior of _targeted killing_ is actually safer for real systems.
 
 ### statement
 
