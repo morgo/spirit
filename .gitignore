@@ -16,5 +16,8 @@ cmd/spirit/spirit
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Lint error logs
+lint-error.logs
+
 .goosehints
 .goose
