@@ -65,7 +65,7 @@ What causes all metadata lock issues? (hint: it's not spirit)
 
 Any open transactions will have shared metadata locks on any of the tables that you are modifying. If you have long transactions that have not yet committed/rolled back, Spirit's exclusive lock will be queued waiting for them to finish. This then looks like a Spirit problem because any shared lock requests that arrive after Spirit's exclusive lock request will then be queued behind Spirit. So the solution is to keep your transactions as short as possible.
 
-The _fix_ for Spirit, is that we now have the option to `--force-kill` the specific connections that are blocking it from acquiring an exclusive lock. This feature is not enabled by default, but we are using it and likely will change the default at some point.
+The _fix_ for Spirit, is that it will by default `force-kill` the specific connections that are blocking it from acquiring an exclusive lock. This can be disabled with `--skip-force-kill` if needed.
 
 ## Using Spirit `migration` as a Go package
 
@@ -86,7 +86,6 @@ func (sm *Spirit) Execute(ctx context.Context, m *ExecutableTask) error {
 		Threads:           m.Concurrency,
 		LockWaitTimeout:   m.LockWaitTimeout,
 		InterpolateParams: true,
-		ForceKill:         true,
 	})
 	if err != nil {
 		return errors.Wrap(err, "failed to create spirit migration runner")

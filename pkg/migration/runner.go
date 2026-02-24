@@ -132,7 +132,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.dbConfig = dbconn.NewDBConfig()
 	r.dbConfig.LockWaitTimeout = int(r.migration.LockWaitTimeout.Seconds())
 	r.dbConfig.InterpolateParams = r.migration.InterpolateParams
-	r.dbConfig.ForceKill = r.migration.ForceKill
+	r.dbConfig.ForceKill = !r.migration.SkipForceKill
 	// Map TLS configuration from migration to dbConfig
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
@@ -410,7 +410,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			TargetChunkTime: r.migration.TargetChunkTime,
 			Threads:         r.migration.Threads,
 			ReplicaMaxLag:   r.migration.ReplicaMaxLag,
-			ForceKill:       r.migration.ForceKill,
+			ForceKill:       !r.migration.SkipForceKill,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
 			Host:                     r.migration.Host,

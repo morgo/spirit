@@ -9,7 +9,7 @@
     - [alter](#alter)
     - [database](#database)
     - [defer-cutover](#defer-cutover)
-    - [force-kill](#force-kill)
+    - [skip-force-kill](#skip-force-kill)
     - [host](#host)
     - [lock-wait-timeout](#lock-wait-timeout)
     - [password](#password)
@@ -91,24 +91,19 @@ If you start a migration and realize that you forgot to set defer-cutover, worry
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
 
-### force-kill
+### skip-force-kill
 
 - Type: Boolean
 - Default value: FALSE
 
-When set to TRUE, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
+By default, Spirit will aggressively try to kill connections that are blocking the checksum or cutover process from starting. It does this in a semi-intelligent way:
 
 - It will read `performance_schema` to find only connections that are blocking a meta data lock being acquired on the migrating table.
 - It refuses to kill connections if they have a transaction open that has modified a large number of rows (>1 million).
 - It refuses to kill connections that hold an explicit `LOCK TABLE`, since unlike transactions these are not always retryable.
 - It only starts killing transactions as it approaches the `lock-wait-timeout`. For example, if the `lock-wait-timeout` is 30 seconds, it will start killing transactions after 27 seconds.
 
-Enabling the `force-kill` option requires spirit to be granted additional privileges:
-
-```
-GRANT SELECT ON performance_schema.* TO spirituser;
-GRANT CONNECTION_ADMIN, PROCESS ON *.* TO spirituser;
-```
+Setting `--skip-force-kill` disables this behavior. This may be useful if you do not want Spirit to kill any connections, but be aware that attempting to acquire MDL locks over and over when they are being blocked is not safe — it can bring down production systems. The force-kill behavior of _targeted killing_ is actually safer for real systems.
 
 ### host
 

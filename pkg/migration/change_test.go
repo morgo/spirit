@@ -39,7 +39,6 @@ func TestMultiChangesDifferentSchemas(t *testing.T) {
 		Threads:         4,
 		TargetChunkTime: 2 * time.Second,
 		Statement:       "ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT",
-		ForceKill:       true,
 	}
 	assert.Error(t, migration.Run())
 	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
