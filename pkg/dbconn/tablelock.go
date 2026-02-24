@@ -22,10 +22,10 @@ type TableLock struct {
 // which gives it a chance to first do things like catch up on replication apply
 // before it does the next attempt.
 //
-// Setting config.ForceKill=true is recommended, since it will more or less ensure
+// config.ForceKill=true is the default, and will more or less ensure
 // that the lock acquisition is successful by killing long-running queries that are
 // blocking our lock acquisition after we have waited for 90% of our configured
-// LockWaitTimeout.
+// LockWaitTimeout. It can be disabled with --skip-force-kill.
 func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger) (*TableLock, error) {
 	var err error
 	var lockTxn *sql.Tx
@@ -70,7 +70,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	logger.Warn("trying to acquire table locks", "timeout", config.LockWaitTimeout)
 	_, err = lockTxn.ExecContext(ctx, lockStmt)
 	if err != nil {
-		logger.Warn("failed to acquire table lock(s), consider setting --force-kill=TRUE and trying again", "error", err)
+		logger.Warn("failed to acquire table lock(s), ensure --skip-force-kill is not set and try again", "error", err)
 		return nil, err
 	}
 

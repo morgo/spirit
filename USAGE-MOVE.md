@@ -64,7 +64,7 @@ A Go MySQL DSN for the source database. All tables in this database will be copi
 - Type: Duration
 - Default value: `5s`
 
-The target time for each chunk of rows to be copied. See the [spirit USAGE-SPIRIT.md](USAGE-SPIRIT.md#target-chunk-time) for a detailed explanation of how chunk timing works.
+The target time for each chunk of rows to be copied. See the [spirit USAGE.md](USAGE.md#target-chunk-time) for a detailed explanation of how chunk timing works.
 
 ### target-dsn
 
