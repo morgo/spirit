@@ -19,14 +19,16 @@ Spirit is designed for **speed** — it is multi-threaded in both row-copying an
 # Build the spirit binary
 cd cmd/spirit && go build
 
-# Build the move binary (experimental cross-server migration)
-cd cmd/move && go build
+# Run a schema change
+./spirit migrate --host=<host> --username=<user> --password=<pass> --database=<db> --table=<table> --alter="<alter statement>"
 
-# Run spirit
-./spirit --host=<host> --username=<user> --password=<pass> --database=<db> --table=<table> --alter="<alter statement>"
+# Other subcommands
+./spirit move --help
+./spirit lint --help
+./spirit diff --help
 ```
 
-Both binaries use [Kong](https://github.com/alecthomas/kong) for CLI argument parsing. The CLI structs are defined in `pkg/migration/` and `pkg/move/` respectively.
+Spirit uses [Kong](https://github.com/alecthomas/kong) for CLI argument parsing with subcommands. The CLI structs are defined in `pkg/migration/`, `pkg/move/`, and `pkg/lint/` respectively.
 
 ## Requirements
 
@@ -79,8 +81,7 @@ The project uses golangci-lint v2 with `gofmt` and `goimports` formatters enable
 
 ```
 cmd/
-  spirit/     → CLI entry point for schema changes (uses pkg/migration)
-  move/       → CLI entry point for cross-server moves (uses pkg/move)
+  spirit/     → Single CLI entry point with subcommands: migrate, move, lint, diff
 
 pkg/
   migration/  → Orchestrator for single-table schema changes (main entry point)

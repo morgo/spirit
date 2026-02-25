@@ -1,42 +1,25 @@
-# How to use Move
+# Move subcommand
 
 The `move` command copies whole schemas (or a subset of tables) between different MySQL servers. It uses the buffered copy algorithm internally and streams binlog changes to keep the target in sync until cutover.
-
-## Table of Contents
-
-- [How to use Move](#how-to-use-move)
-  - [Getting Started](#getting-started)
-  - [Configuration](#configuration)
-    - [create-sentinel](#create-sentinel)
-    - [defer-secondary-indexes](#defer-secondary-indexes)
-    - [source-dsn](#source-dsn)
-    - [target-chunk-time](#target-chunk-time)
-    - [target-dsn](#target-dsn)
-    - [threads](#threads)
-    - [write-threads](#write-threads)
-  - [How it works](#how-it-works)
-  - [API usage](#api-usage)
-
-## Getting Started
-
-To create a binary:
-
-```
-cd cmd/move
-go build
-./move --help
-```
 
 Basic usage:
 
 ```bash
-move --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
-     --target-dsn "user:pass@tcp(target-host:3306)/mydb"
+spirit move --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
+            --target-dsn "user:pass@tcp(target-host:3306)/mydb"
 ```
 
 This will copy all tables from the source database to the target database, verify them with a checksum, and then complete.
 
 ## Configuration
+
+- [create-sentinel](#create-sentinel)
+- [defer-secondary-indexes](#defer-secondary-indexes)
+- [source-dsn](#source-dsn)
+- [target-chunk-time](#target-chunk-time)
+- [target-dsn](#target-dsn)
+- [threads](#threads)
+- [write-threads](#write-threads)
 
 ### create-sentinel
 
@@ -57,14 +40,14 @@ When set to `true`, target tables are created without secondary indexes. The ind
 - Type: String
 - Default value: `spirit:spirit@tcp(127.0.0.1:3306)/src`
 
-A Go MySQL DSN for the source database. All tables in this database will be copied unless filtered by the API (see [API usage](#api-usage)).
+A Go MySQL DSN for the source database. All tables in this database will be copied.
 
 ### target-chunk-time
 
 - Type: Duration
 - Default value: `5s`
 
-The target time for each chunk of rows to be copied. See the [spirit USAGE.md](USAGE.md#target-chunk-time) for a detailed explanation of how chunk timing works.
+The target time for each chunk of rows to be copied. See the [migrate documentation](migrate.md#target-chunk-time) for a detailed explanation of how chunk timing works.
 
 ### target-dsn
 

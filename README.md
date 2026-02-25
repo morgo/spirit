@@ -13,7 +13,7 @@ The goal of Spirit is to apply schema changes much faster than gh-ost. This make
 If this is the case, `gh-ost` remains a fine choice.
 
 Quick Links:
-* [USAGE](USAGE.md) - more information on how to use Spirit.
+* [USAGE](docs/README.md) - more information on how to use Spirit.
 * [More Resilient Schema Changes at Scale](https://code.cash.app/more-resilient-schema-changes-at-scale) - a high-level overview of the motivations behind Spirit.
 * [Introducing Spirit](https://code.cash.app/introducing-spirit) - our launch blog post.
 * [MySQL Belgian Days 2024 Slides](https://www.slideshare.net/slideshows/introducing-spirit-online-schema-change/266175200) - more information in presentation form.

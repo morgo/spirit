@@ -1,53 +1,47 @@
-# How to use Spirit
+# Migrate subcommand
 
-## Table of Contents
+The `migrate` command applies `ALTER TABLE` statements to large tables without blocking
+reads or writes. It creates a shadow copy, streams binlog changes, and performs an
+atomic cutover via `RENAME TABLE`.
 
-- [How to use Spirit](#how-to-use-spirit)
-  - [Table of Contents](#table-of-contents)
-  - [Getting Started](#getting-started)
-  - [Configuration](#configuration)
-    - [alter](#alter)
-    - [buffered](#buffered)
-    - [conf](#conf)
-    - [database](#database)
-    - [defer-cutover](#defer-cutover)
-    - [host](#host)
-    - [lock-wait-timeout](#lock-wait-timeout)
-    - [password](#password)
-    - [replica-dsn](#replica-dsn)
-      - [Replica TLS Behavior](#replica-tls-behavior)
-    - [replica-max-lag](#replica-max-lag)
-    - [skip-drop-after-cutover](#skip-drop-after-cutover)
-    - [skip-force-kill](#skip-force-kill)
-    - [statement](#statement)
-    - [strict](#strict)
-    - [table](#table)
-    - [target-chunk-time](#target-chunk-time)
-    - [threads](#threads)
-    - [tls](#tls)
-      - [PREFERRED](#preferred)
-      - [REQUIRED](#required)
-      - [VERIFY\_CA](#verify_ca)
-      - [VERIFY\_IDENTITY](#verify_identity)
-    - [username](#username)
-  - [Experimental Features](#experimental-features)
-    - [native linting support](#native-linting-support)
+Basic usage:
 
-## Getting Started
-
-To create a binary:
-
-```
-cd cmd/spirit
-go build
-./spirit --help
+```bash
+spirit migrate --host mydb:3306 --username root --password secret \
+               --database mydb --table users --alter "ADD COLUMN email VARCHAR(255)"
 ```
 
 ## Configuration
 
+- [alter](#alter)
+- [buffered](#buffered)
+- [conf](#conf)
+- [database](#database)
+- [defer-cutover](#defer-cutover)
+- [host](#host)
+- [lock-wait-timeout](#lock-wait-timeout)
+- [password](#password)
+- [replica-dsn](#replica-dsn)
+  - [Replica TLS Behavior](#replica-tls-behavior)
+- [replica-max-lag](#replica-max-lag)
+- [skip-drop-after-cutover](#skip-drop-after-cutover)
+- [skip-force-kill](#skip-force-kill)
+- [statement](#statement)
+- [strict](#strict)
+- [table](#table)
+- [target-chunk-time](#target-chunk-time)
+- [threads](#threads)
+- [tls-mode](#tls-mode)
+  - [PREFERRED](#preferred)
+  - [REQUIRED](#required)
+  - [VERIFY\_CA](#verify_ca)
+  - [VERIFY\_IDENTITY](#verify_identity)
+- [username](#username)
+
 ### alter
 
 - Type: String
+- Default value: ``
 - Examples: `add column foo int`, `add index foo (bar)`
 
 The alter table command to perform. The default value is a _null alter table_, which can be useful for testing.
@@ -73,6 +67,7 @@ Note: buffered copy is not yet supported for multi-table migrations (i.e. when u
 ### conf
 
 - Type: String
+- Default value: ``
 
 Optional path to INI file containing host, port, username, password, database and tls settings to be used when connecting to MySQL. Spirit will only interpret the `[client]` section within the INI file and ignore all other sections. Values for `--host`, `--username`, `--password`, `--database`, `--tls-ca` and `tls-mode` provided via command line arguments to Spirit take precedence over what is provided in file.
 
@@ -96,9 +91,12 @@ The database that the schema change will be performed in.
 
 ### defer-cutover
 
+- Type: Boolean
+- Default value: `false`
+
 The "defer cutover" feature makes spirit wait to perform the final cutover until the "sentinel" table has been dropped. This is similar to the `--postpone-cut-over-flag-file` feature of gh-ost.
 
-The defer cutover feature will not be used and the sentinel table will not be created if the schema migration can be successfully executed using `ALGORITHM=INSTANT` (see "Attempt Instant DDL" in README.md).
+The defer cutover feature will not be used and the sentinel table will not be created if the schema migration can be successfully executed using `ALGORITHM=INSTANT` (see "Attempt Instant DDL" in the [project README](../README.md)).
 
 If defer-cutover is true, Spirit will create the "sentinel" table in the same schema as the table being altered; the name of the sentinel table will always be `_spirit_sentinel`. Spirit will block before the cutover, waiting for the operator to manually drop the sentinel table, which triggers Spirit to proceed with the cutover. Spirit will never delete the sentinel table on its own. It will block for 48 hours waiting for the sentinel table to be dropped by the operator, after which it will exit with an error.
 
@@ -158,7 +156,7 @@ Spirit automatically applies the main database TLS configuration to replica conn
 
 For comprehensive examples of replica TLS behavior, including all possible combinations of main DB TLS modes and replica DSN configurations, see:
 
-📋 **[Replica TLS Testing Matrix](compose/replication-tls/usage.md)**
+📋 **[Replica TLS Testing Matrix](../compose/replication-tls/usage.md)**
 
 ### replica-max-lag
 
@@ -200,6 +198,7 @@ Setting `--skip-force-kill` disables this behavior. This may be useful if you do
 ### statement
 
 - Type: String
+- Default value: ``
 
 Spirit accepts either a pair of `--table` and `--alter` arguments or a `--statement` argument. When using `--statement` you can send most DDL statements to Spirit, including `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE` and `DROP TABLE`. Others such as `DROP INDEX` are _not_ supported and should be rewritten as `ALTER TABLE` statements.
 
@@ -214,15 +213,16 @@ There are some restrictions to `--statement`:
 ### strict
 
 - Type: Boolean
-- Default value: FALSE
+- Default value: `false`
 
 By default, Spirit will automatically clean up these old checkpoints before starting the schema change. This allows schema changes to always be possible to proceed forward, at the risk of lost progress.
 
-When set to `TRUE`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the alter statement matches the `--alter` parameter. If the validation fails, spirit will exit and prevent the schema change process from proceeding.
+When set to `true`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the alter statement matches the `--alter` parameter. If the validation fails, Spirit will exit and prevent the schema change process from proceeding.
 
 ### table
 
 - Type: String
+- Default value: ``
 
 The table that the schema change will be performed on.
 
@@ -263,7 +263,10 @@ You may want to wrap `threads` in automation and set it to a percentage of the c
 
 Note that Spirit does not support dynamically adjusting the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values.
 
-### tls
+### tls-mode
+
+- Type: Enumeration
+- Default value: `PREFERRED`
 
 Spirit uses the same TLS/SSL mode options as the MySQL client, making it familiar and intuitive for users.
 
@@ -299,15 +302,14 @@ Configuration Flags:
 NOTE: This mode is the default behavior
 ```bash
 # Add a column with automatic TLS detection (default mode)
-spirit --tls-mode PREFERRED \
+spirit migrate --tls-mode PREFERRED \
        --host mydb.us-west-2.rds.amazonaws.com:3306 \
        --username admin \
        --password mypassword \
        --database production \
        --table users \
        --alter "ADD COLUMN last_login_ip VARCHAR(45) AFTER last_login" \
-       --threads 8 \
-       --chunk-size 2000
+       --threads 8
 ```
 **Result**: Automatically uses TLS for RDS hosts with embedded certificates, optional for others.
 
@@ -315,15 +317,14 @@ spirit --tls-mode PREFERRED \
 Force TLS Without Certificate Verification
 ```bash
 # Add a column requiring TLS but not verifying certificates
-spirit --tls-mode REQUIRED \
+spirit migrate --tls-mode REQUIRED \
        --host mysql.staging.company.com:3306 \
        --username staging_user \
        --password staging_pass \
        --database inventory \
        --table products \
        --alter "ADD COLUMN supplier_notes JSON AFTER supplier_id" \
-       --threads 6 \
-       --chunk-size 1500
+       --threads 6
 ```
 **Result**: TLS encryption required, but accepts self-signed or invalid certificates.
 
@@ -331,7 +332,7 @@ spirit --tls-mode REQUIRED \
 Certificate Verification Without Hostname Check
 ```bash
 # Add a column with CA verification using custom certificate
-spirit --tls-mode VERIFY_CA \
+spirit migrate --tls-mode VERIFY_CA \
        --tls-ca /etc/ssl/certs/company-ca-bundle.pem \
        --host 192.168.1.100:3306 \
        --username app_user \
@@ -339,22 +340,20 @@ spirit --tls-mode VERIFY_CA \
        --database analytics \
        --table events \
        --alter "ADD COLUMN event_metadata JSON AFTER event_type" \
-       --threads 4 \
-       --chunk-size 1000
+       --threads 4
 ```
 **Result**: Verifies certificate against custom CA bundle but allows IP addresses/hostname mismatches.
 
 ```bash
 # Add a column using embedded RDS certificate for non-RDS MySQL server
-spirit --tls-mode VERIFY_CA \
+spirit migrate --tls-mode VERIFY_CA \
        --host mysql.internal.corp:3306 \
        --username internal_user \
        --password internal_pass \
        --database hr_system \
        --table employees \
        --alter "ADD COLUMN emergency_contact VARCHAR(255) AFTER phone_number" \
-       --threads 2 \
-       --chunk-size 500
+       --threads 2
 ```
 **Result**: Uses embedded RDS certificate bundle as fallback for certificate verification.
 
@@ -362,7 +361,7 @@ spirit --tls-mode VERIFY_CA \
 Full Certificate and Hostname Verification
 ```bash
 # Add a column with maximum security verification
-spirit --tls-mode VERIFY_IDENTITY \
+spirit migrate --tls-mode VERIFY_IDENTITY \
        --tls-ca /opt/certificates/production-ca.pem \
        --host mysql.secure.company.com:3306 \
        --username secure_user \
@@ -370,22 +369,20 @@ spirit --tls-mode VERIFY_IDENTITY \
        --database financial \
        --table transactions \
        --alter "ADD COLUMN fraud_score DECIMAL(5,4) AFTER amount" \
-       --threads 8 \
-       --chunk-size 2000
+       --threads 8
 ```
 **Result**: Full TLS verification including hostname matching - maximum security. Custom certificate takes precedence over RDS auto-detection.
 
 ```bash
 # Add a column to RDS with full verification using auto-detected certificate
-spirit --tls-mode VERIFY_IDENTITY \
+spirit migrate --tls-mode VERIFY_IDENTITY \
        --host prod-db.cluster-xyz.us-east-1.rds.amazonaws.com:3306 \
        --username rds_admin \
        --password rds_password \
        --database customer_data \
        --table profiles \
        --alter "ADD COLUMN gdpr_consent_date DATETIME AFTER created_at" \
-       --threads 10 \
-       --chunk-size 3000
+       --threads 10
 ```
 **Result**: Uses embedded RDS certificate with full verification for RDS hostname.
 
@@ -396,22 +393,17 @@ spirit --tls-mode VERIFY_IDENTITY \
 
 The username to use when connecting to MySQL.
 
-## Experimental Features
+## Inline Linting
 
-### native linting support
+Spirit can optionally run lint checks before executing a migration. This uses the same linting engine as [`spirit lint`](lint.md) and [`spirit diff`](diff.md), but runs inline as part of the migration process.
 
-**Feature Description**
+You can enable this via these command-line options:
 
-This feature adds native linting support to Spirit, allowing for various rules to be applied to schema changes before they are executed.
+* `--enable-experimental-linting` — a boolean flag to enable linting before migration
+* `--enable-experimental-linters` — a comma-separated list of linter names to enable explicitly (in addition to the default set), or if preceded by `-`, to disable
+* `--experimental-linter-config` — a comma-separated list of `linter_name.key=value` configuration settings
+* `--experimental-lint-only` — exit after running linters without performing the migration
 
-**Current Status**
+If you provide `--enable-experimental-linters` or `--experimental-linter-config` without explicitly setting `--enable-experimental-linting`, linting will be enabled implicitly.
 
-This feature is partially complete. It relies on new support for parsing CREATE TABLE statements (see `pkg/statement/parse_create_table.go`). There are so far only a few linters implemented.
-
-You can use this experimental feature via these 3 command-line options:
-
-* `--enable-experimental-linting` a boolean flag to enable the feature
-* `--enable-experimental-linters` a comma-separated (or multiple option instance) list of names of individual linters you want to enable explicitly (in addition to the default set) or, if preceded by `-`, that you wish to _disable_
-* `--experimental-linter-config` a comma-separated (or multiple option instance) list of linter_name.key=value configuration settings to control the behavior of individual linters
-
-If you provide `--enable-experimental-linters` or `--experimental-linter-config` without explicitly setting `--enable-experimental-linting`, linting will be enabled implicitly
+For standalone schema linting without running a migration, see [`spirit lint`](lint.md) and [`spirit diff`](diff.md).
