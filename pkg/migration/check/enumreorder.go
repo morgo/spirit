@@ -42,7 +42,7 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 
 		existingType, ok := r.Table.GetColumnMySQLType(col.LookupName)
 		if !ok {
-			continue
+			return fmt.Errorf("unable to validate ENUM reorder for column %q in buffered mode: existing column type not found in table metadata", col.LookupName)
 		}
 
 		existingElems := parseEnumSetValues(existingType)
