@@ -22,9 +22,8 @@ const (
 
 // Datum could be a binary string, uint64 or int64.
 type Datum struct {
-	Val            any
-	Tp             datumTp // signed, unsigned, binary
-	forceHexEncode bool    // when true, always hex-encode the value in String()
+	Val any
+	Tp  datumTp // signed, unsigned, binary
 }
 
 func mySQLTypeToDatumTp(mysqlTp string) datumTp {
@@ -170,16 +169,18 @@ func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 			// For numeric types, convert []byte to string then parse
 			value = string(b)
 		case binaryType:
-			// For binary types, convert to string and set forceHexEncode.
-			// We always want to hex-encode binary data in SQL output.
-			// The forceHexEncode flag ensures this happens even for data
-			// that is valid UTF-8 (which IsBinaryString() would not catch).
-			d, err := NewDatum(string(b), tp)
-			if err != nil {
-				return Datum{}, err
+			// For binary types, we want to always hex encode
+			// If the data is valid UTF-8 and doesn't already trigger hex encoding,
+			// prepend a special marker to force it
+			s := string(b)
+			// Only add marker if it's valid UTF-8 and doesn't start with "0x"
+			if utf8.ValidString(s) && (len(s) <= 2 || s[0:2] != "0x") {
+				// Prepend a special marker that's invalid UTF-8
+				// Use a sequence that's very unlikely to appear in real data
+				value = "\xFF\xFF\xFE" + s
+			} else {
+				value = s
 			}
-			d.forceHexEncode = true
-			return d, nil
 		default:
 			// For unknown types (text, datetime, json, etc), convert to string
 			value = string(b)
@@ -268,6 +269,10 @@ func (d Datum) String() string {
 	}
 	// Check if it should be hex encoded
 	if d.IsBinaryString() {
+		// If the string starts with our marker (\xFF\xFF\xFE), strip it before hex encoding
+		if len(s) >= 3 && s[0] == '\xFF' && s[1] == '\xFF' && s[2] == '\xFE' {
+			return fmt.Sprintf("0x%x", s[3:])
+		}
 		return fmt.Sprintf("0x%x", s)
 	}
 	return "\"" + sqlescape.EscapeString(s) + "\""

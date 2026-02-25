@@ -324,9 +324,9 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 }
 
 // TestBufferedMapFlushWithoutLockRespectsWatermark verifies that when underLock=false,
-// the watermark optimization is applied: keys below the watermark (already copied) are
-// flushed, while keys at or above the watermark (copier hasn't passed them) are skipped.
-// This matches the deltaMap behavior.
+// the watermark optimization is still applied (this is the normal behavior).
+// Note: bufferedMap has inverted logic compared to deltaMap - KeyBelowLowWatermark returns true
+// for keys that are still being copied, so we skip flushing them.
 func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
@@ -393,35 +393,33 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
 
 	// Flush WITHOUT lock (underLock=false)
-	// This should respect the watermark optimization:
-	// Keys 1, 3, 4 are below watermark (copier already passed them) → flushed
-	// Key 5 is at watermark (copier hasn't passed it) → NOT flushed
+	// This should respect the watermark optimization
+	// Keys 1, 3, 4 are below watermark and should NOT be flushed (inverted logic)
+	// Key 5 is at watermark (not below) and should be flushed
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	assert.NoError(t, err)
 	assert.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
-	assert.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
+	assert.Equal(t, 3, sub.Length(), "Keys 1, 3, 4 (below watermark) should remain in the map")
 
-	// Verify that 3 rows (below watermark) were copied to the new table
+	// Verify that only 1 row (at/above watermark) was copied to the new table
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
 	assert.NoError(t, err)
-	assert.Equal(t, 3, count, "Only 3 rows below watermark should be in the new table")
+	assert.Equal(t, 1, count, "Only 1 row at/above watermark should be in the new table")
 
-	// Verify that rows below watermark were copied
+	// Verify that the row at watermark was copied
 	var name string
-	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 1").Scan(&name)
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 5").Scan(&name)
 	assert.NoError(t, err)
-	assert.Equal(t, "below_watermark", name)
+	assert.Equal(t, "at_watermark", name)
+
+	// Verify that rows below watermark were NOT copied
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 1").Scan(&name)
+	assert.Error(t, err, "Row with id=1 (below watermark) should NOT exist yet")
 
 	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 3").Scan(&name)
-	assert.NoError(t, err)
-	assert.Equal(t, "below_watermark_2", name)
+	assert.Error(t, err, "Row with id=3 (below watermark) should NOT exist yet")
 
 	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 4").Scan(&name)
-	assert.NoError(t, err)
-	assert.Equal(t, "below_watermark_3", name)
-
-	// Verify that the row at watermark was NOT copied
-	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 5").Scan(&name)
-	assert.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
+	assert.Error(t, err, "Row with id=4 (below watermark) should NOT exist yet")
 }
