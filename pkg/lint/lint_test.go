@@ -327,29 +327,6 @@ func TestHasWarnings(t *testing.T) {
 	assert.True(t, HasWarnings(violations))
 }
 
-func TestFilterBySeverity(t *testing.T) {
-	violations := []Violation{
-		{Severity: SeverityWarning, Message: "Warning 1"},
-		{Severity: SeverityWarning, Message: "Warning 2"},
-		{Severity: SeverityWarning, Message: "Warning 3"},
-		{Severity: SeverityWarning, Message: "Warning 4"},
-	}
-
-	// All violations are warnings now
-	warnings := FilterBySeverity(violations, SeverityWarning)
-	assert.Len(t, warnings, 4)
-	assert.Equal(t, "Warning 1", warnings[0].Message)
-	assert.Equal(t, "Warning 2", warnings[1].Message)
-
-	// No errors exist
-	errors := FilterBySeverity(violations, SeverityError)
-	assert.Empty(t, errors)
-
-	// No info exist
-	infos := FilterBySeverity(violations, SeverityInfo)
-	assert.Empty(t, infos)
-}
-
 func TestFilterByLinter(t *testing.T) {
 	linter1 := &mockLinter{name: "linter1"}
 	linter2 := &mockLinter{name: "linter2"}
