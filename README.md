@@ -107,6 +107,7 @@ Spirit works with the default configuration of MySQL 8.0, but checks that you ha
   - `binlog_row_image=FULL` or `MINIMAL`
   - `innodb_autoinc_lock_mode=2`
   - `log_slave_updates=1`
+  - `performance_schema=1`
 
 Spirit requires an account with these privileges:
 

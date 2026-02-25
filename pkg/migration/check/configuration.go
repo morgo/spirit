@@ -13,20 +13,22 @@ func init() {
 // check the configuration of the database. There are some hard nos,
 // and some suggestions around configuration for performance.
 func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
-	var binlogFormat, innodbAutoincLockMode, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions string
+	var binlogFormat, innodbAutoincLockMode, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema string
 	err := r.DB.QueryRowContext(ctx,
 		`SELECT @@global.binlog_format,
 		@@global.innodb_autoinc_lock_mode,
 		@@global.binlog_row_image,
 		@@global.log_bin,
 		@@global.log_slave_updates,
-		@@global.binlog_row_value_options`).Scan(
+		@@global.binlog_row_value_options,
+		@@global.performance_schema`).Scan(
 		&binlogFormat,
 		&innodbAutoincLockMode,
 		&binlogRowImage,
 		&logBin,
 		&logSlaveUpdates,
 		&binlogRowValueOptions,
+		&performanceSchema,
 	)
 	if err != nil {
 		return err
@@ -63,6 +65,13 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		// This is a hard requirement unless we enhance this to confirm
 		//  its not receiving any updates via the replication stream.
 		return errors.New("log_slave_updates must be enabled")
+	}
+	if performanceSchema != "1" {
+		// Force-kill (the default) uses performance_schema to find and kill
+		// locking transactions via metadata_locks and threads tables. We could technically
+		// support performance_schema = 0 for other cases, but to simplify testing and future
+		// use, we just require it.
+		return errors.New("performance_schema must be enabled")
 	}
 	return nil
 }
