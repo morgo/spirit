@@ -10,49 +10,71 @@ func TestParseEnumSetValues(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected []string
+		wantErr  bool
 	}{
 		// Basic cases.
-		{"enum('a','b','c')", []string{"a", "b", "c"}},
-		{"set('read','write','execute')", []string{"read", "write", "execute"}},
-		{"enum('active','inactive','pending')", []string{"active", "inactive", "pending"}},
+		{"enum('a','b','c')", []string{"a", "b", "c"}, false},
+		{"set('read','write','execute')", []string{"read", "write", "execute"}, false},
+		{"enum('active','inactive','pending')", []string{"active", "inactive", "pending"}, false},
 
-		// Non-enum/set types.
-		{"int", nil},
-		{"varchar(255)", nil},
+		// Non-enum/set types return an error (fail-closed).
+		{"int", nil, true},
+		{"varchar(255)", nil, true},
 
-		// Empty element list.
-		{"enum()", nil},
+		// Empty element list: valid syntax, no elements, no error.
+		{"enum()", nil, false},
 
 		// Values containing commas.
-		{"enum('a,b','c')", []string{"a,b", "c"}},
-		{"enum('one','two,three','four')", []string{"one", "two,three", "four"}},
+		{"enum('a,b','c')", []string{"a,b", "c"}, false},
+		{"enum('one','two,three','four')", []string{"one", "two,three", "four"}, false},
 
 		// Values containing escaped (doubled) single quotes.
-		{"enum('it''s','ok')", []string{"it's", "ok"}},
-		{"enum('he said ''hi''','bye')", []string{"he said 'hi'", "bye"}},
+		{"enum('it''s','ok')", []string{"it's", "ok"}, false},
+		{"enum('he said ''hi''','bye')", []string{"he said 'hi'", "bye"}, false},
 
 		// Commas and escaped quotes combined.
-		{"enum('a,b''c','d')", []string{"a,b'c", "d"}},
+		{"enum('a,b''c','d')", []string{"a,b'c", "d"}, false},
 
 		// Single element.
-		{"enum('only')", []string{"only"}},
+		{"enum('only')", []string{"only"}, false},
 
 		// Spaces between elements (MySQL SHOW CREATE TABLE may include them).
-		{"enum('a', 'b', 'c')", []string{"a", "b", "c"}},
+		{"enum('a', 'b', 'c')", []string{"a", "b", "c"}, false},
 
 		// Case-insensitive prefix.
-		{"ENUM('X','Y')", []string{"X", "Y"}},
-		{"SET('r','w')", []string{"r", "w"}},
+		{"ENUM('X','Y')", []string{"X", "Y"}, false},
+		{"SET('r','w')", []string{"r", "w"}, false},
 
 		// Empty string as a valid ENUM value.
-		{"enum('','a','b')", []string{"", "a", "b"}},
+		{"enum('','a','b')", []string{"", "a", "b"}, false},
+
+		// Malformed inputs: fail-closed (return error, not partial results).
+		{"enum(a,'b','c')", nil, true},                           // unquoted value
+		{"enum('a','b',3)", nil, true},                           // numeric literal without quotes
+		{"enum('a'  x  'b')", nil, true},                         // junk between elements
+		{"enum('a','b", nil, true},                               // unterminated quote (missing closing paren clips it)
+		{"enum('a', 'b', 'c',)", []string{"a", "b", "c"}, false}, // trailing comma is fine
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := parseEnumSetValues(tt.input)
-			assert.Equal(t, tt.expected, result)
+			result, err := parseEnumSetValues(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, result)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
+			}
 		})
 	}
+}
+
+func TestParseSQLQuotedListUnterminated(t *testing.T) {
+	// A quoted string that is never closed should return an error.
+	result, err := parseSQLQuotedList("'abc")
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "unterminated")
 }
 
 func TestIsPrefix(t *testing.T) {

@@ -45,7 +45,10 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			return fmt.Errorf("unable to validate ENUM reorder for column %q in buffered mode: existing column type not found in table metadata", col.LookupName)
 		}
 
-		existingElems := parseEnumSetValues(existingType)
+		existingElems, err := parseEnumSetValues(existingType)
+		if err != nil {
+			return fmt.Errorf("unable to validate ENUM reorder for column %q in buffered mode: %w", col.LookupName, err)
+		}
 		if len(existingElems) == 0 {
 			continue
 		}

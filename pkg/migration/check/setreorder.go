@@ -43,7 +43,10 @@ func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 			return fmt.Errorf("unable to validate SET reorder for column %q: existing column type not found in TableInfo", col.LookupName)
 		}
 
-		existingElems := parseEnumSetValues(existingType)
+		existingElems, err := parseEnumSetValues(existingType)
+		if err != nil {
+			return fmt.Errorf("unable to validate SET reorder for column %q: %w", col.LookupName, err)
+		}
 		if len(existingElems) == 0 {
 			continue
 		}

@@ -1,6 +1,7 @@
 package check
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -12,24 +13,27 @@ import (
 //
 // It uses a small state machine to correctly handle values containing
 // commas and escaped (doubled) single quotes within enum/set elements.
-func parseEnumSetValues(mysqlType string) []string {
+//
+// It is fail-closed: any unexpected characters or malformed structure returns
+// an error so that callers (safety checks) are never silently bypassed.
+func parseEnumSetValues(mysqlType string) ([]string, error) {
 	lower := strings.ToLower(mysqlType)
 	if !strings.HasPrefix(lower, "enum(") && !strings.HasPrefix(lower, "set(") {
-		return nil
+		return nil, fmt.Errorf("not an enum/set type: %q", mysqlType)
 	}
 
 	start := strings.IndexByte(mysqlType, '(')
 	if start < 0 {
-		return nil
+		return nil, fmt.Errorf("missing opening parenthesis in type: %q", mysqlType)
 	}
 	end := strings.LastIndexByte(mysqlType, ')')
 	if end <= start {
-		return nil
+		return nil, fmt.Errorf("missing closing parenthesis in type: %q", mysqlType)
 	}
 
 	inner := mysqlType[start+1 : end]
 	if len(inner) == 0 {
-		return nil
+		return nil, nil // e.g. enum() — valid but empty
 	}
 
 	return parseSQLQuotedList(inner)
@@ -37,7 +41,10 @@ func parseEnumSetValues(mysqlType string) []string {
 
 // parseSQLQuotedList parses a comma-separated list of single-quoted SQL
 // strings, correctly handling embedded commas and escaped (doubled) quotes.
-func parseSQLQuotedList(s string) []string {
+//
+// It is fail-closed: any unexpected character outside of quotes causes the
+// parser to return an error rather than silently producing a partial result.
+func parseSQLQuotedList(s string) ([]string, error) {
 	var elems []string
 	i := 0
 	n := len(s)
@@ -52,14 +59,13 @@ func parseSQLQuotedList(s string) []string {
 		}
 
 		if s[i] != '\'' {
-			// Unexpected character outside a quote; skip it.
-			i++
-			continue
+			return nil, fmt.Errorf("unexpected character %q at position %d in quoted list %q", s[i], i, s)
 		}
 
 		// Opening quote found; collect the value.
 		i++ // skip opening quote
 		var buf strings.Builder
+		closed := false
 		for i < n {
 			if s[i] == '\'' {
 				// Check for doubled quote (escape sequence).
@@ -70,18 +76,19 @@ func parseSQLQuotedList(s string) []string {
 				}
 				// Closing quote.
 				i++
+				closed = true
 				break
 			}
 			buf.WriteByte(s[i])
 			i++
 		}
+		if !closed {
+			return nil, fmt.Errorf("unterminated quoted string in quoted list %q", s)
+		}
 		elems = append(elems, buf.String())
 	}
 
-	if len(elems) == 0 {
-		return nil
-	}
-	return elems
+	return elems, nil
 }
 
 // isPrefix returns true if oldElems is a prefix of newElems.
