@@ -168,14 +168,6 @@ func (m *MetadataLock) CloseDBConnection(logger *slog.Logger) error {
 	return nil
 }
 
-func (m *MetadataLock) GetLockName() string {
-	// For backwards compatibility, return the first lock name
-	if len(m.lockNames) > 0 {
-		return m.lockNames[0]
-	}
-	return ""
-}
-
 func computeLockName(table *table.TableInfo) string {
 	schemaNamePart := table.SchemaName
 	if len(schemaNamePart) > 20 {
