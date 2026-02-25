@@ -52,21 +52,6 @@ func Enable(names ...string) error {
 	return nil
 }
 
-// Enabled returns whether a specific linter is enabled.
-// Returns an error if the linter is not found.
-func Enabled(name string) bool {
-	lock.RLock()
-	defer lock.RUnlock()
-
-	// if the linter is not found, just return false
-	l, ok := linters[name]
-	if !ok {
-		return false
-	}
-
-	return l.enabled
-}
-
 // Disable disables specific linters by name.
 // Returns an error if the linter is not found.
 func Disable(names ...string) error {
