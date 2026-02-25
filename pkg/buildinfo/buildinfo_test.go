@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGetDefaults(t *testing.T) {
+func TestBuildInfoDefaultsWithoutLdflags(t *testing.T) {
 	// Reset cached state for testing
 	once = sync.Once{}
 	ldflagsVersion = ""
@@ -22,7 +22,7 @@ func TestGetDefaults(t *testing.T) {
 	assert.Equal(t, "dev", info.Version)
 }
 
-func TestSetOverridesDefaults(t *testing.T) {
+func TestBuildInfoLdflagsOverridesVCS(t *testing.T) {
 	// Reset cached state for testing
 	once = sync.Once{}
 	ldflagsVersion = ""
@@ -38,7 +38,7 @@ func TestSetOverridesDefaults(t *testing.T) {
 	assert.NotEmpty(t, info.GoVer, "GoVer from ReadBuildInfo should still be set")
 }
 
-func TestPartialOverride(t *testing.T) {
+func TestBuildInfoPartialLdflagsWithVCSFallback(t *testing.T) {
 	// Reset cached state for testing
 	once = sync.Once{}
 	ldflagsVersion = ""
