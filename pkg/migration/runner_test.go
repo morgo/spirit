@@ -2968,8 +2968,8 @@ func TestPasswordMasking(t *testing.T) {
 //
 // This test only works correctly in unbuffered mode because of the way
 // ENUM values are represented in the binlog. We test *both* unbuffered and buffered modes
-// though and we accept a pre-flight failure as a "pass", since its not corruption.
-// i.e. its OK to refuse changes you can't handle.
+// though and we accept a pre-flight failure as a "pass", since it's not corruption.
+// i.e. it's OK to refuse changes you can't handle.
 //
 // The unbuffered path uses
 // REPLACE INTO ... SELECT (SQL-level string operations) which handles
