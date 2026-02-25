@@ -337,13 +337,14 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 			_ = db.Close()
 		}
 
-		// TLS failed, try without TLS by explicitly removing TLS parameters
+		// TLS failed, try without TLS by rebuilding the DSN with TLS disabled.
+		// We must use newDSN (not createFallbackDSN on the raw inputDSN) so that
+		// all critical session variables (sql_mode, time_zone, charset, rejectReadOnly, etc.)
+		// are included in the fallback connection.
 		configCopy := *config
 		configCopy.TLSMode = "DISABLED"
 
-		// For fallback, we need to strip any existing TLS parameters from the DSN
-		// because the TLS parameter preservation logic will otherwise keep them
-		fallbackDSN, err := createFallbackDSN(inputDSN)
+		fallbackDSN, err := newDSN(inputDSN, &configCopy)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create fallback DSN for %s connection: %w", connectionType, err)
 		}
@@ -462,31 +463,6 @@ func addTLSParametersToDSN(dsn string, config *DBConfig) (string, error) {
 		separator = "&"
 	}
 	return fmt.Sprintf("%s%stls=%s", dsn, separator, url.QueryEscape(tlsParam)), nil
-}
-
-// createFallbackDSN creates a DSN with all TLS parameters removed for PREFERRED mode fallback
-func createFallbackDSN(inputDSN string) (string, error) {
-	cfg, err := mysql.ParseDSN(inputDSN)
-	if err != nil {
-		// Return original DSN for graceful degradation when parsing fails
-		return inputDSN, nil //nolint:nilerr // Intentional graceful degradation
-	}
-
-	// Remove TLS configuration - both from TLSConfig field and params
-	cfg.TLSConfig = ""
-
-	// Remove tls parameter from params if present (case-insensitive)
-	if cfg.Params != nil {
-		// Remove 'tls' parameter in any case variation
-		for key := range cfg.Params {
-			if strings.ToLower(key) == "tls" {
-				delete(cfg.Params, key)
-			}
-		}
-	}
-
-	// Format the DSN back without TLS parameters
-	return cfg.FormatDSN(), nil
 }
 
 // GetTLSConfigForBinlog creates a TLS config for binary log connections
