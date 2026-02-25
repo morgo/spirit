@@ -21,3 +21,5 @@ lint-error.logs
 
 .goosehints
 .goose
+
+bin/
