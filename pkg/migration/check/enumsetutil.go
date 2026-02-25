@@ -49,43 +49,69 @@ func parseSQLQuotedList(s string) ([]string, error) {
 	i := 0
 	n := len(s)
 
-	for i < n {
-		// Skip whitespace and commas between elements.
-		for i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == ',') {
+	// expectValue tracks whether we are currently expecting the start of a
+	// quoted value (true) or a delimiter/completion after a value (false).
+	expectValue := true
+
+	for {
+		// Skip whitespace outside of values.
+		for i < n && (s[i] == ' ' || s[i] == '\t') {
 			i++
 		}
-		if i >= n {
-			break
-		}
 
-		if s[i] != '\'' {
-			return nil, fmt.Errorf("unexpected character %q at position %d in quoted list %q", s[i], i, s)
-		}
-
-		// Opening quote found; collect the value.
-		i++ // skip opening quote
-		var buf strings.Builder
-		closed := false
-		for i < n {
-			if s[i] == '\'' {
-				// Check for doubled quote (escape sequence).
-				if i+1 < n && s[i+1] == '\'' {
-					buf.WriteByte('\'')
-					i += 2
-					continue
+		if expectValue {
+			// We are expecting the start of a quoted value.
+			if i >= n {
+				// Empty input is handled by the caller; reaching EOF here
+				// indicates a trailing delimiter or otherwise malformed input.
+				if len(elems) == 0 {
+					return nil, fmt.Errorf("empty quoted list %q", s)
 				}
-				// Closing quote.
+				return nil, fmt.Errorf("trailing delimiter in quoted list %q", s)
+			}
+			if s[i] != '\'' {
+				return nil, fmt.Errorf("unexpected character %q at position %d in quoted list %q", s[i], i, s)
+			}
+
+			// Opening quote found; collect the value.
+			i++ // skip opening quote
+			var buf strings.Builder
+			closed := false
+			for i < n {
+				if s[i] == '\'' {
+					// Check for doubled quote (escape sequence).
+					if i+1 < n && s[i+1] == '\'' {
+						buf.WriteByte('\'')
+						i += 2
+						continue
+					}
+					// Closing quote.
+					i++
+					closed = true
+					break
+				}
+				buf.WriteByte(s[i])
 				i++
-				closed = true
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated quoted string in quoted list %q", s)
+			}
+			elems = append(elems, buf.String())
+			// Next we expect either a comma delimiter or the end of the list.
+			expectValue = false
+		} else {
+			// We have just parsed a value; now expect either a comma or EOF.
+			if i >= n {
+				// No more input; successfully parsed all elements.
 				break
 			}
-			buf.WriteByte(s[i])
+			if s[i] != ',' {
+				return nil, fmt.Errorf("unexpected character %q at position %d in quoted list %q", s[i], i, s)
+			}
+			// Consume the comma and loop back to parse the next value.
 			i++
+			expectValue = true
 		}
-		if !closed {
-			return nil, fmt.Errorf("unterminated quoted string in quoted list %q", s)
-		}
-		elems = append(elems, buf.String())
 	}
 
 	return elems, nil

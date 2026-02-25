@@ -49,11 +49,11 @@ func TestParseEnumSetValues(t *testing.T) {
 		{"enum('','a','b')", []string{"", "a", "b"}, false},
 
 		// Malformed inputs: fail-closed (return error, not partial results).
-		{"enum(a,'b','c')", nil, true},                           // unquoted value
-		{"enum('a','b',3)", nil, true},                           // numeric literal without quotes
-		{"enum('a'  x  'b')", nil, true},                         // junk between elements
-		{"enum('a','b", nil, true},                               // unterminated quote (missing closing paren clips it)
-		{"enum('a', 'b', 'c',)", []string{"a", "b", "c"}, false}, // trailing comma is fine
+		{"enum(a,'b','c')", nil, true},      // unquoted value
+		{"enum('a','b',3)", nil, true},      // numeric literal without quotes
+		{"enum('a'  x  'b')", nil, true},    // junk between elements
+		{"enum('a','b", nil, true},          // unterminated quote (missing closing paren clips it)
+		{"enum('a', 'b', 'c',)", nil, true}, // trailing comma is malformed
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
