@@ -230,19 +230,6 @@ func HasWarnings(violations []Violation) bool {
 	return false
 }
 
-// FilterBySeverity returns only violations with the specified severity.
-func FilterBySeverity(violations []Violation, severity Severity) []Violation {
-	var filtered []Violation
-
-	for _, v := range violations {
-		if v.Severity == severity {
-			filtered = append(filtered, v)
-		}
-	}
-
-	return filtered
-}
-
 // FilterByLinter returns only violations from the specified linter.
 func FilterByLinter(violations []Violation, linterName string) []Violation {
 	var filtered []Violation
