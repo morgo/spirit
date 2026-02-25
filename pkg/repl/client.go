@@ -370,7 +370,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	if c.flushedPos.Name == "" {
 		c.flushedPos, err = c.getCurrentBinlogPosition(ctx)
 		if err != nil {
-			return errors.New("failed to get binlog position, check binary is enabled")
+			return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
 		}
 	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
