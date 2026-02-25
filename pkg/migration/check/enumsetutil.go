@@ -9,6 +9,9 @@ import (
 
 // parseEnumSetValues extracts the element values from a MySQL type string
 // like "enum('a','b','c')" or "set('x','y','z')".
+//
+// It uses a small state machine to correctly handle values containing
+// commas and escaped (doubled) single quotes within enum/set elements.
 func parseEnumSetValues(mysqlType string) []string {
 	lower := strings.ToLower(mysqlType)
 	if !strings.HasPrefix(lower, "enum(") && !strings.HasPrefix(lower, "set(") {
@@ -29,13 +32,54 @@ func parseEnumSetValues(mysqlType string) []string {
 		return nil
 	}
 
+	return parseSQLQuotedList(inner)
+}
+
+// parseSQLQuotedList parses a comma-separated list of single-quoted SQL
+// strings, correctly handling embedded commas and escaped (doubled) quotes.
+func parseSQLQuotedList(s string) []string {
 	var elems []string
-	for _, part := range strings.Split(inner, ",") {
-		part = strings.TrimSpace(part)
-		part = strings.Trim(part, "'")
-		if part != "" {
-			elems = append(elems, part)
+	i := 0
+	n := len(s)
+
+	for i < n {
+		// Skip whitespace and commas between elements.
+		for i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == ',') {
+			i++
 		}
+		if i >= n {
+			break
+		}
+
+		if s[i] != '\'' {
+			// Unexpected character outside a quote; skip it.
+			i++
+			continue
+		}
+
+		// Opening quote found; collect the value.
+		i++ // skip opening quote
+		var buf strings.Builder
+		for i < n {
+			if s[i] == '\'' {
+				// Check for doubled quote (escape sequence).
+				if i+1 < n && s[i+1] == '\'' {
+					buf.WriteByte('\'')
+					i += 2
+					continue
+				}
+				// Closing quote.
+				i++
+				break
+			}
+			buf.WriteByte(s[i])
+			i++
+		}
+		elems = append(elems, buf.String())
+	}
+
+	if len(elems) == 0 {
+		return nil
 	}
 	return elems
 }

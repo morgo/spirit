@@ -11,12 +11,41 @@ func TestParseEnumSetValues(t *testing.T) {
 		input    string
 		expected []string
 	}{
+		// Basic cases.
 		{"enum('a','b','c')", []string{"a", "b", "c"}},
 		{"set('read','write','execute')", []string{"read", "write", "execute"}},
 		{"enum('active','inactive','pending')", []string{"active", "inactive", "pending"}},
+
+		// Non-enum/set types.
 		{"int", nil},
 		{"varchar(255)", nil},
+
+		// Empty element list.
 		{"enum()", nil},
+
+		// Values containing commas.
+		{"enum('a,b','c')", []string{"a,b", "c"}},
+		{"enum('one','two,three','four')", []string{"one", "two,three", "four"}},
+
+		// Values containing escaped (doubled) single quotes.
+		{"enum('it''s','ok')", []string{"it's", "ok"}},
+		{"enum('he said ''hi''','bye')", []string{"he said 'hi'", "bye"}},
+
+		// Commas and escaped quotes combined.
+		{"enum('a,b''c','d')", []string{"a,b'c", "d"}},
+
+		// Single element.
+		{"enum('only')", []string{"only"}},
+
+		// Spaces between elements (MySQL SHOW CREATE TABLE may include them).
+		{"enum('a', 'b', 'c')", []string{"a", "b", "c"}},
+
+		// Case-insensitive prefix.
+		{"ENUM('X','Y')", []string{"X", "Y"}},
+		{"SET('r','w')", []string{"r", "w"}},
+
+		// Empty string as a valid ENUM value.
+		{"enum('','a','b')", []string{"", "a", "b"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
