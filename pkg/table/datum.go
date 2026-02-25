@@ -194,7 +194,16 @@ func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 		}
 	}
 
-	return NewDatum(value, tp)
+	d, err := NewDatum(value, tp)
+	if err != nil {
+		return Datum{}, err
+	}
+	// Ensure binary types are always hex-encoded, even when the input value
+	// is not []byte (e.g. a string). This is consistent with the []byte path above.
+	if tp == binaryType {
+		d.forceHexEncode = true
+	}
+	return d, nil
 }
 
 func NewNilDatum(tp datumTp) Datum {

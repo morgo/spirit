@@ -133,7 +133,7 @@ func jsonStrings2Datums(ti *TableInfo, keys []string, vals []string) ([]Datum, e
 	for i, str := range vals {
 		tp := ti.datumTp(keys[i])
 		// datumValFromString handles hex decoding for binary types:
-		// if tp is binaryType/unknownType and the string starts with "0x",
+		// if tp is binaryType and the string starts with "0x",
 		// it decodes the hex back to raw binary bytes. This is needed because
 		// checkpoint JSON serialization hex-encodes binary values via Datum.String().
 		sVal, err := datumValFromString(str, tp)
