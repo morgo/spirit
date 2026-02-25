@@ -40,7 +40,7 @@ func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 
 		existingType, ok := r.Table.GetColumnMySQLType(col.LookupName)
 		if !ok {
-			continue
+			return fmt.Errorf("unable to validate SET reorder for column %q: existing column type not found in TableInfo", col.LookupName)
 		}
 
 		existingElems := parseEnumSetValues(existingType)
