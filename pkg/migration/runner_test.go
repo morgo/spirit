@@ -25,6 +25,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// waitForStatus polls the runner's status until it reaches at least the target
+// state. It waits for status >= target (not ==) so that it is resilient to races
+// where the status advances past the target before the poll observes it.
+func waitForStatus(t *testing.T, m *Runner, target status.State) {
+	t.Helper()
+	timeout := time.After(30 * time.Second)
+	for m.status.Get() < target {
+		select {
+		case <-timeout:
+			t.Fatalf("timeout waiting for status >= %s, current status: %s", target, m.status.Get())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestVarcharNonBinaryComparable(t *testing.T) {
 	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS nonbinarycompatt1, _nonbinarycompatt1_new`)
@@ -2268,9 +2284,7 @@ func TestDeferCutOver(t *testing.T) {
 	})
 
 	// While it's waiting, check the Progress.
-	for m.status.Get() != status.WaitingOnSentinelTable {
-		time.Sleep(100 * time.Millisecond)
-	}
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
 	wg.Wait()
 
 	sql := fmt.Sprintf(
@@ -2417,24 +2431,12 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	// Wait for WaitingOnSentinelTable status with timeout
-	timeout := time.After(30 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for m.status.Get() != status.WaitingOnSentinelTable {
-		select {
-		case <-ticker.C:
-			continue
-		case <-timeout:
-			t.Fatal("timeout waiting for WaitingOnSentinelTable status")
-		}
-	}
-	assert.NoError(t, err)
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
 
 	binlogPos := m.replClient.GetBinlogApplyPosition()
 	for range 4 {
 		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
-		time.Sleep(1 * time.Second)
+		assert.NoError(t, m.replClient.BlockWait(t.Context()))
 		assert.NoError(t, m.replClient.Flush(t.Context()))
 		newBinlogPos := m.replClient.GetBinlogApplyPosition()
 		assert.Equal(t, 1, newBinlogPos.Compare(binlogPos))
@@ -2687,8 +2689,9 @@ func TestPreventConcurrentRuns(t *testing.T) {
 		}
 	})
 
-	// While it's waiting, start another run and confirm it fails.
-	time.Sleep(1 * time.Second)
+	// Wait until m has reached the sentinel wait phase before starting m2.
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
+
 	m2, err := NewRunner(&Migration{
 		Host:                 cfg.Addr,
 		Username:             cfg.User,
@@ -2895,9 +2898,7 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	}()
 
 	// Wait until the copy phase has started.
-	for m.status.Get() != status.CopyRows {
-		time.Sleep(1 * time.Millisecond)
-	}
+	waitForStatus(t, m, status.CopyRows)
 
 	// Now modify the table
 	// instant DDL (applies quickly and will cause the migration to cancel)
