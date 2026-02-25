@@ -112,8 +112,8 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 		// Use originalKey to preserve typed values for watermark comparison.
 		// In bufferedMap, we use the low-watermark check to defer flushing keys that are
 		// still being copied (KeyBelowLowWatermark returns true), so this condition skips them.
-		if !underLock && s.watermarkOptimizationEnabled() && s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
-			s.c.logger.Debug("key below watermark", "key", change.originalKey[0])
+		if !underLock && s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
 		}
