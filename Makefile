@@ -1,5 +1,11 @@
 # Makefile for Spirit - MySQL table migration tool
 
+# Build metadata injected via -ldflags
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
 .PHONY: help setup-hooks lint lint-fix test build clean
 
 help: ## Show this help message
@@ -23,9 +29,9 @@ test: ## Run all tests
 	@echo "Running tests..."
 	@go test ./... -v
 
-build: ## Build the spirit binary
-	@echo "Building spirit..."
-	@go build -o bin/spirit ./cmd/spirit
+build: ## Build the spirit binary (with version info)
+	@echo "Building spirit $(VERSION)..."
+	@go build -ldflags "$(LDFLAGS)" -o bin/spirit ./cmd/spirit
 
 clean: ## Clean build artifacts
 	@echo "Cleaning..."

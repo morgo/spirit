@@ -12,6 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -121,7 +122,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
 	r.startTime = time.Now()
+	bi := buildinfo.Get()
 	r.logger.Info("Starting spirit migration",
+		"version", bi.Version,
+		"commit", bi.Commit,
+		"build-date", bi.Date,
+		"go", bi.GoVer,
+		"dirty", bi.Modified,
 		"concurrency", r.migration.Threads,
 		"target-chunk-size", r.migration.TargetChunkTime,
 	)
