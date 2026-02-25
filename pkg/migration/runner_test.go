@@ -2962,3 +2962,259 @@ func TestPasswordMasking(t *testing.T) {
 		})
 	}
 }
+
+// TestEnumReorder tests that reordering ENUM values in an ALTER TABLE
+// produces correct data after migration.
+//
+// This test only works correctly in unbuffered mode because of the way
+// ENUM values are represented in the binlog. We test *both* unbuffered and buffered modes
+// though and we accept a pre-flight failure as a "pass", since its not corruption.
+// i.e. its OK to refuse changes you can't handle.
+//
+// The unbuffered path uses
+// REPLACE INTO ... SELECT (SQL-level string operations) which handles
+// ENUM reordering correctly. The buffered path uses UpsertRows with
+// raw binlog values, where ENUM values are represented as int64 ordinals.
+// If the ENUM is reordered, the ordinals map to different string values
+// in the target table, causing data corruption.
+//
+// This test exercises both the copier path (initial data) and the binlog
+// replay path (concurrent DML during migration) to verify correctness.
+func TestEnumReorder(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) {
+		testEnumReorder(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		if testutils.IsMinimalRBRTestRunner(t) {
+			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+		}
+		testEnumReorder(t, true)
+	})
+}
+
+func testEnumReorder(t *testing.T, enableBuffered bool) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS enumreorder, _enumreorder_new, _enumreorder_chkpnt`)
+	testutils.RunSQL(t, `CREATE TABLE enumreorder (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending') NOT NULL
+	)`)
+
+	// Insert enough initial data so the copy phase takes a measurable amount of time,
+	// giving the concurrent DML goroutine a window to inject changes that will be
+	// captured by the binlog subscription and replayed via the flush path.
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) VALUES ('active'), ('inactive'), ('pending')`)
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 6
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 12
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 24
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 48
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 96
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 192
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 384
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 768
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 1536
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 3072
+	testutils.RunSQL(t, `INSERT INTO enumreorder (status) SELECT status FROM enumreorder`) // 6144
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	// Use NewRunner so we can access the runner's status to synchronize
+	// concurrent DML injection during the copy phase.
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1,
+		TargetChunkTime: 100 * time.Millisecond,
+		Table:           "enumreorder",
+		Alter:           "MODIFY COLUMN status ENUM('pending', 'active', 'inactive') NOT NULL",
+		Buffered:        enableBuffered,
+	})
+	require.NoError(t, err)
+
+	// Open a separate DB connection for DML that won't interfere with test assertions.
+	// Spirit's force-kill mechanism may kill DML connections during the checksum/lock
+	// phase, so we must not use testutils.RunSQL (which asserts no error).
+	dmlDB, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dmlDB)
+
+	// Run concurrent DML in a goroutine to exercise the binlog replay path.
+	// These inserts happen while the copier is running, so they'll be captured
+	// by the binlog subscription and flushed via deltaMap (unbuffered) or
+	// bufferedMap (buffered).
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		// Wait until we're in the copy phase
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		// Insert rows with each ENUM value during the copy phase.
+		// These will be picked up by the binlog and replayed.
+		// We ignore errors because Spirit may kill our connection during
+		// the checksum/lock phase (force-kill of blocking transactions).
+		for i := 0; i < 50; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = dmlDB.ExecContext(ctx, `INSERT INTO enumreorder (status) VALUES ('active')`)
+			_, _ = dmlDB.ExecContext(ctx, `INSERT INTO enumreorder (status) VALUES ('inactive')`)
+			_, _ = dmlDB.ExecContext(ctx, `INSERT INTO enumreorder (status) VALUES ('pending')`)
+			// Also update some existing rows to exercise the update path
+			_, _ = dmlDB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumreorder SET status = 'active' WHERE id = %d`, i*3+1))
+			_, _ = dmlDB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumreorder SET status = 'inactive' WHERE id = %d`, i*3+2))
+			_, _ = dmlDB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumreorder SET status = 'pending' WHERE id = %d`, i*3+3))
+		}
+	}()
+
+	// Run the migration. For unbuffered mode this should succeed with correct data.
+	// For buffered mode, the preflight check should refuse the ENUM reorder
+	// because the binlog replay path uses integer ordinals that would cause corruption.
+	migrationErr := m.Run(ctx)
+	cancel()
+	<-dmlDone
+	assert.NoError(t, m.Close())
+
+	if enableBuffered {
+		// Buffered mode: the preflight check should refuse this migration because
+		// ENUM reordering is unsafe when the binlog replay path uses integer ordinals.
+		// Accepting this preflight error as a "pass" — it's not corruption, it's
+		// Spirit correctly refusing a change it can't handle safely.
+		require.Error(t, migrationErr)
+		assert.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
+		return
+	}
+
+	// Unbuffered mode: migration should succeed and data should be correct.
+	require.NoError(t, migrationErr)
+
+	// Verify that every row has a valid ENUM string value and that
+	// no ordinal-based corruption occurred.
+	var activeCount, inactiveCount, pendingCount int
+	err = db.QueryRowContext(t.Context(), `SELECT
+			SUM(status = 'active'),
+			SUM(status = 'inactive'),
+			SUM(status = 'pending')
+			FROM enumreorder`).Scan(&activeCount, &inactiveCount, &pendingCount)
+	require.NoError(t, err)
+
+	var totalCount int
+	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM enumreorder`).Scan(&totalCount)
+	require.NoError(t, err)
+
+	// Every row must map to one of the three valid ENUM string values.
+	assert.Equal(t, totalCount, activeCount+inactiveCount+pendingCount,
+		"all rows should have a valid ENUM value (no empty strings from ordinal corruption)")
+	assert.Greater(t, activeCount, 0, "should have 'active' rows")
+	assert.Greater(t, inactiveCount, 0, "should have 'inactive' rows")
+	assert.Greater(t, pendingCount, 0, "should have 'pending' rows")
+}
+
+// TestSetReorder mirrors TestEnumReorder but for SET columns.
+// SET values are stored as bitmasks in the binlog, so reordering has the same
+// corruption risk as ENUM in buffered mode.
+func TestSetReorder(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) {
+		testSetReorder(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		if testutils.IsMinimalRBRTestRunner(t) {
+			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+		}
+		testSetReorder(t, true)
+	})
+}
+
+func testSetReorder(t *testing.T, enableBuffered bool) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS setreorder, _setreorder_new, _setreorder_chkpnt`)
+	testutils.RunSQL(t, `CREATE TABLE setreorder (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		perms SET('read', 'write', 'execute') NOT NULL
+	)`)
+
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) VALUES ('read'), ('write'), ('execute'), ('read,write'), ('read,execute'), ('write,execute'), ('read,write,execute')`)
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 14
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 28
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 56
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 112
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 224
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 448
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 896
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 1792
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 3584
+	testutils.RunSQL(t, `INSERT INTO setreorder (perms) SELECT perms FROM setreorder`) // 7168
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	m, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1,
+		TargetChunkTime: 100 * time.Millisecond,
+		Table:           "setreorder",
+		Alter:           "MODIFY COLUMN perms SET('execute', 'read', 'write') NOT NULL",
+		Buffered:        enableBuffered,
+	})
+	require.NoError(t, err)
+
+	dmlDB, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dmlDB)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		for i := 0; i < 50; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = dmlDB.ExecContext(ctx, `INSERT INTO setreorder (perms) VALUES ('read')`)
+			_, _ = dmlDB.ExecContext(ctx, `INSERT INTO setreorder (perms) VALUES ('write,execute')`)
+			_, _ = dmlDB.ExecContext(ctx, `INSERT INTO setreorder (perms) VALUES ('read,write,execute')`)
+			_, _ = dmlDB.ExecContext(ctx, fmt.Sprintf(`UPDATE setreorder SET perms = 'read,write' WHERE id = %d`, i*3+1))
+			_, _ = dmlDB.ExecContext(ctx, fmt.Sprintf(`UPDATE setreorder SET perms = 'execute' WHERE id = %d`, i*3+2))
+			_, _ = dmlDB.ExecContext(ctx, fmt.Sprintf(`UPDATE setreorder SET perms = 'read,write,execute' WHERE id = %d`, i*3+3))
+		}
+	}()
+
+	migrationErr := m.Run(ctx)
+	cancel()
+	<-dmlDone
+	assert.NoError(t, m.Close())
+
+	// Both buffered and unbuffered modes should refuse SET reordering.
+	// In buffered mode, the binlog replay path uses bitmask ordinals that corrupt data.
+	// In unbuffered mode, the data is actually correct but MySQL outputs SET members
+	// in definition order, so the string representation changes (e.g. "read,execute"
+	// becomes "execute,read"), causing Spirit's CRC32 checksum to always fail.
+	require.Error(t, migrationErr)
+	assert.ErrorContains(t, migrationErr, "unsafe SET value reorder")
+}
