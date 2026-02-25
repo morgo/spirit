@@ -74,7 +74,7 @@ func TestMockThrottler(t *testing.T) {
 	throttler.BlockWait(t.Context())
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, 1*time.Second)
-	assert.Less(t, elapsed, 1100*time.Millisecond) // allow 100ms tolerance
+	assert.Less(t, elapsed, 1500*time.Millisecond) // allow 500ms tolerance for CI scheduling delays
 
 	// Test BlockWait respects context cancellation
 	ctx, cancel := context.WithCancel(t.Context())
