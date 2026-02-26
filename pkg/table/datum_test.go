@@ -316,12 +316,13 @@ func TestNewDatumFromValueBinaryString(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "0x000102ff", d.String())
 
-	// Test string that starts with 0x (should be hex encoded to avoid JSON corruption)
+	// Test string that starts with 0x - for VARCHAR (unknownType), this is just a normal string.
+	// It should NOT be hex-encoded because datumValFromString only hex-decodes for binaryType,
+	// so the JSON checkpoint round-trip is safe without encoding.
 	jsonLikeString := "0x123"
 	d, err = NewDatumFromValue(jsonLikeString, "VARCHAR(255)")
 	assert.NoError(t, err)
-	// This should be hex encoded because it starts with 0x
-	assert.Equal(t, "0x3078313233", d.String()) // hex of "0x123"
+	assert.Equal(t, "\"0x123\"", d.String())
 
 	// Test normal UTF-8 string
 	normalString := "hello"
