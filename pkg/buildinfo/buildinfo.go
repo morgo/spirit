@@ -10,8 +10,11 @@
 package buildinfo
 
 import (
+	"fmt"
 	"runtime/debug"
 	"sync"
+
+	"github.com/alecthomas/kong"
 )
 
 // Info holds the resolved build metadata.
@@ -96,4 +99,20 @@ func resolve() Info {
 	}
 
 	return info
+}
+
+// VersionFlag is a Kong-compatible flag that prints detailed build info and exits.
+type VersionFlag bool
+
+// BeforeReset is called by Kong before argument parsing when --version is passed.
+// It prints the full build info and exits with code 0.
+func (v VersionFlag) BeforeReset(app *kong.Kong, vars kong.Vars) error {
+	bi := Get()
+	_, _ = fmt.Fprintf(app.Stdout, "spirit %s\n", bi.Version)
+	_, _ = fmt.Fprintf(app.Stdout, "  commit:  %s\n", bi.Commit)
+	_, _ = fmt.Fprintf(app.Stdout, "  built:   %s\n", bi.Date)
+	_, _ = fmt.Fprintf(app.Stdout, "  go:      %s\n", bi.GoVer)
+	_, _ = fmt.Fprintf(app.Stdout, "  dirty:   %t\n", bi.Modified)
+	app.Exit(0)
+	return nil
 }
