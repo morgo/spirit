@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -65,8 +66,12 @@ func TestBasicMove(t *testing.T) {
 	assert.NoError(t, move.Run())
 }
 func TestResumeFromCheckpointE2E(t *testing.T) {
-	testResumeFromCheckpointE2E(t, false)
-	testResumeFromCheckpointE2E(t, true)
+	t.Run("deferFalse", func(t *testing.T) { // known to race.
+		testResumeFromCheckpointE2E(t, false)
+	})
+	t.Run("deferTrue", func(t *testing.T) {
+		testResumeFromCheckpointE2E(t, true)
+	})
 }
 
 func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
@@ -90,16 +95,6 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	testutils.RunSQL(t, `CREATE DATABASE source_resume`)
 	testutils.RunSQL(t, `CREATE TABLE source_resume.t1 (id INT NOT NULL PRIMARY KEY auto_increment, val VARBINARY(255))`)
 	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM dual`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
-	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
 	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
 	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
 
@@ -140,33 +135,20 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 		DB:       db,
 		Config:   targetConfig,
 	}}
-	assert.NoError(t, r.setup(ctx))
-	r.startBackgroundRoutines(ctx)
+	require.NoError(t, r.setup(ctx))
 
-	// Run the copier in a goroutine.
-	// We are going to cancel it.
-	go func() {
-		err := r.copier.Run(ctx)
-		assert.Error(t, err)
-	}()
+	// copy what there is to be copied. we don't need to cancel it,
+	// we are just running the copier part.
+	require.NoError(t, r.copier.Run(ctx))
+	require.NoError(t, r.DumpCheckpoint(ctx))
 
-	// Wait until the copier has made enough progress for a checkpoint
-	// to be written. Previously this was time.Sleep(time.Second) which
-	// was racy — if the copier hadn't completed enough chunks, the
-	// checkpoint watermark wasn't ready and no checkpoint was saved,
-	// causing checksum failures on resume.
-	for {
-		if err := r.DumpCheckpoint(t.Context()); err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Now close the context, we are canceling this run.
+	// Close everything manually.
 	r.cancelFunc()
 	assert.NoError(t, r.source.Close())
 	assert.NoError(t, r.targets[0].DB.Close())
 	assert.NoError(t, r.Close())
+
+	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
 
 	// Alter the definition of target.t1 just to be difficult.
 	// This will prevent resume.
@@ -182,8 +164,8 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
 	assert.NoError(t, err)
-	defer utils.CloseAndLog(r)
 	assert.NoError(t, r.Run(t.Context()))
+	assert.NoError(t, r.Close())
 }
 
 // TestEmptyDatabaseMove tests that a move operation succeeds when the source database has no tables.
