@@ -17,10 +17,11 @@ var (
 )
 
 var cli struct {
-	Migrate migration.Migration `cmd:"" help:"Run an online schema change on a table."`
-	Move    move.Move           `cmd:"" help:"Move tables between MySQL servers."`
-	Lint    lint.LintCmd        `cmd:"" help:"Lint an entire MySQL schema."`
-	Diff    lint.DiffCmd        `cmd:"" help:"Diff two MySQL schemas and lint the changes."`
+	Version buildinfo.VersionFlag `name:"version" short:"v" help:"Show version information and exit."`
+	Migrate migration.Migration   `cmd:"" help:"Run an online schema change on a table."`
+	Move    move.Move             `cmd:"" help:"Move tables between MySQL servers."`
+	Lint    lint.LintCmd          `cmd:"" help:"Lint an entire MySQL schema."`
+	Diff    lint.DiffCmd          `cmd:"" help:"Diff two MySQL schemas and lint the changes."`
 }
 
 func main() {
