@@ -798,9 +798,38 @@ func (r *Runner) Progress() status.Progress {
 	case status.Checksum:
 		summary = "Checksum Progress=" + r.checker.GetProgress()
 	}
+
+	// Get per-table progress if available (multi-table migrations)
+	var tables []status.TableProgress
+	if mc, ok := r.copyChunker.(interface{ PerTableProgress() []table.TableProgress }); ok {
+		for _, tp := range mc.PerTableProgress() {
+			tables = append(tables, status.TableProgress{
+				TableName:  tp.TableName,
+				RowsCopied: tp.RowsCopied,
+				RowsTotal:  tp.RowsTotal,
+				IsComplete: tp.IsComplete,
+			})
+		}
+	} else if r.copyChunker != nil {
+		// Single table migration - get progress from chunker
+		rowsCopied, _, rowsTotal := r.copyChunker.Progress()
+		tableTables := r.copyChunker.Tables()
+		tableName := ""
+		if len(tableTables) > 0 {
+			tableName = tableTables[0].TableName
+		}
+		tables = append(tables, status.TableProgress{
+			TableName:  tableName,
+			RowsCopied: rowsCopied,
+			RowsTotal:  rowsTotal,
+			IsComplete: r.copyChunker.IsRead(),
+		})
+	}
+
 	return status.Progress{
 		CurrentState: r.status.Get(),
 		Summary:      summary,
+		Tables:       tables,
 	}
 }
 
@@ -1015,6 +1044,10 @@ func (r *Runner) addsUniqueIndex() bool {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
+	// Check if replication client and copier are initialized (nil if called before setup completes)
+	if r.replClient == nil || r.copyChunker == nil {
+		return status.ErrWatermarkNotReady
+	}
 	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()

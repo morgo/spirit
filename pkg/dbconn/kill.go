@@ -111,7 +111,13 @@ func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Ta
 		// This is a fatal error because it means we cannot acquire the metadata lock,
 		// and it's unsafe to kill connections with explicit, non-transactional table locks.
 		for _, lock := range locks {
-			logger.Error("found explicit table lock", "lock", fmt.Sprintf("%#v", lock))
+			logger.Error("found explicit table lock",
+				"pid", lock.PID,
+				"lockType", lock.LockType,
+				"lockStatus", lock.LockStatus,
+				"objectSchema", lock.ObjectSchema,
+				"objectName", lock.ObjectName,
+			)
 		}
 		return ErrTableLockFound
 	}
@@ -187,8 +193,15 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 		); err != nil {
 			return nil, err
 		}
-
-		logger.Info("found locking transaction", "lock", fmt.Sprintf("%#v", &lock))
+		logger.Info("found locking transaction",
+			"pid", lock.PID,
+			"lockType", lock.LockType,
+			"lockStatus", lock.LockStatus,
+			"objectSchema", lock.ObjectSchema,
+			"objectName", lock.ObjectName,
+			"runningTime", lock.RunningTime,
+			"trxWeight", lock.TrxWeight,
+		)
 		locks = append(locks, lock)
 	}
 	if err := rows.Err(); err != nil {
