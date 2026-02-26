@@ -1015,6 +1015,10 @@ func (r *Runner) addsUniqueIndex() bool {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
+	// Check if replication client and copier are initialized (nil if called before setup completes)
+	if r.replClient == nil || r.copyChunker == nil {
+		return status.ErrWatermarkNotReady
+	}
 	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
