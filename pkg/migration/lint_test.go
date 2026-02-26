@@ -1,9 +1,12 @@
 package migration
 
 import (
+	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -387,7 +390,13 @@ func TestLintOnly(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify that the new table was NOT created (migration didn't run)
-	testutils.RunSQL(t, `SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '_t1lintonly_new'`)
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var tableCount int
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf(`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '_t1lintonly_new'`, cfg.DBName)).Scan(&tableCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, tableCount)
 
 	// Test with LintOnly=true and no violations
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1lintonly2, _t1lintonly2_new`)
@@ -414,7 +423,10 @@ func TestLintOnly(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify that the new table was NOT created (migration didn't run)
-	testutils.RunSQL(t, `SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '_t1lintonly2_new'`)
+	var tableCount2 int
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf(`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '_t1lintonly2_new'`, cfg.DBName)).Scan(&tableCount2)
+	require.NoError(t, err)
+	assert.Equal(t, 0, tableCount2)
 }
 
 // TestLintOnlyImpliesLint tests that --lint-only implies --lint behavior
@@ -438,4 +450,13 @@ func TestLintOnlyImpliesLint(t *testing.T) {
 	// Should succeed - linters run, no violations, exits without migrating
 	err = migration.Run()
 	assert.NoError(t, err)
+
+	// Verify that the table was NOT created (lint-only should not execute the statement)
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var tableCount int
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf(`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = 't1lintimply'`, cfg.DBName)).Scan(&tableCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, tableCount)
 }

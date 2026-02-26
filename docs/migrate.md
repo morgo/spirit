@@ -123,7 +123,7 @@ The host (and optional port) to use when connecting to MySQL. If no port is prov
 
 Spirit can optionally run lint checks before executing a migration. This uses the same linting engine as [`spirit lint`](lint.md) and [`spirit diff`](diff.md), but runs inline as part of the migration process.
 
-#### lint-only
+### lint-only
 
 - Type: Boolean
 - Default value: `false`
