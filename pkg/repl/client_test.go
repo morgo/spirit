@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -950,4 +951,304 @@ func TestNewServerIDRange(t *testing.T) {
 		id := NewServerID()
 		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 	}
+}
+
+// TestReplaceFlushUniqueKeyCollateralDamage is an end-to-end test that verifies
+// whether the REPLACE INTO ... SELECT pattern used by the delta map flush can
+// lose rows when a secondary unique key value migrates from one PK to another.
+//
+// The scenario:
+//  1. Source has id=1 name='a', id=2 name='b'. Both copied to _new.
+//  2. Source changes: id=1 name becomes 'c', new id=3 inserted with name='a'.
+//  3. The repl client discovers both changes via binlog.
+//  4. A flush is performed. The REPLACE for id=3 (name='a') may conflict with
+//     stale id=1 (name='a') in _new, potentially deleting id=1 as collateral damage.
+//  5. We verify whether _new ends up with all 3 rows.
+//
+// This test uses the real replication client (not manual HasChanged calls) so that
+// the binlog events flow through processRowsEvent naturally.
+//
+// This is not a regression test. This is just a sanity check for one of the known cases
+// that might be a little bit hairy.
+func TestReplaceFlushUniqueKeyCollateralDamage(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS uktest1, _uktest1_new")
+	testutils.RunSQL(t, `CREATE TABLE uktest1 (
+		id INT NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		UNIQUE KEY idx_name (name)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _uktest1_new (
+		id INT NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		UNIQUE KEY idx_name (name)
+	)`)
+
+	t1 := table.NewTableInfo(db, "test", "uktest1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_uktest1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	require.NoError(t, client.Run(t.Context()))
+	defer client.Close()
+
+	// Step 1: Insert initial rows into source BEFORE the repl client started
+	// tracking (simulates data that was copied by the copier).
+	// We insert directly into both tables to simulate a completed copy phase.
+	testutils.RunSQL(t, "INSERT INTO uktest1 (id, name) VALUES (1, 'a'), (2, 'b')")
+	testutils.RunSQL(t, "INSERT INTO _uktest1_new (id, name) VALUES (1, 'a'), (2, 'b')")
+
+	// Wait for the repl client to see the inserts into the source table.
+	require.NoError(t, client.BlockWait(t.Context()))
+	// Flush these initial changes so the delta map is clean.
+	require.NoError(t, client.Flush(t.Context()))
+
+	// Verify starting state: both tables have 2 rows, identical.
+	var count int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM uktest1").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _uktest1_new").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+
+	// Step 2: Modify source so unique key 'a' migrates from id=1 to a new id=3.
+	// This requires two transactions:
+	//   Txn A: UPDATE id=1 SET name='c' (frees up 'a')
+	//   Txn B: INSERT id=3 name='a' (reuses 'a')
+	// After this, source has: id=1 name='c', id=2 name='b', id=3 name='a'
+	// But _new still has stale: id=1 name='a', id=2 name='b'
+	testutils.RunSQL(t, "UPDATE uktest1 SET name = 'c' WHERE id = 1")
+	testutils.RunSQL(t, "INSERT INTO uktest1 (id, name) VALUES (3, 'a')")
+
+	// Step 3: Let the repl client discover both changes via binlog.
+	require.NoError(t, client.BlockWait(t.Context()))
+
+	// Both id=1 (UPDATE) and id=3 (INSERT) should be in the delta map.
+	assert.Equal(t, 2, client.GetDeltaLen(), "delta map should have 2 entries: id=1 (update) and id=3 (insert)")
+
+	// Step 4: Flush. This generates REPLACE statements that read from source
+	// and write to _new. The REPLACE for id=3 (name='a') may conflict with
+	// stale id=1 (name='a') in _new.
+	require.NoError(t, client.Flush(t.Context()))
+
+	// Step 5: Verify _new has all 3 rows.
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _uktest1_new").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count, "_new should have 3 rows: id=1 name='c', id=2 name='b', id=3 name='a'")
+
+	// Verify each row individually.
+	var name string
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest1_new WHERE id = 1").Scan(&name)
+	require.NoError(t, err, "id=1 must exist in _new")
+	assert.Equal(t, "c", name, "id=1 should have name='c'")
+
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest1_new WHERE id = 2").Scan(&name)
+	require.NoError(t, err, "id=2 must exist in _new")
+	assert.Equal(t, "b", name, "id=2 should have name='b'")
+
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest1_new WHERE id = 3").Scan(&name)
+	require.NoError(t, err, "id=3 must exist in _new")
+	assert.Equal(t, "a", name, "id=3 should have name='a'")
+}
+
+// TestReplaceFlushUniqueKeyCollateralDamageSmallBatch tests whether a small
+// targetBatchSize (=1) can cause data loss when two related changes end up in
+// separate REPLACE statements that execute in parallel. With batch size 1:
+//   - Batch A: REPLACE INTO _new SELECT FROM source WHERE id IN (1)
+//   - Batch B: REPLACE INTO _new SELECT FROM source WHERE id IN (3)
+//
+// These run in parallel (when not under lock). If Batch B executes first,
+// it inserts id=3 name='a' which conflicts with stale id=1 name='a' in _new,
+// collaterally deleting id=1. Then Batch A re-inserts id=1 name='c'.
+// The question is whether the parallel execution can cause a lost row.
+func TestReplaceFlushUniqueKeyCollateralDamageSmallBatch(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS uktest3, _uktest3_new")
+	testutils.RunSQL(t, `CREATE TABLE uktest3 (
+		id INT NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		UNIQUE KEY idx_name (name)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _uktest3_new (
+		id INT NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		UNIQUE KEY idx_name (name)
+	)`)
+
+	t1 := table.NewTableInfo(db, "test", "uktest3")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_uktest3_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	// Use targetBatchSize=1 so each key gets its own REPLACE statement,
+	// and concurrency=4 so they execute in parallel.
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Millisecond, // very small to keep batch size small
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	require.NoError(t, client.Run(t.Context()))
+	defer client.Close()
+
+	// Force targetBatchSize to 1 so each key is its own REPLACE statement.
+	atomic.StoreInt64(&client.targetBatchSize, 1)
+
+	// Initial data in both tables.
+	testutils.RunSQL(t, "INSERT INTO uktest3 (id, name) VALUES (1, 'a'), (2, 'b')")
+	testutils.RunSQL(t, "INSERT INTO _uktest3_new (id, name) VALUES (1, 'a'), (2, 'b')")
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+
+	// Both changes in one go — they'll be in the same flush cycle but
+	// split into separate batches due to targetBatchSize=1.
+	testutils.RunSQL(t, "UPDATE uktest3 SET name = 'c' WHERE id = 1")
+	testutils.RunSQL(t, "INSERT INTO uktest3 (id, name) VALUES (3, 'a')")
+	require.NoError(t, client.BlockWait(t.Context()))
+	assert.Equal(t, 2, client.GetDeltaLen())
+
+	// Run the flush many times to try to trigger the race.
+	// With parallel execution and batch size 1, the order is non-deterministic.
+	require.NoError(t, client.Flush(t.Context()))
+
+	var count int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _uktest3_new").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count, "_new should have 3 rows: id=1 name='c', id=2 name='b', id=3 name='a'")
+
+	var name string
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest3_new WHERE id = 1").Scan(&name)
+	require.NoError(t, err, "id=1 must exist in _new")
+	assert.Equal(t, "c", name)
+
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest3_new WHERE id = 3").Scan(&name)
+	require.NoError(t, err, "id=3 must exist in _new")
+	assert.Equal(t, "a", name)
+}
+
+// TestReplaceFlushUniqueKeyCollateralDamageSplitFlush is the dangerous variant:
+// a flush runs BETWEEN the two source changes, so only the second change's key
+// is in the delta map when the second flush runs. This means _new has stale data
+// for id=1 (name='a') when the REPLACE for id=3 (name='a') executes.
+//
+// Timeline:
+//  1. Source: id=1 name='a', id=2 name='b'. Both copied to _new.
+//  2. UPDATE id=1 SET name='c'. Repl client discovers it.
+//  3. Flush #1: processes id=1. _new id=1 updated to name='c'. Delta map cleared.
+//  4. INSERT id=3 name='a'. Repl client discovers it.
+//  5. Flush #2: processes only id=3. REPLACE reads name='a' from source.
+//     _new no longer has name='a' (it was updated in step 3), so no conflict. ✓
+//
+// If step 3 succeeds, there is no conflict. But what if step 3's REPLACE fails
+// silently or the flush is interrupted? Then _new still has id=1 name='a' and
+// the REPLACE for id=3 would collaterally delete id=1.
+//
+// This test verifies the happy path where the split flush works correctly.
+func TestReplaceFlushUniqueKeyCollateralDamageSplitFlush(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS uktest2, _uktest2_new")
+	testutils.RunSQL(t, `CREATE TABLE uktest2 (
+		id INT NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		UNIQUE KEY idx_name (name)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _uktest2_new (
+		id INT NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		UNIQUE KEY idx_name (name)
+	)`)
+
+	t1 := table.NewTableInfo(db, "test", "uktest2")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_uktest2_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	require.NoError(t, client.Run(t.Context()))
+	defer client.Close()
+
+	// Step 1: Initial data in both tables.
+	testutils.RunSQL(t, "INSERT INTO uktest2 (id, name) VALUES (1, 'a'), (2, 'b')")
+	testutils.RunSQL(t, "INSERT INTO _uktest2_new (id, name) VALUES (1, 'a'), (2, 'b')")
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+
+	// Step 2: First change — UPDATE id=1 name='a' -> 'c'.
+	testutils.RunSQL(t, "UPDATE uktest2 SET name = 'c' WHERE id = 1")
+	require.NoError(t, client.BlockWait(t.Context()))
+	assert.Equal(t, 1, client.GetDeltaLen(), "delta map should have 1 entry: id=1")
+
+	// Step 3: Flush #1 — processes id=1. _new id=1 should now have name='c'.
+	require.NoError(t, client.Flush(t.Context()))
+	assert.Equal(t, 0, client.GetDeltaLen(), "delta map should be empty after flush")
+
+	// Verify _new id=1 was updated.
+	var name string
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest2_new WHERE id = 1").Scan(&name)
+	require.NoError(t, err)
+	assert.Equal(t, "c", name, "id=1 should have name='c' after first flush")
+
+	// Step 4: Second change — INSERT id=3 name='a' (reuses the freed unique value).
+	testutils.RunSQL(t, "INSERT INTO uktest2 (id, name) VALUES (3, 'a')")
+	require.NoError(t, client.BlockWait(t.Context()))
+	assert.Equal(t, 1, client.GetDeltaLen(), "delta map should have 1 entry: id=3")
+
+	// Step 5: Flush #2 — processes only id=3. Since _new id=1 already has name='c'
+	// (updated in step 3), there should be no unique key conflict.
+	require.NoError(t, client.Flush(t.Context()))
+
+	// Step 6: Verify _new has all 3 rows with correct data.
+	var count int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _uktest2_new").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count, "_new should have 3 rows")
+
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest2_new WHERE id = 1").Scan(&name)
+	require.NoError(t, err, "id=1 must exist")
+	assert.Equal(t, "c", name)
+
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest2_new WHERE id = 2").Scan(&name)
+	require.NoError(t, err, "id=2 must exist")
+	assert.Equal(t, "b", name)
+
+	err = db.QueryRowContext(t.Context(), "SELECT name FROM _uktest2_new WHERE id = 3").Scan(&name)
+	require.NoError(t, err, "id=3 must exist")
+	assert.Equal(t, "a", name)
 }

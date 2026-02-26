@@ -294,13 +294,6 @@ func (c *Client) GetDeltaLen() int {
 }
 
 func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, error) {
-	// We rotate the binary log before we start, so we can always safely just resume
-	// by reopening the binary log file at Position 4. This is required to get the table map.
-	// Why we need to recreate the syncer just after it is created is a mystery to me, but
-	// we seem to have this issue in tests sometimes.
-	if _, err := c.db.ExecContext(ctx, `FLUSH BINARY LOGS`); err != nil {
-		return mysql.Position{}, fmt.Errorf("failed to flush binary logs: %w", err)
-	}
 	var binlogFile, fake string
 	var binlogPos uint32
 	// On the first call, try SHOW MASTER STATUS (works on MySQL 8.0, the most common version)
