@@ -90,7 +90,9 @@ func (c *Unbuffered) StartTime() time.Time {
 }
 
 func (c *Unbuffered) Run(ctx context.Context) error {
+	c.Lock()
 	c.startTime = time.Now()
+	c.Unlock()
 	go c.estimateRowsPerSecondLoop(ctx) // estimate rows while copying
 	g, errGrpCtx := errgroup.WithContext(ctx)
 	g.SetLimit(c.concurrency)
