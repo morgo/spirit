@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/block/spirit/pkg/table"
@@ -56,13 +57,25 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	if config.ForceKill {
 		// If ForceKill is true, we will wait for 90% of the configured LockWaitTimeout
 		threshold := time.Duration(float64(config.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
+		var wg sync.WaitGroup
+		wg.Add(1)
 		timer := time.AfterFunc(threshold, func() {
+			defer wg.Done()
 			err := KillLockingTransactions(ctx, db, tables, config, logger, []int{pid})
 			if err != nil {
 				logger.Error("failed to kill locking transactions", "error", err)
 			}
 		})
-		defer timer.Stop()
+		defer func() {
+			if timer.Stop() {
+				// Timer was stopped before it fired, so the goroutine never started.
+				wg.Done()
+			}
+			// Wait for the kill goroutine to finish if it was already running.
+			// This prevents a race where the goroutine kills connections that
+			// are now being used for subsequent operations.
+			wg.Wait()
+		}()
 	}
 
 	// We need to lock all the tables we intend to write to while we have the lock.
