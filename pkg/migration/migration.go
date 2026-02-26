@@ -69,7 +69,7 @@ type Migration struct {
 // Validate is called by Kong after parsing to check for invalid flag combinations.
 func (m *Migration) Validate() error {
 	if m.Lint && m.LintOnly {
-		return errors.New("--lint and --lint-only can't be used together")
+		return errors.New("--lint and --lint-only cannot be used together")
 	}
 	return nil
 }
