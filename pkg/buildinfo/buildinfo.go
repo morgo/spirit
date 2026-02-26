@@ -108,11 +108,11 @@ type VersionFlag bool
 // It prints the full build info and exits with code 0.
 func (v VersionFlag) BeforeReset(app *kong.Kong, vars kong.Vars) error {
 	bi := Get()
-	fmt.Fprintf(app.Stdout, "spirit %s\n", bi.Version)
-	fmt.Fprintf(app.Stdout, "  commit:  %s\n", bi.Commit)
-	fmt.Fprintf(app.Stdout, "  built:   %s\n", bi.Date)
-	fmt.Fprintf(app.Stdout, "  go:      %s\n", bi.GoVer)
-	fmt.Fprintf(app.Stdout, "  dirty:   %t\n", bi.Modified)
+	_, _ = fmt.Fprintf(app.Stdout, "spirit %s\n", bi.Version)
+	_, _ = fmt.Fprintf(app.Stdout, "  commit:  %s\n", bi.Commit)
+	_, _ = fmt.Fprintf(app.Stdout, "  built:   %s\n", bi.Date)
+	_, _ = fmt.Fprintf(app.Stdout, "  go:      %s\n", bi.GoVer)
+	_, _ = fmt.Fprintf(app.Stdout, "  dirty:   %t\n", bi.Modified)
 	app.Exit(0)
 	return nil
 }
