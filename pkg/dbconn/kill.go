@@ -74,7 +74,9 @@ FROM
         ON etc.thread_id = ml.owner_thread_id
     LEFT JOIN information_schema.innodb_trx trx
 		ON t.processlist_id = trx.trx_mysql_thread_id
-WHERE t.processlist_id IS NOT NULL `
+WHERE t.processlist_id IS NOT NULL
+    AND ml.object_type = 'TABLE'
+    AND ml.lock_status = 'GRANTED' `
 
 	processIDClause  = " AND t.processlist_id NOT IN (CONNECTION_ID() %s) "
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s) "
@@ -304,7 +306,8 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 		return "", nil
 	}
 	var builder strings.Builder
-	for i, tableInfo := range tables {
+	first := true
+	for _, tableInfo := range tables {
 		if tableInfo == nil {
 			logger.Warn("skipping nil table info in IN list")
 			continue // Skip nil table info
@@ -315,11 +318,12 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 				"table", tableInfo.TableName)
 			continue // Skip tables with empty schema or name
 		}
-		builder.WriteString("(?,?)")
-		params = append(params, tableInfo.SchemaName, tableInfo.TableName)
-		if i < len(tables)-1 {
+		if !first {
 			builder.WriteString(",")
 		}
+		builder.WriteString("(?,?)")
+		params = append(params, tableInfo.SchemaName, tableInfo.TableName)
+		first = false
 	}
 	return builder.String(), params
 }

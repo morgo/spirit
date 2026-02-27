@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
@@ -213,14 +214,25 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	// since the minimum LockWaitTimeout=1 second
 	threshold := max(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier, 0.9)
 	duration := time.Duration(threshold) * time.Second
+	var wg sync.WaitGroup
+	wg.Add(1)
 	timer := time.AfterFunc(duration, func() {
+		defer wg.Done()
 		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
 		if err != nil {
 			return // just return, we can't do much more here
 		}
 	})
 	_, err = trx.ExecContext(ctx, sqlescape.MustEscapeSQL(stmt, args...))
-	timer.Stop() // Stop the timer immediately after the DDL completes
+	if timer.Stop() {
+		// Timer was stopped before it fired, so the goroutine never started.
+		// We need to manually decrement the WaitGroup.
+		wg.Done()
+	}
+	// Wait for the kill goroutine to finish if it was already running.
+	// This prevents a race where the goroutine kills connections that
+	// are now being used for subsequent operations.
+	wg.Wait()
 	return err
 }
 
