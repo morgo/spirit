@@ -74,7 +74,9 @@ FROM
         ON etc.thread_id = ml.owner_thread_id
     LEFT JOIN information_schema.innodb_trx trx
 		ON t.processlist_id = trx.trx_mysql_thread_id
-WHERE t.processlist_id IS NOT NULL `
+WHERE t.processlist_id IS NOT NULL
+    AND ml.object_type = 'TABLE'
+    AND ml.lock_status = 'GRANTED' `
 
 	processIDClause  = " AND t.processlist_id NOT IN (CONNECTION_ID() %s) "
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s) "
@@ -109,7 +111,13 @@ func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Ta
 		// This is a fatal error because it means we cannot acquire the metadata lock,
 		// and it's unsafe to kill connections with explicit, non-transactional table locks.
 		for _, lock := range locks {
-			logger.Error("found explicit table lock", "lock", fmt.Sprintf("%#v", lock))
+			logger.Error("found explicit table lock",
+				"pid", lock.PID,
+				"lockType", lock.LockType,
+				"lockStatus", lock.LockStatus,
+				"objectSchema", lock.ObjectSchema,
+				"objectName", lock.ObjectName,
+			)
 		}
 		return ErrTableLockFound
 	}
@@ -185,8 +193,15 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 		); err != nil {
 			return nil, err
 		}
-
-		logger.Info("found locking transaction", "lock", fmt.Sprintf("%#v", &lock))
+		logger.Info("found locking transaction",
+			"pid", lock.PID,
+			"lockType", lock.LockType,
+			"lockStatus", lock.LockStatus,
+			"objectSchema", lock.ObjectSchema,
+			"objectName", lock.ObjectName,
+			"runningTime", lock.RunningTime,
+			"trxWeight", lock.TrxWeight,
+		)
 		locks = append(locks, lock)
 	}
 	if err := rows.Err(); err != nil {
@@ -291,7 +306,8 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 		return "", nil
 	}
 	var builder strings.Builder
-	for i, tableInfo := range tables {
+	first := true
+	for _, tableInfo := range tables {
 		if tableInfo == nil {
 			logger.Warn("skipping nil table info in IN list")
 			continue // Skip nil table info
@@ -302,11 +318,12 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 				"table", tableInfo.TableName)
 			continue // Skip tables with empty schema or name
 		}
-		builder.WriteString("(?,?)")
-		params = append(params, tableInfo.SchemaName, tableInfo.TableName)
-		if i < len(tables)-1 {
+		if !first {
 			builder.WriteString(",")
 		}
+		builder.WriteString("(?,?)")
+		params = append(params, tableInfo.SchemaName, tableInfo.TableName)
+		first = false
 	}
 	return builder.String(), params
 }
