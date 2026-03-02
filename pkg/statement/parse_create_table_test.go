@@ -672,8 +672,8 @@ func Test_Sloppy(t *testing.T) {
 	// index defined as a column attribute.
 	firstIdx := ct.GetCreateTable().Indexes[0]
 	require.NotNil(t, firstIdx)
-	// Nameless indexes get an empty string as the name
-	assert.Empty(t, firstIdx.Name)
+	// Unnamed indexes are auto-named after their first column (MySQL convention)
+	assert.Equal(t, "user_id", firstIdx.Name)
 	assert.Equal(t, []string{"user_id", "customerEmail"}, firstIdx.Columns)
 	assert.Nil(t, firstIdx.Comment)
 
