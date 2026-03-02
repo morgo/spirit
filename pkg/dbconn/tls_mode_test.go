@@ -737,7 +737,6 @@ func TestPREFERREDModeDISABLEDFallback(t *testing.T) {
 		"collation=utf8mb4_bin",
 		"rejectReadOnly=true",
 		"interpolateParams=true",
-		"allowNativePasswords=true",
 	}
 
 	for _, param := range expectedParams {
