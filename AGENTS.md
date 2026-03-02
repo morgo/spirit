@@ -59,12 +59,12 @@ docker compose up mysql test --abort-on-container-exit
 The `pkg/testutils/` package provides helpers used across all test files:
 
 - `DSN()` / `DSNForDatabase(dbName)` — returns the MySQL DSN from the environment or default
-- `GetNewDatabase(t)` — creates a unique temporary database with automatic cleanup via `t.Cleanup()`
+- `CreateUniqueTestDatabase(t)` — creates a unique temporary database with automatic cleanup via `t.Cleanup()`
 - `RunSQL(t, stmt)` / `RunSQLInDatabase(t, dbName, stmt)` — execute SQL against the test MySQL
 - `IsMinimalRBRTestRunner(t)` — detects minimal `binlog_row_image` environments to skip incompatible tests
 
 **Test patterns used in this project:**
-- Tests create isolated databases via `testutils.GetNewDatabase(t)` to avoid interference
+- Tests create isolated databases via `testutils.CreateUniqueTestDatabase(t)` to avoid interference
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
 - The `table` package provides a `MockChunker` for testing copier/applier without real chunking
 - Test files live alongside their source files (e.g., `single_target.go` / `single_target_test.go`)
