@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -268,14 +269,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 	// Create a copier that reads from the multi chunker and uses the shared applier.
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.move.Threads,
-		TargetChunkTime:               r.move.TargetChunkTime,
-		Logger:                        r.logger,
-		Throttler:                     &throttler.Noop{},
-		MetricsSink:                   &metrics.NoopSink{},
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: true,
-		Applier:                       r.applier, // Use the shared applier
+		Concurrency:     r.move.Threads,
+		TargetChunkTime: r.move.TargetChunkTime,
+		Logger:          r.logger,
+		Throttler:       &throttler.Noop{},
+		MetricsSink:     &metrics.NoopSink{},
+		DBConfig:        r.dbConfig,
+		Applier:         r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -291,7 +291,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var id, binlogPos int
 	err = r.source.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
-		return fmt.Errorf("could not read from checkpoint table '%s' on source: %v", checkpointTableName, err)
+		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
 	}
 
 	r.replClient.SetFlushedPos(gomysql.Position{
@@ -345,15 +345,14 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	r.logger.Info("Setting up repl client")
 	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
-		Logger:                     r.logger,
-		Concurrency:                r.move.Threads,
-		TargetBatchTime:            r.move.TargetChunkTime,
-		OnDDL:                      r.ddlNotification,
-		OnDDLDisableFiltering:      true,
-		ServerID:                   repl.NewServerID(),
-		UseExperimentalBufferedMap: true,
-		Applier:                    r.applier, // Use the shared applier
-		DBConfig:                   r.dbConfig,
+		Logger:                r.logger,
+		Concurrency:           r.move.Threads,
+		TargetBatchTime:       r.move.TargetChunkTime,
+		OnDDL:                 r.ddlNotification,
+		OnDDLDisableFiltering: true,
+		ServerID:              repl.NewServerID(),
+		Applier:               r.applier, // Use the shared applier
+		DBConfig:              r.dbConfig,
 	})
 
 	// Run post-setup checks
@@ -362,11 +361,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		// So we can switch tactics and check if these artifacts pass the tests
 		// to resume from checkpoint instead.
 		if resumeErr := r.runChecks(ctx, check.ScopeResume); resumeErr != nil {
-			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%v, resume_error=%v", err, resumeErr)
+			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%w, resume_error=%w", err, resumeErr)
 		}
 		// We pass the pre-check for resume, so attempt it
 		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return fmt.Errorf("resume validation passed but checkpoint resume failed: %v", err)
+			return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", err)
 		}
 		r.logger.Info("Successfully resumed move from existing checkpoint")
 		return nil
@@ -424,14 +423,13 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	// Create a copier that reads from the multi chunker and uses the shared applier.
 	var err error
 	r.copier, err = copier.NewCopier(r.source, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.move.Threads,
-		TargetChunkTime:               r.move.TargetChunkTime,
-		Logger:                        r.logger,
-		Throttler:                     &throttler.Noop{},
-		MetricsSink:                   &metrics.NoopSink{},
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: true,
-		Applier:                       r.applier, // Use the shared applier
+		Concurrency:     r.move.Threads,
+		TargetChunkTime: r.move.TargetChunkTime,
+		Logger:          r.logger,
+		Throttler:       &throttler.Noop{},
+		MetricsSink:     &metrics.NoopSink{},
+		DBConfig:        r.dbConfig,
+		Applier:         r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -475,14 +473,20 @@ func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
 	r.startTime = time.Now()
-	r.logger.Info("Starting table move")
+	bi := buildinfo.Get()
+	r.logger.Info("Starting table move",
+		"version", bi.Version,
+		"commit", bi.Commit,
+		"build-date", bi.Date,
+		"go", bi.GoVer,
+		"dirty", bi.Modified,
+	)
 
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	r.dbConfig.ForceKill = true // in move we always use force kill; it's new code.
+	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
 	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
-	r.logger.Warn("the move command is experimental and not yet safe for production use.")
 	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
 	if err != nil {
 		return err
@@ -686,7 +690,7 @@ func (r *Runner) Status() string {
 	if state > status.CutOver {
 		return ""
 	}
-	switch state {
+	switch state { //nolint:exhaustive
 	case status.CopyRows:
 		// Status for copy rows
 		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v",
@@ -914,7 +918,7 @@ func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
 
 func (r *Runner) Progress() status.Progress {
 	var summary string
-	switch r.status.Get() {
+	switch r.status.Get() { //nolint:exhaustive
 	case status.CopyRows:
 		summary = fmt.Sprintf("%v %s ETA %v",
 			r.copier.GetProgress(),

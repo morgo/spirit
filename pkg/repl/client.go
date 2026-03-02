@@ -100,7 +100,7 @@ type Client struct {
 	timingHistory   []time.Duration
 	concurrency     int
 
-	isMySQL84 bool
+	binlogStatusStmt string // cached: "SHOW MASTER STATUS" or "SHOW BINARY LOG STATUS"
 
 	// The periodic flush lock is just used for ensuring only one periodic flush runs at a time,
 	// and when we disable it, no more periodic flushes will run. The actual flushing is protected
@@ -113,8 +113,7 @@ type Client struct {
 	logger     *slog.Logger
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
-	useExperimentalBufferedMap bool         // for testing new subscription type
-	flushedBinlogs             atomic.Int64 // for testing binlog flushing frequency
+	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
 // NewClient creates a new Client instance.
@@ -123,34 +122,32 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
-		db:                         db,
-		dbConfig:                   config.DBConfig,
-		host:                       host,
-		username:                   username,
-		password:                   password,
-		logger:                     config.Logger,
-		targetBatchTime:            config.TargetBatchTime,
-		targetBatchSize:            DefaultBatchSize, // initial starting value.
-		concurrency:                config.Concurrency,
-		subscriptions:              make(map[string]Subscription),
-		onDDL:                      config.OnDDL,
-		onDDLDisableFiltering:      config.OnDDLDisableFiltering,
-		serverID:                   config.ServerID,
-		useExperimentalBufferedMap: config.UseExperimentalBufferedMap,
-		applier:                    config.Applier,
+		db:                    db,
+		dbConfig:              config.DBConfig,
+		host:                  host,
+		username:              username,
+		password:              password,
+		logger:                config.Logger,
+		targetBatchTime:       config.TargetBatchTime,
+		targetBatchSize:       DefaultBatchSize, // initial starting value.
+		concurrency:           config.Concurrency,
+		subscriptions:         make(map[string]Subscription),
+		onDDL:                 config.OnDDL,
+		onDDLDisableFiltering: config.OnDDLDisableFiltering,
+		serverID:              config.ServerID,
+		applier:               config.Applier,
 	}
 }
 
 type ClientConfig struct {
-	TargetBatchTime            time.Duration
-	Concurrency                int
-	Logger                     *slog.Logger
-	OnDDL                      chan string
-	OnDDLDisableFiltering      bool
-	ServerID                   uint32
-	UseExperimentalBufferedMap bool
-	Applier                    applier.Applier
-	DBConfig                   *dbconn.DBConfig // Database configuration including TLS settings
+	TargetBatchTime       time.Duration
+	Concurrency           int
+	Logger                *slog.Logger
+	OnDDL                 chan string
+	OnDDLDisableFiltering bool
+	ServerID              uint32
+	Applier               applier.Applier
+	DBConfig              *dbconn.DBConfig // Database configuration including TLS settings
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -215,8 +212,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		}
 		return nil
 	}
-	if c.useExperimentalBufferedMap {
-		c.logger.Info("Using experimental buffered map for table", "schema", currentTable.SchemaName, "table", currentTable.TableName)
+	if c.applier != nil {
 		c.subscriptions[subKey] = &bufferedMap{
 			table:    currentTable,
 			newTable: newTable,
@@ -307,13 +303,26 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	}
 	var binlogFile, fake string
 	var binlogPos uint32
-	var binlogPosStmt = "SHOW MASTER STATUS"
-	if c.isMySQL84 {
-		binlogPosStmt = "SHOW BINARY LOG STATUS"
-	}
-	err := c.db.QueryRowContext(ctx, binlogPosStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
-	if err != nil {
-		return mysql.Position{}, err
+	// On the first call, try SHOW MASTER STATUS (works on MySQL 8.0, the most common version)
+	// and fall back to SHOW BINARY LOG STATUS (MySQL 8.2+). Cache whichever succeeds
+	// so subsequent calls don't waste a round-trip.
+	if c.binlogStatusStmt == "" {
+		err := c.db.QueryRowContext(ctx, "SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+		if err == nil {
+			c.binlogStatusStmt = "SHOW MASTER STATUS"
+		} else {
+			err = c.db.QueryRowContext(ctx, "SHOW BINARY LOG STATUS").Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+			if err == nil {
+				c.binlogStatusStmt = "SHOW BINARY LOG STATUS"
+			} else {
+				return mysql.Position{}, err
+			}
+		}
+	} else {
+		err := c.db.QueryRowContext(ctx, c.binlogStatusStmt).Scan(&binlogFile, &binlogPos, &fake, &fake, &fake)
+		if err != nil {
+			return mysql.Position{}, err
+		}
 	}
 	return mysql.Position{
 		Name: binlogFile,
@@ -354,9 +363,6 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		}
 		c.cfg.TLSConfig = tlsConfig
 	}
-	if dbconn.IsMySQL84(ctx, c.db) { // handle MySQL 8.4
-		c.isMySQL84 = true
-	}
 	// Determine where to start the sync from.
 	// We default from what the current position is right
 	// now, but for resume cases we just need to check that the
@@ -364,7 +370,7 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	if c.flushedPos.Name == "" {
 		c.flushedPos, err = c.getCurrentBinlogPosition(ctx)
 		if err != nil {
-			return errors.New("failed to get binlog position, check binary is enabled")
+			return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
 		}
 	} else if c.binlogPositionIsImpossible(ctx) {
 		return errors.New("binlog position is impossible, the source may have already purged it")
@@ -571,31 +577,29 @@ func (c *Client) readStream(ctx context.Context) {
 			continue
 		}
 		// Handle the event.
-		switch ev.Event.(type) {
+		switch event := ev.Event.(type) {
 		case *replication.RotateEvent:
 			// Rotate event, update the current log name.
-			rotateEvent := ev.Event.(*replication.RotateEvent)
-			currentLogName = string(rotateEvent.NextLogName)
-			// For RotateEvent, we must use rotateEvent.Position (the position in the NEW log)
+			currentLogName = string(event.NextLogName)
+			// For RotateEvent, we must use event.Position (the position in the NEW log)
 			// not ev.Header.LogPos (which is the position in the OLD log).
 			// Update position immediately and skip the generic position update at the end.
 			c.setBufferedPos(mysql.Position{
 				Name: currentLogName,
-				Pos:  uint32(rotateEvent.Position),
+				Pos:  uint32(event.Position),
 			})
-			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", rotateEvent.Position)
+			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", event.Position)
 			continue
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
-			if err = c.processRowsEvent(ev, ev.Event.(*replication.RowsEvent)); err != nil {
+			if err = c.processRowsEvent(ev, event); err != nil {
 				panic("could not process events")
 			}
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
 			// in which case we need to notify the caller.
-			queryEvent := ev.Event.(*replication.QueryEvent)
-			tables, err := extractTablesFromDDLStmts(string(queryEvent.Schema), string(queryEvent.Query))
+			tables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
 				// The parser does not understand all syntax.
 				// For example, it won't parse [CREATE|DROP] TRIGGER statements *or*
@@ -750,7 +754,7 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 				// In theory this is unreachable since we mandate a PK on tables
 				return fmt.Errorf("no primary key found for row: %#v", row)
 			}
-			switch eventType {
+			switch eventType { //nolint:exhaustive
 			case eventTypeInsert:
 				sub.HasChanged(key, row, false)
 			case eventTypeDelete:

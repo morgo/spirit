@@ -51,9 +51,9 @@ The following are common **data lock** issues:
 
 * Data locks are required *on the specific rows* when applying changes from the replication client. This is similar to the copier, except we use a combination of `DELETE` and `REPLACE .. SELECT`.
 
-* The copier and replication client conflict with each other and deadlock. This only happens when the PK is a non auto-increment INT/BIGINT, see [issue #479](https://github.com/block/spirit/issues/479).
+* The copier and replication client conflict with each other and deadlock. This is less likely to occur now than in earlier versions of Spirit, see [issue #479](https://github.com/block/spirit/issues/479).
 
-In future, we may recommend using `--enable-experimental-buffered-copy` for cases where there are hot rows, or high probability of contention with data locks. Because of its different design, it only requires data locks on the `_new` table, which effectively prevents all of the data lock contention.
+You may want to use `--buffered` for cases where there are hot rows, or high probability of contention with data locks. Because of its different design, it only requires data locks on the `_new` table, which effectively prevents all of the data lock contention.
 
 The following are cases where **metadata locks** are required:
 
@@ -65,7 +65,7 @@ What causes all metadata lock issues? (hint: it's not spirit)
 
 Any open transactions will have shared metadata locks on any of the tables that you are modifying. If you have long transactions that have not yet committed/rolled back, Spirit's exclusive lock will be queued waiting for them to finish. This then looks like a Spirit problem because any shared lock requests that arrive after Spirit's exclusive lock request will then be queued behind Spirit. So the solution is to keep your transactions as short as possible.
 
-The _fix_ for Spirit, is that we now have the option to `--force-kill` the specific connections that are blocking it from acquiring an exclusive lock. This feature is not enabled by default, but we are using it and likely will change the default at some point.
+The _fix_ for Spirit, is that it will by default `force-kill` the specific connections that are blocking it from acquiring an exclusive lock. This can be disabled with `--skip-force-kill` if needed.
 
 ## Using Spirit `migration` as a Go package
 
@@ -86,7 +86,6 @@ func (sm *Spirit) Execute(ctx context.Context, m *ExecutableTask) error {
 		Threads:           m.Concurrency,
 		LockWaitTimeout:   m.LockWaitTimeout,
 		InterpolateParams: true,
-		ForceKill:         true,
 	})
 	if err != nil {
 		return errors.Wrap(err, "failed to create spirit migration runner")

@@ -22,8 +22,9 @@ const (
 
 // Datum could be a binary string, uint64 or int64.
 type Datum struct {
-	Val any
-	Tp  datumTp // signed, unsigned, binary
+	Val            any
+	Tp             datumTp // signed, unsigned, binary
+	forceHexEncode bool    // when true, always hex-encode the value in String()
 }
 
 func mySQLTypeToDatumTp(mysqlTp string) datumTp {
@@ -123,17 +124,20 @@ func datumValFromString(val string, tp datumTp) (any, error) {
 		return i, nil
 	case unsignedType:
 		return strconv.ParseUint(val, 10, 64)
-	}
-	// If it starts with 0x then it's a binary string. If it was actually
-	// a string that contained 0x, then we have encoded it as hex anyway.
-	// see pkg/table/chunk.go:valuesString()
-	if strings.HasPrefix(val, "0x") {
-		tmp, err := hex.DecodeString(val[2:])
-		if err != nil {
-			return nil, err
+	case binaryType:
+		// Binary types are always hex-encoded in checkpoint JSON via Datum.String().
+		// Decode the hex back to raw binary bytes.
+		if strings.HasPrefix(val, "0x") {
+			tmp, err := hex.DecodeString(val[2:])
+			if err != nil {
+				return nil, err
+			}
+			return string(tmp), nil
 		}
-		return string(tmp), nil
+		return val, nil
 	}
+	// For unknownType (VARCHAR, TEXT, etc), the value is stored as-is.
+	// No hex decoding is needed because unknownType values are never hex-encoded.
 	return val, nil
 }
 
@@ -145,10 +149,15 @@ func newDatumFromMySQL(val string, mysqlTp string) (Datum, error) {
 	if err != nil {
 		return Datum{}, err
 	}
-	return Datum{
+	d := Datum{
 		Val: sVal,
 		Tp:  tp,
-	}, nil
+	}
+	// Binary types should always be hex-encoded when serialized.
+	if tp == binaryType {
+		d.forceHexEncode = true
+	}
+	return d, nil
 }
 
 // NewDatumFromValue creates a Datum from a value and MySQL column type.
@@ -164,30 +173,37 @@ func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 
 	// Convert []byte to string for non-numeric types
 	if b, ok := value.([]byte); ok {
-		switch tp {
+		switch tp { //nolint:exhaustive
 		case signedType, unsignedType:
 			// For numeric types, convert []byte to string then parse
 			value = string(b)
 		case binaryType:
-			// For binary types, we want to always hex encode
-			// If the data is valid UTF-8 and doesn't already trigger hex encoding,
-			// prepend a special marker to force it
-			s := string(b)
-			// Only add marker if it's valid UTF-8 and doesn't start with "0x"
-			if utf8.ValidString(s) && (len(s) <= 2 || s[0:2] != "0x") {
-				// Prepend a special marker that's invalid UTF-8
-				// Use a sequence that's very unlikely to appear in real data
-				value = "\xFF\xFF\xFE" + s
-			} else {
-				value = s
+			// For binary types, convert to string and set forceHexEncode.
+			// We always want to hex-encode binary data in SQL output.
+			// The forceHexEncode flag ensures this happens even for data
+			// that is valid UTF-8 (which IsBinaryString() would not catch).
+			d, err := NewDatum(string(b), tp)
+			if err != nil {
+				return Datum{}, err
 			}
+			d.forceHexEncode = true
+			return d, nil
 		default:
 			// For unknown types (text, datetime, json, etc), convert to string
 			value = string(b)
 		}
 	}
 
-	return NewDatum(value, tp)
+	d, err := NewDatum(value, tp)
+	if err != nil {
+		return Datum{}, err
+	}
+	// Ensure binary types are always hex-encoded, even when the input value
+	// is not []byte (e.g. a string). This is consistent with the []byte path above.
+	if tp == binaryType {
+		d.forceHexEncode = true
+	}
+	return d, nil
 }
 
 func NewNilDatum(tp datumTp) Datum {
@@ -269,10 +285,6 @@ func (d Datum) String() string {
 	}
 	// Check if it should be hex encoded
 	if d.IsBinaryString() {
-		// If the string starts with our marker (\xFF\xFF\xFE), strip it before hex encoding
-		if len(s) >= 3 && s[0] == '\xFF' && s[1] == '\xFF' && s[2] == '\xFE' {
-			return fmt.Sprintf("0x%x", s[3:])
-		}
 		return fmt.Sprintf("0x%x", s)
 	}
 	return "\"" + sqlescape.EscapeString(s) + "\""
@@ -284,15 +296,15 @@ func (d Datum) IsNumeric() bool {
 }
 
 func (d Datum) IsBinaryString() bool {
+	if d.forceHexEncode {
+		return true
+	}
 	s, ok := d.Val.(string)
 	if !ok {
 		return false
 	}
-	// Hex encode if:
-	// 1. Starts with null byte (our marker for forced hex encoding)
-	// 2. Not valid UTF-8
-	// 3. Starts with "0x" (to avoid corruption when restoring JSON)
-	return (len(s) > 0 && s[0] == '\x00') || !utf8.ValidString(s) || (len(s) > 2 && s[0:2] == "0x")
+	// Hex encode if not valid UTF-8 (binary data that wasn't explicitly marked)
+	return !utf8.ValidString(s)
 }
 
 func (d Datum) IsNil() bool {
@@ -300,27 +312,91 @@ func (d Datum) IsNil() bool {
 }
 
 func (d Datum) GreaterThanOrEqual(d2 Datum) bool {
-	if !d.IsNumeric() {
-		panic("not supported on binary type")
-	}
 	if d.Tp != d2.Tp {
 		panic("cannot compare different datum types")
 	}
-	if d.Tp == signedType {
+
+	switch d.Tp {
+	case signedType:
 		return d.Val.(int64) >= d2.Val.(int64)
+	case unsignedType:
+		return d.Val.(uint64) >= d2.Val.(uint64)
+	case binaryType, unknownType:
+		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
+		return fmt.Sprint(d.Val) >= fmt.Sprint(d2.Val)
+	default:
+		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
 	}
-	return d.Val.(uint64) >= d2.Val.(uint64)
 }
 
 func (d Datum) GreaterThan(d2 Datum) bool {
-	if !d.IsNumeric() {
-		panic("not supported on binary type")
-	}
 	if d.Tp != d2.Tp {
 		panic("cannot compare different datum types")
 	}
-	if d.Tp == signedType {
+
+	switch d.Tp {
+	case signedType:
 		return d.Val.(int64) > d2.Val.(int64)
+	case unsignedType:
+		return d.Val.(uint64) > d2.Val.(uint64)
+	case binaryType, unknownType:
+		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
+		return fmt.Sprint(d.Val) > fmt.Sprint(d2.Val)
+	default:
+		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
 	}
-	return d.Val.(uint64) > d2.Val.(uint64)
+}
+
+// LessThanOrEqual performs a comparison between two Datum values.
+// Works with all comparable types including numeric, strings, binary, and temporal.
+// Provided for completeness.
+func (d Datum) LessThanOrEqual(d2 Datum) bool {
+	if d.Tp != d2.Tp {
+		panic("cannot compare different datum types")
+	}
+
+	switch d.Tp {
+	case signedType:
+		return d.Val.(int64) <= d2.Val.(int64)
+	case unsignedType:
+		return d.Val.(uint64) <= d2.Val.(uint64)
+	case binaryType, unknownType:
+		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
+		return fmt.Sprint(d.Val) <= fmt.Sprint(d2.Val)
+	default:
+		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
+	}
+}
+
+// LessThan performs a comparison between two Datum values.
+// Works with all comparable types including numeric, strings, binary, and temporal.
+// Provided for completeness.
+func (d Datum) LessThan(d2 Datum) bool {
+	if d.Tp != d2.Tp {
+		panic("cannot compare different datum types")
+	}
+
+	switch d.Tp {
+	case signedType:
+		return d.Val.(int64) < d2.Val.(int64)
+	case unsignedType:
+		return d.Val.(uint64) < d2.Val.(uint64)
+	case binaryType, unknownType:
+		// For binary, string, and temporal types, use native Go string comparison
+		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
+		// It may differ from MySQL collation but is safe for watermark optimizations since they
+		// are disabled before the checksum phase.
+		return fmt.Sprint(d.Val) < fmt.Sprint(d2.Val)
+	default:
+		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
+	}
 }

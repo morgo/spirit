@@ -65,7 +65,7 @@ Applied:        REPLACE INTO ... WHERE k IN ("abc", "def"); DELETE FROM ... WHER
 
 ### Buffered Map
 
-The buffered map is an experimental subscription type used for move operations where source and target are on different MySQL servers. It stores full row data and uses the applier interface:
+The buffered map is a subscription type required for move operations where source and target are on different MySQL servers. It stores full row data and uses the applier interface:
 
 **How it works:**
 - Maintains a map of `primaryKeyHash -> (isDelete, fullRowData)`
@@ -83,11 +83,11 @@ The buffered map is an experimental subscription type used for move operations w
 - **Significantly higher memory usage**: Stores full row data for each changed key
 - **Higher CPU usage**: buffering changes in the spirit daemon adds CPU load to Spirit
 - **More complex**: Requires coordination with the applier layer
-- **Experimental**: Not enabled by default, less battle-tested than delta map
+- **Not the default**: Less battle-tested than delta map for single-server schema changes
 
 **When to use:** Primarily for move operations where `REPLACE INTO ... SELECT` cannot be used because the source and target are on different MySQL servers.
 
-**Enabling:** Set `UseExperimentalBufferedMap: true` in the client config. This is automatically enabled for move operations.
+**Enabling:** Provide a non-nil `Applier` in the client config. When an applier is configured, buffered map behavior is enabled automatically, and this is set up by default for move operations.
 
 ## Features
 

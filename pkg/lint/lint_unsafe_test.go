@@ -286,12 +286,12 @@ func TestUnsafeLinter_MixedSafeAndUnsafeOperations(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine statements
-	stmts := append(stmts1, stmts2...)
-	stmts = append(stmts, stmts3...)
-	stmts = append(stmts, stmts4...)
+	stmts1 = append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts3...)
+	stmts1 = append(stmts1, stmts4...)
 
 	linter := &UnsafeLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should only detect the DROP TABLE
 	require.Len(t, violations, 1)

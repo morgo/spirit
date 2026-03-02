@@ -112,13 +112,13 @@ func TestAllowEngine_MultipleAllowedEngines(t *testing.T) {
 	stmts2, err := statement.New(sql2)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := &AllowEngine{allowedEngines: map[string]struct{}{
 		"innodb": {},
 		"myisam": {},
 	}}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 	require.Empty(t, violations)
 }
 
@@ -136,10 +136,10 @@ func TestAllowEngine_MultipleEnginesOneDisallowed(t *testing.T) {
 	stmts2, err := statement.New(sql2)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := &AllowEngine{allowedEngines: map[string]struct{}{"innodb": {}}}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 	require.Len(t, violations, 1)
 	require.Equal(t, "t2", violations[0].Location.Table)
 	require.Contains(t, violations[0].Message, "Memory")

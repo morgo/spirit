@@ -23,8 +23,7 @@ func (l *AutoIncCapacityLinter) Description() string {
 
 func (l *AutoIncCapacityLinter) Configure(config map[string]string) error {
 	for k, v := range config {
-		switch k {
-		case "threshold":
+		if k == "threshold" {
 			threshold, err := strconv.Atoi(v)
 			if err != nil {
 				return fmt.Errorf("threshold value could not be parsed: %w", err)

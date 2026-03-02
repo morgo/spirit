@@ -44,17 +44,18 @@ func versionCheck(ctx context.Context, r Resources, _ *slog.Logger) error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	if !isMySQL8(ctx, db) {
-		return errors.New("MySQL 8.0 is required")
+	if !isMySQLSupported(ctx, db) {
+		return errors.New("MySQL 8.0 or later is required")
 	}
 	return nil
 }
 
-// isMySQL8 returns true if we can positively identify this as mysql 8
-func isMySQL8(ctx context.Context, db *sql.DB) bool {
-	var version string
-	if err := db.QueryRowContext(ctx, "select substr(version(), 1, 1)").Scan(&version); err != nil {
+// isMySQLSupported returns true if the MySQL version is 8.0 or later.
+// Spirit supports MySQL 8.0+ (including 8.4, 9.x, etc.)
+func isMySQLSupported(ctx context.Context, db *sql.DB) bool {
+	var majorVersion int
+	if err := db.QueryRowContext(ctx, "SELECT SUBSTRING_INDEX(version(), '.', 1)").Scan(&majorVersion); err != nil {
 		return false // can't tell
 	}
-	return version == "8"
+	return majorVersion >= 8
 }

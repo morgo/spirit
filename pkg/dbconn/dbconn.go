@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
@@ -34,7 +35,7 @@ type DBConfig struct {
 	MaxOpenConnections       int
 	RangeOptimizerMaxMemSize int64
 	InterpolateParams        bool
-	ForceKill                bool // If true, kill locking transactions to acquire metadata locks
+	ForceKill                bool // If true, kill locking transactions to acquire metadata locks (default: true)
 	// TLS Configuration
 	TLSMode            string // TLS connection mode (DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY)
 	TLSCertificatePath string // Path to custom TLS certificate file
@@ -48,7 +49,7 @@ func NewDBConfig() *DBConfig {
 		MaxOpenConnections:       32,    // default is high for historical tests. It's overwritten by the user threads count + 2 for headroom.
 		RangeOptimizerMaxMemSize: 0,     // default is 8M, we set to unlimited. Not user configurable (may reconsider in the future).
 		InterpolateParams:        false, // default is false
-		ForceKill:                false, // default is false
+		ForceKill:                true,  // default is true
 		// TLS defaults
 		TLSMode:            "PREFERRED", // default to PREFERRED mode like MySQL
 		TLSCertificatePath: "",          // no custom certificate by default
@@ -62,7 +63,8 @@ func NewDBConfig() *DBConfig {
 // succeed but then there is a deadlock later on.
 func canRetryError(err error) bool {
 	var errNumber uint16
-	if val, ok := err.(*mysql.MySQLError); ok {
+	var val *mysql.MySQLError
+	if errors.As(err, &val) {
 		errNumber = val.Number
 	}
 	switch errNumber {
@@ -115,7 +117,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 				// Even though there was no ERROR we still need to inspect SHOW WARNINGS
 				// This is because many of the statements use INSERT IGNORE.
 				var warningRes *sql.Rows
-				warningRes, err = trx.QueryContext(ctx, "SHOW WARNINGS") //nolint: execinquery
+				warningRes, err = trx.QueryContext(ctx, "SHOW WARNINGS")
 				if err != nil {
 					return
 				}
@@ -131,9 +133,10 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 					// because the SQL mode has been unset. This is important
 					// because a historical value like 0000-00-00 00:00:00
 					// might exist in the table and needs to be copied.
-					if code == errFoundDuppKey && ignoreDupKeyWarnings {
+					switch {
+					case code == errFoundDuppKey && ignoreDupKeyWarnings:
 						continue // ignore duplicate key warnings
-					} else if code == errCapacityExceeded {
+					case code == errCapacityExceeded:
 						// "Memory capacity of 8388608 bytes for 'range_optimizer_max_mem_size' exceeded.
 						// Range optimization was not done for this query."
 						// i.e. the query can still execute, but it won't be efficient. Prior to
@@ -143,7 +146,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 						isFatal = true
 						err = errors.New("MySQL refused to optimize a statement because the value of 'range_optimizer_max_mem_size' is too low. Please decrease the target-chunk-time, or increase the value of 'range_optimizer_max_mem_size'")
 						return
-					} else {
+					default:
 						isFatal = true
 						err = fmt.Errorf("unsafe warning: %s", message)
 						return
@@ -211,14 +214,25 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	// since the minimum LockWaitTimeout=1 second
 	threshold := max(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier, 0.9)
 	duration := time.Duration(threshold) * time.Second
+	var wg sync.WaitGroup
+	wg.Add(1)
 	timer := time.AfterFunc(duration, func() {
+		defer wg.Done()
 		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
 		if err != nil {
 			return // just return, we can't do much more here
 		}
 	})
 	_, err = trx.ExecContext(ctx, sqlescape.MustEscapeSQL(stmt, args...))
-	timer.Stop() // Stop the timer immediately after the DDL completes
+	if timer.Stop() {
+		// Timer was stopped before it fired, so the goroutine never started.
+		// We need to manually decrement the WaitGroup.
+		wg.Done()
+	}
+	// Wait for the kill goroutine to finish if it was already running.
+	// This prevents a race where the goroutine kills connections that
+	// are now being used for subsequent operations.
+	wg.Wait()
 	return err
 }
 
@@ -248,13 +262,4 @@ func BeginStandardTrx(ctx context.Context, db *sql.DB, opts *sql.TxOptions) (*sq
 		return nil, 0, err
 	}
 	return trx, connectionID, nil
-}
-
-// IsMySQL84 returns true if the MySQL version can positively be identified as 8.4
-func IsMySQL84(ctx context.Context, db *sql.DB) bool {
-	var version string
-	if err := db.QueryRowContext(ctx, "select substr(version(), 1, 3)").Scan(&version); err != nil {
-		return false // can't tell
-	}
-	return version == "8.4"
 }

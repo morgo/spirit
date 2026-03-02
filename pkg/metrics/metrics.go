@@ -53,10 +53,6 @@ func (s *NoopSink) Send(ctx context.Context, m *Metrics) error {
 
 var _ Sink = &NoopSink{}
 
-func NewNoopSink() *NoopSink {
-	return &NoopSink{}
-}
-
 // logSink logs metrics
 type logSink struct {
 	logger *slog.Logger

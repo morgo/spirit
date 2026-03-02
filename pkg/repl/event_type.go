@@ -16,7 +16,7 @@ const (
 // https://github.com/go-mysql-org/go-mysql/blob/ee9447d96b48783abb05ab76a12501e5f1161e47/canal/sync.go#L282-L294
 // Except we no longer need to use canal directly.
 func parseEventType(eventType replication.EventType) eventType {
-	switch eventType {
+	switch eventType { //nolint:exhaustive
 	case replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2, replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
 		return eventTypeInsert
 	case replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2, replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:

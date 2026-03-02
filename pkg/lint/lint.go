@@ -230,19 +230,6 @@ func HasWarnings(violations []Violation) bool {
 	return false
 }
 
-// FilterBySeverity returns only violations with the specified severity.
-func FilterBySeverity(violations []Violation, severity Severity) []Violation {
-	var filtered []Violation
-
-	for _, v := range violations {
-		if v.Severity == severity {
-			filtered = append(filtered, v)
-		}
-	}
-
-	return filtered
-}
-
 // FilterByLinter returns only violations from the specified linter.
 func FilterByLinter(violations []Violation, linterName string) []Violation {
 	var filtered []Violation
@@ -258,7 +245,7 @@ func FilterByLinter(violations []Violation, linterName string) []Violation {
 
 // AlterTableTypeToString converts an AlterTableType constant to a human-readable string
 func AlterTableTypeToString(tp ast.AlterTableType) string {
-	switch tp {
+	switch tp { //nolint:exhaustive
 	case ast.AlterTableOption:
 		return "ALTER TABLE OPTION"
 	case ast.AlterTableAddColumns:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-replica_status=$(mysql -hmysql_replica -uroot -p"$MYSQL_ROOT_PASSWORD" -e "show replica status\G")
+replica_status=$(mysql -hmysql_replica -uroot -p"$MYSQL_ROOT_PASSWORD" --vertical -e "show replica status")
 
 if ! echo "$replica_status" | grep -q 'Replica_IO_Running: Yes'; then
   echo "replica IO not running..."

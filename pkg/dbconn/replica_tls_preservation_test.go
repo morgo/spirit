@@ -409,13 +409,8 @@ func TestNewDSNTLSPreservationExtensive(t *testing.T) {
 			result, err := newDSN(tt.dsn, tt.config)
 			require.NoError(t, err)
 
-			if tt.expectTLSPreserved {
-				// Should contain the exact original TLS value
-				assert.Contains(t, result, "tls="+tt.expectTLSValue, tt.description)
-			} else {
-				// Should contain the expected TLS value from config
-				assert.Contains(t, result, "tls="+tt.expectTLSValue, tt.description)
-			}
+			// Should contain the expected TLS value (either preserved from original DSN or from config)
+			assert.Contains(t, result, "tls="+tt.expectTLSValue, tt.description)
 		})
 	}
 }

@@ -204,52 +204,53 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	// Determine TLS configuration strategy based on SSL mode,
 	// but only if the DSN doesn't already have explicit TLS configuration.
 	if cfg.TLSConfig == "" {
-	switch strings.ToUpper(config.TLSMode) {
-	case "DISABLED":
-		// No TLS - explicitly clear any TLS configuration
-		cfg.TLSConfig = ""
+		switch strings.ToUpper(config.TLSMode) {
+		case "DISABLED":
+			// No TLS - explicitly clear any TLS configuration
+			cfg.TLSConfig = ""
 
-	case "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY":
-		// TLS with certificate selection - determine which certificate to use
-		if config.TLSCertificatePath != "" {
-			// Use custom certificate
-			if err = initCustomTLS(config); err != nil {
-				return "", err
+		case "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY":
+			// TLS with certificate selection - determine which certificate to use
+			switch {
+			case config.TLSCertificatePath != "":
+				// Use custom certificate
+				if err = initCustomTLS(config); err != nil {
+					return "", err
+				}
+				cfg.TLSConfig = getTLSConfigName(config.TLSMode)
+			case IsRDSHost(cfg.Addr):
+				// Use RDS certificate for RDS hosts
+				if err = initRDSTLS(); err != nil {
+					return "", err
+				}
+				cfg.TLSConfig = rdsTLSConfigName
+			default:
+				// Use embedded RDS bundle as fallback for non-RDS hosts
+				if err = initCustomTLS(config); err != nil {
+					return "", err
+				}
+				cfg.TLSConfig = getTLSConfigName(config.TLSMode)
 			}
-			cfg.TLSConfig = getTLSConfigName(config.TLSMode)
-		} else if IsRDSHost(cfg.Addr) {
-			// Use RDS certificate for RDS hosts
-			if err = initRDSTLS(); err != nil {
-				return "", err
+
+		case "PREFERRED":
+			fallthrough // Use same logic as default case
+
+		default:
+			// PREFERRED and unknown modes - use permissive TLS behavior
+			// For RDS hosts, use RDS certificate. For others, use embedded RDS bundle as fallback
+			if IsRDSHost(cfg.Addr) {
+				if err = initRDSTLS(); err != nil {
+					return "", err
+				}
+				cfg.TLSConfig = rdsTLSConfigName
+			} else {
+				// Use embedded RDS bundle as fallback for non-RDS hosts
+				if err = initCustomTLS(config); err != nil {
+					return "", err
+				}
+				cfg.TLSConfig = getTLSConfigName(config.TLSMode)
 			}
-			cfg.TLSConfig = rdsTLSConfigName
-		} else {
-			// Use embedded RDS bundle as fallback for non-RDS hosts
-			if err = initCustomTLS(config); err != nil {
-				return "", err
-			}
-			cfg.TLSConfig = getTLSConfigName(config.TLSMode)
 		}
-
-	case "PREFERRED":
-		fallthrough // Use same logic as default case
-
-	default:
-		// PREFERRED and unknown modes - use permissive TLS behavior
-		// For RDS hosts, use RDS certificate. For others, use embedded RDS bundle as fallback
-		if IsRDSHost(cfg.Addr) {
-			if err = initRDSTLS(); err != nil {
-				return "", err
-			}
-			cfg.TLSConfig = rdsTLSConfigName
-		} else {
-			// Use embedded RDS bundle as fallback for non-RDS hosts
-			if err = initCustomTLS(config); err != nil {
-				return "", err
-			}
-			cfg.TLSConfig = getTLSConfigName(config.TLSMode)
-		}
-	}
 	} // end if cfg.TLSConfig == ""
 
 	// Set session variables via Params map.
@@ -324,7 +325,10 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 			_ = db.Close()
 		}
 
-		// TLS failed, try without TLS by stripping TLS and re-enriching
+		// TLS failed, try without TLS by rebuilding the DSN with TLS disabled.
+		// We must use newDSN (not createFallbackDSN on the raw inputDSN) so that
+		// all critical session variables (sql_mode, time_zone, charset, rejectReadOnly, etc.)
+		// are included in the fallback connection.
 		configCopy := *config
 		configCopy.TLSMode = "DISABLED"
 

@@ -53,7 +53,7 @@ func New(statement string) ([]*AbstractStatement, error) {
 			sb.Reset()
 			rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
 			if err = alterStmt.Restore(rCtx); err != nil {
-				return nil, fmt.Errorf("could not restore alter clause statement: %s", err)
+				return nil, fmt.Errorf("could not restore alter clause statement: %w", err)
 			}
 			normalizedStmt := sb.String()
 			trimLen := len(alterStmt.Table.Name.String()) + 15 // len ALTER TABLE + quotes
@@ -189,7 +189,7 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 	// If all of them are safe, we can attempt to use INPLACE.
 	unsafeClauses := 0
 	for _, spec := range alterStmt.Specs {
-		switch spec.Tp {
+		switch spec.Tp { //nolint:exhaustive
 		case ast.AlterTableRenameIndex,
 			ast.AlterTableIndexInvisible,
 			ast.AlterTableDropPartition,
@@ -229,7 +229,7 @@ func (a *AbstractStatement) AlterContainsUnsupportedClause() error {
 	}
 	var unsupportedClauses []string
 	for _, spec := range alterStmt.Specs {
-		switch spec.Tp {
+		switch spec.Tp { //nolint:exhaustive
 		case ast.AlterTableAlgorithm:
 			unsupportedClauses = append(unsupportedClauses, "ALGORITHM=")
 		case ast.AlterTableLock:
@@ -276,7 +276,7 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 		}
 		columns = append(columns, part.Column.Name.String())
 	}
-	switch ciStmt.KeyType {
+	switch ciStmt.KeyType { //nolint:exhaustive
 	case ast.IndexKeyTypeUnique:
 		keyType = "UNIQUE INDEX"
 	case ast.IndexKeyTypeFulltext:

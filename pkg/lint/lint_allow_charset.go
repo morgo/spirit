@@ -80,7 +80,7 @@ func (l *AllowCharset) Lint(createTables []*statement.CreateTable, changes []*st
 		}
 		for _, spec := range at.Specs {
 			var message string
-			switch spec.Tp {
+			switch spec.Tp { //nolint:exhaustive
 			case ast.AlterTableAddColumns:
 				message = "New column %q in table %q uses a disallowed character set"
 			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:

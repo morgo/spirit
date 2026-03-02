@@ -50,11 +50,6 @@ func IntersectNonGeneratedColumnsAsSlice(t1, t2 *table.TableInfo) []string {
 	return intersection
 }
 
-// UnhashKey converts a hashed key to a []string
-func UnhashKey(key string) []string {
-	return strings.Split(key, PrimaryKeySeparator)
-}
-
 // UnhashKeyToString converts a hashed key to a string that can be used in a query.
 func UnhashKeyToString(key string) string {
 	str := strings.Split(key, PrimaryKeySeparator)
@@ -65,11 +60,4 @@ func UnhashKeyToString(key string) string {
 		str[i] = "'" + sqlescape.EscapeString(v) + "'"
 	}
 	return "(" + strings.Join(str, ",") + ")"
-}
-
-func StripPort(hostname string) string {
-	if strings.Contains(hostname, ":") {
-		return strings.Split(hostname, ":")[0]
-	}
-	return hostname
 }

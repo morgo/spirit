@@ -198,10 +198,10 @@ func TestHasFKLinter_MultipleTablesWithForeignKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine statements
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := &HasFKLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should detect foreign keys in both tables
 	require.Len(t, violations, 2)
@@ -235,11 +235,11 @@ func TestHasFKLinter_MixedTablesWithAndWithoutForeignKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine statements
-	stmts := append(stmts1, stmts2...)
-	stmts = append(stmts, stmts3...)
+	stmts1 = append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts3...)
 
 	linter := &HasFKLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should only detect foreign key in orders table
 	require.Len(t, violations, 1)
@@ -817,10 +817,10 @@ func TestHasFKLinter_MultipleAlterTableStatements(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine statements
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := &HasFKLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should detect foreign keys in both ALTER TABLE statements
 	require.Len(t, violations, 2)
@@ -844,10 +844,10 @@ func TestHasFKLinter_MixedCreateAndAlterStatements(t *testing.T) {
 	require.NoError(t, err)
 
 	// Combine statements
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := &HasFKLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should detect foreign keys in both CREATE TABLE and ALTER TABLE
 	require.Len(t, violations, 2)

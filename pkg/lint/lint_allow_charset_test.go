@@ -345,10 +345,10 @@ func TestMultipleTablesAllAllowed(t *testing.T) {
 	stmts2, err := statement.New(sql2)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 	require.Empty(t, violations)
 }
 
@@ -367,10 +367,10 @@ func TestMultipleTablesSomeDisallowed(t *testing.T) {
 	stmts2, err := statement.New(sql2)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := AllowCharset{charsets: []string{"utf8mb4"}}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 	require.Len(t, violations, 2) // One for table, one for column
 
 	// Check that both violations are for t2

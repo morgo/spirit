@@ -57,12 +57,11 @@ func TestFixCorruptWithApplier(t *testing.T) {
 
 	// Start the applier so its workers can process async Apply calls
 	feed := repl.NewClient(src, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
-		Logger:                     logger,
-		Concurrency:                4,
-		TargetBatchTime:            time.Second,
-		ServerID:                   repl.NewServerID(),
-		UseExperimentalBufferedMap: true,
-		Applier:                    applier,
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        repl.NewServerID(),
+		Applier:         applier,
 	})
 	defer feed.Close()
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))

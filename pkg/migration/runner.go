@@ -12,6 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -121,7 +122,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
 	r.startTime = time.Now()
+	bi := buildinfo.Get()
 	r.logger.Info("Starting spirit migration",
+		"version", bi.Version,
+		"commit", bi.Commit,
+		"build-date", bi.Date,
+		"go", bi.GoVer,
+		"dirty", bi.Modified,
 		"concurrency", r.migration.Threads,
 		"target-chunk-size", r.migration.TargetChunkTime,
 	)
@@ -132,7 +139,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.dbConfig = dbconn.NewDBConfig()
 	r.dbConfig.LockWaitTimeout = int(r.migration.LockWaitTimeout.Seconds())
 	r.dbConfig.InterpolateParams = r.migration.InterpolateParams
-	r.dbConfig.ForceKill = r.migration.ForceKill
+	r.dbConfig.ForceKill = !r.migration.SkipForceKill
 	// Map TLS configuration from migration to dbConfig
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
@@ -144,7 +151,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// and does not need to wait for free slots from the copier *until* it needs
 	// copy in more than 1 thread.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
-	if r.migration.EnableExperimentalBufferedCopy {
+	if r.migration.Buffered {
 		// Buffered has many more connections because it fans out x8 more write threads
 		// Plus it has read threads. Set this high and figure it out later.
 		r.dbConfig.MaxOpenConnections = 100
@@ -154,14 +161,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", maskPasswordInDSN(r.dsn()), err)
 	}
 
-	// Enable linting if any of the linting related options are given
-	if r.migration.EnableExperimentalLinting || r.migration.ExperimentalLintOnly ||
-		len(r.migration.EnableExperimentalLinters) > 0 || len(r.migration.ExperimentalLinterConfig) > 0 {
+	// Run linting if --lint or --lint-only is specified.
+	// --lint-only implies lint.
+	if r.migration.Lint || r.migration.LintOnly {
 		if err := r.lint(ctx); err != nil {
 			return err
 		}
-		if r.migration.ExperimentalLintOnly {
-			fmt.Printf("Exiting after running linters.\n")
+		if r.migration.LintOnly {
+			r.logger.Info("--lint-only set; exiting after running linters")
 			return nil
 		}
 	}
@@ -410,16 +417,16 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			TargetChunkTime: r.migration.TargetChunkTime,
 			Threads:         r.migration.Threads,
 			ReplicaMaxLag:   r.migration.ReplicaMaxLag,
-			ForceKill:       r.migration.ForceKill,
+			ForceKill:       !r.migration.SkipForceKill,
 			// For the pre-run checks we don't have a DB connection yet.
 			// Instead we check the credentials provided.
-			Host:                     r.migration.Host,
-			Username:                 r.migration.Username,
-			Password:                 *r.migration.Password,
-			TLSMode:                  r.migration.TLSMode,
-			TLSCertificatePath:       r.migration.TLSCertificatePath,
-			SkipDropAfterCutover:     r.migration.SkipDropAfterCutover,
-			ExperimentalBufferedCopy: r.migration.EnableExperimentalBufferedCopy,
+			Host:                 r.migration.Host,
+			Username:             r.migration.Username,
+			Password:             *r.migration.Password,
+			TLSMode:              r.migration.TLSMode,
+			TLSCertificatePath:   r.migration.TLSCertificatePath,
+			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
+			Buffered:             r.migration.Buffered,
 		}, r.logger, scope); err != nil {
 			return err
 		}
@@ -479,7 +486,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 	// Create an applier if using buffered copy or buffered replication
 	var appl applier.Applier
-	if r.migration.EnableExperimentalBufferedCopy {
+	if r.migration.Buffered {
 		// For now, we only support single-table migrations with buffered copy
 		if len(r.changes) > 1 {
 			return errors.New("buffered copy is not yet supported for multi-table migrations")
@@ -498,14 +505,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	}
 	// Create copier with the prepared chunker
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
-		Concurrency:                   r.migration.Threads,
-		TargetChunkTime:               r.migration.TargetChunkTime,
-		Throttler:                     &throttler.Noop{},
-		Logger:                        r.logger,
-		MetricsSink:                   r.metricsSink,
-		DBConfig:                      r.dbConfig,
-		UseExperimentalBufferedCopier: r.migration.EnableExperimentalBufferedCopy,
-		Applier:                       appl,
+		Concurrency:     r.migration.Threads,
+		TargetChunkTime: r.migration.TargetChunkTime,
+		Throttler:       &throttler.Noop{},
+		Logger:          r.logger,
+		MetricsSink:     r.metricsSink,
+		DBConfig:        r.dbConfig,
+		Applier:         appl,
 	})
 	if err != nil {
 		return err
@@ -685,12 +691,13 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// We always attempt to resume from a checkpoint.
 	if err = r.resumeFromCheckpoint(ctx); err != nil {
-		// Strict mode means if we have a mismatched alter,
-		// we should not continue. This is to protect against
-		// a user re-running a migration with a different alter
-		// statement when a previous migration was incomplete,
-		// and all progress is lost.
-		if r.migration.Strict && err == status.ErrMismatchedAlter {
+		// Strict mode prevents silent loss of checkpoint progress.
+		// A mismatched alter means the user changed the DDL between runs.
+		// An expired binlog means the checkpoint can't be used because
+		// changes would be lost in the replication gap.
+		// In both cases, strict mode surfaces the error rather than
+		// silently restarting from scratch.
+		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound)) {
 			return err
 		}
 
@@ -798,9 +805,38 @@ func (r *Runner) Progress() status.Progress {
 	case status.Checksum:
 		summary = "Checksum Progress=" + r.checker.GetProgress()
 	}
+
+	// Get per-table progress if available (multi-table migrations)
+	var tables []status.TableProgress
+	if mc, ok := r.copyChunker.(interface{ PerTableProgress() []table.TableProgress }); ok {
+		for _, tp := range mc.PerTableProgress() {
+			tables = append(tables, status.TableProgress{
+				TableName:  tp.TableName,
+				RowsCopied: tp.RowsCopied,
+				RowsTotal:  tp.RowsTotal,
+				IsComplete: tp.IsComplete,
+			})
+		}
+	} else if r.copyChunker != nil {
+		// Single table migration - get progress from chunker
+		rowsCopied, _, rowsTotal := r.copyChunker.Progress()
+		tableTables := r.copyChunker.Tables()
+		tableName := ""
+		if len(tableTables) > 0 {
+			tableName = tableTables[0].TableName
+		}
+		tables = append(tables, status.TableProgress{
+			TableName:  tableName,
+			RowsCopied: rowsCopied,
+			RowsTotal:  rowsTotal,
+			IsComplete: r.copyChunker.IsRead(),
+		})
+	}
+
 	return status.Progress{
 		CurrentState: r.status.Get(),
 		Summary:      summary,
+		Tables:       tables,
 	}
 }
 
@@ -873,7 +909,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var id, binlogPos int
 	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement)
 	if err != nil {
-		return fmt.Errorf("could not read from table '%s', err:%v", r.checkpointTableName(), err)
+		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
 
 	// We need to validate that the statement matches between the checkpoint
@@ -882,6 +918,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// multi and non-multi table migrations.
 	if r.migration.Statement != statement {
 		return status.ErrMismatchedAlter
+	}
+
+	// Validate the checkpoint's binlog position is still available on the server
+	// before creating any resources (replClient, subscriptions, etc.).
+	// This avoids partial initialization that would need cleanup on failure.
+	if !r.binlogFileExists(ctx, binlogName) {
+		return fmt.Errorf("%w: %s has been purged, cannot resume", status.ErrBinlogNotFound, binlogName)
 	}
 
 	// Initialize and call SetInfo on all the new tables, since we need the column info
@@ -945,6 +988,26 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	)
 	r.usedResumeFromCheckpoint = true
 	return nil
+}
+
+// binlogFileExists checks if the given binlog file is still available on the server.
+// Used to validate checkpoint binlog positions before creating resources.
+func (r *Runner) binlogFileExists(ctx context.Context, binlogName string) bool {
+	rows, err := r.db.QueryContext(ctx, "SHOW BINARY LOGS")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+	var logname, size, encrypted string
+	for rows.Next() {
+		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
+			return false
+		}
+		if logname == binlogName {
+			return true
+		}
+	}
+	return false
 }
 
 // initChunkers sets up the chunker(s) for the migration.
@@ -1015,6 +1078,10 @@ func (r *Runner) addsUniqueIndex() bool {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
+	// Check if replication client and copier are initialized (nil if called before setup completes)
+	if r.replClient == nil || r.copyChunker == nil {
+		return status.ErrWatermarkNotReady
+	}
 	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
 	copierWatermark, err := r.copyChunker.GetLowWatermark()

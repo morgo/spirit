@@ -1,0 +1,30 @@
+#!/bin/sh
+# Pre-push hook to run golangci-lint in Docker
+# This ensures consistent linting across all platforms before code is pushed
+
+echo "Running golangci-lint in Docker before push..."
+
+# Run golangci-lint in Docker container
+docker run --rm \
+  -v "$(pwd):/app" \
+  -w /app \
+  golangci/golangci-lint:latest \
+  golangci-lint run --timeout=5m
+
+LINT_EXIT_CODE=$?
+
+if [ $LINT_EXIT_CODE -ne 0 ]; then
+  echo ""
+  echo "❌ Linting failed! Please fix the errors before pushing."
+  echo ""
+  echo "To see detailed errors, run:"
+  echo "  docker run --rm -v \$(pwd):/app -w /app golangci/golangci-lint:latest golangci-lint run --timeout=5m"
+  echo ""
+  echo "To bypass this check (not recommended), use:"
+  echo "  git push --no-verify"
+  echo ""
+  exit 1
+fi
+
+echo "✅ Linting passed! Pushing..."
+exit 0

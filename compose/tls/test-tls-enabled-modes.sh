@@ -24,7 +24,7 @@ echo ""
 echo "🔍 Testing TLS Mode: DISABLED (should fail - server requires TLS)"
 echo "----------------------------------------------------------------"
 set +e  # Allow this to fail
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -44,7 +44,7 @@ fi
 echo ""
 echo "🔍 Testing TLS Mode: REQUIRED (should work with TLS-enabled server)"
 echo "------------------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -58,7 +58,7 @@ echo "🔍 Testing TLS Mode: VERIFY_CA (should work with server certificates)"
 echo "--------------------------------------------------------------------"
 if [ -f "mysql-certs/ca.pem" ]; then
     echo "Using extracted MySQL CA certificate for verification"
-    ./spirit \
+    ./spirit migrate \
       --host="$MYSQL_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -69,7 +69,7 @@ if [ -f "mysql-certs/ca.pem" ]; then
       --alter="ADD COLUMN test_col_verify_ca VARCHAR(50)"
 else
     echo "⚠️  No MySQL CA certificate found, testing without custom certificate"
-    ./spirit \
+    ./spirit migrate \
       --host="$MYSQL_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -85,7 +85,7 @@ echo "--------------------------------------------------------------------------
 if [ -f "mysql-certs/ca.pem" ]; then
     echo "Using IP address 127.0.0.1 - should fail due to hostname verification"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="$MYSQL_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -109,7 +109,7 @@ if [ -f "mysql-certs/ca.pem" ]; then
     echo "Using localhost hostname - will fail because MySQL's auto-generated certificate"
     echo "has Subject: CN=MySQL_Server_8.0.43_Auto_Generated_CA_Certificate (no hostname match)"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="$MYSQL_HOST_LOCALHOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -131,7 +131,7 @@ else
     echo "⚠️  No MySQL CA certificate found, testing without custom certificate"
     echo "Testing with IP address first (should fail), then hostname (also should fail)"
     set +e  # Allow this to fail
-    ./spirit \
+    ./spirit migrate \
       --host="$MYSQL_HOST" \
       --username="$MYSQL_USER" \
       --password="$MYSQL_PASSWORD" \
@@ -145,7 +145,7 @@ else
     if [ $IP_RESULT -ne 0 ]; then
         echo "✅ VERIFY_IDENTITY with IP correctly failed"
         echo "Now testing with localhost hostname (also expected to fail - no proper certs)..."
-        ./spirit \
+        ./spirit migrate \
           --host="$MYSQL_HOST_LOCALHOST" \
           --username="$MYSQL_USER" \
           --password="$MYSQL_PASSWORD" \
@@ -159,7 +159,7 @@ fi
 echo ""
 echo "🔍 Testing TLS Mode: PREFERRED (should use TLS when available)"
 echo "-------------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \

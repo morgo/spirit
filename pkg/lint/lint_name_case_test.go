@@ -138,10 +138,10 @@ func TestNameCaseLinter_MultipleTablesAllLowercase(t *testing.T) {
 	stmts2, err := statement.New(sql2)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts2...)
 
 	linter := &NameCaseLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// All lowercase - no violations
 	assert.Empty(t, violations)
@@ -160,11 +160,11 @@ func TestNameCaseLinter_MultipleTablesMixedCase(t *testing.T) {
 	stmts3, err := statement.New(sql3)
 	require.NoError(t, err)
 
-	stmts := append(stmts1, stmts2...)
-	stmts = append(stmts, stmts3...)
+	stmts1 = append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts3...)
 
 	linter := &NameCaseLinter{}
-	violations := linter.Lint(nil, stmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should detect two violations
 	require.Len(t, violations, 2)
@@ -461,10 +461,10 @@ func TestNameCaseLinter_CreateAndRename(t *testing.T) {
 	renameStmts, err := statement.New(renameSQL)
 	require.NoError(t, err)
 
-	allStmts := append(createStmts, renameStmts...)
+	createStmts = append(createStmts, renameStmts...)
 
 	linter := &NameCaseLinter{}
-	violations := linter.Lint(nil, allStmts)
+	violations := linter.Lint(nil, createStmts)
 
 	// Should only detect the rename violation
 	require.Len(t, violations, 1)
@@ -484,11 +484,11 @@ func TestNameCaseLinter_MultipleRenames(t *testing.T) {
 	stmts3, err := statement.New(sql3)
 	require.NoError(t, err)
 
-	allStmts := append(stmts1, stmts2...)
-	allStmts = append(allStmts, stmts3...)
+	stmts1 = append(stmts1, stmts2...)
+	stmts1 = append(stmts1, stmts3...)
 
 	linter := &NameCaseLinter{}
-	violations := linter.Lint(nil, allStmts)
+	violations := linter.Lint(nil, stmts1)
 
 	// Should detect two violations (not the lowercase one)
 	require.Len(t, violations, 2)
@@ -656,11 +656,11 @@ func TestNameCaseLinter_ComplexScenario(t *testing.T) {
 	fixRenameStmts, err := statement.New(fixRenameSQL)
 	require.NoError(t, err)
 
-	allChanges := append(newTableStmts, renameStmts...)
-	allChanges = append(allChanges, fixRenameStmts...)
+	newTableStmts = append(newTableStmts, renameStmts...)
+	newTableStmts = append(newTableStmts, fixRenameStmts...)
 
 	linter := &NameCaseLinter{}
-	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, allChanges)
+	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, newTableStmts)
 
 	// Should detect:
 	// 1. USERS (existing table)

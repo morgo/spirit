@@ -1,4 +1,4 @@
-name: MySQL 8.0.33 (with replicas) /w docker-compose
+name: MySQL 8.0.45 (with replicas) /w docker-compose
 on:
   push:
     branches: [ main ]

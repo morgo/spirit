@@ -13,7 +13,7 @@ The goal of Spirit is to apply schema changes much faster than gh-ost. This make
 If this is the case, `gh-ost` remains a fine choice.
 
 Quick Links:
-* [USAGE](USAGE.md) - more information on how to use Spirit.
+* [USAGE](docs/README.md) - more information on how to use Spirit.
 * [More Resilient Schema Changes at Scale](https://code.cash.app/more-resilient-schema-changes-at-scale) - a high-level overview of the motivations behind Spirit.
 * [Introducing Spirit](https://code.cash.app/introducing-spirit) - our launch blog post.
 * [MySQL Belgian Days 2024 Slides](https://www.slideshare.net/slideshows/introducing-spirit-online-schema-change/266175200) - more information in presentation form.
@@ -107,12 +107,14 @@ Spirit works with the default configuration of MySQL 8.0, but checks that you ha
   - `binlog_row_image=FULL` or `MINIMAL`
   - `innodb_autoinc_lock_mode=2`
   - `log_slave_updates=1`
+  - `performance_schema=1`
 
 Spirit requires an account with these privileges:
 
 * `ALTER, CREATE, DELETE, DROP, INDEX, INSERT, LOCK TABLES, SELECT, TRIGGER, UPDATE` on the schema where the table is being migrated.
 * Either `SUPER, REPLICATION SLAVE on *.*` or `REPLICATION CLIENT, REPLICATION SLAVE on *.*`.
 * The `RELOAD` privilege.
+* `CONNECTION_ADMIN` (or `SUPER`) and `PROCESS` on `*.*`, and `SELECT` on `performance_schema.*` — required for the force-kill feature which is enabled by default. This allows Spirit to kill long-running transactions that block metadata lock acquisition during checksum and cutover. These privileges can be omitted if `--skip-force-kill` is used.
 
 For replica throttling, Spirit requires:
 
@@ -132,4 +134,19 @@ We make extensive use of the TiDB parser. If a DDL statement can not be parsed b
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md).
+See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed development instructions.
+
+### Quick Start for Contributors
+
+```bash
+# Setup Git hooks for automatic linting
+make setup-hooks
+
+# Run linter (platform-independent via Docker)
+make lint
+
+# Run tests
+make test
+```
+
+The project uses Git pre-push hooks to ensure code quality. After running `make setup-hooks`, code will be automatically linted before being pushed to the remote repository.

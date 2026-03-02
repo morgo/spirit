@@ -913,9 +913,9 @@ func TestRedundantIndexLinter_AlterTableComplex(t *testing.T) {
 	alter2, err := statement.New(alterSQL2)
 	assert.NoError(t, err)
 
-	allAlters := append(alter1, alter2...)
+	alter1 = append(alter1, alter2...)
 
-	violations := linter.Lint([]*statement.CreateTable{table1, table2}, allAlters)
+	violations := linter.Lint([]*statement.CreateTable{table1, table2}, alter1)
 
 	// Should detect idx_email_dup as redundant but not idx_product
 	violatedIndexes := make(map[string]bool)

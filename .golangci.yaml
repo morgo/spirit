@@ -1,4 +1,16 @@
 version: "2"
+linters:
+  enable:
+    - errcheck        # unchecked errors
+    - govet           # suspicious constructs
+    - staticcheck     # comprehensive static analysis
+    - ineffassign     # useless assignments
+    - unused          # unused code
+    - gocritic        # opinionated but catches real bugs
+    - errorlint       # proper error wrapping/comparison
+    - noctx           # requests without context (we sometimes nolint these)
+    - bodyclose       # recommended, but probably not applicable
+    - exhaustive      # missing switch cases (we already suppress some)
 formatters:
   enable:
     - gofmt

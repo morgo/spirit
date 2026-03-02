@@ -120,7 +120,7 @@ func (c *change) oldTableName() string {
 }
 
 func (c *change) attemptInstantDDL(ctx context.Context) error {
-	if c.runner.migration.ForceKill {
+	if !c.runner.migration.SkipForceKill {
 		return dbconn.ForceExec(
 			ctx,
 			c.runner.db,
@@ -136,7 +136,7 @@ func (c *change) attemptInstantDDL(ctx context.Context) error {
 }
 
 func (c *change) attemptInplaceDDL(ctx context.Context) error {
-	if c.runner.migration.ForceKill {
+	if !c.runner.migration.SkipForceKill {
 		return dbconn.ForceExec(
 			ctx,
 			c.runner.db,

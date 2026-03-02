@@ -212,7 +212,7 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 					// slow path based on reflection
 					reflectTp := reflect.TypeOf(arg)
 					kind := reflectTp.Kind()
-					switch kind {
+					switch kind { //nolint:exhaustive
 					case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 						buf = strconv.AppendInt(buf, reflect.ValueOf(arg).Int(), 10)
 					case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:

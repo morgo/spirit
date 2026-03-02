@@ -31,6 +31,12 @@ func TestDatum(t *testing.T) {
 
 	assert.True(t, newsigned.GreaterThanOrEqual(signed))
 	assert.True(t, newunsigned.GreaterThanOrEqual(unsigned))
+	assert.True(t, newsigned.GreaterThan(signed))
+	assert.True(t, newunsigned.GreaterThan(unsigned))
+	assert.True(t, signed.LessThan(newsigned))
+	assert.True(t, unsigned.LessThan(newunsigned))
+	assert.True(t, signed.LessThanOrEqual(newsigned))
+	assert.True(t, unsigned.LessThanOrEqual(newunsigned))
 
 	// Test that add operations do not overflow. i.e.
 	// We initialize the values to max-10 of the range, but then add 100 to each.
@@ -51,6 +57,38 @@ func TestDatum(t *testing.T) {
 	binary, err := NewDatum("0", binaryType)
 	assert.NoError(t, err)
 	assert.Equal(t, `"0"`, binary.String())
+
+	// Test string comparisons (VARCHAR/TEXT)
+	str1, err := NewDatumFromValue("apple", "VARCHAR(255)")
+	assert.NoError(t, err)
+	str2, err := NewDatumFromValue("banana", "VARCHAR(255)")
+	assert.NoError(t, err)
+	assert.True(t, str2.GreaterThan(str1))        // "banana" > "apple"
+	assert.True(t, str2.GreaterThanOrEqual(str1)) // "banana" >= "apple"
+	assert.True(t, str1.LessThan(str2))           // "apple" < "banana"
+	assert.True(t, str1.LessThanOrEqual(str2))    // "apple" <= "banana"
+	str3, err := NewDatumFromValue("apple", "VARCHAR(255)")
+	assert.NoError(t, err)
+	assert.True(t, str1.GreaterThanOrEqual(str3)) // equal values
+	assert.True(t, str1.LessThanOrEqual(str3))    // equal values
+	assert.False(t, str1.GreaterThan(str3))       // equal values
+	assert.False(t, str1.LessThan(str3))          // equal values
+
+	// Test temporal comparisons (DATETIME)
+	datetime1, err := NewDatumFromValue("2024-01-01 10:00:00", "DATETIME")
+	assert.NoError(t, err)
+	datetime2, err := NewDatumFromValue("2024-01-02 10:00:00", "DATETIME")
+	assert.NoError(t, err)
+	assert.True(t, datetime2.GreaterThan(datetime1))
+	assert.True(t, datetime1.LessThan(datetime2))
+
+	// Test that comparing different types panics
+	assert.Panics(t, func() {
+		signed.GreaterThan(unsigned)
+	})
+	assert.Panics(t, func() {
+		signed.LessThan(str1)
+	})
 }
 
 func TestDatumInt32ToUnsigned(t *testing.T) {
@@ -278,12 +316,13 @@ func TestNewDatumFromValueBinaryString(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "0x000102ff", d.String())
 
-	// Test string that starts with 0x (should be hex encoded to avoid JSON corruption)
+	// Test string that starts with 0x - for VARCHAR (unknownType), this is just a normal string.
+	// It should NOT be hex-encoded because datumValFromString only hex-decodes for binaryType,
+	// so the JSON checkpoint round-trip is safe without encoding.
 	jsonLikeString := "0x123"
 	d, err = NewDatumFromValue(jsonLikeString, "VARCHAR(255)")
 	assert.NoError(t, err)
-	// This should be hex encoded because it starts with 0x
-	assert.Equal(t, "0x3078313233", d.String()) // hex of "0x123"
+	assert.Equal(t, "\"0x123\"", d.String())
 
 	// Test normal UTF-8 string
 	normalString := "hello"

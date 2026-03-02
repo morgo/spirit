@@ -40,7 +40,7 @@ func (l *HasFloatLinter) Lint(existingTables []*statement.CreateTable, changes [
 		}
 		for _, spec := range alter.Specs {
 			var message string
-			switch spec.Tp {
+			switch spec.Tp { //nolint:exhaustive
 			case ast.AlterTableAddColumns:
 				message = "New column %q in table %q uses floating-point data type"
 			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:

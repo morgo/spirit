@@ -22,7 +22,7 @@ MYSQL_DATABASE="spirit_test"
 echo ""
 echo "🔍 Testing TLS Mode: DISABLED"
 echo "------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -34,7 +34,7 @@ echo "------------------------------"
 echo ""
 echo "🔍 Testing TLS Mode: PREFERRED (should fallback to plain)"
 echo "---------------------------------------------------------"
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \
@@ -47,7 +47,7 @@ echo ""
 echo "🔍 Testing TLS Mode: REQUIRED (should fail)"
 echo "-------------------------------------------"
 set +e  # Allow this to fail
-./spirit \
+./spirit migrate \
   --host="$MYSQL_HOST" \
   --username="$MYSQL_USER" \
   --password="$MYSQL_PASSWORD" \

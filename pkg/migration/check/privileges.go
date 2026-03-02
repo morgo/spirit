@@ -90,7 +90,7 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 			errs = append(errs, errors.New("missing PROCESS privilege"))
 		}
 		if len(errs) > 0 {
-			return fmt.Errorf("insufficient privileges to run a migration with --force-kill. Needed: CONNECTION_ADMIN/SUPER, PROCESS, and SELECT on performance_schema.*: %w", errors.Join(errs...))
+			return fmt.Errorf("insufficient privileges to run a migration with force-kill enabled (disable with --skip-force-kill). Needed: CONNECTION_ADMIN/SUPER, PROCESS, and SELECT on performance_schema.*: %w", errors.Join(errs...))
 		}
 	}
 

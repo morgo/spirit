@@ -3,6 +3,7 @@ package copier
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -89,7 +90,9 @@ func (c *Unbuffered) StartTime() time.Time {
 }
 
 func (c *Unbuffered) Run(ctx context.Context) error {
+	c.Lock()
 	c.startTime = time.Now()
+	c.Unlock()
 	go c.estimateRowsPerSecondLoop(ctx) // estimate rows while copying
 	g, errGrpCtx := errgroup.WithContext(ctx)
 	g.SetLimit(c.concurrency)
@@ -97,7 +100,7 @@ func (c *Unbuffered) Run(ctx context.Context) error {
 		g.Go(func() error {
 			chunk, err := c.chunker.Next()
 			if err != nil {
-				if err == table.ErrTableIsRead {
+				if errors.Is(err, table.ErrTableIsRead) {
 					return nil
 				}
 				c.setInvalid(true)

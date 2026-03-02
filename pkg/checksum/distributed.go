@@ -449,7 +449,7 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		g.Go(func() error {
 			chunk, err := c.chunker.Next()
 			if err != nil {
-				if err == table.ErrTableIsRead {
+				if errors.Is(err, table.ErrTableIsRead) {
 					return nil
 				}
 				c.setInvalid(true)
