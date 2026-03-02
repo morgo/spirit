@@ -322,11 +322,11 @@ func TestTLSParameterEdgeCases(t *testing.T) {
 		description string
 	}{
 		{
-			name:        "Mixed case TLS parameter not recognized by ParseDSN",
+			name:        "Mixed case TLS parameter is ignored by ParseDSN",
 			dsn:         "user:pass@tcp(host:3306)/db?TLS=false",
 			config:      &DBConfig{TLSMode: "REQUIRED"},
 			expected:    "user:pass@tcp(host:3306)/db?tls=required&TLS=false",
-			description: "Mixed case TLS parameter is not recognized by ParseDSN, so TLS config is added",
+			description: "Mixed case 'TLS' (uppercase) is not recognized by go-sql-driver's ParseDSN — it is ignored and passed through as an unknown query parameter, so our TLS config is added alongside it",
 		},
 		{
 			name:        "TLS in middle of query params",

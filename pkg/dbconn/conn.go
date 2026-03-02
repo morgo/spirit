@@ -281,8 +281,6 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	// See also: https://github.com/go-sql-driver/mysql?tab=readme-ov-file#rejectreadonly
 	cfg.RejectReadOnly = true
 	cfg.InterpolateParams = config.InterpolateParams
-	// Allow mysql_native_password authentication
-	cfg.AllowNativePasswords = true
 	// Allow cleartext password authentication only when TLS is configured
 	// (required for AWS RDS IAM auth, safe because the connection uses TLS).
 	cfg.AllowCleartextPasswords = cfg.TLSConfig != ""
