@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -55,6 +56,8 @@ type Runner struct {
 
 	checker         checksum.Checker
 	checksumChunker table.Chunker // the chunker for checksum
+
+	chunkerMu sync.RWMutex // protects copyChunker and checksumChunker from concurrent access
 
 	ddlNotification chan string
 
@@ -806,9 +809,14 @@ func (r *Runner) Progress() status.Progress {
 		summary = "Checksum Progress=" + r.checker.GetProgress()
 	}
 
-	// Get per-table progress if available (multi-table migrations)
+	// Get per-table progress if available (multi-table migrations).
+	// We hold chunkerMu to synchronize with initChunkers(), which
+	// may be assigning r.copyChunker concurrently during setup.
 	var tables []status.TableProgress
-	if mc, ok := r.copyChunker.(interface{ PerTableProgress() []table.TableProgress }); ok {
+	r.chunkerMu.RLock()
+	copyChunker := r.copyChunker
+	r.chunkerMu.RUnlock()
+	if mc, ok := copyChunker.(interface{ PerTableProgress() []table.TableProgress }); ok {
 		for _, tp := range mc.PerTableProgress() {
 			tables = append(tables, status.TableProgress{
 				TableName:  tp.TableName,
@@ -817,10 +825,10 @@ func (r *Runner) Progress() status.Progress {
 				IsComplete: tp.IsComplete,
 			})
 		}
-	} else if r.copyChunker != nil {
+	} else if copyChunker != nil {
 		// Single table migration - get progress from chunker
-		rowsCopied, _, rowsTotal := r.copyChunker.Progress()
-		tableTables := r.copyChunker.Tables()
+		rowsCopied, _, rowsTotal := copyChunker.Progress()
+		tableTables := copyChunker.Tables()
 		tableName := ""
 		if len(tableTables) > 0 {
 			tableName = tableTables[0].TableName
@@ -829,7 +837,7 @@ func (r *Runner) Progress() status.Progress {
 			TableName:  tableName,
 			RowsCopied: rowsCopied,
 			RowsTotal:  rowsTotal,
-			IsComplete: r.copyChunker.IsRead(),
+			IsComplete: copyChunker.IsRead(),
 		})
 	}
 
@@ -1030,8 +1038,10 @@ func (r *Runner) initChunkers() error {
 	}
 	// We can wrap it the multi-chunker regardless.
 	// It won't cause any harm.
+	r.chunkerMu.Lock()
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
+	r.chunkerMu.Unlock()
 	return nil
 }
 
@@ -1078,13 +1088,19 @@ func (r *Runner) addsUniqueIndex() bool {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
-	// Check if replication client and copier are initialized (nil if called before setup completes)
-	if r.replClient == nil || r.copyChunker == nil {
+	// Check if replication client and copier are initialized (nil if called before setup completes).
+	// We hold chunkerMu to synchronize with initChunkers(), which
+	// may be assigning r.copyChunker concurrently during setup.
+	r.chunkerMu.RLock()
+	copyChunker := r.copyChunker
+	checksumChunker := r.checksumChunker
+	r.chunkerMu.RUnlock()
+	if r.replClient == nil || copyChunker == nil {
 		return status.ErrWatermarkNotReady
 	}
 	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
-	copierWatermark, err := r.copyChunker.GetLowWatermark()
+	copierWatermark, err := copyChunker.GetLowWatermark()
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
@@ -1093,7 +1109,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// operation, leaving a race condition.
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum {
-		checksumWatermark, err = r.checksumChunker.GetLowWatermark()
+		checksumWatermark, err = checksumChunker.GetLowWatermark()
 		if err != nil {
 			return status.ErrWatermarkNotReady
 		}
