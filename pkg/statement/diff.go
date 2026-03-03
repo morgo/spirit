@@ -1029,19 +1029,26 @@ func formatColumnDefinition(col *Column) string {
 func formatAddIndex(idx *Index) string {
 	var parts []string
 
-	// Index type
+	// Build the ADD clause: keyword + optional name.
+	// The name is omitted when empty (safety net; autoNameIndexes should
+	// have already assigned one during parsing).
+	var keyword string
 	switch idx.Type {
 	case "PRIMARY KEY":
-		parts = append(parts, "ADD PRIMARY KEY")
+		keyword = "ADD PRIMARY KEY"
 	case "UNIQUE":
-		parts = append(parts, fmt.Sprintf("ADD UNIQUE INDEX `%s`", idx.Name))
+		keyword = "ADD UNIQUE INDEX"
 	case "FULLTEXT":
-		parts = append(parts, fmt.Sprintf("ADD FULLTEXT INDEX `%s`", idx.Name))
+		keyword = "ADD FULLTEXT INDEX"
 	case "SPATIAL":
-		parts = append(parts, fmt.Sprintf("ADD SPATIAL INDEX `%s`", idx.Name))
+		keyword = "ADD SPATIAL INDEX"
 	default:
-		parts = append(parts, fmt.Sprintf("ADD INDEX `%s`", idx.Name))
+		keyword = "ADD INDEX"
 	}
+	if idx.Type != "PRIMARY KEY" && idx.Name != "" {
+		keyword += fmt.Sprintf(" `%s`", idx.Name)
+	}
+	parts = append(parts, keyword)
 
 	// Columns - use ColumnList if available for full details (prefix, expressions)
 	var columns []string

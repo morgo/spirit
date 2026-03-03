@@ -757,6 +757,43 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, content TEXT, INDEX new_idx (content(100)))",
 			expected: "ALTER TABLE `t1` DROP INDEX `old_idx`, ADD INDEX `new_idx` (`content`(100))",
 		},
+		// Unnamed index auto-naming tests
+		{
+			name:     "UnnamedIndexMatchesNormalized",
+			source:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, branch_name VARCHAR(100) DEFAULT NULL, PRIMARY KEY (id), INDEX (branch_name))",
+			target:   "CREATE TABLE t1 (id INT NOT NULL AUTO_INCREMENT, branch_name VARCHAR(100) DEFAULT NULL, PRIMARY KEY (id), KEY `branch_name` (`branch_name`))",
+			expected: "",
+		},
+		{
+			name:     "UnnamedIndexAutoNamed",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, INDEX (b))",
+			expected: "ALTER TABLE `t1` ADD INDEX `b` (`b`)",
+		},
+		{
+			name:     "UnnamedIndexDuplicateColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, INDEX b (b))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, INDEX b (b), INDEX (b))",
+			expected: "ALTER TABLE `t1` ADD INDEX `b_2` (`b`)",
+		},
+		{
+			name:     "MultipleUnnamedIndexesSameColumn",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT, INDEX (b), INDEX (b))",
+			expected: "ALTER TABLE `t1` ADD INDEX `b_2` (`b`), ADD INDEX `b` (`b`)",
+		},
+		{
+			name:     "UnnamedUniqueIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), UNIQUE INDEX (email))",
+			expected: "ALTER TABLE `t1` ADD UNIQUE INDEX `email` (`email`)",
+		},
+		{
+			name:     "UnnamedIndexNoDiffBothUnnamed",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, INDEX (b))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, INDEX (b))",
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
