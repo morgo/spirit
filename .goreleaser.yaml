@@ -1,0 +1,42 @@
+# GoReleaser configuration for Spirit
+# See https://goreleaser.com for documentation.
+
+version: 2
+
+builds:
+  - id: spirit
+    main: ./cmd/spirit
+    binary: spirit
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Only build the combinations we want:
+    #   linux/amd64, linux/arm64, darwin/arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+
+archives:
+  - id: spirit
+    builds:
+      - spirit
+    format: tar.gz
+    name_template: "spirit_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
