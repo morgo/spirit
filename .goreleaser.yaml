@@ -10,7 +10,7 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -X main.version={{.Tag}} -X main.commit={{.Commit}} -X main.date={{.Date}}
     goos:
       - linux
       - darwin
