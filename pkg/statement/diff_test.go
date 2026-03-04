@@ -794,6 +794,24 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, INDEX (b))",
 			expected: "",
 		},
+		{
+			name:     "NamedPKMatchesUnnamedPK",
+			source:   "CREATE TABLE `t1` (\n  `version` varchar(50) NOT NULL,\n  `installed_by` varchar(30) DEFAULT NULL,\n  PRIMARY KEY `version` (`version`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			target:   "CREATE TABLE `t1` (\n  `version` varchar(50) NOT NULL,\n  `installed_by` varchar(30) DEFAULT NULL,\n  PRIMARY KEY (`version`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			expected: "",
+		},
+		{
+			name:     "NamedPKNoDiffIdentical",
+			source:   "CREATE TABLE `t1` (\n  `version` varchar(50) NOT NULL,\n  PRIMARY KEY `version` (`version`)\n)",
+			target:   "CREATE TABLE `t1` (\n  `version` varchar(50) NOT NULL,\n  PRIMARY KEY `version` (`version`)\n)",
+			expected: "",
+		},
+		{
+			name:     "NamedPKReversed",
+			source:   "CREATE TABLE `t1` (\n  `version` varchar(50) NOT NULL,\n  PRIMARY KEY (`version`)\n)",
+			target:   "CREATE TABLE `t1` (\n  `version` varchar(50) NOT NULL,\n  PRIMARY KEY `version` (`version`)\n)",
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
