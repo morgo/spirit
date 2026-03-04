@@ -30,6 +30,12 @@ archives:
     format: tar.gz
     name_template: "spirit_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+release:
+  # If a release already exists for the tag, replace its assets
+  # rather than failing. This handles the case where a release
+  # is created via the GitHub UI before the workflow runs.
+  mode: replace
+
 checksum:
   name_template: "checksums.txt"
 
