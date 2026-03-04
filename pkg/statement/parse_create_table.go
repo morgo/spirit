@@ -570,6 +570,11 @@ func (ct *CreateTable) parseIndex(constraint *ast.Constraint) Index {
 	switch constraint.Tp {
 	case ast.ConstraintPrimaryKey:
 		index.Type = "PRIMARY KEY"
+		// MySQL ignores user-specified names on PRIMARY KEYs; SHOW CREATE TABLE
+		// never includes one. Normalize to empty so that a named PK
+		// (e.g. PRIMARY KEY `version` (`version`)) compares equal to an
+		// unnamed PK (PRIMARY KEY (`version`)) during diff.
+		index.Name = ""
 	case ast.ConstraintKey, ast.ConstraintIndex:
 		index.Type = "INDEX"
 	case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
