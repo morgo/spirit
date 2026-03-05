@@ -24,6 +24,8 @@ const (
 // String returns the human-readable name for a StatementType.
 func (t StatementType) String() string {
 	switch t {
+	case StatementUnknown:
+		return "UNKNOWN"
 	case StatementAlterTable:
 		return "ALTER TABLE"
 	case StatementCreateTable:
@@ -49,7 +51,7 @@ func (t StatementType) String() string {
 
 // IsDDL returns true if this is a DDL statement type.
 func (t StatementType) IsDDL() bool {
-	switch t {
+	switch t { //nolint:exhaustive
 	case StatementAlterTable, StatementCreateTable, StatementDropTable,
 		StatementRenameTable, StatementTruncateTable, StatementCreateIndex:
 		return true
@@ -59,7 +61,7 @@ func (t StatementType) IsDDL() bool {
 
 // IsDML returns true if this is a DML statement type.
 func (t StatementType) IsDML() bool {
-	switch t {
+	switch t { //nolint:exhaustive
 	case StatementInsert, StatementUpdate, StatementDelete:
 		return true
 	}
