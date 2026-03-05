@@ -12,6 +12,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestMoveWithConcurrentWrites verifies move behavior under lots of concurrent
@@ -308,4 +309,90 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 	// Stop the write threads
 	cancel()
 	wg.Wait()
+}
+
+// TestMoveFailsGracefullyWithMinimalRBR verifies that a move operation fails
+// gracefully when it receives minimal RBR events. The move always uses a buffered
+// applier which requires full row images. We simulate a rogue session that has
+// SET binlog_row_image = 'minimal' at the session level, which causes its DML
+// to produce minimal row images in the binlog even though the global setting is FULL.
+func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner (global setting already minimal)")
+	}
+
+	sourceDSN := testutils.DSNForDatabase("source_minrbr")
+	targetDSN := testutils.DSNForDatabase("dest_minrbr")
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_minrbr`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_minrbr`)
+
+	testutils.RunSQL(t, `CREATE DATABASE source_minrbr`)
+	testutils.RunSQL(t, `CREATE TABLE source_minrbr.t1 (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		val INT NOT NULL DEFAULT 0
+	)`)
+
+	// Insert a small amount of data. The copier will finish quickly,
+	// and the error will surface when Flush/BlockWait is called after the copy phase.
+	testutils.RunSQL(t, `INSERT INTO source_minrbr.t1 (name, val) VALUES ('seed', 1)`)
+	for range 5 {
+		testutils.RunSQL(t, `INSERT INTO source_minrbr.t1 (name, val) SELECT CONCAT(name, '-', id), val FROM source_minrbr.t1`)
+	}
+
+	testutils.RunSQL(t, `CREATE DATABASE dest_minrbr`)
+
+	// Open a dedicated connection with session-level minimal RBR.
+	// DML on this connection will produce minimal row images in the binlog.
+	minimalDB, err := sql.Open("mysql", sourceDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(minimalDB)
+
+	// Force a single connection so the session variable sticks.
+	minimalDB.SetMaxOpenConns(1)
+	_, err = minimalDB.ExecContext(t.Context(), "SET binlog_row_image = 'MINIMAL'")
+	require.NoError(t, err)
+
+	// Write a batch of rows using the minimal-RBR session before starting the move.
+	// These will be in the binlog when the repl client starts reading.
+	for i := range 100 {
+		_, err = minimalDB.ExecContext(t.Context(), `UPDATE source_minrbr.t1 SET val = val + 1 WHERE id = ?`, (i%32)+1)
+		require.NoError(t, err)
+	}
+
+	// Also keep writing during the move to ensure the repl client sees minimal events.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				_, _ = minimalDB.ExecContext(ctx, `UPDATE source_minrbr.t1 SET val = val + 1 WHERE id = ?`, (i%32)+1)
+			}
+		}
+	}()
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		CreateSentinel:  false,
+	}
+
+	err = move.Run()
+	cancel()
+	wg.Wait()
+
+	// The move should fail because the runtime check detects minimal RBR
+	// events while a buffered applier is in use.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "minimal RBR")
 }

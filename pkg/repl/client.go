@@ -57,7 +57,7 @@ const (
 )
 
 var (
-	// maxRecreateAttempts is the maximum number of streamer recreation attempts before panic.
+	// maxRecreateAttempts is the maximum number of streamer recreation attempts before giving up.
 	// This is really a const, but set to var for testing.
 	maxRecreateAttempts = 10
 )
@@ -112,6 +112,12 @@ type Client struct {
 	isClosed   atomic.Bool
 	logger     *slog.Logger
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
+
+	// streamErr stores a fatal error from the readStream goroutine.
+	// When set, the goroutine has exited and the client is no longer processing events.
+	// Protected by streamErrMu since it may be read from any goroutine.
+	streamErrMu sync.Mutex
+	streamErr   error
 
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
@@ -247,6 +253,21 @@ func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
 	return c.bufferedPos
+}
+
+// setStreamErr stores a fatal error from the readStream goroutine.
+// Once set, the goroutine has exited and the client is no longer processing events.
+func (c *Client) setStreamErr(err error) {
+	c.streamErrMu.Lock()
+	defer c.streamErrMu.Unlock()
+	c.streamErr = err
+}
+
+// getStreamErr returns the fatal error from the readStream goroutine, if any.
+func (c *Client) getStreamErr() error {
+	c.streamErrMu.Lock()
+	defer c.streamErrMu.Unlock()
+	return c.streamErr
 }
 
 // SetFlushedPos updates the known safe position that all changes have been flushed.
@@ -513,16 +534,17 @@ func (c *Client) readStream(ctx context.Context) {
 
 				// Check if we've exceeded the maximum number of recreation attempts
 				if recreateAttempts >= maxRecreateAttempts {
-					// Log comprehensive debugging information before panicking
-					c.logger.Error("PANIC: Failed to recreate binlog streamer, dumping debug info",
+					c.logger.Error("failed to recreate binlog streamer, giving up",
 						"total_attempts", recreateAttempts,
 						"current_position", currentPos,
 						"start_position", startPos,
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
 
-					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up. Recent errors: %v",
+					c.setStreamErr(fmt.Errorf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up. Recent errors: %v",
 						recreateAttempts, currentPos, recentErrors))
+					c.cancelFunc()
+					return
 				}
 
 				// Apply exponential backoff
@@ -594,7 +616,10 @@ func (c *Client) readStream(ctx context.Context) {
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, event); err != nil {
-				panic("could not process events")
+				c.logger.Error("fatal error processing binlog rows event", "error", err)
+				c.setStreamErr(fmt.Errorf("could not process events: %w", err))
+				c.cancelFunc()
+				return
 			}
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
@@ -690,6 +715,18 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	if !ok {
 		return nil // ignore event, it could be to a _new table.
 	}
+
+	// Runtime check for minimal RBR (binlog_row_image=MINIMAL).
+	// When a buffered applier is in use, it needs full row images to replay
+	// changes on the target. Minimal row images skip non-PK, non-changed columns
+	// which would cause data loss. We check c.applier rather than iterating
+	// all subscriptions for performance, since c.applier != nil implies a
+	// bufferedMap subscription is in use.
+	if c.applier != nil && isMinimalRowImage(e) {
+		return fmt.Errorf("received a minimal RBR event for table %s.%s, but a buffered applier is in use which requires full row images (binlog_row_image=FULL). "+
+			"Please set binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
+	}
+
 	eventType := parseEventType(ev.Header.EventType)
 
 	if eventType == eventTypeUpdate {
@@ -765,6 +802,18 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 		}
 	}
 	return nil
+}
+
+// isMinimalRowImage returns true if the RowsEvent contains a minimal row image,
+// i.e. some columns were skipped. This happens when binlog_row_image=MINIMAL or NOBLOB.
+// With full row images, SkippedColumns entries are empty slices.
+func isMinimalRowImage(e *replication.RowsEvent) bool {
+	for _, skipped := range e.SkippedColumns {
+		if len(skipped) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
@@ -887,6 +936,11 @@ func (c *Client) Flush(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return ctx.Err()
 			}
+			// If the stream has a fatal error, return it immediately
+			// instead of retrying forever.
+			if streamErr := c.getStreamErr(); streamErr != nil {
+				return streamErr
+			}
 			continue
 		}
 		//  If it doesn't timeout, we ensure the deltas
@@ -950,6 +1004,12 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
 func (c *Client) BlockWait(ctx context.Context) error {
+	// Check for a fatal stream error before doing anything.
+	// This surfaces errors from the readStream goroutine (e.g. minimal RBR detection,
+	// or exhausted streamer recreation attempts) instead of timing out.
+	if err := c.getStreamErr(); err != nil {
+		return err
+	}
 	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {
 		return err
@@ -963,8 +1023,17 @@ func (c *Client) BlockWait(ctx context.Context) error {
 	for {
 		select {
 		case <-timer.C:
+			// Before returning a generic timeout, check if the stream died.
+			if err := c.getStreamErr(); err != nil {
+				return err
+			}
 			return fmt.Errorf("timed out waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 		default:
+			// Check for stream errors each iteration so we fail fast
+			// instead of waiting for the full timeout.
+			if err := c.getStreamErr(); err != nil {
+				return err
+			}
 			currPos := c.getBufferedPos()
 			if currPos.Compare(prevPos) <= 0 && !first {
 				// we skip flushing on the first iteration because c.getCurrentBinlogPosition already flushes the binary log

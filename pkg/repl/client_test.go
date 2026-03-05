@@ -6,18 +6,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -784,65 +784,27 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }
 
-// TestMaxRecreateAttemptsPanic tests that the panic actually occurs after max attempts.
-// This uses a subprocess pattern to test the panic behavior.
-func TestMaxRecreateAttemptsPanic(t *testing.T) {
-	if os.Getenv("TEST_PANIC_SUBPROCESS") == "1" {
-		// This is the subprocess that should panic
-		testMaxRecreateAttemptsPanicSubprocess(t)
-		return
-	}
-
-	// Run the test in a subprocess
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestMaxRecreateAttemptsPanic")
-	cmd.Env = append(os.Environ(), "TEST_PANIC_SUBPROCESS=1")
-	output, err := cmd.CombinedOutput()
-
-	outputStr := string(output)
-	t.Logf("Subprocess output:\n%s", outputStr)
-
-	// We expect the subprocess to exit with non-zero (panic or crash)
-	if err == nil {
-		t.Fatal("Expected subprocess to panic or crash, but it exited successfully")
-	}
-
-	if !strings.Contains(outputStr, "consecutive errors") {
-		t.Errorf("Expected to see consecutive errors. Output:\n%s", outputStr)
-	}
-	if !strings.Contains(outputStr, "Failed to recreate streamer") {
-		t.Errorf("Expected to see recreation attempt. Output:\n%s", outputStr)
-	}
-
-	// If we DID get the max attempts panic message, verify it's correct
-	if strings.Contains(outputStr, "failed to recreate binlog streamer after") {
-		if !strings.Contains(outputStr, "giving up") {
-			t.Errorf("Panic message should contain 'giving up'. Output:\n%s", outputStr)
-		}
-	}
-}
-
-func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
+// TestMaxRecreateAttemptsError tests that the readStream goroutine sets a stream error
+// and exits cleanly after exhausting the maximum number of streamer recreation attempts.
+func TestMaxRecreateAttemptsError(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS panic_test_t1, panic_test_t2")
-	testutils.RunSQL(t, "CREATE TABLE panic_test_t1 (a INT NOT NULL PRIMARY KEY)")
-	testutils.RunSQL(t, "CREATE TABLE panic_test_t2 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS recreate_err_t1, recreate_err_t2")
+	testutils.RunSQL(t, "CREATE TABLE recreate_err_t1 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE recreate_err_t2 (a INT NOT NULL PRIMARY KEY)")
 
-	t1 := table.NewTableInfo(db, "test", "panic_test_t1")
+	t1 := table.NewTableInfo(db, "test", "recreate_err_t1")
 	require.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "panic_test_t2")
+	t2 := table.NewTableInfo(db, "test", "recreate_err_t2")
 	require.NoError(t, t2.SetInfo(t.Context()))
-
-	logger := slog.Default()
-	// Note: slog doesn't have SetLevel method, level is set via handler options
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
-		Logger:          logger,
+		Logger:          slog.Default(),
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
@@ -865,12 +827,22 @@ func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
 		client.syncer.Close()
 	}
 
-	// Wait for the panic to occur (with max 30 seconds timeout)
-	// With 2 attempts and fast failures, should happen quickly
-	time.Sleep(30 * time.Second)
+	// Wait for the readStream goroutine to exit after exhausting recreation attempts.
+	// With maxRecreateAttempts=3 (set in TestMain) and fast failures, this should be quick.
+	client.streamWG.Wait()
 
-	// If we reach here, test failed - no panic occurred
-	t.Fatal("Expected panic did not occur")
+	// Verify the stream error was set
+	streamErr := client.getStreamErr()
+	require.Error(t, streamErr)
+	assert.Contains(t, streamErr.Error(), "failed to recreate binlog streamer after")
+	assert.Contains(t, streamErr.Error(), "giving up")
+
+	// Verify that BlockWait surfaces the stream error instead of timing out
+	err = client.BlockWait(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to recreate binlog streamer after")
+
+	client.Close()
 }
 
 // TestNewServerIDConcurrent tests that NewServerID generates unique IDs even when called concurrently.
@@ -950,4 +922,125 @@ func TestNewServerIDRange(t *testing.T) {
 		id := NewServerID()
 		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 	}
+}
+
+// TestIsMinimalRowImage tests the isMinimalRowImage helper function.
+func TestIsMinimalRowImage(t *testing.T) {
+	// Full row image: SkippedColumns is nil
+	e := &replication.RowsEvent{}
+	assert.False(t, isMinimalRowImage(e))
+
+	// Full row image: SkippedColumns has entries but all are empty
+	e = &replication.RowsEvent{
+		SkippedColumns: [][]int{{}, {}},
+	}
+	assert.False(t, isMinimalRowImage(e))
+
+	// Minimal row image: SkippedColumns has entries with skipped column indices
+	e = &replication.RowsEvent{
+		SkippedColumns: [][]int{{1, 2}},
+	}
+	assert.True(t, isMinimalRowImage(e))
+
+	// Minimal row image: mixed - some rows full, some minimal
+	e = &replication.RowsEvent{
+		SkippedColumns: [][]int{{}, {2}},
+	}
+	assert.True(t, isMinimalRowImage(e))
+}
+
+// TestProcessRowsEventMinimalRBRWithApplier tests that processRowsEvent returns
+// an error when it detects a minimal RBR event and a buffered applier is in use.
+func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replminrbrt1, replminrbrt2")
+	testutils.RunSQL(t, "CREATE TABLE replminrbrt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE replminrbrt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "replminrbrt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "replminrbrt2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	// Create a mock RowsEvent with minimal row image (skipped columns)
+	rowsEvent := &replication.RowsEvent{
+		Table: &replication.TableMapEvent{
+			Schema: []byte("test"),
+			Table:  []byte("replminrbrt1"),
+		},
+		Rows: [][]interface{}{
+			{1, nil, nil}, // INSERT with only PK, other columns skipped
+		},
+		SkippedColumns: [][]int{
+			{1, 2}, // columns b and c were skipped
+		},
+	}
+	binlogEvent := &replication.BinlogEvent{
+		Header: &replication.EventHeader{
+			EventType: replication.WRITE_ROWS_EVENTv2,
+		},
+		Event: rowsEvent,
+	}
+
+	// Test 1: With an applier set (buffered mode), minimal RBR should return an error
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	applierInstance, err := applier.NewSingleTargetApplier(applier.Target{
+		DB:     db,
+		Config: cfg,
+	}, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+		Applier:         applierInstance,
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+
+	err = client.processRowsEvent(binlogEvent, rowsEvent)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "minimal RBR event")
+	assert.Contains(t, err.Error(), "binlog_row_image=FULL")
+
+	// Test 2: Without an applier (delta mode), minimal RBR should NOT return an error
+	client2 := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client2.AddSubscription(t1, t2, nil))
+
+	err = client2.processRowsEvent(binlogEvent, rowsEvent)
+	assert.NoError(t, err)
+
+	// Test 3: With an applier but full row image, should NOT return an error
+	fullRowsEvent := &replication.RowsEvent{
+		Table: &replication.TableMapEvent{
+			Schema: []byte("test"),
+			Table:  []byte("replminrbrt1"),
+		},
+		Rows: [][]interface{}{
+			{1, 2, 3}, // INSERT with all columns present
+		},
+		SkippedColumns: [][]int{
+			{}, // no columns skipped
+		},
+	}
+	fullBinlogEvent := &replication.BinlogEvent{
+		Header: &replication.EventHeader{
+			EventType: replication.WRITE_ROWS_EVENTv2,
+		},
+		Event: fullRowsEvent,
+	}
+
+	err = client.processRowsEvent(fullBinlogEvent, fullRowsEvent)
+	assert.NoError(t, err)
 }

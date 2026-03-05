@@ -3306,3 +3306,106 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	require.Error(t, migrationErr)
 	assert.ErrorContains(t, migrationErr, "unsafe SET value reorder")
 }
+
+// TestBufferedMigrationFailsGracefullyWithMinimalRBR verifies that a buffered
+// migration fails gracefully when it receives minimal RBR events. The buffered
+// mode uses a buffered applier which requires full row images. We simulate a
+// rogue session that has SET binlog_row_image = 'minimal' at the session level,
+// which causes its DML to produce minimal row images in the binlog even though
+// the global setting is FULL.
+func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner (global setting already minimal)")
+	}
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS minrbr_buffered, _minrbr_buffered_new, _minrbr_buffered_chkpnt`)
+	testutils.RunSQL(t, `CREATE TABLE minrbr_buffered (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		val INT NOT NULL DEFAULT 0
+	)`)
+
+	// Insert some data. The test throttler will slow the copier down,
+	// giving the repl client time to process the minimal-RBR events.
+	testutils.RunSQL(t, `INSERT INTO minrbr_buffered (name, val) VALUES ('seed', 1)`)
+	for range 8 {
+		testutils.RunSQL(t, `INSERT INTO minrbr_buffered (name, val) SELECT CONCAT(name, '-', id), val FROM minrbr_buffered`)
+	}
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	// Open a dedicated connection with session-level minimal RBR.
+	// DML on this connection will produce minimal row images in the binlog.
+	minimalDB, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(minimalDB)
+
+	// Force a single connection so the session variable sticks.
+	minimalDB.SetMaxOpenConns(1)
+	_, err = minimalDB.ExecContext(t.Context(), "SET binlog_row_image = 'MINIMAL'")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	m, err := NewRunner(&Migration{
+		Host:             cfg.Addr,
+		Username:         cfg.User,
+		Password:         &cfg.Passwd,
+		Database:         cfg.DBName,
+		Threads:          1,
+		TargetChunkTime:  100 * time.Millisecond,
+		Table:            "minrbr_buffered",
+		Alter:            "ENGINE=InnoDB",
+		Buffered:         true,
+		useTestThrottler: true, // slows the copier so the repl client has time to see minimal events
+	})
+	require.NoError(t, err)
+
+	// Run the migration in a goroutine so we can inject minimal-RBR writes
+	// once the copy phase has started.
+	var migrationErr error
+	migrationDone := make(chan struct{})
+	go func() {
+		defer close(migrationDone)
+		migrationErr = m.Run(ctx)
+	}()
+
+	// Wait until the migration is in the copy phase, then start writing
+	// with minimal RBR. This ensures the repl client is actively reading
+	// binlog events when the minimal row images arrive.
+	waitForStatus(t, m, status.CopyRows)
+
+	// Continuously write using the minimal-RBR session during the copy phase.
+	// The test throttler slows the copier, so these writes will be picked up
+	// by the binlog subscription before the copy phase finishes.
+	var writerWg sync.WaitGroup
+	writerWg.Add(1)
+	go func() {
+		defer writerWg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				_, _ = minimalDB.ExecContext(ctx, `UPDATE minrbr_buffered SET val = val + 1 WHERE id = ?`, (i%100)+1)
+			}
+		}
+	}()
+
+	// Wait for the migration to complete (it should fail), then stop the writer.
+	<-migrationDone
+	cancel()
+	writerWg.Wait()
+	assert.NoError(t, m.Close())
+
+	// The migration should fail because the runtime check detects minimal RBR
+	// events while a buffered applier is in use.
+	require.Error(t, migrationErr)
+	assert.ErrorContains(t, migrationErr, "minimal RBR")
+}
