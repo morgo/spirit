@@ -107,12 +107,14 @@ func TestClassifySchema(t *testing.T) {
 	results, err := Classify("ALTER TABLE test.t1 ADD COLUMN foo INT")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
+	assert.Equal(t, StatementAlterTable, results[0].Type)
 	assert.Equal(t, "test", results[0].Schema)
 	assert.Equal(t, "t1", results[0].Table)
 
 	results, err = Classify("DROP TABLE mydb.users")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
+	assert.Equal(t, StatementDropTable, results[0].Type)
 	assert.Equal(t, "mydb", results[0].Schema)
 	assert.Equal(t, "users", results[0].Table)
 }
