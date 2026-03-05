@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -27,7 +26,6 @@ import (
 func TestMain(m *testing.M) {
 	maxRecreateAttempts = 3
 	goleak.VerifyTestMain(m)
-	os.Exit(m.Run())
 }
 
 func TestReplClient(t *testing.T) {
@@ -443,7 +441,10 @@ func TestBlockWait(t *testing.T) {
 	// 1. kicking off a go-routine that inserts into an unrelated table
 	// 2. verifying that flushedBinlogs is still 0 at the end of BlockWait
 	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		i := 1
 		for {
 			select {
@@ -451,7 +452,12 @@ func TestBlockWait(t *testing.T) {
 				return
 			default:
 				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
-				testutils.RunSQL(t, insert)
+				db, err := sql.Open("mysql", testutils.DSN())
+				if err != nil {
+					return
+				}
+				_, _ = db.ExecContext(ctx, insert)
+				_ = db.Close()
 				i++
 			}
 		}
@@ -460,6 +466,7 @@ func TestBlockWait(t *testing.T) {
 	client.flushedBinlogs.Store(0)
 	assert.NoError(t, client.BlockWait(t.Context()))
 	cancel()
+	wg.Wait() // ensure goroutine exits before test completes
 	assert.Equal(t, int64(0), client.flushedBinlogs.Load())
 
 	// Insert into t1.

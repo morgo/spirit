@@ -3,7 +3,6 @@ package table
 import (
 	"database/sql"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
-	os.Exit(m.Run())
 }
 
 func TestOpenOnBinaryType(t *testing.T) {

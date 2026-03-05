@@ -2,7 +2,6 @@ package copier
 
 import (
 	"context"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +21,6 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
-	os.Exit(m.Run())
 }
 
 type TestMetricsSink struct {
