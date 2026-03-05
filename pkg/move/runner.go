@@ -353,6 +353,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		ServerID:              repl.NewServerID(),
 		Applier:               r.applier, // Use the shared applier
 		DBConfig:              r.dbConfig,
+		CancelFunc:            r.cancelFunc, // allows the repl client to cancel the move on fatal stream errors
 	})
 
 	// Run post-setup checks

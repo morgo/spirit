@@ -803,14 +803,20 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
+	// Create a cancellable context to simulate the caller (migration/move runner).
+	// The repl client will call this cancel func on fatal stream errors.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          slog.Default(),
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
+		CancelFunc:      cancel,
 	})
 	require.NoError(t, client.AddSubscription(t1, t2, nil))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Run(ctx))
 
 	// Ensure we are no longer on the initial binary log.
 	_, err = db.ExecContext(t.Context(), "FLUSH BINARY LOGS")
@@ -837,10 +843,8 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	assert.Contains(t, streamErr.Error(), "failed to recreate binlog streamer after")
 	assert.Contains(t, streamErr.Error(), "giving up")
 
-	// Verify that BlockWait surfaces the stream error instead of timing out
-	err = client.BlockWait(t.Context())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to recreate binlog streamer after")
+	// Verify that the caller's context was cancelled by the repl client.
+	assert.Error(t, ctx.Err(), "caller context should be cancelled")
 
 	client.Close()
 }

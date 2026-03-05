@@ -108,16 +108,11 @@ type Client struct {
 	periodicFlushLock    sync.Mutex
 	periodicFlushEnabled bool
 
-	cancelFunc func()
-	isClosed   atomic.Bool
-	logger     *slog.Logger
-	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
-
-	// streamErr stores a fatal error from the readStream goroutine.
-	// When set, the goroutine has exited and the client is no longer processing events.
-	// Protected by streamErrMu since it may be read from any goroutine.
-	streamErrMu sync.Mutex
-	streamErr   error
+	cancelFunc       func()
+	callerCancelFunc context.CancelFunc // optional: cancels the caller's context on fatal stream errors
+	isClosed         atomic.Bool
+	logger           *slog.Logger
+	streamWG         sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
@@ -142,6 +137,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		onDDLDisableFiltering: config.OnDDLDisableFiltering,
 		serverID:              config.ServerID,
 		applier:               config.Applier,
+		callerCancelFunc:      config.CancelFunc,
 	}
 }
 
@@ -154,6 +150,13 @@ type ClientConfig struct {
 	ServerID              uint32
 	Applier               applier.Applier
 	DBConfig              *dbconn.DBConfig // Database configuration including TLS settings
+
+	// CancelFunc is an optional cancel function from the caller (e.g. migration or move runner).
+	// When the readStream goroutine encounters a fatal error (such as minimal RBR detection
+	// or exhausted streamer recreation attempts), it will call this function to cancel the
+	// caller's context. This ensures the copier and other long-running operations stop
+	// immediately rather than waiting until the next BlockWait/Flush call.
+	CancelFunc context.CancelFunc
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -253,21 +256,6 @@ func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
 	defer c.Unlock()
 	return c.bufferedPos
-}
-
-// setStreamErr stores a fatal error from the readStream goroutine.
-// Once set, the goroutine has exited and the client is no longer processing events.
-func (c *Client) setStreamErr(err error) {
-	c.streamErrMu.Lock()
-	defer c.streamErrMu.Unlock()
-	c.streamErr = err
-}
-
-// getStreamErr returns the fatal error from the readStream goroutine, if any.
-func (c *Client) getStreamErr() error {
-	c.streamErrMu.Lock()
-	defer c.streamErrMu.Unlock()
-	return c.streamErr
 }
 
 // SetFlushedPos updates the known safe position that all changes have been flushed.
@@ -541,8 +529,9 @@ func (c *Client) readStream(ctx context.Context) {
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
 
-					c.setStreamErr(fmt.Errorf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up. Recent errors: %v",
-						recreateAttempts, currentPos, recentErrors))
+					if c.callerCancelFunc != nil {
+						c.callerCancelFunc()
+					}
 					c.cancelFunc()
 					return
 				}
@@ -617,7 +606,9 @@ func (c *Client) readStream(ctx context.Context) {
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing binlog rows event", "error", err)
-				c.setStreamErr(fmt.Errorf("could not process events: %w", err))
+				if c.callerCancelFunc != nil {
+					c.callerCancelFunc()
+				}
 				c.cancelFunc()
 				return
 			}
@@ -936,11 +927,6 @@ func (c *Client) Flush(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// If the stream has a fatal error, return it immediately
-			// instead of retrying forever.
-			if streamErr := c.getStreamErr(); streamErr != nil {
-				return streamErr
-			}
 			continue
 		}
 		//  If it doesn't timeout, we ensure the deltas
@@ -1004,12 +990,6 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
 func (c *Client) BlockWait(ctx context.Context) error {
-	// Check for a fatal stream error before doing anything.
-	// This surfaces errors from the readStream goroutine (e.g. minimal RBR detection,
-	// or exhausted streamer recreation attempts) instead of timing out.
-	if err := c.getStreamErr(); err != nil {
-		return err
-	}
 	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {
 		return err
@@ -1023,17 +1003,8 @@ func (c *Client) BlockWait(ctx context.Context) error {
 	for {
 		select {
 		case <-timer.C:
-			// Before returning a generic timeout, check if the stream died.
-			if err := c.getStreamErr(); err != nil {
-				return err
-			}
 			return fmt.Errorf("timed out waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 		default:
-			// Check for stream errors each iteration so we fail fast
-			// instead of waiting for the full timeout.
-			if err := c.getStreamErr(); err != nil {
-				return err
-			}
 			currPos := c.getBufferedPos()
 			if currPos.Compare(prevPos) <= 0 && !first {
 				// we skip flushing on the first iteration because c.getCurrentBinlogPosition already flushes the binary log

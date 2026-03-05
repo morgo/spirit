@@ -530,6 +530,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		ServerID:        repl.NewServerID(),
 		DBConfig:        r.dbConfig, // Pass database configuration to replication client
 		Applier:         appl,
+		CancelFunc:      r.cancelFunc, // allows the repl client to cancel the migration on fatal stream errors
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
