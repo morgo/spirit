@@ -59,8 +59,6 @@ type Runner struct {
 
 	chunkerMu sync.RWMutex // protects copyChunker and checksumChunker from concurrent access
 
-	ddlNotification chan string
-
 	// Track some key statistics.
 	startTime             time.Time
 	sentinelWaitStartTime time.Time
@@ -526,11 +524,10 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		Logger:          r.logger,
 		Concurrency:     r.migration.Threads,
 		TargetBatchTime: r.migration.TargetChunkTime,
-		OnDDL:           r.ddlNotification,
+		CancelFunc:      r.cancel,
 		ServerID:        repl.NewServerID(),
 		DBConfig:        r.dbConfig, // Pass database configuration to replication client
 		Applier:         appl,
-		CancelFunc:      r.cancelFunc, // allows the repl client to cancel the migration on fatal stream errors
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
@@ -663,7 +660,7 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 }
 
 // startBackgroundRoutines starts the background routines needed for migration monitoring.
-// This includes table statistics updates, periodic binlog flushing, and DDL change notifications.
+// This includes table statistics updates and periodic binlog flushing.
 func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 	// Start routines in table and replication packages to
 	// Continuously update the min/max and estimated rows
@@ -675,7 +672,6 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go change.table.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
 	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
-	go r.tableChangeNotification(ctx)
 	// Start go routines for checkpointing and dumping status
 	status.WatchTask(ctx, r, r.logger)
 }
@@ -691,7 +687,6 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // - starting the periodic flush routine
 func (r *Runner) setup(ctx context.Context) error {
 	var err error
-	r.ddlNotification = make(chan string, 1)
 
 	// We always attempt to resume from a checkpoint.
 	if err = r.resumeFromCheckpoint(ctx); err != nil {
@@ -730,43 +725,25 @@ func (r *Runner) setup(ctx context.Context) error {
 	return nil
 }
 
-// tableChangeNotification is called as a goroutine.
-// Any schema changes to the source or new table will be sent to a channel
-// that this function reads from.
-func (r *Runner) tableChangeNotification(ctx context.Context) {
-	defer r.replClient.SetDDLNotificationChannel(nil)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case tbl, ok := <-r.ddlNotification:
-			if !ok {
-				return // channel was closed
-			}
-			if r.status.Get() >= status.CutOver {
-				return
-			}
-
-			// The table names are filtered from the replication stream
-			// Before they are sent here, so we know it's one of our tables.
-			// Because there has been an external change,
-			// we now have to cancel our work :(
-			r.status.Set(status.ErrCleanup)
-			// Write this to the logger, so it can be captured by the initiator.
-			r.logger.Error("table definition changed during migration",
-				"table", tbl,
-			)
-			// Invalidate the checkpoint, so we don't try to resume.
-			// If we don't do this, the migration will permanently be blocked from proceeding.
-			// Letting it start again is the better choice.
-			if err := r.dropCheckpoint(ctx); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
-			}
-			r.cancelFunc() // cancel the migration context
-		}
+// cancel is the callback provided to the replication client.
+// It is called when a DDL change is detected on a subscribed table,
+// or when a fatal stream error occurs. The replication client handles
+// its own logging before calling this.
+func (r *Runner) cancel() {
+	if r.status.Get() >= status.CutOver {
+		return
 	}
+	r.status.Set(status.ErrCleanup)
+	// Invalidate the checkpoint, so we don't try to resume.
+	// If we don't do this, the migration will permanently be blocked from proceeding.
+	// Letting it start again is the better choice.
+	// Use a background context since the migration context may already be cancelled.
+	if err := r.dropCheckpoint(context.Background()); err != nil {
+		r.logger.Error("could not remove checkpoint",
+			"error", err,
+		)
+	}
+	r.cancelFunc() // cancel the migration context
 }
 
 func (r *Runner) dropCheckpoint(ctx context.Context) error {
@@ -866,14 +843,6 @@ func (r *Runner) Close() error {
 		if err != nil {
 			return err
 		}
-	}
-	// Set the DDL notification channel to nil before closing it
-	// to prevent race conditions where another goroutine might try to send to it
-	if r.replClient != nil {
-		r.replClient.SetDDLNotificationChannel(nil)
-	}
-	if r.ddlNotification != nil {
-		close(r.ddlNotification)
 	}
 	if r.replClient != nil {
 		r.replClient.Close()

@@ -83,12 +83,12 @@ type Client struct {
 	// each subscription has its own set of changes.
 	subscriptions map[string]Subscription
 
-	// onDDL is a channel that is used to notify of
-	// any schema changes. It will send any changes,
-	// and the caller is expected to filter it if
-	// onDDLDisableFiltering=true
-	onDDL                 chan string
-	onDDLDisableFiltering bool
+	// callerCancelFunc is an optional callback that is called when a DDL
+	// change is detected on a subscribed table, or when a fatal stream
+	// error occurs. The caller is expected to handle cancellation and
+	// cleanup in this callback.
+	callerCancelFunc    func()
+	disableDDLFiltering bool
 
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
@@ -108,11 +108,10 @@ type Client struct {
 	periodicFlushLock    sync.Mutex
 	periodicFlushEnabled bool
 
-	cancelFunc       func()
-	callerCancelFunc context.CancelFunc // optional: cancels the caller's context on fatal stream errors
-	isClosed         atomic.Bool
-	logger           *slog.Logger
-	streamWG         sync.WaitGroup // tracks readStream goroutine for proper cleanup
+	cancelFunc func()
+	isClosed   atomic.Bool
+	logger     *slog.Logger
+	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
@@ -123,40 +122,39 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
-		db:                    db,
-		dbConfig:              config.DBConfig,
-		host:                  host,
-		username:              username,
-		password:              password,
-		logger:                config.Logger,
-		targetBatchTime:       config.TargetBatchTime,
-		targetBatchSize:       DefaultBatchSize, // initial starting value.
-		concurrency:           config.Concurrency,
-		subscriptions:         make(map[string]Subscription),
-		onDDL:                 config.OnDDL,
-		onDDLDisableFiltering: config.OnDDLDisableFiltering,
-		serverID:              config.ServerID,
-		applier:               config.Applier,
-		callerCancelFunc:      config.CancelFunc,
+		db:                  db,
+		dbConfig:            config.DBConfig,
+		host:                host,
+		username:            username,
+		password:            password,
+		logger:              config.Logger,
+		targetBatchTime:     config.TargetBatchTime,
+		targetBatchSize:     DefaultBatchSize, // initial starting value.
+		concurrency:         config.Concurrency,
+		subscriptions:       make(map[string]Subscription),
+		callerCancelFunc:    config.CancelFunc,
+		disableDDLFiltering: config.DisableDDLFiltering,
+		serverID:            config.ServerID,
+		applier:             config.Applier,
 	}
 }
 
 type ClientConfig struct {
-	TargetBatchTime       time.Duration
-	Concurrency           int
-	Logger                *slog.Logger
-	OnDDL                 chan string
-	OnDDLDisableFiltering bool
-	ServerID              uint32
-	Applier               applier.Applier
-	DBConfig              *dbconn.DBConfig // Database configuration including TLS settings
+	TargetBatchTime time.Duration
+	Concurrency     int
+	Logger          *slog.Logger
+	ServerID        uint32
+	Applier         applier.Applier
+	DBConfig        *dbconn.DBConfig // Database configuration including TLS settings
 
-	// CancelFunc is an optional cancel function from the caller (e.g. migration or move runner).
-	// When the readStream goroutine encounters a fatal error (such as minimal RBR detection
-	// or exhausted streamer recreation attempts), it will call this function to cancel the
-	// caller's context. This ensures the copier and other long-running operations stop
-	// immediately rather than waiting until the next BlockWait/Flush call.
-	CancelFunc context.CancelFunc
+	// CancelFunc is an optional callback from the caller (e.g. migration or move runner).
+	// It is called when a DDL change is detected on a subscribed table, or when a fatal
+	// stream error occurs (such as minimal RBR detection or exhausted streamer recreation
+	// attempts). The caller is expected to handle cancellation and cleanup.
+	// If DisableDDLFiltering is true, the callback is called for all DDL changes
+	// without filtering by subscription (used by the move runner).
+	CancelFunc          func()
+	DisableDDLFiltering bool
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -193,7 +191,6 @@ func NewClientDefaultConfig() *ClientConfig {
 		Concurrency:     4,
 		TargetBatchTime: DefaultTargetBatchTime,
 		Logger:          slog.Default(),
-		OnDDL:           nil,
 		ServerID:        NewServerID(),
 	}
 }
@@ -652,15 +649,15 @@ func (c *Client) readStream(ctx context.Context) {
 	}
 }
 
-// processDDLNotification sends a notification to the onDDL channel if the table matches
+// processDDLNotification calls the callerCancelFunc if the table matches a subscription.
 // The table is encoded with EncodeSchemaTable() and should include the schema name.
 func (c *Client) processDDLNotification(encodedTable string) {
 	c.Lock()
 	defer c.Unlock()
-	if c.onDDL == nil {
+	if c.callerCancelFunc == nil {
 		return // no one is listening for DDL events
 	}
-	if !c.onDDLDisableFiltering {
+	if !c.disableDDLFiltering {
 		// Check if the encodedTable matches any of our subscriptions.
 		// This is the default behavior.
 		matchFound := false
@@ -678,14 +675,8 @@ func (c *Client) processDDLNotification(encodedTable string) {
 			return
 		}
 	}
-	// Use non-blocking send to prevent deadlock
-	select {
-	case c.onDDL <- encodedTable:
-		// Successfully sent notification
-	default:
-		// Channel is full or blocked, skip notification to prevent deadlock
-		// This is acceptable as DDL notifications are best-effort
-	}
+	c.logger.Error("table definition changed, cancelling operation", "table", encodedTable)
+	c.callerCancelFunc()
 }
 
 // processRowsEvent processes a RowsEvent. It will search all active
@@ -1079,10 +1070,4 @@ func (c *Client) SetWatermarkOptimization(newVal bool) {
 	for _, sub := range c.subscriptions {
 		sub.SetWatermarkOptimization(newVal)
 	}
-}
-
-func (c *Client) SetDDLNotificationChannel(ch chan string) {
-	c.Lock()
-	defer c.Unlock()
-	c.onDDL = ch
 }

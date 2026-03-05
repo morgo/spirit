@@ -494,13 +494,17 @@ func TestDDLNotification(t *testing.T) {
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
-	ddlNotifications := make(chan string, 1)
+
+	// Use a channel to track cancel calls from the CancelFunc callback.
+	cancelled := make(chan struct{}, 1)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
-		OnDDL:           ddlNotifications,
-		ServerID:        NewServerID(),
+		CancelFunc: func() {
+			cancelled <- struct{}{}
+		},
+		ServerID: NewServerID(),
 	})
 	assert.NoError(t, client.AddSubscription(t1, t2, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -509,90 +513,7 @@ func TestDDLNotification(t *testing.T) {
 	// Alter the existing table ddl_t2, check that we get notification of it.
 	testutils.RunSQL(t, "ALTER TABLE ddl_t2 ADD COLUMN d INT")
 
-	tableModified := <-ddlNotifications
-	assert.Equal(t, "test.ddl_t2", tableModified)
-
-	// Set the channel to a new channel.
-	ddlNotifications2 := make(chan string, 1)
-	client.SetDDLNotificationChannel(ddlNotifications2)
-
-	// Alter the existing table ddl_t1, check that we get notification of it on the new channel.
-	testutils.RunSQL(t, "ALTER TABLE ddl_t1 ADD COLUMN d INT")
-
-	tableModified = <-ddlNotifications2
-	assert.Equal(t, "test.ddl_t1", tableModified)
-}
-
-func TestSetDDLNotificationChannel(t *testing.T) {
-	t.Skip("test is flaky")
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS ddl_channel_t1, ddl_channel_t2")
-	testutils.RunSQL(t, "CREATE TABLE ddl_channel_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE ddl_channel_t2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-
-	t1 := table.NewTableInfo(db, "test", "ddl_channel_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "ddl_channel_t2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
-
-	logger := slog.Default()
-	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-
-	t.Run("change notification channels", func(t *testing.T) {
-		client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
-			Logger:          logger,
-			Concurrency:     4,
-			TargetBatchTime: time.Second,
-			ServerID:        NewServerID(),
-		})
-		assert.NoError(t, client.AddSubscription(t1, t2, nil))
-		assert.NoError(t, client.Run(t.Context()))
-		defer client.Close()
-
-		// Test 1: Set initial channel
-		ch1 := make(chan string, 1)
-		client.SetDDLNotificationChannel(ch1)
-		testutils.RunSQL(t, "ALTER TABLE ddl_channel_t1 ADD COLUMN d INT")
-		select {
-		case tableModified := <-ch1:
-			assert.Equal(t, "test.ddl_channel_t1", tableModified)
-		case <-time.After(time.Second):
-			t.Fatal("Did not receive DDL notification on first channel")
-		}
-
-		// Test 2: Change to new channel
-		ch2 := make(chan string, 1)
-		client.SetDDLNotificationChannel(ch2)
-		testutils.RunSQL(t, "ALTER TABLE ddl_channel_t2 ADD COLUMN d INT")
-		select {
-		case tableModified := <-ch2:
-			assert.Equal(t, "test.ddl_channel_t2", tableModified)
-		case <-time.After(time.Second):
-			t.Fatal("Did not receive DDL notification on second channel")
-		}
-
-		// Test 3: Verify old channel doesn't receive notifications
-		select {
-		case <-ch1:
-			t.Fatal("Should not receive notification on old channel")
-		case <-time.After(100 * time.Millisecond):
-			// This is expected
-		}
-
-		// Test 4: Set to nil
-		client.SetDDLNotificationChannel(nil)
-		testutils.RunSQL(t, "ALTER TABLE ddl_channel_t1 ADD COLUMN e INT")
-		select {
-		case <-ch2:
-			t.Fatal("Should not receive notification when channel is nil")
-		case <-time.After(100 * time.Millisecond):
-			// This is expected
-		}
-	})
+	<-cancelled // CancelFunc was called
 }
 
 // TestCompositePKUpdate tests that we correctly handle
@@ -804,7 +725,8 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a cancellable context to simulate the caller (migration/move runner).
-	// The repl client will call this cancel func on fatal stream errors.
+	// The repl client will call CancelFunc on fatal stream errors,
+	// which cancels the context (mimicking what the runner does).
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -837,13 +759,7 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	// With maxRecreateAttempts=3 (set in TestMain) and fast failures, this should be quick.
 	client.streamWG.Wait()
 
-	// Verify the stream error was set
-	streamErr := client.getStreamErr()
-	require.Error(t, streamErr)
-	assert.Contains(t, streamErr.Error(), "failed to recreate binlog streamer after")
-	assert.Contains(t, streamErr.Error(), "giving up")
-
-	// Verify that the caller's context was cancelled by the repl client.
+	// Verify that the caller's context was cancelled via the CancelFunc callback.
 	assert.Error(t, ctx.Err(), "caller context should be cancelled")
 
 	client.Close()
