@@ -89,6 +89,7 @@ type Client struct {
 	// cleanup in this callback.
 	callerCancelFunc func()
 	ddlFilterSchema  string
+	ddlFilterTables  map[string]struct{}
 
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
@@ -134,6 +135,7 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		subscriptions:    make(map[string]Subscription),
 		callerCancelFunc: config.CancelFunc,
 		ddlFilterSchema:  config.DDLFilterSchema,
+		ddlFilterTables:  toSet(config.DDLFilterTables),
 		serverID:         config.ServerID,
 		applier:          config.Applier,
 	}
@@ -157,6 +159,13 @@ type ClientConfig struct {
 	// in the specified schema, rather than only on exact table matches against subscriptions.
 	// This is used by the move runner to detect DDL on any table in the source database.
 	DDLFilterSchema string
+
+	// DDLFilterTables, when set alongside DDLFilterSchema, narrows the schema-level
+	// DDL detection to only the specified table names. This is used for partial moves
+	// where only specific tables from a schema are being moved — DDL on unrelated
+	// tables in the same schema should not trigger cancellation.
+	// If empty (and DDLFilterSchema is set), all tables in the schema trigger cancellation.
+	DDLFilterTables []string
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -648,18 +657,26 @@ func (c *Client) readStream(ctx context.Context) {
 // processDDLNotification cancels the client if the DDL matches our filter criteria.
 // By default, only exact schema.table matches against subscriptions trigger cancellation.
 // If ddlFilterSchema is set, any DDL in that schema triggers cancellation instead.
+// If ddlFilterTables is also set (alongside ddlFilterSchema), only DDL on those
+// specific tables within the schema triggers cancellation — this is used for partial
+// moves where only a subset of tables from a schema are being moved.
 func (c *Client) processDDLNotification(schema, table string) {
-	c.Lock()
-	defer c.Unlock()
 	if c.ddlFilterSchema != "" {
-		// Schema-level filtering: cancel on any DDL in the specified schema.
+		// Schema-level filtering: cancel on DDL in the specified schema.
 		if schema != c.ddlFilterSchema {
 			return
+		}
+		// If ddlFilterTables is set, further narrow to only those tables.
+		if len(c.ddlFilterTables) > 0 {
+			if _, ok := c.ddlFilterTables[table]; !ok {
+				return
+			}
 		}
 	} else {
 		// Check if the schema.table matches any of our subscriptions.
 		// This is the default behavior.
 		matchFound := false
+		c.Lock()
 		for _, sub := range c.subscriptions {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
 				if tsub.SchemaName == schema && tsub.TableName == table {
@@ -668,6 +685,7 @@ func (c *Client) processDDLNotification(schema, table string) {
 				}
 			}
 		}
+		c.Unlock()
 		if !matchFound {
 			return
 		}
@@ -818,8 +836,7 @@ func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 
 // fatalError is called from within the readStream goroutine when a truly fatal
 // stream error occurs (e.g. unrecoverable stream error, minimal RBR detection,
-// or a fatal rows event error). It cancels the client's own context to stop
-// the stream and notifies the caller.
+// or a fatal rows event error).
 //
 // IMPORTANT: This method must NOT call Close() because Close() calls
 // streamWG.Wait(), which would deadlock since readStream is the caller.

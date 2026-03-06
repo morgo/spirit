@@ -200,6 +200,64 @@ func TestExtractTablesFromDDLStmts(t *testing.T) {
 	}
 }
 
+func TestToSet(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected map[string]struct{}
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name:     "empty slice",
+			input:    []string{},
+			expected: nil,
+		},
+		{
+			name:  "single element",
+			input: []string{"a"},
+			expected: map[string]struct{}{
+				"a": {},
+			},
+		},
+		{
+			name:  "multiple elements",
+			input: []string{"a", "b", "c"},
+			expected: map[string]struct{}{
+				"a": {},
+				"b": {},
+				"c": {},
+			},
+		},
+		{
+			name:  "duplicate elements",
+			input: []string{"a", "b", "a"},
+			expected: map[string]struct{}{
+				"a": {},
+				"b": {},
+			},
+		},
+		{
+			name:  "schema.table style strings",
+			input: []string{"test.users", "test.orders"},
+			expected: map[string]struct{}{
+				"test.users":  {},
+				"test.orders": {},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := toSet(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 // TestExtractTablesFromDDLStmtsComplex tests more complex DDL statements
 func TestExtractTablesFromDDLStmtsComplex(t *testing.T) {
 	tests := []struct {

@@ -342,8 +342,12 @@ func (r *Runner) setup(ctx context.Context) error {
 		TargetBatchTime: r.move.TargetChunkTime,
 		CancelFunc:      r.fatalError,
 		// receive all DDL events from the source database to
-		// ensure we can react to any changes that would impact the move
+		// ensure we can react to any changes that would impact the move.
+		// When SourceTables is set (partial move), only DDL on those specific
+		// tables triggers cancellation — DDL on unrelated tables in the same
+		// schema is ignored.
 		DDLFilterSchema: r.sourceConfig.DBName,
+		DDLFilterTables: r.move.SourceTables,
 		ServerID:        repl.NewServerID(),
 		Applier:         r.applier, // Use the shared applier
 		DBConfig:        r.dbConfig,

@@ -105,3 +105,17 @@ func extractTablesFromDDLStmts(defaultSchema string, statements string) ([]schem
 	}
 	return tables, nil
 }
+
+// toSet converts a string slice to a set (map[string]struct{}) for O(1) lookups.
+// Returns nil if the input slice is empty, so callers can use len() to check
+// whether filtering is enabled.
+func toSet(ss []string) map[string]struct{} {
+	if len(ss) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		m[s] = struct{}{}
+	}
+	return m
+}
