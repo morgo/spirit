@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
+	os.Exit(m.Run())
 }
 
 func getVariable(trx *sql.Tx, name string, sessionScope bool) (string, error) {

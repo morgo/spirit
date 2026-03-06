@@ -3,6 +3,7 @@ package move
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ func TestMain(m *testing.M) {
 	sentinelCheckInterval = 100 * time.Millisecond
 	sentinelWaitLimit = 10 * time.Second
 	goleak.VerifyTestMain(m)
+	os.Exit(m.Run())
 }
 
 func TestBasicMove(t *testing.T) {

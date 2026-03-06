@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 func TestMain(m *testing.M) {
 	maxRecreateAttempts = 3
 	goleak.VerifyTestMain(m)
+	os.Exit(m.Run())
 }
 
 func TestReplClient(t *testing.T) {

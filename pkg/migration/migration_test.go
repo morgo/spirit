@@ -36,6 +36,7 @@ func TestMain(m *testing.M) {
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
 	sentinelCheckInterval = 100 * time.Millisecond
 	goleak.VerifyTestMain(m)
+	os.Exit(m.Run())
 }
 
 func TestE2ENullAlterEmpty(t *testing.T) {

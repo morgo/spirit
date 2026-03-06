@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"os"
 	"testing"
 
 	"github.com/block/spirit/pkg/table"
@@ -10,6 +11,7 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
+	os.Exit(m.Run())
 }
 
 func TestIntersectColumns(t *testing.T) {

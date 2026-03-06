@@ -1,6 +1,7 @@
 package statement
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +10,7 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
+	os.Exit(m.Run())
 }
 func TestExtractFromStatement(t *testing.T) {
 	abstractStmt, err := New("ALTER TABLE t1 ADD INDEX (something)")
