@@ -963,3 +963,111 @@ func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
 	err = client.processRowsEvent(fullBinlogEvent, fullRowsEvent)
 	assert.NoError(t, err)
 }
+
+func TestProcessDDLNotification(t *testing.T) {
+	// Helper: create a minimal Client with the given filter config and a cancel tracker.
+	makeClient := func(filterSchema string, filterTables []string) (*Client, *bool) {
+		cancelled := false
+		c := &Client{
+			logger:           slog.Default(),
+			callerCancelFunc: func() { cancelled = true },
+			ddlFilterSchema:  filterSchema,
+			ddlFilterTables:  toSet(filterTables),
+			subscriptions:    make(map[string]Subscription),
+		}
+		return c, &cancelled
+	}
+
+	// Set up a real database and tables for the default-mode subtest.
+	// Done at top level to avoid subtest name length issues with CreateUniqueTestDatabase.
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	dbName := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE orders (id INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _orders_new (id INT NOT NULL PRIMARY KEY)")
+
+	tbl := table.NewTableInfo(db, dbName, "orders")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+	newTbl := table.NewTableInfo(db, dbName, "_orders_new")
+	require.NoError(t, newTbl.SetInfo(t.Context()))
+
+	t.Run("default mode: cancels on exact subscription match", func(t *testing.T) {
+		cancelled := false
+		c := &Client{
+			logger:           slog.Default(),
+			callerCancelFunc: func() { cancelled = true },
+			subscriptions:    make(map[string]Subscription),
+		}
+		c.subscriptions[dbName+".orders"] = &deltaMap{
+			table:    tbl,
+			newTable: newTbl,
+			changes:  make(map[string]mapChange),
+			c:        c,
+		}
+
+		// DDL on the subscribed table should cancel.
+		c.processDDLNotification(dbName, "orders")
+		assert.True(t, cancelled, "should cancel on DDL matching a subscribed table")
+
+		// DDL on an unrelated table should not cancel.
+		cancelled = false
+		c.processDDLNotification(dbName, "unrelated_table")
+		assert.False(t, cancelled, "should not cancel on DDL for an unrelated table")
+
+		// DDL on a different schema should not cancel.
+		cancelled = false
+		c.processDDLNotification("other_schema", "orders")
+		assert.False(t, cancelled, "should not cancel on DDL in a different schema")
+	})
+
+	t.Run("schema filter without table filter: cancels on any table in schema", func(t *testing.T) {
+		c, cancelled := makeClient("mydb", nil)
+
+		c.processDDLNotification("mydb", "any_table")
+		assert.True(t, *cancelled, "should cancel on any DDL in the filtered schema")
+
+		*cancelled = false
+		c.processDDLNotification("mydb", "another_table")
+		assert.True(t, *cancelled, "should cancel on DDL for any table in the filtered schema")
+
+		*cancelled = false
+		c.processDDLNotification("other_schema", "any_table")
+		assert.False(t, *cancelled, "should not cancel on DDL in a different schema")
+	})
+
+	t.Run("schema filter with table filter: cancels only on specified tables", func(t *testing.T) {
+		c, cancelled := makeClient("mydb", []string{"orders", "customers"})
+
+		// DDL on a filtered table should cancel.
+		c.processDDLNotification("mydb", "orders")
+		assert.True(t, *cancelled, "should cancel on DDL for a filtered table")
+
+		*cancelled = false
+		c.processDDLNotification("mydb", "customers")
+		assert.True(t, *cancelled, "should cancel on DDL for another filtered table")
+
+		// DDL on an unrelated table in the same schema should NOT cancel.
+		*cancelled = false
+		c.processDDLNotification("mydb", "unrelated_table")
+		assert.False(t, *cancelled, "should not cancel on DDL for an unrelated table in the same schema")
+
+		// DDL in a different schema should NOT cancel.
+		*cancelled = false
+		c.processDDLNotification("other_schema", "orders")
+		assert.False(t, *cancelled, "should not cancel on DDL in a different schema even if table name matches")
+	})
+
+	t.Run("no cancel func: does not panic", func(t *testing.T) {
+		c := &Client{
+			logger:          slog.Default(),
+			ddlFilterSchema: "mydb",
+			subscriptions:   make(map[string]Subscription),
+		}
+		// Should not panic even though callerCancelFunc is nil.
+		assert.NotPanics(t, func() {
+			c.processDDLNotification("mydb", "some_table")
+		})
+	})
+}

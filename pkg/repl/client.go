@@ -1025,13 +1025,6 @@ func (c *Client) BlockWait(ctx context.Context) error {
 		case <-timer.C:
 			return fmt.Errorf("timed out waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 		default:
-			// If the client has been closed (e.g. by fatalError), the readStream
-			// goroutine is no longer advancing the buffered position, so we can
-			// never catch up. Return immediately instead of spinning until timeout.
-			if c.isClosed.Load() {
-				return errors.New("client is closed, cannot catch up to source position")
-			}
-
 			currPos := c.getBufferedPos()
 			if currPos.Compare(prevPos) <= 0 && !first {
 				// we skip flushing on the first iteration because c.getCurrentBinlogPosition already flushes the binary log
