@@ -341,6 +341,9 @@ func (r *Runner) setup(ctx context.Context) error {
 		Concurrency:     r.move.Threads,
 		TargetBatchTime: r.move.TargetChunkTime,
 		CancelFunc:      r.cancel,
+		// receive all DDL events from the source database to
+		// ensure we can react to any changes that would impact the move
+		DDLFilterSchema: r.sourceConfig.DBName,
 		ServerID:        repl.NewServerID(),
 		Applier:         r.applier, // Use the shared applier
 		DBConfig:        r.dbConfig,

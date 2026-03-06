@@ -667,7 +667,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
 	}
-	client.subscriptions[EncodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
+	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed

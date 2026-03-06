@@ -159,6 +159,17 @@ func (a *AbstractStatement) IsCreateTable() bool {
 	_, ok := (*a.StmtNode).(*ast.CreateTableStmt)
 	return ok
 }
+
+func (a *AbstractStatement) IsDropTable() bool {
+	_, ok := (*a.StmtNode).(*ast.DropTableStmt)
+	return ok
+}
+
+func (a *AbstractStatement) IsRenameTable() bool {
+	_, ok := (*a.StmtNode).(*ast.RenameTableStmt)
+	return ok
+}
+
 func (a *AbstractStatement) ParseCreateTable() (*CreateTable, error) {
 	createStmt, ok := (*a.StmtNode).(*ast.CreateTableStmt)
 	if !ok {

@@ -87,8 +87,8 @@ type Client struct {
 	// change is detected on a subscribed table, or when a fatal stream
 	// error occurs. The caller is expected to handle cancellation and
 	// cleanup in this callback.
-	callerCancelFunc    func()
-	disableDDLFiltering bool
+	callerCancelFunc func()
+	ddlFilterSchema  string
 
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
@@ -122,20 +122,20 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
-		db:                  db,
-		dbConfig:            config.DBConfig,
-		host:                host,
-		username:            username,
-		password:            password,
-		logger:              config.Logger,
-		targetBatchTime:     config.TargetBatchTime,
-		targetBatchSize:     DefaultBatchSize, // initial starting value.
-		concurrency:         config.Concurrency,
-		subscriptions:       make(map[string]Subscription),
-		callerCancelFunc:    config.CancelFunc,
-		disableDDLFiltering: config.DisableDDLFiltering,
-		serverID:            config.ServerID,
-		applier:             config.Applier,
+		db:               db,
+		dbConfig:         config.DBConfig,
+		host:             host,
+		username:         username,
+		password:         password,
+		logger:           config.Logger,
+		targetBatchTime:  config.TargetBatchTime,
+		targetBatchSize:  DefaultBatchSize, // initial starting value.
+		concurrency:      config.Concurrency,
+		subscriptions:    make(map[string]Subscription),
+		callerCancelFunc: config.CancelFunc,
+		ddlFilterSchema:  config.DDLFilterSchema,
+		serverID:         config.ServerID,
+		applier:          config.Applier,
 	}
 }
 
@@ -151,10 +151,12 @@ type ClientConfig struct {
 	// It is called when a DDL change is detected on a subscribed table, or when a fatal
 	// stream error occurs (such as minimal RBR detection or exhausted streamer recreation
 	// attempts). The caller is expected to handle cancellation and cleanup.
-	// If DisableDDLFiltering is true, the callback is called for all DDL changes
-	// without filtering by subscription (used by the move runner).
-	CancelFunc          func()
-	DisableDDLFiltering bool
+	CancelFunc func()
+
+	// DDLFilterSchema, when set, broadens DDL detection to cancel on any DDL change
+	// in the specified schema, rather than only on exact table matches against subscriptions.
+	// This is used by the move runner to detect DDL on any table in the source database.
+	DDLFilterSchema string
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -201,7 +203,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	c.Lock()
 	defer c.Unlock()
 
-	subKey := EncodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
+	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
 	if _, exists := c.subscriptions[subKey]; exists {
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
@@ -612,7 +614,7 @@ func (c *Client) readStream(ctx context.Context) {
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
 			// in which case we need to notify the caller.
-			tables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
+			ddlTables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
 				// The parser does not understand all syntax.
 				// For example, it won't parse [CREATE|DROP] TRIGGER statements *or*
@@ -624,8 +626,8 @@ func (c *Client) readStream(ctx context.Context) {
 				c.logger.Error("Skipping query that was unable to parse", "file", currentLogName, "pos", ev.Header.LogPos)
 				continue
 			}
-			for _, table := range tables {
-				c.processDDLNotification(table)
+			for _, ddlTable := range ddlTables {
+				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
 		default:
 			// Log unknown event types for debugging
@@ -649,33 +651,37 @@ func (c *Client) readStream(ctx context.Context) {
 	}
 }
 
-// processDDLNotification calls the callerCancelFunc if the table matches a subscription.
-// The table is encoded with EncodeSchemaTable() and should include the schema name.
-func (c *Client) processDDLNotification(encodedTable string) {
+// processDDLNotification calls the callerCancelFunc if the DDL matches our filter criteria.
+// By default, only exact schema.table matches against subscriptions trigger the callback.
+// If ddlFilterSchema is set, any DDL in that schema triggers the callback instead.
+func (c *Client) processDDLNotification(schema, table string) {
 	c.Lock()
 	defer c.Unlock()
 	if c.callerCancelFunc == nil {
 		return // no one is listening for DDL events
 	}
-	if !c.disableDDLFiltering {
-		// Check if the encodedTable matches any of our subscriptions.
+	if c.ddlFilterSchema != "" {
+		// Schema-level filtering: cancel on any DDL in the specified schema.
+		if schema != c.ddlFilterSchema {
+			return
+		}
+	} else {
+		// Check if the schema.table matches any of our subscriptions.
 		// This is the default behavior.
 		matchFound := false
 		for _, sub := range c.subscriptions {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
-				tName := EncodeSchemaTable(tsub.SchemaName, tsub.TableName)
-				if encodedTable == tName {
+				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
 					break
 				}
 			}
 		}
-		// If there is no matchFound, we don't send the notification.
 		if !matchFound {
 			return
 		}
 	}
-	c.logger.Error("table definition changed, cancelling operation", "table", encodedTable)
+	c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
 	c.callerCancelFunc()
 }
 
@@ -692,7 +698,7 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	c.Lock()
 	defer c.Unlock()
 
-	subName := EncodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
+	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
 	sub, ok := c.subscriptions[subName]
 	if !ok {
 		return nil // ignore event, it could be to a _new table.

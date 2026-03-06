@@ -40,6 +40,9 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Equal(t, "t1", abstractStmt[0].Table)
 	assert.Empty(t, abstractStmt[0].Alter)
 	assert.False(t, abstractStmt[0].IsAlterTable())
+	assert.True(t, abstractStmt[0].IsCreateTable())
+	assert.False(t, abstractStmt[0].IsDropTable())
+	assert.False(t, abstractStmt[0].IsRenameTable())
 
 	// Try and extract multiple statements.
 	// This works
@@ -86,6 +89,9 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Equal(t, "t1", abstractStmt[0].Table)
 	assert.Empty(t, abstractStmt[0].Alter)
 	assert.False(t, abstractStmt[0].IsAlterTable())
+	assert.True(t, abstractStmt[0].IsDropTable())
+	assert.False(t, abstractStmt[0].IsRenameTable())
+	assert.False(t, abstractStmt[0].IsCreateTable())
 
 	// drop table with multiple schemas
 	_, err = New("DROP TABLE test.t1, test2.t1")
@@ -97,6 +103,8 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Equal(t, "t1", abstractStmt[0].Table)
 	assert.Empty(t, abstractStmt[0].Alter)
 	assert.False(t, abstractStmt[0].IsAlterTable())
+	assert.True(t, abstractStmt[0].IsRenameTable())
+	assert.False(t, abstractStmt[0].IsDropTable())
 	assert.Equal(t, "RENAME TABLE t1 TO t2", abstractStmt[0].Statement)
 
 	_, err = New("-- commented out sql")
