@@ -651,9 +651,6 @@ func (c *Client) readStream(ctx context.Context) {
 func (c *Client) processDDLNotification(schema, table string) {
 	c.Lock()
 	defer c.Unlock()
-	if c.callerCancelFunc == nil {
-		return // no one is listening for DDL events
-	}
 	if c.ddlFilterSchema != "" {
 		// Schema-level filtering: cancel on any DDL in the specified schema.
 		if schema != c.ddlFilterSchema {
@@ -819,17 +816,16 @@ func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 	return true
 }
 
-// fatalError is called when the client detects a fatal error (e.g. DDL on a subscribed
-// table, unrecoverable stream error, or a fatal rows event error). It notifies
-// the caller via callerCancelFunc and cancels the client's own context via cancelFunc.
-// Both functions are set once during initialization and never mutated, so this method
-// is safe to call with or without the client lock held.
+// fatalError is called from within the readStream goroutine when a truly fatal
+// stream error occurs (e.g. unrecoverable stream error, minimal RBR detection,
+// or a fatal rows event error). It cancels the client's own context to stop
+// the stream and notifies the caller.
+//
+// IMPORTANT: This method must NOT call Close() because Close() calls
+// streamWG.Wait(), which would deadlock since readStream is the caller.
 func (c *Client) fatalError() {
 	if c.callerCancelFunc != nil {
 		c.callerCancelFunc()
-	}
-	if c.cancelFunc != nil {
-		c.cancelFunc()
 	}
 }
 

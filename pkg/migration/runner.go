@@ -524,7 +524,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		Logger:          r.logger,
 		Concurrency:     r.migration.Threads,
 		TargetBatchTime: r.migration.TargetChunkTime,
-		CancelFunc:      r.cancel,
+		CancelFunc:      r.fatalError,
 		ServerID:        repl.NewServerID(),
 		DBConfig:        r.dbConfig, // Pass database configuration to replication client
 		Applier:         appl,
@@ -725,11 +725,11 @@ func (r *Runner) setup(ctx context.Context) error {
 	return nil
 }
 
-// cancel is the callback provided to the replication client.
+// fatalError is the callback provided to the replication client.
 // It is called when a DDL change is detected on a subscribed table,
 // or when a fatal stream error occurs. The replication client handles
 // its own logging before calling this.
-func (r *Runner) cancel() {
+func (r *Runner) fatalError() {
 	if r.status.Get() >= status.CutOver {
 		return
 	}

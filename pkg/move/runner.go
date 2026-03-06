@@ -340,7 +340,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		Logger:          r.logger,
 		Concurrency:     r.move.Threads,
 		TargetBatchTime: r.move.TargetChunkTime,
-		CancelFunc:      r.cancel,
+		CancelFunc:      r.fatalError,
 		// receive all DDL events from the source database to
 		// ensure we can react to any changes that would impact the move
 		DDLFilterSchema: r.sourceConfig.DBName,
@@ -625,11 +625,11 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 	status.WatchTask(ctx, r, r.logger)
 }
 
-// cancel is the callback provided to the replication client.
+// fatalError is the callback provided to the replication client.
 // It is called when a DDL change is detected on a subscribed table,
 // or when a fatal stream error occurs. The replication client handles
 // its own logging before calling this.
-func (r *Runner) cancel() {
+func (r *Runner) fatalError() {
 	if r.status.Get() >= status.CutOver {
 		return
 	}
