@@ -2,7 +2,6 @@ package checksum
 
 import (
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
-	os.Exit(m.Run())
 }
 
 func TestBasicChecksum(t *testing.T) {
