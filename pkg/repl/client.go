@@ -528,10 +528,7 @@ func (c *Client) readStream(ctx context.Context) {
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
 
-					if c.callerCancelFunc != nil {
-						c.callerCancelFunc()
-					}
-					c.cancelFunc()
+					c.fatalError()
 					return
 				}
 
@@ -605,10 +602,7 @@ func (c *Client) readStream(ctx context.Context) {
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing binlog rows event", "error", err)
-				if c.callerCancelFunc != nil {
-					c.callerCancelFunc()
-				}
-				c.cancelFunc()
+				c.fatalError()
 				return
 			}
 		case *replication.QueryEvent:
@@ -651,9 +645,9 @@ func (c *Client) readStream(ctx context.Context) {
 	}
 }
 
-// processDDLNotification calls the callerCancelFunc if the DDL matches our filter criteria.
-// By default, only exact schema.table matches against subscriptions trigger the callback.
-// If ddlFilterSchema is set, any DDL in that schema triggers the callback instead.
+// processDDLNotification cancels the client if the DDL matches our filter criteria.
+// By default, only exact schema.table matches against subscriptions trigger cancellation.
+// If ddlFilterSchema is set, any DDL in that schema triggers cancellation instead.
 func (c *Client) processDDLNotification(schema, table string) {
 	c.Lock()
 	defer c.Unlock()
@@ -682,7 +676,7 @@ func (c *Client) processDDLNotification(schema, table string) {
 		}
 	}
 	c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
-	c.callerCancelFunc()
+	c.fatalError()
 }
 
 // processRowsEvent processes a RowsEvent. It will search all active
@@ -823,6 +817,20 @@ func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 		return true // can't determine.
 	}
 	return true
+}
+
+// fatalError is called when the client detects a fatal error (e.g. DDL on a subscribed
+// table, unrecoverable stream error, or a fatal rows event error). It notifies
+// the caller via callerCancelFunc and cancels the client's own context via cancelFunc.
+// Both functions are set once during initialization and never mutated, so this method
+// is safe to call with or without the client lock held.
+func (c *Client) fatalError() {
+	if c.callerCancelFunc != nil {
+		c.callerCancelFunc()
+	}
+	if c.cancelFunc != nil {
+		c.cancelFunc()
+	}
 }
 
 func (c *Client) Close() {

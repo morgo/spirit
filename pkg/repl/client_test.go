@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -443,26 +442,18 @@ func TestBlockWait(t *testing.T) {
 	// 2. verifying that flushedBinlogs is still 0 at the end of BlockWait
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		i := 1
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
-				db, err := sql.Open("mysql", testutils.DSN())
-				if err != nil {
-					return
-				}
-				_, _ = db.ExecContext(ctx, insert)
-				_ = db.Close()
+				_, _ = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i))
 				i++
 			}
 		}
-	}()
+	})
 	time.Sleep(3 * time.Second) // should be enough for BlockWait to block for 1 iteration before catching up, but not guaranteed
 	client.flushedBinlogs.Store(0)
 	assert.NoError(t, client.BlockWait(t.Context()))
