@@ -5,19 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -442,23 +441,24 @@ func TestBlockWait(t *testing.T) {
 	// 1. kicking off a go-routine that inserts into an unrelated table
 	// 2. verifying that flushedBinlogs is still 0 at the end of BlockWait
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		i := 1
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				insert := fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i)
-				testutils.RunSQL(t, insert)
+				_, _ = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO blockwaitt3 (a, b, c) VALUES (%d, %d, %d)", i, i, i))
 				i++
 			}
 		}
-	}()
+	})
 	time.Sleep(3 * time.Second) // should be enough for BlockWait to block for 1 iteration before catching up, but not guaranteed
 	client.flushedBinlogs.Store(0)
 	assert.NoError(t, client.BlockWait(t.Context()))
 	cancel()
+	wg.Wait() // ensure goroutine exits before test completes
 	assert.Equal(t, int64(0), client.flushedBinlogs.Load())
 
 	// Insert into t1.
@@ -493,13 +493,17 @@ func TestDDLNotification(t *testing.T) {
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
-	ddlNotifications := make(chan string, 1)
+
+	// Use a channel to track cancel calls from the CancelFunc callback.
+	cancelled := make(chan struct{}, 1)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
-		OnDDL:           ddlNotifications,
-		ServerID:        NewServerID(),
+		CancelFunc: func() {
+			cancelled <- struct{}{}
+		},
+		ServerID: NewServerID(),
 	})
 	assert.NoError(t, client.AddSubscription(t1, t2, nil))
 	assert.NoError(t, client.Run(t.Context()))
@@ -508,90 +512,7 @@ func TestDDLNotification(t *testing.T) {
 	// Alter the existing table ddl_t2, check that we get notification of it.
 	testutils.RunSQL(t, "ALTER TABLE ddl_t2 ADD COLUMN d INT")
 
-	tableModified := <-ddlNotifications
-	assert.Equal(t, "test.ddl_t2", tableModified)
-
-	// Set the channel to a new channel.
-	ddlNotifications2 := make(chan string, 1)
-	client.SetDDLNotificationChannel(ddlNotifications2)
-
-	// Alter the existing table ddl_t1, check that we get notification of it on the new channel.
-	testutils.RunSQL(t, "ALTER TABLE ddl_t1 ADD COLUMN d INT")
-
-	tableModified = <-ddlNotifications2
-	assert.Equal(t, "test.ddl_t1", tableModified)
-}
-
-func TestSetDDLNotificationChannel(t *testing.T) {
-	t.Skip("test is flaky")
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS ddl_channel_t1, ddl_channel_t2")
-	testutils.RunSQL(t, "CREATE TABLE ddl_channel_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE ddl_channel_t2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-
-	t1 := table.NewTableInfo(db, "test", "ddl_channel_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "ddl_channel_t2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
-
-	logger := slog.Default()
-	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-
-	t.Run("change notification channels", func(t *testing.T) {
-		client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
-			Logger:          logger,
-			Concurrency:     4,
-			TargetBatchTime: time.Second,
-			ServerID:        NewServerID(),
-		})
-		assert.NoError(t, client.AddSubscription(t1, t2, nil))
-		assert.NoError(t, client.Run(t.Context()))
-		defer client.Close()
-
-		// Test 1: Set initial channel
-		ch1 := make(chan string, 1)
-		client.SetDDLNotificationChannel(ch1)
-		testutils.RunSQL(t, "ALTER TABLE ddl_channel_t1 ADD COLUMN d INT")
-		select {
-		case tableModified := <-ch1:
-			assert.Equal(t, "test.ddl_channel_t1", tableModified)
-		case <-time.After(time.Second):
-			t.Fatal("Did not receive DDL notification on first channel")
-		}
-
-		// Test 2: Change to new channel
-		ch2 := make(chan string, 1)
-		client.SetDDLNotificationChannel(ch2)
-		testutils.RunSQL(t, "ALTER TABLE ddl_channel_t2 ADD COLUMN d INT")
-		select {
-		case tableModified := <-ch2:
-			assert.Equal(t, "test.ddl_channel_t2", tableModified)
-		case <-time.After(time.Second):
-			t.Fatal("Did not receive DDL notification on second channel")
-		}
-
-		// Test 3: Verify old channel doesn't receive notifications
-		select {
-		case <-ch1:
-			t.Fatal("Should not receive notification on old channel")
-		case <-time.After(100 * time.Millisecond):
-			// This is expected
-		}
-
-		// Test 4: Set to nil
-		client.SetDDLNotificationChannel(nil)
-		testutils.RunSQL(t, "ALTER TABLE ddl_channel_t1 ADD COLUMN e INT")
-		select {
-		case <-ch2:
-			t.Fatal("Should not receive notification when channel is nil")
-		case <-time.After(100 * time.Millisecond):
-			// This is expected
-		}
-	})
+	<-cancelled // CancelFunc was called
 }
 
 // TestCompositePKUpdate tests that we correctly handle
@@ -736,7 +657,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
 	}
-	client.subscriptions[EncodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
+	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
@@ -783,71 +704,40 @@ func TestAllChangesFlushed(t *testing.T) {
 	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }
 
-// TestMaxRecreateAttemptsPanic tests that the panic actually occurs after max attempts.
-// This uses a subprocess pattern to test the panic behavior.
-func TestMaxRecreateAttemptsPanic(t *testing.T) {
-	if os.Getenv("TEST_PANIC_SUBPROCESS") == "1" {
-		// This is the subprocess that should panic
-		testMaxRecreateAttemptsPanicSubprocess(t)
-		return
-	}
-
-	// Run the test in a subprocess
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestMaxRecreateAttemptsPanic")
-	cmd.Env = append(os.Environ(), "TEST_PANIC_SUBPROCESS=1")
-	output, err := cmd.CombinedOutput()
-
-	outputStr := string(output)
-	t.Logf("Subprocess output:\n%s", outputStr)
-
-	// We expect the subprocess to exit with non-zero (panic or crash)
-	if err == nil {
-		t.Fatal("Expected subprocess to panic or crash, but it exited successfully")
-	}
-
-	if !strings.Contains(outputStr, "consecutive errors") {
-		t.Errorf("Expected to see consecutive errors. Output:\n%s", outputStr)
-	}
-	if !strings.Contains(outputStr, "Failed to recreate streamer") {
-		t.Errorf("Expected to see recreation attempt. Output:\n%s", outputStr)
-	}
-
-	// If we DID get the max attempts panic message, verify it's correct
-	if strings.Contains(outputStr, "failed to recreate binlog streamer after") {
-		if !strings.Contains(outputStr, "giving up") {
-			t.Errorf("Panic message should contain 'giving up'. Output:\n%s", outputStr)
-		}
-	}
-}
-
-func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
+// TestMaxRecreateAttemptsError tests that the readStream goroutine sets a stream error
+// and exits cleanly after exhausting the maximum number of streamer recreation attempts.
+func TestMaxRecreateAttemptsError(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS panic_test_t1, panic_test_t2")
-	testutils.RunSQL(t, "CREATE TABLE panic_test_t1 (a INT NOT NULL PRIMARY KEY)")
-	testutils.RunSQL(t, "CREATE TABLE panic_test_t2 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS recreate_err_t1, recreate_err_t2")
+	testutils.RunSQL(t, "CREATE TABLE recreate_err_t1 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE recreate_err_t2 (a INT NOT NULL PRIMARY KEY)")
 
-	t1 := table.NewTableInfo(db, "test", "panic_test_t1")
+	t1 := table.NewTableInfo(db, "test", "recreate_err_t1")
 	require.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "panic_test_t2")
+	t2 := table.NewTableInfo(db, "test", "recreate_err_t2")
 	require.NoError(t, t2.SetInfo(t.Context()))
-
-	logger := slog.Default()
-	// Note: slog doesn't have SetLevel method, level is set via handler options
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
+	// Create a cancellable context to simulate the caller (migration/move runner).
+	// The repl client will call CancelFunc on fatal stream errors,
+	// which cancels the context (mimicking what the runner does).
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
-		Logger:          logger,
+		Logger:          slog.Default(),
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
+		CancelFunc:      cancel,
 	})
 	require.NoError(t, client.AddSubscription(t1, t2, nil))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Run(ctx))
 
 	// Ensure we are no longer on the initial binary log.
 	_, err = db.ExecContext(t.Context(), "FLUSH BINARY LOGS")
@@ -864,12 +754,14 @@ func testMaxRecreateAttemptsPanicSubprocess(t *testing.T) {
 		client.syncer.Close()
 	}
 
-	// Wait for the panic to occur (with max 30 seconds timeout)
-	// With 2 attempts and fast failures, should happen quickly
-	time.Sleep(30 * time.Second)
+	// Wait for the readStream goroutine to exit after exhausting recreation attempts.
+	// With maxRecreateAttempts=3 (set in TestMain) and fast failures, this should be quick.
+	client.streamWG.Wait()
 
-	// If we reach here, test failed - no panic occurred
-	t.Fatal("Expected panic did not occur")
+	// Verify that the caller's context was cancelled via the CancelFunc callback.
+	assert.Error(t, ctx.Err(), "caller context should be cancelled")
+
+	client.Close()
 }
 
 // TestNewServerIDConcurrent tests that NewServerID generates unique IDs even when called concurrently.
@@ -949,4 +841,233 @@ func TestNewServerIDRange(t *testing.T) {
 		id := NewServerID()
 		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 	}
+}
+
+// TestIsMinimalRowImage tests the isMinimalRowImage helper function.
+func TestIsMinimalRowImage(t *testing.T) {
+	// Full row image: SkippedColumns is nil
+	e := &replication.RowsEvent{}
+	assert.False(t, isMinimalRowImage(e))
+
+	// Full row image: SkippedColumns has entries but all are empty
+	e = &replication.RowsEvent{
+		SkippedColumns: [][]int{{}, {}},
+	}
+	assert.False(t, isMinimalRowImage(e))
+
+	// Minimal row image: SkippedColumns has entries with skipped column indices
+	e = &replication.RowsEvent{
+		SkippedColumns: [][]int{{1, 2}},
+	}
+	assert.True(t, isMinimalRowImage(e))
+
+	// Minimal row image: mixed - some rows full, some minimal
+	e = &replication.RowsEvent{
+		SkippedColumns: [][]int{{}, {2}},
+	}
+	assert.True(t, isMinimalRowImage(e))
+}
+
+// TestProcessRowsEventMinimalRBRWithApplier tests that processRowsEvent returns
+// an error when it detects a minimal RBR event and a buffered applier is in use.
+func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replminrbrt1, replminrbrt2")
+	testutils.RunSQL(t, "CREATE TABLE replminrbrt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE replminrbrt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "replminrbrt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "replminrbrt2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	// Create a mock RowsEvent with minimal row image (skipped columns)
+	rowsEvent := &replication.RowsEvent{
+		Table: &replication.TableMapEvent{
+			Schema: []byte("test"),
+			Table:  []byte("replminrbrt1"),
+		},
+		Rows: [][]interface{}{
+			{1, nil, nil}, // INSERT with only PK, other columns skipped
+		},
+		SkippedColumns: [][]int{
+			{1, 2}, // columns b and c were skipped
+		},
+	}
+	binlogEvent := &replication.BinlogEvent{
+		Header: &replication.EventHeader{
+			EventType: replication.WRITE_ROWS_EVENTv2,
+		},
+		Event: rowsEvent,
+	}
+
+	// Test 1: With an applier set (buffered mode), minimal RBR should return an error
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	applierInstance, err := applier.NewSingleTargetApplier(applier.Target{
+		DB:     db,
+		Config: cfg,
+	}, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+		Applier:         applierInstance,
+	})
+	require.NoError(t, client.AddSubscription(t1, t2, nil))
+
+	err = client.processRowsEvent(binlogEvent, rowsEvent)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "minimal RBR event")
+	assert.Contains(t, err.Error(), "binlog_row_image=FULL")
+
+	// Test 2: Without an applier (delta mode), minimal RBR should NOT return an error
+	client2 := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+		Logger:          slog.Default(),
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        NewServerID(),
+	})
+	require.NoError(t, client2.AddSubscription(t1, t2, nil))
+
+	err = client2.processRowsEvent(binlogEvent, rowsEvent)
+	assert.NoError(t, err)
+
+	// Test 3: With an applier but full row image, should NOT return an error
+	fullRowsEvent := &replication.RowsEvent{
+		Table: &replication.TableMapEvent{
+			Schema: []byte("test"),
+			Table:  []byte("replminrbrt1"),
+		},
+		Rows: [][]interface{}{
+			{1, 2, 3}, // INSERT with all columns present
+		},
+		SkippedColumns: [][]int{
+			{}, // no columns skipped
+		},
+	}
+	fullBinlogEvent := &replication.BinlogEvent{
+		Header: &replication.EventHeader{
+			EventType: replication.WRITE_ROWS_EVENTv2,
+		},
+		Event: fullRowsEvent,
+	}
+
+	err = client.processRowsEvent(fullBinlogEvent, fullRowsEvent)
+	assert.NoError(t, err)
+}
+
+func TestProcessDDLNotification(t *testing.T) {
+	// Helper: create a minimal Client with the given filter config and a cancel tracker.
+	makeClient := func(filterSchema string, filterTables []string) (*Client, *bool) {
+		cancelled := false
+		c := &Client{
+			logger:           slog.Default(),
+			callerCancelFunc: func() { cancelled = true },
+			ddlFilterSchema:  filterSchema,
+			ddlFilterTables:  toSet(filterTables),
+			subscriptions:    make(map[string]Subscription),
+		}
+		return c, &cancelled
+	}
+
+	// Set up a real database and tables for the default-mode subtest.
+	// Done at top level to avoid subtest name length issues with CreateUniqueTestDatabase.
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	dbName := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE orders (id INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _orders_new (id INT NOT NULL PRIMARY KEY)")
+
+	tbl := table.NewTableInfo(db, dbName, "orders")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+	newTbl := table.NewTableInfo(db, dbName, "_orders_new")
+	require.NoError(t, newTbl.SetInfo(t.Context()))
+
+	t.Run("default mode: cancels on exact subscription match", func(t *testing.T) {
+		cancelled := false
+		c := &Client{
+			logger:           slog.Default(),
+			callerCancelFunc: func() { cancelled = true },
+			subscriptions:    make(map[string]Subscription),
+		}
+		c.subscriptions[dbName+".orders"] = &deltaMap{
+			table:    tbl,
+			newTable: newTbl,
+			changes:  make(map[string]mapChange),
+			c:        c,
+		}
+
+		// DDL on the subscribed table should cancel.
+		c.processDDLNotification(dbName, "orders")
+		assert.True(t, cancelled, "should cancel on DDL matching a subscribed table")
+
+		// DDL on an unrelated table should not cancel.
+		cancelled = false
+		c.processDDLNotification(dbName, "unrelated_table")
+		assert.False(t, cancelled, "should not cancel on DDL for an unrelated table")
+
+		// DDL on a different schema should not cancel.
+		cancelled = false
+		c.processDDLNotification("other_schema", "orders")
+		assert.False(t, cancelled, "should not cancel on DDL in a different schema")
+	})
+
+	t.Run("schema filter without table filter: cancels on any table in schema", func(t *testing.T) {
+		c, cancelled := makeClient("mydb", nil)
+
+		c.processDDLNotification("mydb", "any_table")
+		assert.True(t, *cancelled, "should cancel on any DDL in the filtered schema")
+
+		*cancelled = false
+		c.processDDLNotification("mydb", "another_table")
+		assert.True(t, *cancelled, "should cancel on DDL for any table in the filtered schema")
+
+		*cancelled = false
+		c.processDDLNotification("other_schema", "any_table")
+		assert.False(t, *cancelled, "should not cancel on DDL in a different schema")
+	})
+
+	t.Run("schema filter with table filter: cancels only on specified tables", func(t *testing.T) {
+		c, cancelled := makeClient("mydb", []string{"orders", "customers"})
+
+		// DDL on a filtered table should cancel.
+		c.processDDLNotification("mydb", "orders")
+		assert.True(t, *cancelled, "should cancel on DDL for a filtered table")
+
+		*cancelled = false
+		c.processDDLNotification("mydb", "customers")
+		assert.True(t, *cancelled, "should cancel on DDL for another filtered table")
+
+		// DDL on an unrelated table in the same schema should NOT cancel.
+		*cancelled = false
+		c.processDDLNotification("mydb", "unrelated_table")
+		assert.False(t, *cancelled, "should not cancel on DDL for an unrelated table in the same schema")
+
+		// DDL in a different schema should NOT cancel.
+		*cancelled = false
+		c.processDDLNotification("other_schema", "orders")
+		assert.False(t, *cancelled, "should not cancel on DDL in a different schema even if table name matches")
+	})
+
+	t.Run("no cancel func: does not panic", func(t *testing.T) {
+		c := &Client{
+			logger:          slog.Default(),
+			ddlFilterSchema: "mydb",
+			subscriptions:   make(map[string]Subscription),
+		}
+		// Should not panic even though callerCancelFunc is nil.
+		assert.NotPanics(t, func() {
+			c.processDDLNotification("mydb", "some_table")
+		})
+	})
 }

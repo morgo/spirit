@@ -34,16 +34,8 @@ func extractStmt(stmts []statement) []string {
 	return trimmed
 }
 
-func EncodeSchemaTable(schema, table string) string {
+func encodeSchemaTable(schema, table string) string {
 	return schema + "." + table
-}
-
-func DecodeSchemaTable(encoded string) (string, string) {
-	parts := strings.SplitN(encoded, ".", 2)
-	if len(parts) != 2 {
-		return "", ""
-	}
-	return parts[0], parts[1]
 }
 
 // getTableIdentity extracts the schema and table name from an AST node that has table information
@@ -65,26 +57,32 @@ func getTableIdentity(defaultSchema string, node ast.Node) (string, string) {
 	return schema, table
 }
 
+// schemaTable is a parsed schema and table name pair extracted from a DDL statement.
+type schemaTable struct {
+	schema string
+	table  string
+}
+
 // extractTablesFromDDLStmts extracts table names from DDL statements.
 // The logic is based on canal: https://github.com/go-mysql-org/go-mysql/blob/34b6b0998dde44e51dff0bbcc1ac88339f57f830/canal/sync.go#L195-L245
-func extractTablesFromDDLStmts(defaultSchema string, statements string) ([]string, error) {
+func extractTablesFromDDLStmts(defaultSchema string, statements string) ([]schemaTable, error) {
 	p := parser.New()
 	stmts, _, err := p.Parse(statements, "", "")
 	if err != nil {
 		return nil, err
 	}
-	var tables []string
+	var tables []schemaTable
 	for _, stmt := range stmts {
 		switch t := stmt.(type) {
 		case *ast.RenameTableStmt:
 			for _, tableInfo := range t.TableToTables {
 				schema, table := getTableIdentity(defaultSchema, tableInfo.OldTable)
-				tables = append(tables, EncodeSchemaTable(schema, table))
+				tables = append(tables, schemaTable{schema, table})
 			}
 		case *ast.DropTableStmt:
 			for _, table := range t.Tables {
 				schema, tableName := getTableIdentity(defaultSchema, table)
-				tables = append(tables, EncodeSchemaTable(schema, tableName))
+				tables = append(tables, schemaTable{schema, tableName})
 			}
 		case *ast.AlterTableStmt, *ast.CreateTableStmt, *ast.TruncateTableStmt,
 			*ast.CreateIndexStmt, *ast.DropIndexStmt:
@@ -102,8 +100,22 @@ func extractTablesFromDDLStmts(defaultSchema string, statements string) ([]strin
 				tableNode = n.Table
 			}
 			schema, table := getTableIdentity(defaultSchema, tableNode)
-			tables = append(tables, EncodeSchemaTable(schema, table))
+			tables = append(tables, schemaTable{schema, table})
 		}
 	}
 	return tables, nil
+}
+
+// toSet converts a string slice to a set (map[string]struct{}) for O(1) lookups.
+// Returns nil if the input slice is empty, so callers can use len() to check
+// whether filtering is enabled.
+func toSet(ss []string) map[string]struct{} {
+	if len(ss) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		m[s] = struct{}{}
+	}
+	return m
 }

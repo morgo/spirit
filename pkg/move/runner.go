@@ -53,7 +53,6 @@ type Runner struct {
 	copier            copier.Copier
 	checker           checksum.Checker
 	checksumWatermark string
-	ddlNotification   chan string
 
 	// Track some key statistics.
 	startTime                time.Time
@@ -83,14 +82,8 @@ func (r *Runner) Close() error {
 			return err
 		}
 	}
-	// Set the DDL notification channel to nil before closing it
-	// to prevent race conditions where another goroutine might try to send to it
 	if r.replClient != nil {
-		r.replClient.SetDDLNotificationChannel(nil)
 		r.replClient.Close()
-	}
-	if r.ddlNotification != nil {
-		close(r.ddlNotification)
 	}
 	for _, target := range r.targets {
 		if err := target.DB.Close(); err != nil {
@@ -316,7 +309,6 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 func (r *Runner) setup(ctx context.Context) error {
 	var err error
-	r.ddlNotification = make(chan string, 1)
 
 	// Run preflight checks on the source database
 	r.logger.Info("Running preflight checks")
@@ -345,14 +337,20 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	r.logger.Info("Setting up repl client")
 	r.replClient = repl.NewClient(r.source, r.sourceConfig.Addr, r.sourceConfig.User, r.sourceConfig.Passwd, &repl.ClientConfig{
-		Logger:                r.logger,
-		Concurrency:           r.move.Threads,
-		TargetBatchTime:       r.move.TargetChunkTime,
-		OnDDL:                 r.ddlNotification,
-		OnDDLDisableFiltering: true,
-		ServerID:              repl.NewServerID(),
-		Applier:               r.applier, // Use the shared applier
-		DBConfig:              r.dbConfig,
+		Logger:          r.logger,
+		Concurrency:     r.move.Threads,
+		TargetBatchTime: r.move.TargetChunkTime,
+		CancelFunc:      r.fatalError,
+		// receive all DDL events from the source database to
+		// ensure we can react to any changes that would impact the move.
+		// When SourceTables is set (partial move), only DDL on those specific
+		// tables triggers cancellation — DDL on unrelated tables in the same
+		// schema is ignored.
+		DDLFilterSchema: r.sourceConfig.DBName,
+		DDLFilterTables: r.move.SourceTables,
+		ServerID:        repl.NewServerID(),
+		Applier:         r.applier, // Use the shared applier
+		DBConfig:        r.dbConfig,
 	})
 
 	// Run post-setup checks
@@ -614,7 +612,7 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // startBackgroundRoutines starts the background routines needed for monitoring.
-// This includes table statistics updates, periodic binlog flushing, and DDL change notifications.
+// This includes table statistics updates and periodic binlog flushing.
 func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 	// Start routines in table and replication packages to
 	// Continuously update the min/max and estimated rows
@@ -626,63 +624,32 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
 	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
-	go r.tableChangeNotification(ctx)
 
 	// Start go routines for checkpointing and dumping status
 	status.WatchTask(ctx, r, r.logger)
 }
 
-// tableChangeNotification is called as a goroutine.
-// Any schema changes to the source tables will be sent to a channel
-// that this function reads from. For move operations, we monitor all
-// tables on the source connection for changes, this means we need
-// to do filtering for relevance.
-func (r *Runner) tableChangeNotification(ctx context.Context) {
-	defer r.replClient.SetDDLNotificationChannel(nil)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case tbl, ok := <-r.ddlNotification:
-			if !ok {
-				return // channel was closed
-			}
-			if r.status.Get() >= status.CutOver {
-				return
-			}
-
-			// Decode the tablename and see if it is relevant.
-			schema, table := repl.DecodeSchemaTable(tbl)
-			if schema != r.sourceConfig.DBName {
-				continue // not our database
-			}
-			if len(r.move.SourceTables) > 0 {
-				// If r.move.SourceTables is not-empty, it means we only care about these
-				// tables. If it is empty it means we care about any table in the schema.
-				if !slices.Contains(r.move.SourceTables, table) {
-					continue // not one of our tables
-				}
-			}
-			// We have a DDL change on one of our tables!
-			// Either in the database we are observing, or in the list of tables we care about.
-			r.status.Set(status.ErrCleanup)
-			// Write this to the logger, so it can be captured by the initiator.
-			r.logger.Error("table definition changed during move operation",
-				"table", tbl,
+// fatalError is the callback provided to the replication client.
+// It is called when a DDL change is detected on a subscribed table,
+// or when a fatal stream error occurs. The replication client handles
+// its own logging before calling this.
+func (r *Runner) fatalError() {
+	if r.status.Get() >= status.CutOver {
+		return
+	}
+	r.status.Set(status.ErrCleanup)
+	// Invalidate the checkpoint, so we don't try to resume.
+	// If we don't do this, the move will permanently be blocked from proceeding.
+	// Letting it start again is the better choice.
+	// Use a background context since the move context may already be cancelled.
+	if r.checkpointTable != nil {
+		if err := dbconn.Exec(context.Background(), r.source, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
+			r.logger.Error("could not remove checkpoint",
+				"error", err,
 			)
-			// Invalidate the checkpoint, so we don't try to resume.
-			// If we don't do this, the move will permanently be blocked from proceeding.
-			// Letting it start again is the better choice.
-			if r.checkpointTable != nil {
-				if err := dbconn.Exec(ctx, r.source, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
-					r.logger.Error("could not remove checkpoint",
-						"error", err,
-					)
-				}
-			}
-			r.cancelFunc() // cancel the move context
 		}
 	}
+	r.cancelFunc() // cancel the move context
 }
 
 func (r *Runner) Status() string {

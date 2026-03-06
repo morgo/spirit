@@ -57,7 +57,7 @@ const (
 )
 
 var (
-	// maxRecreateAttempts is the maximum number of streamer recreation attempts before panic.
+	// maxRecreateAttempts is the maximum number of streamer recreation attempts before giving up.
 	// This is really a const, but set to var for testing.
 	maxRecreateAttempts = 10
 )
@@ -83,12 +83,13 @@ type Client struct {
 	// each subscription has its own set of changes.
 	subscriptions map[string]Subscription
 
-	// onDDL is a channel that is used to notify of
-	// any schema changes. It will send any changes,
-	// and the caller is expected to filter it if
-	// onDDLDisableFiltering=true
-	onDDL                 chan string
-	onDDLDisableFiltering bool
+	// callerCancelFunc is an optional callback that is called when a DDL
+	// change is detected on a subscribed table, or when a fatal stream
+	// error occurs. The caller is expected to handle cancellation and
+	// cleanup in this callback.
+	callerCancelFunc func()
+	ddlFilterSchema  string
+	ddlFilterTables  map[string]struct{}
 
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
@@ -122,32 +123,49 @@ func NewClient(db *sql.DB, host string, username, password string, config *Clien
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
 	return &Client{
-		db:                    db,
-		dbConfig:              config.DBConfig,
-		host:                  host,
-		username:              username,
-		password:              password,
-		logger:                config.Logger,
-		targetBatchTime:       config.TargetBatchTime,
-		targetBatchSize:       DefaultBatchSize, // initial starting value.
-		concurrency:           config.Concurrency,
-		subscriptions:         make(map[string]Subscription),
-		onDDL:                 config.OnDDL,
-		onDDLDisableFiltering: config.OnDDLDisableFiltering,
-		serverID:              config.ServerID,
-		applier:               config.Applier,
+		db:               db,
+		dbConfig:         config.DBConfig,
+		host:             host,
+		username:         username,
+		password:         password,
+		logger:           config.Logger,
+		targetBatchTime:  config.TargetBatchTime,
+		targetBatchSize:  DefaultBatchSize, // initial starting value.
+		concurrency:      config.Concurrency,
+		subscriptions:    make(map[string]Subscription),
+		callerCancelFunc: config.CancelFunc,
+		ddlFilterSchema:  config.DDLFilterSchema,
+		ddlFilterTables:  toSet(config.DDLFilterTables),
+		serverID:         config.ServerID,
+		applier:          config.Applier,
 	}
 }
 
 type ClientConfig struct {
-	TargetBatchTime       time.Duration
-	Concurrency           int
-	Logger                *slog.Logger
-	OnDDL                 chan string
-	OnDDLDisableFiltering bool
-	ServerID              uint32
-	Applier               applier.Applier
-	DBConfig              *dbconn.DBConfig // Database configuration including TLS settings
+	TargetBatchTime time.Duration
+	Concurrency     int
+	Logger          *slog.Logger
+	ServerID        uint32
+	Applier         applier.Applier
+	DBConfig        *dbconn.DBConfig // Database configuration including TLS settings
+
+	// CancelFunc is an optional callback from the caller (e.g. migration or move runner).
+	// It is called when a DDL change is detected on a subscribed table, or when a fatal
+	// stream error occurs (such as minimal RBR detection or exhausted streamer recreation
+	// attempts). The caller is expected to handle cancellation and cleanup.
+	CancelFunc func()
+
+	// DDLFilterSchema, when set, broadens DDL detection to cancel on any DDL change
+	// in the specified schema, rather than only on exact table matches against subscriptions.
+	// This is used by the move runner to detect DDL on any table in the source database.
+	DDLFilterSchema string
+
+	// DDLFilterTables, when set alongside DDLFilterSchema, narrows the schema-level
+	// DDL detection to only the specified table names. This is used for partial moves
+	// where only specific tables from a schema are being moved — DDL on unrelated
+	// tables in the same schema should not trigger cancellation.
+	// If empty (and DDLFilterSchema is set), all tables in the schema trigger cancellation.
+	DDLFilterTables []string
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -184,7 +202,6 @@ func NewClientDefaultConfig() *ClientConfig {
 		Concurrency:     4,
 		TargetBatchTime: DefaultTargetBatchTime,
 		Logger:          slog.Default(),
-		OnDDL:           nil,
 		ServerID:        NewServerID(),
 	}
 }
@@ -195,7 +212,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	c.Lock()
 	defer c.Unlock()
 
-	subKey := EncodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
+	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
 	if _, exists := c.subscriptions[subKey]; exists {
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
@@ -513,16 +530,15 @@ func (c *Client) readStream(ctx context.Context) {
 
 				// Check if we've exceeded the maximum number of recreation attempts
 				if recreateAttempts >= maxRecreateAttempts {
-					// Log comprehensive debugging information before panicking
-					c.logger.Error("PANIC: Failed to recreate binlog streamer, dumping debug info",
+					c.logger.Error("failed to recreate binlog streamer, giving up",
 						"total_attempts", recreateAttempts,
 						"current_position", currentPos,
 						"start_position", startPos,
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
 
-					panic(fmt.Sprintf("failed to recreate binlog streamer after %d attempts, current position: %v, giving up. Recent errors: %v",
-						recreateAttempts, currentPos, recentErrors))
+					c.fatalError()
+					return
 				}
 
 				// Apply exponential backoff
@@ -594,12 +610,14 @@ func (c *Client) readStream(ctx context.Context) {
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, event); err != nil {
-				panic("could not process events")
+				c.logger.Error("fatal error processing binlog rows event", "error", err)
+				c.fatalError()
+				return
 			}
 		case *replication.QueryEvent:
 			// Query event, check if it is a DDL statement,
 			// in which case we need to notify the caller.
-			tables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
+			ddlTables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
 				// The parser does not understand all syntax.
 				// For example, it won't parse [CREATE|DROP] TRIGGER statements *or*
@@ -611,8 +629,8 @@ func (c *Client) readStream(ctx context.Context) {
 				c.logger.Error("Skipping query that was unable to parse", "file", currentLogName, "pos", ev.Header.LogPos)
 				continue
 			}
-			for _, table := range tables {
-				c.processDDLNotification(table)
+			for _, ddlTable := range ddlTables {
+				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
 		default:
 			// Log unknown event types for debugging
@@ -636,40 +654,44 @@ func (c *Client) readStream(ctx context.Context) {
 	}
 }
 
-// processDDLNotification sends a notification to the onDDL channel if the table matches
-// The table is encoded with EncodeSchemaTable() and should include the schema name.
-func (c *Client) processDDLNotification(encodedTable string) {
-	c.Lock()
-	defer c.Unlock()
-	if c.onDDL == nil {
-		return // no one is listening for DDL events
-	}
-	if !c.onDDLDisableFiltering {
-		// Check if the encodedTable matches any of our subscriptions.
+// processDDLNotification cancels the client if the DDL matches our filter criteria.
+// By default, only exact schema.table matches against subscriptions trigger cancellation.
+// If ddlFilterSchema is set, any DDL in that schema triggers cancellation instead.
+// If ddlFilterTables is also set (alongside ddlFilterSchema), only DDL on those
+// specific tables within the schema triggers cancellation — this is used for partial
+// moves where only a subset of tables from a schema are being moved.
+func (c *Client) processDDLNotification(schema, table string) {
+	if c.ddlFilterSchema != "" {
+		// Schema-level filtering: cancel on DDL in the specified schema.
+		if schema != c.ddlFilterSchema {
+			return
+		}
+		// If ddlFilterTables is set, further narrow to only those tables.
+		if len(c.ddlFilterTables) > 0 {
+			if _, ok := c.ddlFilterTables[table]; !ok {
+				return
+			}
+		}
+	} else {
+		// Check if the schema.table matches any of our subscriptions.
 		// This is the default behavior.
 		matchFound := false
+		c.Lock()
 		for _, sub := range c.subscriptions {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
-				tName := EncodeSchemaTable(tsub.SchemaName, tsub.TableName)
-				if encodedTable == tName {
+				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
 					break
 				}
 			}
 		}
-		// If there is no matchFound, we don't send the notification.
+		c.Unlock()
 		if !matchFound {
 			return
 		}
 	}
-	// Use non-blocking send to prevent deadlock
-	select {
-	case c.onDDL <- encodedTable:
-		// Successfully sent notification
-	default:
-		// Channel is full or blocked, skip notification to prevent deadlock
-		// This is acceptable as DDL notifications are best-effort
-	}
+	c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
+	c.fatalError()
 }
 
 // processRowsEvent processes a RowsEvent. It will search all active
@@ -685,11 +707,23 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	c.Lock()
 	defer c.Unlock()
 
-	subName := EncodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
+	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
 	sub, ok := c.subscriptions[subName]
 	if !ok {
 		return nil // ignore event, it could be to a _new table.
 	}
+
+	// Runtime check for minimal RBR (binlog_row_image=MINIMAL).
+	// When a buffered applier is in use, it needs full row images to replay
+	// changes on the target. Minimal row images skip non-PK, non-changed columns
+	// which would cause data loss. We check c.applier rather than iterating
+	// all subscriptions for performance, since c.applier != nil implies a
+	// bufferedMap subscription is in use.
+	if c.applier != nil && isMinimalRowImage(e) {
+		return fmt.Errorf("received a minimal RBR event for table %s.%s, but a buffered applier is in use which requires full row images (binlog_row_image=FULL). "+
+			"Please set binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
+	}
+
 	eventType := parseEventType(ev.Header.EventType)
 
 	if eventType == eventTypeUpdate {
@@ -767,6 +801,18 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	return nil
 }
 
+// isMinimalRowImage returns true if the RowsEvent contains a minimal row image,
+// i.e. some columns were skipped. This happens when binlog_row_image=MINIMAL or NOBLOB.
+// With full row images, SkippedColumns entries are empty slices.
+func isMinimalRowImage(e *replication.RowsEvent) bool {
+	for _, skipped := range e.SkippedColumns {
+		if len(skipped) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
@@ -786,6 +832,18 @@ func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 		return true // can't determine.
 	}
 	return true
+}
+
+// fatalError is called from within the readStream goroutine when a truly fatal
+// stream error occurs (e.g. unrecoverable stream error, minimal RBR detection,
+// or a fatal rows event error).
+//
+// IMPORTANT: This method must NOT call Close() because Close() calls
+// streamWG.Wait(), which would deadlock since readStream is the caller.
+func (c *Client) fatalError() {
+	if c.callerCancelFunc != nil {
+		c.callerCancelFunc()
+	}
 }
 
 func (c *Client) Close() {
@@ -962,6 +1020,8 @@ func (c *Client) BlockWait(ctx context.Context) error {
 	first := true
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-timer.C:
 			return fmt.Errorf("timed out waiting to catch up to source position: %v, current position is: %v", targetPos, c.getBufferedPos())
 		default:
@@ -1039,10 +1099,4 @@ func (c *Client) SetWatermarkOptimization(newVal bool) {
 	for _, sub := range c.subscriptions {
 		sub.SetWatermarkOptimization(newVal)
 	}
-}
-
-func (c *Client) SetDDLNotificationChannel(ch chan string) {
-	c.Lock()
-	defer c.Unlock()
-	c.onDDL = ch
 }
