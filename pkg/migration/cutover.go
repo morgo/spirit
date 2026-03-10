@@ -128,7 +128,7 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 		return err
 	}
 	if !c.feed.AllChangesFlushed() {
-		return errors.New("not all changes flushed, final flush might be broken")
+		return fmt.Errorf("%w, final flush might be broken", repl.ErrChangesNotFlushed)
 	}
 
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")

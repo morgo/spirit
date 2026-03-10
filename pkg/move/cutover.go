@@ -88,7 +88,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 	}
 
 	if !c.feed.AllChangesFlushed() {
-		return errors.New("not all changes flushed, final flush might be broken")
+		return fmt.Errorf("%w, final flush might be broken", repl.ErrChangesNotFlushed)
 	}
 
 	// If we have all changes flushed under a lock, we can now run the cutover func.
