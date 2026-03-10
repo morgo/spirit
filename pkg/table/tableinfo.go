@@ -19,9 +19,10 @@ const (
 )
 
 var (
-	ErrTableIsRead       = errors.New("table is read")
-	ErrTableNotOpen      = errors.New("please call Open() first")
-	ErrUnsupportedPKType = errors.New("unsupported primary key type")
+	ErrTableIsRead        = errors.New("table is read")
+	ErrTableNotOpen       = errors.New("please call Open() first")
+	ErrUnsupportedPKType  = errors.New("unsupported primary key type")
+	ErrWatermarkNotReady  = errors.New("watermark not yet ready")
 )
 
 type TableInfo struct {

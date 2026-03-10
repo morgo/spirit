@@ -318,7 +318,7 @@ func (t *chunkerComposite) GetLowWatermark() (string, error) {
 	t.Lock()
 	defer t.Unlock()
 	if t.watermark == nil || t.watermark.UpperBound == nil || t.watermark.LowerBound == nil {
-		return "", errors.New("watermark not yet ready")
+		return "", ErrWatermarkNotReady
 	}
 
 	// For composite chunks we also need to embed the rowsCopied
