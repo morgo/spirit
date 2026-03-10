@@ -48,7 +48,7 @@ func TestMultiChunkerLifecycle(t *testing.T) {
 		// Double open should fail
 		err = chunker.Open()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "already open")
+		assert.ErrorIs(t, err, ErrChunkerAlreadyOpen)
 	})
 
 	t.Run("OpenError", func(t *testing.T) {
@@ -443,7 +443,7 @@ func TestMultiChunkerReset(t *testing.T) {
 	// Test that Reset() fails when chunker is not open
 	err := chunker.Reset()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "multi-chunker is not open")
+	assert.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
 	assert.NoError(t, chunker.Open())

@@ -359,7 +359,7 @@ func TestOptimisticChunkerReset(t *testing.T) {
 	// Test that Reset() fails when chunker is not open
 	err := chunker.Reset()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "chunker is not open")
+	assert.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
 	assert.NoError(t, chunker.Open())

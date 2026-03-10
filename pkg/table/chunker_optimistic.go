@@ -253,7 +253,7 @@ func (t *chunkerOptimistic) Reset() error {
 	defer t.Unlock()
 
 	if !t.isOpen {
-		return errors.New("chunker is not open, call Open() first")
+		return ErrChunkerNotOpen
 	}
 
 	// Reset all state to initial values
@@ -428,7 +428,7 @@ func (t *chunkerOptimistic) open() (err error) {
 	if t.isOpen {
 		// This prevents an error where open is re-called
 		// leading to the watermark being in a strange state.
-		return errors.New("table is already open, did you mean to call Reset()?")
+		return ErrChunkerAlreadyOpen
 	}
 	t.isOpen = true
 	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])

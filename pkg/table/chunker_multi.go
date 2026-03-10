@@ -49,7 +49,7 @@ func (m *multiChunker) Open() error {
 	defer m.Unlock()
 
 	if m.isOpen {
-		return errors.New("multi-chunker is already open")
+		return ErrChunkerAlreadyOpen
 	}
 
 	// Open each of the child chunkers.
@@ -99,7 +99,7 @@ func (m *multiChunker) Reset() error {
 	defer m.Unlock()
 
 	if !m.isOpen {
-		return errors.New("multi-chunker is not open")
+		return ErrChunkerNotOpen
 	}
 
 	var errs []error
