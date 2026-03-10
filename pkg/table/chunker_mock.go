@@ -2,7 +2,6 @@ package table
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -134,7 +133,7 @@ func (m *MockChunker) Open() error {
 	}
 
 	if m.isOpen {
-		return errors.New("mock chunker is already open")
+		return ErrChunkerAlreadyOpen
 	}
 
 	m.isOpen = true
@@ -168,7 +167,7 @@ func (m *MockChunker) Reset() error {
 	defer m.mu.Unlock()
 
 	if !m.isOpen {
-		return errors.New("mock chunker is not open")
+		return ErrChunkerNotOpen
 	}
 
 	// Reset to initial state
@@ -320,7 +319,7 @@ func (m *MockChunker) OpenAtWatermark(watermark string) error {
 	}
 
 	if m.isOpen {
-		return errors.New("mock chunker is already open")
+		return ErrChunkerAlreadyOpen
 	}
 
 	// Simple watermark parsing - just extract position

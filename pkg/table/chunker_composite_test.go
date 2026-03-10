@@ -646,7 +646,7 @@ func TestCompositeChunkerReset(t *testing.T) {
 	// Test that Reset() fails when chunker is not open
 	err = chunker.Reset()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "chunker is not open")
+	assert.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
 	assert.NoError(t, chunker.Open())
@@ -708,7 +708,7 @@ func TestCompositeChunkerReset(t *testing.T) {
 	// Verify watermark is not ready after reset
 	_, err = chunker.GetLowWatermark()
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "watermark not yet ready")
+	assert.ErrorIs(t, err, ErrWatermarkNotReady)
 
 	// Verify that after reset, the chunker produces the same sequence as a fresh chunker
 	resetChunk1, err := chunker.Next()

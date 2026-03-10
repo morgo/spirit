@@ -332,7 +332,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// Assert that the change set is empty. This should always
 	// be the case because we are under a lock.
 	if !c.feed.AllChangesFlushed() {
-		return errors.New("not all changes flushed")
+		return repl.ErrChangesNotFlushed
 	}
 
 	// Create a transaction pool for the source

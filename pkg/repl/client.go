@@ -60,6 +60,9 @@ var (
 	// maxRecreateAttempts is the maximum number of streamer recreation attempts before giving up.
 	// This is really a const, but set to var for testing.
 	maxRecreateAttempts = 10
+
+	// ErrChangesNotFlushed indicates that not all changes have been flushed from the replication feed.
+	ErrChangesNotFlushed = errors.New("not all changes flushed")
 )
 
 type Client struct {
