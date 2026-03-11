@@ -289,6 +289,23 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP CHECK `chk_age`, ADD CONSTRAINT `chk_age` CHECK (`age`>=18)",
 		},
 		{
+			// CHECK constraints with charset introducers like _utf8mb3 are normalized
+			// during parsing. MySQL generates different auto-names based on the original
+			// expression text, so the same logical constraint can have different names.
+			// The diff should recognize these as equivalent and produce no diff.
+			name:     "CheckConstraintCharsetIntroducerNoDiff",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_abc123 CHECK (type = _utf8mb3'A' AND tok IS NOT NULL OR type = _utf8mb3'B' AND tok IS NULL))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, type enum('A','B'), tok varchar(15), CONSTRAINT chk_tok_def456 CHECK (type = 'A' AND tok IS NOT NULL OR type = 'B' AND tok IS NULL))",
+			expected: "",
+		},
+		{
+			// When constraint names differ AND expressions actually differ, it should still produce a diff.
+			name:     "CheckConstraintDifferentNameDifferentExpression",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_v1 CHECK (age >= 0))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_v2 CHECK (age >= 18))",
+			expected: "ALTER TABLE `t1` DROP CHECK `chk_v1`, ADD CONSTRAINT `chk_v2` CHECK (`age`>=18)",
+		},
+		{
 			name:     "AddForeignKey",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",

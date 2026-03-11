@@ -524,10 +524,43 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		targetConstraints[target.Constraints[i].Name] = &target.Constraints[i]
 	}
 
+	// Build a set of source constraint names that have an equivalent match in the
+	// target under a different name. This handles the case where MySQL generates
+	// different auto-names for CHECK constraints whose original expression text
+	// differs only cosmetically (e.g. charset introducers like _utf8mb3 that are
+	// stripped during parsing). Without this, such constraints would produce a
+	// spurious DROP + ADD.
+	matchedSourceByExpression := make(map[string]bool) // source name -> matched
+	matchedTargetByExpression := make(map[string]bool) // target name -> matched
+	for i := range ct.Constraints {
+		sourceConstr := &ct.Constraints[i]
+		if _, exactMatch := targetConstraints[sourceConstr.Name]; exactMatch {
+			continue // will be handled by the normal name-based path
+		}
+		// No exact name match — look for an expression-equivalent target constraint
+		for j := range target.Constraints {
+			targetConstr := &target.Constraints[j]
+			if _, exactMatch := sourceConstraints[targetConstr.Name]; exactMatch {
+				continue // this target constraint already has a name match in source
+			}
+			if matchedTargetByExpression[targetConstr.Name] {
+				continue // already paired with another source constraint
+			}
+			if constraintsEqualIgnoreName(sourceConstr, targetConstr) {
+				matchedSourceByExpression[sourceConstr.Name] = true
+				matchedTargetByExpression[targetConstr.Name] = true
+				break
+			}
+		}
+	}
+
 	// Collect DROP operations and sort by name for deterministic output
 	var dropClauses []string
 	for i := range ct.Constraints {
 		sourceConstr := &ct.Constraints[i]
+		if matchedSourceByExpression[sourceConstr.Name] {
+			continue // equivalent constraint exists in target under a different name
+		}
 		targetConstr, exists := targetConstraints[sourceConstr.Name]
 
 		// Drop if constraint doesn't exist in target OR if it changed
@@ -546,6 +579,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 	// Collect ADD operations and sort by name for deterministic output
 	var addClauses []string
 	for _, targetConstr := range target.Constraints {
+		if matchedTargetByExpression[targetConstr.Name] {
+			continue // equivalent constraint exists in source under a different name
+		}
 		sourceConstr, existsInSource := sourceConstraints[targetConstr.Name]
 
 		if !existsInSource || !constraintsEqual(sourceConstr, &targetConstr) {
@@ -909,6 +945,14 @@ func constraintsEqual(a, b *Constraint) bool {
 	if a.Name != b.Name {
 		return false
 	}
+	return constraintsEqualIgnoreName(a, b)
+}
+
+// constraintsEqualIgnoreName compares two constraints on everything except their name.
+// This is used to detect constraints that are logically identical but have different
+// auto-generated names (e.g., MySQL generates different CHECK constraint names when
+// the original expression text differs only in charset introducers like _utf8mb3).
+func constraintsEqualIgnoreName(a, b *Constraint) bool {
 	if a.Type != b.Type {
 		return false
 	}
