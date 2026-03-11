@@ -1,0 +1,79 @@
+package table
+
+import (
+	"database/sql"
+	"testing"
+
+	"github.com/block/spirit/pkg/testutils"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestLoadSchemaFromDB(t *testing.T) {
+	dbName := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (
+		id bigint unsigned NOT NULL AUTO_INCREMENT,
+		name varchar(100) DEFAULT NULL,
+		PRIMARY KEY (id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE orders (
+		id bigint unsigned NOT NULL AUTO_INCREMENT,
+		user_id bigint unsigned NOT NULL,
+		amount decimal(10,2) NOT NULL,
+		PRIMARY KEY (id),
+		KEY idx_user_id (user_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+
+	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	tables, err := LoadSchemaFromDB(t.Context(), db)
+	require.NoError(t, err)
+	assert.Len(t, tables, 2)
+
+	// Build a map for easier assertions
+	byName := make(map[string]TableSchema)
+	for _, ts := range tables {
+		byName[ts.Name] = ts
+	}
+
+	assert.Contains(t, byName, "users")
+	assert.Contains(t, byName, "orders")
+	assert.Contains(t, byName["users"].Schema, "CREATE TABLE")
+	assert.Contains(t, byName["users"].Schema, "`name` varchar(100)")
+	assert.Contains(t, byName["orders"].Schema, "`amount` decimal(10,2)")
+}
+
+func TestLoadSchemaFromDB_EmptyDatabase(t *testing.T) {
+	dbName := testutils.CreateUniqueTestDatabase(t)
+
+	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	tables, err := LoadSchemaFromDB(t.Context(), db)
+	require.NoError(t, err)
+	assert.Empty(t, tables)
+}
+
+func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
+	// Verify that LoadSchemaFromDB returns the raw DDL including AUTO_INCREMENT
+	// values. Consumers that need to strip it (e.g. for diffing) do so themselves.
+	dbName := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE counters (
+		id bigint unsigned NOT NULL AUTO_INCREMENT,
+		PRIMARY KEY (id)
+	) ENGINE=InnoDB AUTO_INCREMENT=1000 DEFAULT CHARSET=utf8mb4`)
+
+	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	tables, err := LoadSchemaFromDB(t.Context(), db)
+	require.NoError(t, err)
+	require.Len(t, tables, 1)
+	assert.Equal(t, "counters", tables[0].Name)
+	assert.Contains(t, tables[0].Schema, "AUTO_INCREMENT=")
+}
