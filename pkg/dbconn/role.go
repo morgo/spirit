@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"time"
 )
 
 // SetRoleAllOnTxn executes SET ROLE ALL on a transaction to activate all granted roles.
@@ -19,11 +20,13 @@ func SetRoleAllOnTxn(ctx context.Context, txn *sql.Tx, logger *slog.Logger) (fun
 		return func() {}, err
 	}
 	return func() {
-		// Use context.Background() instead of the caller's ctx because the cleanup
+		// Use a fresh context with a short timeout instead of the caller's ctx because the cleanup
 		// may run after the original context is canceled (e.g. on shutdown/timeout).
 		// SET ROLE DEFAULT must still succeed to prevent leaking elevated roles
-		// into the connection pool.
-		if _, err := txn.ExecContext(context.Background(), "SET ROLE DEFAULT"); err != nil {
+		// into the connection pool, but this should not be able to block indefinitely.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := txn.ExecContext(cleanupCtx, "SET ROLE DEFAULT"); err != nil {
 			// If SET ROLE DEFAULT fails, the transaction is likely already closed.
 			logger.Debug("SET ROLE DEFAULT failed", "error", err)
 		}
