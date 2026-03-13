@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -17,6 +18,11 @@ func init() {
 	registerCheck("privileges", privilegesCheck, ScopePreflight)
 }
 
+// grantedRolesRegexp matches role grants in SHOW GRANTS output.
+// MySQL outputs role grants as: GRANT `role_name`@`%` TO `user`@`%`
+// There may be multiple roles in a single line, comma-separated.
+var grantedRolesRegexp = regexp.MustCompile("`([^`]+)`@`[^`]+`")
+
 // Check the privileges of the user running the migration.
 // Ensure there is LOCK TABLES etc so we don't find out and get errors
 // at cutover time.
@@ -24,6 +30,7 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	// This is a re-implementation of the gh-ost check
 	// validateGrants() in gh-ost/go/logic/inspect.go
 	var foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess bool
+	var grantedRoles []string
 	rows, err := r.DB.QueryContext(ctx, `SHOW GRANTS`)
 	if err != nil {
 		return err
@@ -40,6 +47,12 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 			foundAll, foundSuper, foundReplicationClient, foundReplicationSlave,
 			foundDBAll, foundReload, foundConnectionAdmin, foundProcess,
 		)
+		// Collect role names from grant lines like:
+		// GRANT `rds_superuser_role`@`%` TO `user`@`%`
+		if strings.HasPrefix(grant, "GRANT `") && strings.Contains(grant, " TO ") {
+			roles := parseRoleNames(grant)
+			grantedRoles = append(grantedRoles, roles...)
+		}
 	}
 	if rows.Err() != nil {
 		return rows.Err()
@@ -60,14 +73,20 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		}
 		// If CONNECTION_ADMIN (or SUPER) or PROCESS are not found in direct grants,
 		// check if they are available via roles (e.g. rds_superuser_role in RDS).
-		if !foundConnectionAdmin && !foundSuper && !foundAll {
-			if !checkPrivilegeWithRoles(ctx, r.DB, logger, "CONNECTION_ADMIN", "SUPER") {
-				errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
+		// We use SHOW GRANTS FOR CURRENT_USER() USING 'role1', 'role2' which expands
+		// role privileges into individual grant lines, unlike plain SHOW GRANTS which
+		// only shows the role name without expanding its privileges.
+		if (!foundConnectionAdmin && !foundSuper) || !foundProcess {
+			roleAll, roleSuper, _, _, _, _, roleConnectionAdmin, roleProcess := scanGrantsWithRoles(ctx, r.DB, r.Table.SchemaName, grantedRoles, logger)
+			if !foundConnectionAdmin && !foundSuper {
+				if !roleConnectionAdmin && !roleSuper && !roleAll {
+					errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
+				}
 			}
-		}
-		if !foundProcess && !foundAll {
-			if !checkPrivilegeWithRoles(ctx, r.DB, logger, "PROCESS") {
-				errs = append(errs, errors.New("missing PROCESS privilege"))
+			if !foundProcess {
+				if !roleProcess && !roleAll {
+					errs = append(errs, errors.New("missing PROCESS privilege"))
+				}
 			}
 		}
 		if len(errs) > 0 {
@@ -123,53 +142,66 @@ func scanGrantLine(grant, schemaName string, foundAll, foundSuper, foundReplicat
 	return foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess
 }
 
-// checkPrivilegeWithRoles checks if any of the specified privileges are available via roles
-// by executing SET ROLE ALL in a transaction and then checking SHOW GRANTS.
-// This is needed in RDS environments where privileges like CONNECTION_ADMIN or PROCESS
-// may be granted via a role (e.g. rds_superuser_role) that is not enabled by default.
-func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logger, privileges ...string) bool {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return false
+// parseRoleNames extracts role names from a SHOW GRANTS line that grants roles.
+// e.g. "GRANT `rds_superuser_role`@`%`,`other_role`@`%` TO `user`@`%`"
+// returns ["rds_superuser_role", "other_role"]
+func parseRoleNames(grant string) []string {
+	// Split on " TO " to get only the roles part (before the target user)
+	parts := strings.SplitN(grant, " TO ", 2)
+	if len(parts) < 2 {
+		return nil
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// Activate all granted roles and ensure they are reset before the transaction ends.
-	cleanup, err := dbconn.SetRoleAllOnTxn(ctx, tx, logger)
-	if err != nil {
-		// If setting roles fails, the user has no roles or roles cannot be activated
-		return false
+	rolesPart := parts[0] // "GRANT `role1`@`%`,`role2`@`%`"
+	matches := grantedRolesRegexp.FindAllStringSubmatch(rolesPart, -1)
+	var roles []string
+	for _, match := range matches {
+		if len(match) >= 2 {
+			roles = append(roles, match[1])
+		}
 	}
-	defer cleanup()
+	return roles
+}
 
-	// Now check SHOW GRANTS which will include privileges from active roles
-	rows, err := tx.QueryContext(ctx, "SHOW GRANTS")
+// scanGrantsWithRoles uses SHOW GRANTS FOR CURRENT_USER() USING 'role1','role2',...
+// to expand role privileges into individual grant lines, then scans them.
+// This is needed because plain SHOW GRANTS after SET ROLE ALL only shows the role
+// name (e.g. GRANT `rds_superuser_role`@`%` TO `user`@`%`) without expanding
+// the individual privileges the role contains.
+func scanGrantsWithRoles(ctx context.Context, db *sql.DB, schemaName string, roles []string, logger *slog.Logger) (foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess bool) {
+	if len(roles) == 0 {
+		return
+	}
+
+	// Build the USING clause: SHOW GRANTS FOR CURRENT_USER() USING `role1`,`role2`
+	quotedRoles := make([]string, len(roles))
+	for i, role := range roles {
+		quotedRoles[i] = "`" + role + "`"
+	}
+	query := fmt.Sprintf("SHOW GRANTS FOR CURRENT_USER() USING %s", strings.Join(quotedRoles, ","))
+
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
-		return false
+		logger.Debug("SHOW GRANTS FOR CURRENT_USER() USING failed", "error", err)
+		return
 	}
 	defer utils.CloseAndLog(rows)
 
 	for rows.Next() {
 		var grant string
 		if err := rows.Scan(&grant); err != nil {
-			return false
+			return
 		}
-		if strings.Contains(grant, `GRANT ALL PRIVILEGES ON *.*`) {
-			return true
-		}
-		if strings.Contains(grant, ` ON *.*`) {
-			for _, privilege := range privileges {
-				if strings.Contains(grant, privilege) {
-					return true
-				}
-			}
-		}
+		foundAll, foundSuper, foundReplicationClient, foundReplicationSlave,
+			foundDBAll, foundReload, foundConnectionAdmin, foundProcess = scanGrantLine(
+			grant, schemaName,
+			foundAll, foundSuper, foundReplicationClient, foundReplicationSlave,
+			foundDBAll, foundReload, foundConnectionAdmin, foundProcess,
+		)
 	}
 	if err := rows.Err(); err != nil {
-		logger.Error("error iterating SHOW GRANTS rows", "err", err)
-		return false
+		logger.Debug("error iterating SHOW GRANTS USING rows", "error", err)
 	}
-	return false
+	return
 }
 
 // stringContainsAll returns true if `s` contains all non empty given `substrings`
