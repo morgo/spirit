@@ -18,6 +18,7 @@ func TestMovePrivileges(t *testing.T) {
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoveprivsuser")
 	assert.NoError(t, err)
@@ -38,6 +39,7 @@ func TestMovePrivileges(t *testing.T) {
 
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
+	defer utils.CloseAndLog(lowPrivDB)
 
 	r := Resources{
 		SourceDB:     lowPrivDB,
