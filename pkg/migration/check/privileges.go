@@ -161,6 +161,10 @@ func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logge
 			return true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		logger.Error("error iterating SHOW GRANTS rows", "err", err)
+		return false
+	}
 	return false
 }
 

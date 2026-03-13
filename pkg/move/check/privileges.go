@@ -95,6 +95,11 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	// Move operations always use force-kill (it's enabled by default in DBConfig).
 	// Check the force-kill related privileges.
 	var errs []error
+	// Verify SELECT access on performance_schema.*, which is required for the
+	// queries used by force-kill during cutover.
+	if !hasSelectOnPerformanceSchema(ctx, r.SourceDB, logger) {
+		errs = append(errs, errors.New("missing SELECT privilege on performance_schema.*"))
+	}
 	// If CONNECTION_ADMIN or PROCESS are not found in direct grants,
 	// check if they are available via roles (e.g. rds_superuser_role in RDS).
 	if !foundConnectionAdmin && !foundSuper && !foundAll {
@@ -119,6 +124,68 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	}
 
 	return fmt.Errorf("insufficient privileges to run a move. Needed: SUPER|REPLICATION CLIENT, RELOAD, REPLICATION SLAVE and ALL on %s.*", schemaName)
+}
+
+// scanGrantsForPerformanceSchemaSelect checks SHOW GRANTS output for sufficient
+// privileges to SELECT from performance_schema.* (either directly or via global grants).
+func scanGrantsForPerformanceSchemaSelect(rows *sql.Rows) bool {
+	for rows.Next() {
+		var grant string
+		if err := rows.Scan(&grant); err != nil {
+			return false
+		}
+		// Global ALL or SELECT on *.* implies SELECT on performance_schema.*
+		if strings.Contains(grant, `GRANT ALL PRIVILEGES ON *.*`) {
+			return true
+		}
+		if strings.Contains(grant, `SELECT`) && strings.Contains(grant, ` ON *.*`) {
+			return true
+		}
+		// Explicit privileges on performance_schema.* (backtick-quoted in SHOW GRANTS output).
+		// We check for SELECT independently of the grant prefix because the grant line
+		// may contain multiple privileges, e.g. "GRANT SELECT, EXECUTE ON `performance_schema`.*"
+		if strings.Contains(grant, "ON `performance_schema`.*") {
+			if strings.Contains(grant, `ALL PRIVILEGES`) || strings.Contains(grant, `SELECT`) {
+				return true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false
+	}
+	return false
+}
+
+// hasSelectOnPerformanceSchema checks whether the current user effectively has
+// SELECT on performance_schema.*, considering both direct grants and grants
+// obtained via roles (activated using SET ROLE ALL in a transaction).
+func hasSelectOnPerformanceSchema(ctx context.Context, db *sql.DB, logger *slog.Logger) bool {
+	// First, check direct grants.
+	rows, err := db.QueryContext(ctx, "SHOW GRANTS")
+	if err == nil {
+		defer utils.CloseAndLog(rows)
+		if scanGrantsForPerformanceSchemaSelect(rows) {
+			return true
+		}
+	}
+	// If direct grants are not sufficient, try again with roles activated.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback() //nolint:errcheck
+	cleanup, err := dbconn.SetRoleAllOnTxn(ctx, tx, logger)
+	if err != nil {
+		// If setting roles fails, the user has no roles or roles cannot be activated.
+		return false
+	}
+	defer cleanup()
+	rows, err = tx.QueryContext(ctx, "SHOW GRANTS")
+	if err != nil {
+		return false
+	}
+	defer utils.CloseAndLog(rows)
+	return scanGrantsForPerformanceSchemaSelect(rows)
 }
 
 // checkPrivilegeWithRoles checks if a specific privilege is available via roles
@@ -158,6 +225,10 @@ func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logge
 		if strings.Contains(grant, privilege) && strings.Contains(grant, ` ON *.*`) {
 			return true
 		}
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("error iterating SHOW GRANTS rows", "err", err)
+		return false
 	}
 	return false
 }

@@ -3,6 +3,8 @@ package dbconn
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -131,9 +133,10 @@ func (s *TableLock) ExecUnderLock(ctx context.Context, stmts ...string) error {
 
 // Close closes the table lock
 func (s *TableLock) Close(ctx context.Context) error {
+	var errs []error
 	_, err := s.lockTxn.ExecContext(ctx, "UNLOCK TABLES")
 	if err != nil {
-		return err
+		errs = append(errs, err)
 	}
 	// Run cleanup functions (e.g. SET ROLE DEFAULT) before releasing the
 	// connection back to the pool.
@@ -142,7 +145,10 @@ func (s *TableLock) Close(ctx context.Context) error {
 	}
 	err = s.lockTxn.Rollback()
 	if err != nil {
-		return err
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("errors occurred while closing table lock: %w", errors.Join(errs...))
 	}
 	s.logger.Warn("table lock released")
 	return nil
