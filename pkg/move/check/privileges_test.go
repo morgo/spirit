@@ -102,6 +102,7 @@ func TestMovePrivilegesWithRoles(t *testing.T) {
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	// Clean up any previous test artifacts
 	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoveprivsroleuser")

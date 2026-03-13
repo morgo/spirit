@@ -19,7 +19,11 @@ func SetRoleAllOnTxn(ctx context.Context, txn *sql.Tx, logger *slog.Logger) (fun
 		return func() {}, err
 	}
 	return func() {
-		if _, err := txn.ExecContext(ctx, "SET ROLE DEFAULT"); err != nil {
+		// Use context.Background() instead of the caller's ctx because the cleanup
+		// may run after the original context is canceled (e.g. on shutdown/timeout).
+		// SET ROLE DEFAULT must still succeed to prevent leaking elevated roles
+		// into the connection pool.
+		if _, err := txn.ExecContext(context.Background(), "SET ROLE DEFAULT"); err != nil {
 			// If SET ROLE DEFAULT fails, the transaction is likely already closed.
 			logger.Debug("SET ROLE DEFAULT failed", "error", err)
 		}

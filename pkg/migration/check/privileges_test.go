@@ -19,6 +19,7 @@ func TestPrivileges(t *testing.T) {
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsuser")
 	assert.NoError(t, err)
@@ -104,6 +105,7 @@ func TestPrivilegesWithRoles(t *testing.T) {
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	// Clean up any previous test artifacts
 	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsroleuser")
@@ -169,6 +171,7 @@ func TestPrivilegesWithSkipForceKill(t *testing.T) {
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsskipfk")
 	assert.NoError(t, err)

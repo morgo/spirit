@@ -103,8 +103,8 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	// If CONNECTION_ADMIN or PROCESS are not found in direct grants,
 	// check if they are available via roles (e.g. rds_superuser_role in RDS).
 	if !foundConnectionAdmin && !foundSuper && !foundAll {
-		if !checkPrivilegeWithRoles(ctx, r.SourceDB, logger, "CONNECTION_ADMIN") {
-			errs = append(errs, errors.New("missing CONNECTION_ADMIN privilege"))
+		if !checkPrivilegeWithRoles(ctx, r.SourceDB, logger, "CONNECTION_ADMIN", "SUPER") {
+			errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
 		}
 	}
 	if !foundProcess && !foundAll {
@@ -188,11 +188,11 @@ func hasSelectOnPerformanceSchema(ctx context.Context, db *sql.DB, logger *slog.
 	return scanGrantsForPerformanceSchemaSelect(rows)
 }
 
-// checkPrivilegeWithRoles checks if a specific privilege is available via roles
+// checkPrivilegeWithRoles checks if any of the specified privileges are available via roles
 // by executing SET ROLE ALL in a transaction and then checking SHOW GRANTS.
 // This is needed in RDS environments where privileges like CONNECTION_ADMIN or PROCESS
 // may be granted via a role (e.g. rds_superuser_role) that is not enabled by default.
-func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logger, privilege string) bool {
+func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logger, privileges ...string) bool {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false
@@ -222,8 +222,12 @@ func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logge
 		if strings.Contains(grant, `GRANT ALL PRIVILEGES ON *.*`) {
 			return true
 		}
-		if strings.Contains(grant, privilege) && strings.Contains(grant, ` ON *.*`) {
-			return true
+		if strings.Contains(grant, ` ON *.*`) {
+			for _, privilege := range privileges {
+				if strings.Contains(grant, privilege) {
+					return true
+				}
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
