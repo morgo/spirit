@@ -329,12 +329,12 @@ func KillTransaction(ctx context.Context, db *sql.DB, pid int, logger *slog.Logg
 	defer tx.Rollback() //nolint:errcheck
 
 	// Activate all granted roles on this transaction.
-	// We must reset the role before the connection is returned to the pool.
+	// resetRole must be called before Rollback closes the transaction.
 	resetRole, err := SetRoleAllOnTxn(ctx, tx, logger)
 	if err != nil {
 		return err
 	}
-	defer resetRole()
+	defer resetRole() // runs before deferred Rollback (LIFO)
 
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(killStatement, pid)); err != nil {
 		return fmt.Errorf("failed to kill transaction %d: %w", pid, err)

@@ -71,21 +71,31 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		if _, err := dbconn.GetLockingTransactions(ctx, r.DB, []*table.TableInfo{r.Table}, nil, logger, nil); err != nil {
 			errs = append(errs, err)
 		}
-		// If CONNECTION_ADMIN (or SUPER) or PROCESS are not found in direct grants,
-		// check if they are available via roles (e.g. rds_superuser_role in RDS).
-		// We use SHOW GRANTS FOR CURRENT_USER() USING 'role1', 'role2' which expands
-		// role privileges into individual grant lines, unlike plain SHOW GRANTS which
-		// only shows the role name without expanding its privileges.
+		// Check CONNECTION_ADMIN/SUPER and PROCESS. If not found in direct grants,
+		// try expanding role privileges using SHOW GRANTS FOR CURRENT_USER() USING.
+		// On RDS, rds_superuser_role is opaque and won't expand, but if the user has
+		// roles granted we log a warning and proceed (the runtime SET ROLE ALL will
+		// activate the privilege).
 		if (!foundConnectionAdmin && !foundSuper) || !foundProcess {
 			roleAll, roleSuper, _, _, _, _, roleConnectionAdmin, roleProcess := scanGrantsWithRoles(ctx, r.DB, r.Table.SchemaName, grantedRoles, logger)
 			if !foundConnectionAdmin && !foundSuper {
 				if !roleConnectionAdmin && !roleSuper && !roleAll {
-					errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
+					if len(grantedRoles) > 0 {
+						logger.Warn("CONNECTION_ADMIN/SUPER not found in direct grants or expanded roles, but user has roles granted; proceeding (roles will be activated at runtime via SET ROLE ALL)",
+							"roles", grantedRoles)
+					} else {
+						errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
+					}
 				}
 			}
 			if !foundProcess {
 				if !roleProcess && !roleAll {
-					errs = append(errs, errors.New("missing PROCESS privilege"))
+					if len(grantedRoles) > 0 {
+						logger.Warn("PROCESS not found in direct grants or expanded roles, but user has roles granted; proceeding (roles will be activated at runtime via SET ROLE ALL)",
+							"roles", grantedRoles)
+					} else {
+						errs = append(errs, errors.New("missing PROCESS privilege"))
+					}
 				}
 			}
 		}
@@ -167,6 +177,8 @@ func parseRoleNames(grant string) []string {
 // This is needed because plain SHOW GRANTS after SET ROLE ALL only shows the role
 // name (e.g. GRANT `rds_superuser_role`@`%` TO `user`@`%`) without expanding
 // the individual privileges the role contains.
+// Note: on RDS, rds_superuser_role is opaque and USING will not expand it.
+// Standard MySQL roles will be expanded correctly.
 func scanGrantsWithRoles(ctx context.Context, db *sql.DB, schemaName string, roles []string, logger *slog.Logger) (foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess bool) {
 	if len(roles) == 0 {
 		return

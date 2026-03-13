@@ -156,7 +156,8 @@ func TestMovePrivilegesWithRoles(t *testing.T) {
 	}
 
 	// The user has CONNECTION_ADMIN and PROCESS via a role, not directly.
-	// The privilege check should detect this via SET ROLE ALL.
+	// The KILL 0 probe with SET ROLE ALL detects CONNECTION_ADMIN via the role.
+	// The performance_schema and PROCESS checks also use SET ROLE ALL internally.
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err)
 }
