@@ -14,6 +14,11 @@ func isEnumOrSetType(mysqlType string) bool {
 	return strings.HasPrefix(lower, "enum(") || strings.HasPrefix(lower, "set(")
 }
 
+// isEnumType returns true if the MySQL type string represents an ENUM type.
+func isEnumType(mysqlType string) bool {
+	return strings.HasPrefix(strings.ToLower(mysqlType), "enum(")
+}
+
 // isSetType returns true if the MySQL type string represents a SET type.
 func isSetType(mysqlType string) bool {
 	return strings.HasPrefix(strings.ToLower(mysqlType), "set(")

@@ -199,3 +199,65 @@ func TestEnumSetRemovalCheckNonEnumColumn(t *testing.T) {
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err)
 }
+
+func TestEnumSetRemovalCheckEnumToSet(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS enumtoset`)
+	testutils.RunSQL(t, `CREATE TABLE enumtoset (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive') NOT NULL
+	)`)
+
+	tbl := table.NewTableInfo(db, "test", "enumtoset")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	// Buffered + ENUM→SET: should fail (ordinal vs bitmask mismatch)
+	r := Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumtoset MODIFY COLUMN status SET('active', 'inactive') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "unsafe ENUM to SET")
+	assert.ErrorContains(t, err, "buffered mode")
+
+	// Unbuffered + ENUM→SET: should pass
+	r.Buffered = false
+	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+}
+
+func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS settoenum`)
+	testutils.RunSQL(t, `CREATE TABLE settoenum (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		flags SET('read', 'write') NOT NULL
+	)`)
+
+	tbl := table.NewTableInfo(db, "test", "settoenum")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	// Buffered + SET→ENUM: should fail (bitmask vs ordinal mismatch)
+	r := Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE settoenum MODIFY COLUMN flags ENUM('read', 'write') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "unsafe SET to ENUM")
+	assert.ErrorContains(t, err, "buffered mode")
+
+	// Unbuffered + SET→ENUM: should pass
+	r.Buffered = false
+	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+}

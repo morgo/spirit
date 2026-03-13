@@ -46,10 +46,11 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			return fmt.Errorf("unable to validate ENUM reorder for column %q in buffered mode: existing column type not found in table metadata", col.LookupName)
 		}
 
-		// If the existing column is not an ENUM/SET type, this is a type
-		// conversion (e.g., VARCHAR → ENUM), not a reorder. There are no
-		// existing ordinals to worry about, so it's safe to skip.
-		if !isEnumOrSetType(existingType) {
+		// The ENUM reorder check only applies when the existing column is
+		// also an ENUM. If the existing column is a different type (e.g.,
+		// VARCHAR → ENUM or SET → ENUM), the reorder check is not applicable.
+		// Cross-type conversions like SET → ENUM are caught by enumSetRemovalCheck.
+		if !isEnumType(existingType) {
 			continue
 		}
 

@@ -44,10 +44,11 @@ func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 			return fmt.Errorf("unable to validate SET reorder for column %q: existing column type not found in TableInfo", col.LookupName)
 		}
 
-		// If the existing column is not an ENUM/SET type, this is a type
-		// conversion (e.g., VARCHAR → SET), not a reorder. There are no
-		// existing ordinals to worry about, so it's safe to skip.
-		if !isEnumOrSetType(existingType) {
+		// The SET reorder check only applies when the existing column is
+		// also a SET. If the existing column is a different type (e.g.,
+		// VARCHAR → SET or ENUM → SET), the reorder check is not applicable.
+		// Cross-type conversions like ENUM → SET are caught by enumSetRemovalCheck.
+		if !isSetType(existingType) {
 			continue
 		}
 
