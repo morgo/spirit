@@ -69,6 +69,26 @@ func TestParseEnumSetValues(t *testing.T) {
 	}
 }
 
+func TestIsEnumOrSetType(t *testing.T) {
+	// ENUM types
+	assert.True(t, isEnumOrSetType("enum('a','b','c')"))
+	assert.True(t, isEnumOrSetType("ENUM('A','B')"))
+	assert.True(t, isEnumOrSetType("Enum('x')"))
+
+	// SET types
+	assert.True(t, isEnumOrSetType("set('read','write')"))
+	assert.True(t, isEnumOrSetType("SET('r','w')"))
+	assert.True(t, isEnumOrSetType("Set('a')"))
+
+	// Non-ENUM/SET types
+	assert.False(t, isEnumOrSetType("varchar(191)"))
+	assert.False(t, isEnumOrSetType("int"))
+	assert.False(t, isEnumOrSetType("bigint"))
+	assert.False(t, isEnumOrSetType("text"))
+	assert.False(t, isEnumOrSetType("decimal(10,2)"))
+	assert.False(t, isEnumOrSetType(""))
+}
+
 func TestParseSQLQuotedListUnterminated(t *testing.T) {
 	// A quoted string that is never closed should return an error.
 	result, err := parseSQLQuotedList("'abc")

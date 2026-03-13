@@ -8,6 +8,12 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 )
 
+// isEnumOrSetType returns true if the MySQL type string represents an ENUM or SET type.
+func isEnumOrSetType(mysqlType string) bool {
+	lower := strings.ToLower(mysqlType)
+	return strings.HasPrefix(lower, "enum(") || strings.HasPrefix(lower, "set(")
+}
+
 // parseEnumSetValues extracts the element values from a MySQL type string
 // like "enum('a','b','c')" or "set('x','y','z')".
 //
