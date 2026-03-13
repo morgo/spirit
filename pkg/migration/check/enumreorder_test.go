@@ -93,3 +93,41 @@ func TestEnumReorderCheck(t *testing.T) {
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err)
 }
+
+func TestEnumReorderCheckVarcharToEnum(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS enumchk_varchar`)
+	testutils.RunSQL(t, `CREATE TABLE enumchk_varchar (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		state VARCHAR(191) NOT NULL
+	)`)
+
+	tbl := table.NewTableInfo(db, "test", "enumchk_varchar")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	// Buffered + VARCHAR→ENUM conversion: should pass (not a reorder)
+	r := Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumchk_varchar MODIFY COLUMN state ENUM('active', 'inactive', 'pending') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+
+	// Unbuffered + VARCHAR→ENUM conversion: should also pass
+	r.Buffered = false
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+
+	// Buffered + CHANGE COLUMN VARCHAR→ENUM: should pass
+	r = Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumchk_varchar CHANGE COLUMN state state ENUM('active', 'inactive') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+}

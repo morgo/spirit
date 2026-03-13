@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
@@ -31,7 +32,7 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	}
 
 	for _, col := range findModifiedEnumSetColumns(*r.Statement.StmtNode) {
-		if col.IsSet {
+		if col.ColDef.Tp.GetType() == mysql.TypeSet {
 			continue // handled by setReorderCheck
 		}
 
@@ -43,6 +44,14 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 		existingType, ok := r.Table.GetColumnMySQLType(col.LookupName)
 		if !ok {
 			return fmt.Errorf("unable to validate ENUM reorder for column %q in buffered mode: existing column type not found in table metadata", col.LookupName)
+		}
+
+		// The ENUM reorder check only applies when the existing column is
+		// also an ENUM. If the existing column is a different type (e.g.,
+		// VARCHAR → ENUM or SET → ENUM), the reorder check is not applicable.
+		// Cross-type conversions like SET → ENUM are caught by enumSetRemovalCheck.
+		if !isEnumType(existingType) {
+			continue
 		}
 
 		existingElems, err := parseEnumSetValues(existingType)
