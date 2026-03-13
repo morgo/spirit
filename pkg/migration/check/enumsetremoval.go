@@ -55,8 +55,8 @@ func enumSetRemovalCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 				typeName = "SET"
 			}
 			return fmt.Errorf("unsafe %s to non-%s type conversion on column %q is not supported in buffered mode. "+
-				"In buffered mode, the binlog replay path uses integer ordinals for %s values, "+
-				"so converting to %s would insert ordinal numbers instead of the original string values. "+
+				"In buffered mode, the binlog replay path uses integer encodings for %s values (ENUM ordinals / SET bitmasks), "+
+				"so converting to %s would insert those integer encodings instead of the original string values. "+
 				"Either use unbuffered mode (the default) or keep the column as %s type",
 				typeName, typeName, col.LookupName, typeName, col.ColDef.Tp.String(), typeName)
 		}
