@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,39 +34,12 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		if err := rows.Scan(&grant); err != nil {
 			return err
 		}
-		if strings.Contains(grant, `GRANT ALL PRIVILEGES ON *.*`) {
-			foundAll = true
-		}
-		if strings.Contains(grant, `SUPER`) && strings.Contains(grant, ` ON *.*`) {
-			foundSuper = true
-		}
-		if strings.Contains(grant, `REPLICATION CLIENT`) && strings.Contains(grant, ` ON *.*`) {
-			foundReplicationClient = true
-		}
-		if strings.Contains(grant, `REPLICATION SLAVE`) && strings.Contains(grant, ` ON *.*`) {
-			foundReplicationSlave = true
-		}
-		if strings.Contains(grant, `RELOAD`) && strings.Contains(grant, ` ON *.*`) {
-			foundReload = true
-		}
-		if strings.Contains(grant, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.*", r.Table.SchemaName)) {
-			foundDBAll = true
-		}
-		if strings.Contains(grant, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.*", strings.ReplaceAll(r.Table.SchemaName, "_", "\\_"))) {
-			foundDBAll = true
-		}
-		if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, ` ON *.*`) {
-			foundDBAll = true
-		}
-		if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, fmt.Sprintf(" ON `%s`.*", r.Table.SchemaName)) {
-			foundDBAll = true
-		}
-		if strings.Contains(grant, `CONNECTION_ADMIN`) && strings.Contains(grant, ` ON *.*`) {
-			foundConnectionAdmin = true
-		}
-		if strings.Contains(grant, `PROCESS`) && strings.Contains(grant, ` ON *.*`) {
-			foundProcess = true
-		}
+		foundAll, foundSuper, foundReplicationClient, foundReplicationSlave,
+			foundDBAll, foundReload, foundConnectionAdmin, foundProcess = scanGrantLine(
+			grant, r.Table.SchemaName,
+			foundAll, foundSuper, foundReplicationClient, foundReplicationSlave,
+			foundDBAll, foundReload, foundConnectionAdmin, foundProcess,
+		)
 	}
 	if rows.Err() != nil {
 		return rows.Err()
@@ -77,17 +51,24 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	if r.ForceKill {
 		var errs []error
 		// Parsing performance_schema grants seems really hard, so we just try to execute the queries and see if they succeed.
+		// These functions internally use SET ROLE ALL, so they will succeed if the privilege is granted via a role.
 		if _, err := dbconn.GetTableLocks(ctx, r.DB, []*table.TableInfo{r.Table}, logger, nil); err != nil {
 			errs = append(errs, err)
 		}
 		if _, err := dbconn.GetLockingTransactions(ctx, r.DB, []*table.TableInfo{r.Table}, nil, logger, nil); err != nil {
 			errs = append(errs, err)
 		}
+		// If CONNECTION_ADMIN or PROCESS are not found in direct grants,
+		// check if they are available via roles (e.g. rds_superuser_role in RDS).
 		if !foundConnectionAdmin && !foundSuper && !foundAll {
-			errs = append(errs, errors.New("missing CONNECTION_ADMIN privilege"))
+			if !checkPrivilegeWithRoles(ctx, r.DB, logger, "CONNECTION_ADMIN") {
+				errs = append(errs, errors.New("missing CONNECTION_ADMIN privilege"))
+			}
 		}
 		if !foundProcess && !foundAll {
-			errs = append(errs, errors.New("missing PROCESS privilege"))
+			if !checkPrivilegeWithRoles(ctx, r.DB, logger, "PROCESS") {
+				errs = append(errs, errors.New("missing PROCESS privilege"))
+			}
 		}
 		if len(errs) > 0 {
 			return fmt.Errorf("insufficient privileges to run a migration with force-kill enabled (disable with --skip-force-kill). Needed: CONNECTION_ADMIN/SUPER, PROCESS, and SELECT on performance_schema.*: %w", errors.Join(errs...))
@@ -102,6 +83,83 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	}
 
 	return errors.New("insufficient privileges to run a migration. Needed: SUPER|REPLICATION CLIENT, RELOAD, REPLICATION SLAVE and ALL on %s.*")
+}
+
+// scanGrantLine scans a single SHOW GRANTS line and updates the found flags.
+func scanGrantLine(grant, schemaName string, foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess bool) (bool, bool, bool, bool, bool, bool, bool, bool) {
+	if strings.Contains(grant, `GRANT ALL PRIVILEGES ON *.*`) {
+		foundAll = true
+	}
+	if strings.Contains(grant, `SUPER`) && strings.Contains(grant, ` ON *.*`) {
+		foundSuper = true
+	}
+	if strings.Contains(grant, `REPLICATION CLIENT`) && strings.Contains(grant, ` ON *.*`) {
+		foundReplicationClient = true
+	}
+	if strings.Contains(grant, `REPLICATION SLAVE`) && strings.Contains(grant, ` ON *.*`) {
+		foundReplicationSlave = true
+	}
+	if strings.Contains(grant, `RELOAD`) && strings.Contains(grant, ` ON *.*`) {
+		foundReload = true
+	}
+	if strings.Contains(grant, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.*", schemaName)) {
+		foundDBAll = true
+	}
+	if strings.Contains(grant, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.*", strings.ReplaceAll(schemaName, "_", "\\_"))) {
+		foundDBAll = true
+	}
+	if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, ` ON *.*`) {
+		foundDBAll = true
+	}
+	if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, fmt.Sprintf(" ON `%s`.*", schemaName)) {
+		foundDBAll = true
+	}
+	if strings.Contains(grant, `CONNECTION_ADMIN`) && strings.Contains(grant, ` ON *.*`) {
+		foundConnectionAdmin = true
+	}
+	if strings.Contains(grant, `PROCESS`) && strings.Contains(grant, ` ON *.*`) {
+		foundProcess = true
+	}
+	return foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess
+}
+
+// checkPrivilegeWithRoles checks if a specific privilege is available via roles
+// by executing SET ROLE ALL in a transaction and then checking SHOW GRANTS.
+// This is needed in RDS environments where privileges like CONNECTION_ADMIN or PROCESS
+// may be granted via a role (e.g. rds_superuser_role) that is not enabled by default.
+func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logger, privilege string) bool {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Activate all granted roles
+	if _, err := tx.ExecContext(ctx, "SET ROLE ALL"); err != nil {
+		// If SET ROLE ALL fails, the user has no roles
+		return false
+	}
+
+	// Now check SHOW GRANTS which will include privileges from active roles
+	rows, err := tx.QueryContext(ctx, "SHOW GRANTS")
+	if err != nil {
+		return false
+	}
+	defer utils.CloseAndLog(rows)
+
+	for rows.Next() {
+		var grant string
+		if err := rows.Scan(&grant); err != nil {
+			return false
+		}
+		if strings.Contains(grant, `GRANT ALL PRIVILEGES ON *.*`) {
+			return true
+		}
+		if strings.Contains(grant, privilege) && strings.Contains(grant, ` ON *.*`) {
+			return true
+		}
+	}
+	return false
 }
 
 // stringContainsAll returns true if `s` contains all non empty given `substrings`

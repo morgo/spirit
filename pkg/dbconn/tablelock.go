@@ -54,6 +54,17 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 			_ = lockTxn.Rollback()
 		}
 	}()
+
+	// Activate all granted roles on this transaction. In RDS environments,
+	// LOCK TABLES privilege may be granted via a role (e.g. rds_superuser_role)
+	// that is not enabled by default. We must defer the cleanup to reset the role
+	// before the connection is returned to the pool, because the Go MySQL driver
+	// does not reset session state on transaction commit/rollback.
+	resetRole, err := SetRoleAllOnTxn(ctx, lockTxn, logger)
+	if err != nil {
+		return nil, err
+	}
+	defer resetRole()
 	if config.ForceKill {
 		// If ForceKill is true, we will wait for 90% of the configured LockWaitTimeout
 		threshold := time.Duration(float64(config.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
