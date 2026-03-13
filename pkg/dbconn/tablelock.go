@@ -12,9 +12,10 @@ import (
 )
 
 type TableLock struct {
-	tables  []*table.TableInfo
-	lockTxn *sql.Tx
-	logger  *slog.Logger
+	tables   []*table.TableInfo
+	lockTxn  *sql.Tx
+	logger   *slog.Logger
+	cleanups []func() // cleanup functions to run when the lock is closed
 }
 
 // NewTableLock creates a new server wide lock on multiple tables.
@@ -57,14 +58,15 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 
 	// Activate all granted roles on this transaction. In RDS environments,
 	// LOCK TABLES privilege may be granted via a role (e.g. rds_superuser_role)
-	// that is not enabled by default. We must defer the cleanup to reset the role
-	// before the connection is returned to the pool, because the Go MySQL driver
-	// does not reset session state on transaction commit/rollback.
+	// that is not enabled by default. The role reset is deferred to Close()
+	// so that the role remains active for the lifetime of the lock, and is
+	// cleaned up before the connection is returned to the pool (the Go MySQL
+	// driver does not reset session state on transaction commit/rollback).
 	resetRole, err := SetRoleAllOnTxn(ctx, lockTxn, logger)
 	if err != nil {
 		return nil, err
 	}
-	defer resetRole()
+
 	if config.ForceKill {
 		// If ForceKill is true, we will wait for 90% of the configured LockWaitTimeout
 		threshold := time.Duration(float64(config.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
@@ -102,9 +104,10 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	// it's a critical function.
 	logger.Warn("table lock(s) acquired")
 	return &TableLock{
-		tables:  tables,
-		lockTxn: lockTxn,
-		logger:  logger,
+		tables:   tables,
+		lockTxn:  lockTxn,
+		logger:   logger,
+		cleanups: []func(){resetRole},
 	}, nil
 }
 
@@ -127,6 +130,11 @@ func (s *TableLock) Close(ctx context.Context) error {
 	_, err := s.lockTxn.ExecContext(ctx, "UNLOCK TABLES")
 	if err != nil {
 		return err
+	}
+	// Run cleanup functions (e.g. SET ROLE DEFAULT) before releasing the
+	// connection back to the pool.
+	for _, cleanup := range s.cleanups {
+		cleanup()
 	}
 	err = s.lockTxn.Rollback()
 	if err != nil {
