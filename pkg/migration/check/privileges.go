@@ -82,7 +82,7 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		return nil
 	}
 
-	return errors.New("insufficient privileges to run a migration. Needed: SUPER|REPLICATION CLIENT, RELOAD, REPLICATION SLAVE and ALL on %s.*")
+	return fmt.Errorf("insufficient privileges to run a migration. Needed: SUPER|REPLICATION CLIENT, RELOAD, REPLICATION SLAVE and ALL on %s.*", r.Table.SchemaName)
 }
 
 // scanGrantLine scans a single SHOW GRANTS line and updates the found flags.
