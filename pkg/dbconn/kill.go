@@ -336,11 +336,10 @@ func KillTransaction(ctx context.Context, db *sql.DB, pid int, logger *slog.Logg
 	}
 	defer resetRole()
 
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(killStatement, pid)); err != nil {
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(killStatement, pid)); err != nil {
 		return fmt.Errorf("failed to kill transaction %d: %w", pid, err)
 	}
-
-	return tx.Commit()
+	return nil // This will "rollback", but KILL is non transactional
 }
 
 func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList string, params []any) {

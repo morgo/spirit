@@ -95,15 +95,6 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	// Move operations always use force-kill (it's enabled by default in DBConfig).
 	// Check the force-kill related privileges.
 	var errs []error
-	// These functions internally use SET ROLE ALL, so they will succeed if the privilege is granted via a role.
-	if len(r.SourceTables) > 0 {
-		if _, err := dbconn.GetTableLocks(ctx, r.SourceDB, r.SourceTables, logger, nil); err != nil {
-			errs = append(errs, err)
-		}
-		if _, err := dbconn.GetLockingTransactions(ctx, r.SourceDB, r.SourceTables, nil, logger, nil); err != nil {
-			errs = append(errs, err)
-		}
-	}
 	// If CONNECTION_ADMIN or PROCESS are not found in direct grants,
 	// check if they are available via roles (e.g. rds_superuser_role in RDS).
 	if !foundConnectionAdmin && !foundSuper && !foundAll {
@@ -141,11 +132,13 @@ func checkPrivilegeWithRoles(ctx context.Context, db *sql.DB, logger *slog.Logge
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Activate all granted roles
-	if _, err := tx.ExecContext(ctx, "SET ROLE ALL"); err != nil {
-		// If SET ROLE ALL fails, the user has no roles
+	// Activate all granted roles and ensure they are reset before the transaction ends.
+	cleanup, err := dbconn.SetRoleAllOnTxn(ctx, tx, logger)
+	if err != nil {
+		// If setting roles fails, the user has no roles or roles cannot be activated
 		return false
 	}
+	defer cleanup()
 
 	// Now check SHOW GRANTS which will include privileges from active roles
 	rows, err := tx.QueryContext(ctx, "SHOW GRANTS")

@@ -47,11 +47,15 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	if err != nil {
 		return nil, err
 	}
+	var resetRole func()
 	defer func() {
 		// Before we return an error, we need to now ensure that
 		// we rollback the transaction if it was opened,
 		// this helps prevent a connection leak.
 		if err != nil {
+			if resetRole != nil {
+				resetRole()
+			}
 			_ = lockTxn.Rollback()
 		}
 	}()
@@ -62,7 +66,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	// so that the role remains active for the lifetime of the lock, and is
 	// cleaned up before the connection is returned to the pool (the Go MySQL
 	// driver does not reset session state on transaction commit/rollback).
-	resetRole, err := SetRoleAllOnTxn(ctx, lockTxn, logger)
+	resetRole, err = SetRoleAllOnTxn(ctx, lockTxn, logger)
 	if err != nil {
 		return nil, err
 	}
