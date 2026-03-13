@@ -64,7 +64,8 @@ The `pkg/testutils/` package provides helpers used across all test files:
 - `IsMinimalRBRTestRunner(t)` — detects minimal `binlog_row_image` environments to skip incompatible tests
 
 **Test patterns used in this project:**
-- Tests create isolated databases via `testutils.CreateUniqueTestDatabase(t)` to avoid interference
+- Most tests use `RunSQL(t, stmt)` with `DROP TABLE IF EXISTS` in the default `test` database. This is simple and sufficient for tests that don't interfere with each other.
+- Use `CreateUniqueTestDatabase(t)` only for integration tests that run concurrent migrations or need full database isolation (e.g., tests in `pkg/migration/`).
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
 - The `table` package provides a `MockChunker` for testing copier/applier without real chunking
 - Test files live alongside their source files (e.g., `single_target.go` / `single_target_test.go`)

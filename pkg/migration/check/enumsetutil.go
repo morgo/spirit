@@ -14,6 +14,11 @@ func isEnumOrSetType(mysqlType string) bool {
 	return strings.HasPrefix(lower, "enum(") || strings.HasPrefix(lower, "set(")
 }
 
+// isSetType returns true if the MySQL type string represents a SET type.
+func isSetType(mysqlType string) bool {
+	return strings.HasPrefix(strings.ToLower(mysqlType), "set(")
+}
+
 // parseEnumSetValues extracts the element values from a MySQL type string
 // like "enum('a','b','c')" or "set('x','y','z')".
 //
@@ -23,8 +28,7 @@ func isEnumOrSetType(mysqlType string) bool {
 // It is fail-closed: any unexpected characters or malformed structure returns
 // an error so that callers (safety checks) are never silently bypassed.
 func parseEnumSetValues(mysqlType string) ([]string, error) {
-	lower := strings.ToLower(mysqlType)
-	if !strings.HasPrefix(lower, "enum(") && !strings.HasPrefix(lower, "set(") {
+	if !isEnumOrSetType(mysqlType) {
 		return nil, fmt.Errorf("not an enum/set type: %q", mysqlType)
 	}
 
@@ -138,25 +142,23 @@ func isPrefix(oldElems, newElems []string) bool {
 	return true
 }
 
-// modifiedEnumSetColumn describes a column in an ALTER TABLE that is being
-// modified and has an ENUM or SET type. It captures the information needed
-// by the enum and set reorder checks.
-type modifiedEnumSetColumn struct {
+// modifiedColumn describes a column in an ALTER TABLE that is being
+// modified via MODIFY COLUMN or CHANGE COLUMN.
+type modifiedColumn struct {
 	LookupName string         // column name to look up in the existing table
 	ColDef     *ast.ColumnDef // the new column definition from the ALTER
-	IsSet      bool           // true for SET, false for ENUM
 }
 
-// findModifiedEnumSetColumns extracts all MODIFY COLUMN and CHANGE COLUMN
-// specs from an ALTER TABLE statement that target ENUM or SET columns.
+// findModifiedColumns extracts all MODIFY COLUMN and CHANGE COLUMN
+// specs from an ALTER TABLE statement.
 // These are the only two ALTER specs that can redefine a column's type.
-func findModifiedEnumSetColumns(stmtNode ast.StmtNode) []modifiedEnumSetColumn {
+func findModifiedColumns(stmtNode ast.StmtNode) []modifiedColumn {
 	alterStmt, ok := stmtNode.(*ast.AlterTableStmt)
 	if !ok {
 		return nil
 	}
 
-	var result []modifiedEnumSetColumn
+	var result []modifiedColumn
 	for _, spec := range alterStmt.Specs {
 		var colDef *ast.ColumnDef
 		var lookupName string
@@ -182,16 +184,23 @@ func findModifiedEnumSetColumns(stmtNode ast.StmtNode) []modifiedEnumSetColumn {
 			continue
 		}
 
-		tp := colDef.Tp.GetType()
-		if tp != mysql.TypeEnum && tp != mysql.TypeSet {
-			continue
-		}
-
-		result = append(result, modifiedEnumSetColumn{
+		result = append(result, modifiedColumn{
 			LookupName: lookupName,
 			ColDef:     colDef,
-			IsSet:      tp == mysql.TypeSet,
 		})
+	}
+	return result
+}
+
+// findModifiedEnumSetColumns returns only the modified columns whose new type
+// is ENUM or SET.
+func findModifiedEnumSetColumns(stmtNode ast.StmtNode) []modifiedColumn {
+	var result []modifiedColumn
+	for _, col := range findModifiedColumns(stmtNode) {
+		tp := col.ColDef.Tp.GetType()
+		if tp == mysql.TypeEnum || tp == mysql.TypeSet {
+			result = append(result, col)
+		}
 	}
 	return result
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
@@ -31,7 +32,7 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	}
 
 	for _, col := range findModifiedEnumSetColumns(*r.Statement.StmtNode) {
-		if col.IsSet {
+		if col.ColDef.Tp.GetType() == mysql.TypeSet {
 			continue // handled by setReorderCheck
 		}
 
