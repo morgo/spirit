@@ -500,8 +500,9 @@ func TestDDLNotification(t *testing.T) {
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
-		CancelFunc: func() {
+		CancelFunc: func() bool {
 			cancelled <- struct{}{}
+			return true
 		},
 		ServerID: NewServerID(),
 	})
@@ -734,7 +735,7 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
-		CancelFunc:      cancel,
+		CancelFunc:      func() bool { cancel(); return true },
 	})
 	require.NoError(t, client.AddSubscription(t1, t2, nil))
 	require.NoError(t, client.Run(ctx))
@@ -970,7 +971,7 @@ func TestProcessDDLNotification(t *testing.T) {
 		cancelled := false
 		c := &Client{
 			logger:           slog.Default(),
-			callerCancelFunc: func() { cancelled = true },
+			callerCancelFunc: func() bool { cancelled = true; return true },
 			ddlFilterSchema:  filterSchema,
 			ddlFilterTables:  toSet(filterTables),
 			subscriptions:    make(map[string]Subscription),
@@ -997,7 +998,7 @@ func TestProcessDDLNotification(t *testing.T) {
 		cancelled := false
 		c := &Client{
 			logger:           slog.Default(),
-			callerCancelFunc: func() { cancelled = true },
+			callerCancelFunc: func() bool { cancelled = true; return true },
 			subscriptions:    make(map[string]Subscription),
 		}
 		c.subscriptions[dbName+".orders"] = &deltaMap{
@@ -1069,5 +1070,30 @@ func TestProcessDDLNotification(t *testing.T) {
 		assert.NotPanics(t, func() {
 			c.processDDLNotification("mydb", "some_table")
 		})
+	})
+
+	t.Run("cancel func returns false: DDL is silently ignored", func(t *testing.T) {
+		// This simulates the cutover scenario: the migration is past cutover,
+		// so fatalError() returns false. Spirit's own RENAME TABLE DDL during
+		// cutover should not produce an error log.
+		cancelCalled := false
+		c := &Client{
+			logger:           slog.Default(),
+			callerCancelFunc: func() bool { cancelCalled = true; return false },
+			subscriptions:    make(map[string]Subscription),
+		}
+		c.subscriptions[dbName+".orders"] = &deltaMap{
+			table:    tbl,
+			newTable: newTbl,
+			changes:  make(map[string]mapChange),
+			c:        c,
+		}
+		// DDL on the subscribed table should call the cancel func,
+		// but since it returns false, the notification is silently ignored.
+		c.processDDLNotification(dbName, "orders")
+		assert.True(t, cancelCalled, "cancel func should have been called")
+		// The key assertion is that this does NOT produce an error log.
+		// Before this fix, it would always log "table definition changed"
+		// even during cutover, causing false Sentry alerts.
 	})
 }

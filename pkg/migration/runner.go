@@ -729,9 +729,12 @@ func (r *Runner) setup(ctx context.Context) error {
 // It is called when a DDL change is detected on a subscribed table,
 // or when a fatal stream error occurs. The replication client handles
 // its own logging before calling this.
-func (r *Runner) fatalError() {
+// It returns true if the error was acted upon (migration cancelled),
+// or false if it was ignored (e.g. because the migration is already
+// past cutover, where Spirit's own RENAME TABLE DDL is expected).
+func (r *Runner) fatalError() bool {
 	if r.status.Get() >= status.CutOver {
-		return
+		return false
 	}
 	r.status.Set(status.ErrCleanup)
 	// Invalidate the checkpoint, so we don't try to resume.
@@ -744,6 +747,7 @@ func (r *Runner) fatalError() {
 		)
 	}
 	r.cancelFunc() // cancel the migration context
+	return true
 }
 
 func (r *Runner) dropCheckpoint(ctx context.Context) error {

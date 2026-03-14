@@ -633,9 +633,9 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // It is called when a DDL change is detected on a subscribed table,
 // or when a fatal stream error occurs. The replication client handles
 // its own logging before calling this.
-func (r *Runner) fatalError() {
+func (r *Runner) fatalError() bool {
 	if r.status.Get() >= status.CutOver {
-		return
+		return false
 	}
 	r.status.Set(status.ErrCleanup)
 	// Invalidate the checkpoint, so we don't try to resume.
@@ -650,6 +650,7 @@ func (r *Runner) fatalError() {
 		}
 	}
 	r.cancelFunc() // cancel the move context
+	return true
 }
 
 func (r *Runner) Status() string {
