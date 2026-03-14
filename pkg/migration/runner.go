@@ -727,8 +727,8 @@ func (r *Runner) setup(ctx context.Context) error {
 
 // fatalError is the callback provided to the replication client.
 // It is called when a DDL change is detected on a subscribed table,
-// or when a fatal stream error occurs. The replication client handles
-// its own logging before calling this.
+// or when a fatal stream error occurs. The replication client is
+// responsible for any logging related to these errors.
 // It returns true if the error was acted upon (migration cancelled),
 // or false if it was ignored (e.g. because the migration is already
 // past cutover, where Spirit's own RENAME TABLE DDL is expected).

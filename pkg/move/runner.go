@@ -631,8 +631,15 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 
 // fatalError is the callback provided to the replication client.
 // It is called when a DDL change is detected on a subscribed table,
-// or when a fatal stream error occurs. The replication client handles
-// its own logging before calling this.
+// or when a fatal stream error occurs. The replication client may perform
+// its own logging either before or after invoking this callback, and DDL
+// logging may be skipped entirely if this callback returns false.
+//
+// The return value indicates whether the replication client should treat
+// the condition as fatal and stop the replication stream. It returns true
+// when the error should be treated as fatal (and replication should be
+// terminated and cleaned up), and false when the error should not be treated
+// as fatal (in which case the client may continue without logging the DDL).
 func (r *Runner) fatalError() bool {
 	if r.status.Get() >= status.CutOver {
 		return false
