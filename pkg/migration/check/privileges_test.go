@@ -97,87 +97,6 @@ func TestPrivileges(t *testing.T) {
 	assert.NoError(t, err) // privileges work fine
 }
 
-// TestPrivilegesWithRoles tests that privileges granted via roles are detected
-// when activate_all_roles_on_login=ON. This simulates RDS environments where
-// privileges like CONNECTION_ADMIN and PROCESS are granted via rds_superuser_role.
-func TestPrivilegesWithRoles(t *testing.T) {
-	config, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	config.User = "root" // needs grant privilege
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	// Clean up any previous test artifacts
-	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsroleuser")
-	_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS testprivsrole")
-
-	// Create a role with CONNECTION_ADMIN and PROCESS privileges
-	_, err = db.ExecContext(t.Context(), "CREATE ROLE testprivsrole")
-	assert.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS testprivsrole")
-	})
-
-	_, err = db.ExecContext(t.Context(), "GRANT CONNECTION_ADMIN, PROCESS ON *.* TO testprivsrole")
-	assert.NoError(t, err)
-
-	_, err = db.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testprivsrole")
-	assert.NoError(t, err)
-
-	// Create a user with basic privileges but NOT CONNECTION_ADMIN or PROCESS directly
-	_, err = db.ExecContext(t.Context(), "CREATE USER testprivsroleuser")
-	assert.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsroleuser")
-	})
-
-	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testprivsroleuser")
-	assert.NoError(t, err)
-
-	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsroleuser")
-	assert.NoError(t, err)
-
-	// Grant the role to the user and set activate_all_roles_on_login=ON
-	// so the role privileges are active at runtime (needed for the actual
-	// performance_schema queries to succeed, not just the privilege check).
-	_, err = db.ExecContext(t.Context(), "GRANT testprivsrole TO testprivsroleuser")
-	assert.NoError(t, err)
-
-	// Save original value and restore after test
-	var origValue string
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&origValue))
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(t.Context(), fmt.Sprintf("SET GLOBAL activate_all_roles_on_login = %s", origValue))
-	})
-	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
-	assert.NoError(t, err)
-
-	config, err = mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	config.User = "testprivsroleuser"
-	config.Passwd = ""
-
-	// Must open connection AFTER setting activate_all_roles_on_login=ON
-	// so the role is active on the new connection.
-	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(lowPrivDB)
-
-	r := Resources{
-		DB:        lowPrivDB,
-		Table:     &table.TableInfo{TableName: "test", SchemaName: "test"},
-		ForceKill: true, // default behavior
-	}
-
-	// The user has CONNECTION_ADMIN and PROCESS via a role. Since the role
-	// is a standard role (not rds_superuser_role), SHOW GRANTS USING can
-	// expand it and detect the privileges. With activate_all_roles_on_login=ON,
-	// the role is active at runtime so the actual queries succeed too.
-	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
-}
-
 // TestPrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
 // only when activate_all_roles_on_login=ON.
 func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
@@ -193,9 +112,9 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS rds_superuser_role")
 
 	// Create an opaque role that simulates rds_superuser_role on RDS.
-	// We intentionally do NOT grant CONNECTION_ADMIN or PROCESS to it,
-	// because on real RDS the role is opaque and SHOW GRANTS USING cannot expand it.
-	// The privilege check tolerates it by name only.
+	// We intentionally do NOT grant CONNECTION_ADMIN to it, because on real
+	// RDS the role is opaque and cannot be inspected. The privilege check
+	// tolerates it by name only.
 	_, err = db.ExecContext(t.Context(), "CREATE ROLE rds_superuser_role")
 	require.NoError(t, err)
 	t.Cleanup(func() {
