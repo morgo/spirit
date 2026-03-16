@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPrivileges(t *testing.T) {
@@ -96,9 +97,9 @@ func TestPrivileges(t *testing.T) {
 	assert.NoError(t, err) // privileges work fine
 }
 
-// TestPrivilegesWithRoles tests that privileges granted via roles are detected.
-// In RDS environments, privileges like CONNECTION_ADMIN and PROCESS may be
-// granted via a role (e.g. rds_superuser_role) that is not enabled by default.
+// TestPrivilegesWithRoles tests that privileges granted via roles are detected
+// when activate_all_roles_on_login=ON. This simulates RDS environments where
+// privileges like CONNECTION_ADMIN and PROCESS are granted via rds_superuser_role.
 func TestPrivilegesWithRoles(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
@@ -137,8 +138,19 @@ func TestPrivilegesWithRoles(t *testing.T) {
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsroleuser")
 	assert.NoError(t, err)
 
-	// Grant the role to the user
+	// Grant the role to the user and set activate_all_roles_on_login=ON
+	// so the role privileges are active at runtime (needed for the actual
+	// performance_schema queries to succeed, not just the privilege check).
 	_, err = db.ExecContext(t.Context(), "GRANT testprivsrole TO testprivsroleuser")
+	assert.NoError(t, err)
+
+	// Save original value and restore after test
+	var origValue string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&origValue))
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(t.Context(), fmt.Sprintf("SET GLOBAL activate_all_roles_on_login = %s", origValue))
+	})
+	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
 	assert.NoError(t, err)
 
 	config, err = mysql.ParseDSN(testutils.DSN())
@@ -146,6 +158,8 @@ func TestPrivilegesWithRoles(t *testing.T) {
 	config.User = "testprivsroleuser"
 	config.Passwd = ""
 
+	// Must open connection AFTER setting activate_all_roles_on_login=ON
+	// so the role is active on the new connection.
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
@@ -156,11 +170,103 @@ func TestPrivilegesWithRoles(t *testing.T) {
 		ForceKill: true, // default behavior
 	}
 
-	// The user has CONNECTION_ADMIN and PROCESS via a role, not directly.
-	// The KILL 0 probe with SET ROLE ALL detects CONNECTION_ADMIN via the role.
-	// The performance_schema and PROCESS checks also use SET ROLE ALL internally.
+	// The user has CONNECTION_ADMIN and PROCESS via a role. Since the role
+	// is a standard role (not rds_superuser_role), SHOW GRANTS USING can
+	// expand it and detect the privileges. With activate_all_roles_on_login=ON,
+	// the role is active at runtime so the actual queries succeed too.
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err)
+}
+
+// TestPrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
+// only when activate_all_roles_on_login=ON.
+func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "root"
+	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// Clean up any previous test artifacts
+	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testrdsroleuser")
+	_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS rds_superuser_role")
+
+	// Create an opaque role that simulates rds_superuser_role on RDS.
+	// We intentionally do NOT grant CONNECTION_ADMIN or PROCESS to it,
+	// because on real RDS the role is opaque and SHOW GRANTS USING cannot expand it.
+	// The privilege check tolerates it by name only.
+	_, err = db.ExecContext(t.Context(), "CREATE ROLE rds_superuser_role")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS rds_superuser_role")
+	})
+
+	_, err = db.ExecContext(t.Context(), "CREATE USER testrdsroleuser")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testrdsroleuser")
+	})
+
+	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testrdsroleuser")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testrdsroleuser")
+	require.NoError(t, err)
+	// Grant performance_schema and PROCESS directly so the probe queries succeed.
+	// On real RDS, rds_superuser_role grants these, but our test role is opaque
+	// (no actual privileges) so we simulate by granting them directly.
+	// The test specifically validates that CONNECTION_ADMIN tolerance works via
+	// the rds_superuser_role name check + activate_all_roles_on_login guard.
+	_, err = db.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testrdsroleuser")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testrdsroleuser")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "GRANT rds_superuser_role TO testrdsroleuser")
+	require.NoError(t, err)
+
+	config, err = mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "testrdsroleuser"
+	config.Passwd = ""
+
+	// Save original value and restore after test
+	var origValue string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&origValue))
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(t.Context(), fmt.Sprintf("SET GLOBAL activate_all_roles_on_login = %s", origValue))
+	})
+
+	// With activate_all_roles_on_login=OFF, rds_superuser_role should NOT be tolerated
+	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = OFF")
+	require.NoError(t, err)
+
+	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(lowPrivDB)
+
+	r := Resources{
+		DB:        lowPrivDB,
+		Table:     &table.TableInfo{TableName: "test", SchemaName: "test"},
+		ForceKill: true,
+	}
+
+	err = privilegesCheck(t.Context(), r, slog.Default())
+	assert.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
+	assert.Contains(t, err.Error(), "CONNECTION_ADMIN")
+
+	// With activate_all_roles_on_login=ON, rds_superuser_role should be tolerated
+	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
+	require.NoError(t, err)
+
+	// Must reconnect after changing the global variable so the new connection
+	// gets roles activated on login.
+	require.NoError(t, lowPrivDB.Close())
+	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	r.DB = lowPrivDB
+
+	err = privilegesCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
 }
 
 // TestPrivilegesWithSkipForceKill tests that when ForceKill is disabled

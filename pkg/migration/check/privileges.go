@@ -64,7 +64,6 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	if r.ForceKill {
 		var errs []error
 		// Parsing performance_schema grants seems really hard, so we just try to execute the queries and see if they succeed.
-		// These functions internally use SET ROLE ALL, so they will succeed if the privilege is granted via a role.
 		if _, err := dbconn.GetTableLocks(ctx, r.DB, []*table.TableInfo{r.Table}, logger, nil); err != nil {
 			errs = append(errs, err)
 		}
@@ -73,27 +72,23 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 		}
 		// Check CONNECTION_ADMIN/SUPER and PROCESS. If not found in direct grants,
 		// try expanding role privileges using SHOW GRANTS FOR CURRENT_USER() USING.
-		// On RDS, rds_superuser_role is opaque and won't expand, but if the user has
-		// roles granted we log a warning and proceed (the runtime SET ROLE ALL will
-		// activate the privilege).
 		if (!foundConnectionAdmin && !foundSuper) || !foundProcess {
 			roleAll, roleSuper, _, _, _, _, roleConnectionAdmin, roleProcess := scanGrantsWithRoles(ctx, r.DB, r.Table.SchemaName, grantedRoles, logger)
 			if !foundConnectionAdmin && !foundSuper {
 				if !roleConnectionAdmin && !roleSuper && !roleAll {
-					if len(grantedRoles) > 0 {
-						logger.Warn("CONNECTION_ADMIN/SUPER not found in direct grants or expanded roles, but user has roles granted; proceeding (roles will be activated at runtime via SET ROLE ALL)",
-							"roles", grantedRoles)
-					} else {
+					// On RDS, rds_superuser_role is opaque and SHOW GRANTS USING
+					// cannot expand it. Since rds_superuser_role includes
+					// CONNECTION_ADMIN, we tolerate its presence specifically,
+					// but only when activate_all_roles_on_login=ON ensures the
+					// role is actually active at runtime.
+					if !hasRole(grantedRoles, "rds_superuser_role") || !activateAllRolesOnLogin(ctx, r.DB, logger) {
 						errs = append(errs, errors.New("missing CONNECTION_ADMIN or SUPER privilege"))
 					}
 				}
 			}
 			if !foundProcess {
 				if !roleProcess && !roleAll {
-					if len(grantedRoles) > 0 {
-						logger.Warn("PROCESS not found in direct grants or expanded roles, but user has roles granted; proceeding (roles will be activated at runtime via SET ROLE ALL)",
-							"roles", grantedRoles)
-					} else {
+					if !hasRole(grantedRoles, "rds_superuser_role") || !activateAllRolesOnLogin(ctx, r.DB, logger) {
 						errs = append(errs, errors.New("missing PROCESS privilege"))
 					}
 				}
@@ -174,8 +169,8 @@ func parseRoleNames(grant string) []string {
 
 // scanGrantsWithRoles uses SHOW GRANTS FOR CURRENT_USER() USING 'role1','role2',...
 // to expand role privileges into individual grant lines, then scans them.
-// This is needed because plain SHOW GRANTS after SET ROLE ALL only shows the role
-// name (e.g. GRANT `rds_superuser_role`@`%` TO `user`@`%`) without expanding
+// This is needed because plain SHOW GRANTS only shows the role name
+// (e.g. GRANT `rds_superuser_role`@`%` TO `user`@`%`) without expanding
 // the individual privileges the role contains.
 // Note: on RDS, rds_superuser_role is opaque and USING will not expand it.
 // Standard MySQL roles will be expanded correctly.
@@ -214,6 +209,29 @@ func scanGrantsWithRoles(ctx context.Context, db *sql.DB, schemaName string, rol
 		logger.Debug("error iterating SHOW GRANTS USING rows", "error", err)
 	}
 	return
+}
+
+// activateAllRolesOnLogin returns true if the server has activate_all_roles_on_login=ON.
+// When this is enabled, all granted roles are automatically activated on login,
+// so role-granted privileges are available without explicit SET ROLE ALL.
+func activateAllRolesOnLogin(ctx context.Context, db *sql.DB, logger *slog.Logger) bool {
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT @@global.activate_all_roles_on_login").Scan(&value)
+	if err != nil {
+		logger.Debug("failed to check activate_all_roles_on_login", "error", err)
+		return false
+	}
+	return value == "1" || strings.EqualFold(value, "ON")
+}
+
+// hasRole returns true if the given role name is present in the list of granted roles.
+func hasRole(grantedRoles []string, roleName string) bool {
+	for _, r := range grantedRoles {
+		if r == roleName {
+			return true
+		}
+	}
+	return false
 }
 
 // stringContainsAll returns true if `s` contains all non empty given `substrings`
