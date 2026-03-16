@@ -89,3 +89,41 @@ func TestSetReorderCheck(t *testing.T) {
 	err = setReorderCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err)
 }
+
+func TestSetReorderCheckVarcharToSet(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS setchk_varchar`)
+	testutils.RunSQL(t, `CREATE TABLE setchk_varchar (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		perms VARCHAR(191) NOT NULL
+	)`)
+
+	tbl := table.NewTableInfo(db, "test", "setchk_varchar")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	// Buffered + VARCHAR→SET conversion: should pass (not a reorder)
+	r := Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE setchk_varchar MODIFY COLUMN perms SET('read', 'write', 'execute') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = setReorderCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+
+	// Unbuffered + VARCHAR→SET conversion: should also pass
+	r.Buffered = false
+	err = setReorderCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+
+	// Buffered + CHANGE COLUMN VARCHAR→SET: should pass
+	r = Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE setchk_varchar CHANGE COLUMN perms perms SET('read', 'write') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = setReorderCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
+}
