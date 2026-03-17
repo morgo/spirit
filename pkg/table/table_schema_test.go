@@ -78,18 +78,6 @@ func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
 	assert.Contains(t, tables[0].Schema, "AUTO_INCREMENT=")
 }
 
-func TestLoadSchemaFromDB_MultipleOptsReturnsError(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
-
-	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	_, err = LoadSchemaFromDB(t.Context(), db, FilterOptions{}, FilterOptions{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at most one FilterOptions may be provided")
-}
-
 func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
 	dbName := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
@@ -106,7 +94,7 @@ func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
 	assert.Len(t, all, 3)
 
 	// With underscore filter: only "users" returned.
-	filtered, err := LoadSchemaFromDB(t.Context(), db, FilterOptions{TablesStartingWithUnderscore: true})
+	filtered, err := LoadSchemaFromDB(t.Context(), db, WithoutUnderscoreTables)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "users", filtered[0].Name)
@@ -129,7 +117,7 @@ func TestLoadSchemaFromDB_FilterArchiveTables(t *testing.T) {
 	assert.Len(t, all, 4)
 
 	// With archive filter: only "users" returned.
-	filtered, err := LoadSchemaFromDB(t.Context(), db, FilterOptions{ArchiveTables: true})
+	filtered, err := LoadSchemaFromDB(t.Context(), db, WithoutArchiveTables)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "users", filtered[0].Name)
@@ -146,7 +134,7 @@ func TestLoadSchemaFromDB_StripAutoIncrement(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	tables, err := LoadSchemaFromDB(t.Context(), db, FilterOptions{StripAutoIncrement: true})
+	tables, err := LoadSchemaFromDB(t.Context(), db, WithStrippedAutoIncrement)
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
 	assert.NotContains(t, tables[0].Schema, "AUTO_INCREMENT=")
@@ -167,11 +155,11 @@ func TestLoadSchemaFromDB_CombinedFilters(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	filtered, err := LoadSchemaFromDB(t.Context(), db, FilterOptions{
-		TablesStartingWithUnderscore: true,
-		ArchiveTables:                true,
-		StripAutoIncrement:           true,
-	})
+	filtered, err := LoadSchemaFromDB(t.Context(), db,
+		WithoutUnderscoreTables,
+		WithoutArchiveTables,
+		WithStrippedAutoIncrement,
+	)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "users", filtered[0].Name)
