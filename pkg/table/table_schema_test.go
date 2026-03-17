@@ -78,6 +78,18 @@ func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
 	assert.Contains(t, tables[0].Schema, "AUTO_INCREMENT=")
 }
 
+func TestLoadSchemaFromDB_MultipleOptsReturnsError(t *testing.T) {
+	dbName := testutils.CreateUniqueTestDatabase(t)
+
+	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	_, err = LoadSchemaFromDB(t.Context(), db, FilterOptions{}, FilterOptions{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most one FilterOptions may be provided")
+}
+
 func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
 	dbName := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)

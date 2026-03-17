@@ -42,17 +42,17 @@ var archiveTableRegexp = regexp.MustCompile(`^.*_archive_[0-9]{4}(_[0-9]{2}(_[0-
 // autoIncrementRegexp matches the AUTO_INCREMENT table option in CREATE TABLE output.
 var autoIncrementRegexp = regexp.MustCompile(`(?i)\s*AUTO_INCREMENT\s*=?\s*[0-9]+`)
 
-// IsArchiveTable returns true if the table name matches the archive naming
+// isArchiveTable returns true if the table name matches the archive naming
 // convention: <name>_archive_YYYY, <name>_archive_YYYY_MM, or
 // <name>_archive_YYYY_MM_DD.
-func IsArchiveTable(name string) bool {
+func isArchiveTable(name string) bool {
 	return archiveTableRegexp.MatchString(name)
 }
 
-// StripAutoIncrement removes the AUTO_INCREMENT=N table option from a
+// stripAutoIncrement removes the AUTO_INCREMENT=N table option from a
 // CREATE TABLE statement. This is useful when comparing schemas to avoid
 // spurious diffs caused by differing auto-increment counters.
-func StripAutoIncrement(stmt string) string {
+func stripAutoIncrement(stmt string) string {
 	return autoIncrementRegexp.ReplaceAllString(stmt, "")
 }
 
@@ -61,8 +61,11 @@ func StripAutoIncrement(stmt string) string {
 // are filtered according to the specified options. With no opts or a
 // zero-value FilterOptions, the raw DDL is returned unmodified.
 func LoadSchemaFromDB(ctx context.Context, db *sql.DB, opts ...FilterOptions) ([]TableSchema, error) {
+	if len(opts) > 1 {
+		return nil, fmt.Errorf("at most one FilterOptions may be provided, got %d", len(opts))
+	}
 	var filter FilterOptions
-	if len(opts) > 0 {
+	if len(opts) == 1 {
 		filter = opts[0]
 	}
 
@@ -87,7 +90,7 @@ func LoadSchemaFromDB(ctx context.Context, db *sql.DB, opts ...FilterOptions) ([
 		if filter.TablesStartingWithUnderscore && strings.HasPrefix(name, "_") {
 			continue
 		}
-		if filter.ArchiveTables && archiveTableRegexp.MatchString(name) {
+		if filter.ArchiveTables && isArchiveTable(name) {
 			continue
 		}
 		var tbl, createStmt string
@@ -96,7 +99,7 @@ func LoadSchemaFromDB(ctx context.Context, db *sql.DB, opts ...FilterOptions) ([
 			return nil, fmt.Errorf("failed to get CREATE TABLE for %s: %w", name, err)
 		}
 		if filter.StripAutoIncrement {
-			createStmt = autoIncrementRegexp.ReplaceAllString(createStmt, "")
+			createStmt = stripAutoIncrement(createStmt)
 		}
 		tables = append(tables, TableSchema{Name: tbl, Schema: createStmt})
 	}
