@@ -22,6 +22,9 @@ type DiffCmd struct {
 	TargetDSN   string   `help:"MySQL DSN for target schema (will diff against source)" xor:"target" required:""`
 	TargetDir   string   `help:"Directory of CREATE TABLE .sql files for target state" xor:"target" required:"" type:"existingdir"`
 	TargetAlter []string `help:"ALTER TABLE statement(s) to apply" short:"a" xor:"target" required:""`
+
+	// Filtering
+	IgnoreTables string `help:"Regex pattern of table names to ignore" default:""`
 }
 
 // Run executes the diff command. It is called by Kong.
@@ -38,7 +41,14 @@ func (cmd *DiffCmd) Run() error {
 		os.Exit(2)
 	}
 
-	// 2. Diff + lint, or just lint if using --target-alter.
+	// 2. Build lint config from flags.
+	config, err := buildIgnoreTablesConfig(cmd.IgnoreTables, source)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building config: %s\n", err)
+		os.Exit(2)
+	}
+
+	// 3. Diff + lint, or just lint if using --target-alter.
 	if len(cmd.TargetAlter) > 0 {
 		// Imperative path: ALTER statements provided directly.
 		// There is no declarative target, so we lint the provided changes
@@ -48,7 +58,8 @@ func (cmd *DiffCmd) Run() error {
 			fmt.Fprintf(os.Stderr, "Error loading changes: %s\n", err)
 			os.Exit(2)
 		}
-		violations, err := RunLinters(source, changes, Config{LintOnlyChanges: true})
+		config.LintOnlyChanges = true
+		violations, err := RunLinters(source, changes, config)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error running linters: %s\n", err)
 			os.Exit(2)
@@ -78,11 +89,7 @@ func (cmd *DiffCmd) Run() error {
 			fmt.Fprintf(os.Stderr, "Error converting target schema: %s\n", err)
 			os.Exit(2)
 		}
-		plan, err := PlanChanges(
-			currentSchemas,
-			targetSchemas,
-			nil, nil,
-		)
+		plan, err := PlanChanges(currentSchemas, targetSchemas, nil, &config)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error planning changes: %s\n", err)
 			os.Exit(2)
@@ -131,6 +138,8 @@ func createTablesToTableSchemas(tables []*statement.CreateTable) ([]table.TableS
 }
 
 // printPlan prints a Plan as valid SQL: violations as comments, then DDL.
+// The statement order from PlanChanges is preserved (CREATE/ALTER before DROP,
+// sorted by table name within each group).
 func printPlan(plan *Plan) {
 	// Collect all violations across changes for the comment header.
 	var hasViolations bool
@@ -156,13 +165,8 @@ func printPlan(plan *Plan) {
 		fmt.Println("-- No schema differences found.")
 		return
 	}
-	// Sort changes by table name for consistent output.
-	sorted := make([]PlannedChange, len(plan.Changes))
-	copy(sorted, plan.Changes)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].TableName < sorted[j].TableName
-	})
-	for _, ch := range sorted {
+
+	for _, ch := range plan.Changes {
 		fmt.Printf("%s\n", terminatedStmt(ch.Statement))
 	}
 }

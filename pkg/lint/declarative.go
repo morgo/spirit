@@ -18,17 +18,18 @@ type PlannedChange struct {
 	TableName string
 
 	// Warnings contains lint violations with WARNING severity for this table.
-	// Linters operate at the table level, so when multiple statements affect
-	// the same table, each will carry the same warnings.
+	// Linters operate at the table level. When a diff produces multiple
+	// statements for the same table, violations are attached only to the
+	// last statement to avoid duplication.
 	Warnings []string
 
 	// Errors contains lint violations with ERROR severity for this table.
-	// Linters operate at the table level, so when multiple statements affect
-	// the same table, each will carry the same errors.
+	// See Warnings for multi-statement behavior.
 	Errors []string
 
 	// Infos contains lint violations with INFO severity for this table.
 	// These are suggestions or style preferences that callers may choose to ignore.
+	// See Warnings for multi-statement behavior.
 	Infos []string
 }
 
@@ -87,11 +88,14 @@ func (p *Plan) Statements() []string {
 // current schema. This combines statement.DeclarativeToImperative with RunLinters
 // into a single call, returning per-statement lint results.
 //
+// LintOnlyChanges is always set to true regardless of the provided lintConfig,
+// since PlanChanges only produces lint results for tables that have changes.
+//
 // Parameters:
 //   - current: the current table schemas (CREATE TABLE DDL)
 //   - desired: the desired table schemas (CREATE TABLE DDL)
 //   - diffOpts: options for the diff (nil uses defaults)
-//   - lintConfig: configuration for linting (nil uses defaults)
+//   - lintConfig: configuration for linting (nil uses defaults; LintOnlyChanges is always overridden to true)
 func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffOptions, lintConfig *Config) (*Plan, error) {
 	// 1. Compute the diff.
 	changes, err := statement.DeclarativeToImperative(current, desired, diffOpts)
@@ -122,9 +126,9 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 
 	// 4. Build per-table violation map.
 	// Linters operate at the table level, so violations are grouped by table
-	// name and attached to all statements for that table. When a diff produces
-	// multiple statements for the same table (e.g. partition changes), each
-	// statement will carry the same set of violations.
+	// name. In step 5, they are attached only to the last statement for each
+	// table to avoid duplication when a diff produces multiple statements
+	// (e.g. partition type changes).
 	type tableViolations struct {
 		warnings []string
 		errors   []string
