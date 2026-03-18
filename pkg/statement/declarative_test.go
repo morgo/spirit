@@ -179,6 +179,45 @@ func TestDeclarativeToImperativeWithOptions(t *testing.T) {
 	assert.Empty(t, changes, "AUTO_INCREMENT differences should be ignored with default options")
 }
 
+func TestDeclarativeToImperative_OrderingCreateAlterBeforeDrop(t *testing.T) {
+	// Verify the correctness property: CREATE/ALTER statements always come
+	// before DROP statements. This ensures safe sequential execution (e.g.
+	// a table referenced by a FK won't be dropped before the referencing
+	// ALTER runs).
+	current := []table.TableSchema{
+		{Name: "a_table", Schema: "CREATE TABLE a_table (id INT PRIMARY KEY)"},
+		{Name: "b_table", Schema: "CREATE TABLE b_table (id INT PRIMARY KEY)"},
+		{Name: "c_drop_me", Schema: "CREATE TABLE c_drop_me (id INT PRIMARY KEY)"},
+		{Name: "d_drop_me", Schema: "CREATE TABLE d_drop_me (id INT PRIMARY KEY)"},
+	}
+	desired := []table.TableSchema{
+		{Name: "a_table", Schema: "CREATE TABLE a_table (id INT PRIMARY KEY, name VARCHAR(100))"},
+		{Name: "b_table", Schema: "CREATE TABLE b_table (id INT PRIMARY KEY)"},
+		{Name: "e_new", Schema: "CREATE TABLE e_new (id INT PRIMARY KEY)"},
+	}
+
+	changes, err := DeclarativeToImperative(current, desired, nil)
+	require.NoError(t, err)
+
+	// We expect: ALTER a_table, CREATE e_new, DROP c_drop_me, DROP d_drop_me
+	require.Len(t, changes, 4)
+
+	// Find the boundary: all DROPs must come after all non-DROPs.
+	firstDropIdx := -1
+	for i, ch := range changes {
+		if strings.Contains(ch.Statement, "DROP TABLE") {
+			if firstDropIdx == -1 {
+				firstDropIdx = i
+			}
+		} else {
+			// Any non-DROP after a DROP is a violation of the ordering invariant.
+			if firstDropIdx != -1 {
+				t.Fatalf("non-DROP statement at index %d after DROP at index %d: %s", i, firstDropIdx, ch.Statement)
+			}
+		}
+	}
+}
+
 func TestToTableSchema(t *testing.T) {
 	ct, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)")
 	require.NoError(t, err)

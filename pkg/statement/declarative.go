@@ -18,7 +18,10 @@ import (
 // subcommand, strata, and GAP.
 //
 // The returned statements are ordered by table name, with CREATE/ALTER
-// statements before DROP statements.
+// statements before DROP statements. This ordering is a correctness property:
+// it ensures the output is safe to execute sequentially (e.g. a table
+// referenced by a foreign key will not be dropped before the referencing
+// ALTER runs).
 //
 // If opts is nil, NewDiffOptions() defaults are used for table diffs.
 func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOptions) ([]*AbstractStatement, error) {
@@ -56,17 +59,9 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 		}
 
 		// Both exist — compute ALTER TABLE diff.
-		a, err := ParseCreateTable(existingTable.Schema)
+		diffs, err := diffTable(name, existingTable.Schema, desiredTable.Schema, opts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse current schema for table %q: %w", name, err)
-		}
-		b, err := ParseCreateTable(desiredTable.Schema)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse desired schema for table %q: %w", name, err)
-		}
-		diffs, err := a.Diff(b, opts)
-		if err != nil {
-			return nil, fmt.Errorf("failed to diff table %q: %w", name, err)
+			return nil, err
 		}
 		changes = append(changes, diffs...)
 	}
@@ -91,6 +86,35 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 	// CREATE/ALTER first, then DROP.
 	changes = append(changes, drops...)
 	return changes, nil
+}
+
+// diffTable computes the ALTER TABLE diff for a single table, recovering from
+// panics in CreateTable.Diff(). Diff() can panic on certain edge cases (e.g.
+// formatting differences between MySQL's SHOW CREATE TABLE output and embedded
+// schema files). This recovery ensures DeclarativeToImperative is at least as
+// safe as callers who previously wrapped Diff() in recover() themselves.
+func diffTable(name, currentSchema, desiredSchema string, opts *DiffOptions) (stmts []*AbstractStatement, err error) {
+	a, err := ParseCreateTable(currentSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse current schema for table %q: %w", name, err)
+	}
+	b, err := ParseCreateTable(desiredSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse desired schema for table %q: %w", name, err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			stmts = nil
+			err = fmt.Errorf("panic diffing table %q: %v", name, r)
+		}
+	}()
+
+	diffs, diffErr := a.Diff(b, opts)
+	if diffErr != nil {
+		return nil, fmt.Errorf("failed to diff table %q: %w", name, diffErr)
+	}
+	return diffs, nil
 }
 
 // ToTableSchema converts a parsed CreateTable back to a table.TableSchema

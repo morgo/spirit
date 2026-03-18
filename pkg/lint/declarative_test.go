@@ -157,11 +157,11 @@ func TestPlanChanges_WithLintConfig(t *testing.T) {
 	plan, err := PlanChanges(current, desired, nil, cfg)
 	require.NoError(t, err)
 	assert.True(t, plan.HasChanges())
-	// has_foreign_key is disabled, so no FK warnings should appear.
+	// has_foreign_key is disabled and is the only linter that would fire
+	// on this schema, so there should be no warnings at all.
+	assert.False(t, plan.HasWarnings(), "expected no warnings when has_foreign_key is disabled")
 	for _, ch := range plan.Changes {
-		for _, w := range ch.Warnings {
-			assert.NotContains(t, w, "has_foreign_key")
-		}
+		assert.Empty(t, ch.Warnings, "expected no warnings on any change")
 	}
 }
 
