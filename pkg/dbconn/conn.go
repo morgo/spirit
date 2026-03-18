@@ -284,6 +284,7 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	// Allow cleartext password authentication only when TLS is configured
 	// (required for AWS RDS IAM auth, safe because the connection uses TLS).
 	cfg.AllowCleartextPasswords = cfg.TLSConfig != ""
+	cfg.AllowNativePasswords = true
 
 	return cfg.FormatDSN(), nil
 }
