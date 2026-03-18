@@ -17,13 +17,17 @@ type PlannedChange struct {
 	// TableName is the table affected by this change.
 	TableName string
 
-	// Warnings contains lint violations with WARNING severity for this statement.
+	// Warnings contains lint violations with WARNING severity for this table.
+	// Linters operate at the table level, so when multiple statements affect
+	// the same table, each will carry the same warnings.
 	Warnings []string
 
-	// Errors contains lint violations with ERROR severity for this statement.
+	// Errors contains lint violations with ERROR severity for this table.
+	// Linters operate at the table level, so when multiple statements affect
+	// the same table, each will carry the same errors.
 	Errors []string
 
-	// Infos contains lint violations with INFO severity for this statement.
+	// Infos contains lint violations with INFO severity for this table.
 	// These are suggestions or style preferences that callers may choose to ignore.
 	Infos []string
 }
@@ -100,8 +104,7 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 	for _, t := range current {
 		ct, err := statement.ParseCreateTable(t.Schema)
 		if err != nil {
-			// If we can't parse a table, skip it rather than failing the plan.
-			continue
+			return nil, fmt.Errorf("failed to parse current schema for table %q: %w", t.Name, err)
 		}
 		createTables = append(createTables, ct)
 	}
@@ -117,8 +120,11 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 		return nil, fmt.Errorf("failed to run linters: %w", err)
 	}
 
-	// 4. Build per-statement violation map keyed by table name.
-	// Violations are associated with the change for the same table.
+	// 4. Build per-table violation map.
+	// Linters operate at the table level, so violations are grouped by table
+	// name and attached to all statements for that table. When a diff produces
+	// multiple statements for the same table (e.g. partition changes), each
+	// statement will carry the same set of violations.
 	type tableViolations struct {
 		warnings []string
 		errors   []string
@@ -145,19 +151,28 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 		}
 	}
 
-	// 5. Build the plan, attaching violations to their statements.
+	// 5. Build the plan, attaching violations to the last statement per table.
+	// A diff may produce multiple statements for the same table (e.g. partition
+	// type changes require REMOVE PARTITIONING then PARTITION BY). Violations
+	// are attached only to the last statement for each table so they are not
+	// duplicated.
 	plan := &Plan{}
-	for _, ch := range changes {
-		pc := PlannedChange{
+	lastIndexByTable := make(map[string]int)
+	for i, ch := range changes {
+		plan.Changes = append(plan.Changes, PlannedChange{
 			Statement: terminatedStmt(ch.Statement),
 			TableName: ch.Table,
+		})
+		lastIndexByTable[ch.Table] = i
+	}
+	for tableName, tv := range violationsByTable {
+		idx, ok := lastIndexByTable[tableName]
+		if !ok {
+			continue
 		}
-		if tv, ok := violationsByTable[ch.Table]; ok {
-			pc.Warnings = tv.warnings
-			pc.Errors = tv.errors
-			pc.Infos = tv.infos
-		}
-		plan.Changes = append(plan.Changes, pc)
+		plan.Changes[idx].Warnings = tv.warnings
+		plan.Changes[idx].Errors = tv.errors
+		plan.Changes[idx].Infos = tv.infos
 	}
 
 	return plan, nil

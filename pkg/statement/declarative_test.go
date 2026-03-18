@@ -1,6 +1,7 @@
 package statement
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/table"
@@ -9,29 +10,20 @@ import (
 )
 
 // assertChangesContain checks that each expected substring appears in at least
-// one of the returned statements. This avoids depending on map iteration order.
+// one of the returned statements.
 func assertChangesContain(t *testing.T, changes []*AbstractStatement, expected []string) {
 	t.Helper()
 	strs := statementsToStrings(changes)
 	for _, exp := range expected {
 		found := false
 		for _, s := range strs {
-			if containsStr(s, exp) {
+			if strings.Contains(s, exp) {
 				found = true
 				break
 			}
 		}
 		assert.True(t, found, "expected some statement to contain %q, got %v", exp, strs)
 	}
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func statementsToStrings(changes []*AbstractStatement) []string {
@@ -191,7 +183,8 @@ func TestToTableSchema(t *testing.T) {
 	ct, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)")
 	require.NoError(t, err)
 
-	ts := ct.ToTableSchema()
+	ts, err := ct.ToTableSchema()
+	require.NoError(t, err)
 	assert.Equal(t, "t1", ts.Name)
 	assert.Contains(t, ts.Schema, "CREATE TABLE")
 	assert.Contains(t, ts.Schema, "t1")

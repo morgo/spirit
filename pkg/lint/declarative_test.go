@@ -245,6 +245,51 @@ func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
 	assert.Empty(t, plan.Changes[0].Infos)
 }
 
+func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
+	// Changing partition type produces two ALTER TABLE statements for the same
+	// table (REMOVE PARTITIONING, then PARTITION BY ...). Adding a FK to the
+	// table ensures the has_foreign_key linter fires. Violations should only
+	// be attached to the last statement for the table.
+	current := []table.TableSchema{
+		{Name: "parent", Schema: "CREATE TABLE parent (id INT NOT NULL PRIMARY KEY)"},
+		{Name: "t1", Schema: `CREATE TABLE t1 (
+			id INT NOT NULL PRIMARY KEY,
+			parent_id INT,
+			CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent(id)
+		) PARTITION BY HASH(id) PARTITIONS 4`},
+	}
+	desired := []table.TableSchema{
+		{Name: "parent", Schema: "CREATE TABLE parent (id INT NOT NULL PRIMARY KEY)"},
+		{Name: "t1", Schema: `CREATE TABLE t1 (
+			id INT NOT NULL PRIMARY KEY,
+			parent_id INT,
+			CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent(id)
+		) PARTITION BY RANGE(id) (PARTITION p0 VALUES LESS THAN (100), PARTITION p1 VALUES LESS THAN MAXVALUE)`},
+	}
+
+	plan, err := PlanChanges(current, desired, nil, nil)
+	require.NoError(t, err)
+	require.True(t, plan.HasChanges())
+
+	// Should have exactly 2 changes for t1: REMOVE PARTITIONING, then PARTITION BY.
+	var t1Changes []PlannedChange
+	for _, ch := range plan.Changes {
+		if ch.TableName == "t1" {
+			t1Changes = append(t1Changes, ch)
+		}
+	}
+	require.Len(t, t1Changes, 2, "expected 2 statements for t1 (partition type change)")
+	assert.Contains(t, t1Changes[0].Statement, "REMOVE PARTITIONING")
+	assert.Contains(t, t1Changes[1].Statement, "PARTITION BY")
+
+	// Violations should only be on the last statement.
+	assert.Empty(t, t1Changes[0].Warnings, "first statement should have no violations")
+	assert.Empty(t, t1Changes[0].Errors, "first statement should have no violations")
+	assert.Empty(t, t1Changes[0].Infos, "first statement should have no violations")
+	assert.NotEmpty(t, t1Changes[1].Warnings, "last statement should carry the FK warning")
+	assert.True(t, plan.HasWarnings())
+}
+
 func TestTerminatedStmt(t *testing.T) {
 	assert.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1"))
 	assert.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1;"))

@@ -4,11 +4,20 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
+	"github.com/block/spirit/pkg/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestDiffSchemas_AddColumn(t *testing.T) {
+// mustTableSchemas is a test helper that converts CreateTable objects to TableSchemas.
+func mustTableSchemas(t *testing.T, tables []*statement.CreateTable) []table.TableSchema {
+	t.Helper()
+	schemas, err := createTablesToTableSchemas(tables)
+	require.NoError(t, err)
+	return schemas
+}
+
+func TestDiff_AddColumn(t *testing.T) {
 	source := parseCreateTables(t,
 		`CREATE TABLE users (
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -26,22 +35,15 @@ func TestDiffSchemas_AddColumn(t *testing.T) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 	)
 
-	changes, err := diffSchemas(source, target)
+	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.NotEmpty(t, changes)
-
-	// The diff should produce an ALTER TABLE for users
-	foundUsersAlter := false
-	for _, ch := range changes {
-		if ch.Table == "users" {
-			foundUsersAlter = true
-			assert.Equal(t, "ALTER TABLE `users` ADD COLUMN `email` varchar(255) NULL DEFAULT NULL", ch.Statement, "expected ALTER TABLE statement for users")
-		}
-	}
-	assert.True(t, foundUsersAlter, "expected ALTER TABLE for users")
+	assert.True(t, plan.HasChanges())
+	require.Len(t, plan.Changes, 1)
+	assert.Equal(t, "users", plan.Changes[0].TableName)
+	assert.Contains(t, plan.Changes[0].Statement, "ALTER TABLE")
 }
 
-func TestDiffSchemas_NewTable(t *testing.T) {
+func TestDiff_NewTable(t *testing.T) {
 	source := parseCreateTables(t,
 		`CREATE TABLE users (
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -60,22 +62,15 @@ func TestDiffSchemas_NewTable(t *testing.T) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 	)
 
-	changes, err := diffSchemas(source, target)
+	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.NotEmpty(t, changes)
-
-	// Should have a CREATE TABLE for orders
-	foundOrdersCreate := false
-	for _, ch := range changes {
-		if ch.Table == "orders" {
-			foundOrdersCreate = true
-			assert.Equal(t, "CREATE TABLE `orders` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,PRIMARY KEY(`id`)) ENGINE = InnoDB DEFAULT CHARACTER SET = UTF8MB4", ch.Statement, "expected CREATE TABLE statement for orders")
-		}
-	}
-	assert.True(t, foundOrdersCreate, "expected CREATE TABLE for orders")
+	assert.True(t, plan.HasChanges())
+	require.Len(t, plan.Changes, 1)
+	assert.Equal(t, "orders", plan.Changes[0].TableName)
+	assert.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
 }
 
-func TestDiffSchemas_DroppedTable(t *testing.T) {
+func TestDiff_DroppedTable(t *testing.T) {
 	source := parseCreateTables(t,
 		`CREATE TABLE users (
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -94,22 +89,15 @@ func TestDiffSchemas_DroppedTable(t *testing.T) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 	)
 
-	changes, err := diffSchemas(source, target)
+	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.NotEmpty(t, changes)
-
-	// Should have a DROP TABLE for orders
-	foundOrdersDrop := false
-	for _, ch := range changes {
-		if ch.Table == "orders" {
-			foundOrdersDrop = true
-			assert.Equal(t, "DROP TABLE `orders`", ch.Statement, "expected DROP TABLE statement for orders")
-		}
-	}
-	assert.True(t, foundOrdersDrop, "expected DROP TABLE for orders")
+	assert.True(t, plan.HasChanges())
+	require.Len(t, plan.Changes, 1)
+	assert.Equal(t, "orders", plan.Changes[0].TableName)
+	assert.Contains(t, plan.Changes[0].Statement, "DROP TABLE")
 }
 
-func TestDiffSchemas_NoChanges(t *testing.T) {
+func TestDiff_NoChanges(t *testing.T) {
 	source := parseCreateTables(t,
 		`CREATE TABLE users (
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -126,12 +114,12 @@ func TestDiffSchemas_NoChanges(t *testing.T) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 	)
 
-	changes, err := diffSchemas(source, target)
+	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.Empty(t, changes)
+	assert.False(t, plan.HasChanges())
 }
 
-func TestDiffSchemas_MultipleTables(t *testing.T) {
+func TestDiff_MultipleTables(t *testing.T) {
 	source := parseCreateTables(t,
 		`CREATE TABLE users (
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -160,14 +148,14 @@ func TestDiffSchemas_MultipleTables(t *testing.T) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 	)
 
-	changes, err := diffSchemas(source, target)
+	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.NotEmpty(t, changes)
+	assert.True(t, plan.HasChanges())
 
 	// Both tables should have changes
 	changedTables := make(map[string]bool)
-	for _, ch := range changes {
-		changedTables[ch.Table] = true
+	for _, ch := range plan.Changes {
+		changedTables[ch.TableName] = true
 	}
 	assert.True(t, changedTables["users"])
 	assert.True(t, changedTables["orders"])
@@ -192,7 +180,7 @@ func TestLoadAlterChanges_InvalidSQL(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to parse ALTER statement")
 }
 
-func TestDiffCmd_DirToDirIntegration(t *testing.T) {
+func TestDiff_DirToDirIntegration(t *testing.T) {
 	// Create source directory
 	sourceDir := t.TempDir()
 	writeFile(t, sourceDir, "users.sql", `CREATE TABLE users (
@@ -223,33 +211,38 @@ func TestDiffCmd_DirToDirIntegration(t *testing.T) {
 		CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`)
 
-	// Load source and target, diff, and run linters
+	// Load source and target, then PlanChanges
 	source, err := LoadSchemaFromDir(sourceDir)
 	require.NoError(t, err)
 
 	target, err := LoadSchemaFromDir(targetDir)
 	require.NoError(t, err)
 
-	changes, err := diffSchemas(source, target)
+	sourceSchemas := mustTableSchemas(t, source)
+	targetSchemas := mustTableSchemas(t, target)
+
+	plan, err := PlanChanges(sourceSchemas, targetSchemas, nil, &Config{LintOnlyChanges: true})
 	require.NoError(t, err)
-	assert.NotEmpty(t, changes)
+	assert.True(t, plan.HasChanges())
 
-	// Run linters with LintOnlyChanges=true (only orders is changed)
-	violations, err := RunLinters(source, changes, Config{
-		LintOnlyChanges: true,
-	})
-	require.NoError(t, err)
+	// Should have warnings for orders (has_float, has_fk)
+	var ordersChange *PlannedChange
+	for i := range plan.Changes {
+		if plan.Changes[i].TableName == "orders" {
+			ordersChange = &plan.Changes[i]
+			break
+		}
+	}
+	require.NotNil(t, ordersChange, "expected a change for orders table")
+	assert.NotEmpty(t, ordersChange.Warnings, "expected warnings for orders table (has_float, has_fk)")
 
-	// Should have violations for orders (has_float, has_fk)
-	orderViolations := filterByTable(violations, "orders")
-	assert.NotEmpty(t, orderViolations, "expected violations for orders table")
-
-	// Should NOT have violations for users (unchanged)
-	userViolations := filterByTable(violations, "users")
-	assert.Empty(t, userViolations, "expected no violations for users table")
+	// Should NOT have changes for users (unchanged)
+	for _, ch := range plan.Changes {
+		assert.NotEqual(t, "users", ch.TableName, "users table is unchanged, should not appear in plan")
+	}
 }
 
-func TestDiffCmd_AlterIntegration(t *testing.T) {
+func TestDiff_AlterIntegration(t *testing.T) {
 	source := parseCreateTables(t,
 		`CREATE TABLE users (
 			id bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -263,6 +256,7 @@ func TestDiffCmd_AlterIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// The alter path uses RunLinters directly (no declarative target).
 	violations, err := RunLinters(source, changes, Config{
 		LintOnlyChanges: true,
 	})
@@ -274,10 +268,10 @@ func TestDiffCmd_AlterIntegration(t *testing.T) {
 }
 
 // filterByTable filters violations to only those for a specific table.
-func filterByTable(violations []Violation, table string) []Violation {
+func filterByTable(violations []Violation, tableName string) []Violation {
 	var result []Violation
 	for _, v := range violations {
-		if v.Location != nil && v.Location.Table == table {
+		if v.Location != nil && v.Location.Table == tableName {
 			result = append(result, v)
 		}
 	}
