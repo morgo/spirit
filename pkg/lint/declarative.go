@@ -129,13 +129,16 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 	// name. In step 5, they are attached only to the last statement for each
 	// table to avoid duplication when a diff produces multiple statements
 	// (e.g. partition type changes).
+	//
+	// Violations are sorted first to ensure deterministic output, since
+	// RunLinters iterates over a map of registered linters.
 	type tableViolations struct {
 		warnings []string
 		errors   []string
 		infos    []string
 	}
 	violationsByTable := make(map[string]*tableViolations)
-	for _, v := range violations {
+	for _, v := range sortViolations(violations) {
 		tableName := ""
 		if v.Location != nil {
 			tableName = v.Location.Table

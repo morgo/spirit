@@ -133,7 +133,7 @@ func TestPlanChanges_WithLintViolations(t *testing.T) {
 }
 
 func TestPlanChanges_WithLintConfig(t *testing.T) {
-	// Use a config that disables all linters — should get no violations
+	// Disable the has_foreign_key linter — FK warnings should not appear.
 	current := []table.TableSchema{
 		{Name: "t1", Schema: `CREATE TABLE t1 (
 			id BIGINT PRIMARY KEY,
@@ -151,16 +151,16 @@ func TestPlanChanges_WithLintConfig(t *testing.T) {
 	}
 	cfg := &Config{
 		Enabled: map[string]bool{
-			"has_fk": false,
+			"has_foreign_key": false,
 		},
 	}
 	plan, err := PlanChanges(current, desired, nil, cfg)
 	require.NoError(t, err)
 	assert.True(t, plan.HasChanges())
-	// has_fk is disabled, so no FK warnings on the change
+	// has_foreign_key is disabled, so no FK warnings should appear.
 	for _, ch := range plan.Changes {
 		for _, w := range ch.Warnings {
-			assert.NotContains(t, w, "has_fk")
+			assert.NotContains(t, w, "has_foreign_key")
 		}
 	}
 }
