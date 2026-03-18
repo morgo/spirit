@@ -273,20 +273,6 @@ func TestDiffCmd_AlterIntegration(t *testing.T) {
 	assert.NotEmpty(t, floatViolations, "expected has_float violation")
 }
 
-func TestRestoreCreateTable(t *testing.T) {
-	ct, err := statement.ParseCreateTable(`CREATE TABLE users (
-		id bigint unsigned NOT NULL AUTO_INCREMENT,
-		name varchar(100) DEFAULT NULL,
-		PRIMARY KEY (id)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`)
-	require.NoError(t, err)
-
-	sql, err := restoreCreateTable(ct)
-	require.NoError(t, err)
-	assert.Contains(t, sql, "CREATE TABLE")
-	assert.Contains(t, sql, "users")
-}
-
 // filterByTable filters violations to only those for a specific table.
 func filterByTable(violations []Violation, table string) []Violation {
 	var result []Violation

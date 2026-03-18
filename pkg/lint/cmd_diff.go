@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/block/spirit/pkg/table"
 )
 
 // DiffCmd is the Kong CLI struct for the diff command.
@@ -115,66 +115,21 @@ func loadAlterChanges(alters []string) ([]*statement.AbstractStatement, error) {
 // diffSchemas compares source and target schemas and produces statements
 // representing the changes needed to transform source into target.
 func diffSchemas(source, target []*statement.CreateTable) ([]*statement.AbstractStatement, error) {
-	sourceMap := make(map[string]*statement.CreateTable, len(source))
-	for _, ct := range source {
-		sourceMap[ct.TableName] = ct
-	}
-
-	targetMap := make(map[string]*statement.CreateTable, len(target))
-	for _, ct := range target {
-		targetMap[ct.TableName] = ct
-	}
-
-	var changes []*statement.AbstractStatement
-
-	// Tables in target: diff against source or treat as new
-	for name, targetTable := range targetMap {
-		sourceTable, exists := sourceMap[name]
-		if !exists {
-			// New table — restore the AST to SQL and produce a CREATE TABLE as the change
-			createSQL, err := restoreCreateTable(targetTable)
-			if err != nil {
-				return nil, fmt.Errorf("failed to restore CREATE TABLE for new table %s: %w", name, err)
-			}
-			stmts, err := statement.New(createSQL)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse CREATE TABLE for new table %s: %w", name, err)
-			}
-			changes = append(changes, stmts...)
-			continue
-		}
-
-		// Existing table — diff it
-		diffs, err := sourceTable.Diff(targetTable, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to diff table %s: %w", name, err)
-		}
-		changes = append(changes, diffs...)
-	}
-
-	// Tables in source but not in target — produce DROP TABLE
-	for name := range sourceMap {
-		if _, exists := targetMap[name]; !exists {
-			stmts, err := statement.New(fmt.Sprintf("DROP TABLE `%s`", name))
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse DROP TABLE for %s: %w", name, err)
-			}
-			changes = append(changes, stmts...)
-		}
-	}
-
-	return changes, nil
+	return statement.DeclarativeToImperative(
+		createTablesToTableSchemas(source),
+		createTablesToTableSchemas(target),
+		nil,
+	)
 }
 
-// restoreCreateTable converts a parsed CreateTable back to a SQL string
-// using the TiDB AST restore functionality.
-func restoreCreateTable(ct *statement.CreateTable) (string, error) {
-	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
-	if err := ct.Raw.Restore(rCtx); err != nil {
-		return "", fmt.Errorf("failed to restore CREATE TABLE: %w", err)
+// createTablesToTableSchemas converts parsed CreateTable objects back to
+// table.TableSchema values for use with statement.DeclarativeToImperative.
+func createTablesToTableSchemas(tables []*statement.CreateTable) []table.TableSchema {
+	schemas := make([]table.TableSchema, len(tables))
+	for i, ct := range tables {
+		schemas[i] = ct.ToTableSchema()
 	}
-	return sb.String(), nil
+	return schemas
 }
 
 // printViolationsAsSQL prints violations as SQL comments, sorted by table then severity.
