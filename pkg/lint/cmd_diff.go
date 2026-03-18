@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/block/spirit/pkg/table"
 )
 
 // DiffCmd is the Kong CLI struct for the diff command.
@@ -34,69 +34,80 @@ type DiffCmd struct {
 func (cmd *DiffCmd) Run() error {
 	ctx := context.Background()
 
-	// 1. Load source schema
+	// 1. Load source schema.
 	source, err := loadSource(ctx, cmd.SourceDSN, cmd.SourceDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading source schema: %s\n", err)
 		os.Exit(2)
 	}
 
-	// 2. Load changes
-	changes, err := cmd.loadChanges(ctx, source)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading changes: %s\n", err)
-		os.Exit(2)
-	}
-
-	// 3. Build config — lint only changed tables
+	// 2. Build lint config from flags.
 	config, err := buildIgnoreTablesConfig(cmd.IgnoreTables, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building config: %s\n", err)
 		os.Exit(2)
 	}
-	config.LintOnlyChanges = true
 
-	// 4. Run linters
-	violations, err := RunLinters(source, changes, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error running linters: %s\n", err)
-		os.Exit(2)
+	// 3. Diff + lint, or just lint if using --target-alter.
+	if len(cmd.TargetAlter) > 0 {
+		// Imperative path: ALTER statements provided directly.
+		// There is no declarative target, so we lint the provided changes
+		// against the source schema.
+		changes, err := loadAlterChanges(cmd.TargetAlter)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading changes: %s\n", err)
+			os.Exit(2)
+		}
+		config.LintOnlyChanges = true
+		violations, err := RunLinters(source, changes, config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error running linters: %s\n", err)
+			os.Exit(2)
+		}
+		printViolationsAsSQL(violations)
+		if len(violations) > 0 && len(changes) > 0 {
+			fmt.Println()
+		}
+		printDiff(changes)
+		if HasErrors(violations) {
+			os.Exit(1)
+		}
+	} else {
+		// Declarative path: diff source against target, then lint.
+		target, err := cmd.loadTarget(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading target schema: %s\n", err)
+			os.Exit(2)
+		}
+		currentSchemas, err := createTablesToTableSchemas(source)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error converting source schema: %s\n", err)
+			os.Exit(2)
+		}
+		targetSchemas, err := createTablesToTableSchemas(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error converting target schema: %s\n", err)
+			os.Exit(2)
+		}
+		plan, err := PlanChanges(currentSchemas, targetSchemas, nil, &config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error planning changes: %s\n", err)
+			os.Exit(2)
+		}
+		printPlan(plan)
+		if plan.HasErrors() {
+			os.Exit(1)
+		}
 	}
-
-	// 5. Print output as valid SQL: violations as comments, then DDL
-	printViolationsAsSQL(violations)
-	if len(violations) > 0 && len(changes) > 0 {
-		fmt.Println()
-	}
-	printDiff(changes)
-
-	// 6. Exit code
-	if HasErrors(violations) {
-		os.Exit(1)
-	}
-
 	return nil
 }
 
-// loadChanges loads the proposed changes from ALTER statements, a target directory, or a target DSN.
-func (cmd *DiffCmd) loadChanges(ctx context.Context, source []*statement.CreateTable) ([]*statement.AbstractStatement, error) {
-	if len(cmd.TargetAlter) > 0 {
-		return loadAlterChanges(cmd.TargetAlter)
-	}
-
-	// Load target schema (from dir or DSN) and diff against source
-	var target []*statement.CreateTable
-	var err error
+// loadTarget loads the target schema from a directory or DSN.
+func (cmd *DiffCmd) loadTarget(ctx context.Context) ([]*statement.CreateTable, error) {
 	if cmd.TargetDir != "" {
-		target, err = LoadSchemaFromDir(cmd.TargetDir)
-	} else {
-		target, err = LoadSchemaFromDSN(ctx, cmd.TargetDSN)
+		return LoadSchemaFromDir(cmd.TargetDir)
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	return diffSchemas(source, target)
+	return LoadSchemaFromDSN(ctx, cmd.TargetDSN)
 }
 
 // loadAlterChanges parses ALTER TABLE statements provided via --target-alter.
@@ -112,69 +123,52 @@ func loadAlterChanges(alters []string) ([]*statement.AbstractStatement, error) {
 	return changes, nil
 }
 
-// diffSchemas compares source and target schemas and produces statements
-// representing the changes needed to transform source into target.
-func diffSchemas(source, target []*statement.CreateTable) ([]*statement.AbstractStatement, error) {
-	sourceMap := make(map[string]*statement.CreateTable, len(source))
-	for _, ct := range source {
-		sourceMap[ct.TableName] = ct
-	}
-
-	targetMap := make(map[string]*statement.CreateTable, len(target))
-	for _, ct := range target {
-		targetMap[ct.TableName] = ct
-	}
-
-	var changes []*statement.AbstractStatement
-
-	// Tables in target: diff against source or treat as new
-	for name, targetTable := range targetMap {
-		sourceTable, exists := sourceMap[name]
-		if !exists {
-			// New table — restore the AST to SQL and produce a CREATE TABLE as the change
-			createSQL, err := restoreCreateTable(targetTable)
-			if err != nil {
-				return nil, fmt.Errorf("failed to restore CREATE TABLE for new table %s: %w", name, err)
-			}
-			stmts, err := statement.New(createSQL)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse CREATE TABLE for new table %s: %w", name, err)
-			}
-			changes = append(changes, stmts...)
-			continue
-		}
-
-		// Existing table — diff it
-		diffs, err := sourceTable.Diff(targetTable, nil)
+// createTablesToTableSchemas converts parsed CreateTable objects to
+// table.TableSchema values for use with PlanChanges.
+func createTablesToTableSchemas(tables []*statement.CreateTable) ([]table.TableSchema, error) {
+	schemas := make([]table.TableSchema, len(tables))
+	for i, ct := range tables {
+		ts, err := ct.ToTableSchema()
 		if err != nil {
-			return nil, fmt.Errorf("failed to diff table %s: %w", name, err)
+			return nil, err
 		}
-		changes = append(changes, diffs...)
+		schemas[i] = ts
 	}
-
-	// Tables in source but not in target — produce DROP TABLE
-	for name := range sourceMap {
-		if _, exists := targetMap[name]; !exists {
-			stmts, err := statement.New(fmt.Sprintf("DROP TABLE `%s`", name))
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse DROP TABLE for %s: %w", name, err)
-			}
-			changes = append(changes, stmts...)
-		}
-	}
-
-	return changes, nil
+	return schemas, nil
 }
 
-// restoreCreateTable converts a parsed CreateTable back to a SQL string
-// using the TiDB AST restore functionality.
-func restoreCreateTable(ct *statement.CreateTable) (string, error) {
-	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
-	if err := ct.Raw.Restore(rCtx); err != nil {
-		return "", fmt.Errorf("failed to restore CREATE TABLE: %w", err)
+// printPlan prints a Plan as valid SQL: violations as comments, then DDL.
+// The statement order from PlanChanges is preserved (CREATE/ALTER before DROP,
+// sorted by table name within each group).
+func printPlan(plan *Plan) {
+	// Collect all violations across changes for the comment header.
+	var hasViolations bool
+	for _, ch := range plan.Changes {
+		for _, e := range ch.Errors {
+			fmt.Printf("-- %s\n", e)
+			hasViolations = true
+		}
+		for _, w := range ch.Warnings {
+			fmt.Printf("-- %s\n", w)
+			hasViolations = true
+		}
+		for _, info := range ch.Infos {
+			fmt.Printf("-- %s\n", info)
+			hasViolations = true
+		}
 	}
-	return sb.String(), nil
+
+	if hasViolations && plan.HasChanges() {
+		fmt.Println()
+	}
+	if !plan.HasChanges() {
+		fmt.Println("-- No schema differences found.")
+		return
+	}
+
+	for _, ch := range plan.Changes {
+		fmt.Printf("%s\n", terminatedStmt(ch.Statement))
+	}
 }
 
 // printViolationsAsSQL prints violations as SQL comments, sorted by table then severity.
