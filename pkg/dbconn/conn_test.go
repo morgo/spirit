@@ -86,6 +86,31 @@ func TestNewDSN(t *testing.T) {
 	assert.Empty(t, resp)
 }
 
+func TestNewDSNAllowNativePasswords(t *testing.T) {
+	// Verify AllowNativePasswords is true for both TLS-enabled and TLS-disabled DSNs.
+	// This is important because Spirit's PREFERRED TLS mode falls back to a DISABLED
+	// DSN when TLS is unavailable, and both paths must support mysql_native_password.
+	dsn := "root:password@tcp(127.0.0.1:3306)/test"
+
+	// Default (PREFERRED) mode — TLS enabled
+	resp, err := newDSN(dsn, NewDBConfig())
+	assert.NoError(t, err)
+	cfg, err := mysql.ParseDSN(resp)
+	assert.NoError(t, err)
+	assert.True(t, cfg.AllowNativePasswords, "AllowNativePasswords must be true with TLS enabled")
+
+	// DISABLED mode — the fallback path used when TLS is unavailable
+	config := NewDBConfig()
+	config.TLSMode = "DISABLED"
+	resp, err = newDSN(dsn, config)
+	assert.NoError(t, err)
+	cfg, err = mysql.ParseDSN(resp)
+	assert.NoError(t, err)
+	assert.True(t, cfg.AllowNativePasswords, "AllowNativePasswords must be true with TLS disabled (fallback path)")
+	assert.NotContains(t, resp, "allowNativePasswords=false",
+		"DSN must not contain allowNativePasswords=false")
+}
+
 func TestNewDSNAllowCleartextPasswords(t *testing.T) {
 	// With TLS enabled (default PREFERRED mode), AllowCleartextPasswords should be true
 	dsn := "root:password@tcp(127.0.0.1:3306)/test"
