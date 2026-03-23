@@ -233,15 +233,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		// Find which shard's key range contains this hash value
 		shardID := -1
 		for i, shard := range a.shards {
-			contains := shard.keyRange.contains(hashValue)
-			a.logger.Info("checking shard for hash",
-				"shardingValue", shardingValue,
-				"hashValue", fmt.Sprintf("0x%016x", hashValue),
-				"shardID", i,
-				"shardStart", fmt.Sprintf("0x%016x", shard.keyRange.start),
-				"shardEnd", fmt.Sprintf("0x%016x", shard.keyRange.end),
-				"contains", contains)
-			if contains {
+			if shard.keyRange.contains(hashValue) {
 				shardID = i
 				break
 			}
