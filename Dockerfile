@@ -1,9 +1,9 @@
-FROM golang:1.25 as builder
+FROM golang:1.26 as builder
 
 RUN go install github.com/mfridman/tparse@latest
 
 # copy the installed tparse binary to the final image
-FROM golang:1.25
+FROM golang:1.26
 
 COPY --from=builder /go/bin/tparse /usr/local/bin/tparse
 
