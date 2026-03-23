@@ -32,7 +32,7 @@ Spirit uses [Kong](https://github.com/alecthomas/kong) for CLI argument parsing 
 
 ## Requirements
 
-- **Go 1.25+**
+- **Go 1.26+**
 - **MySQL 8.0+** for running tests and performing schema changes
 - **golangci-lint v2** for linting
 
@@ -199,7 +199,7 @@ Spirit is designed to fail safely. When in doubt:
 ## CI/CD
 
 GitHub Actions workflows (`.github/workflows/`):
-- **linter.yml** — runs `golangci-lint` v2.8.0 on Go 1.25 (push to main + PRs)
+- **linter.yml** — runs `golangci-lint` v2.11.4 on Go 1.26 (push to main + PRs)
 - **mysql8-docker.yml** — integration tests against MySQL 8.0.33 with replication/TLS
 - **mysql8.0.28-docker.yml** — integration tests against MySQL 8.0.28
 - **mysql84-docker.yml** — integration tests against MySQL 8.4
