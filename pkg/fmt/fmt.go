@@ -201,6 +201,8 @@ func canonicalize(ctx context.Context, db *sql.DB, createStmt string) (string, e
 
 // collectSQLFiles expands the given paths into a list of .sql files.
 // Paths can be individual files or directories (non-recursive).
+// Non-.sql files are silently skipped so that shell globs like
+// `spirit fmt *` work without erroring on metadata files.
 func collectSQLFiles(paths []string) ([]string, error) {
 	var files []string
 	for _, p := range paths {
@@ -221,10 +223,7 @@ func collectSQLFiles(paths []string) ([]string, error) {
 					files = append(files, filepath.Join(p, entry.Name()))
 				}
 			}
-		} else {
-			if !strings.HasSuffix(strings.ToLower(p), ".sql") {
-				return nil, fmt.Errorf("%s is not a .sql file", p)
-			}
+		} else if strings.HasSuffix(strings.ToLower(p), ".sql") {
 			files = append(files, p)
 		}
 	}

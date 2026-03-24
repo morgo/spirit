@@ -120,10 +120,21 @@ func TestCollectSQLFiles(t *testing.T) {
 		assert.Len(t, files, 1)
 	})
 
-	t.Run("non-sql file rejected", func(t *testing.T) {
-		_, err := collectSQLFiles([]string{filepath.Join(dir, "README.md")})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "not a .sql file")
+	t.Run("non-sql file silently skipped", func(t *testing.T) {
+		files, err := collectSQLFiles([]string{filepath.Join(dir, "README.md")})
+		require.NoError(t, err)
+		assert.Empty(t, files)
+	})
+
+	t.Run("mixed glob", func(t *testing.T) {
+		// Simulates `spirit fmt *` in a directory with mixed file types.
+		files, err := collectSQLFiles([]string{
+			filepath.Join(dir, "users.sql"),
+			filepath.Join(dir, "README.md"),
+			filepath.Join(dir, "orders.SQL"),
+		})
+		require.NoError(t, err)
+		assert.Len(t, files, 2)
 	})
 
 	t.Run("nonexistent path", func(t *testing.T) {
