@@ -32,7 +32,21 @@ var (
 	ErrAlterContainsUnique     = errors.New("ALTER contains adding a unique index")
 )
 
+// Options configures the behavior of statement parsing.
+type Options struct {
+	// AllowMixedStatementTypes permits multi-statement input containing different
+	// DDL types (e.g., CREATE TABLE + ALTER TABLE). By default, multi-statement
+	// input must be all ALTER TABLE statements (required for atomic schema changes).
+	// Enable this when using New() to split/parse schema files that may contain
+	// a mix of DDL statement types.
+	AllowMixedStatementTypes bool
+}
+
 func New(statement string) ([]*AbstractStatement, error) {
+	return NewWithOptions(statement, Options{})
+}
+
+func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error) {
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(statement, "", "")
 	if err != nil {
@@ -123,7 +137,7 @@ func New(statement string) ([]*AbstractStatement, error) {
 		}
 	}
 
-	if len(stmts) > 1 && mustBeOnlyStatement {
+	if len(stmts) > 1 && mustBeOnlyStatement && !opts.AllowMixedStatementTypes {
 		return nil, ErrMixMatchMultiStatements
 	}
 	if len(stmts) < 1 {

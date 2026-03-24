@@ -223,3 +223,55 @@ func TestMixedOperationsLogic(t *testing.T) {
 	// Complex mixed operations that should be unsafe (contains table-rebuilding)
 	assert.ErrorIs(t, testInplace("ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` int"), ErrMultipleAlterClauses)
 }
+
+func TestNewWithOptions(t *testing.T) {
+	// Default behavior: mixed statement types are rejected
+	_, err := New("CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT)")
+	assert.ErrorIs(t, err, ErrMixMatchMultiStatements)
+
+	_, err = New("CREATE TABLE t1 (a INT); ALTER TABLE t2 ADD COLUMN b INT")
+	assert.ErrorIs(t, err, ErrMixMatchMultiStatements)
+
+	// With AllowMixedStatementTypes: mixed types are accepted
+	opts := Options{AllowMixedStatementTypes: true}
+
+	stmts, err := NewWithOptions("CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT)", opts)
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 2)
+	assert.Equal(t, "t1", stmts[0].Table)
+	assert.True(t, stmts[0].IsCreateTable())
+	assert.Equal(t, "t2", stmts[1].Table)
+	assert.True(t, stmts[1].IsCreateTable())
+
+	stmts, err = NewWithOptions("CREATE TABLE t1 (a INT); ALTER TABLE t2 ADD COLUMN b INT", opts)
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 2)
+	assert.True(t, stmts[0].IsCreateTable())
+	assert.True(t, stmts[1].IsAlterTable())
+
+	stmts, err = NewWithOptions("CREATE TABLE t1 (a INT); DROP TABLE t2; ALTER TABLE t3 ADD COLUMN c INT", opts)
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 3)
+	assert.True(t, stmts[0].IsCreateTable())
+	assert.True(t, stmts[1].IsDropTable())
+	assert.True(t, stmts[2].IsAlterTable())
+
+	// AllowMixedStatementTypes does not affect other validations
+	_, err = NewWithOptions("DROP TABLE test.t1, test2.t1", opts)
+	assert.ErrorIs(t, err, ErrMultipleSchemas)
+
+	_, err = NewWithOptions("INSERT INTO t1 (a) VALUES (1)", opts)
+	assert.ErrorIs(t, err, ErrNotSupportedStatement)
+
+	_, err = NewWithOptions("-- commented out sql", opts)
+	assert.ErrorIs(t, err, ErrNoStatements)
+
+	// Multiple ALTER TABLE still works (was already supported)
+	stmts, err = NewWithOptions("ALTER TABLE t1 ADD COLUMN x INT; ALTER TABLE t2 ADD COLUMN y INT", opts)
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 2)
+
+	// NewWithOptions with zero-value options behaves like New
+	_, err = NewWithOptions("CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT)", Options{})
+	assert.ErrorIs(t, err, ErrMixMatchMultiStatements)
+}
