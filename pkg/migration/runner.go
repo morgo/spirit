@@ -488,11 +488,9 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// Create an applier if using buffered copy or buffered replication
 	var appl applier.Applier
 	if r.migration.Buffered {
-		// For now, we only support single-table migrations with buffered copy
-		if len(r.changes) > 1 {
-			return errors.New("buffered copy is not yet supported for multi-table migrations")
-		}
-		// Create a SingleTargetApplier for the buffered copier
+		// Create a SingleTargetApplier for the buffered copier.
+		// The applier is table-aware: each chunk/operation carries its own
+		// table info, so a single applier handles multi-table migrations correctly.
 		appl, err = applier.NewSingleTargetApplier(
 			applier.Target{DB: r.db},
 			&applier.ApplierConfig{

@@ -710,6 +710,60 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestBufferedMultiTableMigration(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
+	}
+	// Create two tables with data
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS bmt_t1, _bmt_t1_new, _bmt_t1_old`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS bmt_t2, _bmt_t2_new, _bmt_t2_old`)
+	testutils.RunSQL(t, `CREATE TABLE bmt_t1 (
+		id int not null primary key auto_increment,
+		name varchar(100) not null,
+		val int not null
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE bmt_t2 (
+		id int not null primary key auto_increment,
+		description varchar(200) not null,
+		amount decimal(10,2) not null
+	)`)
+	// Insert enough rows to trigger multiple chunks
+	for i := range 100 {
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO bmt_t1 (name, val) VALUES ('row_%d', %d)`, i, i*10))
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO bmt_t2 (description, amount) VALUES ('item_%d', %d.%d)`, i, i, i%100))
+	}
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+	migration := &Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         2,
+		TargetChunkTime: 100 * time.Millisecond,
+		Buffered:        true,
+		Statement:       "ALTER TABLE bmt_t1 ADD COLUMN extra int DEFAULT 0; ALTER TABLE bmt_t2 ADD COLUMN extra int DEFAULT 0",
+	}
+	err = migration.Run()
+	assert.NoError(t, err)
+
+	// Verify both tables were altered correctly
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer func() { assert.NoError(t, db.Close()) }()
+
+	var count1 int
+	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM bmt_t1 WHERE extra = 0`).Scan(&count1)
+	assert.NoError(t, err)
+	assert.Equal(t, 100, count1)
+
+	var count2 int
+	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM bmt_t2 WHERE extra = 0`).Scan(&count2)
+	assert.NoError(t, err)
+	assert.Equal(t, 100, count2)
+}
+
 func TestMigrationParamsDefaultsUsed(t *testing.T) {
 	migration := &Migration{Table: "test_table", Alter: "ENGINE=INNODB"}
 
