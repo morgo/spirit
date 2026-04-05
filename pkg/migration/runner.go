@@ -538,7 +538,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		}
 	}
 
-	r.checker, err = checksum.NewChecker(r.db, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []*repl.Client{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: r.migration.TargetChunkTime,
 		DBConfig:        r.dbConfig,

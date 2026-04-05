@@ -69,6 +69,13 @@ func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	}
 }
 
+// DB returns the database connection associated with this table.
+// This is used by components like the copier and checksum that need
+// to read from the correct source database when multiple sources are in use.
+func (t *TableInfo) DB() *sql.DB {
+	return t.db
+}
+
 // PrimaryKeyValues helps extract the PRIMARY KEY from a row image.
 // It uses our knowledge of the ordinal position of columns to find the
 // position of primary key columns (there might be more than one).

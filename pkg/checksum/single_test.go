@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"database/sql"
 	"log/slog"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestBasicChecksum(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
-	checker, err := NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
 
 	assert.NoError(t, checker.Run(t.Context()))
@@ -91,11 +92,14 @@ func TestBasicValidation(t *testing.T) {
 	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
 	assert.NoError(t, err)
 
-	_, err = NewChecker(db, nil, feed, NewCheckerDefaultConfig())
+	_, err = NewChecker(nil, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig()) // no source DBs
+	assert.EqualError(t, err, "at least one source database must be provided")
+
+	_, err = NewChecker([]*sql.DB{db}, nil, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.EqualError(t, err, "chunker must be non-nil")
 
-	_, err = NewChecker(db, chunker, nil, NewCheckerDefaultConfig()) // no feed
-	assert.EqualError(t, err, "feed must be non-nil")
+	_, err = NewChecker([]*sql.DB{db}, chunker, nil, NewCheckerDefaultConfig()) // no feed
+	assert.EqualError(t, err, "at least one feed must be provided")
 }
 
 func TestUnfixableUniqueChecksum(t *testing.T) {
@@ -149,7 +153,7 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
-	checker, err := NewChecker(db, chunker, feed, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
 	assert.NoError(t, err)
 	err = checker.Run(t.Context())
 	assert.ErrorContains(t, err, "checksum failed")
@@ -193,7 +197,7 @@ func TestFixCorrupt(t *testing.T) {
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	config.MaxRetries = 2
-	checker, err := NewChecker(db, chunker, feed, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
 	assert.NoError(t, err)
 	err = checker.Run(t.Context())
 	assert.NoError(t, err) // yes there is corruption, but it was fixed.
@@ -204,7 +208,7 @@ func TestFixCorrupt(t *testing.T) {
 	assert.Equal(t, uint64(0), singleChecker.differencesFound.Load()) // this is "0", because we fixed it.
 
 	// If we run the checker again, it will report zero differences.
-	checker2, err := NewChecker(db, chunker, feed, config)
+	checker2, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
 	assert.NoError(t, err)
 	err = checker2.Run(t.Context())
 	assert.NoError(t, err)
@@ -248,7 +252,7 @@ func TestCorruptChecksum(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
-	checker, err := NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	assert.True(t, ok, "checker is not of type *SingleChecker")
@@ -290,7 +294,7 @@ func TestBoundaryCases(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
-	checker, err := NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok := checker.(*SingleChecker)
@@ -299,7 +303,7 @@ func TestBoundaryCases(t *testing.T) {
 
 	// UPDATE t1 to also be NULL
 	testutils.RunSQL(t, "UPDATE checkert1 SET c = NULL")
-	checker, err = NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
+	checker, err = NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok = checker.(*SingleChecker)
@@ -368,7 +372,7 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
-	checker, err := NewChecker(db, chunker, feed, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
 	assert.NoError(t, checker.Run(t.Context())) // fails
 }
@@ -408,7 +412,7 @@ func TestFromWatermark(t *testing.T) {
 
 	config := NewCheckerDefaultConfig()
 	config.Watermark = "{\"Key\":[\"a\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"2\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"3\"],\"Inclusive\":false}}"
-	checker, err := NewChecker(db, chunker, feed, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
 	assert.NoError(t, err)
 	assert.NoError(t, checker.Run(t.Context()))
 }

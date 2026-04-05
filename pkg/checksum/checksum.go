@@ -49,9 +49,15 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 }
 
 // NewChecker creates a new checksum object.
-func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *CheckerConfig) (Checker, error) {
-	if feed == nil {
-		return nil, errors.New("feed must be non-nil")
+// sourceDBs contains the source database connections (one for single-source migrations,
+// multiple for N:M moves). The distributed checker aggregates checksums across all sources.
+// The single checker uses sourceDBs[0].
+func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []*repl.Client, config *CheckerConfig) (Checker, error) {
+	if len(sourceDBs) == 0 {
+		return nil, errors.New("at least one source database must be provided")
+	}
+	if len(feeds) == 0 {
+		return nil, errors.New("at least one feed must be provided")
 	}
 	if chunker == nil {
 		return nil, errors.New("chunker must be non-nil")
@@ -65,8 +71,8 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 	if config.Applier != nil {
 		return &DistributedChecker{
 			concurrency:    config.Concurrency,
-			db:             db,
-			feed:           feed,
+			sourceDBs:      sourceDBs,
+			feeds:          feeds,
 			chunker:        chunker,
 			dbConfig:       config.DBConfig,
 			logger:         config.Logger,
@@ -77,8 +83,8 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 	}
 	return &SingleChecker{
 		concurrency:    config.Concurrency,
-		db:             db,
-		feed:           feed,
+		db:             sourceDBs[0],
+		feed:           feeds[0],
 		chunker:        chunker,
 		dbConfig:       config.DBConfig,
 		logger:         config.Logger,
