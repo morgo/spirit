@@ -872,7 +872,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 
 	// Perform a checksum operation
 	var err error
-	r.checker, err = checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+	r.checker, err = checksum.NewChecker([]*sql.DB{r.source}, r.checksumChunker, []*repl.Client{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.move.Threads,
 		TargetChunkTime: r.move.TargetChunkTime,
 		DBConfig:        r.dbConfig,
