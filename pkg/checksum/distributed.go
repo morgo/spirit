@@ -190,7 +190,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// Step 2: Read all rows from ALL sources for the chunk range and merge them.
 	// Use NonGeneratedColumns because the applier expects non-generated columns only.
 	// This ensures the column ordinals match when the applier extracts the sharding column.
-	columnList := strings.Join(chunk.Table.NonGeneratedColumns, ", ")
+	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
 	// Use the table name only; each source DB connection determines which database is queried.
 	query := fmt.Sprintf("SELECT %s FROM `%s` WHERE %s",
 		columnList,
@@ -305,15 +305,14 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 
 	c.logger.Info("distributed checksum will lock tables on all targets", "targetCount", len(targets))
 
-	// Collect unique table names for locking. We use the chunker's tables
-	// but deduplicate by table name since the same table may appear multiple
-	// times (once per source, or as both currentTable and newTable).
+	// Collect unique table names from the chunker for locking.
+	// Force-kill uses DATABASE() to resolve the schema, so we only need table names.
 	allTables := c.chunker.Tables()
-	var uniqueTables []*table.TableInfo
+	var lockTables []*table.TableInfo
 	seen := make(map[string]bool)
 	for _, tbl := range allTables {
 		if !seen[tbl.TableName] {
-			uniqueTables = append(uniqueTables, tbl)
+			lockTables = append(lockTables, tbl)
 			seen[tbl.TableName] = true
 		}
 	}
@@ -322,7 +321,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// provided (for N:M moves) or defaults to the single source DB.
 	var sourceTableLocks []*dbconn.TableLock
 	for i, srcDB := range c.sourceDBs {
-		lock, err := dbconn.NewTableLock(ctx, srcDB, uniqueTables, c.dbConfig, c.logger)
+		lock, err := dbconn.NewTableLock(ctx, srcDB, lockTables, c.dbConfig, c.logger)
 		if err != nil {
 			for _, l := range sourceTableLocks {
 				utils.CloseAndLogWithContext(ctx, l)
@@ -340,7 +339,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// Lock tables on all targets
 	var targetTableLocks []*dbconn.TableLock
 	for i, target := range targets {
-		targetLock, err := dbconn.NewTableLock(ctx, target.DB, uniqueTables, c.dbConfig, c.logger)
+		targetLock, err := dbconn.NewTableLock(ctx, target.DB, lockTables, c.dbConfig, c.logger)
 		if err != nil {
 			// Clean up any locks we've already acquired
 			for _, lock := range targetTableLocks {
