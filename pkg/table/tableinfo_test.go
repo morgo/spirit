@@ -281,7 +281,7 @@ func TestStatisticsUpdate(t *testing.T) {
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "statsupdate",
-		QuotedName:        "`test`.`statsupdate`",
+		QuotedTableName:   "`test`.`statsupdate`",
 		KeyColumns:        []string{"id"},
 		keyColumnsMySQLTp: []string{"int"},
 		keyDatums:         []datumTp{signedType},

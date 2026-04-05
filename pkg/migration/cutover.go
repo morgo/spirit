@@ -109,8 +109,8 @@ func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
 		tablesToLock = append(tablesToLock, cfg.table, cfg.newTable)
 		oldQuotedName := fmt.Sprintf("`%s`.`%s`", cfg.table.SchemaName, cfg.oldTableName)
 		renameFragments = append(renameFragments,
-			fmt.Sprintf("%s TO %s", cfg.table.QuotedName, oldQuotedName),
-			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedName, cfg.table.QuotedName),
+			fmt.Sprintf("%s TO %s", cfg.table.QuotedTableName, oldQuotedName),
+			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedTableName, cfg.table.QuotedTableName),
 		)
 	}
 	return c.executeRenameUnderLock(ctx, tablesToLock, renameFragments)
@@ -149,7 +149,7 @@ func (c *CutOver) partialRenameForTest(ctx context.Context) error {
 		// Only add the first rename: original table -> _old
 		// Intentionally skip the second rename: _new -> original
 		renameFragments = append(renameFragments,
-			fmt.Sprintf("%s TO %s", cfg.table.QuotedName, oldQuotedName),
+			fmt.Sprintf("%s TO %s", cfg.table.QuotedTableName, oldQuotedName),
 		)
 	}
 	// Execute the partial rename using the same code path

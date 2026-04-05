@@ -17,7 +17,7 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "t1",
-		QuotedName:        "`test`.`t1`",
+		QuotedTableName:   "`test`.`t1`",
 		KeyColumns:        []string{"id"},
 		keyColumnsMySQLTp: []string{"int"},
 		keyDatums:         []datumTp{signedType},
@@ -40,7 +40,7 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 	t1.keyDatums[0] = signedType
 	assert.NoError(t, t1.PrimaryKeyIsMemoryComparable())
 
-	assert.Equal(t, "`test`.`t1`", t1.QuotedName)
+	assert.Equal(t, "`t1`", t1.QuotedTableName)
 
 	assert.NoError(t, chunker.Open())
 	assert.Error(t, chunker.Open())                  // can't open twice.
@@ -338,7 +338,7 @@ func TestOptimisticChunkerReset(t *testing.T) {
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "t1",
-		QuotedName:        "`test`.`t1`",
+		QuotedTableName:   "`test`.`t1`",
 		KeyColumns:        []string{"id"},
 		keyColumnsMySQLTp: []string{"bigint"},
 		keyDatums:         []datumTp{signedType},

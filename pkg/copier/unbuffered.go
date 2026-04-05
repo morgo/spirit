@@ -46,10 +46,10 @@ func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	// INSERT INGORE because we can have duplicate rows in the chunk because in
 	// resuming from checkpoint we will be re-applying some of the previous executed work.
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE %s",
-		chunk.NewTable.QuotedName,
+		chunk.NewTable.QuotedTableName,
 		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
 		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 	c.logger.Debug("running chunk", "chunk", chunk.String(), "query", query)

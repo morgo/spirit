@@ -34,8 +34,7 @@ type TableInfo struct {
 	EstimatedRows               uint64 // used by the composite chunker for Max
 	SchemaName                  string
 	TableName                   string
-	QuotedName                  string            // `schema`.`table` - for use on same-server queries
-	QuotedTableName             string            // `table` - for use when connection is already scoped to the database
+	QuotedTableName             string            // `table` - backtick-quoted table name without schema
 	Columns                     []string          // all the column names
 	NonGeneratedColumns         []string          // all the non-generated column names
 	Indexes                     []string          // all the index names
@@ -66,7 +65,6 @@ func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 		db:              db,
 		SchemaName:      schema,
 		TableName:       table,
-		QuotedName:      fmt.Sprintf("`%s`.`%s`", schema, table),
 		QuotedTableName: fmt.Sprintf("`%s`", table),
 	}
 }
@@ -120,7 +118,7 @@ func (t *TableInfo) SetInfo(ctx context.Context) error {
 // setRowEstimate is a separate function so it can be repeated continuously
 // Since if a schema migration takes 14 days, it could change.
 func (t *TableInfo) setRowEstimate(ctx context.Context) error {
-	_, err := t.db.ExecContext(ctx, "ANALYZE TABLE "+t.QuotedName)
+	_, err := t.db.ExecContext(ctx, "ANALYZE TABLE "+t.QuotedTableName)
 	if err != nil {
 		return err
 	}
@@ -294,7 +292,7 @@ func (t *TableInfo) setMinMax(ctx context.Context) error {
 	if t.keyDatums[0] == binaryType {
 		return nil // we don't min/max binary types for now.
 	}
-	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", t.KeyColumns[0], t.KeyColumns[0], t.QuotedName)
+	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", t.KeyColumns[0], t.KeyColumns[0], t.QuotedTableName)
 	var minimum, maximum string
 	err := t.db.QueryRowContext(ctx, query).Scan(&minimum, &maximum)
 	if err != nil {
