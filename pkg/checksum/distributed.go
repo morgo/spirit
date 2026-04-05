@@ -76,10 +76,9 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		}
 		defer c.sourcePools[i].trxPool.Put(srcTrx)
 
-		// Use the table name only; the source DB connection determines which database is queried.
-		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM `%s` WHERE %s",
+		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 			checksumColumns,
-			chunk.Table.TableName,
+			chunk.Table.QuotedTableName,
 			whereClause,
 		)
 		var cs int64
@@ -103,9 +102,9 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		}
 		defer targetTrxPool.Put(targetTrx)
 
-		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM `%s` WHERE %s",
+		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 			checksumColumns,
-			chunk.Table.TableName,
+			chunk.Table.QuotedTableName,
 			whereClause,
 		)
 		var cs int64
@@ -176,7 +175,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// This ensures we remove any extra rows that shouldn't be there
 	// Note: In move operations, chunk.NewTable is nil. We use the same tablename across all shards,
 	// so we can just use chunk.Table to get it.
-	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE %s", chunk.Table.TableName, chunk.String())
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.Table.QuotedTableName, chunk.String())
 
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
@@ -192,9 +191,9 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// This ensures the column ordinals match when the applier extracts the sharding column.
 	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
 	// Use the table name only; each source DB connection determines which database is queried.
-	query := fmt.Sprintf("SELECT %s FROM `%s` WHERE %s",
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,
-		chunk.Table.TableName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 	var rowData [][]any

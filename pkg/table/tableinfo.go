@@ -34,7 +34,8 @@ type TableInfo struct {
 	EstimatedRows               uint64 // used by the composite chunker for Max
 	SchemaName                  string
 	TableName                   string
-	QuotedName                  string
+	QuotedName                  string            // `schema`.`table` - for use on same-server queries
+	QuotedTableName             string            // `table` - for use when connection is already scoped to the database
 	Columns                     []string          // all the column names
 	NonGeneratedColumns         []string          // all the non-generated column names
 	Indexes                     []string          // all the index names
@@ -62,10 +63,11 @@ type HashFunc func(value any) (uint64, error)
 
 func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	return &TableInfo{
-		db:         db,
-		SchemaName: schema,
-		TableName:  table,
-		QuotedName: fmt.Sprintf("`%s`.`%s`", schema, table),
+		db:              db,
+		SchemaName:      schema,
+		TableName:       table,
+		QuotedName:      fmt.Sprintf("`%s`.`%s`", schema, table),
+		QuotedTableName: fmt.Sprintf("`%s`", table),
 	}
 }
 
