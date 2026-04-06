@@ -16,6 +16,8 @@ const (
 	StatementRenameTable                 // RENAME TABLE ...
 	StatementTruncateTable               // TRUNCATE TABLE ...
 	StatementCreateIndex                 // CREATE INDEX ...
+	StatementDropIndex                   // DROP INDEX ...
+	StatementCreateView                  // CREATE VIEW ...
 	StatementInsert                      // INSERT ...
 	StatementUpdate                      // UPDATE ...
 	StatementDelete                      // DELETE ...
@@ -38,6 +40,10 @@ func (t StatementType) String() string {
 		return "TRUNCATE TABLE"
 	case StatementCreateIndex:
 		return "CREATE INDEX"
+	case StatementDropIndex:
+		return "DROP INDEX"
+	case StatementCreateView:
+		return "CREATE VIEW"
 	case StatementInsert:
 		return "INSERT"
 	case StatementUpdate:
@@ -53,7 +59,8 @@ func (t StatementType) String() string {
 func (t StatementType) IsDDL() bool {
 	switch t { //nolint:exhaustive
 	case StatementAlterTable, StatementCreateTable, StatementDropTable,
-		StatementRenameTable, StatementTruncateTable, StatementCreateIndex:
+		StatementRenameTable, StatementTruncateTable, StatementCreateIndex,
+		StatementDropIndex, StatementCreateView:
 		return true
 	}
 	return false
@@ -134,6 +141,18 @@ func classifyNode(node ast.StmtNode) Classification {
 			Type:   StatementCreateIndex,
 			Table:  stmt.Table.Name.String(),
 			Schema: stmt.Table.Schema.String(),
+		}
+	case *ast.DropIndexStmt:
+		return Classification{
+			Type:   StatementDropIndex,
+			Table:  stmt.Table.Name.String(),
+			Schema: stmt.Table.Schema.String(),
+		}
+	case *ast.CreateViewStmt:
+		return Classification{
+			Type:   StatementCreateView,
+			Table:  stmt.ViewName.Name.String(),
+			Schema: stmt.ViewName.Schema.String(),
 		}
 	case *ast.InsertStmt:
 		return classifyDMLWithTableRefs(StatementInsert, stmt.Table)
