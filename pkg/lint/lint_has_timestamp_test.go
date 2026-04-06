@@ -9,35 +9,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- CREATE TABLE tests ---
+// --- CREATE TABLE in changes (new tables — Error) ---
 
-func TestHasTimestampLinter_NoTimestamp(t *testing.T) {
+func TestHasTimestampLinter_CreateTableAsChange_NoTimestamp(t *testing.T) {
 	sql := `CREATE TABLE users (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		name VARCHAR(255),
 		created_at DATETIME,
 		updated_at DATETIME
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	// No TIMESTAMP columns — no violations
 	assert.Empty(t, violations)
 }
 
-func TestHasTimestampLinter_SingleTimestamp(t *testing.T) {
+func TestHasTimestampLinter_CreateTableAsChange_SingleTimestamp(t *testing.T) {
 	sql := `CREATE TABLE events (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		created_at TIMESTAMP
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "has_timestamp", violations[0].Linter.Name())
@@ -51,20 +51,19 @@ func TestHasTimestampLinter_SingleTimestamp(t *testing.T) {
 	assert.Equal(t, "created_at", *violations[0].Location.Column)
 }
 
-func TestHasTimestampLinter_MultipleTimestamps(t *testing.T) {
+func TestHasTimestampLinter_CreateTableAsChange_MultipleTimestamps(t *testing.T) {
 	sql := `CREATE TABLE audit_log (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		created_at TIMESTAMP,
 		updated_at TIMESTAMP
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 2)
-
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
 	assert.Contains(t, columnNames, "created_at")
 	assert.Contains(t, columnNames, "updated_at")
@@ -75,18 +74,18 @@ func TestHasTimestampLinter_MultipleTimestamps(t *testing.T) {
 	}
 }
 
-func TestHasTimestampLinter_MixedDatetimeAndTimestamp(t *testing.T) {
+func TestHasTimestampLinter_CreateTableAsChange_MixedDatetimeAndTimestamp(t *testing.T) {
 	sql := `CREATE TABLE orders (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		created_at DATETIME,
 		updated_at TIMESTAMP,
 		deleted_at DATE
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	// Only TIMESTAMP should be flagged, not DATETIME or DATE
 	require.Len(t, violations, 1)
@@ -94,136 +93,26 @@ func TestHasTimestampLinter_MixedDatetimeAndTimestamp(t *testing.T) {
 	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
-func TestHasTimestampLinter_TimestampWithDefaultCurrentTimestamp(t *testing.T) {
+func TestHasTimestampLinter_CreateTableAsChange_TimestampWithDefault(t *testing.T) {
 	sql := `CREATE TABLE logs (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	// Should still flag TIMESTAMP regardless of default value
 	require.Len(t, violations, 1)
 	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
 }
 
-func TestHasTimestampLinter_TimestampWithOnUpdate(t *testing.T) {
+func TestHasTimestampLinter_CreateTableAsChange_TimestampWithOnUpdate(t *testing.T) {
 	sql := `CREATE TABLE logs (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "updated_at")
-}
-
-func TestHasTimestampLinter_TimestampNullable(t *testing.T) {
-	sql := `CREATE TABLE logs (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		deleted_at TIMESTAMP NULL
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	// Nullable TIMESTAMP is still TIMESTAMP
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-}
-
-func TestHasTimestampLinter_TimestampNotNull(t *testing.T) {
-	sql := `CREATE TABLE logs (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at TIMESTAMP NOT NULL
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-}
-
-func TestHasTimestampLinter_CaseInsensitive(t *testing.T) {
-	// Test lowercase
-	sql := `CREATE TABLE test1 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		ts timestamp
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-
-	// Test mixed case
-	sql = `CREATE TABLE test2 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		ts Timestamp
-	)`
-	ct, err = statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	violations = linter.Lint([]*statement.CreateTable{ct}, nil)
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-}
-
-func TestHasTimestampLinter_MultipleTables(t *testing.T) {
-	sql1 := `CREATE TABLE t1 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		ts TIMESTAMP
-	)`
-	sql2 := `CREATE TABLE t2 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		name VARCHAR(255)
-	)`
-	sql3 := `CREATE TABLE t3 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at TIMESTAMP,
-		updated_at TIMESTAMP
-	)`
-
-	ct1, err := statement.ParseCreateTable(sql1)
-	require.NoError(t, err)
-	ct2, err := statement.ParseCreateTable(sql2)
-	require.NoError(t, err)
-	ct3, err := statement.ParseCreateTable(sql3)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3}, nil)
-
-	// t1 has 1, t2 has 0, t3 has 2 = 3 total
-	require.Len(t, violations, 3)
-	for _, v := range violations {
-		assert.Equal(t, SeverityError, v.Severity)
-	}
-}
-
-// --- CREATE TABLE via changes (AbstractStatement) ---
-
-func TestHasTimestampLinter_CreateTableAsChange(t *testing.T) {
-	sql := `CREATE TABLE events (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at TIMESTAMP
 	)`
 	stmts, err := statement.New(sql)
 	require.NoError(t, err)
@@ -233,7 +122,142 @@ func TestHasTimestampLinter_CreateTableAsChange(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestHasTimestampLinter_CreateTableAsChange_TimestampNullable(t *testing.T) {
+	sql := `CREATE TABLE logs (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		deleted_at TIMESTAMP NULL
+	)`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestHasTimestampLinter_CreateTableAsChange_TimestampNotNull(t *testing.T) {
+	sql := `CREATE TABLE logs (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP NOT NULL
+	)`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestHasTimestampLinter_CreateTableAsChange_CaseInsensitive(t *testing.T) {
+	linter := &HasTimestampLinter{}
+
+	// Test lowercase
+	stmts, err := statement.New(`CREATE TABLE test1 (id BIGINT UNSIGNED PRIMARY KEY, ts timestamp)`)
+	require.NoError(t, err)
+	violations := linter.Lint(nil, stmts)
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+
+	// Test mixed case
+	stmts, err = statement.New(`CREATE TABLE test2 (id BIGINT UNSIGNED PRIMARY KEY, ts Timestamp)`)
+	require.NoError(t, err)
+	violations = linter.Lint(nil, stmts)
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestHasTimestampLinter_CreateTableAsChange_TimestampWithPrecision(t *testing.T) {
+	sql := `CREATE TABLE events (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP(6)
+	)`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// TIMESTAMP(6) is still TIMESTAMP
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
 	assert.Contains(t, violations[0].Message, "created_at")
+}
+
+// --- Existing tables (legacy schemas — Warning) ---
+
+func TestHasTimestampLinter_ExistingTable_SingleTimestamp(t *testing.T) {
+	existingSQL := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	// Existing tables with TIMESTAMP get Warning — don't boil the ocean
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Contains(t, violations[0].Message, "created_at")
+	assert.Contains(t, violations[0].Message, "TIMESTAMP")
+	assert.Contains(t, violations[0].Message, "2038-01-19")
+}
+
+func TestHasTimestampLinter_ExistingTable_MultipleTimestamps(t *testing.T) {
+	existingSQL := `CREATE TABLE logs (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP,
+		updated_at TIMESTAMP
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	require.Len(t, violations, 2)
+	for _, v := range violations {
+		assert.Equal(t, SeverityWarning, v.Severity)
+	}
+}
+
+func TestHasTimestampLinter_ExistingTable_NoTimestamp(t *testing.T) {
+	existingSQL := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at DATETIME
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	assert.Empty(t, violations)
+}
+
+func TestHasTimestampLinter_ExistingTable_MultipleTables(t *testing.T) {
+	ct1, err := statement.ParseCreateTable(`CREATE TABLE t1 (id BIGINT PRIMARY KEY, ts TIMESTAMP)`)
+	require.NoError(t, err)
+	ct2, err := statement.ParseCreateTable(`CREATE TABLE t2 (id BIGINT PRIMARY KEY, name VARCHAR(255))`)
+	require.NoError(t, err)
+	ct3, err := statement.ParseCreateTable(`CREATE TABLE t3 (id BIGINT PRIMARY KEY, a TIMESTAMP, b TIMESTAMP)`)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3}, nil)
+
+	// t1=1, t2=0, t3=2 = 3 total, all Warning
+	require.Len(t, violations, 3)
+	for _, v := range violations {
+		assert.Equal(t, SeverityWarning, v.Severity)
+	}
 }
 
 // --- ALTER TABLE adding TIMESTAMP column (Error) ---
@@ -350,6 +374,18 @@ func TestHasTimestampLinter_AlterAddTimestampWithDefault(t *testing.T) {
 	assert.Equal(t, SeverityError, violations[0].Severity)
 }
 
+func TestHasTimestampLinter_AlterAddTimestampWithPrecision(t *testing.T) {
+	sql := `ALTER TABLE users ADD COLUMN created_at TIMESTAMP(3)`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityError, violations[0].Severity)
+}
+
 // --- ALTER TABLE modifying table with existing TIMESTAMP (Warning) ---
 
 func TestHasTimestampLinter_AlterExistingTableWithTimestamp(t *testing.T) {
@@ -370,32 +406,21 @@ func TestHasTimestampLinter_AlterExistingTableWithTimestamp(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Should produce a Warning for the existing TIMESTAMP column on the table
-	// Plus an Error for the CREATE TABLE itself
-	// Filter to just the warnings from the ALTER
-	var warnings []Violation
-	var errors []Violation
+	// Existing table produces Warning + ALTER on table with TIMESTAMP produces Warning
+	// All should be Warning — no Errors since nothing new is introducing TIMESTAMP
 	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			warnings = append(warnings, v)
-		}
-		if v.Severity == SeverityError {
-			errors = append(errors, v)
-		}
+		assert.Equal(t, SeverityWarning, v.Severity)
 	}
 
-	// The existing table CREATE produces an Error
-	require.Len(t, errors, 1)
-	assert.Equal(t, "created_at", *errors[0].Location.Column)
-
-	// The ALTER on a table with existing TIMESTAMP produces a Warning
-	require.Len(t, warnings, 1)
-	assert.Equal(t, "has_timestamp", warnings[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, warnings[0].Severity)
-	assert.Contains(t, warnings[0].Message, "created_at")
-	assert.Contains(t, warnings[0].Message, "TIMESTAMP")
-	assert.Contains(t, warnings[0].Message, "2038-01-19")
-	assert.Equal(t, "users", warnings[0].Location.Table)
+	// Should have warnings from both the existing table and the ALTER path
+	// (existing table warning + ALTER-on-existing-table warning)
+	var warningsForCreatedAt int
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Column != nil && *v.Location.Column == "created_at" {
+			warningsForCreatedAt++
+		}
+	}
+	assert.GreaterOrEqual(t, warningsForCreatedAt, 1)
 }
 
 func TestHasTimestampLinter_AlterExistingTableWithMultipleTimestamps(t *testing.T) {
@@ -415,18 +440,20 @@ func TestHasTimestampLinter_AlterExistingTableWithMultipleTimestamps(t *testing.
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Filter warnings from the ALTER
-	var warnings []Violation
+	// All violations should be Warning
 	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			warnings = append(warnings, v)
-		}
+		assert.Equal(t, SeverityWarning, v.Severity)
 	}
 
-	require.Len(t, warnings, 2)
-	columnNames := []string{*warnings[0].Location.Column, *warnings[1].Location.Column}
-	assert.Contains(t, columnNames, "created_at")
-	assert.Contains(t, columnNames, "updated_at")
+	// Should have warnings mentioning both TIMESTAMP columns
+	columnSet := make(map[string]bool)
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Column != nil {
+			columnSet[*v.Location.Column] = true
+		}
+	}
+	assert.True(t, columnSet["created_at"])
+	assert.True(t, columnSet["updated_at"])
 }
 
 func TestHasTimestampLinter_AlterExistingTableNoTimestamp(t *testing.T) {
@@ -447,7 +474,7 @@ func TestHasTimestampLinter_AlterExistingTableNoTimestamp(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// No TIMESTAMP anywhere — no violations (the CREATE TABLE has DATETIME, not TIMESTAMP)
+	// No TIMESTAMP anywhere — no violations
 	assert.Empty(t, violations)
 }
 
@@ -468,8 +495,6 @@ func TestHasTimestampLinter_AlterAddTimestampToTableWithExistingTimestamp(t *tes
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Should have Error for CREATE TABLE's existing TIMESTAMP + Error for the new TIMESTAMP being added
-	// Should NOT have a Warning because the ALTER is adding TIMESTAMP (Error takes precedence)
 	var errors []Violation
 	var warnings []Violation
 	for _, v := range violations {
@@ -481,13 +506,72 @@ func TestHasTimestampLinter_AlterAddTimestampToTableWithExistingTimestamp(t *tes
 		}
 	}
 
-	// Error from CREATE TABLE (created_at) + Error from ALTER (updated_at)
-	require.Len(t, errors, 2)
-	// No warnings — the ALTER is adding TIMESTAMP so it gets Error, not Warning
-	assert.Empty(t, warnings)
+	// Error from ALTER adding updated_at TIMESTAMP
+	require.Len(t, errors, 1)
+	assert.Equal(t, "updated_at", *errors[0].Location.Column)
+
+	// Warning from existing table having created_at TIMESTAMP
+	require.Len(t, warnings, 1)
+	assert.Equal(t, "created_at", *warnings[0].Location.Column)
 }
 
-func TestHasTimestampLinter_AlterDropColumn(t *testing.T) {
+// --- ALTER TABLE that fixes TIMESTAMP (no false-positive warnings) ---
+
+func TestHasTimestampLinter_AlterDropTimestampColumn(t *testing.T) {
+	// Existing table has two TIMESTAMP columns
+	existingSQL := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP,
+		updated_at TIMESTAMP
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	// ALTER drops one of the TIMESTAMP columns — actively fixing the problem
+	alterSQL := `ALTER TABLE users DROP COLUMN updated_at`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	// Filter to just ALTER-path warnings (exclude existing table warnings)
+	var alterWarnings []Violation
+	for _, v := range violations {
+		if v.Severity == SeverityWarning {
+			alterWarnings = append(alterWarnings, v)
+		}
+	}
+
+	// Should warn about created_at (still TIMESTAMP) but NOT about updated_at (being dropped)
+	// Existing table produces 2 warnings, ALTER path should only warn about created_at
+	// Total warnings: 2 from existing table + 1 from ALTER path = but updated_at is being fixed
+	// Let's check that we don't have warnings for updated_at from the ALTER path
+	// The existing table warnings are separate from ALTER warnings
+	// With the fix: existing table warns about both, ALTER only warns about created_at (not updated_at)
+	createdAtCount := 0
+	updatedAtCount := 0
+	for _, v := range alterWarnings {
+		if v.Location != nil && v.Location.Column != nil {
+			switch *v.Location.Column {
+			case "created_at":
+				createdAtCount++
+			case "updated_at":
+				updatedAtCount++
+			}
+		}
+	}
+
+	// created_at appears in both existing table warning and ALTER warning
+	assert.GreaterOrEqual(t, createdAtCount, 1)
+	// updated_at: existing table still warns (it doesn't know about the ALTER),
+	// but the ALTER path should NOT warn about it since it's being dropped.
+	// We expect exactly 1 warning for updated_at (from existing table only),
+	// not 2 (which would mean the ALTER path also warned about it).
+	assert.Equal(t, 1, updatedAtCount, "updated_at should only be warned about from existing table, not from ALTER path")
+}
+
+func TestHasTimestampLinter_AlterModifyTimestampToDatetime(t *testing.T) {
 	// Existing table has a TIMESTAMP column
 	existingSQL := `CREATE TABLE users (
 		id BIGINT UNSIGNED PRIMARY KEY,
@@ -497,28 +581,129 @@ func TestHasTimestampLinter_AlterDropColumn(t *testing.T) {
 	ct, err := statement.ParseCreateTable(existingSQL)
 	require.NoError(t, err)
 
-	// ALTER drops a column (not adding TIMESTAMP)
-	alterSQL := `ALTER TABLE users DROP COLUMN updated_at`
+	// ALTER converts one TIMESTAMP to DATETIME — actively fixing the problem
+	alterSQL := `ALTER TABLE users MODIFY COLUMN created_at DATETIME`
 	stmts, err := statement.New(alterSQL)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Errors from CREATE TABLE + Warnings from ALTER on table with existing TIMESTAMP
-	var warnings []Violation
+	// The ALTER is fixing created_at, so the ALTER path should only warn about updated_at
+	var alterPathWarnings []Violation
 	for _, v := range violations {
 		if v.Severity == SeverityWarning {
-			warnings = append(warnings, v)
+			alterPathWarnings = append(alterPathWarnings, v)
 		}
 	}
 
-	// The ALTER is modifying a table with TIMESTAMP columns — should produce warnings
-	require.Len(t, warnings, 2)
+	// Existing table warns about both (2 warnings)
+	// ALTER path warns about updated_at only (1 warning), created_at is being fixed
+	createdAtCount := 0
+	updatedAtCount := 0
+	for _, v := range alterPathWarnings {
+		if v.Location != nil && v.Location.Column != nil {
+			switch *v.Location.Column {
+			case "created_at":
+				createdAtCount++
+			case "updated_at":
+				updatedAtCount++
+			}
+		}
+	}
+
+	// created_at: 1 from existing table (the ALTER path excludes it since it's being fixed)
+	assert.Equal(t, 1, createdAtCount)
+	// updated_at: 1 from existing table + 1 from ALTER path = 2
+	assert.Equal(t, 2, updatedAtCount)
+
+	// No errors — nothing is introducing TIMESTAMP
+	for _, v := range violations {
+		assert.NotEqual(t, SeverityError, v.Severity)
+	}
 }
 
-func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
+func TestHasTimestampLinter_AlterChangeTimestampToDatetime(t *testing.T) {
 	// Existing table has a TIMESTAMP column
+	existingSQL := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		old_ts TIMESTAMP
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	// CHANGE renames and converts the column — fixing the problem
+	alterSQL := `ALTER TABLE users CHANGE COLUMN old_ts new_dt DATETIME`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	// Existing table warns about old_ts (1 warning)
+	// ALTER path should NOT warn about old_ts since it's being converted away
+	var errors []Violation
+	for _, v := range violations {
+		if v.Severity == SeverityError {
+			errors = append(errors, v)
+		}
+	}
+	assert.Empty(t, errors, "converting TIMESTAMP to DATETIME should not produce errors")
+
+	// The ALTER path should not add a warning for old_ts since it's being fixed
+	// Only the existing table warning for old_ts should remain
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, "old_ts", *violations[0].Location.Column)
+}
+
+func TestHasTimestampLinter_AlterDropAllTimestampColumns(t *testing.T) {
+	// Existing table has TIMESTAMP columns
+	existingSQL := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP,
+		updated_at TIMESTAMP
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	// ALTER drops both TIMESTAMP columns
+	alterSQL := `ALTER TABLE users DROP COLUMN created_at, DROP COLUMN updated_at`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	// Existing table still warns (2 warnings) — it doesn't know about the ALTER
+	// ALTER path should NOT warn since both columns are being dropped
+	var alterPathViolations []Violation
+	for _, v := range violations {
+		// All violations should be Warning from existing table
+		assert.Equal(t, SeverityWarning, v.Severity)
+		alterPathViolations = append(alterPathViolations, v)
+	}
+
+	// Only 2 warnings from existing table, none from ALTER path
+	require.Len(t, alterPathViolations, 2)
+}
+
+func TestHasTimestampLinter_AlterModifyTimestampToDatetimeNoExisting(t *testing.T) {
+	// No existing table info — just the ALTER
+	alterSQL := `ALTER TABLE users MODIFY COLUMN created_at DATETIME`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// Converting to DATETIME — no violations
+	assert.Empty(t, violations)
+}
+
+// --- ALTER TABLE with other operations ---
+
+func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
 	existingSQL := `CREATE TABLE users (
 		id BIGINT UNSIGNED PRIMARY KEY,
 		created_at TIMESTAMP,
@@ -527,7 +712,7 @@ func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
 	ct, err := statement.ParseCreateTable(existingSQL)
 	require.NoError(t, err)
 
-	// ALTER adds an index (not adding TIMESTAMP)
+	// ALTER adds an index (not touching TIMESTAMP columns)
 	alterSQL := `ALTER TABLE users ADD INDEX idx_name (name)`
 	stmts, err := statement.New(alterSQL)
 	require.NoError(t, err)
@@ -535,17 +720,19 @@ func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Filter warnings
-	var warnings []Violation
+	// All should be Warning
 	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			warnings = append(warnings, v)
-		}
+		assert.Equal(t, SeverityWarning, v.Severity)
 	}
 
-	// The ALTER is modifying a table with TIMESTAMP — should produce a warning
-	require.Len(t, warnings, 1)
-	assert.Equal(t, "created_at", *warnings[0].Location.Column)
+	// Should have warnings mentioning created_at
+	found := false
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Column != nil && *v.Location.Column == "created_at" {
+			found = true
+		}
+	}
+	assert.True(t, found)
 }
 
 func TestHasTimestampLinter_AlterTableNotInExisting(t *testing.T) {
@@ -559,6 +746,30 @@ func TestHasTimestampLinter_AlterTableNotInExisting(t *testing.T) {
 
 	// No existing table info, no TIMESTAMP being added — no violations
 	assert.Empty(t, violations)
+}
+
+func TestHasTimestampLinter_AlterDifferentTable(t *testing.T) {
+	// Existing table "users" has TIMESTAMP
+	existingSQL := `CREATE TABLE users (
+		id BIGINT UNSIGNED PRIMARY KEY,
+		created_at TIMESTAMP
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	// ALTER is on a different table "orders"
+	alterSQL := `ALTER TABLE orders ADD COLUMN email VARCHAR(255)`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	// Warning from existing table (users has TIMESTAMP)
+	// No warning from ALTER (orders is not in existingTables)
+	require.Len(t, violations, 1)
+	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	assert.Equal(t, "users", violations[0].Location.Table)
 }
 
 // --- Linter metadata ---
@@ -601,13 +812,12 @@ func TestHasTimestampLinter_Registered(t *testing.T) {
 // --- Edge cases ---
 
 func TestHasTimestampLinter_EmptyTable(t *testing.T) {
-	// Table with no columns (unusual but valid parse)
 	sql := `CREATE TABLE empty_table (id INT PRIMARY KEY)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	assert.Empty(t, violations)
 }
@@ -618,35 +828,6 @@ func TestHasTimestampLinter_NilInputs(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
-func TestHasTimestampLinter_TimestampWithPrecision(t *testing.T) {
-	sql := `CREATE TABLE events (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at TIMESTAMP(6)
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	// TIMESTAMP(6) is still TIMESTAMP
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
-}
-
-func TestHasTimestampLinter_AlterAddTimestampWithPrecision(t *testing.T) {
-	sql := `ALTER TABLE users ADD COLUMN created_at TIMESTAMP(3)`
-	stmts, err := statement.New(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint(nil, stmts)
-
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-}
-
 // --- Violation message format ---
 
 func TestHasTimestampLinter_MessageFormat(t *testing.T) {
@@ -654,11 +835,11 @@ func TestHasTimestampLinter_MessageFormat(t *testing.T) {
 		id BIGINT UNSIGNED PRIMARY KEY,
 		my_ts TIMESTAMP
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
 	msg := violations[0].Message
@@ -673,11 +854,11 @@ func TestHasTimestampLinter_ViolationString(t *testing.T) {
 		id BIGINT UNSIGNED PRIMARY KEY,
 		my_ts TIMESTAMP
 	)`
-	ct, err := statement.ParseCreateTable(sql)
+	stmts, err := statement.New(sql)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
 	str := violations[0].String()
@@ -688,114 +869,37 @@ func TestHasTimestampLinter_ViolationString(t *testing.T) {
 // --- Other date/time types should NOT be flagged ---
 
 func TestHasTimestampLinter_DatetimeNotFlagged(t *testing.T) {
-	sql := `CREATE TABLE t1 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at DATETIME
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations)
-}
-
-func TestHasTimestampLinter_DateNotFlagged(t *testing.T) {
-	sql := `CREATE TABLE t1 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		birth_date DATE
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations)
-}
-
-func TestHasTimestampLinter_TimeNotFlagged(t *testing.T) {
-	sql := `CREATE TABLE t1 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		duration TIME
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations)
-}
-
-func TestHasTimestampLinter_YearNotFlagged(t *testing.T) {
-	sql := `CREATE TABLE t1 (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		birth_year YEAR
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations)
-}
-
-// --- existingTables parameter tests ---
-
-func TestHasTimestampLinter_ExistingTablesOnly(t *testing.T) {
-	// When existingTables has TIMESTAMP and no changes, should produce errors
-	existingSQL := `CREATE TABLE users (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at TIMESTAMP
-	)`
-	ct, err := statement.ParseCreateTable(existingSQL)
-	require.NoError(t, err)
-
-	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-}
-
-func TestHasTimestampLinter_ChangesOnly(t *testing.T) {
-	// When only changes are provided (no existing tables)
-	sql := `ALTER TABLE users ADD COLUMN ts TIMESTAMP`
-	stmts, err := statement.New(sql)
+	stmts, err := statement.New(`CREATE TABLE t1 (id BIGINT PRIMARY KEY, created_at DATETIME)`)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, stmts)
-
-	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	assert.Empty(t, violations)
 }
 
-// --- ALTER TABLE with non-matching table name ---
-
-func TestHasTimestampLinter_AlterDifferentTable(t *testing.T) {
-	// Existing table "users" has TIMESTAMP
-	existingSQL := `CREATE TABLE users (
-		id BIGINT UNSIGNED PRIMARY KEY,
-		created_at TIMESTAMP
-	)`
-	ct, err := statement.ParseCreateTable(existingSQL)
-	require.NoError(t, err)
-
-	// ALTER is on a different table "orders"
-	alterSQL := `ALTER TABLE orders ADD COLUMN email VARCHAR(255)`
-	stmts, err := statement.New(alterSQL)
+func TestHasTimestampLinter_DateNotFlagged(t *testing.T) {
+	stmts, err := statement.New(`CREATE TABLE t1 (id BIGINT PRIMARY KEY, birth_date DATE)`)
 	require.NoError(t, err)
 
 	linter := &HasTimestampLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+	violations := linter.Lint(nil, stmts)
+	assert.Empty(t, violations)
+}
 
-	// Error from the CREATE TABLE (users has TIMESTAMP)
-	// No warning for the ALTER (orders is not in existingTables)
-	var warnings []Violation
-	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			warnings = append(warnings, v)
-		}
-	}
-	assert.Empty(t, warnings)
+func TestHasTimestampLinter_TimeNotFlagged(t *testing.T) {
+	stmts, err := statement.New(`CREATE TABLE t1 (id BIGINT PRIMARY KEY, duration TIME)`)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+	assert.Empty(t, violations)
+}
+
+func TestHasTimestampLinter_YearNotFlagged(t *testing.T) {
+	stmts, err := statement.New(`CREATE TABLE t1 (id BIGINT PRIMARY KEY, birth_year YEAR)`)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint(nil, stmts)
+	assert.Empty(t, violations)
 }

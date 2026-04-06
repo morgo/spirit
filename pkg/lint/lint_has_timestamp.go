@@ -27,10 +27,44 @@ func (l *HasTimestampLinter) Description() string {
 }
 
 func (l *HasTimestampLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	// Check all CREATE TABLE statements (from both existingTables and changes).
-	// CREATE TABLE with TIMESTAMP is an error — don't introduce new ones.
-	for ct := range CreateTableStatements(existingTables, changes) {
-		violations = append(violations, l.checkCreateTable(ct)...)
+	// Existing tables with TIMESTAMP get Warning — don't boil the ocean on legacy schemas.
+	for _, ct := range existingTables {
+		for _, col := range ct.Columns {
+			if col.Raw.Tp.GetType() == mysql.TypeTimestamp {
+				violations = append(violations, Violation{
+					Linter: l,
+					Location: &Location{
+						Table:  ct.TableName,
+						Column: &col.Name,
+					},
+					Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Consider using DATETIME instead.", col.Name),
+					Severity: SeverityWarning,
+				})
+			}
+		}
+	}
+
+	// CREATE TABLE statements in changes get Error — don't introduce new TIMESTAMP.
+	for _, change := range changes {
+		if change.IsCreateTable() {
+			ct, err := change.ParseCreateTable()
+			if err != nil {
+				continue
+			}
+			for _, col := range ct.Columns {
+				if col.Raw.Tp.GetType() == mysql.TypeTimestamp {
+					violations = append(violations, Violation{
+						Linter: l,
+						Location: &Location{
+							Table:  ct.TableName,
+							Column: &col.Name,
+						},
+						Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Consider using DATETIME instead.", col.Name),
+						Severity: SeverityError,
+					})
+				}
+			}
+		}
 	}
 
 	// Check ALTER TABLE statements
@@ -39,27 +73,10 @@ func (l *HasTimestampLinter) Lint(existingTables []*statement.CreateTable, chang
 	return violations
 }
 
-// checkCreateTable checks a CREATE TABLE for TIMESTAMP columns and returns Error-level violations.
-func (l *HasTimestampLinter) checkCreateTable(table *statement.CreateTable) (violations []Violation) {
-	for _, col := range table.Columns {
-		if col.Raw.Tp.GetType() == mysql.TypeTimestamp {
-			violations = append(violations, Violation{
-				Linter: l,
-				Location: &Location{
-					Table:  table.TableName,
-					Column: &col.Name,
-				},
-				Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Please use DATETIME instead.", col.Name),
-				Severity: SeverityError,
-			})
-		}
-	}
-	return violations
-}
-
 // checkAlterStatements checks ALTER TABLE statements for TIMESTAMP usage.
-// Adding a TIMESTAMP column is an Error. Modifying a table that already has
-// TIMESTAMP columns (but not adding new ones) is a Warning.
+// Adding or modifying a column to TIMESTAMP is an Error. Modifying a table that
+// already has TIMESTAMP columns (but not adding new ones) is a Warning — unless
+// the ALTER is actively removing/converting those TIMESTAMP columns.
 func (l *HasTimestampLinter) checkAlterStatements(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	// Build a map of existing tables for quick lookup
 	existingTableMap := make(map[string]*statement.CreateTable)
@@ -73,48 +90,71 @@ func (l *HasTimestampLinter) checkAlterStatements(existingTables []*statement.Cr
 			continue
 		}
 
-		// Check if the ALTER itself adds/modifies columns to TIMESTAMP (Error)
+		// Track whether the ALTER is adding/modifying columns to TIMESTAMP (Error),
+		// and collect the set of columns being dropped or converted away from TIMESTAMP.
 		addingTimestamp := false
+		columnsBeingFixed := make(map[string]bool)
+
 		for _, spec := range alter.Specs {
-			var message string
 			switch spec.Tp { //nolint:exhaustive
 			case ast.AlterTableAddColumns:
-				message = "Column %q uses TIMESTAMP which overflows on 2038-01-19. Please use DATETIME instead."
+				for _, col := range spec.NewColumns {
+					if col.Tp.GetType() == mysql.TypeTimestamp {
+						addingTimestamp = true
+						violations = append(violations, Violation{
+							Linter: l,
+							Location: &Location{
+								Table:  change.Table,
+								Column: &col.Name.Name.O,
+							},
+							Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Consider using DATETIME instead.", col.Name.Name.O),
+							Severity: SeverityError,
+						})
+					}
+				}
 			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-				message = "Column %q uses TIMESTAMP which overflows on 2038-01-19. Please use DATETIME instead."
-			default:
-				continue
-			}
-
-			for _, col := range spec.NewColumns {
-				if col.Tp.GetType() == mysql.TypeTimestamp {
-					addingTimestamp = true
-					violations = append(violations, Violation{
-						Linter: l,
-						Location: &Location{
-							Table:  change.Table,
-							Column: &col.Name.Name.O,
-						},
-						Message:  fmt.Sprintf(message, col.Name.Name.O),
-						Severity: SeverityError,
-					})
+				for _, col := range spec.NewColumns {
+					if col.Tp.GetType() == mysql.TypeTimestamp {
+						addingTimestamp = true
+						violations = append(violations, Violation{
+							Linter: l,
+							Location: &Location{
+								Table:  change.Table,
+								Column: &col.Name.Name.O,
+							},
+							Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Consider using DATETIME instead.", col.Name.Name.O),
+							Severity: SeverityError,
+						})
+					} else {
+						// Column is being changed to a non-TIMESTAMP type — it's being fixed.
+						// For CHANGE COLUMN, OldColumnName is the original name.
+						if spec.OldColumnName != nil {
+							columnsBeingFixed[spec.OldColumnName.Name.O] = true
+						}
+						columnsBeingFixed[col.Name.Name.O] = true
+					}
+				}
+			case ast.AlterTableDropColumn:
+				if spec.OldColumnName != nil {
+					columnsBeingFixed[spec.OldColumnName.Name.O] = true
 				}
 			}
 		}
 
 		// If the ALTER is not itself introducing TIMESTAMP columns, check whether
 		// the existing table already has TIMESTAMP columns (Warning).
+		// Exclude columns that are being dropped or converted in this ALTER.
 		if !addingTimestamp {
 			if existing, ok := existingTableMap[change.Table]; ok {
 				for _, col := range existing.Columns {
-					if col.Raw.Tp.GetType() == mysql.TypeTimestamp {
+					if col.Raw.Tp.GetType() == mysql.TypeTimestamp && !columnsBeingFixed[col.Name] {
 						violations = append(violations, Violation{
 							Linter: l,
 							Location: &Location{
 								Table:  change.Table,
 								Column: &col.Name,
 							},
-							Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Please use DATETIME instead.", col.Name),
+							Message:  fmt.Sprintf("Column %q uses TIMESTAMP which overflows on 2038-01-19. Consider using DATETIME instead.", col.Name),
 							Severity: SeverityWarning,
 						})
 					}
