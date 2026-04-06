@@ -11,7 +11,7 @@ import (
 )
 
 func TestLoadSchemaFromDB(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (
 		id bigint unsigned NOT NULL AUTO_INCREMENT,
 		name varchar(100) DEFAULT NULL,
@@ -47,7 +47,7 @@ func TestLoadSchemaFromDB(t *testing.T) {
 }
 
 func TestLoadSchemaFromDB_EmptyDatabase(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestLoadSchemaFromDB_EmptyDatabase(t *testing.T) {
 func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
 	// Verify that LoadSchemaFromDB returns the raw DDL including AUTO_INCREMENT
 	// values. Consumers that need to strip it (e.g. for diffing) do so themselves.
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE counters (
 		id bigint unsigned NOT NULL AUTO_INCREMENT,
 		PRIMARY KEY (id)
@@ -79,7 +79,7 @@ func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
 }
 
 func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE _vt_shadow (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE _pending_drops (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
@@ -101,7 +101,7 @@ func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
 }
 
 func TestLoadSchemaFromDB_FilterArchiveTables(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users_archive_2024 (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE orders_archive_2024_01 (id bigint NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB`)
@@ -124,7 +124,7 @@ func TestLoadSchemaFromDB_FilterArchiveTables(t *testing.T) {
 }
 
 func TestLoadSchemaFromDB_StripAutoIncrement(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE counters (
 		id bigint unsigned NOT NULL AUTO_INCREMENT,
 		PRIMARY KEY (id)
@@ -143,7 +143,7 @@ func TestLoadSchemaFromDB_StripAutoIncrement(t *testing.T) {
 }
 
 func TestLoadSchemaFromDB_CombinedFilters(t *testing.T) {
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (
 		id bigint unsigned NOT NULL AUTO_INCREMENT,
 		PRIMARY KEY (id)

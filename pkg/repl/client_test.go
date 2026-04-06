@@ -981,11 +981,7 @@ func TestProcessDDLNotification(t *testing.T) {
 
 	// Set up a real database and tables for the default-mode subtest.
 	// Done at top level to avoid subtest name length issues with CreateUniqueTestDatabase.
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE orders (id INT NOT NULL PRIMARY KEY)")
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _orders_new (id INT NOT NULL PRIMARY KEY)")
 

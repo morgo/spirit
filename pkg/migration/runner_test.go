@@ -2246,7 +2246,8 @@ func TestDeferCutOver(t *testing.T) {
 	t.Parallel()
 
 	// Create unique database for this test
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	defer utils.CloseAndLog(db)
 
 	tableName := `deferred_cutover`
 	newName := fmt.Sprintf("_%s_new", tableName)
@@ -2302,7 +2303,8 @@ func TestDeferCutOverE2E(t *testing.T) {
 	t.Parallel()
 
 	// Create unique database for this test
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	defer utils.CloseAndLog(db)
 
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e`
@@ -2349,9 +2351,6 @@ func TestDeferCutOverE2E(t *testing.T) {
 	}()
 
 	// wait until the sentinel table exists
-	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
 	for {
 		var rowCount int
 		sql := fmt.Sprintf(
@@ -2383,7 +2382,8 @@ func TestDeferCutOverE2E(t *testing.T) {
 func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	t.Parallel()
 	// Create unique database for this test
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	defer utils.CloseAndLog(db)
 
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e_stage`
@@ -2428,10 +2428,6 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	}()
 
 	// wait until the sentinel table exists
-	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
 	waitForStatus(t, m, status.WaitingOnSentinelTable)
 
 	binlogPos := m.replClient.GetBinlogApplyPosition()
@@ -2649,7 +2645,8 @@ func TestIndexVisibility(t *testing.T) {
 func TestPreventConcurrentRuns(t *testing.T) {
 	t.Parallel()
 
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	defer utils.CloseAndLog(db)
 	tableName := `prevent_concurrent_runs`
 
 	dropStmt := `DROP TABLE IF EXISTS %s`
