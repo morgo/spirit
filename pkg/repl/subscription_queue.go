@@ -63,7 +63,7 @@ func (s *deltaQueue) createDeleteStmt(deleteKeys []string) statement {
 	var deleteStmt string
 	if len(deleteKeys) > 0 {
 		deleteStmt = fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-			s.newTable.QuotedName,
+			s.newTable.QuotedTableName,
 			table.QuoteColumns(s.table.KeyColumns),
 			pksToRowValueConstructor(deleteKeys),
 		)
@@ -78,10 +78,10 @@ func (s *deltaQueue) createReplaceStmt(replaceKeys []string) statement {
 	var replaceStmt string
 	if len(replaceKeys) > 0 {
 		replaceStmt = fmt.Sprintf("REPLACE INTO %s (%s) SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE (%s) IN (%s)",
-			s.newTable.QuotedName,
+			s.newTable.QuotedTableName,
 			utils.IntersectNonGeneratedColumns(s.table, s.newTable),
 			utils.IntersectNonGeneratedColumns(s.table, s.newTable),
-			s.table.QuotedName,
+			s.table.QuotedTableName,
 			table.QuoteColumns(s.table.KeyColumns),
 			pksToRowValueConstructor(replaceKeys),
 		)

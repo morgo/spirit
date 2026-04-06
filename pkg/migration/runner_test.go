@@ -2246,7 +2246,7 @@ func TestDeferCutOver(t *testing.T) {
 	t.Parallel()
 
 	// Create unique database for this test
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	tableName := `deferred_cutover`
 	newName := fmt.Sprintf("_%s_new", tableName)
@@ -2302,7 +2302,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 	t.Parallel()
 
 	// Create unique database for this test
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e`
@@ -2383,7 +2383,7 @@ func TestDeferCutOverE2E(t *testing.T) {
 func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	t.Parallel()
 	// Create unique database for this test
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	c := make(chan error)
 	tableName := `deferred_cutover_e2e_stage`
@@ -2649,7 +2649,7 @@ func TestIndexVisibility(t *testing.T) {
 func TestPreventConcurrentRuns(t *testing.T) {
 	t.Parallel()
 
-	dbName := testutils.CreateUniqueTestDatabase(t)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	tableName := `prevent_concurrent_runs`
 
 	dropStmt := `DROP TABLE IF EXISTS %s`

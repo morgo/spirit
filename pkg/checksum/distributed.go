@@ -61,7 +61,7 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 	// Query source
 	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 		c.intersectColumns(chunk),
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 	var sourceChecksum int64
@@ -178,11 +178,11 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	columnList := strings.Join(chunk.Table.NonGeneratedColumns, ", ")
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 
-	c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "query", query, "table", chunk.Table.QuotedName)
+	c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "query", query, "table", chunk.Table.QuotedTableName)
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to query chunk data: %w", err)

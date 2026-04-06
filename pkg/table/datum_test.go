@@ -166,7 +166,7 @@ func TestKeyBelowLowWatermarkWithNegativeInt32(t *testing.T) {
 	ti := &TableInfo{
 		SchemaName:        "test",
 		TableName:         "t1",
-		QuotedName:        "`test`.`t1`",
+		QuotedTableName:   "`t1`",
 		KeyColumns:        []string{"id"},
 		keyColumnsMySQLTp: []string{"int unsigned"},
 		KeyIsAutoInc:      true,

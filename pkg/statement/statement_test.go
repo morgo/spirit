@@ -64,18 +64,39 @@ func TestExtractFromStatement(t *testing.T) {
 	abstractStmt, err = New("CREATE INDEX idx ON t1 (a)")
 	assert.NoError(t, err)
 	assert.Equal(t, "t1", abstractStmt[0].Table)
-	assert.Equal(t, "ADD INDEX idx (a)", abstractStmt[0].Alter)
-	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX idx (a)", abstractStmt[0].Statement)
+	assert.Equal(t, "ADD INDEX `idx` (`a`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`a`)", abstractStmt[0].Statement)
 
 	abstractStmt, err = New("CREATE INDEX idx ON test.`t1` (a)")
 	assert.NoError(t, err)
 	assert.Equal(t, "t1", abstractStmt[0].Table)
-	assert.Equal(t, "ADD INDEX idx (a)", abstractStmt[0].Alter)
-	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX idx (a)", abstractStmt[0].Statement)
+	assert.Equal(t, "ADD INDEX `idx` (`a`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`a`)", abstractStmt[0].Statement)
+
+	// Test create index with spaces in identifiers (requires quoting).
+	abstractStmt, err = New("CREATE UNIQUE INDEX `an index` ON `a table` (id)")
+	assert.NoError(t, err)
+	assert.Equal(t, "a table", abstractStmt[0].Table)
+	assert.Equal(t, "ADD UNIQUE INDEX `an index` (`id`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `a table` ADD UNIQUE INDEX `an index` (`id`)", abstractStmt[0].Statement)
 
 	_, err = New("CREATE INDEX idx ON t1 ((`a` IS NULL))")
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "cannot convert functional index to ALTER TABLE statement")
+
+	// Test drop index is rewritten.
+	abstractStmt, err = New("DROP INDEX idx ON t1")
+	assert.NoError(t, err)
+	assert.Equal(t, "t1", abstractStmt[0].Table)
+	assert.Equal(t, "DROP INDEX `idx`", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from DROP INDEX */ ALTER TABLE `t1` DROP INDEX `idx`", abstractStmt[0].Statement)
+
+	abstractStmt, err = New("DROP INDEX idx ON test.`t1`")
+	assert.NoError(t, err)
+	assert.Equal(t, "test", abstractStmt[0].Schema)
+	assert.Equal(t, "t1", abstractStmt[0].Table)
+	assert.Equal(t, "DROP INDEX `idx`", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from DROP INDEX */ ALTER TABLE `t1` DROP INDEX `idx`", abstractStmt[0].Statement)
 
 	// test unsupported.
 	_, err = New("INSERT INTO t1 (a) VALUES (1)")

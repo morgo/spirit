@@ -58,7 +58,7 @@ var _ Chunker = &chunkerOptimistic{}
 func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 	key := t.Ti.KeyColumns[0]
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
-		key, t.Ti.QuotedName, key, key, t.chunkSize,
+		key, t.Ti.QuotedTableName, key, key, t.chunkSize,
 	)
 	//nolint: noctx // too much refactoring to add context here
 	rows, err := t.Ti.db.Query(query, t.chunkPtr.String())
