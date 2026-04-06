@@ -318,10 +318,9 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	default:
 		keyType = "INDEX"
 	}
-	alterStmt := fmt.Sprintf("ADD %s %s (%s)", keyType, ciStmt.IndexName, strings.Join(columns, ", "))
+	alterStmt := fmt.Sprintf("ADD %s `%s` (`%s`)", keyType, ciStmt.IndexName, strings.Join(columns, "`, `"))
 	// We hint in the statement that it's been rewritten
 	// and in the stmtNode we reparse from the alterStmt.
-	// TODO: identifiers should be quoted/escaped in case a maniac includes a backtick in a table name.
 	statement := fmt.Sprintf("/* rewritten from CREATE INDEX */ ALTER TABLE `%s` %s", ciStmt.Table.Name, alterStmt)
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(statement, "", "")
