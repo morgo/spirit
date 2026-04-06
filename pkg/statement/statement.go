@@ -88,6 +88,13 @@ func NewWithOptions(statement string, opts Options) ([]*AbstractStatement, error
 				return nil, err
 			}
 			stmts = append(stmts, stmt)
+		case *ast.DropIndexStmt:
+			// Need to rewrite to a corresponding ALTER TABLE statement
+			stmt, err := convertDropIndexToAlterTable(node)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, stmt)
 		// returning an empty alter means we are allowed to run it
 		// but it's not a spirit migration. But the table should be specified.
 		case *ast.CreateTableStmt:
@@ -327,6 +334,32 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	return &AbstractStatement{
 		Schema:    ciStmt.Table.Schema.String(),
 		Table:     ciStmt.Table.Name.String(),
+		Alter:     alterStmt,
+		Statement: statement,
+		StmtNode:  &stmtNodes[0],
+	}, err
+}
+
+func convertDropIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, error) {
+	diStmt, isDropIndexStmt := stmt.(*ast.DropIndexStmt)
+	if !isDropIndexStmt {
+		return nil, errors.New("not a DROP INDEX statement")
+	}
+	alterStmt := fmt.Sprintf("DROP INDEX `%s`", diStmt.IndexName)
+	// We hint in the statement that it's been rewritten
+	// and in the stmtNode we reparse from the alterStmt.
+	statement := fmt.Sprintf("/* rewritten from DROP INDEX */ ALTER TABLE `%s` %s", diStmt.Table.Name, alterStmt)
+	p := parser.New()
+	stmtNodes, _, err := p.Parse(statement, "", "")
+	if err != nil {
+		return nil, errors.New("could not parse SQL statement: " + statement)
+	}
+	if len(stmtNodes) != 1 {
+		return nil, errors.New("only one statement may be specified at once")
+	}
+	return &AbstractStatement{
+		Schema:    diStmt.Table.Schema.String(),
+		Table:     diStmt.Table.Name.String(),
 		Alter:     alterStmt,
 		Statement: statement,
 		StmtNode:  &stmtNodes[0],

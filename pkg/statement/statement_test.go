@@ -77,6 +77,20 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "cannot convert functional index to ALTER TABLE statement")
 
+	// Test drop index is rewritten.
+	abstractStmt, err = New("DROP INDEX idx ON t1")
+	assert.NoError(t, err)
+	assert.Equal(t, "t1", abstractStmt[0].Table)
+	assert.Equal(t, "DROP INDEX `idx`", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from DROP INDEX */ ALTER TABLE `t1` DROP INDEX `idx`", abstractStmt[0].Statement)
+
+	abstractStmt, err = New("DROP INDEX idx ON test.`t1`")
+	assert.NoError(t, err)
+	assert.Equal(t, "test", abstractStmt[0].Schema)
+	assert.Equal(t, "t1", abstractStmt[0].Table)
+	assert.Equal(t, "DROP INDEX `idx`", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from DROP INDEX */ ALTER TABLE `t1` DROP INDEX `idx`", abstractStmt[0].Statement)
+
 	// test unsupported.
 	_, err = New("INSERT INTO t1 (a) VALUES (1)")
 	assert.ErrorIs(t, err, ErrNotSupportedStatement)
