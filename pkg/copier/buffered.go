@@ -52,7 +52,7 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 	columnList := utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable)
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE %s",
 		columnList,
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 

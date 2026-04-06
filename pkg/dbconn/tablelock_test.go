@@ -27,7 +27,7 @@ func TestTableLock(t *testing.T) {
 	err = Exec(t.Context(), db, "CREATE TABLE _testlock_new (id INT NOT NULL PRIMARY KEY, colb int)")
 	assert.NoError(t, err)
 
-	tbl := &table.TableInfo{SchemaName: "test", TableName: "testlock", QuotedName: "`test`.`testlock`"}
+	tbl := &table.TableInfo{SchemaName: "test", TableName: "testlock", QuotedTableName: "`testlock`"}
 
 	lock1, err := NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
 	assert.NoError(t, err)
@@ -51,7 +51,7 @@ func TestExecUnderLock(t *testing.T) {
 	err = Exec(t.Context(), db, "CREATE TABLE _testunderlock_new (id INT NOT NULL PRIMARY KEY, colb int)")
 	assert.NoError(t, err)
 
-	tbl := &table.TableInfo{SchemaName: "test", TableName: "testunderlock", QuotedName: "`test`.`testunderlock`"}
+	tbl := &table.TableInfo{SchemaName: "test", TableName: "testunderlock", QuotedTableName: "`testunderlock`"}
 	lock, err := NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
 	assert.NoError(t, err)
 	err = lock.ExecUnderLock(t.Context(), "INSERT INTO testunderlock VALUES (1, 1)", "", "INSERT INTO testunderlock VALUES (2, 2)")
@@ -85,9 +85,9 @@ func TestTableLockMultiple(t *testing.T) {
 	assert.NoError(t, err)
 
 	tables := []*table.TableInfo{
-		{SchemaName: "test", TableName: "testlock1", QuotedName: "`test`.`testlock1`"},
-		{SchemaName: "test", TableName: "testlock2", QuotedName: "`test`.`testlock2`"},
-		{SchemaName: "test", TableName: "testlock3", QuotedName: "`test`.`testlock3`"},
+		{SchemaName: "test", TableName: "testlock1", QuotedTableName: "`testlock1`"},
+		{SchemaName: "test", TableName: "testlock2", QuotedTableName: "`testlock2`"},
+		{SchemaName: "test", TableName: "testlock3", QuotedTableName: "`testlock3`"},
 	}
 
 	// Acquire locks on all tables

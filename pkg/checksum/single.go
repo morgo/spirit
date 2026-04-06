@@ -53,12 +53,12 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 		c.intersectColumns(chunk),
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 	target := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 		c.intersectColumns(chunk),
-		chunk.NewTable.QuotedName,
+		chunk.NewTable.QuotedTableName,
 		chunk.String(),
 	)
 	var sourceChecksum, targetChecksum int64
@@ -113,7 +113,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	sourceRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		c.intersectColumns(chunk),
 		strings.Join(chunk.Table.KeyColumns, ", "),
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	))
 	if err != nil {
@@ -137,7 +137,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	targetRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		c.intersectColumns(chunk),
 		strings.Join(chunk.NewTable.KeyColumns, ", "),
-		chunk.NewTable.QuotedName,
+		chunk.NewTable.QuotedTableName,
 		chunk.String(),
 	))
 	if err != nil {
@@ -193,7 +193,7 @@ func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) er
 	defer c.recopyLock.Unlock()
 
 	// Construct a delete statement to remove existing rows in the target chunk
-	deleteStmt := "DELETE FROM " + chunk.NewTable.QuotedName + " WHERE " + chunk.String()
+	deleteStmt := "DELETE FROM " + chunk.NewTable.QuotedTableName + " WHERE " + chunk.String()
 
 	// Within the same database we use a REPLACE INTO .. SELECT approach.
 	// Within database we also support intersecting columns (i.e.
@@ -256,10 +256,10 @@ func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) er
 	// By doing this as two transactions we should be able to remove
 	// the opportunity for deadlocks.
 	replaceStmt := fmt.Sprintf("REPLACE INTO %s (%s) SELECT %s FROM %s WHERE %s",
-		chunk.NewTable.QuotedName,
+		chunk.NewTable.QuotedTableName,
 		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
 		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
-		chunk.Table.QuotedName,
+		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 	if _, err := dbconn.RetryableTransaction(ctx, c.db, false, c.dbConfig, deleteStmt); err != nil {

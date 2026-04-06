@@ -42,9 +42,9 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	for i := range n + 1 {
 		tbl := fmt.Sprintf("%s%d", TestKillLongRunningTransactionsTableBaseName, i)
 		tables[i] = table.NewTableInfo(db, schema, tbl)
-		err = Exec(t.Context(), db, "DROP TABLE IF EXISTS "+tables[i].QuotedName)
+		err = Exec(t.Context(), db, "DROP TABLE IF EXISTS "+tables[i].QuotedTableName)
 		require.NoError(t, err)
-		err = Exec(t.Context(), db, "CREATE TABLE "+tables[i].QuotedName+" (id INT NOT NULL auto_increment PRIMARY KEY, i int)")
+		err = Exec(t.Context(), db, "CREATE TABLE "+tables[i].QuotedTableName+" (id INT NOT NULL auto_increment PRIMARY KEY, i int)")
 		require.NoError(t, err)
 	}
 
@@ -57,7 +57,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		require.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "use "+schema)
 		require.NoError(t, err)
-		_, err = tx.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) VALUES (%d)", tables[i].QuotedName, i))
+		_, err = tx.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) VALUES (%d)", tables[i].QuotedTableName, i))
 		require.NoError(t, err)
 		txs[i] = tx
 	}
@@ -66,7 +66,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Explicitly lock the table in a non-transactional way
-	_, err = nonTrx.ExecContext(t.Context(), fmt.Sprintf("LOCK TABLES %s WRITE", tables[n].QuotedName))
+	_, err = nonTrx.ExecContext(t.Context(), fmt.Sprintf("LOCK TABLES %s WRITE", tables[n].QuotedTableName))
 	require.NoError(t, err)
 	var nonTrxID int
 	err = nonTrx.QueryRowContext(t.Context(), "SELECT CONNECTION_ID()").Scan(&nonTrxID)
@@ -74,7 +74,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 
 	// Insert a lot of rows in the 1st transaction to give it a higher "weight"
 	for i := range 16 {
-		_, err = txs[0].ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) SELECT %d FROM %s", tables[0].QuotedName, i, tables[0].QuotedName))
+		_, err = txs[0].ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) SELECT %d FROM %s", tables[0].QuotedTableName, i, tables[0].QuotedTableName))
 		require.NoError(t, err)
 	}
 
