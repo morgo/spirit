@@ -138,7 +138,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	// It will be closed in r.Close()
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	r.dbConfig.LockWaitTimeout = int(r.migration.LockWaitTimeout.Seconds())
+	if r.migration.LockWaitTimeout > 0 {
+		r.dbConfig.LockWaitTimeout = int(r.migration.LockWaitTimeout.Seconds())
+	}
 	r.dbConfig.InterpolateParams = r.migration.InterpolateParams
 	r.dbConfig.ForceKill = !r.migration.SkipForceKill
 	// Map TLS configuration from migration to dbConfig

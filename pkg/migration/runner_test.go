@@ -3411,3 +3411,50 @@ func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 	// operation observes the cancellation first.
 	require.Error(t, migrationErr)
 }
+
+func TestMigrationWithSQLCommentsInStatement(t *testing.T) {
+	// This test verifies that Spirit correctly handles SQL comments
+	// prepended to ALTER TABLE statements when using the Statement field
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS t1_comment_test")
+	testutils.RunSQL(t, "CREATE TABLE t1_comment_test (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, a INT)")
+	testutils.RunSQL(t, "INSERT INTO t1_comment_test (a) VALUES (1), (2), (3)")
+
+	// Statement with multiple SQL comments before the ALTER — this is exactly
+	// what Shift passes when users include comments in their .sql files.
+	statementWithComments := `-- Migration for JIRA-1234
+-- Author: someone@block.xyz
+-- Date: 2025-07-01
+-- This migration adds an index on column a
+-- for improved query performance on the dashboard.
+ALTER TABLE t1_comment_test ADD INDEX idx_a (a)`
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	migration := &Migration{
+		Host:      cfg.Addr,
+		Username:  cfg.User,
+		Password:  &cfg.Passwd,
+		Database:  cfg.DBName,
+		Statement: statementWithComments,
+	}
+
+	// Use NewRunner so we can inspect the parsed changes before running.
+	r, err := NewRunner(migration)
+	require.NoError(t, err)
+	require.Len(t, r.changes, 1)
+	assert.Equal(t, "ADD INDEX `idx_a`(`a`)", r.changes[0].stmt.Alter)
+
+	err = migration.Run()
+	assert.NoError(t, err)
+
+	// Verify the index was actually created
+	var indexName string
+	err = db.QueryRowContext(t.Context(), "SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA='test' AND TABLE_NAME='t1_comment_test' AND INDEX_NAME='idx_a'").Scan(&indexName)
+	assert.NoError(t, err)
+	assert.Equal(t, "idx_a", indexName)
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS t1_comment_test")
+}
