@@ -83,7 +83,7 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 	// just below.
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) %s ORDER BY %s LIMIT 1 OFFSET %d",
 		strings.Join(t.chunkKeys, ","),
-		t.Ti.QuotedName,
+		t.Ti.QuotedTableName,
 		t.keyName,
 		t.additionalConditionsSQL(false),
 		strings.Join(t.chunkKeys, ","),
@@ -93,7 +93,7 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 		// This is not the first chunk, since we have pointers set.
 		query = fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) WHERE %s %s ORDER BY %s LIMIT 1 OFFSET %d",
 			strings.Join(t.chunkKeys, ","),
-			t.Ti.QuotedName,
+			t.Ti.QuotedTableName,
 			t.keyName,
 			expandRowConstructorComparison(t.chunkKeys, OpGreaterThan, t.chunkPtrs),
 			t.additionalConditionsSQL(true),

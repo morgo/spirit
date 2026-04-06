@@ -107,10 +107,10 @@ func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
 	renameFragments := []string{}
 	for _, cfg := range c.config {
 		tablesToLock = append(tablesToLock, cfg.table, cfg.newTable)
-		oldQuotedName := fmt.Sprintf("`%s`.`%s`", cfg.table.SchemaName, cfg.oldTableName)
+		oldQuotedName := fmt.Sprintf("`%s`", cfg.oldTableName)
 		renameFragments = append(renameFragments,
-			fmt.Sprintf("%s TO %s", cfg.table.QuotedName, oldQuotedName),
-			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedName, cfg.table.QuotedName),
+			fmt.Sprintf("%s TO %s", cfg.table.QuotedTableName, oldQuotedName),
+			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedTableName, cfg.table.QuotedTableName),
 		)
 	}
 	return c.executeRenameUnderLock(ctx, tablesToLock, renameFragments)
@@ -124,6 +124,14 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 		return err
 	}
 	defer utils.CloseAndLogWithContext(ctx, tableLock)
+	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
+		return err
+	}
+	// Perform a second FlushUnderTableLock to handle the rare case where
+	// the first flush's own binlog events (from REPLACE INTO/DELETE statements)
+	// need to be read back and processed. The first flush writes changes to
+	// the _new table, which generates binlog events. The second flush ensures
+	// those events are consumed and the positions are fully synchronized.
 	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
 		return err
 	}
@@ -145,11 +153,11 @@ func (c *CutOver) partialRenameForTest(ctx context.Context) error {
 	// but only include the first rename (original -> _old)
 	for _, cfg := range c.config {
 		tablesToLock = append(tablesToLock, cfg.table, cfg.newTable)
-		oldQuotedName := fmt.Sprintf("`%s`.`%s`", cfg.table.SchemaName, cfg.oldTableName)
+		oldQuotedName := fmt.Sprintf("`%s`", cfg.oldTableName)
 		// Only add the first rename: original table -> _old
 		// Intentionally skip the second rename: _new -> original
 		renameFragments = append(renameFragments,
-			fmt.Sprintf("%s TO %s", cfg.table.QuotedName, oldQuotedName),
+			fmt.Sprintf("%s TO %s", cfg.table.QuotedTableName, oldQuotedName),
 		)
 	}
 	// Execute the partial rename using the same code path

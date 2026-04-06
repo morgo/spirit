@@ -36,8 +36,10 @@ func DSNForDatabase(dbName string) string {
 	return baseDSN
 }
 
-// CreateUniqueTestDatabase creates a unique database for a test
-func CreateUniqueTestDatabase(t *testing.T) string {
+// CreateUniqueTestDatabase creates a unique database for a test and returns
+// both the database name and a *sql.DB connection scoped to that database.
+// The connection and database are automatically cleaned up when the test finishes.
+func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	t.Helper()
 
 	// Create a unique database name based on test name
@@ -48,31 +50,36 @@ func CreateUniqueTestDatabase(t *testing.T) string {
 	// Connect to MySQL without specifying a database
 	baseDSN := DSN()
 	lastSlash := strings.LastIndex(baseDSN, "/")
-	if lastSlash >= 0 {
-		// Keep everything up to and including the slash, but remove the database name
-		rootDSN := baseDSN[:lastSlash+1]
+	if lastSlash < 0 {
+		t.Fatalf("could not parse DSN: %s", baseDSN)
+	}
+	rootDSN := baseDSN[:lastSlash+1]
 
-		db, err := sql.Open("mysql", rootDSN)
+	rootDB, err := sql.Open("mysql", rootDSN)
+	require.NoError(t, err)
+	defer func() {
+		_ = rootDB.Close()
+	}()
+	_, err = rootDB.ExecContext(t.Context(), "CREATE DATABASE IF NOT EXISTS "+dbName)
+	require.NoError(t, err)
+
+	// Open a connection scoped to the new database
+	scopedDB, err := sql.Open("mysql", rootDSN+dbName)
+	require.NoError(t, err)
+
+	// Register cleanup to close the connection and drop the database
+	t.Cleanup(func() {
+		_ = scopedDB.Close()
+		cleanupDB, err := sql.Open("mysql", rootDSN)
 		assert.NoError(t, err)
 		defer func() {
-			_ = db.Close()
+			_ = cleanupDB.Close()
 		}()
-		// Create the database
-		_, err = db.ExecContext(t.Context(), "CREATE DATABASE IF NOT EXISTS "+dbName)
+		_, err = cleanupDB.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
 		assert.NoError(t, err)
+	})
 
-		// Register cleanup to drop the database
-		t.Cleanup(func() {
-			db, err := sql.Open("mysql", rootDSN)
-			assert.NoError(t, err)
-			defer func() {
-				_ = db.Close()
-			}()
-			_, err = db.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
-			assert.NoError(t, err)
-		})
-	}
-	return dbName
+	return dbName, scopedDB
 }
 
 // RunSQLInDatabase runs SQL in a specific database
