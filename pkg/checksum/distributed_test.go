@@ -19,7 +19,7 @@ import (
 func TestFixCorruptWithApplier(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
-	newDBName := testutils.CreateUniqueTestDatabase(t)
+	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS corruptt1")
 	testutils.RunSQL(t, "CREATE TABLE corruptt1 (a INT NOT NULL , b INT, c INT, PRIMARY KEY (a))")
