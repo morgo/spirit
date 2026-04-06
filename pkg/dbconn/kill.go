@@ -312,17 +312,20 @@ func tablesToInList(tables []*table.TableInfo, logger *slog.Logger) (inList stri
 			logger.Warn("skipping nil table info in IN list")
 			continue // Skip nil table info
 		}
-		if tableInfo.SchemaName == "" || tableInfo.TableName == "" {
-			logger.Warn("skipping table with empty schema or name",
-				"schema", tableInfo.SchemaName,
+		if tableInfo.TableName == "" {
+			logger.Warn("skipping table with empty name",
 				"table", tableInfo.TableName)
-			continue // Skip tables with empty schema or name
+			continue // Skip tables with empty name
 		}
 		if !first {
 			builder.WriteString(",")
 		}
-		builder.WriteString("(?,?)")
-		params = append(params, tableInfo.SchemaName, tableInfo.TableName)
+		// Use DATABASE() instead of a parameter for the schema name so that
+		// the query matches the connection's current database. This is important
+		// for N:M moves where TableInfo objects may not have the correct SchemaName
+		// for the connection they're being used on.
+		builder.WriteString("(DATABASE(),?)")
+		params = append(params, tableInfo.TableName)
 		first = false
 	}
 	return builder.String(), params

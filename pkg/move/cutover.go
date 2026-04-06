@@ -107,7 +107,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 	for _, tbl := range c.tables {
 		oldQuotedName := fmt.Sprintf("`%s`.`%s_old`", tbl.SchemaName, tbl.TableName)
 		renameFragments = append(renameFragments,
-			fmt.Sprintf("%s TO %s", tbl.QuotedName, oldQuotedName),
+			fmt.Sprintf("%s TO %s", tbl.QuotedTableName, oldQuotedName),
 		)
 	}
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
