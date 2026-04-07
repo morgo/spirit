@@ -84,6 +84,24 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "cannot convert functional index to ALTER TABLE statement")
 
+	// Test create index with prefix length.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10))")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`name`(10))", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`name`(10))", abstractStmt[0].Statement)
+
+	// Test create index with prefix length on multiple columns.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10), id)")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`name`(10), `id`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`name`(10), `id`)", abstractStmt[0].Statement)
+
+	// Test create index with prefix length on all columns.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10), description(20))")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`name`(10), `description`(20))", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`name`(10), `description`(20))", abstractStmt[0].Statement)
+
 	// Test drop index is rewritten.
 	abstractStmt, err = New("DROP INDEX idx ON t1")
 	assert.NoError(t, err)

@@ -306,7 +306,11 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 		if part.Column == nil {
 			return nil, errors.New("cannot convert functional index to ALTER TABLE statement; please use ALTER TABLE ADD INDEX … instead")
 		}
-		columns = append(columns, part.Column.Name.String())
+		col := fmt.Sprintf("`%s`", part.Column.Name.String())
+		if part.Length > 0 {
+			col = fmt.Sprintf("%s(%d)", col, part.Length)
+		}
+		columns = append(columns, col)
 	}
 	switch ciStmt.KeyType { //nolint:exhaustive
 	case ast.IndexKeyTypeUnique:
@@ -318,7 +322,7 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	default:
 		keyType = "INDEX"
 	}
-	alterStmt := fmt.Sprintf("ADD %s `%s` (`%s`)", keyType, ciStmt.IndexName, strings.Join(columns, "`, `"))
+	alterStmt := fmt.Sprintf("ADD %s `%s` (%s)", keyType, ciStmt.IndexName, strings.Join(columns, ", "))
 	// We hint in the statement that it's been rewritten
 	// and in the stmtNode we reparse from the alterStmt.
 	statement := fmt.Sprintf("/* rewritten from CREATE INDEX */ ALTER TABLE `%s` %s", ciStmt.Table.Name, alterStmt)
