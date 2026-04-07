@@ -308,7 +308,7 @@ func TestStatementWithSQLComments(t *testing.T) {
 	assert.Equal(t, "ADD INDEX(`a`)", stmts[0].Alter)
 	assert.True(t, stmts[0].IsAlterTable())
 
-	// Multiple comment lines before the ALTER (reproduces the Shift support ticket)
+	// Multiple comment lines before the ALTER (reproduces a support ticket)
 	stmts, err = New(`-- Migration for JIRA-1234
 -- Author: someone@block.xyz
 -- Date: 2025-07-01

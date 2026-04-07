@@ -3424,7 +3424,7 @@ func TestMigrationWithSQLCommentsInStatement(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO t1_comment_test (a) VALUES (1), (2), (3)")
 
 	// Statement with multiple SQL comments before the ALTER — this is exactly
-	// what Shift passes when users include comments in their .sql files.
+	// what our tool passes when users include comments in their .sql files.
 	statementWithComments := `-- Migration for JIRA-1234
 -- Author: someone@block.xyz
 -- Date: 2025-07-01
