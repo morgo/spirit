@@ -296,3 +296,36 @@ func TestNewWithOptions(t *testing.T) {
 	_, err = NewWithOptions("CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT)", Options{})
 	assert.ErrorIs(t, err, ErrMixMatchMultiStatements)
 }
+
+// Verify that SQL comments before/after ALTER TABLE are handled correctly.
+// This reproduces an issue where users pass comments in their DDL.
+func TestStatementWithSQLComments(t *testing.T) {
+	// Single-line comments before the ALTER
+	stmts, err := New("-- This is a comment\nALTER TABLE t1 ADD INDEX (a)")
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 1)
+	assert.Equal(t, "t1", stmts[0].Table)
+	assert.Equal(t, "ADD INDEX(`a`)", stmts[0].Alter)
+	assert.True(t, stmts[0].IsAlterTable())
+
+	// Multiple comment lines before the ALTER (reproduces a support ticket)
+	stmts, err = New(`-- Migration for JIRA-1234
+-- Author: someone@block.xyz
+-- Date: 2025-07-01
+-- Description: Add index on column a for performance
+ALTER TABLE t1 ADD INDEX idx_a (a)`)
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 1)
+	assert.Equal(t, "t1", stmts[0].Table)
+	assert.Contains(t, stmts[0].Alter, "ADD INDEX")
+
+	// Block comments (/* ... */) before the ALTER
+	stmts, err = New("/* block comment */ ALTER TABLE t1 ADD COLUMN b INT")
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 1)
+	assert.Equal(t, "t1", stmts[0].Table)
+
+	// Comments only (no actual DDL) should still return ErrNoStatements
+	_, err = New("-- just a comment\n-- another comment")
+	assert.ErrorIs(t, err, ErrNoStatements)
+}
