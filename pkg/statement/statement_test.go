@@ -64,18 +64,57 @@ func TestExtractFromStatement(t *testing.T) {
 	abstractStmt, err = New("CREATE INDEX idx ON t1 (a)")
 	assert.NoError(t, err)
 	assert.Equal(t, "t1", abstractStmt[0].Table)
-	assert.Equal(t, "ADD INDEX idx (a)", abstractStmt[0].Alter)
-	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX idx (a)", abstractStmt[0].Statement)
+	assert.Equal(t, "ADD INDEX `idx` (`a`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`a`)", abstractStmt[0].Statement)
 
 	abstractStmt, err = New("CREATE INDEX idx ON test.`t1` (a)")
 	assert.NoError(t, err)
 	assert.Equal(t, "t1", abstractStmt[0].Table)
-	assert.Equal(t, "ADD INDEX idx (a)", abstractStmt[0].Alter)
-	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX idx (a)", abstractStmt[0].Statement)
+	assert.Equal(t, "ADD INDEX `idx` (`a`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`a`)", abstractStmt[0].Statement)
+
+	// Test create index with spaces in identifiers (requires quoting).
+	abstractStmt, err = New("CREATE UNIQUE INDEX `an index` ON `a table` (id)")
+	assert.NoError(t, err)
+	assert.Equal(t, "a table", abstractStmt[0].Table)
+	assert.Equal(t, "ADD UNIQUE INDEX `an index` (`id`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `a table` ADD UNIQUE INDEX `an index` (`id`)", abstractStmt[0].Statement)
 
 	_, err = New("CREATE INDEX idx ON t1 ((`a` IS NULL))")
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "cannot convert functional index to ALTER TABLE statement")
+
+	// Test create index with prefix length.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10))")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`name`(10))", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`name`(10))", abstractStmt[0].Statement)
+
+	// Test create index with prefix length on multiple columns.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10), id)")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`name`(10), `id`)", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`name`(10), `id`)", abstractStmt[0].Statement)
+
+	// Test create index with prefix length on all columns.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10), description(20))")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`name`(10), `description`(20))", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` (`name`(10), `description`(20))", abstractStmt[0].Statement)
+
+	// Test drop index is rewritten.
+	abstractStmt, err = New("DROP INDEX idx ON t1")
+	assert.NoError(t, err)
+	assert.Equal(t, "t1", abstractStmt[0].Table)
+	assert.Equal(t, "DROP INDEX `idx`", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from DROP INDEX */ ALTER TABLE `t1` DROP INDEX `idx`", abstractStmt[0].Statement)
+
+	abstractStmt, err = New("DROP INDEX idx ON test.`t1`")
+	assert.NoError(t, err)
+	assert.Equal(t, "test", abstractStmt[0].Schema)
+	assert.Equal(t, "t1", abstractStmt[0].Table)
+	assert.Equal(t, "DROP INDEX `idx`", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from DROP INDEX */ ALTER TABLE `t1` DROP INDEX `idx`", abstractStmt[0].Statement)
 
 	// test unsupported.
 	_, err = New("INSERT INTO t1 (a) VALUES (1)")
@@ -274,4 +313,37 @@ func TestNewWithOptions(t *testing.T) {
 	// NewWithOptions with zero-value options behaves like New
 	_, err = NewWithOptions("CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT)", Options{})
 	assert.ErrorIs(t, err, ErrMixMatchMultiStatements)
+}
+
+// Verify that SQL comments before/after ALTER TABLE are handled correctly.
+// This reproduces an issue where users pass comments in their DDL.
+func TestStatementWithSQLComments(t *testing.T) {
+	// Single-line comments before the ALTER
+	stmts, err := New("-- This is a comment\nALTER TABLE t1 ADD INDEX (a)")
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 1)
+	assert.Equal(t, "t1", stmts[0].Table)
+	assert.Equal(t, "ADD INDEX(`a`)", stmts[0].Alter)
+	assert.True(t, stmts[0].IsAlterTable())
+
+	// Multiple comment lines before the ALTER (reproduces a support ticket)
+	stmts, err = New(`-- Migration for JIRA-1234
+-- Author: someone@block.xyz
+-- Date: 2025-07-01
+-- Description: Add index on column a for performance
+ALTER TABLE t1 ADD INDEX idx_a (a)`)
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 1)
+	assert.Equal(t, "t1", stmts[0].Table)
+	assert.Contains(t, stmts[0].Alter, "ADD INDEX")
+
+	// Block comments (/* ... */) before the ALTER
+	stmts, err = New("/* block comment */ ALTER TABLE t1 ADD COLUMN b INT")
+	assert.NoError(t, err)
+	assert.Len(t, stmts, 1)
+	assert.Equal(t, "t1", stmts[0].Table)
+
+	// Comments only (no actual DDL) should still return ErrNoStatements
+	_, err = New("-- just a comment\n-- another comment")
+	assert.ErrorIs(t, err, ErrNoStatements)
 }

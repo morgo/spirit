@@ -53,7 +53,6 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	if lastSlash < 0 {
 		t.Fatalf("could not parse DSN: %s", baseDSN)
 	}
-	// Keep everything up to and including the slash, but remove the database name
 	rootDSN := baseDSN[:lastSlash+1]
 
 	rootDB, err := sql.Open("mysql", rootDSN)
@@ -61,7 +60,6 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	defer func() {
 		_ = rootDB.Close()
 	}()
-	// Create the database
 	_, err = rootDB.ExecContext(t.Context(), "CREATE DATABASE IF NOT EXISTS "+dbName)
 	require.NoError(t, err)
 

@@ -66,6 +66,34 @@ func TestClassify(t *testing.T) {
 			wantDDL:   true,
 		},
 		{
+			name:      "DROP INDEX",
+			sql:       "DROP INDEX idx ON t1",
+			wantType:  StatementDropIndex,
+			wantTable: "t1",
+			wantDDL:   true,
+		},
+		{
+			name:      "CREATE VIEW",
+			sql:       "CREATE VIEW v1 AS SELECT 1",
+			wantType:  StatementCreateView,
+			wantTable: "v1",
+			wantDDL:   true,
+		},
+		{
+			name:      "CREATE OR REPLACE VIEW",
+			sql:       "CREATE OR REPLACE VIEW v1 AS SELECT 1",
+			wantType:  StatementCreateView,
+			wantTable: "v1",
+			wantDDL:   true,
+		},
+		{
+			name:      "CREATE VIEW with definer",
+			sql:       "CREATE DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW v1 AS SELECT 1",
+			wantType:  StatementCreateView,
+			wantTable: "v1",
+			wantDDL:   true,
+		},
+		{
 			name:      "INSERT",
 			sql:       "INSERT INTO t1 (a) VALUES (1)",
 			wantType:  StatementInsert,
@@ -152,6 +180,20 @@ func TestClassifySchema(t *testing.T) {
 			wantType:   StatementCreateIndex,
 			wantSchema: "mydb",
 			wantTable:  "t1",
+		},
+		{
+			name:       "DROP INDEX",
+			sql:        "DROP INDEX idx ON mydb.t1",
+			wantType:   StatementDropIndex,
+			wantSchema: "mydb",
+			wantTable:  "t1",
+		},
+		{
+			name:       "CREATE VIEW",
+			sql:        "CREATE VIEW mydb.v1 AS SELECT 1",
+			wantType:   StatementCreateView,
+			wantSchema: "mydb",
+			wantTable:  "v1",
 		},
 		{
 			name:       "INSERT",
@@ -257,6 +299,8 @@ func TestStatementTypeString(t *testing.T) {
 	assert.Equal(t, "RENAME TABLE", StatementRenameTable.String())
 	assert.Equal(t, "TRUNCATE TABLE", StatementTruncateTable.String())
 	assert.Equal(t, "CREATE INDEX", StatementCreateIndex.String())
+	assert.Equal(t, "DROP INDEX", StatementDropIndex.String())
+	assert.Equal(t, "CREATE VIEW", StatementCreateView.String())
 	assert.Equal(t, "INSERT", StatementInsert.String())
 	assert.Equal(t, "UPDATE", StatementUpdate.String())
 	assert.Equal(t, "DELETE", StatementDelete.String())

@@ -196,6 +196,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
+
 	var rowData [][]any
 	for i := range c.sourcePools {
 		c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "sourceID", i, "table", chunk.Table.TableName)

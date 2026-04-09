@@ -396,8 +396,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	t.Parallel()
 	// Create unique database for this test
-	dbName, db := testutils.CreateUniqueTestDatabase(t)
-	defer utils.CloseAndLog(db)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	tbl := `CREATE TABLE cptresume (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -962,8 +961,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	// so we test to make sure a sentinel table created manually by the operator
 	// blocks cutover.
 
-	dbName, db := testutils.CreateUniqueTestDatabase(t)
-	defer utils.CloseAndLog(db)
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	tableName := `resume_checkpoint_e2e_w_sentinel`
 	tableInfo := table.TableInfo{SchemaName: dbName, TableName: tableName}
 	lockTables := []*table.TableInfo{&tableInfo}

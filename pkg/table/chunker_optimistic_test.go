@@ -338,7 +338,7 @@ func TestOptimisticChunkerReset(t *testing.T) {
 		EstimatedRows:     1000000,
 		SchemaName:        "test",
 		TableName:         "t1",
-		QuotedTableName:   "`test`.`t1`",
+		QuotedTableName:   "`t1`",
 		KeyColumns:        []string{"id"},
 		keyColumnsMySQLTp: []string{"bigint"},
 		keyDatums:         []datumTp{signedType},
