@@ -29,15 +29,14 @@ func NewMultiChunker(c ...Chunker) Chunker {
 		return c[0]
 	}
 	chunkers := make(map[string]Chunker, len(c))
-	for i, chunker := range c {
+	for _, chunker := range c {
 		tables := chunker.Tables()
 		if len(tables) == 0 {
 			continue
 		}
-		// Key by index to guarantee uniqueness. In N:M moves, multiple sources
-		// may have the same SchemaName and TableName (e.g., schema "source" on
-		// different servers), so we cannot key by name alone.
-		chunkers[fmt.Sprintf("%d", i)] = chunker
+		// Key by QualifiedName which includes Host (when set) to disambiguate
+		// tables with the same schema.table on different servers (N:M moves).
+		chunkers[tables[0].QualifiedName()] = chunker
 	}
 	return &multiChunker{
 		chunkers: chunkers,

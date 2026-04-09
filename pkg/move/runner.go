@@ -127,6 +127,7 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		}
 
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
+		tableInfo.Host = r.sourceConfig.Addr // Set the Host field for disambiguation in multi-chunker
 		if err := tableInfo.SetInfo(ctx); err != nil {
 			return nil, err
 		}
