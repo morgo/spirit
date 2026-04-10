@@ -17,20 +17,36 @@ type PlannedChange struct {
 	// TableName is the table affected by this change.
 	TableName string
 
-	// Warnings contains lint violations with WARNING severity for this table.
+	// Violations contains lint violations for this table.
 	// Linters operate at the table level. When a diff produces multiple
 	// statements for the same table, violations are attached only to the
 	// last statement to avoid duplication.
-	Warnings []string
+	Violations []Violation
+}
 
-	// Errors contains lint violations with ERROR severity for this table.
-	// See Warnings for multi-statement behavior.
-	Errors []string
+// Errors returns lint violations with ERROR severity.
+func (c *PlannedChange) Errors() []Violation {
+	return c.filterBySeverity(SeverityError)
+}
 
-	// Infos contains lint violations with INFO severity for this table.
-	// These are suggestions or style preferences that callers may choose to ignore.
-	// See Warnings for multi-statement behavior.
-	Infos []string
+// Warnings returns lint violations with WARNING severity.
+func (c *PlannedChange) Warnings() []Violation {
+	return c.filterBySeverity(SeverityWarning)
+}
+
+// Infos returns lint violations with INFO severity.
+func (c *PlannedChange) Infos() []Violation {
+	return c.filterBySeverity(SeverityInfo)
+}
+
+func (c *PlannedChange) filterBySeverity(severity Severity) []Violation {
+	var result []Violation
+	for _, v := range c.Violations {
+		if v.Severity == severity {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 // Plan holds the complete result of a declarative-to-imperative diff with linting.
@@ -47,7 +63,7 @@ func (p *Plan) HasChanges() bool {
 // HasErrors returns true if any change has lint errors.
 func (p *Plan) HasErrors() bool {
 	for i := range p.Changes {
-		if len(p.Changes[i].Errors) > 0 {
+		if len(p.Changes[i].Errors()) > 0 {
 			return true
 		}
 	}
@@ -57,7 +73,7 @@ func (p *Plan) HasErrors() bool {
 // HasWarnings returns true if any change has lint warnings.
 func (p *Plan) HasWarnings() bool {
 	for i := range p.Changes {
-		if len(p.Changes[i].Warnings) > 0 {
+		if len(p.Changes[i].Warnings()) > 0 {
 			return true
 		}
 	}
@@ -67,7 +83,7 @@ func (p *Plan) HasWarnings() bool {
 // HasInfos returns true if any change has lint infos.
 func (p *Plan) HasInfos() bool {
 	for i := range p.Changes {
-		if len(p.Changes[i].Infos) > 0 {
+		if len(p.Changes[i].Infos()) > 0 {
 			return true
 		}
 	}
@@ -132,30 +148,13 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 	//
 	// Violations are sorted first to ensure deterministic output, since
 	// RunLinters iterates over a map of registered linters.
-	type tableViolations struct {
-		warnings []string
-		errors   []string
-		infos    []string
-	}
-	violationsByTable := make(map[string]*tableViolations)
+	violationsByTable := make(map[string][]Violation)
 	for _, v := range sortViolations(violations) {
 		tableName := ""
 		if v.Location != nil {
 			tableName = v.Location.Table
 		}
-		tv, ok := violationsByTable[tableName]
-		if !ok {
-			tv = &tableViolations{}
-			violationsByTable[tableName] = tv
-		}
-		switch v.Severity {
-		case SeverityError:
-			tv.errors = append(tv.errors, v.String())
-		case SeverityWarning:
-			tv.warnings = append(tv.warnings, v.String())
-		case SeverityInfo:
-			tv.infos = append(tv.infos, v.String())
-		}
+		violationsByTable[tableName] = append(violationsByTable[tableName], v)
 	}
 
 	// 5. Build the plan, attaching violations to the last statement per table.
@@ -172,14 +171,12 @@ func PlanChanges(current, desired []table.TableSchema, diffOpts *statement.DiffO
 		})
 		lastIndexByTable[ch.Table] = i
 	}
-	for tableName, tv := range violationsByTable {
+	for tableName, vs := range violationsByTable {
 		idx, ok := lastIndexByTable[tableName]
 		if !ok {
 			continue
 		}
-		plan.Changes[idx].Warnings = tv.warnings
-		plan.Changes[idx].Errors = tv.errors
-		plan.Changes[idx].Infos = tv.infos
+		plan.Changes[idx].Violations = vs
 	}
 
 	return plan, nil

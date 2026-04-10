@@ -234,7 +234,7 @@ func TestDiff_DirToDirIntegration(t *testing.T) {
 		}
 	}
 	require.NotNil(t, ordersChange, "expected a change for orders table")
-	assert.NotEmpty(t, ordersChange.Warnings, "expected warnings for orders table (has_float, has_fk)")
+	assert.NotEmpty(t, ordersChange.Warnings(), "expected warnings for orders table (has_float, has_fk)")
 
 	// Should NOT have changes for users (unchanged)
 	for _, ch := range plan.Changes {
