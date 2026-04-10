@@ -172,9 +172,8 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	defer c.recopyLock.Unlock()
 
 	// Step 1: Delete all rows in the chunk range from all targets
-	// This ensures we remove any extra rows that shouldn't be there
-	// Note: In move operations, chunk.NewTable is nil. We use the same tablename across all shards,
-	// so we can just use chunk.Table to get it.
+	// This ensures we remove any extra rows that shouldn't be there.
+	// Use chunk.Table here to target the chunk's original table name consistently across targets.
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.Table.QuotedTableName, chunk.String())
 
 	targets := c.applier.GetTargets()
