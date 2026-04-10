@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"database/sql"
 	"log/slog"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	config.FixDifferences = true
 	config.Applier = applier
 
-	checker, err := NewChecker(src, chunker, feed, config)
+	checker, err := NewChecker([]*sql.DB{src}, chunker, []*repl.Client{feed}, config)
 	assert.Equal(t, "0/3 0.00%", checker.GetProgress())
 	assert.NoError(t, err)
 	assert.NoError(t, checker.Run(t.Context())) // should be fixed!
@@ -184,7 +185,7 @@ func TestDistributedChecksum(t *testing.T) {
 	config.FixDifferences = false // Should pass without needing fixes
 
 	// Create and run the distributed checker
-	checker, err := NewChecker(sourceDB, chunker, feed, config)
+	checker, err := NewChecker([]*sql.DB{sourceDB}, chunker, []*repl.Client{feed}, config)
 	require.NoError(t, err)
 
 	// Run the checksum - should pass since data is correctly distributed
@@ -200,4 +201,133 @@ func TestDistributedChecksum(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, sourceCount, shard0Count+shard1Count, "Total rows in shards should equal source")
+}
+
+// TestDistributedChecksumNtoM tests the distributed checksum with 2 sources and 2 targets (N:M).
+// Source layout:
+//   - source_nm_ck_0.t1: rows with id 1-4
+//   - source_nm_ck_1.t1: rows with id 5-8
+//
+// Target layout (resharded by even/odd):
+//   - target_nm_ck_0.t1: even ids (2, 4, 6, 8)
+//   - target_nm_ck_1.t1: odd ids (1, 3, 5, 7)
+//
+// The checksum aggregates BIT_XOR across all sources and all targets respectively,
+// so the merged source checksum should match the merged target checksum.
+func TestDistributedChecksumNtoM(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	// Create source databases
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_nm_ck_0`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_nm_ck_1`)
+	testutils.RunSQL(t, `CREATE DATABASE source_nm_ck_0`)
+	testutils.RunSQL(t, `CREATE DATABASE source_nm_ck_1`)
+	testutils.RunSQL(t, `CREATE TABLE source_nm_ck_0.t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+	testutils.RunSQL(t, `CREATE TABLE source_nm_ck_1.t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+
+	// Source 0 has rows 1-4
+	testutils.RunSQL(t, `INSERT INTO source_nm_ck_0.t1 VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four')`)
+	// Source 1 has rows 5-8
+	testutils.RunSQL(t, `INSERT INTO source_nm_ck_1.t1 VALUES (5, 'five'), (6, 'six'), (7, 'seven'), (8, 'eight')`)
+
+	// Create target databases (resharded by even/odd)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS target_nm_ck_0`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS target_nm_ck_1`)
+	testutils.RunSQL(t, `CREATE DATABASE target_nm_ck_0`)
+	testutils.RunSQL(t, `CREATE DATABASE target_nm_ck_1`)
+	testutils.RunSQL(t, `CREATE TABLE target_nm_ck_0.t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+	testutils.RunSQL(t, `CREATE TABLE target_nm_ck_1.t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+
+	// Target 0 (-80): even ids from both sources
+	testutils.RunSQL(t, `INSERT INTO target_nm_ck_0.t1 VALUES (2, 'two'), (4, 'four'), (6, 'six'), (8, 'eight')`)
+	// Target 1 (80-): odd ids from both sources
+	testutils.RunSQL(t, `INSERT INTO target_nm_ck_1.t1 VALUES (1, 'one'), (3, 'three'), (5, 'five'), (7, 'seven')`)
+
+	// Create DB connections
+	src0Cfg := cfg.Clone()
+	src0Cfg.DBName = "source_nm_ck_0"
+	src0DB, err := dbconn.New(src0Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src0DB)
+
+	src1Cfg := cfg.Clone()
+	src1Cfg.DBName = "source_nm_ck_1"
+	src1DB, err := dbconn.New(src1Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src1DB)
+
+	tgt0Cfg := cfg.Clone()
+	tgt0Cfg.DBName = "target_nm_ck_0"
+	tgt0DB, err := dbconn.New(tgt0Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt0DB)
+
+	tgt1Cfg := cfg.Clone()
+	tgt1Cfg.DBName = "target_nm_ck_1"
+	tgt1DB, err := dbconn.New(tgt1Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt1DB)
+
+	// Create TableInfo for each source (bound to its own DB connection)
+	src0Table := table.NewTableInfo(src0DB, "source_nm_ck_0", "t1")
+	require.NoError(t, src0Table.SetInfo(t.Context()))
+	src0Table.ShardingColumn = "id"
+	src0Table.HashFunc = testutils.EvenOddHasher
+
+	src1Table := table.NewTableInfo(src1DB, "source_nm_ck_1", "t1")
+	require.NoError(t, src1Table.SetInfo(t.Context()))
+	src1Table.ShardingColumn = "id"
+	src1Table.HashFunc = testutils.EvenOddHasher
+
+	// Create ShardedApplier with 2 targets
+	targets := []applier.Target{
+		{DB: tgt0DB, KeyRange: "-80", Config: tgt0Cfg},
+		{DB: tgt1DB, KeyRange: "80-", Config: tgt1Cfg},
+	}
+	shardedApplier, err := applier.NewShardedApplier(targets, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	// Create a repl client per source. Both share the same applier.
+	logger := slog.Default()
+	feed0 := repl.NewClient(src0DB, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        repl.NewServerID(),
+		Applier:         shardedApplier,
+	})
+	defer feed0.Close()
+	require.NoError(t, feed0.AddSubscription(src0Table, src0Table, nil))
+	require.NoError(t, feed0.Run(t.Context()))
+
+	feed1 := repl.NewClient(src1DB, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        repl.NewServerID(),
+		Applier:         shardedApplier,
+	})
+	defer feed1.Close()
+	require.NoError(t, feed1.AddSubscription(src1Table, src1Table, nil))
+	require.NoError(t, feed1.Run(t.Context()))
+
+	// Create a chunker per source, then wrap in a MultiChunker.
+	chunker0, err := table.NewChunker(src0Table, nil, 0, logger)
+	require.NoError(t, err)
+	chunker1, err := table.NewChunker(src1Table, nil, 0, logger)
+	require.NoError(t, err)
+	multiChunker := table.NewMultiChunker(chunker0, chunker1)
+	require.NoError(t, multiChunker.Open())
+
+	// Create the distributed checker with both source DBs and both feeds.
+	config := NewCheckerDefaultConfig()
+	config.Applier = shardedApplier
+	config.FixDifferences = false
+
+	checker, err := NewChecker([]*sql.DB{src0DB, src1DB}, multiChunker, []*repl.Client{feed0, feed1}, config)
+	require.NoError(t, err)
+
+	// Run the checksum — should pass since the merged source data matches merged target data.
+	require.NoError(t, checker.Run(t.Context()))
 }

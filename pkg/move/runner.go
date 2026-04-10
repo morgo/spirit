@@ -127,6 +127,7 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 		}
 
 		tableInfo := table.NewTableInfo(r.source, r.sourceConfig.DBName, tableName)
+		tableInfo.Host = r.sourceConfig.Addr // Set the Host field for disambiguation in multi-chunker
 		if err := tableInfo.SetInfo(ctx); err != nil {
 			return nil, err
 		}
@@ -167,7 +168,7 @@ func (r *Runner) getTables(ctx context.Context, db *sql.DB) ([]*table.TableInfo,
 func (r *Runner) createTargetTables(ctx context.Context) error {
 	for _, t := range r.sourceTables {
 		var createStmt string
-		row := r.source.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", t.TableName))
+		row := r.source.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", t.QuotedTableName))
 		var tbl string
 		if err := row.Scan(&tbl, &createStmt); err != nil {
 			return err
@@ -776,7 +777,7 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 	for _, tbl := range r.sourceTables {
 		// Get CREATE TABLE statement from source
 		var sourceCreateStmt string
-		row := r.source.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", tbl.TableName))
+		row := r.source.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", tbl.QuotedTableName))
 		var tableName string
 		if err := row.Scan(&tableName, &sourceCreateStmt); err != nil {
 			return fmt.Errorf("failed to get CREATE TABLE for source %s: %w", tbl.TableName, err)
@@ -791,7 +792,7 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 
 			// Get CREATE TABLE statement from target
 			var targetCreateStmt, targetTableName string
-			targetRow := target.DB.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", tbl.TableName))
+			targetRow := target.DB.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", tbl.QuotedTableName))
 			if err := targetRow.Scan(&targetTableName, &targetCreateStmt); err != nil {
 				return fmt.Errorf("failed to get CREATE TABLE for target %d table %s: %w", targetIdx, tbl.TableName, err)
 			}
@@ -872,7 +873,7 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 
 	// Perform a checksum operation
 	var err error
-	r.checker, err = checksum.NewChecker(r.source, r.checksumChunker, r.replClient, &checksum.CheckerConfig{
+	r.checker, err = checksum.NewChecker([]*sql.DB{r.source}, r.checksumChunker, []*repl.Client{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.move.Threads,
 		TargetChunkTime: r.move.TargetChunkTime,
 		DBConfig:        r.dbConfig,

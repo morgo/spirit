@@ -449,3 +449,22 @@ func TestGetNonGeneratedColumnOrdinal(t *testing.T) {
 	assert.Equal(t, -1, ordinal)
 	assert.ErrorContains(t, err, "column nonexistent not found in non-generated columns of table testtable")
 }
+
+func TestQualifiedName(t *testing.T) {
+	// Without Host, returns schema.table
+	ti := &TableInfo{SchemaName: "mydb", TableName: "orders"}
+	assert.Equal(t, "mydb.orders", ti.QualifiedName())
+
+	// With Host, returns host.schema.table
+	ti.Host = "server1:3306"
+	assert.Equal(t, "server1:3306.mydb.orders", ti.QualifiedName())
+
+	// Two tables with same schema.table but different hosts are distinct
+	ti2 := &TableInfo{SchemaName: "mydb", TableName: "orders", Host: "server2:3306"}
+	assert.NotEqual(t, ti.QualifiedName(), ti2.QualifiedName())
+
+	// Two tables with same name, no host, different schemas are distinct
+	ti3 := &TableInfo{SchemaName: "db1", TableName: "t1"}
+	ti4 := &TableInfo{SchemaName: "db2", TableName: "t1"}
+	assert.NotEqual(t, ti3.QualifiedName(), ti4.QualifiedName())
+}

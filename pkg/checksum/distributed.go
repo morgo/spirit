@@ -23,14 +23,21 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// sourcePool pairs a source database connection with its transaction pool.
+// Used during checksum to query all sources for a given chunk range.
+type sourcePool struct {
+	db      *sql.DB
+	trxPool *dbconn.TrxPool
+}
+
 type DistributedChecker struct {
 	sync.Mutex
 
 	concurrency      int
-	feed             *repl.Client
-	db               *sql.DB
+	feeds            []*repl.Client
+	sourceDBs        []*sql.DB // all source database connections
 	applier          applier.Applier
-	trxPool          *dbconn.TrxPool   // reader trx pool (source)
+	sourcePools      []sourcePool      // one per source DB, created during initConnPool
 	targetTrxPools   []*dbconn.TrxPool // transaction pools for each target
 	isInvalid        bool
 	chunker          table.Chunker
@@ -46,44 +53,48 @@ type DistributedChecker struct {
 
 var _ Checker = (*DistributedChecker)(nil)
 
-func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPool, chunk *table.Chunk) error {
+func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chunk) error {
 	startTime := time.Now()
-
-	// Get source transaction
-	srcTrx, err := trxPool.Get()
-	if err != nil {
-		return err
-	}
-	defer trxPool.Put(srcTrx)
 
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 
-	// Query source
-	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		c.intersectColumns(chunk),
-		chunk.Table.QuotedTableName,
-		chunk.String(),
-	)
+	// Build the checksum query fragment. The same WHERE clause and column list
+	// applies to both sources and targets since all schemas are identical.
+	checksumColumns := c.intersectColumns(chunk)
+	whereClause := chunk.String()
+
+	// Query ALL sources and aggregate results.
+	// BIT_XOR is associative/commutative, so XOR-ing per-source checksums
+	// produces the same result as checksumming all rows in one table.
+	// The count is simply summed.
 	var sourceChecksum int64
 	var sourceCount uint64
-	err = srcTrx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount)
-	if err != nil {
-		return err
+	for i := range c.sourcePools {
+		srcTrx, err := c.sourcePools[i].trxPool.Get()
+		if err != nil {
+			return fmt.Errorf("failed to get transaction for source %d: %w", i, err)
+		}
+		defer c.sourcePools[i].trxPool.Put(srcTrx)
+
+		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+			checksumColumns,
+			chunk.Table.QuotedTableName,
+			whereClause,
+		)
+		var cs int64
+		var cnt uint64
+		if err := srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt); err != nil {
+			return fmt.Errorf("failed to query source %d: %w", i, err)
+		}
+		sourceChecksum ^= cs
+		sourceCount += cnt
+		c.logger.Debug("source checksum", "sourceID", i, "checksum", cs, "count", cnt)
 	}
 
-	// Query all targets and aggregate results
-	// Note: In move operations, chunk.NewTable is nil. We use the same tablename across all shards,
-	// so we can just use chunk.Table to get it.
-	targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM `%s` WHERE %s",
-		c.intersectColumns(chunk),
-		chunk.Table.TableName,
-		chunk.String(),
-	)
-
-	// Aggregate checksums and counts from all targets
-	var aggregatedChecksum int64 = 0
-	var aggregatedCount uint64 = 0
-
+	// Query ALL targets and aggregate results.
+	// Same aggregation logic: XOR checksums, sum counts.
+	var targetChecksum int64
+	var targetCount uint64
 	for i, targetTrxPool := range c.targetTrxPools {
 		targetTrx, err := targetTrxPool.Get()
 		if err != nil {
@@ -91,31 +102,34 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 		}
 		defer targetTrxPool.Put(targetTrx)
 
-		var targetChecksum int64
-		var targetCount uint64
-		err = targetTrx.QueryRowContext(ctx, targetQuery).Scan(&targetChecksum, &targetCount)
-		if err != nil {
+		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+			checksumColumns,
+			chunk.Table.QuotedTableName,
+			whereClause,
+		)
+		var cs int64
+		var cnt uint64
+		if err := targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt); err != nil {
 			return fmt.Errorf("failed to query target %d: %w", i, err)
 		}
-
-		// Aggregate: XOR the checksums, sum the counts
-		aggregatedChecksum ^= targetChecksum
-		aggregatedCount += targetCount
-
-		c.logger.Debug("target checksum", "targetID", i, "checksum", targetChecksum, "count", targetCount)
+		targetChecksum ^= cs
+		targetCount += cnt
+		c.logger.Debug("target checksum", "targetID", i, "checksum", cs, "count", cnt)
 	}
 
-	c.logger.Debug("aggregated checksum", "checksum", aggregatedChecksum, "count", aggregatedCount)
+	c.logger.Debug("aggregated checksums",
+		"sourceChecksum", sourceChecksum, "sourceCount", sourceCount,
+		"targetChecksum", targetChecksum, "targetCount", targetCount)
 
-	if sourceChecksum != aggregatedChecksum {
+	if sourceChecksum != targetChecksum {
 		// The checksums do not match, so we first need
 		// to inspect closely and report on the differences.
 		c.differencesFound.Add(1)
 		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(),
-			"sourceChecksum", sourceChecksum, "targetChecksum", aggregatedChecksum,
-			"sourceCount", sourceCount, "targetCount", aggregatedCount)
+			"sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum,
+			"sourceCount", sourceCount, "targetCount", targetCount)
 
-		// For distributed case, we can't easily inspect differences across multiple targets
+		// For distributed case, we can't easily inspect differences across multiple sources/targets
 		// So we'll just log the mismatch and proceed to fix
 		c.logger.Warn("distributed checksum mismatch detected, will recopy chunk")
 
@@ -125,12 +139,12 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.
 			return errors.New("checksum mismatch")
 		}
 		// Since we can fix differences, replace the chunk.
-		if err = c.replaceChunk(ctx, chunk); err != nil {
+		if err := c.replaceChunk(ctx, chunk); err != nil {
 			return err
 		}
 	}
 	// When we give feedback, we need to say how many rows were in the chunk.
-	c.chunker.Feedback(chunk, time.Since(startTime), aggregatedCount)
+	c.chunker.Feedback(chunk, time.Since(startTime), targetCount)
 	return nil
 }
 
@@ -158,10 +172,9 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	defer c.recopyLock.Unlock()
 
 	// Step 1: Delete all rows in the chunk range from all targets
-	// This ensures we remove any extra rows that shouldn't be there
-	// Note: In move operations, chunk.NewTable is nil. We use the same tablename across all shards,
-	// so we can just use chunk.Table to get it.
-	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE %s", chunk.Table.TableName, chunk.String())
+	// This ensures we remove any extra rows that shouldn't be there.
+	// Use chunk.Table here to target the chunk's original table name consistently across targets.
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.Table.QuotedTableName, chunk.String())
 
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
@@ -172,47 +185,52 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 		}
 	}
 
-	// Step 2: Read all rows from the source chunk
+	// Step 2: Read all rows from ALL sources for the chunk range and merge them.
 	// Use NonGeneratedColumns because the applier expects non-generated columns only.
 	// This ensures the column ordinals match when the applier extracts the sharding column.
-	columnList := strings.Join(chunk.Table.NonGeneratedColumns, ", ")
+	columnList := table.QuoteColumns(chunk.Table.NonGeneratedColumns)
+	// Use the table name only; each source DB connection determines which database is queried.
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		columnList,
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 
-	c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "query", query, "table", chunk.Table.QuotedTableName)
-	rows, err := c.db.QueryContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("failed to query chunk data: %w", err)
-	}
-	defer utils.CloseAndLog(rows)
-
-	// Collect all rows
 	var rowData [][]any
-	for rows.Next() {
-		values := make([]any, len(chunk.Table.NonGeneratedColumns))
-		valuePtrs := make([]any, len(chunk.Table.NonGeneratedColumns))
-		for i := range values {
-			valuePtrs[i] = &values[i]
+	for i := range c.sourcePools {
+		c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "sourceID", i, "table", chunk.Table.TableName)
+
+		rows, err := c.sourcePools[i].db.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("failed to query chunk data from source %d: %w", i, err)
 		}
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return fmt.Errorf("failed to scan row: %w", err)
+
+		for rows.Next() {
+			values := make([]any, len(chunk.Table.NonGeneratedColumns))
+			valuePtrs := make([]any, len(chunk.Table.NonGeneratedColumns))
+			for j := range values {
+				valuePtrs[j] = &values[j]
+			}
+			if err := rows.Scan(valuePtrs...); err != nil {
+				utils.CloseAndLog(rows)
+				return fmt.Errorf("failed to scan row from source %d: %w", i, err)
+			}
+			rowData = append(rowData, values)
 		}
-		rowData = append(rowData, values)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating rows: %w", err)
+		if err := rows.Err(); err != nil {
+			utils.CloseAndLog(rows)
+			return fmt.Errorf("error iterating rows from source %d: %w", i, err)
+		}
+		utils.CloseAndLog(rows)
 	}
 
-	c.logger.Info("recopying chunk via applier", "chunk", chunk.String(), "rowCount", len(rowData))
+	c.logger.Info("recopying chunk via applier", "chunk", chunk.String(), "rowCount", len(rowData), "sourceCount", len(c.sourcePools))
 
 	// Step 3: Use the applier to write the rows to all targets
 	// The applier will handle distribution across shards if needed
 	if len(rowData) > 0 {
 		done := make(chan error, 1)
-		err = c.applier.Apply(ctx, chunk, rowData, func(affectedRows int64, err error) {
+		applyErr := c.applier.Apply(ctx, chunk, rowData, func(affectedRows int64, err error) {
 			if err != nil {
 				c.logger.Error("failed to recopy chunk via applier", "error", err)
 				done <- err
@@ -221,8 +239,8 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 				done <- nil
 			}
 		})
-		if err != nil {
-			return fmt.Errorf("failed to initiate recopy via applier: %w", err)
+		if applyErr != nil {
+			return fmt.Errorf("failed to initiate recopy via applier: %w", applyErr)
 		}
 
 		// Wait for the apply to complete
@@ -270,8 +288,10 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// Try and catch up before we apply a table lock,
 	// since we will need to catch up again with the lock held
 	// and we want to minimize that.
-	if err := c.feed.Flush(ctx); err != nil {
-		return err
+	for _, feed := range c.feeds {
+		if err := feed.Flush(ctx); err != nil {
+			return err
+		}
 	}
 
 	c.logger.Info("starting distributed checksum operation, this will require table locks")
@@ -284,30 +304,41 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 
 	c.logger.Info("distributed checksum will lock tables on all targets", "targetCount", len(targets))
 
-	// Extract the source and target tables from the chunker's Tables() method
-	// By convention, every second table is the "new" table.
-	// However, in a move we don't usually specify the writeTable when creating the chunker,
-	// so it automatically gets set to the same as the readTable.
-	var readTables, writeTables []*table.TableInfo
-	for i, tbl := range c.chunker.Tables() {
-		if i%2 == 0 {
-			readTables = append(readTables, tbl)
-		} else {
-			writeTables = append(writeTables, tbl)
+	// Collect unique table names from the chunker for locking.
+	// Force-kill uses DATABASE() to resolve the schema, so we only need table names.
+	allTables := c.chunker.Tables()
+	var lockTables []*table.TableInfo
+	seen := make(map[string]bool)
+	for _, tbl := range allTables {
+		if !seen[tbl.TableName] {
+			lockTables = append(lockTables, tbl)
+			seen[tbl.TableName] = true
 		}
 	}
 
-	// Lock source tables
-	sourceTableLock, err := dbconn.NewTableLock(ctx, c.db, readTables, c.dbConfig, c.logger)
-	if err != nil {
-		return fmt.Errorf("failed to lock source tables: %w", err)
+	// Lock tables on each source DB. We use c.sourceDBs which is explicitly
+	// provided (for N:M moves) or defaults to the single source DB.
+	var sourceTableLocks []*dbconn.TableLock
+	for i, srcDB := range c.sourceDBs {
+		lock, err := dbconn.NewTableLock(ctx, srcDB, lockTables, c.dbConfig, c.logger)
+		if err != nil {
+			for _, l := range sourceTableLocks {
+				utils.CloseAndLogWithContext(ctx, l)
+			}
+			return fmt.Errorf("failed to lock source tables on source %d: %w", i, err)
+		}
+		sourceTableLocks = append(sourceTableLocks, lock)
 	}
-	defer utils.CloseAndLogWithContext(ctx, sourceTableLock)
+	defer func() {
+		for _, lock := range sourceTableLocks {
+			utils.CloseAndLogWithContext(ctx, lock)
+		}
+	}()
 
 	// Lock tables on all targets
 	var targetTableLocks []*dbconn.TableLock
 	for i, target := range targets {
-		targetLock, err := dbconn.NewTableLock(ctx, target.DB, writeTables, c.dbConfig, c.logger)
+		targetLock, err := dbconn.NewTableLock(ctx, target.DB, lockTables, c.dbConfig, c.logger)
 		if err != nil {
 			// Clean up any locks we've already acquired
 			for _, lock := range targetTableLocks {
@@ -323,22 +354,35 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		}
 	}()
 
-	// With the lock(s) held, flush one more time under the lock tables.
-	// We use the first target's lock for flushing (they should all be consistent)
-	if err := c.feed.FlushUnderTableLock(ctx, targetTableLocks[0]); err != nil {
-		return fmt.Errorf("failed to flush under table lock: %w", err)
+	// With the lock(s) held, flush all feeds one more time.
+	// We use the first target's lock for flushing (they should all be consistent).
+	for _, feed := range c.feeds {
+		if err := feed.FlushUnderTableLock(ctx, targetTableLocks[0]); err != nil {
+			return fmt.Errorf("failed to flush under table lock: %w", err)
+		}
 	}
 
-	// Assert that the change set is empty. This should always
-	// be the case because we are under a lock.
-	if !c.feed.AllChangesFlushed() {
-		return repl.ErrChangesNotFlushed
+	// Assert that the change set is empty on all feeds.
+	for i, feed := range c.feeds {
+		if !feed.AllChangesFlushed() {
+			return fmt.Errorf("feed %d: %w", i, repl.ErrChangesNotFlushed)
+		}
 	}
 
-	// Create a transaction pool for the source
-	c.trxPool, err = dbconn.NewTrxPool(ctx, c.db, c.concurrency, c.dbConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create source transaction pool: %w", err)
+	// Create transaction pools for each source
+	c.sourcePools = make([]sourcePool, 0, len(c.sourceDBs))
+	for i, srcDB := range c.sourceDBs {
+		pool, err := dbconn.NewTrxPool(ctx, srcDB, c.concurrency, c.dbConfig)
+		if err != nil {
+			// Clean up pools already created
+			for _, sp := range c.sourcePools {
+				if err2 := sp.trxPool.Close(); err2 != nil {
+					c.logger.Error("failed to close source transaction pool", "error", err2)
+				}
+			}
+			return fmt.Errorf("failed to create source transaction pool for source %d: %w", i, err)
+		}
+		c.sourcePools = append(c.sourcePools, sourcePool{db: srcDB, trxPool: pool})
 	}
 
 	// Create transaction pools for each target
@@ -349,8 +393,8 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		targetTrxPool, err := dbconn.NewTrxPool(ctx, target.DB, c.concurrency, c.dbConfig)
 		if err != nil {
 			// Clean up any pools we've already created
-			if c.trxPool != nil {
-				if err2 := c.trxPool.Close(); err2 != nil {
+			for _, sp := range c.sourcePools {
+				if err2 := sp.trxPool.Close(); err2 != nil {
 					c.logger.Error("failed to close source transaction pool", "error", err2)
 				}
 			}
@@ -366,7 +410,9 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		c.targetTrxPools[i] = targetTrxPool
 	}
 
-	c.logger.Info("distributed checksum transaction pools created", "targetCount", len(c.targetTrxPools))
+	c.logger.Info("distributed checksum transaction pools created",
+		"sourceCount", len(c.sourcePools),
+		"targetCount", len(c.targetTrxPools))
 	return nil
 }
 
@@ -440,8 +486,14 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	// - If they are there, they will take a huge amount of time to flush
 	// - The memory requirements for 1MM deltas seems reasonable, but for a multi-day
 	//   checksum it is reasonable to assume it may exceed this.
-	go c.feed.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
-	defer c.feed.StopPeriodicFlush()
+	for _, feed := range c.feeds {
+		go feed.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+	}
+	defer func() {
+		for _, feed := range c.feeds {
+			feed.StopPeriodicFlush()
+		}
+	}()
 
 	g, errGrpCtx := errgroup.WithContext(ctx)
 	g.SetLimit(c.concurrency)
@@ -455,7 +507,7 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 				c.setInvalid(true)
 				return err
 			}
-			if err := c.ChecksumChunk(errGrpCtx, c.trxPool, chunk); err != nil {
+			if err := c.ChecksumChunk(errGrpCtx, chunk); err != nil {
 				c.setInvalid(true)
 				return err
 			}
@@ -467,8 +519,10 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	// Regardless of err state, we should attempt to rollback the transactions
 	// in all transaction pools. They are likely holding metadata locks, which will block
 	// further operations like cleanup or cut-over.
-	if err := c.trxPool.Close(); err != nil {
-		return err
+	for i, sp := range c.sourcePools {
+		if err := sp.trxPool.Close(); err != nil {
+			c.logger.Error("failed to close source transaction pool", "sourceID", i, "error", err)
+		}
 	}
 	// Close all target transaction pools
 	for i := range c.targetTrxPools {

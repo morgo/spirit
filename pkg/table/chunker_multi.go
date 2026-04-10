@@ -34,9 +34,9 @@ func NewMultiChunker(c ...Chunker) Chunker {
 		if len(tables) == 0 {
 			continue
 		}
-		// By convention the first table is the "current" table
-		table := tables[0]
-		chunkers[table.TableName] = chunker
+		// Key by QualifiedName which includes Host (when set) to disambiguate
+		// tables with the same schema.table on different servers (N:M moves).
+		chunkers[tables[0].QualifiedName()] = chunker
 	}
 	return &multiChunker{
 		chunkers: chunkers,
@@ -282,7 +282,7 @@ func (m *multiChunker) OpenAtWatermark(watermark string) error {
 func (m *multiChunker) GetLowWatermark() (string, error) {
 	watermarks := make(map[string]string, len(m.chunkers))
 
-	for _, chunker := range m.chunkers {
+	for key, chunker := range m.chunkers {
 		watermark, err := chunker.GetLowWatermark()
 		if err != nil {
 			// If this chunker's watermark isn't ready yet, skip it from the checkpoint
@@ -290,8 +290,7 @@ func (m *multiChunker) GetLowWatermark() (string, error) {
 			// On recovery, tables without watermarks will start from scratch via Open()
 			continue
 		}
-		tbl := chunker.Tables()[0]
-		watermarks[tbl.TableName] = watermark
+		watermarks[key] = watermark
 	}
 	// We have to serialize the map to a string.
 	json, err := json.Marshal(watermarks)

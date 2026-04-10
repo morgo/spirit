@@ -30,8 +30,8 @@ func TestNewMultiChunker(t *testing.T) {
 
 		multiChunker := chunker.(*multiChunker)
 		assert.Len(t, multiChunker.chunkers, 2)
-		assert.Contains(t, multiChunker.chunkers, "table1")
-		assert.Contains(t, multiChunker.chunkers, "table2")
+		assert.Contains(t, multiChunker.chunkers, "test.table1")
+		assert.Contains(t, multiChunker.chunkers, "test.table2")
 	})
 }
 
@@ -232,19 +232,19 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 		err = json.Unmarshal([]byte(watermark), &watermarks)
 		assert.NoError(t, err)
 
-		assert.Contains(t, watermarks, "table1")
-		assert.Contains(t, watermarks, "table2")
+		assert.Contains(t, watermarks, "test.table1")
+		assert.Contains(t, watermarks, "test.table2")
 
 		// Check individual watermarks
-		assert.Equal(t, "300", watermarks["table1"])
-		assert.Equal(t, "1000", watermarks["table2"])
+		assert.Equal(t, "300", watermarks["test.table1"])
+		assert.Equal(t, "1000", watermarks["test.table2"])
 	})
 
 	t.Run("OpenAtWatermark", func(t *testing.T) {
 		// Create watermark
 		watermarks := map[string]string{
-			"table1": "300",
-			"table2": "1000",
+			"test.table1": "300",
+			"test.table2": "1000",
 		}
 		watermarkJSON, err := json.Marshal(watermarks)
 		require.NoError(t, err)
@@ -274,8 +274,8 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 
 		// Missing table in watermark - this should now succeed with our fix
 		watermarks := map[string]string{
-			"table1": "300",
-			// table2 missing - should start from scratch
+			"test.table1": "300",
+			// "test.table2" missing - should start from scratch
 		}
 		watermarkJSON, err := json.Marshal(watermarks)
 		require.NoError(t, err)
@@ -366,8 +366,8 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 		err = json.Unmarshal([]byte(watermark), &watermarks)
 		assert.NoError(t, err)
 
-		assert.NotContains(t, watermarks, "table1", "Should skip table1 due to watermark error")
-		assert.Contains(t, watermarks, "table2", "Should include table2 watermark")
+		assert.NotContains(t, watermarks, "test.table1", "Should skip table1 due to watermark error")
+		assert.Contains(t, watermarks, "test.table2", "Should include table2 watermark")
 	})
 }
 
@@ -740,9 +740,9 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Should contain table1 and table3, but not table2 (error)
-		assert.Contains(t, watermarks, "table1", "Should include table1 watermark")
-		assert.Contains(t, watermarks, "table3", "Should include table3 watermark")
-		assert.NotContains(t, watermarks, "table2", "Should skip table2 due to watermark error")
+		assert.Contains(t, watermarks, "test.table1", "Should include table1 watermark")
+		assert.Contains(t, watermarks, "test.table3", "Should include table3 watermark")
+		assert.NotContains(t, watermarks, "test.table2", "Should skip table2 due to watermark error")
 	})
 
 	t.Run("RegressionOpenAtWatermarkMissingTable", func(t *testing.T) {
@@ -754,7 +754,7 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 
 		// Create watermark with only table1 (table2 missing - simulates watermark not ready scenario)
 		watermarks := map[string]string{
-			"table1": "500", // table2 intentionally missing
+			"test.table1": "500", // "test.table2" intentionally missing
 		}
 		watermarkJSON, err := json.Marshal(watermarks)
 		require.NoError(t, err)
