@@ -58,7 +58,10 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 
 	c.logger.Debug("reading chunk data", "chunk", chunk.String(), "query", query)
 
-	rows, err := c.db.QueryContext(ctx, query)
+	// Use the chunk's table DB connection so each chunk reads from its own source.
+	// This is important for N:M moves where chunks from different sources
+	// need to read from different database connections.
+	rows, err := chunk.Table.DB().QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query chunk data: %w", err)
 	}
