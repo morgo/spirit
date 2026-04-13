@@ -45,7 +45,7 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 
 func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources, logger *slog.Logger) error {
 	if src.DB == nil {
-		return nil // skip if no source DB connection yet (pre-run phase)
+		return errors.New("database connection is not initialized")
 	}
 
 	var foundAll, foundSuper, foundReplicationClient, foundReplicationSlave, foundDBAll, foundReload, foundConnectionAdmin, foundProcess bool
