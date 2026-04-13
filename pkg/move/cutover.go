@@ -34,8 +34,14 @@ func NewCutOver(sources []CutOverSource, cutoverFunc func(ctx context.Context) e
 		return nil, errors.New("at least one source must be provided")
 	}
 	for i, src := range sources {
+		if src.DB == nil {
+			return nil, fmt.Errorf("source %d: DB must be non-nil", i)
+		}
 		if src.ReplClient == nil {
 			return nil, fmt.Errorf("source %d: repl client must be non-nil", i)
+		}
+		if len(src.Tables) == 0 {
+			return nil, fmt.Errorf("source %d: at least one table must be provided", i)
 		}
 		for _, tbl := range src.Tables {
 			if tbl == nil {
@@ -58,9 +64,9 @@ func (c *CutOver) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		// Flush all sources before attempting the cutover.
-		for _, src := range c.sources {
+		for sourceIdx, src := range c.sources {
 			if err := src.ReplClient.Flush(ctx); err != nil {
-				return err
+				return fmt.Errorf("source %d: flush failed: %w", sourceIdx, err)
 			}
 		}
 		c.logger.Warn("Attempting final cut over operation",
@@ -133,7 +139,9 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		}
 		renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
 		if err := sourceLocks[i].ExecUnderLock(ctx, renameStatement); err != nil {
-			// Rollback completed renames.
+			// Rollback completed renames. Log failures since callers need to know
+			// if rollback was incomplete for manual intervention.
+			var rollbackErrors []string
 			for _, j := range completedRenames {
 				undoFragments := make([]string, 0, len(c.sources[j].Tables))
 				for _, tbl := range c.sources[j].Tables {
@@ -143,7 +151,14 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 					)
 				}
 				undoStatement := "RENAME TABLE " + strings.Join(undoFragments, ", ")
-				_ = sourceLocks[j].ExecUnderLock(ctx, undoStatement)
+				if undoErr := sourceLocks[j].ExecUnderLock(ctx, undoStatement); undoErr != nil {
+					c.logger.Error("rollback rename failed", "source", j, "error", undoErr)
+					rollbackErrors = append(rollbackErrors, fmt.Sprintf("source %d: %v", j, undoErr))
+				}
+			}
+			if len(rollbackErrors) > 0 {
+				return fmt.Errorf("rename failed on source %d and rollback also failed (%s): %w",
+					i, strings.Join(rollbackErrors, "; "), err)
 			}
 			return fmt.Errorf("rename failed on source %d, rolled back %d completed renames: %w",
 				i, len(completedRenames), err)
