@@ -35,6 +35,9 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 
 	// Check 1: Verify checkpoint table exists on sources[0] (by convention).
 	src0 := r.Sources[0]
+	if src0.DB == nil || src0.Config == nil {
+		return errors.New("source[0] database connection or config is not initialized")
+	}
 	checkpointTableName := "_spirit_checkpoint"
 	var checkpointExists int
 	err := src0.DB.QueryRowContext(ctx,

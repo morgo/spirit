@@ -13,7 +13,13 @@ func init() {
 
 // configurationCheck verifies the MySQL configuration on all source databases.
 func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	if len(r.Sources) == 0 {
+		return errors.New("no sources configured")
+	}
 	for i, src := range r.Sources {
+		if src.DB == nil {
+			return fmt.Errorf("source %d: database connection is not initialized", i)
+		}
 		var binlogFormat, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema string
 		err := src.DB.QueryRowContext(ctx,
 			`SELECT @@global.binlog_format,
@@ -50,10 +56,6 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		if performanceSchema != "1" {
 			return fmt.Errorf("source %d: performance_schema must be enabled for move operations", i)
 		}
-	}
-	// Preserve the original single-source error format for backward compatibility.
-	if len(r.Sources) == 0 {
-		return errors.New("no sources configured")
 	}
 	return nil
 }
