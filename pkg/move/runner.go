@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -43,6 +44,14 @@ type sourceInfo struct {
 	dsn        string
 	replClient *repl.Client
 	tables     []*table.TableInfo // this source's TableInfo objects (bound to this source's db)
+}
+
+// sourceKey returns a stable identifier for a source, used for checkpoint
+// map keys and deterministic ordering. It is based on the network address
+// and database name only, so it remains stable across credential rotations
+// or DSN parameter reordering.
+func (s *sourceInfo) sourceKey() string {
+	return s.config.Addr + "/" + s.config.DBName
 }
 
 // binlogPosition is used for JSON serialization of per-source binlog positions in checkpoints.
@@ -301,13 +310,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
 	}
 
-	// Restore per-source binlog positions.
+	// Restore per-source binlog positions, keyed by sourceKey (addr/dbname).
 	var positions map[string]binlogPosition
 	if err := json.Unmarshal([]byte(binlogPositionsJSON), &positions); err != nil {
 		return fmt.Errorf("could not parse binlog positions from checkpoint: %w", err)
 	}
 	for i := range r.sources {
-		key := r.sources[i].config.DBName
+		key := r.sources[i].sourceKey()
 		pos, ok := positions[key]
 		if !ok {
 			return fmt.Errorf("checkpoint missing binlog position for source %s", key)
@@ -529,10 +538,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	if len(sourceDSNs) == 0 {
 		sourceDSNs = []string{r.move.SourceDSN}
 	}
-	// Sort source DSNs for deterministic ordering. The checkpoint is always
-	// written to sources[0], so the order must be stable across runs even if
-	// the caller constructed SourceDSNs from a map.
-	slices.Sort(sourceDSNs)
 
 	// Open connections to all sources.
 	r.sources = make([]sourceInfo, len(sourceDSNs))
@@ -547,6 +552,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		r.sources[i] = sourceInfo{db: db, config: cfg, dsn: dsn}
 	}
+	// Sort sources by sourceKey (addr/dbname) for deterministic ordering.
+	// The checkpoint is always written to sources[0], so the order must be
+	// stable across runs even if the caller constructed SourceDSNs from a map.
+	// Sorting by addr/dbname rather than raw DSN ensures stability across
+	// credential rotations or DSN parameter reordering.
+	slices.SortFunc(r.sources, func(a, b sourceInfo) int {
+		return strings.Compare(a.sourceKey(), b.sourceKey())
+	})
 	defer func() {
 		for i := range r.sources {
 			utils.CloseAndLog(r.sources[i].db)
@@ -1060,11 +1073,11 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
-	// Collect per-source binlog positions.
+	// Collect per-source binlog positions, keyed by sourceKey (addr/dbname).
 	positions := make(map[string]binlogPosition)
 	for i := range r.sources {
 		pos := r.sources[i].replClient.GetBinlogApplyPosition()
-		positions[r.sources[i].config.DBName] = binlogPosition{Name: pos.Name, Pos: pos.Pos}
+		positions[r.sources[i].sourceKey()] = binlogPosition{Name: pos.Name, Pos: pos.Pos}
 	}
 	positionsJSON, err := json.Marshal(positions)
 	if err != nil {

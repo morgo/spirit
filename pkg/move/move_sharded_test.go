@@ -280,17 +280,23 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 			"INSERT INTO users (id, name) VALUES (%d, 'user_%d')", i, i))
 	}
 
-	// Deliberately pass SourceDSNs in reverse lexicographic order.
-	// The runner must sort them so that sources[0] is deterministic.
+	// Deliberately pass SourceDSNs in reverse order by sourceKey (addr/dbname).
+	// The runner sorts by sourceKey, so sources[0] must be deterministic.
 	src0DSN := testutils.DSNForDatabase(src0Name)
 	src1DSN := testutils.DSNForDatabase(src1Name)
+	src0Config, err := mysql.ParseDSN(src0DSN)
+	require.NoError(t, err)
+	src1Config, err := mysql.ParseDSN(src1DSN)
+	require.NoError(t, err)
+	src0Key := src0Config.Addr + "/" + src0Config.DBName
+	src1Key := src1Config.Addr + "/" + src1Config.DBName
 	reversedDSNs := []string{src1DSN, src0DSN}
-	if src0DSN > src1DSN {
+	if src0Key > src1Key {
 		reversedDSNs = []string{src0DSN, src1DSN}
 	}
-	// After sorting, the lexicographically smaller DSN must be sources[0].
+	// After sorting by sourceKey, the smaller key must be sources[0].
 	expectedFirstDSN := src0DSN
-	if src1DSN < src0DSN {
+	if src1Key < src0Key {
 		expectedFirstDSN = src1DSN
 	}
 
@@ -324,9 +330,9 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	runner, err := NewRunner(move)
 	require.NoError(t, err)
 
-	// Use the cutover callback to verify sources[0].dsn is the lexicographically
-	// first DSN. The checkpoint is always written to sources[0], so this ordering
-	// must be deterministic regardless of input order.
+	// Use the cutover callback to verify sources[0] has the smallest sourceKey
+	// (addr/dbname). The checkpoint is always written to sources[0], so this
+	// ordering must be deterministic regardless of input order.
 	var actualFirstDSN string
 	runner.SetCutover(func(_ context.Context) error {
 		actualFirstDSN = runner.sources[0].dsn
@@ -338,7 +344,7 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	assert.NoError(t, runner.Close())
 
 	assert.Equal(t, expectedFirstDSN, actualFirstDSN,
-		"sources[0] should be the lexicographically first DSN, even when SourceDSNs is provided in reverse order")
+		"sources[0] should have the smallest sourceKey (addr/dbname), even when SourceDSNs is provided in reverse order")
 }
 
 // testShardingProvider is a simple implementation of ShardingMetadataProvider for testing.
