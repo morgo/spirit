@@ -153,6 +153,7 @@ func (r *Runner) getTables(ctx context.Context, src *sourceInfo) ([]*table.Table
 			if err != nil {
 				return nil, fmt.Errorf("failed to get sharding metadata for table %s: %w", tableName, err)
 			}
+			// Only set if sharding metadata is available (could be empty for some tables)
 			if shardingColumn != "" && hashFunc != nil {
 				tableInfo.ShardingColumn = shardingColumn
 				tableInfo.HashFunc = hashFunc
@@ -271,9 +272,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
+	// Then create a multi chunker of all chunkers.
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
+	// Create a copier that reads from the multi chunker and uses the shared applier.
 	r.copier, err = copier.NewCopier(r.sources[0].db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:     r.move.Threads,
 		TargetChunkTime: r.move.TargetChunkTime,
@@ -281,7 +284,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		Throttler:       &throttler.Noop{},
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
-		Applier:         r.applier,
+		Applier:         r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
@@ -450,6 +453,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	r.copyChunker = table.NewMultiChunker(copyChunkers...)
 	r.checksumChunker = table.NewMultiChunker(checksumChunkers...)
 
+	// Create a copier that reads from the multi chunker and uses the shared applier.
 	var err error
 	r.copier, err = copier.NewCopier(r.sources[0].db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:     r.move.Threads,
@@ -458,12 +462,13 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		Throttler:       &throttler.Noop{},
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
-		Applier:         r.applier,
+		Applier:         r.applier, // Use the shared applier
 	})
 	if err != nil {
 		return err
 	}
 
+	// Then open the multi chunker.
 	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
@@ -514,6 +519,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
+	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
+	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
 
 	// Build the list of source DSNs. If SourceDSNs is set (N:M), use it.
@@ -568,6 +575,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if len(r.sourceTables) == 0 {
+		// Because this is called from orchestration, there might be a bug where
+		// it is asked to move *no tables*. Since there are no tables,
+		// there is no:
+		// - copier, replication changes
+		// - metadata lock
+		// - cutover step
+		//
+		// But the caller will still want their cutoverFunc called. So we do that
+		// and then exit.
 		r.logger.Info("No tables to copy, proceeding directly to cutover")
 		r.status.Set(status.CutOver)
 		if r.cutoverFunc != nil {
@@ -604,6 +620,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Disable both watermark optimizations so that all changes can be flushed.
+	// The watermark optimizations can prevent some keys from being flushed,
+	// which would cause flushedPos to not advance, leading to a mismatch
+	// with bufferedPos and causing AllChangesFlushed() to return false.
 	r.setWatermarkOptimizationAll(false)
 	if err := r.flushAllReplClients(ctx); err != nil {
 		return err
@@ -621,7 +641,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	r.logger.Info("Checksum completed successfully, starting cutover")
-
+	// Create a cutover.
 	r.status.Set(status.CutOver)
 	cutoverSources := make([]CutOverSource, len(r.sources))
 	for i := range r.sources {
@@ -1049,7 +1069,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 
 	copierWatermark, err := r.copyChunker.GetLowWatermark()
 	if err != nil {
-		return status.ErrWatermarkNotReady
+		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum {
@@ -1060,6 +1080,10 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			}
 		}
 	}
+	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
+	// when using the composite chunker are based on actual user-data.
+	// We believe this is OK but may change it in the future. Please do not
+	// add any other fields to this log line.
 	r.logger.Info("checkpoint",
 		"low-watermark", copierWatermark,
 		"binlog-positions", string(positionsJSON))
