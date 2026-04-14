@@ -28,6 +28,11 @@ type Move struct {
 	// For resharding operations (1:many), this should be set to provide sharding key information.
 	// The provider is called during table discovery to configure ShardingColumn and HashFunc
 	// on each TableInfo.
+	// SourceDSNs optionally specifies multiple source DSNs for N:M resharding operations.
+	// When set, each DSN represents a separate source shard. All sources must have identical
+	// table schemas. If empty, SourceDSN is used as the single source.
+	SourceDSNs []string `kong:"-"`
+
 	ShardingProvider table.ShardingMetadataProvider `kong:"-"`
 	Targets          []applier.Target               `kong:"-"`
 }

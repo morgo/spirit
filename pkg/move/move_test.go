@@ -120,11 +120,12 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	var ctx context.Context
 	ctx, r.cancelFunc = context.WithCancel(t.Context())
 	r.dbConfig = dbconn.NewDBConfig()
-	r.source, err = dbconn.New(r.move.SourceDSN, r.dbConfig)
+	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
 	assert.NoError(t, err)
+	srcConfig, err := mysql.ParseDSN(r.move.SourceDSN)
+	assert.NoError(t, err)
+	r.sources = []sourceInfo{{db: srcDB, config: srcConfig, dsn: r.move.SourceDSN}}
 	db, err = dbconn.New(r.move.TargetDSN, r.dbConfig)
-	assert.NoError(t, err)
-	r.sourceConfig, err = mysql.ParseDSN(r.move.SourceDSN)
 	assert.NoError(t, err)
 	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
 	assert.NoError(t, err)
@@ -142,7 +143,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Close everything manually.
 	r.cancelFunc()
-	assert.NoError(t, r.source.Close())
+	assert.NoError(t, r.sources[0].db.Close())
 	assert.NoError(t, r.targets[0].DB.Close())
 	assert.NoError(t, r.Close())
 

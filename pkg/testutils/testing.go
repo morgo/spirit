@@ -9,12 +9,17 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// dbCounter ensures unique database names when CreateUniqueTestDatabase
+// is called multiple times within the same test.
+var dbCounter atomic.Uint64
 
 func DSN() string {
 	dsn := os.Getenv("MYSQL_DSN")
@@ -42,10 +47,12 @@ func DSNForDatabase(dbName string) string {
 func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	t.Helper()
 
-	// Create a unique database name based on test name
-	dbName := fmt.Sprintf("t_%s_%d",
+	// Create a unique database name based on test name and an atomic counter.
+	// The counter ensures uniqueness when called multiple times within the same test.
+	dbName := fmt.Sprintf("t_%s_%d_%d",
 		strings.ReplaceAll(strings.ToLower(t.Name()), "/", "_"),
-		os.Getpid())
+		os.Getpid(),
+		dbCounter.Add(1))
 
 	// Connect to MySQL without specifying a database
 	baseDSN := DSN()

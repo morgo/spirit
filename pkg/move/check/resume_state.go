@@ -28,11 +28,9 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	if len(r.SourceTables) == 0 {
 		return errors.New("no source tables available for resume validation")
 	}
-
 	if len(r.Sources) == 0 {
-		return errors.New("no sources configured for resume validation")
+		return errors.New("no sources configured")
 	}
-
 	// Check 1: Verify checkpoint table exists on sources[0] (by convention).
 	src0 := r.Sources[0]
 	if src0.DB == nil || src0.Config == nil {

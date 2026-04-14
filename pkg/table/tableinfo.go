@@ -77,6 +77,13 @@ func (t *TableInfo) QualifiedName() string {
 	return t.SchemaName + "." + t.TableName
 }
 
+// DB returns the database connection associated with this table.
+// This is used by components like the copier and checksum that need
+// to read from the correct source database when multiple sources are in use.
+func (t *TableInfo) DB() *sql.DB {
+	return t.db
+}
+
 func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	return &TableInfo{
 		db:              db,
