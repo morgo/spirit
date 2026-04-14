@@ -248,6 +248,99 @@ func TestNtoMShardedMove(t *testing.T) {
 	assert.Equal(t, 0, evenCount, "target 1 should have no even IDs")
 }
 
+// TestNtoMShardedMoveCheckpointDeterminism verifies that sources[0] is stable
+// regardless of the order in which SourceDSNs are provided. This matters because
+// the checkpoint is always written to sources[0], and the upstream caller may
+// construct the DSN slice from a map with non-deterministic iteration order.
+func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
+
+	src0Name, _ := testutils.CreateUniqueTestDatabase(t)
+	src1Name, _ := testutils.CreateUniqueTestDatabase(t)
+	tgt0Name, _ := testutils.CreateUniqueTestDatabase(t)
+	tgt1Name, _ := testutils.CreateUniqueTestDatabase(t)
+
+	// Create identical tables on both sources.
+	for _, dbName := range []string{src0Name, src1Name} {
+		testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (
+			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL
+		)`)
+	}
+
+	// Insert a small amount of data — we only care about checkpoint placement, not data distribution.
+	for i := 1; i <= 10; i++ {
+		testutils.RunSQLInDatabase(t, src0Name, fmt.Sprintf(
+			"INSERT INTO users (id, name) VALUES (%d, 'user_%d')", i, i))
+	}
+	for i := 11; i <= 20; i++ {
+		testutils.RunSQLInDatabase(t, src1Name, fmt.Sprintf(
+			"INSERT INTO users (id, name) VALUES (%d, 'user_%d')", i, i))
+	}
+
+	// Deliberately pass SourceDSNs in reverse lexicographic order.
+	// The runner must sort them so that sources[0] is deterministic.
+	src0DSN := testutils.DSNForDatabase(src0Name)
+	src1DSN := testutils.DSNForDatabase(src1Name)
+	reversedDSNs := []string{src1DSN, src0DSN}
+	if src0DSN > src1DSN {
+		reversedDSNs = []string{src0DSN, src1DSN}
+	}
+	// After sorting, the lexicographically smaller DSN must be sources[0].
+	expectedFirstDSN := src0DSN
+	if src1DSN < src0DSN {
+		expectedFirstDSN = src1DSN
+	}
+
+	dbConfig := dbconn.NewDBConfig()
+	tgt0DB, err := dbconn.New(testutils.DSNForDatabase(tgt0Name), dbConfig)
+	require.NoError(t, err)
+	tgt0Config, err := mysql.ParseDSN(testutils.DSNForDatabase(tgt0Name))
+	require.NoError(t, err)
+
+	tgt1DB, err := dbconn.New(testutils.DSNForDatabase(tgt1Name), dbConfig)
+	require.NoError(t, err)
+	tgt1Config, err := mysql.ParseDSN(testutils.DSNForDatabase(tgt1Name))
+	require.NoError(t, err)
+
+	move := &Move{
+		SourceDSNs:      reversedDSNs,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		WriteThreads:    2,
+		Targets: []applier.Target{
+			{KeyRange: "-80", DB: tgt0DB, Config: tgt0Config},
+			{KeyRange: "80-", DB: tgt1DB, Config: tgt1Config},
+		},
+		SourceTables: []string{"users"},
+		ShardingProvider: &testShardingProvider{
+			shardingColumn: "id",
+			hashFunc:       testutils.EvenOddHasher,
+		},
+	}
+
+	runner, err := NewRunner(move)
+	require.NoError(t, err)
+
+	// Use the cutover callback to verify sources[0].dsn is the lexicographically
+	// first DSN. The checkpoint is always written to sources[0], so this ordering
+	// must be deterministic regardless of input order.
+	var actualFirstDSN string
+	runner.SetCutover(func(_ context.Context) error {
+		actualFirstDSN = runner.sources[0].dsn
+		return nil
+	})
+
+	err = runner.Run(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, runner.Close())
+
+	assert.Equal(t, expectedFirstDSN, actualFirstDSN,
+		"sources[0] should be the lexicographically first DSN, even when SourceDSNs is provided in reverse order")
+}
+
 // testShardingProvider is a simple implementation of ShardingMetadataProvider for testing.
 // It returns the same sharding configuration for all tables.
 type testShardingProvider struct {

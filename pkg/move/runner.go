@@ -529,6 +529,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	if len(sourceDSNs) == 0 {
 		sourceDSNs = []string{r.move.SourceDSN}
 	}
+	// Sort source DSNs for deterministic ordering. The checkpoint is always
+	// written to sources[0], so the order must be stable across runs even if
+	// the caller constructed SourceDSNs from a map.
+	slices.Sort(sourceDSNs)
 
 	// Open connections to all sources.
 	r.sources = make([]sourceInfo, len(sourceDSNs))
