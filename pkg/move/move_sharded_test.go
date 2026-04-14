@@ -149,6 +149,9 @@ func TestShardedMove(t *testing.T) {
 // TestNtoMShardedMove tests an N:M resharding scenario:
 // 2 source shards → 2 target shards, with data redistributed by even/odd hash.
 func TestNtoMShardedMove(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
 	// Create 2 source databases and 2 target databases.
 	src0Name, _ := testutils.CreateUniqueTestDatabase(t)
 	src1Name, _ := testutils.CreateUniqueTestDatabase(t)
