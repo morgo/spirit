@@ -617,6 +617,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	for i := range r.sources {
 		lock, err := dbconn.NewMetadataLock(ctx, r.sources[i].dsn, r.sources[i].tables, r.dbConfig, r.logger)
 		if err != nil {
+			for _, acquiredLock := range metadataLocks {
+				if closeErr := acquiredLock.Close(); closeErr != nil {
+					r.logger.Error("failed to release metadata lock after acquisition failure", "error", closeErr)
+				}
+			}
 			return fmt.Errorf("failed to acquire metadata lock on source %d: %w", i, err)
 		}
 		metadataLocks = append(metadataLocks, lock)
