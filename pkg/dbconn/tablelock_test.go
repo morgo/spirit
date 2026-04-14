@@ -1,13 +1,16 @@
 package dbconn
 
 import (
+	"fmt"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testConfig() *DBConfig {
@@ -157,4 +160,73 @@ func TestTableLockFail(t *testing.T) {
 	cfg.ForceKill = true
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, slog.Default())
 	assert.Error(t, err) // We won't kill a connection with an explicit table lock, so this should fail after exhausting retries
+}
+
+// TestTableLockCrossSchema verifies that LOCK TABLES on the same table name
+// in different schemas can be held concurrently on the same MySQL server.
+// This is critical for N:M move operations where multiple source databases
+// on the same server each have identically-named tables.
+// Both ForceKill=true and ForceKill=false variants must succeed, and neither
+// should require any force-killing (the locks are on different schemas).
+func TestTableLockCrossSchema(t *testing.T) {
+	for _, forceKill := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ForceKill=%v", forceKill), func(t *testing.T) {
+			db0Name := fmt.Sprintf("t_crosslock_0_%d", os.Getpid())
+			db1Name := fmt.Sprintf("t_crosslock_1_%d", os.Getpid())
+
+			// Create two separate databases.
+			testutils.RunSQL(t, fmt.Sprintf("DROP DATABASE IF EXISTS %s", db0Name))
+			testutils.RunSQL(t, fmt.Sprintf("DROP DATABASE IF EXISTS %s", db1Name))
+			testutils.RunSQL(t, fmt.Sprintf("CREATE DATABASE %s", db0Name))
+			testutils.RunSQL(t, fmt.Sprintf("CREATE DATABASE %s", db1Name))
+			defer testutils.RunSQL(t, fmt.Sprintf("DROP DATABASE IF EXISTS %s", db0Name))
+			defer testutils.RunSQL(t, fmt.Sprintf("DROP DATABASE IF EXISTS %s", db1Name))
+
+			cfg := testConfig()
+			cfg.ForceKill = forceKill
+
+			db0, err := New(testutils.DSNForDatabase(db0Name), cfg)
+			require.NoError(t, err)
+			defer utils.CloseAndLog(db0)
+			db1, err := New(testutils.DSNForDatabase(db1Name), cfg)
+			require.NoError(t, err)
+			defer utils.CloseAndLog(db1)
+
+			// Create identically-named tables in both schemas.
+			testutils.RunSQLInDatabase(t, db0Name, "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY)")
+			testutils.RunSQLInDatabase(t, db1Name, "CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY)")
+
+			tbl0 := &table.TableInfo{SchemaName: db0Name, TableName: "t1", QuotedTableName: "`t1`"}
+			tbl1 := &table.TableInfo{SchemaName: db1Name, TableName: "t1", QuotedTableName: "`t1`"}
+
+			// Acquire lock on t1 in schema 0.
+			lock0, err := NewTableLock(t.Context(), db0, []*table.TableInfo{tbl0}, cfg, slog.Default())
+			require.NoError(t, err, "lock on schema 0 should succeed")
+
+			// Acquire lock on t1 in schema 1 — should succeed immediately because
+			// the connections are scoped to different databases.
+			lock1, err := NewTableLock(t.Context(), db1, []*table.TableInfo{tbl1}, cfg, slog.Default())
+			require.NoError(t, err, "lock on schema 1 should succeed without contention")
+
+			// Verify both locks work: write under each lock.
+			err = lock0.ExecUnderLock(t.Context(), "INSERT INTO t1 VALUES (1)")
+			assert.NoError(t, err)
+			err = lock1.ExecUnderLock(t.Context(), "INSERT INTO t1 VALUES (2)")
+			assert.NoError(t, err)
+
+			// Release both locks.
+			assert.NoError(t, lock0.Close(t.Context()))
+			assert.NoError(t, lock1.Close(t.Context()))
+
+			// Verify data landed in the correct schemas.
+			var id0, id1 int
+			err = db0.QueryRowContext(t.Context(), "SELECT id FROM t1").Scan(&id0)
+			assert.NoError(t, err)
+			assert.Equal(t, 1, id0)
+
+			err = db1.QueryRowContext(t.Context(), "SELECT id FROM t1").Scan(&id1)
+			assert.NoError(t, err)
+			assert.Equal(t, 2, id1)
+		})
+	}
 }
