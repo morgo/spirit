@@ -64,9 +64,9 @@ func (c *CutOver) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		// Flush all sources before attempting the cutover.
-		for sourceIdx, src := range c.sources {
+		for i, src := range c.sources {
 			if err := src.ReplClient.Flush(ctx); err != nil {
-				return fmt.Errorf("source %d: flush failed: %w", sourceIdx, err)
+				return fmt.Errorf("source %d: flush failed: %w", i, err)
 			}
 		}
 		c.logger.Warn("Attempting final cut over operation",
