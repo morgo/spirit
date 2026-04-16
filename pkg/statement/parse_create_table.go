@@ -1040,8 +1040,22 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 	// Handle different expression types
 	switch e := expr.(type) {
 	case *ast.FuncCallExpr:
-		// Handle function calls like CURRENT_TIMESTAMP
-		return e.FnName.L
+		// Handle function calls like CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(3), UUID(), etc.
+		// We use Restore to preserve function arguments (e.g. precision in CURRENT_TIMESTAMP(3)).
+		// For CURRENT_TIMESTAMP with no args, Restore produces "CURRENT_TIMESTAMP()" but
+		// MySQL's canonical form (SHOW CREATE TABLE) omits the parens, so we normalize it.
+		var sb strings.Builder
+		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+		if err := e.Restore(rCtx); err != nil {
+			return e.FnName.L // fallback to function name on error
+		}
+		restored := sb.String()
+		// Normalize: MySQL's canonical SHOW CREATE TABLE uses "CURRENT_TIMESTAMP" (no parens)
+		// when there is no fractional seconds precision, but the parser's Restore always adds "()".
+		if len(e.Args) == 0 && strings.HasSuffix(restored, "()") {
+			restored = strings.TrimSuffix(restored, "()")
+		}
+		return strings.ToLower(restored)
 	default:
 		// For other types, fall back to text representation
 		var sb strings.Builder

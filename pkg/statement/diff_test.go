@@ -22,6 +22,12 @@ func TestDiff(t *testing.T) {
 			expected: "",
 		},
 		{
+			name:     "NoChanges_DatetimeWithPrecision",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))",
+			expected: "",
+		},
+		{
 			name:     "AddColumn",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT)",
@@ -192,6 +198,12 @@ func TestDiff(t *testing.T) {
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME DEFAULT NOW())",
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `created_at` datetime NULL DEFAULT current_timestamp",
+		},
+		{
+			name:     "DefaultValueFunction_CurrentTimestampWithPrecision",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME(3))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `created_at` datetime(3) NOT NULL DEFAULT current_timestamp(3)",
 		},
 		{
 			name:     "DefaultValueFunction_UUID",
