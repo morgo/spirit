@@ -1792,6 +1792,57 @@ func TestRemoveSecondaryIndexes_ErrorCases(t *testing.T) {
 	}
 }
 
+// TestCurrentTimestampPrecision tests that CURRENT_TIMESTAMP with fractional seconds
+// precision (e.g. CURRENT_TIMESTAMP(3)) is correctly preserved during parsing.
+// This is critical for DATETIME(3)/TIMESTAMP(3) columns where MySQL requires the
+// precision to match between the column type and the default value.
+// See: https://github.com/block/spirit/issues/XXX
+func TestCurrentTimestampPrecision(t *testing.T) {
+	testCases := []struct {
+		name            string
+		sql             string
+		columnName      string
+		expectedDefault string
+	}{
+		{
+			name:            "CURRENT_TIMESTAMP without precision",
+			sql:             "CREATE TABLE t1 (id INT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+			columnName:      "created_at",
+			expectedDefault: "current_timestamp",
+		},
+		{
+			name:            "CURRENT_TIMESTAMP(3) with millisecond precision",
+			sql:             "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))",
+			columnName:      "created_at",
+			expectedDefault: "current_timestamp(3)",
+		},
+		{
+			name:            "CURRENT_TIMESTAMP(6) with microsecond precision",
+			sql:             "CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6))",
+			columnName:      "created_at",
+			expectedDefault: "current_timestamp(6)",
+		},
+		{
+			name:            "NOW() normalized to CURRENT_TIMESTAMP",
+			sql:             "CREATE TABLE t1 (id INT PRIMARY KEY, created_at TIMESTAMP DEFAULT NOW())",
+			columnName:      "created_at",
+			expectedDefault: "current_timestamp",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			col := ct.Columns.ByName(tc.columnName)
+			require.NotNil(t, col, "column %q not found", tc.columnName)
+			require.NotNil(t, col.Default, "column %q has no default", tc.columnName)
+			assert.Equal(t, tc.expectedDefault, *col.Default)
+		})
+	}
+}
+
 // TestBinaryTypeDetection tests that binary types are correctly detected and converted
 // from their text equivalents when the binary flag is set
 func TestBinaryTypeDetection(t *testing.T) {
