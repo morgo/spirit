@@ -987,12 +987,12 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	// Insert dummy data.
+	// Insert dummy data. We need enough rows to ensure the first migration is
+	// still copying when we kill it (so we get a checkpoint), but not so many
+	// that the resumed migration can't finish within the Eventually timeout.
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM dual", tableName))
-	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
-	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
-	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
-	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 100000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 50000", tableName, tableName, tableName, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (pad) SELECT RANDOM_BYTES(1024) FROM %s a, %s b, %s c LIMIT 50000", tableName, tableName, tableName, tableName))
 	alterSQL := "ADD INDEX(pad);"
 	// use as slow as possible here: we want the copy to be still running
 	// when we kill it once we have a checkpoint saved.
