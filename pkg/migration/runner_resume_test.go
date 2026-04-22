@@ -1213,3 +1213,188 @@ func TestResumeFromCheckpointStrictBinlogExpired(t *testing.T) {
 	assert.ErrorIs(t, err, status.ErrBinlogNotFound)
 	assert.NoError(t, r2.Close())
 }
+
+// TestResumeFromCheckpointTooOld tests that when a checkpoint's created_at timestamp
+// exceeds CheckpointMaxAge, the migration falls back to a fresh start instead of
+// resuming from the stale checkpoint. This prevents the slow replay of many days
+// of binary logs when starting fresh would be faster.
+func TestResumeFromCheckpointTooOld(t *testing.T) {
+	t.Parallel()
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS chkpttooold, _chkpttooold_new, _chkpttooold_chkpnt, _chkpttooold_old`)
+	testutils.RunSQL(t, `CREATE TABLE chkpttooold (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	testutils.RunSQL(t, "INSERT INTO chkpttooold (name, pad) VALUES ('a', REPEAT('x', 1000))")
+	testutils.RunSQL(t, `INSERT INTO chkpttooold (name, pad) SELECT a.name, a.pad FROM chkpttooold a, chkpttooold b, chkpttooold c LIMIT 10`)
+	testutils.RunSQL(t, `INSERT INTO chkpttooold (name, pad) SELECT a.name, a.pad FROM chkpttooold a, chkpttooold b, chkpttooold c LIMIT 100`)
+	testutils.RunSQL(t, `INSERT INTO chkpttooold (name, pad) SELECT a.name, a.pad FROM chkpttooold a, chkpttooold b LIMIT 1000`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	// First run: create a checkpoint
+	r, err := NewRunner(&Migration{
+		Host:             cfg.Addr,
+		Username:         cfg.User,
+		Password:         &cfg.Passwd,
+		Database:         cfg.DBName,
+		Threads:          1,
+		TargetChunkTime:  100 * time.Millisecond,
+		Table:            "chkpttooold",
+		Alter:            "ENGINE=InnoDB",
+		useTestThrottler: true,
+	})
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		_ = r.Run(ctx)
+	}()
+
+	waitForCheckpoint(t, r)
+	assert.NoError(t, r.Close())
+	cancel()
+
+	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
+	testutils.RunSQL(t, `UPDATE _chkpttooold_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
+
+	// Without strict mode: falls back to newMigration and completes successfully.
+	r2, err := NewRunner(&Migration{
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  2,
+		Table:    "chkpttooold",
+		Alter:    "ENGINE=InnoDB",
+	})
+	assert.NoError(t, err)
+
+	err = r2.Run(t.Context())
+	assert.NoError(t, err)                       // Should succeed - falls back to newMigration
+	assert.False(t, r2.usedResumeFromCheckpoint) // Should NOT have resumed because checkpoint was too old
+	assert.NoError(t, r2.Close())
+}
+
+// TestResumeFromCheckpointStrictTooOld tests that when strict mode is enabled
+// and a checkpoint exceeds CheckpointMaxAge, the migration fails with
+// ErrCheckpointTooOld rather than silently starting fresh.
+func TestResumeFromCheckpointStrictTooOld(t *testing.T) {
+	t.Parallel()
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS strictoldtest, _strictoldtest_new, _strictoldtest_chkpnt, _strictoldtest_old`)
+	testutils.RunSQL(t, `CREATE TABLE strictoldtest (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	testutils.RunSQL(t, "INSERT INTO strictoldtest (name, pad) VALUES ('a', REPEAT('x', 1000))")
+	testutils.RunSQL(t, `INSERT INTO strictoldtest (name, pad) SELECT a.name, a.pad FROM strictoldtest a, strictoldtest b, strictoldtest c LIMIT 10`)
+	testutils.RunSQL(t, `INSERT INTO strictoldtest (name, pad) SELECT a.name, a.pad FROM strictoldtest a, strictoldtest b, strictoldtest c LIMIT 100`)
+	testutils.RunSQL(t, `INSERT INTO strictoldtest (name, pad) SELECT a.name, a.pad FROM strictoldtest a, strictoldtest b LIMIT 1000`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	// First run: create a checkpoint
+	r, err := NewRunner(&Migration{
+		Host:             cfg.Addr,
+		Username:         cfg.User,
+		Password:         &cfg.Passwd,
+		Database:         cfg.DBName,
+		Threads:          1,
+		TargetChunkTime:  100 * time.Millisecond,
+		Table:            "strictoldtest",
+		Alter:            "ENGINE=InnoDB",
+		useTestThrottler: true,
+	})
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		_ = r.Run(ctx)
+	}()
+
+	waitForCheckpoint(t, r)
+	assert.NoError(t, r.Close())
+	cancel()
+
+	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
+	testutils.RunSQL(t, `UPDATE _strictoldtest_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
+
+	// With strict mode: should error with ErrCheckpointTooOld instead of silently restarting.
+	r2, err := NewRunner(&Migration{
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  2,
+		Table:    "strictoldtest",
+		Alter:    "ENGINE=InnoDB",
+		Strict:   true,
+	})
+	assert.NoError(t, err)
+
+	err = r2.Run(t.Context())
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, status.ErrCheckpointTooOld)
+	assert.NoError(t, r2.Close())
+}
+
+// TestResumeFromCheckpointNotTooOld tests that a recent checkpoint (within
+// CheckpointMaxAge) is still used for resume as expected.
+func TestResumeFromCheckpointNotTooOld(t *testing.T) {
+	t.Parallel()
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS chkptnotold, _chkptnotold_new, _chkptnotold_chkpnt, _chkptnotold_old`)
+	testutils.RunSQL(t, `CREATE TABLE chkptnotold (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	testutils.RunSQL(t, "INSERT INTO chkptnotold (name, pad) VALUES ('a', REPEAT('x', 1000))")
+	testutils.RunSQL(t, `INSERT INTO chkptnotold (name, pad) SELECT a.name, a.pad FROM chkptnotold a, chkptnotold b, chkptnotold c LIMIT 10`)
+	testutils.RunSQL(t, `INSERT INTO chkptnotold (name, pad) SELECT a.name, a.pad FROM chkptnotold a, chkptnotold b, chkptnotold c LIMIT 100`)
+	testutils.RunSQL(t, `INSERT INTO chkptnotold (name, pad) SELECT a.name, a.pad FROM chkptnotold a, chkptnotold b LIMIT 1000`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	// First run: create a checkpoint
+	r, err := NewRunner(&Migration{
+		Host:             cfg.Addr,
+		Username:         cfg.User,
+		Password:         &cfg.Passwd,
+		Database:         cfg.DBName,
+		Threads:          1,
+		TargetChunkTime:  100 * time.Millisecond,
+		Table:            "chkptnotold",
+		Alter:            "ENGINE=InnoDB",
+		useTestThrottler: true,
+	})
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		_ = r.Run(ctx)
+	}()
+
+	waitForCheckpoint(t, r)
+	assert.NoError(t, r.Close())
+	cancel()
+
+	// Do NOT backdate the checkpoint - it was just created, so it's fresh.
+	// The migration should resume from checkpoint successfully.
+	r2, err := NewRunner(&Migration{
+		Host:     cfg.Addr,
+		Username: cfg.User,
+		Password: &cfg.Passwd,
+		Database: cfg.DBName,
+		Threads:  2,
+		Table:    "chkptnotold",
+		Alter:    "ENGINE=InnoDB",
+	})
+	assert.NoError(t, err)
+
+	err = r2.Run(t.Context())
+	assert.NoError(t, err)
+	assert.True(t, r2.usedResumeFromCheckpoint) // Should have resumed because checkpoint is fresh
+	assert.NoError(t, r2.Close())
+}

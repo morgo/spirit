@@ -54,6 +54,8 @@ type Migration struct {
 	// using INSERT IGNORE .. SELECT. This is also required for cross-server moves.
 	Buffered bool `name:"buffered" help:"Use the buffered copier based on the lock-free DBLog algorithm" optional:"" default:"false"`
 
+	CheckpointMaxAge time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
+
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
 	// Used for tests so we can concurrently execute without issues even though
@@ -103,6 +105,9 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 	}
 	if m.ReplicaMaxLag == 0 {
 		m.ReplicaMaxLag = 120 * time.Second
+	}
+	if m.CheckpointMaxAge == 0 {
+		m.CheckpointMaxAge = 7 * 24 * time.Hour // 7 days
 	}
 
 	if err := m.normalizeConnectionOptions(); err != nil {
