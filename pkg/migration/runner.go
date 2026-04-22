@@ -915,20 +915,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 
 	// Check if the checkpoint is too old to safely resume.
 	// Replaying many days of binary logs can be slower than starting fresh.
-	if r.migration.CheckpointMaxAge > 0 {
-		// The connection uses time_zone="+00:00", so timestamps are in UTC.
-		createdAt, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr)
-		if parseErr != nil {
-			return fmt.Errorf("could not parse checkpoint created_at timestamp: %w", parseErr)
-		}
-		checkpointAge := time.Since(createdAt)
-		if checkpointAge >= r.migration.CheckpointMaxAge {
-			return fmt.Errorf("%w: checkpoint is %s old (max allowed: %s)",
-				status.ErrCheckpointTooOld,
-				checkpointAge.Round(time.Second),
-				r.migration.CheckpointMaxAge,
-			)
-		}
+	// The connection uses time_zone="+00:00", so timestamps are in UTC.
+	createdAt, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr)
+	if parseErr != nil {
+		return fmt.Errorf("could not parse checkpoint created_at timestamp: %w", parseErr)
+	}
+	checkpointAge := time.Since(createdAt)
+	if checkpointAge >= r.migration.CheckpointMaxAge {
+		return fmt.Errorf("%w: checkpoint is %s old (max allowed: %s)",
+			status.ErrCheckpointTooOld,
+			checkpointAge.Round(time.Second),
+			r.migration.CheckpointMaxAge,
+		)
 	}
 
 	// Initialize and call SetInfo on all the new tables, since we need the column info
