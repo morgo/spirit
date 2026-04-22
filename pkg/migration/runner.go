@@ -694,9 +694,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		// A mismatched alter means the user changed the DDL between runs.
 		// An expired binlog means the checkpoint can't be used because
 		// changes would be lost in the replication gap.
-		// In both cases, strict mode surfaces the error rather than
+		// A checkpoint that is too old means replaying binlogs would be
+		// slower than starting fresh.
+		// In all cases, strict mode surfaces the error rather than
 		// silently restarting from scratch.
-		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound)) {
+		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound) || errors.Is(err, status.ErrCheckpointTooOld)) {
 			return err
 		}
 
@@ -766,7 +768,8 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	checksum_watermark TEXT,
 	binlog_name VARCHAR(255),
 	binlog_pos INT,
-	statement TEXT
+	statement TEXT,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`,
 		r.changes[0].table.SchemaName, cpName); err != nil {
 		return err
@@ -889,7 +892,8 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		r.changes[0].stmt.Schema, r.checkpointTableName())
 	var copierWatermark, binlogName, statement, checksumWatermark string
 	var id, binlogPos int
-	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement)
+	var createdAtStr string
+	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &createdAtStr)
 	if err != nil {
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
@@ -907,6 +911,22 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// This avoids partial initialization that would need cleanup on failure.
 	if !r.binlogFileExists(ctx, binlogName) {
 		return fmt.Errorf("%w: %s has been purged, cannot resume", status.ErrBinlogNotFound, binlogName)
+	}
+
+	// Check if the checkpoint is too old to safely resume.
+	// Replaying many days of binary logs can be slower than starting fresh.
+	// The connection uses time_zone="+00:00", so timestamps are in UTC.
+	createdAt, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr)
+	if parseErr != nil {
+		return fmt.Errorf("could not parse checkpoint created_at timestamp: %w", parseErr)
+	}
+	checkpointAge := time.Since(createdAt)
+	if checkpointAge >= r.migration.CheckpointMaxAge {
+		return fmt.Errorf("%w: checkpoint is %s old (max allowed: %s)",
+			status.ErrCheckpointTooOld,
+			checkpointAge.Round(time.Second),
+			r.migration.CheckpointMaxAge,
+		)
 	}
 
 	// Initialize and call SetInfo on all the new tables, since we need the column info
