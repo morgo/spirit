@@ -406,6 +406,19 @@ func (t *TableInfo) wrapCastTypeAs(sqlCol, typeCol string) (string, error) {
 	return fmt.Sprintf("CAST(`%s` AS %s)", sqlCol, castableTp(tp)), nil
 }
 
+// WrapCastTypeAs generates a CAST expression using sqlCol as the column reference
+// in the SQL, but looks up the cast type from typeCol in this table's column types.
+// This is used for column renames where the SQL column name differs from the
+// type-lookup column name (e.g., source table uses old name, but cast type
+// comes from the target table's new name).
+func (t *TableInfo) WrapCastTypeAs(sqlCol, typeCol string) string {
+	tp, ok := t.columnsMySQLTps[typeCol]
+	if !ok {
+		panic(fmt.Sprintf("column %q not found for type lookup", typeCol))
+	}
+	return fmt.Sprintf("CAST(`%s` AS %s)", sqlCol, castableTp(tp))
+}
+
 func (t *TableInfo) datumTp(col string) datumTp {
 	tp, ok := t.columnsMySQLTps[col] // the tp keeps the width in this context.
 	if !ok {
