@@ -15,6 +15,8 @@ spirit migrate --host mydb:3306 --username root --password secret \
 
 - [alter](#alter)
 - [buffered](#buffered)
+- [checkpoint-max-age](#checkpoint-max-age)
+- [checksum-yield-timeout](#checksum-yield-timeout)
 - [conf](#conf)
 - [database](#database)
 - [defer-cutover](#defer-cutover)
@@ -33,6 +35,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [table](#table)
 - [target-chunk-time](#target-chunk-time)
 - [threads](#threads)
+- [tls-ca](#tls-ca)
 - [tls-mode](#tls-mode)
   - [PREFERRED](#preferred)
   - [REQUIRED](#required)
@@ -65,6 +68,42 @@ The advantages of buffered copy are:
 The buffered copier requires `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since it relies on reading all column values from the binary log.
 
 Note: buffered copy is not yet supported for multi-table migrations (i.e. when using `--statement` with multiple `ALTER TABLE` statements).
+
+### checkpoint-max-age
+
+- Type: Duration
+- Default value: `168h` (7 days)
+
+The maximum age of a checkpoint before Spirit refuses to resume from it. When Spirit starts and finds an existing checkpoint from a previous run, it checks how old the checkpoint is. If the checkpoint is older than this value, Spirit will discard it and start a fresh migration instead of attempting to resume.
+
+This protects against resuming from very stale checkpoints where replaying the accumulated binary log changes would take longer than starting the migration from scratch.
+
+### checksum-yield-timeout
+
+- Type: Duration
+- Default value: `24h`
+
+The maximum duration for a single checksum pass before Spirit yields to release long-running `REPEATABLE READ` transactions. This helps control InnoDB History List Length (HLL) growth on large tables where the checksum phase can take many hours or even days.
+
+During the checksum, Spirit holds open `REPEATABLE READ` transactions to get a consistent snapshot of the source and target tables. These long-running read views prevent InnoDB from purging old row versions, causing the history list length to grow. On busy systems this can degrade performance for all workloads.
+
+When the yield timeout fires, Spirit:
+
+1. Closes the current transactions (releasing the read views)
+2. Records the current checksum progress (low watermark)
+3. Re-acquires a table lock and creates fresh `REPEATABLE READ` transactions
+4. Resumes checksumming from where it left off
+
+The checksum will complete correctly regardless of how many yields occur. However, each yield requires re-acquiring a table lock, which has the same impact as the initial checksum lock acquisition — it may conflict with running transactions, and since [skip-force-kill](#skip-force-kill) is `false` by default, Spirit may kill blocking transactions to acquire the lock.
+
+For most migrations the default of `24h` is appropriate. You may want to lower this value if your system is sensitive to HLL growth (e.g. many concurrent writers generating undo log entries).
+
+```bash
+# Yield every 4 hours to limit HLL growth
+spirit migrate --checksum-yield-timeout=4h \
+       --host mydb:3306 --database mydb --table large_table \
+       --alter "ADD INDEX idx_foo (foo)"
+```
 
 ### conf
 
@@ -278,6 +317,15 @@ Internal to Spirit, the database pool size is set to `threads + 1`. This is inte
 You may want to wrap `threads` in automation and set it to a percentage of the cores of your database server. For example, if you have a 32-core machine you may choose to set this to `8`. Approximately 25% is a good starting point, making sure you always leave plenty of free cores for regular database operations. If your migration is IO bound and/or your IO latency is high (such as Aurora) you may even go higher than 25%.
 
 Note that Spirit does not support dynamically adjusting the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values.
+
+### tls-ca
+
+- Type: String
+- Default value: ``
+
+Path to a custom TLS CA certificate file (PEM format) used to verify the MySQL server's certificate. This is used in combination with [tls-mode](#tls-mode) when set to `VERIFY_CA` or `VERIFY_IDENTITY`.
+
+When not specified, Spirit will attempt to use the embedded RDS certificate bundle as a fallback for AWS RDS/Aurora connections. For non-RDS connections with `VERIFY_CA` or `VERIFY_IDENTITY`, you should provide this flag to ensure proper certificate verification.
 
 ### tls-mode
 
