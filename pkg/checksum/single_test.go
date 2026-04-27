@@ -377,6 +377,64 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 	assert.NoError(t, checker.Run(t.Context())) // fails
 }
 
+func TestYieldTimeout(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS yield_t1, _yield_t1_new, _yield_t1_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE yield_t1 (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(255), c VARCHAR(255), PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _yield_t1_new (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(255), c VARCHAR(255), PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _yield_t1_chkpnt (a INT)") // for binlog advancement
+
+	// Insert enough rows with wide data to produce multiple chunks and ensure
+	// the checksum takes long enough for the yield timeout to fire mid-pass.
+	// Starting chunk size is 1000, so 100k rows should produce many chunks.
+	testutils.RunSQL(t, "INSERT INTO yield_t1 (b, c) SELECT REPEAT('x', 200), REPEAT('y', 200) FROM information_schema.columns a, information_schema.columns b LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO _yield_t1_new SELECT * FROM yield_t1")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "yield_t1")
+	assert.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_yield_t1_new")
+	assert.NoError(t, t2.SetInfo(t.Context()))
+	logger := slog.Default()
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+		Logger:          logger,
+		Concurrency:     4,
+		TargetBatchTime: time.Second,
+		ServerID:        repl.NewServerID(),
+	})
+	defer feed.Close()
+	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
+	assert.NoError(t, feed.Run(t.Context()))
+
+	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	assert.NoError(t, err)
+	assert.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.Concurrency = 1
+	// Use a short yield timeout. The initConnPool phase uses the parent
+	// context (not the yield context), so lock acquisition always succeeds.
+	// The yield context only governs the chunk-processing loop. 100ms is
+	// long enough for at least one chunk to complete (setting the watermark)
+	// but short enough to trigger multiple yields over 100k rows.
+	config.YieldTimeout = 100 * time.Millisecond
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
+	assert.NoError(t, err)
+
+	// The checksum should still pass despite yielding — it resumes from the watermark.
+	assert.NoError(t, checker.Run(t.Context()))
+
+	// Verify that at least one yield actually occurred.
+	singleChecker := checker.(*SingleChecker)
+	assert.Greater(t, singleChecker.yieldsPerformed.Load(), uint64(0), "expected at least one yield to occur")
+	t.Logf("yields performed: %d", singleChecker.yieldsPerformed.Load())
+}
+
 func TestFromWatermark(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS tfromwatermark, _tfromwatermark_new, _tfromwatermark_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE tfromwatermark (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")

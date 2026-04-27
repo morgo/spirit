@@ -222,6 +222,12 @@ func (t *chunkerComposite) OpenAtWatermark(checkpnt string) error {
 	if err := json.Unmarshal([]byte(checkpnt), &watermark); err != nil {
 		return fmt.Errorf("could not parse composite watermark: %w", err)
 	}
+	// If the chunker is already open, mark it as closed so open() can
+	// reinitialize. This supports the yield/resume case where the checksum
+	// needs to restart from a watermark without creating a new chunker.
+	if t.isOpen {
+		t.isOpen = false
+	}
 	if err := t.open(); err != nil {
 		return err
 	}

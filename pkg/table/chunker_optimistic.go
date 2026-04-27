@@ -206,6 +206,13 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	t.Lock()
 	defer t.Unlock()
 
+	// If the chunker is already open, mark it as closed so open() can
+	// reinitialize. This supports the yield/resume case where the checksum
+	// needs to restart from a watermark without creating a new chunker.
+	if t.isOpen {
+		t.isOpen = false
+	}
+
 	// Open the table first.
 	// This will reset the chunk pointer, but we'll set it before the mutex
 	// is released.

@@ -547,6 +547,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		Logger:          r.logger,
 		FixDifferences:  true, // we want to repair the differences.
 		MaxRetries:      3,
+		YieldTimeout:    r.migration.ChecksumYieldTimeout,
 	})
 
 	return err
