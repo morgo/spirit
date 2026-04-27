@@ -16,6 +16,16 @@ import (
 var (
 	// Query template for row checksums
 	queryTemplate = "SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s"
+
+	// ErrYieldTimeout is returned by runChecksum when the yield timeout expires.
+	// This is distinct from the parent context being canceled, and signals that
+	// the checksum should resume from the current watermark after releasing
+	// long-running transactions to reduce HLL (history list length) growth.
+	ErrYieldTimeout = errors.New("checksum yield timeout")
+
+	// DefaultYieldTimeout is the default maximum duration for a single checksum
+	// pass before yielding to release long-running REPEATABLE READ transactions.
+	DefaultYieldTimeout = 24 * time.Hour
 )
 
 type Checker interface {
@@ -35,6 +45,7 @@ type CheckerConfig struct {
 	Watermark       string // optional; defines a watermark to start from
 	MaxRetries      int
 	Applier         applier.Applier // optional; indicates it is a distributed checker
+	YieldTimeout    time.Duration   // maximum duration for a single checksum pass before yielding to release long-running transactions
 }
 
 func NewCheckerDefaultConfig() *CheckerConfig {
@@ -45,6 +56,7 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 		Logger:          slog.Default(),
 		FixDifferences:  false,
 		MaxRetries:      3,
+		YieldTimeout:    DefaultYieldTimeout,
 	}
 }
 
@@ -68,6 +80,9 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []*repl.Client
 	if config.MaxRetries == 0 {
 		config.MaxRetries = 3
 	}
+	if config.YieldTimeout == 0 {
+		config.YieldTimeout = DefaultYieldTimeout
+	}
 	if config.Applier != nil {
 		return &DistributedChecker{
 			concurrency:    config.Concurrency,
@@ -90,5 +105,6 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []*repl.Client
 		logger:         config.Logger,
 		fixDifferences: config.FixDifferences,
 		maxRetries:     config.MaxRetries,
+		yieldTimeout:   config.YieldTimeout,
 	}, nil
 }

@@ -39,6 +39,8 @@ type SingleChecker struct {
 	differencesFound atomic.Uint64
 	recopyLock       sync.Mutex
 	maxRetries       int
+	yieldTimeout     time.Duration
+	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
 }
 
 var _ Checker = (*SingleChecker)(nil)
@@ -360,10 +362,12 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			c.differencesFound.Store(0)
 		}
 
-		// Run the actual checksum
-		if err := c.runChecksum(ctx); err != nil {
-			// This is really not expected to fail, since if there are differences
-			// it will run the resolver and report the differences in DifferencesFound().
+		// Run the checksum with yield support. A single checksum pass may be
+		// split across multiple runChecksum calls if the yield timeout fires.
+		// Between yields we release the REPEATABLE READ transactions to limit
+		// InnoDB history list length (HLL) growth, then re-acquire a table lock
+		// and fresh snapshot before resuming from the low watermark.
+		if err := c.runChecksumWithYield(ctx); err != nil {
 			c.logger.Error("checksum encountered an error", "error", err)
 			continue
 		}
@@ -386,6 +390,50 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	return fmt.Errorf("checksum failed after %d attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit", c.maxRetries)
 }
 
+// runChecksumWithYield runs the checksum, automatically yielding and resuming
+// when the yield timeout expires. Each yield releases the long-running
+// REPEATABLE READ transactions (reducing HLL pressure), then re-acquires a
+// table lock and fresh snapshot before resuming from the low watermark.
+func (c *SingleChecker) runChecksumWithYield(ctx context.Context) error {
+	for {
+		err := c.runChecksum(ctx)
+		if !errors.Is(err, ErrYieldTimeout) {
+			return err
+		}
+		// The yield timeout fired. Get the low watermark so we can resume.
+		watermark, wmErr := c.chunker.GetLowWatermark()
+		if wmErr != nil {
+			// If the watermark isn't ready (e.g. the timeout fired before any
+			// chunks were processed), reset and start over rather than failing.
+			if errors.Is(wmErr, table.ErrWatermarkNotReady) {
+				c.yieldsPerformed.Add(1)
+				c.logger.Info("checksum yielding but no watermark available, restarting from beginning",
+					"yieldTimeout", c.yieldTimeout,
+				)
+				c.setInvalid(false)
+				if resetErr := c.chunker.Reset(); resetErr != nil {
+					return fmt.Errorf("failed to reset chunker after yield: %w", resetErr)
+				}
+				continue
+			}
+			return fmt.Errorf("failed to get low watermark after yield: %w", wmErr)
+		}
+		c.yieldsPerformed.Add(1)
+		c.logger.Info("checksum yielding to release long-running transactions",
+			"watermark", watermark,
+			"yieldTimeout", c.yieldTimeout,
+		)
+		// Reset the isInvalid flag since we are resuming, not failing.
+		c.setInvalid(false)
+		// Re-open the chunker at the watermark position.
+		if err := c.chunker.OpenAtWatermark(watermark); err != nil {
+			return fmt.Errorf("failed to resume chunker from watermark after yield: %w", err)
+		}
+		// Loop back to runChecksum which will re-acquire the table lock
+		// and create fresh REPEATABLE READ transactions.
+	}
+}
+
 func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	// initConnPool initialize the connection pool.
 	// This is done under a table lock which is acquired in this func.
@@ -395,16 +443,21 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	}
 	c.logger.Info("table unlocked, starting checksum")
 
-	// Start the periodic flush again *just* for the duration of the checksum.
-	// If the checksum is long running, it could block flushing for too long:
-	// - If we need to resume from checkpoint, the binlogs may not be there.
-	// - If they are there, they will take a huge amount of time to flush
-	// - The memory requirements for 1MM deltas seems reasonable, but for a multi-day
-	//   checksum it is reasonable to assume it may exceed this.
+	// Start the periodic flush *after* the table lock is released.
+	// This must not run while initConnPool holds the table lock, because
+	// the periodic flush executes DML (INSERT/DELETE) against the locked
+	// table, which would deadlock with the lock holder.
 	go c.feed.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 	defer c.feed.StopPeriodicFlush()
 
-	g, errGrpCtx := errgroup.WithContext(ctx)
+	// Create a yield-timeout context to limit how long a single checksum pass
+	// can hold REPEATABLE READ transactions open. Long-running read views cause
+	// InnoDB history list length (HLL) growth, so we periodically yield to
+	// release them and re-acquire fresh ones.
+	yieldCtx, yieldCancel := context.WithTimeout(ctx, c.yieldTimeout)
+	defer yieldCancel()
+
+	g, errGrpCtx := errgroup.WithContext(yieldCtx)
 	g.SetLimit(c.concurrency)
 	for !c.chunker.IsRead() && c.isHealthy(errGrpCtx) {
 		g.Go(func() error {
@@ -425,11 +478,21 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	}
 	// wait for all work to finish
 	err1 := g.Wait()
-	// Regardless of err state, we should attempt to rollback the transaction
-	// in checksumTxns. They are likely holding metadata locks, which will block
-	// further operations like cleanup or cut-over.
-	if err := c.trxPool.Close(); err != nil {
-		return err
+	// Regardless of err state, we should attempt to rollback the transactions.
+	// They are likely holding metadata locks, which will block further operations
+	// like cleanup or cut-over.
+	closeErr := c.trxPool.Close()
+	// Distinguish between the yield timeout expiring and the parent context
+	// being canceled. If the parent context is still valid but the yield context
+	// expired and the chunker hasn't finished, this was a yield — not a failure.
+	// This check must come before inspecting closeErr or err1, because the yield
+	// timeout can cause both transaction rollback errors and context errors from
+	// in-flight queries.
+	if ctx.Err() == nil && yieldCtx.Err() != nil && !c.chunker.IsRead() {
+		return ErrYieldTimeout
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if err1 != nil {
 		c.logger.Error("checksum failed")

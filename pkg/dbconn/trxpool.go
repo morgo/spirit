@@ -55,10 +55,19 @@ func (p *TrxPool) Put(trx *sql.Tx) {
 
 // Close closes all transactions in the pool.
 func (p *TrxPool) Close() error {
+	var firstErr error
 	for _, trx := range p.trxs {
 		if err := trx.Rollback(); err != nil {
-			return err
+			// sql.ErrTxDone means the transaction was already rolled back
+			// (e.g. due to context cancellation). This is not a real error —
+			// skip it and continue closing the remaining transactions.
+			if errors.Is(err, sql.ErrTxDone) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
