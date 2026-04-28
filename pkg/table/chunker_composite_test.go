@@ -1347,3 +1347,88 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 
 	assert.NoError(t, comp.Close())
 }
+
+// TestCompositeChunkerCheckpointHighPtr verifies that after OpenAtWatermark,
+// the checkpointHighPtr prevents KeyAboveHighWatermark from discarding events
+// for keys between the watermark and the new table's max value. This prevents
+// a race condition on resume where rows above the watermark may have already
+// been copied to the new table before the interruption.
+//
+// Note: KeyAboveHighWatermark only compares key0 (the first PK column), so
+// this test uses a composite PK (a, b) but the watermark optimization only
+// operates on the `a` column. We use distinct `a` values to test the behavior.
+func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS composite_ckpt_src, composite_ckpt_dst")
+	testutils.RunSQL(t, `CREATE TABLE composite_ckpt_src (
+		a int NOT NULL,
+		b int NOT NULL,
+		PRIMARY KEY (a, b)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE composite_ckpt_dst (
+		a int NOT NULL,
+		b int NOT NULL,
+		PRIMARY KEY (a, b)
+	)`)
+
+	// Source has rows with a values from 1 to 1000
+	testutils.RunSQL(t, `INSERT INTO composite_ckpt_src (a, b)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n UNION ALL SELECT n + 1 FROM seq WHERE n < 1000
+		) SELECT n, 1 FROM seq`)
+
+	// Destination has rows with a values from 1 to 500 — simulating a partial copy.
+	// The copier watermark will be at a=200, but rows up to a=500 were already copied
+	// before the interruption. This is the scenario that causes phantom rows.
+	testutils.RunSQL(t, `INSERT INTO composite_ckpt_dst (a, b)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n UNION ALL SELECT n + 1 FROM seq WHERE n < 500
+		) SELECT n, 1 FROM seq`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	assert.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	srcTable := NewTableInfo(db, "test", "composite_ckpt_src")
+	assert.NoError(t, srcTable.SetInfo(t.Context()))
+
+	dstTable := NewTableInfo(db, "test", "composite_ckpt_dst")
+	assert.NoError(t, dstTable.SetInfo(t.Context()))
+
+	chunker, err := NewChunker(srcTable, ChunkerConfig{NewTable: dstTable})
+	assert.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+
+	// Before OpenAtWatermark: everything should be "above" (no chunks dispatched)
+	assert.True(t, comp.KeyAboveHighWatermark(1))
+
+	// Simulate a watermark at a=200 — the copier had reached this point before interruption.
+	watermark := `{"ChunkJSON":"{\"Key\":[\"a\",\"b\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"100\",\"1\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"200\",\"1\"],\"Inclusive\":false}}","RowsCopied":200}`
+	assert.NoError(t, comp.OpenAtWatermark(watermark))
+
+	// checkpointHighPtr should now be set to the max value of the destination
+	// table's first PK column (a=500, since dstTable has rows up to a=499).
+	assert.False(t, comp.checkpointHighPtr.IsNil(), "checkpointHighPtr should be set after OpenAtWatermark")
+
+	// Key a=150 is below the watermark — should NOT be above high watermark.
+	assert.False(t, comp.KeyAboveHighWatermark(150))
+
+	// Key a=300 is above the watermark but below checkpointHighPtr (~500).
+	// This key may have been copied before the interruption.
+	// It should NOT be considered "above high watermark" — we must not discard events for it.
+	assert.False(t, comp.KeyAboveHighWatermark(300))
+
+	// Key a=499 is at the max of the destination — should NOT be above.
+	assert.False(t, comp.KeyAboveHighWatermark(499))
+
+	// Key a=501 is above checkpointHighPtr — safe to discard.
+	assert.True(t, comp.KeyAboveHighWatermark(501))
+
+	// Key a=999 is well above — safe to discard.
+	assert.True(t, comp.KeyAboveHighWatermark(999))
+
+	assert.NoError(t, comp.Close())
+}

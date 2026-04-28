@@ -331,6 +331,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		})
 	}
 
+	// Delete rows above the watermark from all target tables before resuming.
+	// When resuming from a checkpoint, the keyAboveWatermark optimization
+	// needs to know the highest key in the target table to avoid discarding
+	// binlog events for keys that were already copied. In the move path the
+	// target is on a different server, so we can't (easily) read its max value.
+	// Instead, we delete everything above the watermark from the targets,
+	// guaranteeing that no rows exist above the copier's resume position.
+	// The copier will re-copy these rows, and the checksum will verify.
+	if err := r.deleteAboveWatermark(ctx, copierWatermark); err != nil {
+		return err
+	}
+
 	if err := r.copyChunker.OpenAtWatermark(copierWatermark); err != nil {
 		return err
 	}
@@ -1176,6 +1188,56 @@ func (r *Runner) flushAllReplClients(ctx context.Context) error {
 	for i := range r.sources {
 		if err := r.sources[i].replClient.Flush(ctx); err != nil {
 			return fmt.Errorf("failed to flush repl client for source %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// deleteAboveWatermark deletes rows above the copier watermark from all target
+// tables. This is called during resume-from-checkpoint because of a race
+// condition with the keyAboveWatermark optimization:
+//
+// During normal copying, the keyAboveWatermark optimization discards binlog
+// events for keys the copier "hasn't reached yet" — these rows don't exist
+// in the target, so deletes/updates for them can be safely ignored. But after
+// a resume, some rows above the watermark may have already been copied to the
+// target before the interruption. If a DELETE event arrives for one of these
+// rows and keyAboveWatermark discards it, the row remains in the target as
+// a phantom row that no longer exists in the source.
+//
+// In the migration path, this is solved by reading the target table's max
+// value and temporarily disabling the optimization up to that point. In the
+// move path, the target is on a different server, so we can't cheaply read
+// its max value. Instead, we delete everything above the watermark from the
+// targets before resuming. This guarantees no rows exist above the copier's
+// resume position, so the optimization is safe.
+//
+// tl;dr: this is required to prevent a race where:
+//   - watermark is at key=100, but a row at key=105 was inserted and copied.
+//   - immediately after resume there is a delete for key=105 but we incorrectly
+//     skip it because it is above the watermark.
+func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark string) error {
+	for _, src := range r.sourceTables {
+		aboveClause, err := table.WatermarkAboveClause(src, copierWatermark)
+		if err != nil {
+			return fmt.Errorf("failed to parse watermark for table %s: %w", src.TableName, err)
+		}
+		for i, target := range r.targets {
+			deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s",
+				src.QuotedTableName, aboveClause)
+			result, err := target.DB.ExecContext(ctx, deleteStmt)
+			if err != nil {
+				return fmt.Errorf("failed to delete above watermark on target %d table %s: %w", i, src.TableName, err)
+			}
+			rowsDeleted, _ := result.RowsAffected()
+			if rowsDeleted > 0 {
+				r.logger.Info("deleted rows above watermark from target",
+					"target", i,
+					"table", src.TableName,
+					"rowsDeleted", rowsDeleted,
+					"watermark", copierWatermark,
+				)
+			}
 		}
 	}
 	return nil

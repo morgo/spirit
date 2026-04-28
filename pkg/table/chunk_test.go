@@ -133,3 +133,33 @@ func TestComparesTo(t *testing.T) {
 	b2.Value = []Datum{{Val: 200, Tp: signedType}, {Val: 400, Tp: signedType}}
 	assert.False(t, b1.comparesTo(b2))
 }
+
+func TestWatermarkAboveClause(t *testing.T) {
+	// Single-column auto-increment key
+	ti := NewTableInfo(nil, "test", "t1")
+	ti.KeyColumns = []string{"id"}
+	ti.columnsMySQLTps = map[string]string{"id": "bigint"}
+
+	// Build a watermark JSON: chunk with upper bound id=100
+	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`
+	clause, err := WatermarkAboveClause(ti, watermark)
+	assert.NoError(t, err)
+	assert.Equal(t, "`id` > 100", clause)
+
+	// Composite key
+	ti2 := NewTableInfo(nil, "test", "t2")
+	ti2.KeyColumns = []string{"tenant_id", "item_id"}
+	ti2.columnsMySQLTps = map[string]string{"tenant_id": "int", "item_id": "int"}
+
+	watermark2 := `{"Key":["tenant_id","item_id"],"ChunkSize":1000,"LowerBound":{"Value":["1","50"],"Inclusive":true},"UpperBound":{"Value":["2","100"],"Inclusive":false}}`
+	clause2, err := WatermarkAboveClause(ti2, watermark2)
+	assert.NoError(t, err)
+	assert.Contains(t, clause2, "`tenant_id`")
+	assert.Contains(t, clause2, "`item_id`")
+	// Should be a row constructor comparison: ((tenant_id > 2) OR (tenant_id = 2 AND item_id > 100))
+	assert.Equal(t, "((`tenant_id` > 2)\n OR (`tenant_id` = 2 AND `item_id` > 100))", clause2)
+
+	// Invalid JSON
+	_, err = WatermarkAboveClause(ti, "not-json")
+	assert.Error(t, err)
+}
