@@ -1398,7 +1398,7 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 	dstTable := NewTableInfo(db, "test", "composite_ckpt_dst")
 	assert.NoError(t, dstTable.SetInfo(t.Context()))
 
-	chunker, err := NewChunker(srcTable, dstTable, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(srcTable, ChunkerConfig{NewTable: dstTable})
 	assert.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
