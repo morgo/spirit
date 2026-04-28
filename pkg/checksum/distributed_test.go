@@ -65,11 +65,10 @@ func TestFixCorruptWithApplier(t *testing.T) {
 		Applier:         applier,
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -170,13 +169,10 @@ func TestDistributedChecksum(t *testing.T) {
 
 	// For distributed checksum, we only add one subscription for the source table
 	// The applier handles distribution to multiple shards
-	require.NoError(t, feed.AddSubscription(sourceTable, sourceTable, nil))
-	require.NoError(t, feed.Run(t.Context()))
-
-	// Create chunker - for distributed checksum, we pass nil for the new table
-	// because the chunker will use the source table for both sides
 	chunker, err := table.NewChunker(sourceTable, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(sourceTable, sourceTable, chunker))
+	require.NoError(t, feed.Run(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	// Create distributed checker config
@@ -298,7 +294,9 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 		Applier:         shardedApplier,
 	})
 	defer feed0.Close()
-	require.NoError(t, feed0.AddSubscription(src0Table, src0Table, nil))
+	chunker0, err := table.NewChunker(src0Table, table.ChunkerConfig{NewTable: src0Table})
+	require.NoError(t, err)
+	require.NoError(t, feed0.AddSubscription(src0Table, src0Table, chunker0))
 	require.NoError(t, feed0.Run(t.Context()))
 
 	feed1 := repl.NewClient(src1DB, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
@@ -309,14 +307,10 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 		Applier:         shardedApplier,
 	})
 	defer feed1.Close()
-	require.NoError(t, feed1.AddSubscription(src1Table, src1Table, nil))
-	require.NoError(t, feed1.Run(t.Context()))
-
-	// Create a chunker per source, then wrap in a MultiChunker.
-	chunker0, err := table.NewChunker(src0Table, table.ChunkerConfig{Logger: logger})
-	require.NoError(t, err)
 	chunker1, err := table.NewChunker(src1Table, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
+	require.NoError(t, feed1.AddSubscription(src1Table, src1Table, chunker1))
+	require.NoError(t, feed1.Run(t.Context()))
 	multiChunker := table.NewMultiChunker(chunker0, chunker1)
 	require.NoError(t, multiChunker.Open())
 

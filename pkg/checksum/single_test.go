@@ -46,12 +46,11 @@ func TestBasicChecksum(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
-	assert.NoError(t, feed.Run(t.Context()))
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
 	assert.NoError(t, err)
@@ -86,11 +85,10 @@ func TestBasicValidation(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 
 	_, err = NewChecker(nil, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig()) // no source DBs
 	assert.EqualError(t, err, "at least one source database must be provided")
@@ -144,11 +142,10 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -187,11 +184,10 @@ func TestFixCorrupt(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -245,11 +241,10 @@ func TestCorruptChecksum(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
@@ -287,11 +282,10 @@ func TestBoundaryCases(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
@@ -365,11 +359,10 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
@@ -408,11 +401,10 @@ func TestYieldTimeout(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -461,11 +453,10 @@ func TestFromWatermark(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	assert.NoError(t, feed.Run(t.Context()))
 	assert.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
