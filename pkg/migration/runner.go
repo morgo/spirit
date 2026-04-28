@@ -1021,7 +1021,14 @@ func (r *Runner) initChunkers() error {
 	copyChunkers := make([]table.Chunker, 0, len(r.changes))
 	checksumChunkers := make([]table.Chunker, 0, len(r.changes))
 	for _, change := range r.changes {
-		columnMapping := table.NewColumnMapping(change.table, change.newTable, nil)
+		columnRenames := change.stmt.ColumnRenameMap()
+		if len(columnRenames) > 0 {
+			r.logger.Info("column renames detected",
+				"table", change.table.TableName,
+				"renames", columnRenames,
+			)
+		}
+		columnMapping := table.NewColumnMapping(change.table, change.newTable, columnRenames)
 		chunkerCfg := table.ChunkerConfig{
 			NewTable:        change.newTable,
 			TargetChunkTime: r.migration.TargetChunkTime,

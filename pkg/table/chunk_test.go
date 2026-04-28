@@ -105,35 +105,6 @@ func TestCompositeChunks(t *testing.T) {
 	assert.Equal(t, "((`status` > \"ARCHIVED\")\n OR (`status` = \"ARCHIVED\" AND `id` >= 1234)) AND ((`status` < \"ARCHIVED\")\n OR (`status` = \"ARCHIVED\" AND `id` < 5412))", chunk.String())
 }
 
-func TestComparesTo(t *testing.T) {
-	b1 := &Boundary{
-		Value:     []Datum{{Val: 200, Tp: signedType}},
-		Inclusive: true,
-	}
-	b2 := &Boundary{
-		Value:     []Datum{{Val: 200, Tp: signedType}},
-		Inclusive: true,
-	}
-	assert.True(t, b1.comparesTo(b2))
-	b2.Inclusive = false              // change operator
-	assert.True(t, b1.comparesTo(b2)) // still compares
-	b2.Value = []Datum{{Val: 300, Tp: signedType}}
-	assert.False(t, b1.comparesTo(b2))
-
-	// Compound values.
-	b1 = &Boundary{
-		Value:     []Datum{{Val: 200, Tp: signedType}, {Val: 300, Tp: signedType}},
-		Inclusive: true,
-	}
-	b2 = &Boundary{
-		Value:     []Datum{{Val: 200, Tp: signedType}, {Val: 300, Tp: signedType}},
-		Inclusive: true,
-	}
-	assert.True(t, b1.comparesTo(b2))
-	b2.Value = []Datum{{Val: 200, Tp: signedType}, {Val: 400, Tp: signedType}}
-	assert.False(t, b1.comparesTo(b2))
-}
-
 func TestWatermarkAboveClause(t *testing.T) {
 	// Single-column auto-increment key
 	ti := NewTableInfo(nil, "test", "t1")
@@ -162,4 +133,33 @@ func TestWatermarkAboveClause(t *testing.T) {
 	// Invalid JSON
 	_, err = WatermarkAboveClause(ti, "not-json")
 	assert.Error(t, err)
+}
+
+func TestComparesTo(t *testing.T) {
+	b1 := &Boundary{
+		Value:     []Datum{{Val: 200, Tp: signedType}},
+		Inclusive: true,
+	}
+	b2 := &Boundary{
+		Value:     []Datum{{Val: 200, Tp: signedType}},
+		Inclusive: true,
+	}
+	assert.True(t, b1.comparesTo(b2))
+	b2.Inclusive = false              // change operator
+	assert.True(t, b1.comparesTo(b2)) // still compares
+	b2.Value = []Datum{{Val: 300, Tp: signedType}}
+	assert.False(t, b1.comparesTo(b2))
+
+	// Compound values.
+	b1 = &Boundary{
+		Value:     []Datum{{Val: 200, Tp: signedType}, {Val: 300, Tp: signedType}},
+		Inclusive: true,
+	}
+	b2 = &Boundary{
+		Value:     []Datum{{Val: 200, Tp: signedType}, {Val: 300, Tp: signedType}},
+		Inclusive: true,
+	}
+	assert.True(t, b1.comparesTo(b2))
+	b2.Value = []Datum{{Val: 200, Tp: signedType}, {Val: 400, Tp: signedType}}
+	assert.False(t, b1.comparesTo(b2))
 }
