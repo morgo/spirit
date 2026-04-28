@@ -68,7 +68,7 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -175,7 +175,7 @@ func TestDistributedChecksum(t *testing.T) {
 
 	// Create chunker - for distributed checksum, we pass nil for the new table
 	// because the chunker will use the source table for both sides
-	chunker, err := table.NewChunker(sourceTable, nil, 0, logger)
+	chunker, err := table.NewChunker(sourceTable, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 
@@ -313,9 +313,9 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 	require.NoError(t, feed1.Run(t.Context()))
 
 	// Create a chunker per source, then wrap in a MultiChunker.
-	chunker0, err := table.NewChunker(src0Table, nil, 0, logger)
+	chunker0, err := table.NewChunker(src0Table, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
-	chunker1, err := table.NewChunker(src1Table, nil, 0, logger)
+	chunker1, err := table.NewChunker(src1Table, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
 	multiChunker := table.NewMultiChunker(chunker0, chunker1)
 	require.NoError(t, multiChunker.Open())
