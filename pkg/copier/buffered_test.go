@@ -41,7 +41,7 @@ func TestBufferedCopier(t *testing.T) {
 	}
 	cfg.Applier, err = applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
 	assert.NoError(t, err)
 
 	assert.NoError(t, chunker.Open())
@@ -98,7 +98,7 @@ func TestBufferedCopierCharsetConversion(t *testing.T) {
 	cfg := NewCopierDefaultConfig()
 	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
 	assert.NoError(t, err)
-	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
 	assert.NoError(t, err)
 
 	assert.NoError(t, chunker.Open())
@@ -114,7 +114,7 @@ func TestBufferedCopierCharsetConversion(t *testing.T) {
 	// Reverse the copy to show the other direction works too
 	// Start by emptying the "src" table, which is our intended destination.
 	testutils.RunSQL(t, "TRUNCATE TABLE charsetsrc")
-	chunker, err = table.NewChunker(t2, t1, cfg.TargetChunkTime, cfg.Logger)
+	chunker, err = table.NewChunker(t2, table.ChunkerConfig{NewTable: t1, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
 	assert.NoError(t, err)
 	copier, err = NewCopier(db, chunker, cfg)
 	assert.NoError(t, err)
@@ -155,7 +155,7 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 	cfg.TargetChunkTime = 10 // Small chunk time to create more chunks
 	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
 	assert.NoError(t, err)
 
 	assert.NoError(t, chunker.Open())
@@ -210,7 +210,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	cfg := NewCopierDefaultConfig()
 
 	// Create a real chunker (we need real chunk metadata for the copier)
-	realChunker, err := table.NewChunker(t1, t2, 1000*time.Millisecond, cfg.Logger)
+	realChunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 1000 * time.Millisecond, Logger: cfg.Logger})
 	require.NoError(t, err)
 	assert.NoError(t, realChunker.Open())
 
