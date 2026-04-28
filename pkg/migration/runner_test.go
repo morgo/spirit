@@ -489,7 +489,9 @@ func TestBadAlter(t *testing.T) {
 	assert.Error(t, err) // parses and fails.
 	assert.Nil(t, m)
 
-	// Renames are not supported.
+	// Column renames are now supported, but this ALTER is invalid because
+	// it references the old column name in the ADD INDEX after renaming it.
+	// MySQL rejects this when Spirit applies the ALTER to the shadow table.
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
@@ -497,16 +499,14 @@ func TestBadAlter(t *testing.T) {
 		Database: cfg.DBName,
 		Threads:  2,
 		Table:    "bot1",
-		Alter:    "RENAME COLUMN name TO name2, ADD INDEX(name)", // need both, otherwise INSTANT algorithm will do the rename
+		Alter:    "RENAME COLUMN name TO name2, ADD INDEX(name)", // ADD INDEX references old name after rename
 	})
 	assert.NoError(t, err) // does not parse alter yet.
 	err = m.Run(t.Context())
-	assert.Error(t, err) // alter is invalid
-	assert.ErrorContains(t, err, "renames are not supported")
+	assert.Error(t, err) // alter is invalid (MySQL rejects it)
 	assert.NoError(t, m.Close())
 
-	// This is a different type of rename,
-	// which is coming via a change
+	// Same issue via CHANGE COLUMN syntax
 	m, err = NewRunner(&Migration{
 		Host:     cfg.Addr,
 		Username: cfg.User,
@@ -514,12 +514,11 @@ func TestBadAlter(t *testing.T) {
 		Database: cfg.DBName,
 		Threads:  2,
 		Table:    "bot1",
-		Alter:    "CHANGE name name2 VARCHAR(255), ADD INDEX(name)", // need both, otherwise INSTANT algorithm will do the rename
+		Alter:    "CHANGE name name2 VARCHAR(255), ADD INDEX(name)", // ADD INDEX references old name after rename
 	})
 	assert.NoError(t, err) // does not parse alter yet.
 	err = m.Run(t.Context())
-	assert.Error(t, err) // alter is invalid
-	assert.ErrorContains(t, err, "renames are not supported")
+	assert.Error(t, err) // alter is invalid (MySQL rejects it)
 	assert.NoError(t, m.Close())
 
 	// But this is supported (no rename)

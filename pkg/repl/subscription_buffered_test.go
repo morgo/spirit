@@ -258,6 +258,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	mockChunker := table.NewMockChunker("subscription_test", 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
 		c:                     client,
@@ -387,6 +388,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	mockChunker := table.NewMockChunker("subscription_test", 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
 		c:                     client,

@@ -347,3 +347,45 @@ ALTER TABLE t1 ADD INDEX idx_a (a)`)
 	_, err = New("-- just a comment\n-- another comment")
 	assert.ErrorIs(t, err, ErrNoStatements)
 }
+
+func TestColumnRenameMap(t *testing.T) {
+	// RENAME COLUMN syntax
+	stmts := MustNew("ALTER TABLE t1 RENAME COLUMN a TO b")
+	renames := stmts[0].ColumnRenameMap()
+	assert.Equal(t, map[string]string{"a": "b"}, renames)
+
+	// CHANGE COLUMN syntax (rename + type change)
+	stmts = MustNew("ALTER TABLE t1 CHANGE COLUMN old_col new_col BIGINT")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Equal(t, map[string]string{"old_col": "new_col"}, renames)
+
+	// CHANGE COLUMN without rename (same name, different type) should not produce a rename
+	stmts = MustNew("ALTER TABLE t1 CHANGE COLUMN a a BIGINT")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Nil(t, renames)
+
+	// Multiple renames in one ALTER
+	stmts = MustNew("ALTER TABLE t1 RENAME COLUMN a TO b, RENAME COLUMN c TO d")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Equal(t, map[string]string{"a": "b", "c": "d"}, renames)
+
+	// Mixed: rename + change column
+	stmts = MustNew("ALTER TABLE t1 RENAME COLUMN a TO b, CHANGE COLUMN x y INT")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Equal(t, map[string]string{"a": "b", "x": "y"}, renames)
+
+	// No rename at all (ADD COLUMN)
+	stmts = MustNew("ALTER TABLE t1 ADD COLUMN z INT")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Nil(t, renames)
+
+	// Non-ALTER statement
+	stmts = MustNew("CREATE TABLE t1 (a INT PRIMARY KEY)")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Nil(t, renames)
+
+	// Rename + other operations in same ALTER
+	stmts = MustNew("ALTER TABLE t1 RENAME COLUMN a TO b, ADD COLUMN c INT")
+	renames = stmts[0].ColumnRenameMap()
+	assert.Equal(t, map[string]string{"a": "b"}, renames)
+}

@@ -702,3 +702,92 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "below_watermark", name)
 }
+
+func TestCreateReplaceStmtWithRenames(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		old_name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		new_name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	client := &Client{
+		db:              nil,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	renames := map[string]string{"old_name": "new_name"}
+	mapping := table.NewColumnMapping(srcTable, dstTable, renames)
+	chunkerForSub, err := table.NewChunker(srcTable, table.ChunkerConfig{
+		NewTable:      dstTable,
+		ColumnMapping: mapping,
+	})
+	assert.NoError(t, err)
+
+	sub := &deltaMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]mapChange),
+		chunker:  chunkerForSub,
+	}
+
+	stmt := sub.createReplaceStmt([]string{"'1'"})
+	// The INSERT side should use target column names (new_name)
+	assert.Contains(t, stmt.stmt, "REPLACE INTO")
+	assert.Contains(t, stmt.stmt, "`new_name`")
+	// The SELECT side should use source column names (old_name)
+	assert.Contains(t, stmt.stmt, "`old_name`")
+
+	// Verify the full structure: REPLACE INTO <target> (<target_cols>) SELECT <source_cols> FROM <source>
+	// Target columns come first (after REPLACE INTO ... (), then source columns after SELECT
+	srcCols, tgtCols := mapping.Columns()
+	assert.Contains(t, stmt.stmt, "REPLACE INTO "+dstTable.QuotedTableName+" ("+tgtCols+") SELECT "+srcCols+" FROM")
+}
+
+func TestCreateReplaceStmtWithoutRenames(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	client := &Client{
+		db:              nil,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	chunkerForSub, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
+	assert.NoError(t, err)
+
+	sub := &deltaMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]mapChange),
+		chunker:  chunkerForSub,
+	}
+
+	stmt := sub.createReplaceStmt([]string{"'1'"})
+	// Without renames, source and target column lists should be identical
+	srcCols, tgtCols := chunkerForSub.ColumnMapping().Columns()
+	assert.Equal(t, srcCols, tgtCols)
+	assert.Contains(t, stmt.stmt, "REPLACE INTO "+dstTable.QuotedTableName+" ("+tgtCols+") SELECT "+srcCols+" FROM")
+}
