@@ -49,7 +49,7 @@ var _ Copier = (*buffered)(nil)
 // readChunkData reads all rows from a chunk into memory
 func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]any, error) {
 	// Build the SELECT query to read full row data
-	columnList := utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable)
+	columnList, _ := chunk.ColumnMapping.Columns()
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE %s",
 		columnList,
 		chunk.Table.QuotedTableName,

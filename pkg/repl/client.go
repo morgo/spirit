@@ -215,7 +215,7 @@ func NewClientDefaultConfig() *ClientConfig {
 
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
-func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.Chunker) error {
+func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	c.Lock()
 	defer c.Unlock()
 

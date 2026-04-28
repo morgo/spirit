@@ -536,7 +536,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		if err := change.newTable.SetInfo(ctx); err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(change.table, change.newTable, r.copyChunker); err != nil {
+		if err := r.replClient.AddSubscription(change.table, change.newTable, change.chunker); err != nil {
 			return err
 		}
 	}
@@ -1021,12 +1021,15 @@ func (r *Runner) initChunkers() error {
 	copyChunkers := make([]table.Chunker, 0, len(r.changes))
 	checksumChunkers := make([]table.Chunker, 0, len(r.changes))
 	for _, change := range r.changes {
+		columnMapping := table.NewColumnMapping(change.table, change.newTable, nil)
 		chunkerCfg := table.ChunkerConfig{
 			NewTable:        change.newTable,
 			TargetChunkTime: r.migration.TargetChunkTime,
 			Logger:          r.logger,
+			ColumnMapping:   columnMapping,
 		}
-		copyChunker, err := table.NewChunker(change.table, chunkerCfg)
+		var err error
+		change.chunker, err = table.NewChunker(change.table, chunkerCfg)
 		if err != nil {
 			return err
 		}
@@ -1034,7 +1037,7 @@ func (r *Runner) initChunkers() error {
 		if err != nil {
 			return err
 		}
-		copyChunkers = append(copyChunkers, copyChunker)
+		copyChunkers = append(copyChunkers, change.chunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 	// We can wrap it the multi-chunker regardless.

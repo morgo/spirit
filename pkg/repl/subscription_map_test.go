@@ -37,6 +37,11 @@ func TestSubscriptionDeltaMap(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker: func() table.MappedChunker {
+			m := table.NewMockChunker("test", 1000)
+			m.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+			return m
+		}(),
 	}
 
 	// Test initial state
@@ -91,6 +96,11 @@ func TestFlushWithLock(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker: func() table.MappedChunker {
+			m := table.NewMockChunker("test", 1000)
+			m.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+			return m
+		}(),
 	}
 
 	// Insert test data
@@ -148,6 +158,11 @@ func TestFlushWithoutLock(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker: func() table.MappedChunker {
+			m := table.NewMockChunker("test", 1000)
+			m.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+			return m
+		}(),
 	}
 
 	// Insert test data
@@ -198,6 +213,11 @@ func TestConcurrentKeyChanges(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker: func() table.MappedChunker {
+			m := table.NewMockChunker("test", 1000)
+			m.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+			return m
+		}(),
 	}
 
 	// Run concurrent key changes
@@ -250,6 +270,11 @@ func TestKeyChangedOverwrite(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker: func() table.MappedChunker {
+			m := table.NewMockChunker("test", 1000)
+			m.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+			return m
+		}(),
 	}
 
 	// Test overwriting the same key multiple times
@@ -296,6 +321,7 @@ func TestKeyChangedEdgeCases(t *testing.T) {
 
 	// Create mock chunker with watermark behavior
 	mockChunker := table.NewMockChunker("test_table", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	// Set current position to 5, so keys above 5 will be above watermark
 	mockChunker.SimulateProgress(0.005) // 5/1000 = 0.005
 
@@ -355,6 +381,11 @@ func TestKeyChangedNilAndEmpty(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker: func() table.MappedChunker {
+			m := table.NewMockChunker("test", 1000)
+			m.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+			return m
+		}(),
 	}
 
 	// Test with empty string key
@@ -392,6 +423,7 @@ func TestKeyAboveWatermark(t *testing.T) {
 	}
 
 	mockChunker := table.NewMockChunker("test_table", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	// Set current position to 5, so keys above 5 will be above watermark
 	mockChunker.SimulateProgress(0.005) // 5/1000 = 0.005
 
@@ -442,6 +474,7 @@ func TestKeyBelowWatermarkMock(t *testing.T) {
 
 	// Create mock chunker with low watermark behavior
 	mockChunker := table.NewMockChunker("test_table", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	// Set current position to 5, so keys below 5 will be below watermark
 	mockChunker.SimulateProgress(0.005) // 5/1000 = 0.005
 
@@ -513,6 +546,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// - Keys >= 5 are NOT below the low watermark (copier is at or hasn't reached them)
 	// - Keys > 5 are above the high watermark (copier hasn't reached them, don't track)
 	mockChunker := table.NewMockChunker("subscription_test", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
 	sub := &deltaMap{
@@ -616,6 +650,7 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 
 	// Create mock chunker with current position at 5
 	mockChunker := table.NewMockChunker("subscription_test", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
 	sub := &deltaMap{

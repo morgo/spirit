@@ -27,6 +27,8 @@ type chunkerComposite struct {
 	finalChunkSent bool
 	isOpen         bool
 
+	columnMapping *ColumnMapping
+
 	checkpointHighPtr Datum // the high watermark detected on restore from checkpoint
 
 	// Dynamic Chunking is time based instead of row based.
@@ -55,7 +57,7 @@ type compositeWatermark struct {
 	RowsCopied uint64
 }
 
-var _ Chunker = &chunkerComposite{}
+var _ MappedChunker = &chunkerComposite{}
 
 func (t *chunkerComposite) additionalConditionsSQL(whereSent bool) string {
 	if t.where == "" {
@@ -119,6 +121,7 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 				AdditionalConditions: t.where,
 				Table:                t.Ti,
 				NewTable:             t.NewTi,
+				ColumnMapping:        t.columnMapping,
 			}, nil
 		}
 		// Else, it's just the last chunk.
@@ -129,6 +132,7 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 			AdditionalConditions: t.where,
 			Table:                t.Ti,
 			NewTable:             t.NewTi,
+			ColumnMapping:        t.columnMapping,
 		}, nil
 	}
 	// Else, there were rows found.
@@ -146,6 +150,7 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 		AdditionalConditions: t.where,
 		Table:                t.Ti,
 		NewTable:             t.NewTi,
+		ColumnMapping:        t.columnMapping,
 	}, nil
 }
 
@@ -654,4 +659,8 @@ func (t *chunkerComposite) Tables() []*TableInfo {
 		return []*TableInfo{t.Ti, t.NewTi}
 	}
 	return []*TableInfo{t.Ti}
+}
+
+func (t *chunkerComposite) ColumnMapping() *ColumnMapping {
+	return t.columnMapping
 }

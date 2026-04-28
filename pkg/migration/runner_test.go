@@ -933,7 +933,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	assert.Equal(t, 1, m.replClient.GetDeltaLen())
 
 	testutils.RunSQL(t, `delete from e2et1 where id1 = 1`)
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark(1))
+	assert.False(t, m.changes[0].chunker.KeyAboveHighWatermark(1))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
 	// id1=1 is below high watermark (1 < 1001), so it's kept
 	assert.Equal(t, 2, m.replClient.GetDeltaLen())
@@ -941,7 +941,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	// Some data is inserted later, even though the last chunk is done.
 	// We still care to pick it up because it could be inserted during checkpoint.
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (5000, 1)`)
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark(int64(math.MaxInt64)))
+	assert.False(t, m.changes[0].chunker.KeyAboveHighWatermark(int64(math.MaxInt64)))
 
 	// Now that copy rows is done, we flush the changeset until trivial.
 	// and perform the optional checksum.
@@ -1615,7 +1615,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	// This will be ignored by the binlog subscription.
 	// Because it's ahead of the high watermark.
 	testutils.RunSQL(t, `insert into e2et2 (id) values (4)`)
-	assert.True(t, m.copyChunker.KeyAboveHighWatermark(4))
+	assert.True(t, m.changes[0].chunker.KeyAboveHighWatermark(4))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
 	assert.Equal(t, 0, m.replClient.GetDeltaLen())
 
@@ -1631,8 +1631,8 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	// but until we copy the chunk it is *not* below the low watermark
 	// and can't be flushed.
 	testutils.RunSQL(t, `insert into e2et2 (id) values (5)`)
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark(5))
-	assert.False(t, m.copyChunker.KeyBelowLowWatermark(5))
+	assert.False(t, m.changes[0].chunker.KeyAboveHighWatermark(5))
+	assert.False(t, m.changes[0].chunker.KeyBelowLowWatermark(5))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
 	assert.Equal(t, 1, m.replClient.GetDeltaLen())
 	assert.NoError(t, m.replClient.Flush(t.Context()))
@@ -1642,14 +1642,14 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	// it will mean that the low watermark is advanced and
 	// we can safely flush all changes.
 	assert.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	assert.True(t, m.copyChunker.KeyBelowLowWatermark(5))
+	assert.True(t, m.changes[0].chunker.KeyBelowLowWatermark(5))
 	assert.NoError(t, m.replClient.Flush(t.Context()))
 	assert.Equal(t, 0, m.replClient.GetDeltaLen())
 
 	// delete some data.
 	testutils.RunSQL(t, `delete from e2et2 where id = 1`)
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark(1))
-	assert.True(t, m.copyChunker.KeyBelowLowWatermark(1))
+	assert.False(t, m.changes[0].chunker.KeyAboveHighWatermark(1))
+	assert.True(t, m.changes[0].chunker.KeyBelowLowWatermark(1))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
 	assert.Equal(t, 1, m.replClient.GetDeltaLen())
 
@@ -1670,7 +1670,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	testutils.RunSQL(t, `insert into e2et2 (id) values (6)`)
 	// the pointer should be at maxint64 for safety. this ensures
 	// that any keyAboveHighWatermark checks return false
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark(int64(math.MaxInt64)))
+	assert.False(t, m.changes[0].chunker.KeyAboveHighWatermark(int64(math.MaxInt64)))
 
 	// Now that copy rows is done, we flush the changeset until trivial.
 	// and perform the optional checksum.
@@ -2054,7 +2054,7 @@ func TestE2ERogueValues(t *testing.T) {
 	// This means the binlog event is discarded (not buffered), and the row will
 	// be copied in later chunks or fixed during checksum.
 	testutils.RunSQL(t, `insert into e2erogue values ("zz'z\"z", 2)`)
-	assert.True(t, m.copyChunker.KeyAboveHighWatermark("zz'z\"z"))
+	assert.True(t, m.changes[0].chunker.KeyAboveHighWatermark("zz'z\"z"))
 
 	// Wait for the binlog event to be processed/discarded
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
@@ -2070,7 +2070,7 @@ func TestE2ERogueValues(t *testing.T) {
 	// Note: "zz'z\"z" was discarded (KeyAboveHighWatermark=true), not buffered,
 	// so delta count is 1 (only this insert), not 2.
 	testutils.RunSQL(t, `insert into e2erogue values (5, 2)`)
-	assert.False(t, m.copyChunker.KeyAboveHighWatermark(5))
+	assert.False(t, m.changes[0].chunker.KeyAboveHighWatermark(5))
 	assert.NoError(t, m.replClient.BlockWait(t.Context()))
 	assert.Equal(t, 1, m.replClient.GetDeltaLen())
 

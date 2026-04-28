@@ -29,7 +29,7 @@ type deltaMap struct {
 	changes map[string]mapChange // delta map, for memory comparable PKs
 
 	watermarkOptimization bool
-	chunker               table.Chunker
+	chunker               table.MappedChunker
 }
 
 // Assert that deltaMap implements subscription
@@ -79,10 +79,11 @@ func (s *deltaMap) createDeleteStmt(deleteKeys []string) statement {
 func (s *deltaMap) createReplaceStmt(replaceKeys []string) statement {
 	var replaceStmt string
 	if len(replaceKeys) > 0 {
+		sourceColumns, targetColumns := s.chunker.ColumnMapping().Columns()
 		replaceStmt = fmt.Sprintf("REPLACE INTO %s (%s) SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE (%s) IN (%s)",
 			s.newTable.QuotedTableName,
-			utils.IntersectNonGeneratedColumns(s.table, s.newTable),
-			utils.IntersectNonGeneratedColumns(s.table, s.newTable),
+			targetColumns,
+			sourceColumns,
 			s.table.QuotedTableName,
 			table.QuoteColumns(s.table.KeyColumns),
 			pksToRowValueConstructor(replaceKeys),

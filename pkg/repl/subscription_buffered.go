@@ -36,7 +36,7 @@ type bufferedMap struct {
 	changes map[string]bufferedChange
 
 	watermarkOptimization bool
-	chunker               table.Chunker
+	chunker               table.MappedChunker
 }
 
 // Assert that bufferedMap implements subscription
@@ -167,7 +167,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 
 	// Execute upserts
 	if len(upsertRows) > 0 {
-		affectedRows, err := s.applier.UpsertRows(ctx, s.table, s.newTable, upsertRows, lock)
+		affectedRows, err := s.applier.UpsertRows(ctx, s.chunker.ColumnMapping(), upsertRows, lock)
 		if err != nil {
 			return fmt.Errorf("failed to upsert rows: %w", err)
 		}
