@@ -170,7 +170,7 @@ Key principles:
 
 ## Unsupported Features (Do Not Implement)
 
-- **RENAME column** (except via INSTANT DDL) — too risky for data corruption
+- **RENAME column** — some rename operations are intentionally not supported. Renaming primary key columns, renaming in buffered mode, and dangerous overlap patterns (e.g., `RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...`) are blocked. Simple non-PK column renames in unbuffered mode are supported.
 - **ALTER/DROP PRIMARY KEY** — primary key must remain unchanged
 - **Lossy conversions** (e.g., shortening VARCHAR below max data length)
 - **FOREIGN KEYS or TRIGGERS** on migrated tables

@@ -24,8 +24,7 @@ The delta map is the preferred subscription type and is selected for tables with
 
 **Limitations:**
 - Requires memory-comparable primary keys (no VARCHAR, FLOAT etc.)
-- Watermark optimizations are only effective when the selected chunker implements both `KeyAboveHighWatermark` and `KeyBelowLowWatermark` (e.g., the optimistic chunker for single-column `AUTO_INCREMENT` primary keys)
-- For composite or non-auto-increment primary keys (which use the composite chunker), both watermark methods currently return stub values, so these optimizations are effectively disabled (see [issue #479](https://github.com/block/spirit/issues/479))
+- Watermark optimizations (`KeyAboveHighWatermark` and `KeyBelowLowWatermark`) are available on `MappedChunker` implementations (both optimistic and composite chunkers). They work correctly for numeric, binary, and temporal primary key types. For `VARCHAR`/`TEXT` columns with collations, Go's byte-order comparison may differ from MySQL's collation order; any discrepancies are caught by the checksum phase (see [issue #479](https://github.com/block/spirit/issues/479)).
 
 **Example scenario:**
 ```

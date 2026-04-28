@@ -64,7 +64,7 @@ The applier interface provides both asynchronous and synchronous methods:
 
 **Synchronous (used by subscription)**:
 - `DeleteKeys(ctx, sourceTable, targetTable, keys, lock)`: Deletes rows by primary key and waits for completion.
-- `UpsertRows(ctx, sourceTable, targetTable, rows, lock)`: Upserts rows and waits for completion.
+- `UpsertRows(ctx, mapping, rows, lock)`: Upserts rows using a `ColumnMapping` and waits for completion.
 
 This distinction exists because:
 - The **copier** processes large batches of rows and benefits from async processing with callbacks to advance its watermark.
