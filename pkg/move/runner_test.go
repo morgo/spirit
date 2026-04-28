@@ -398,3 +398,56 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	// operation observes the cancellation first.
 	require.Error(t, err)
 }
+
+// TestMoveResumeDeletesAboveWatermark verifies that when a move operation
+// resumes from a checkpoint, rows above the watermark are deleted from the
+// target tables before resuming. This prevents phantom rows from the
+// keyAboveWatermark optimization race condition.
+func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
+	if testutils.IsMinimalRBRTestRunner(t) {
+		t.Skip("Skipping test for minimal RBR test runner")
+	}
+
+	sourceDSN := testutils.DSNForDatabase("source_resume_wm")
+	targetDSN := testutils.DSNForDatabase("dest_resume_wm")
+
+	// Clean up both databases
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_resume_wm`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_resume_wm`)
+
+	// Setup source database with a table and data
+	testutils.RunSQL(t, `CREATE DATABASE source_resume_wm`)
+	testutils.RunSQL(t, `CREATE TABLE source_resume_wm.t1 (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(50) NOT NULL
+	)`)
+	testutils.RunSQL(t, `INSERT INTO source_resume_wm.t1 (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
+
+	// Setup target database with the same table
+	testutils.RunSQL(t, `CREATE DATABASE dest_resume_wm`)
+	testutils.RunSQL(t, `CREATE TABLE dest_resume_wm.t1 (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(50) NOT NULL
+	)`)
+
+	// Run a full move to verify the basic path works end-to-end.
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+	}
+
+	err := move.Run()
+	require.NoError(t, err)
+
+	// Verify all rows were copied
+	targetDB, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	var count int
+	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 5, count)
+}

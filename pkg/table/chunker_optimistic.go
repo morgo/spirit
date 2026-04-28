@@ -221,12 +221,27 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	}
 	// Because this chunker only supports single-column primary keys,
 	// we can safely set the checkpointHighPtr as a single value like this.
-	// For high watermark, use the type of old table, not the new one.
-	checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp) // set the high pointer.
-	if err != nil {
-		return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
+	// We need the highest value in the new table so the keyAboveWatermark
+	// optimization stays disabled for keys that may already exist in the
+	// new table from before the resume. This prevents a race where a
+	// delete event is discarded (key "above watermark") but the row was
+	// actually already copied before the checkpoint. i.e.:
+	//   - watermark is at key=100, but a row at key=105 was inserted and copied.
+	//   - immediately after resume there is a delete for key=105 but we incorrectly
+	//     skip it because it is above the watermark.
+	//
+	// When NewTi is nil (the move path), we skip setting checkpointHighPtr
+	// entirely. The move path deletes all rows above the watermark from
+	// the target tables before resuming (see Runner.deleteAboveWatermark),
+	// so there are no phantom rows above the watermark to protect and the
+	// optimization can be enabled immediately.
+	if t.NewTi != nil {
+		checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp)
+		if err != nil {
+			return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
+		}
+		t.checkpointHighPtr = checkpointHighPtr
 	}
-	t.checkpointHighPtr = checkpointHighPtr
 	chunk, err := newChunkFromJSON(t.Ti, cp)
 	if err != nil {
 		return err

@@ -27,6 +27,8 @@ type chunkerComposite struct {
 	finalChunkSent bool
 	isOpen         bool
 
+	checkpointHighPtr Datum // the high watermark detected on restore from checkpoint
+
 	// Dynamic Chunking is time based instead of row based.
 	// It uses *time* to determine the target chunk size.
 	chunkTimingInfo []time.Duration
@@ -231,6 +233,30 @@ func (t *chunkerComposite) OpenAtWatermark(checkpnt string) error {
 	if err := t.open(); err != nil {
 		return err
 	}
+
+	// Set checkpointHighPtr from the new table's max value so the
+	// keyAboveWatermark optimization stays disabled for keys that may
+	// already exist in the new table from before the resume. This
+	// prevents a race where a delete event is discarded (key "above
+	// watermark") but the row was actually copied before the checkpoint.
+	// i.e.:
+	//   - watermark is at key=100, but a row at key=105 was inserted and copied.
+	//   - immediately after resume there is a delete for key=105 but we incorrectly
+	//     skip it because it is above the watermark.
+	//
+	// When NewTi is nil (the move path), we skip setting it. The move
+	// path deletes all rows above the watermark from the target tables
+	// before resuming (see Runner.deleteAboveWatermark), so there are no
+	// phantom rows to protect and the optimization can be enabled
+	// immediately.
+	if t.NewTi != nil {
+		checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp)
+		if err != nil {
+			return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
+		}
+		t.checkpointHighPtr = checkpointHighPtr
+	}
+
 	chunk, err := newChunkFromJSON(t.Ti, watermark.ChunkJSON)
 	if err != nil {
 		return err
@@ -431,6 +457,7 @@ func (t *chunkerComposite) open() (err error) {
 	}
 	t.finalChunkSent = false
 	t.chunkSize = StartingChunkSize
+	t.checkpointHighPtr = Datum{} // reset checkpoint high pointer
 
 	// Initialize progress tracking
 	atomic.StoreUint64(&t.rowsCopied, 0)
@@ -501,8 +528,10 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 
 	// If we haven't dispatched any chunks yet (chunkPtrs is empty),
 	// everything is "above" the high watermark (we haven't started copying yet)
-	// Return true to discard binlog events that are ahead of our progress
-	if len(t.chunkPtrs) == 0 {
+	// Return true to discard binlog events that are ahead of our progress.
+	// But if checkpointHighPtr is set (resume case), we must not discard
+	// events below it — those rows may already exist in the target.
+	if len(t.chunkPtrs) == 0 && t.checkpointHighPtr.IsNil() {
 		return true
 	}
 
@@ -512,15 +541,37 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	}
 
 	// Convert key0 to Datum for comparison
-	keyDatum, err := NewDatum(key0, t.chunkPtrs[0].Tp)
-	if err != nil {
-		// If we can't convert the key, return false to be safe (don't discard the row)
-		t.logger.Error("failed to create datum in KeyAboveHighWatermark", "key", key0, "error", err)
+	var keyDatum Datum
+	if len(t.chunkPtrs) > 0 {
+		var err error
+		keyDatum, err = NewDatum(key0, t.chunkPtrs[0].Tp)
+		if err != nil {
+			t.logger.Error("failed to create datum in KeyAboveHighWatermark", "key", key0, "error", err)
+			return false
+		}
+	} else {
+		// chunkPtrs not yet set but checkpointHighPtr is — use its type.
+		var err error
+		keyDatum, err = NewDatum(key0, t.checkpointHighPtr.Tp)
+		if err != nil {
+			t.logger.Error("failed to create datum in KeyAboveHighWatermark", "key", key0, "error", err)
+			return false
+		}
+	}
+
+	// If there is a checkpoint high pointer, first verify that the key
+	// is above it. If it's not above it, we return FALSE before we check
+	// the chunkPtr. This prevents a phantom row issue on resume where
+	// rows above the watermark may already exist in the new table.
+	if !t.checkpointHighPtr.IsNil() && t.checkpointHighPtr.GreaterThanOrEqual(keyDatum) {
 		return false
 	}
 
 	// Check if key is greater than or equal to the current chunkPtr[0]
 	// Use GreaterThanOrEqual which supports all types (numeric, string, temporal)
+	if len(t.chunkPtrs) == 0 {
+		return true // no chunkPtrs yet, but above checkpointHighPtr
+	}
 	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
 }
 
