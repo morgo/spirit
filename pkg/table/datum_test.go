@@ -278,6 +278,21 @@ func TestNewDatumFromValue(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "0xfffefd", d.String())
 
+	// Test empty binary values - must NOT serialize as "0x" because
+	// MySQL parses that as an identifier, not a hex literal.
+	d, err = NewDatumFromValue([]byte{0x00}, "MEDIUMBLOB")
+	assert.NoError(t, err)
+	assert.Equal(t, "0x00", d.String())
+	d, err = NewDatumFromValue([]byte{}, "VARBINARY(255)")
+	assert.NoError(t, err)
+	assert.Equal(t, "0x00", d.String())
+	d, err = NewDatumFromValue("", "BLOB")
+	assert.NoError(t, err)
+	assert.Equal(t, "0x00", d.String())
+	d, err = NewDatumFromValue(nil, "BLOB")
+	assert.NoError(t, err)
+	assert.Equal(t, "NULL", d.String())
+
 	// Test JSON types - should be quoted like text
 	jsonBytes := []byte(`[1, 2, 3]`)
 	d, err = NewDatumFromValue(jsonBytes, "JSON")
