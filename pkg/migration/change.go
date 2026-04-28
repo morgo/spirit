@@ -16,6 +16,12 @@ type change struct {
 	table    *table.TableInfo
 	newTable *table.TableInfo
 
+	// chunker is the MappedChunker specific to this change.
+	// It is set during initChunkers() and used by setupCopierCheckerAndReplClient()
+	// to pass to AddSubscription, which requires a single-table MappedChunker
+	// (not the multi-chunker wrapper stored on the Runner).
+	chunker table.MappedChunker
+
 	// Store a pointer back to the migration runner
 	// (for compatibility, we want to eventually remove this)
 	runner *Runner

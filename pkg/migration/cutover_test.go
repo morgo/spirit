@@ -58,7 +58,9 @@ func TestCutOver(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t1new, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
+	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t1new, chunker))
 	// the feed must be started.
 	assert.NoError(t, feed.Run(t.Context()))
 
@@ -130,7 +132,9 @@ func TestMDLLockFails(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t1new, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
+	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t1new, chunker))
 	// the feed must be started.
 	assert.NoError(t, feed.Run(t.Context()))
 
@@ -193,7 +197,9 @@ func TestInvalidOptions(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
-	assert.NoError(t, feed.AddSubscription(t1, t1new, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
+	assert.NoError(t, err)
+	assert.NoError(t, feed.AddSubscription(t1, t1new, chunker))
 
 	_, err = NewCutOver(db, []*cutoverConfig{{
 		table:        nil,

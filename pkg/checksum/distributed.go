@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,7 +59,10 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 
 	// Build the checksum query fragment. The same WHERE clause and column list
 	// applies to both sources and targets since all schemas are identical.
-	checksumColumns := c.intersectColumns(chunk)
+	checksumColumns, _, err := chunk.ColumnMapping.ChecksumExprs()
+	if err != nil {
+		return err
+	}
 	whereClause := chunk.String()
 
 	// Query ALL sources and aggregate results.
@@ -538,21 +540,4 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		return err1
 	}
 	return nil
-}
-
-// intersectColumns is similar to utils.IntersectColumns, but it
-// wraps an IFNULL(), ISNULL() and cast operation around the columns.
-// The cast is to c.newTable type.
-func (c *DistributedChecker) intersectColumns(chunk *table.Chunk) string {
-	var intersection []string
-	for _, col := range chunk.Table.NonGeneratedColumns {
-		for _, col2 := range chunk.NewTable.NonGeneratedColumns {
-			if col == col2 {
-				// Column exists in both, so we add intersection wrapped in
-				// IFNULL, ISNULL and CAST.
-				intersection = append(intersection, "IFNULL("+chunk.NewTable.WrapCastType(col)+",''), ISNULL(`"+col+"`)")
-			}
-		}
-	}
-	return strings.Join(intersection, ", ")
 }

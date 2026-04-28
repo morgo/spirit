@@ -66,7 +66,9 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client) {
 		ServerID:        NewServerID(),
 		Applier:         applier,
 	})
-	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
+	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	return db, client
 }

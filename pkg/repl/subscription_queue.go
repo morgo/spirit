@@ -27,7 +27,7 @@ type deltaQueue struct {
 	changes []queuedChange
 
 	watermarkOptimization bool
-	chunker               table.Chunker
+	chunker               table.MappedChunker
 }
 
 // Assert that deltaQueue implements subscription
@@ -77,10 +77,11 @@ func (s *deltaQueue) createDeleteStmt(deleteKeys []string) statement {
 func (s *deltaQueue) createReplaceStmt(replaceKeys []string) statement {
 	var replaceStmt string
 	if len(replaceKeys) > 0 {
+		sourceColumns, targetColumns := s.chunker.ColumnMapping().Columns()
 		replaceStmt = fmt.Sprintf("REPLACE INTO %s (%s) SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE (%s) IN (%s)",
 			s.newTable.QuotedTableName,
-			utils.IntersectNonGeneratedColumns(s.table, s.newTable),
-			utils.IntersectNonGeneratedColumns(s.table, s.newTable),
+			targetColumns,
+			sourceColumns,
 			s.table.QuotedTableName,
 			table.QuoteColumns(s.table.KeyColumns),
 			pksToRowValueConstructor(replaceKeys),

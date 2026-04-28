@@ -21,6 +21,7 @@ type chunkerOptimistic struct {
 	checkpointHighPtr Datum // the high watermark detected on restore
 	finalChunkSent    bool
 	isOpen            bool
+	columnMapping     *ColumnMapping
 
 	// Dynamic Chunking is time based instead of row based.
 	// It uses *time* to determine the target chunk size.
@@ -49,7 +50,7 @@ type chunkerOptimistic struct {
 	logger *slog.Logger
 }
 
-var _ Chunker = &chunkerOptimistic{}
+var _ MappedChunker = &chunkerOptimistic{}
 
 // nextChunkByPrefetching uses prefetching instead of feedback to determine the chunk size.
 // It is used when the chunker detects that there are very large gaps in the sequence.
@@ -101,6 +102,8 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 			UpperBound: &Boundary{[]Datum{maxVal}, false},
 			Table:      t.Ti,
 			NewTable:   t.NewTi,
+
+			ColumnMapping: t.columnMapping,
 		}, nil
 	}
 	if rows.Err() != nil {
@@ -116,6 +119,8 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 		LowerBound: &Boundary{[]Datum{t.chunkPtr}, true},
 		Table:      t.Ti,
 		NewTable:   t.NewTi,
+
+		ColumnMapping: t.columnMapping,
 	}, nil
 }
 
@@ -139,6 +144,8 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 			UpperBound: &Boundary{[]Datum{t.chunkPtr}, false},
 			Table:      t.Ti,
 			NewTable:   t.NewTi,
+
+			ColumnMapping: t.columnMapping,
 		}, nil
 	}
 	if t.chunkPrefetchingEnabled {
@@ -167,6 +174,8 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 			LowerBound: &Boundary{[]Datum{t.chunkPtr}, true},
 			Table:      t.Ti,
 			NewTable:   t.NewTi,
+
+			ColumnMapping: t.columnMapping,
 		}, nil
 	}
 
@@ -184,6 +193,8 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 		UpperBound: &Boundary{[]Datum{maxVal}, false},
 		Table:      t.Ti,
 		NewTable:   t.NewTi,
+
+		ColumnMapping: t.columnMapping,
 	}, nil
 }
 
@@ -608,4 +619,8 @@ func (t *chunkerOptimistic) Tables() []*TableInfo {
 		return []*TableInfo{t.Ti, t.NewTi}
 	}
 	return []*TableInfo{t.Ti}
+}
+
+func (t *chunkerOptimistic) ColumnMapping() *ColumnMapping {
+	return t.columnMapping
 }

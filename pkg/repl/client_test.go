@@ -51,7 +51,9 @@ func TestReplClient(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
 	})
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -181,7 +183,9 @@ func TestReplClientResumeFromImpossible(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
 	})
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	client.SetFlushedPos(mysql.Position{
 		Name: "impossible",
 		Pos:  uint32(12345),
@@ -213,7 +217,9 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
 	})
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	pos, err := client.getCurrentBinlogPosition(t.Context())
 	assert.NoError(t, err)
 	pos.Pos = 4
@@ -251,7 +257,9 @@ func TestReplClientOpts(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
 	})
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.Equal(t, 0, db.Stats().InUse) // no connections in use.
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
@@ -371,7 +379,9 @@ func TestFeedback(t *testing.T) {
 	assert.NoError(t, err)
 
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, NewClientDefaultConfig())
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -433,7 +443,9 @@ func TestBlockWait(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
 	})
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -506,7 +518,9 @@ func TestDDLNotification(t *testing.T) {
 		},
 		ServerID: NewServerID(),
 	})
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -576,7 +590,9 @@ func TestCompositePKUpdate(t *testing.T) {
 	})
 
 	// Add subscription - note that keyAboveWatermark is disabled for composite PKs
-	assert.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
@@ -737,7 +753,9 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 		ServerID:        NewServerID(),
 		CancelFunc:      func() bool { cancel(); return true },
 	})
-	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 	require.NoError(t, client.Run(ctx))
 
 	// Ensure we are no longer on the initial binary log.
@@ -922,7 +940,9 @@ func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
 		ServerID:        NewServerID(),
 		Applier:         applierInstance,
 	})
-	require.NoError(t, client.AddSubscription(t1, t2, nil))
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 
 	err = client.processRowsEvent(binlogEvent, rowsEvent)
 	assert.Error(t, err)
@@ -936,7 +956,9 @@ func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
 	})
-	require.NoError(t, client2.AddSubscription(t1, t2, nil))
+	chunker, err = table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client2.AddSubscription(t1, t2, chunker))
 
 	err = client2.processRowsEvent(binlogEvent, rowsEvent)
 	assert.NoError(t, err)

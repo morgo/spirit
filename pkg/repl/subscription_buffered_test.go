@@ -107,7 +107,9 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 		ServerID:        NewServerID(),
 		Applier:         applier,
 	})
-	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
+	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 
 	defer client.Close()
@@ -165,7 +167,9 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 		ServerID:        NewServerID(),
 		Applier:         applier,
 	})
-	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
+	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
+	assert.NoError(t, err)
+	assert.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
 	assert.NoError(t, client.Run(t.Context()))
 
 	defer client.Close()
@@ -252,6 +256,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	// - Keys >= 5 are NOT below the low watermark (copier is at or hasn't reached them)
 	// - Keys > 5 are above the high watermark (copier hasn't reached them, don't track)
 	mockChunker := table.NewMockChunker("subscription_test", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
 	sub := &bufferedMap{
@@ -380,6 +385,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 
 	// Create mock chunker with current position at 5
 	mockChunker := table.NewMockChunker("subscription_test", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
 	sub := &bufferedMap{

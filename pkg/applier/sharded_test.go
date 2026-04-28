@@ -118,8 +118,9 @@ func TestShardedApplierIntegration(t *testing.T) {
 
 	// Create a chunk for the apply operation
 	chunk := &table.Chunk{
-		Table:    sourceTable,
-		NewTable: shard1Table, // Doesn't matter which, both have same structure
+		Table:         sourceTable,
+		NewTable:      shard1Table, // Doesn't matter which, both have same structure
+		ColumnMapping: table.NewColumnMapping(sourceTable, shard1Table, nil),
 	}
 
 	// Apply the rows
@@ -476,7 +477,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 		},
 	}
 
-	affectedRows, err := applier.UpsertRows(t.Context(), sourceTable, target1Table, upsertRows, nil)
+	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(sourceTable, target1Table, nil), upsertRows, nil)
 	require.NoError(t, err)
 	t.Logf("Upserted %d rows total across all shards", affectedRows)
 
@@ -609,7 +610,7 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 		},
 	}
 
-	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, upsertRows, nil)
+	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), upsertRows, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), affectedRows)
 
@@ -776,7 +777,7 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Upsert with empty rows
-	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, []LogicalRow{}, nil)
+	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), []LogicalRow{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), affectedRows)
 }

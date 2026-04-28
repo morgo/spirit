@@ -90,8 +90,12 @@ func TestDiscovery(t *testing.T) {
 
 	// normalize for mysql 5.7 and 8.0
 	assert.Equal(t, "int", removeWidth(t1.columnsMySQLTps["id"]))
-	assert.Equal(t, "CAST(`id` AS signed)", t1.WrapCastType("id"))
-	assert.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", t1.WrapCastType("name"))
+	castID, err := t1.wrapCastType("id")
+	assert.NoError(t, err)
+	assert.Equal(t, "CAST(`id` AS signed)", castID)
+	castName, err := t1.wrapCastType("name")
+	assert.NoError(t, err)
+	assert.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", castName)
 
 	assert.Equal(t, "1", t1.minValue.String())
 	assert.Equal(t, "3", t1.maxValue.String())
