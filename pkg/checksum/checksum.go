@@ -16,6 +16,16 @@ import (
 var (
 	// Query template for row checksums
 	queryTemplate = "SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s"
+
+	// ErrYieldTimeout is returned by runChecksum when the yield timeout expires.
+	// This is distinct from the parent context being canceled, and signals that
+	// the checksum should resume from the current watermark after releasing
+	// long-running transactions to reduce HLL (history list length) growth.
+	ErrYieldTimeout = errors.New("checksum yield timeout")
+
+	// DefaultYieldTimeout is the default maximum duration for a single checksum
+	// pass before yielding to release long-running REPEATABLE READ transactions.
+	DefaultYieldTimeout = 24 * time.Hour
 )
 
 type Checker interface {
@@ -35,6 +45,7 @@ type CheckerConfig struct {
 	Watermark       string // optional; defines a watermark to start from
 	MaxRetries      int
 	Applier         applier.Applier // optional; indicates it is a distributed checker
+	YieldTimeout    time.Duration   // maximum duration for a single checksum pass before yielding to release long-running transactions
 }
 
 func NewCheckerDefaultConfig() *CheckerConfig {
@@ -45,13 +56,20 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 		Logger:          slog.Default(),
 		FixDifferences:  false,
 		MaxRetries:      3,
+		YieldTimeout:    DefaultYieldTimeout,
 	}
 }
 
 // NewChecker creates a new checksum object.
-func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *CheckerConfig) (Checker, error) {
-	if feed == nil {
-		return nil, errors.New("feed must be non-nil")
+// sourceDBs contains the source database connections (one for single-source migrations,
+// multiple for N:M moves). The distributed checker aggregates checksums across all sources.
+// The single checker uses sourceDBs[0].
+func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []*repl.Client, config *CheckerConfig) (Checker, error) {
+	if len(sourceDBs) == 0 {
+		return nil, errors.New("at least one source database must be provided")
+	}
+	if len(feeds) == 0 {
+		return nil, errors.New("at least one feed must be provided")
 	}
 	if chunker == nil {
 		return nil, errors.New("chunker must be non-nil")
@@ -62,11 +80,14 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 	if config.MaxRetries == 0 {
 		config.MaxRetries = 3
 	}
+	if config.YieldTimeout == 0 {
+		config.YieldTimeout = DefaultYieldTimeout
+	}
 	if config.Applier != nil {
 		return &DistributedChecker{
 			concurrency:    config.Concurrency,
-			db:             db,
-			feed:           feed,
+			sourceDBs:      sourceDBs,
+			feeds:          feeds,
 			chunker:        chunker,
 			dbConfig:       config.DBConfig,
 			logger:         config.Logger,
@@ -77,12 +98,13 @@ func NewChecker(db *sql.DB, chunker table.Chunker, feed *repl.Client, config *Ch
 	}
 	return &SingleChecker{
 		concurrency:    config.Concurrency,
-		db:             db,
-		feed:           feed,
+		db:             sourceDBs[0],
+		feed:           feeds[0],
 		chunker:        chunker,
 		dbConfig:       config.DBConfig,
 		logger:         config.Logger,
 		fixDifferences: config.FixDifferences,
 		maxRetries:     config.MaxRetries,
+		yieldTimeout:   config.YieldTimeout,
 	}, nil
 }

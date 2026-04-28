@@ -2,14 +2,8 @@ name: MySQL 8.0 Build and Run /w docker-compose
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
 jobs:
   build:
     runs-on: ubuntu-latest

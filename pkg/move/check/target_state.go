@@ -24,16 +24,13 @@ func init() {
 // This check runs at ScopePostSetup because it needs the source tables to be discovered first.
 func targetStateCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	if len(r.SourceTables) == 0 {
-		// No source tables to validate against, skip check
-		return nil
+		return nil // No source tables to validate against, skip check
 	}
-
 	// Build a map of source tables for quick lookup
 	sourceTableMap := make(map[string]*table.TableInfo)
 	for _, tbl := range r.SourceTables {
 		sourceTableMap[tbl.TableName] = tbl
 	}
-
 	for i, target := range r.Targets {
 		rows, err := target.DB.QueryContext(ctx, "SHOW TABLES")
 		if err != nil {

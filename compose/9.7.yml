@@ -1,0 +1,4 @@
+services:
+  mysql:
+    image: mysql:9.7
+    ports: [ '9070:3306' ]

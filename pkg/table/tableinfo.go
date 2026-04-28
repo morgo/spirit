@@ -49,6 +49,12 @@ type TableInfo struct {
 	statisticsLock              sync.Mutex
 	DisableAutoUpdateStatistics atomic.Bool
 
+	// Host is an optional identifier for the MySQL server this table belongs to.
+	// It is used by MultiChunker to disambiguate tables with the same SchemaName
+	// and TableName on different servers (e.g., in N:M move operations).
+	// When empty, the multi-chunker keys by SchemaName.TableName only.
+	Host string
+
 	// Sharding configuration (for ShardedApplier)
 	// These are set per-table when using multi-table migrations with different sharding keys
 	ShardingColumn string   // Column name to extract and hash (e.g., "user_id")
@@ -59,6 +65,24 @@ type TableInfo struct {
 // This matches Vitess vindex behavior where the hash is used to determine shard placement.
 // The hash value is then matched against key ranges to find the target shard.
 type HashFunc func(value any) (uint64, error)
+
+// QualifiedName returns a stable key for this table suitable for use in
+// checkpoint watermarks. The format is "host.schema.table" when Host is set,
+// or "schema.table" otherwise. This ensures uniqueness even when multiple
+// servers have identically-named schemas and tables (N:M moves).
+func (t *TableInfo) QualifiedName() string {
+	if t.Host != "" {
+		return t.Host + "." + t.SchemaName + "." + t.TableName
+	}
+	return t.SchemaName + "." + t.TableName
+}
+
+// DB returns the database connection associated with this table.
+// This is used by components like the copier and checksum that need
+// to read from the correct source database when multiple sources are in use.
+func (t *TableInfo) DB() *sql.DB {
+	return t.db
+}
 
 func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	return &TableInfo{

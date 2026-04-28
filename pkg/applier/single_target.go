@@ -328,7 +328,7 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 
 	// Build the INSERT statement
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.TableName,
+		chunkletData.chunk.NewTable.QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
@@ -428,7 +428,7 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 
 	// Build DELETE statement
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-		targetTable.TableName,
+		targetTable.QuotedTableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		strings.Join(pkValues, ","),
 	)
@@ -527,7 +527,7 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 	}
 
 	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		targetTable.TableName,
+		targetTable.QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 		strings.Join(updateClauses, ", "),

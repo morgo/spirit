@@ -43,8 +43,7 @@ func TestMovePrivileges(t *testing.T) {
 	defer utils.CloseAndLog(lowPrivDB)
 
 	r := Resources{
-		SourceDB:     lowPrivDB,
-		SourceConfig: sourceConfig,
+		Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err) // privileges fail, since user has nothing granted.
@@ -82,18 +81,82 @@ func TestMovePrivileges(t *testing.T) {
 	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
-	r.SourceDB = lowPrivDB
+	r.Sources = []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err) // all privileges granted, should pass now
 
 	// Test the root user
 	r = Resources{
-		SourceDB:     db,
-		SourceConfig: sourceConfig,
+		Sources: []SourceResource{{DB: db, Config: sourceConfig}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err) // root privileges work fine
+}
+
+// TestMovePrivilegesMultipleSources verifies that the privileges check iterates
+// over all sources and reports the correct source index on failure.
+func TestMovePrivilegesMultipleSources(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "root" // needs grant privilege
+	rootDSN := fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName)
+	rootDB, err := sql.Open("mysql", rootDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rootDB)
+
+	// Verify root can connect; skip if not (e.g., local dev without root access).
+	if err := rootDB.PingContext(t.Context()); err != nil {
+		t.Skip("Skipping: root user cannot connect to MySQL")
+	}
+
+	// Create a low-privilege user for the second source.
+	_, err = rootDB.ExecContext(t.Context(), "DROP USER IF EXISTS testmovemultisrcuser")
+	require.NoError(t, err)
+	_, err = rootDB.ExecContext(t.Context(), "CREATE USER testmovemultisrcuser")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = rootDB.ExecContext(t.Context(), "DROP USER IF EXISTS testmovemultisrcuser")
+	})
+
+	rootConfig, err := mysql.ParseDSN(rootDSN)
+	require.NoError(t, err)
+
+	// Source 1: low-privilege connection.
+	config, err = mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	lowPrivDSN := fmt.Sprintf("testmovemultisrcuser:@tcp(%s)/%s", config.Addr, config.DBName)
+	lowPrivConfig, err := mysql.ParseDSN(lowPrivDSN)
+	require.NoError(t, err)
+	lowPrivDB, err := sql.Open("mysql", lowPrivDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(lowPrivDB)
+
+	r := Resources{
+		Sources: []SourceResource{
+			{DB: rootDB, Config: rootConfig},
+			{DB: lowPrivDB, Config: lowPrivConfig},
+		},
+	}
+
+	// The check should fail on source 1 (the low-privilege user).
+	err = privilegesCheck(t.Context(), r, slog.Default())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "source 1")
+
+	// Verify the check passes when both sources have sufficient privileges.
+	rootDB2, err := sql.Open("mysql", rootDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rootDB2)
+
+	r = Resources{
+		Sources: []SourceResource{
+			{DB: rootDB, Config: rootConfig},
+			{DB: rootDB2, Config: rootConfig},
+		},
+	}
+	err = privilegesCheck(t.Context(), r, slog.Default())
+	assert.NoError(t, err)
 }
 
 // TestMovePrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
@@ -163,8 +226,7 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	defer utils.CloseAndLog(lowPrivDB)
 
 	r := Resources{
-		SourceDB:     lowPrivDB,
-		SourceConfig: sourceConfig,
+		Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}},
 	}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
@@ -180,7 +242,7 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	require.NoError(t, lowPrivDB.Close())
 	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	require.NoError(t, err)
-	r.SourceDB = lowPrivDB
+	r.Sources = []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")

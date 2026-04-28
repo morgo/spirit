@@ -129,7 +129,44 @@ func TestPlanChanges_WithLintViolations(t *testing.T) {
 	assert.Equal(t, "child", plan.Changes[0].TableName)
 	// The has_fk linter should produce a warning for the child table
 	assert.True(t, plan.HasWarnings(), "expected lint warnings for table with FK")
-	assert.NotEmpty(t, plan.Changes[0].Warnings)
+	assert.NotEmpty(t, plan.Changes[0].Warnings())
+}
+
+func TestPlanChanges_StructuredViolations(t *testing.T) {
+	current := []table.TableSchema{
+		{Name: "parent", Schema: "CREATE TABLE parent (id BIGINT PRIMARY KEY)"},
+		{Name: "child", Schema: `CREATE TABLE child (
+			id BIGINT PRIMARY KEY,
+			parent_id BIGINT,
+			CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent(id)
+		)`},
+	}
+	desired := []table.TableSchema{
+		{Name: "parent", Schema: "CREATE TABLE parent (id BIGINT PRIMARY KEY)"},
+		{Name: "child", Schema: `CREATE TABLE child (
+			id BIGINT PRIMARY KEY,
+			parent_id BIGINT,
+			name VARCHAR(100),
+			CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent(id)
+		)`},
+	}
+	plan, err := PlanChanges(current, desired, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, plan.Changes, 1)
+
+	change := plan.Changes[0]
+	require.NotEmpty(t, change.Violations, "expected structured Violations to be populated")
+
+	// Verify structured fields are accessible
+	v := change.Violations[0]
+	assert.Equal(t, "child", v.Location.Table)
+	assert.NotEmpty(t, v.Message)
+	assert.Equal(t, SeverityWarning, v.Severity)
+	assert.Equal(t, "has_foreign_key", v.Linter.Name())
+
+	// Severity methods filter correctly
+	assert.Len(t, change.Warnings(), 1)
+	assert.Empty(t, change.Errors())
 }
 
 func TestPlanChanges_WithLintConfig(t *testing.T) {
@@ -161,7 +198,7 @@ func TestPlanChanges_WithLintConfig(t *testing.T) {
 	// on this schema, so there should be no warnings at all.
 	assert.False(t, plan.HasWarnings(), "expected no warnings when has_foreign_key is disabled")
 	for _, ch := range plan.Changes {
-		assert.Empty(t, ch.Warnings, "expected no warnings on any change")
+		assert.Empty(t, ch.Warnings(), "expected no warnings on any change")
 	}
 }
 
@@ -195,12 +232,12 @@ func TestPlanChanges_WithInfos(t *testing.T) {
 
 	// The test_info linter should produce an info for the ALTER TABLE change.
 	assert.True(t, plan.HasInfos(), "expected lint infos from test_info linter")
-	require.NotEmpty(t, plan.Changes[0].Infos)
-	assert.Contains(t, plan.Changes[0].Infos[0], "test_info")
-	assert.Contains(t, plan.Changes[0].Infos[0], "informational suggestion")
+	require.NotEmpty(t, plan.Changes[0].Infos())
+	assert.Equal(t, "test_info", plan.Changes[0].Infos()[0].Linter.Name())
+	assert.Contains(t, plan.Changes[0].Infos()[0].Message, "informational suggestion")
 
 	// Infos should not appear as warnings or errors.
-	assert.Empty(t, plan.Changes[0].Errors)
+	assert.Empty(t, plan.Changes[0].Errors())
 }
 
 func TestPlanChanges_HasInfosFalseWhenNone(t *testing.T) {
@@ -215,7 +252,7 @@ func TestPlanChanges_HasInfosFalseWhenNone(t *testing.T) {
 	assert.True(t, plan.HasChanges())
 	// No info-producing linter is registered, so HasInfos should be false.
 	assert.False(t, plan.HasInfos())
-	assert.Empty(t, plan.Changes[0].Infos)
+	assert.Empty(t, plan.Changes[0].Infos())
 }
 
 func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
@@ -242,7 +279,7 @@ func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
 	assert.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
 	// The info linter only fires on ALTER, so no infos here.
 	assert.False(t, plan.HasInfos())
-	assert.Empty(t, plan.Changes[0].Infos)
+	assert.Empty(t, plan.Changes[0].Infos())
 }
 
 func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
@@ -283,10 +320,10 @@ func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
 	assert.Contains(t, t1Changes[1].Statement, "PARTITION BY")
 
 	// Violations should only be on the last statement.
-	assert.Empty(t, t1Changes[0].Warnings, "first statement should have no violations")
-	assert.Empty(t, t1Changes[0].Errors, "first statement should have no violations")
-	assert.Empty(t, t1Changes[0].Infos, "first statement should have no violations")
-	assert.NotEmpty(t, t1Changes[1].Warnings, "last statement should carry the FK warning")
+	assert.Empty(t, t1Changes[0].Warnings(), "first statement should have no violations")
+	assert.Empty(t, t1Changes[0].Errors(), "first statement should have no violations")
+	assert.Empty(t, t1Changes[0].Infos(), "first statement should have no violations")
+	assert.NotEmpty(t, t1Changes[1].Warnings(), "last statement should carry the FK warning")
 	assert.True(t, plan.HasWarnings())
 }
 

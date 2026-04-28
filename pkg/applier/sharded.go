@@ -441,9 +441,8 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	// Build the INSERT statement
 	// Note: We use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
-	tableName := fmt.Sprintf("`%s`", chunkletData.chunk.NewTable.TableName)
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		tableName,
+		chunkletData.chunk.NewTable.QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
@@ -582,8 +581,8 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 	// Build DELETE statement
 	// Use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
-	deleteStmt := fmt.Sprintf("DELETE FROM `%s` WHERE (%s) IN (%s)",
-		sourceTable.TableName,
+	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
+		sourceTable.QuotedTableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		strings.Join(pkValues, ","),
 	)
@@ -775,8 +774,8 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 
 			// Use just the table name, not the fully qualified name, because
 			// the database connection (shard.writeDB) already determines which database to write to
-			upsertStmt := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-				sourceTable.TableName,
+			upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+				sourceTable.QuotedTableName,
 				columnList,
 				strings.Join(valuesClauses, ", "),
 				strings.Join(updateClauses, ", "),

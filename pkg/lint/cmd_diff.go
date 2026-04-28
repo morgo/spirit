@@ -144,16 +144,8 @@ func printPlan(plan *Plan) {
 	// Collect all violations across changes for the comment header.
 	var hasViolations bool
 	for _, ch := range plan.Changes {
-		for _, e := range ch.Errors {
-			fmt.Printf("-- %s\n", e)
-			hasViolations = true
-		}
-		for _, w := range ch.Warnings {
-			fmt.Printf("-- %s\n", w)
-			hasViolations = true
-		}
-		for _, info := range ch.Infos {
-			fmt.Printf("-- %s\n", info)
+		for _, v := range ch.Violations {
+			fmt.Printf("-- %s\n", v.String())
 			hasViolations = true
 		}
 	}
