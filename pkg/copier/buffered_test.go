@@ -344,8 +344,8 @@ func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, ta
 	return d.realApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, lock)
 }
 
-func (d *delayedCallbackApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []applier.LogicalRow, lock *dbconn.TableLock) (int64, error) {
-	return d.realApplier.UpsertRows(ctx, sourceTable, targetTable, rows, lock)
+func (d *delayedCallbackApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, lock *dbconn.TableLock) (int64, error) {
+	return d.realApplier.UpsertRows(ctx, mapping, rows, lock)
 }
 
 func (d *delayedCallbackApplier) Wait(ctx context.Context) error {

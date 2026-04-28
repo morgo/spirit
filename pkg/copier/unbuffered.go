@@ -15,7 +15,6 @@ import (
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
-	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -45,10 +44,11 @@ func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	startTime := time.Now()
 	// INSERT INGORE because we can have duplicate rows in the chunk because in
 	// resuming from checkpoint we will be re-applying some of the previous executed work.
+	sourceColumns, targetColumns := chunk.ColumnMapping.Columns()
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) SELECT %s FROM %s FORCE INDEX (PRIMARY) WHERE %s",
 		chunk.NewTable.QuotedTableName,
-		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
-		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
+		targetColumns,
+		sourceColumns,
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)

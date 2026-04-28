@@ -301,8 +301,8 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	}
 
 	// Get the intersected column names to match with the values
-	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
-	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
+	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
+	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
 
 	// Build VALUES clauses for all rows in the chunklet
 	var valuesClauses []string
@@ -313,7 +313,7 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		}
 		var values []string
 		for i, value := range row.values {
-			columnType, ok := chunkletData.chunk.NewTable.GetColumnMySQLType(columnNames[i])
+			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
@@ -328,12 +328,12 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 
 	// Build the INSERT statement
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.QuotedTableName,
+		chunkletData.chunk.ColumnMapping.TargetTable().QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
-	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
+	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert
 	result, err := dbconn.RetryableTransaction(ctx, a.target.DB, true, a.dbConfig, query)
@@ -456,25 +456,13 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 // UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
 // The rows are LogicalRow structs containing the row images.
 // If lock is non-nil, the upsert is executed under the table lock.
-func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	// For move operations, targetTable may be nil - use sourceTable for both
-	if targetTable == nil {
-		targetTable = sourceTable
-	}
-	// Get the columns that exist in both source and destination tables
-	columnList := utils.IntersectNonGeneratedColumns(sourceTable, targetTable)
-	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(sourceTable, targetTable)
-
-	// Get the intersected column indices
-	var intersectedColumns []int
-	for i, sourceCol := range sourceTable.NonGeneratedColumns {
-		if slices.Contains(targetTable.NonGeneratedColumns, sourceCol) {
-			intersectedColumns = append(intersectedColumns, i)
-		}
-	}
+	_, targetColumnList := mapping.Columns()
+	sourceColumnNames, targetColumnNames := mapping.ColumnsSlice()
+	intersectedColumns := mapping.SourceColumnIndices()
 
 	// Build the VALUES clause from the row images
 	var valuesClauses []string
@@ -489,21 +477,14 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 				return 0, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.RowImage))
 			}
 			// In order to create a datum we need to know the MySQL type,
-			// which we can get from the source table. We just do an initial
-			// safety check to ensure the column index exists in the list
-			// of column names.
-			if i >= len(columnNames) {
-				return 0, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
-			}
-			columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
+			// which we can get from the source table.
+			columnType, ok := mapping.SourceTable().GetColumnMySQLType(sourceColumnNames[i])
 			if !ok {
-				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+				return 0, fmt.Errorf("column %s not found in table info", sourceColumnNames[i])
 			}
-			// The value appended here will be escaped
-			// by calling String() on the Datum
 			datum, err := table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType)
 			if err != nil {
-				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
 			values = append(values, datum.String())
 		}
@@ -514,26 +495,22 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 		return 0, nil
 	}
 
-	// Build the ON DUPLICATE KEY UPDATE clause using MySQL 8.0+ syntax
+	// Build the ON DUPLICATE KEY UPDATE clause using target column names.
 	var updateClauses []string
-	for _, col := range targetTable.NonGeneratedColumns {
-		// Skip primary key columns in the UPDATE clause
-		if !slices.Contains(targetTable.KeyColumns, col) {
-			// Check if this column exists in both tables
-			if slices.Contains(sourceTable.NonGeneratedColumns, col) {
-				updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
-			}
+	for _, col := range targetColumnNames {
+		if !slices.Contains(mapping.TargetTable().KeyColumns, col) {
+			updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
 		}
 	}
 
 	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		targetTable.QuotedTableName,
-		columnList,
+		mapping.TargetTable().QuotedTableName,
+		targetColumnList,
 		strings.Join(valuesClauses, ", "),
 		strings.Join(updateClauses, ", "),
 	)
 
-	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", targetTable.TableName)
+	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", mapping.TargetTable().TableName)
 
 	// Execute under lock if provided
 	if lock != nil {

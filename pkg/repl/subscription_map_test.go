@@ -37,6 +37,7 @@ func TestSubscriptionDeltaMap(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker:  table.NewMockChunker("test", 1000),
 	}
 
 	// Test initial state
@@ -91,6 +92,7 @@ func TestFlushWithLock(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker:  table.NewMockChunker("test", 1000),
 	}
 
 	// Insert test data
@@ -148,6 +150,7 @@ func TestFlushWithoutLock(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker:  table.NewMockChunker("test", 1000),
 	}
 
 	// Insert test data
@@ -198,6 +201,7 @@ func TestConcurrentKeyChanges(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker:  table.NewMockChunker("test", 1000),
 	}
 
 	// Run concurrent key changes
@@ -250,6 +254,7 @@ func TestKeyChangedOverwrite(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker:  table.NewMockChunker("test", 1000),
 	}
 
 	// Test overwriting the same key multiple times
@@ -355,6 +360,7 @@ func TestKeyChangedNilAndEmpty(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]mapChange),
+		chunker:  table.NewMockChunker("test", 1000),
 	}
 
 	// Test with empty string key

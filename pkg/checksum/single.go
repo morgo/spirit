@@ -53,13 +53,17 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	}
 	defer trxPool.Put(trx)
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
+	if err != nil {
+		return err
+	}
 	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		c.intersectColumns(chunk),
+		sourceChecksumCols,
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
 	target := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		c.intersectColumns(chunk),
+		targetChecksumCols,
 		chunk.NewTable.QuotedTableName,
 		chunk.String(),
 	)
@@ -112,8 +116,12 @@ func (c *SingleChecker) GetProgress() string {
 func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chunk *table.Chunk) error {
 	c.logger.Info("inspecting differences for chunk", "chunk", chunk.String())
 
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
+	if err != nil {
+		return err
+	}
 	sourceRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
-		c.intersectColumns(chunk),
+		sourceChecksumCols,
 		strings.Join(chunk.Table.KeyColumns, ", "),
 		chunk.Table.QuotedTableName,
 		chunk.String(),
@@ -137,7 +145,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	}
 
 	targetRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
-		c.intersectColumns(chunk),
+		targetChecksumCols,
 		strings.Join(chunk.NewTable.KeyColumns, ", "),
 		chunk.NewTable.QuotedTableName,
 		chunk.String(),
@@ -257,10 +265,11 @@ func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) er
 	// first so that any since-deleted rows (which wouldn't get removed by replace) are removed first.
 	// By doing this as two transactions we should be able to remove
 	// the opportunity for deadlocks.
+	sourceColumns, targetColumns := chunk.ColumnMapping.Columns()
 	replaceStmt := fmt.Sprintf("REPLACE INTO %s (%s) SELECT %s FROM %s WHERE %s",
 		chunk.NewTable.QuotedTableName,
-		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
-		utils.IntersectNonGeneratedColumns(chunk.Table, chunk.NewTable),
+		targetColumns,
+		sourceColumns,
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
@@ -499,21 +508,4 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 		return err1
 	}
 	return nil
-}
-
-// intersectColumns is similar to utils.IntersectColumns, but it
-// wraps an IFNULL(), ISNULL() and cast operation around the columns.
-// The cast is to c.newTable type.
-func (c *SingleChecker) intersectColumns(chunk *table.Chunk) string {
-	var intersection []string
-	for _, col := range chunk.Table.NonGeneratedColumns {
-		for _, col2 := range chunk.NewTable.NonGeneratedColumns {
-			if col == col2 {
-				// Column exists in both, so we add intersection wrapped in
-				// IFNULL, ISNULL and CAST.
-				intersection = append(intersection, "IFNULL("+chunk.NewTable.WrapCastType(col)+",''), ISNULL(`"+col+"`)")
-			}
-		}
-	}
-	return strings.Join(intersection, ", ")
 }

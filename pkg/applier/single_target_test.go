@@ -539,7 +539,7 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 		},
 	}
 
-	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, upsertRows, nil)
+	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), upsertRows, nil)
 	require.NoError(t, err)
 	// MySQL returns 1 for insert, 2 for update in ON DUPLICATE KEY UPDATE
 	// So we expect 1 (update of id=1) + 1 (insert of id=3) = at least 2
@@ -621,7 +621,7 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 		},
 	}
 
-	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, upsertRows, nil)
+	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), upsertRows, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), affectedRows)
 
@@ -663,7 +663,7 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Upsert with empty rows
-	affectedRows, err := applier.UpsertRows(t.Context(), targetTable, targetTable, []LogicalRow{}, nil)
+	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), []LogicalRow{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), affectedRows)
 }

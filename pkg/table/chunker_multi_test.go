@@ -314,16 +314,6 @@ func TestMultiChunkerTables(t *testing.T) {
 	assert.Contains(t, tableNames, "table2")
 }
 
-func TestMultiChunkerKeyAboveHighWatermark(t *testing.T) {
-	mock1 := NewMockChunker("table1", 1000)
-	mock2 := NewMockChunker("table2", 1000)
-	chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
-
-	// Should always return false (not supported)
-	result := chunker.KeyAboveHighWatermark("any_key")
-	assert.False(t, result)
-}
-
 func TestMultiChunkerErrorHandling(t *testing.T) {
 	t.Run("NextOnClosedChunker", func(t *testing.T) {
 		mock1 := NewMockChunker("table1", 1000)

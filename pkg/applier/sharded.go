@@ -413,8 +413,8 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	defer cancel()
 
 	// Get the intersected column names
-	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
-	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
+	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
+	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
 
 	// Build VALUES clauses for all rows in the chunklet
 	var valuesClauses []string
@@ -425,7 +425,7 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		}
 		var values []string
 		for i, value := range row.values {
-			columnType, ok := chunkletData.chunk.NewTable.GetColumnMySQLType(columnNames[i])
+			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
@@ -442,13 +442,13 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	// Note: We use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.QuotedTableName,
+		chunkletData.chunk.ColumnMapping.TargetTable().QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
 	a.logger.Debug("writing chunklet to shard", "shardID", shard.shardID,
-		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
+		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert on this shard's database
 	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, true, shard.dbConfig, query)
@@ -652,7 +652,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 // Note: the sharded applier does not allow any transformations!
 // The targetTable argument is intentionally ignored.
 // This also means that table names between source and target must be the same.
-func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
@@ -661,6 +661,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
 	defer cancel()
 
+	sourceTable := mapping.SourceTable()
 	if sourceTable.ShardingColumn == "" {
 		return 0, errors.New("ShardingColumn not configured in TableInfo")
 	}
@@ -671,19 +672,9 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 	// Find the ordinal position of the sharding column within ALL columns
 	// (since RowImage from binlog contains ALL columns, including generated ones)
 	shardingOrdinal := slices.Index(sourceTable.Columns, sourceTable.ShardingColumn)
+	sourceOrdinal := mapping.SourceOrdinalIndices()
 	if shardingOrdinal == -1 {
 		return 0, fmt.Errorf("sharding column %s not found in columns", sourceTable.ShardingColumn)
-	}
-
-	// Build a map from NonGeneratedColumns to their indices in the full Columns list
-	// This is needed because RowImage contains ALL columns, but we only INSERT non-generated ones
-	var nonGeneratedIndices []int
-	for _, col := range sourceTable.NonGeneratedColumns {
-		idx := slices.Index(sourceTable.Columns, col)
-		if idx == -1 {
-			return 0, fmt.Errorf("non-generated column %s not found in columns", col)
-		}
-		nonGeneratedIndices = append(nonGeneratedIndices, idx)
 	}
 
 	// Group rows by shard
@@ -742,7 +733,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 			var valuesClauses []string
 			for _, logicalRow := range r {
 				var values []string
-				for i, colIdx := range nonGeneratedIndices {
+				for i, colIdx := range sourceOrdinal {
 					if colIdx >= len(logicalRow.RowImage) {
 						results <- result{err: fmt.Errorf("column index %d exceeds row image length %d", colIdx, len(logicalRow.RowImage))}
 						return
