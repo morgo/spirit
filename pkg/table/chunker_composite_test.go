@@ -45,7 +45,7 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 	assert.Equal(t, binaryType, t1.keyDatums[0])
 	assert.Equal(t, binaryType, t1.keyDatums[1])
 
-	chunker, err := newChunker(t1, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
@@ -149,7 +149,7 @@ func TestCompositeChunkerBinary(t *testing.T) {
 	assert.Equal(t, []string{"varbinary"}, t1.keyColumnsMySQLTp)
 	assert.Equal(t, binaryType, t1.keyDatums[0])
 
-	chunker, err := newChunker(t1, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
@@ -229,7 +229,7 @@ func TestCompositeChunkerInt(t *testing.T) {
 	assert.Equal(t, []string{"int"}, t1.keyColumnsMySQLTp)
 	assert.Equal(t, signedType, t1.keyDatums[0])
 
-	chunker, err := newChunker(t1, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
@@ -420,7 +420,7 @@ func TestCompositeSmallTable(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "compositesmall_t1")
 	assert.NoError(t, t1.SetInfo(t.Context()))
 
-	chunker, err := newChunker(t1, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
@@ -829,7 +829,7 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	tbl := NewTableInfo(db, "test", "compositewatermarkopt_t1")
 	assert.NoError(t, tbl.SetInfo(t.Context()))
 
-	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
 	assert.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
@@ -976,7 +976,7 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 	tbl := NewTableInfo(db, "test", "compositewatermarknn_t1")
 	assert.NoError(t, tbl.SetInfo(t.Context()))
 
-	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
 	assert.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
@@ -1055,7 +1055,7 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 	tbl := NewTableInfo(db, "test", "compositewatermarkdt_t1")
 	assert.NoError(t, tbl.SetInfo(t.Context()))
 
-	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
 	assert.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
@@ -1165,7 +1165,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 	tbl := NewTableInfo(db, "test", "compositecollation_t1")
 	assert.NoError(t, tbl.SetInfo(t.Context()))
 
-	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
 	assert.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
@@ -1284,7 +1284,7 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 	tbl := NewTableInfo(db, "test", "compositewatermarkooo_t1")
 	assert.NoError(t, tbl.SetInfo(t.Context()))
 
-	chunker, err := newChunker(tbl, ChunkerDefaultTarget, slog.Default())
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
 	assert.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 

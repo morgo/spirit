@@ -2,7 +2,6 @@ package table
 
 import (
 	"database/sql"
-	"log/slog"
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
@@ -29,7 +28,7 @@ func TestCompositeChunker(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "composite")
 	assert.NoError(t, t1.SetInfo(t.Context()))
 
-	chunker, err := newChunker(t1, 0, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 }
@@ -53,12 +52,12 @@ func TestOptimisticChunker(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "optimistic")
 	assert.NoError(t, t1.SetInfo(t.Context()))
 
-	chunker, err := newChunker(t1, 0, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerOptimistic{}, chunker)
 }
 
-func TestNewCompositeChunker(t *testing.T) {
+func TestNewCompositeChunkerWithKeyAndWhere(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS composite`)
 	table := `CREATE TABLE composite (
 		id bigint NOT NULL AUTO_INCREMENT,
@@ -79,7 +78,12 @@ func TestNewCompositeChunker(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "composite")
 	assert.NoError(t, t1.SetInfo(t.Context()))
 
-	chunker, err := NewCompositeChunker(t1, 0, slog.Default(), "age_idx", "age > 50")
+	// When Key and Where are specified, NewChunker should always return a
+	// composite chunker even though this table has a single-column auto-inc PK.
+	chunker, err := NewChunker(t1, ChunkerConfig{
+		Key:   "age_idx",
+		Where: "age > 50",
+	})
 	assert.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 	assert.Equal(t, "age_idx", chunker.(*chunkerComposite).keyName)

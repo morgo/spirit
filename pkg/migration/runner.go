@@ -1021,11 +1021,16 @@ func (r *Runner) initChunkers() error {
 	copyChunkers := make([]table.Chunker, 0, len(r.changes))
 	checksumChunkers := make([]table.Chunker, 0, len(r.changes))
 	for _, change := range r.changes {
-		copyChunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		chunkerCfg := table.ChunkerConfig{
+			NewTable:        change.newTable,
+			TargetChunkTime: r.migration.TargetChunkTime,
+			Logger:          r.logger,
+		}
+		copyChunker, err := table.NewChunker(change.table, chunkerCfg)
 		if err != nil {
 			return err
 		}
-		checksumChunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		checksumChunker, err := table.NewChunker(change.table, chunkerCfg)
 		if err != nil {
 			return err
 		}

@@ -50,7 +50,7 @@ func TestBasicChecksum(t *testing.T) {
 	defer feed.Close()
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
@@ -89,7 +89,7 @@ func TestBasicValidation(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 
 	_, err = NewChecker(nil, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig()) // no source DBs
@@ -147,7 +147,7 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -190,7 +190,7 @@ func TestFixCorrupt(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -248,7 +248,7 @@ func TestCorruptChecksum(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -290,7 +290,7 @@ func TestBoundaryCases(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -368,7 +368,7 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -411,7 +411,7 @@ func TestYieldTimeout(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 
@@ -464,7 +464,7 @@ func TestFromWatermark(t *testing.T) {
 	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
 	assert.NoError(t, feed.Run(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker.Open())
 

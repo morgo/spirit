@@ -194,7 +194,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 	t1.columnsMySQLTps = make(map[string]string)
 	t1.columnsMySQLTps["id"] = "bigint"
 
-	chunker, err := newChunker(t1, 100*time.Millisecond, slog.Default())
+	chunker, err := NewChunker(t1, ChunkerConfig{TargetChunkTime: 100 * time.Millisecond})
 	assert.NoError(t, err)
 
 	assert.NoError(t, chunker.Open())
@@ -261,7 +261,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 	t2.columnsMySQLTps = make(map[string]string)
 	t2.columnsMySQLTps["id"] = "bigint"
 
-	chunker2, err := NewChunker(t2, t2, 100, slog.Default())
+	chunker2, err := NewChunker(t2, ChunkerConfig{NewTable: t2, TargetChunkTime: 100})
 	assert.NoError(t, err)
 	assert.NoError(t, chunker2.OpenAtWatermark(watermark))
 
