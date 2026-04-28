@@ -87,8 +87,9 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 
 	// Create a chunk
 	chunk := &table.Chunk{
-		Table:    sourceTable,
-		NewTable: targetTable,
+		Table:         sourceTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(sourceTable, targetTable, nil),
 	}
 
 	// Apply the rows
@@ -195,8 +196,9 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 
 	// Apply empty rows
 	chunk := &table.Chunk{
-		Table:    targetTable,
-		NewTable: targetTable,
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 	}
 
 	var callbackInvoked atomic.Bool
@@ -259,8 +261,9 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	}
 
 	chunk := &table.Chunk{
-		Table:    targetTable,
-		NewTable: targetTable,
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 	}
 
 	var callbackInvoked atomic.Bool
@@ -345,8 +348,9 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 			}
 
 			chunk := &table.Chunk{
-				Table:    targetTable,
-				NewTable: targetTable,
+				Table:         targetTable,
+				NewTable:      targetTable,
+				ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 			}
 
 			callback := func(affectedRows int64, err error) {
@@ -714,8 +718,9 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 	}
 
 	chunk := &table.Chunk{
-		Table:    targetTable,
-		NewTable: targetTable,
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 	}
 
 	// Start applying but cancel immediately
@@ -773,8 +778,9 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	// Apply some work
 	testRows := [][]any{{int64(1)}, {int64(2)}}
 	chunk := &table.Chunk{
-		Table:    targetTable,
-		NewTable: targetTable,
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 	}
 
 	callback := func(affectedRows int64, err error) {}
@@ -830,8 +836,9 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	// Apply some work
 	testRows := [][]any{{int64(1)}, {int64(2)}}
 	chunk := &table.Chunk{
-		Table:    targetTable,
-		NewTable: targetTable,
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 	}
 
 	var callbackInvoked atomic.Bool

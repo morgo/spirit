@@ -25,6 +25,8 @@ func TestSubscriptionDeltaQueue(t *testing.T) {
 		PRIMARY KEY (id)
 	)`
 	srcTable, dstTable := setupTestTables(t, t1, t2)
+	mockChunker := table.NewMockChunker("test", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
 		db:              nil,
@@ -39,6 +41,7 @@ func TestSubscriptionDeltaQueue(t *testing.T) {
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make([]queuedChange, 0),
+		chunker:  mockChunker,
 	}
 
 	// Test initial state
@@ -71,6 +74,8 @@ func TestFlushDeltaQueue(t *testing.T) {
 		PRIMARY KEY (id)
 	)`
 	srcTable, dstTable := setupTestTables(t, t1, t2)
+	mockChunker := table.NewMockChunker("test", 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	dbConfig := dbconn.NewDBConfig()
 	dbConfig.MaxOpenConnections = 32
@@ -92,6 +97,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 			table:    srcTable,
 			newTable: dstTable,
 			changes:  make([]queuedChange, 0),
+			chunker:  mockChunker,
 		}
 
 		allFlushed, err := sub.Flush(t.Context(), false, nil)
@@ -112,6 +118,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 			table:    srcTable,
 			newTable: dstTable,
 			changes:  make([]queuedChange, 0),
+			chunker:  mockChunker,
 		}
 
 		// Clear the source and destination table
@@ -171,6 +178,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 			table:    srcTable,
 			newTable: dstTable,
 			changes:  make([]queuedChange, 0),
+			chunker:  mockChunker,
 		}
 
 		// Clear the source and destination table
@@ -210,6 +218,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 			table:    srcTable,
 			newTable: dstTable,
 			changes:  make([]queuedChange, 0),
+			chunker:  mockChunker,
 		}
 
 		// Clear the source and destination table
@@ -254,6 +263,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 			table:    srcTable,
 			newTable: dstTable,
 			changes:  make([]queuedChange, 0),
+			chunker:  mockChunker,
 		}
 
 		// Clear the source and destination table
@@ -309,6 +319,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 			table:    srcTable,
 			newTable: dstTable,
 			changes:  make([]queuedChange, 0),
+			chunker:  mockChunker,
 		}
 
 		// Clear the source and destination table

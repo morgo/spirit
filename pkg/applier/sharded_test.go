@@ -118,8 +118,9 @@ func TestShardedApplierIntegration(t *testing.T) {
 
 	// Create a chunk for the apply operation
 	chunk := &table.Chunk{
-		Table:    sourceTable,
-		NewTable: shard1Table, // Doesn't matter which, both have same structure
+		Table:         sourceTable,
+		NewTable:      shard1Table, // Doesn't matter which, both have same structure
+		ColumnMapping: table.NewColumnMapping(sourceTable, shard1Table, nil),
 	}
 
 	// Apply the rows

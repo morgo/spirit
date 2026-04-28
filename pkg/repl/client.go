@@ -224,6 +224,14 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
 
+	// If no chunker is provided, create a MockChunker with a default ColumnMapping.
+	// This supports test scenarios and cases where watermark optimization is not needed.
+	if chunker == nil {
+		mock := table.NewMockChunker(currentTable.TableName, 0)
+		mock.SetColumnMapping(table.NewColumnMapping(currentTable, newTable, nil))
+		chunker = mock
+	}
+
 	// Decide which subscription type to use. We always prefer deltaMap
 	// But will fall back to deltaQueue if the PK is not memory comparable.
 	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
