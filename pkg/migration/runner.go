@@ -498,6 +498,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 			&applier.ApplierConfig{
 				Logger:   r.logger,
 				DBConfig: r.dbConfig,
+				Threads:  r.migration.Threads,
 			},
 		)
 		if err != nil {
