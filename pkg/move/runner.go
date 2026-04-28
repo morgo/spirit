@@ -252,14 +252,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// to that source's repl client.
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
-			copyChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			chunkerCfg := table.ChunkerConfig{
+				TargetChunkTime: r.move.TargetChunkTime,
+				Logger:          r.logger,
+			}
+			copyChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
 			if err := r.sources[i].replClient.AddSubscription(tbl, nil, copyChunker); err != nil {
 				return err
 			}
-			checksumChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			checksumChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
@@ -455,14 +459,18 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	// to that source's repl client.
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
-			copyChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			chunkerCfg := table.ChunkerConfig{
+				TargetChunkTime: r.move.TargetChunkTime,
+				Logger:          r.logger,
+			}
+			copyChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
 			if err := r.sources[i].replClient.AddSubscription(tbl, nil, copyChunker); err != nil {
 				return err
 			}
-			checksumChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			checksumChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}

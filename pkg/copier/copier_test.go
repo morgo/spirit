@@ -55,7 +55,7 @@ func TestCopier(t *testing.T) {
 	copierConfig := NewCopierDefaultConfig()
 	testMetricsSink := &TestMetricsSink{}
 	copierConfig.MetricsSink = testMetricsSink
-	chunker, err := table.NewChunker(t1, t2, copierConfig.TargetChunkTime, copierConfig.Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: copierConfig.TargetChunkTime, Logger: copierConfig.Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, copierConfig)
@@ -89,7 +89,7 @@ func TestThrottler(t *testing.T) {
 	t2 := table.NewTableInfo(db, "test", "throttlert2")
 	assert.NoError(t, t2.SetInfo(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
 	assert.NoError(t, err)
@@ -131,7 +131,7 @@ func TestCopierUniqueDestination(t *testing.T) {
 	assert.NoError(t, t1.SetInfo(t.Context()))
 	t2 = table.NewTableInfo(db, "test", "copieruniqt2")
 	assert.NoError(t, t2.SetInfo(t.Context()))
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
@@ -157,7 +157,7 @@ func TestCopierLossyDataTypeConversion(t *testing.T) {
 	assert.NoError(t, t2.SetInfo(t.Context()))
 
 	// Checksum flag does not affect this error.
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
@@ -184,7 +184,7 @@ func TestCopierNullToNotNullConversion(t *testing.T) {
 	assert.NoError(t, t2.SetInfo(t.Context()))
 
 	// Checksum flag does not affect this error.
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
@@ -210,7 +210,7 @@ func TestSQLModeAllowZeroInvalidDates(t *testing.T) {
 	assert.NoError(t, t2.SetInfo(t.Context()))
 
 	// Checksum flag does not affect this error.
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
@@ -253,7 +253,7 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 		assert.NoError(t, err)
 	})
 	wg1.Wait()
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
@@ -301,7 +301,7 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 		assert.NoError(t, err)
 	})
 	wg1.Wait() // Wait only for the lock to be acquired.
-	chunker, err := table.NewChunker(t1, t2, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
 	assert.NoError(t, err)
@@ -339,7 +339,7 @@ func TestCopierFromCheckpoint(t *testing.T) {
 	lowWatermark := `{"Key":["a"],"ChunkSize":1,"LowerBound":{"Value":["3"],"Inclusive":true},"UpperBound":{"Value":["4"],"Inclusive":false}}`
 
 	// Create chunker first and open at the checkpoint watermark
-	chunker, err := table.NewChunker(t1, t1new, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 
 	// Open chunker at the specified watermark
@@ -382,7 +382,7 @@ func TestRangeOptimizationMustApply(t *testing.T) {
 	t1new := table.NewTableInfo(db, "test", "_rangeoptimizertest_new")
 	assert.NoError(t, t1new.SetInfo(t.Context()))
 
-	chunker, err := table.NewChunker(t1, t1new, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
@@ -395,7 +395,7 @@ func TestRangeOptimizationMustApply(t *testing.T) {
 	assert.NoError(t, err)
 	defer utils.CloseAndLog(db2)
 	testutils.RunSQL(t, "TRUNCATE _rangeoptimizertest_new")
-	chunker2, err := table.NewChunker(t1, t1new, NewCopierDefaultConfig().TargetChunkTime, NewCopierDefaultConfig().Logger)
+	chunker2, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
 	assert.NoError(t, err)
 	require.NoError(t, chunker2.Open())
 	copier, err = NewCopier(db2, chunker2, NewCopierDefaultConfig())

@@ -448,10 +448,14 @@ func (t *chunkerComposite) open() (err error) {
 		return ErrChunkerAlreadyOpen
 	}
 	t.isOpen = true
+	if len(t.chunkKeys) == 0 && t.keyName != "" {
+		// A key name was provided at construction time but not yet resolved.
+		if err := t.resolveKey(); err != nil {
+			return err
+		}
+	}
 	if len(t.chunkKeys) == 0 {
-		// SetKey has not been called.
-		// chunk on all keys in the PK.
-		// default to primary key.
+		// No key specified; default to primary key.
 		t.chunkKeys = t.Ti.KeyColumns
 		t.keyName = "PRIMARY"
 	}
@@ -619,7 +623,14 @@ func (t *chunkerComposite) SetKey(keyName string, where string) error {
 	if t.isOpen {
 		return errors.New("cannot set key after table is open")
 	}
-	keyCols, err := t.Ti.DescIndex(keyName)
+	t.keyName = keyName
+	t.where = where
+	return t.resolveKey()
+}
+
+// resolveKey resolves keyName to its index columns and merges in PK columns.
+func (t *chunkerComposite) resolveKey() error {
+	keyCols, err := t.Ti.DescIndex(t.keyName)
 	if err != nil {
 		return err // index is not valid.
 	}
@@ -635,8 +646,6 @@ func (t *chunkerComposite) SetKey(keyName string, where string) error {
 		}
 	}
 	t.chunkKeys = keyCols
-	t.keyName = keyName
-	t.where = where
 	return nil
 }
 
