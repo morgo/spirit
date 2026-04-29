@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/block/spirit/pkg/utils"
 )
 
 const (
-	// Max table name length in MySQL
-	maxTableNameLength = 64
-
 	// Formats for table names
 	NameFormatCheckpoint   = "_%s_chkpnt"
 	NameFormatNew          = "_%s_new"
@@ -48,12 +47,7 @@ func tableNameCheck(ctx context.Context, r Resources, logger *slog.Logger) error
 		return errors.New("table name must be at least 1 character")
 	}
 
-	timestampTableNameLength := maxTableNameLength - NameFormatTimestampExtraChars
-	if r.SkipDropAfterCutover && len(tableName) > timestampTableNameLength {
-		return fmt.Errorf("table name must be less than %d characters when --skip-drop-after-cutover is set", timestampTableNameLength)
-	}
-
-	normalTableNameLength := maxTableNameLength - NameFormatNormalExtraChars
+	normalTableNameLength := utils.MaxTableNameLength - NameFormatNormalExtraChars
 	if len(tableName) > normalTableNameLength {
 		return fmt.Errorf("table name must be less than %d characters", normalTableNameLength)
 	}

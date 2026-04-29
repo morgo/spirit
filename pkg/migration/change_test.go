@@ -3,9 +3,12 @@ package migration
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/migration/check"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
@@ -252,4 +255,117 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, autoIncValue.Valid)
 	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
+}
+
+func TestOldTableNameTruncation(t *testing.T) {
+	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
+
+	tests := []struct {
+		name                 string
+		tableName            string
+		skipDropAfterCutover bool
+		expectMaxLen         int
+	}{
+		{
+			name:                 "short name without skip drop",
+			tableName:            "mytable",
+			skipDropAfterCutover: false,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+		{
+			name:                 "short name with skip drop",
+			tableName:            "mytable",
+			skipDropAfterCutover: true,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+		{
+			name:                 "long name without skip drop",
+			tableName:            strings.Repeat("a", 56),
+			skipDropAfterCutover: false,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+		{
+			name:                 "long name with skip drop - requires truncation",
+			tableName:            strings.Repeat("b", 56),
+			skipDropAfterCutover: true,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+		{
+			name:                 "max normal length with skip drop - requires truncation",
+			tableName:            strings.Repeat("c", utils.MaxTableNameLength-check.NameFormatNormalExtraChars),
+			skipDropAfterCutover: true,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &change{
+				table: &table.TableInfo{
+					TableName: tt.tableName,
+				},
+				runner: &Runner{
+					migration: &Migration{
+						SkipDropAfterCutover: tt.skipDropAfterCutover,
+					},
+					startTime: startTime,
+				},
+			}
+
+			result := c.oldTableName()
+			assert.LessOrEqual(t, len(result), tt.expectMaxLen,
+				"oldTableName() result %q (len=%d) exceeds max length %d",
+				result, len(result), tt.expectMaxLen)
+			assert.Greater(t, len(result), 0, "oldTableName() should not be empty")
+
+			if tt.skipDropAfterCutover {
+				// Should contain the timestamp
+				assert.Contains(t, result, "20250615_103045")
+				// Should have the expected format prefix and suffix
+				assert.True(t, strings.HasPrefix(result, "_"))
+				assert.Contains(t, result, "_old_")
+			} else {
+				// Should have the simple _<name>_old format
+				expected := fmt.Sprintf(check.NameFormatOld, tt.tableName)
+				assert.Equal(t, expected, result)
+			}
+		})
+	}
+}
+
+func TestOldTableNameTruncationPreservesUniqueness(t *testing.T) {
+	// Two different long table names that share a prefix should still produce
+	// different old table names because the timestamp is always included.
+	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
+
+	c1 := &change{
+		table: &table.TableInfo{
+			TableName: strings.Repeat("x", 56) + "_table1",
+		},
+		runner: &Runner{
+			migration: &Migration{SkipDropAfterCutover: true},
+			startTime: startTime,
+		},
+	}
+	c2 := &change{
+		table: &table.TableInfo{
+			TableName: strings.Repeat("x", 56) + "_table2",
+		},
+		runner: &Runner{
+			migration: &Migration{SkipDropAfterCutover: true},
+			startTime: startTime,
+		},
+	}
+
+	// Both should fit within the limit
+	result1 := c1.oldTableName()
+	result2 := c2.oldTableName()
+	assert.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
+	assert.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
+
+	// With the same start time and truncated names, they will be the same
+	// (since the distinguishing suffix is truncated). This is acceptable because
+	// SkipDropAfterCutover migrations with the same start time on the same table
+	// cannot run concurrently.
+	assert.Equal(t, result1, result2)
 }

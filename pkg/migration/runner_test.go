@@ -430,6 +430,97 @@ func TestTableLength(t *testing.T) {
 	assert.NoError(t, m.Close())
 }
 
+func TestCreateTableNameLength(t *testing.T) {
+	t.Parallel()
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	// A CREATE TABLE with a table name exceeding MySQL's 64-character limit should be rejected.
+	longName := "this_is_a_really_long_table_name_that_exceeds_sixty_four_characters_total"
+	assert.Greater(t, len(longName), 64)
+
+	m, err := NewRunner(&Migration{
+		Host:      cfg.Addr,
+		Username:  cfg.User,
+		Password:  &cfg.Passwd,
+		Database:  cfg.DBName,
+		Threads:   2,
+		Statement: fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL PRIMARY KEY)", longName),
+	})
+	assert.NoError(t, err)
+	err = m.Run(t.Context())
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "exceeds MySQL's maximum length of 64 characters")
+	assert.NoError(t, m.Close())
+
+	// A CREATE TABLE with a table name at exactly 64 characters should be allowed
+	// (MySQL will accept it, and we don't need to reserve space for shadow tables
+	// since CREATE TABLE doesn't go through the online schema change path).
+	exactName := strings.Repeat("x", 64)
+	assert.Equal(t, 64, len(exactName))
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", exactName))
+
+	m, err = NewRunner(&Migration{
+		Host:      cfg.Addr,
+		Username:  cfg.User,
+		Password:  &cfg.Passwd,
+		Database:  cfg.DBName,
+		Threads:   2,
+		Statement: fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL PRIMARY KEY)", exactName),
+	})
+	assert.NoError(t, err)
+	err = m.Run(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m.Close())
+
+	// Cleanup
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", exactName))
+}
+
+func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
+	t.Parallel()
+
+	// A table name at the normal max (56 chars) should work with SkipDropAfterCutover.
+	// Previously this would have been rejected because the timestamp format exceeds 64 chars,
+	// but now we truncate the table name portion in the old table name.
+	tableName := "a_fifty_six_character_table_name_that_fits_normal_limits"
+	assert.Equal(t, 56, len(tableName))
+
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tableName))
+	testutils.RunSQL(t, fmt.Sprintf(`CREATE TABLE %s (
+		pk int UNSIGNED NOT NULL AUTO_INCREMENT,
+		PRIMARY KEY(pk)
+	)`, tableName))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+	m, err := NewRunner(&Migration{
+		Host:                 cfg.Addr,
+		Username:             cfg.User,
+		Password:             &cfg.Passwd,
+		Database:             cfg.DBName,
+		Threads:              4,
+		Table:                tableName,
+		Alter:                "ENGINE=InnoDB",
+		SkipDropAfterCutover: true,
+	})
+	assert.NoError(t, err)
+	err = m.Run(t.Context())
+	assert.NoError(t, err)
+
+	// Verify the old table exists (with truncated name + timestamp)
+	oldName := m.changes[0].oldTableName()
+	assert.LessOrEqual(t, len(oldName), 64, "old table name should fit within 64 chars")
+
+	var tableCount int
+	err = m.db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, oldName)).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, tableCount, "old table should exist after SkipDropAfterCutover")
+	assert.NoError(t, m.Close())
+}
+
 func TestBadOptions(t *testing.T) {
 	// N.B. Because host, user, password and database have defaults enforced, we expect to
 	// fail in the same way when they're not provided.
