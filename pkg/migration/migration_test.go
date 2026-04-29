@@ -1,13 +1,14 @@
 package migration
 
 import (
-	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -18,18 +19,7 @@ import (
 	"go.uber.org/goleak"
 )
 
-func mkPtr[T any](t T) *T {
-	return &t
-}
 
-func mkIniFile(t *testing.T, content string) *os.File {
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	_, err = tmpFile.WriteString(content)
-	require.NoError(t, err)
-
-	return tmpFile
-}
 
 func TestMain(m *testing.M) {
 	status.CheckpointDumpInterval = 100 * time.Millisecond
@@ -40,150 +30,86 @@ func TestMain(m *testing.M) {
 
 func TestE2ENullAlterEmpty(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1e2e, _t1e2e_new`)
-	table := `CREATE TABLE t1e2e (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, table)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "t1e2e",
+		`CREATE TABLE t1e2e (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
 
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 1
-	migration.Table = "t1e2e"
-	migration.Alter = "ENGINE=InnoDB"
-
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestRunner(t, "t1e2e", "ENGINE=InnoDB", WithThreads(1))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 func TestE2EExplicitAutoIncrementInAlter(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1explicit_autoinc, _t1explicit_autoinc_new`)
+	tt := testutils.NewTestTable(t, "t1explicit_autoinc",
+		`CREATE TABLE t1explicit_autoinc (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		) ENGINE=InnoDB AUTO_INCREMENT=1000`)
 
-	// Create table with AUTO_INCREMENT=1000
-	table := `CREATE TABLE t1explicit_autoinc (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	) ENGINE=InnoDB AUTO_INCREMENT=1000`
-	testutils.RunSQL(t, table)
-
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1explicit_autoinc"
 	// User explicitly sets AUTO_INCREMENT=5000 in the ALTER
-	migration.Alter = "ADD COLUMN test_col VARCHAR(255), AUTO_INCREMENT=5000"
-
-	err = migration.Run()
-	require.NoError(t, err)
-
-	// Connect to database to verify results
-	db, err := sql.Open("mysql", testutils.DSN())
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, db.Close())
-	}()
+	m := NewTestRunner(t, "t1explicit_autoinc", "ADD COLUMN test_col VARCHAR(255), AUTO_INCREMENT=5000")
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 
 	// Verify that new inserts start from 5000
 	// Note: We use INSERT behavior rather than information_schema.TABLES because
 	// InnoDB may cache AUTO_INCREMENT values and information_schema may show stale data.
 	testutils.RunSQL(t, "INSERT INTO t1explicit_autoinc (name) VALUES ('test')")
 	var insertedID int64
-	err = db.QueryRowContext(t.Context(), "SELECT MAX(id) FROM t1explicit_autoinc").Scan(&insertedID)
+	err := tt.DB.QueryRowContext(t.Context(), "SELECT MAX(id) FROM t1explicit_autoinc").Scan(&insertedID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(5000), insertedID, "User-specified AUTO_INCREMENT=5000 should be preserved, first insert should get ID 5000")
 }
 
 func TestMissingAlter(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1missing, _t1missing_new`)
-	table := `CREATE TABLE t1missing (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, table)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "t1missing",
+		`CREATE TABLE t1missing (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
 
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1missing"
-	migration.Alter = ""
-
-	err = migration.Run()
-	assert.Error(t, err) // missing alter
+	m := NewTestMigration(t, WithTable("t1missing"), WithAlter(""))
+	err := m.Run()
+	assert.Error(t, err)
 	assert.ErrorContains(t, err, "alter statement is required")
 }
 
 func TestBadDatabaseCredentials(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1bad, _t1bad_new`)
-	table := `CREATE TABLE t1bad (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, table)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "t1bad",
+		`CREATE TABLE t1bad (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
 
-	migration.Host = "127.0.0.1:9999"
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1bad"
-	migration.Alter = "ENGINE=InnoDB"
-
-	err = migration.Run()
-	assert.Error(t, err)                                        // bad database credentials
-	assert.ErrorContains(t, err, "connect: connection refused") // could be no host or temporary resolution failure.
+	m := NewTestMigration(t, WithTable("t1bad"), WithAlter("ENGINE=InnoDB"))
+	m.Host = "127.0.0.1:9999"
+	err := m.Run()
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "connect: connection refused")
 }
 
 func TestE2ENullAlter1Row(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1nullalter, _t1nullalter_new`)
-	table := `CREATE TABLE t1nullalter (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, `insert into t1nullalter (id,name) values (1, 'aaa')`)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	tt := testutils.NewTestTable(t, "t1nullalter",
+		`CREATE TABLE t1nullalter (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
+	tt.SeedRows(t, "INSERT INTO t1nullalter (name) SELECT 'aaa'", 1)
 
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "t1nullalter"
-	migration.Alter = "ENGINE=InnoDB"
-
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestRunner(t, "t1nullalter", "ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 func TestE2ENullAlterWithReplicas(t *testing.T) {
@@ -192,29 +118,17 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 	if replicaDSN == "" {
 		t.Skip("skipping replica tests because REPLICA_DSN not set")
 	}
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS replicatest, _replicatest_new`)
-	table := `CREATE TABLE replicatest (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, table)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "replicatest",
+		`CREATE TABLE replicatest (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
 
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "replicatest"
-	migration.Alter = "ENGINE=InnoDB"
-	migration.ReplicaDSN = replicaDSN
-	migration.ReplicaMaxLag = 10 * time.Second
-
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestMigration(t, WithTable("replicatest"), WithAlter("ENGINE=InnoDB"))
+	m.ReplicaDSN = replicaDSN
+	m.ReplicaMaxLag = 10 * time.Second
+	require.NoError(t, m.Run())
 }
 
 // TestRenameInMySQL80 tests that even though renames are not supported,
@@ -223,30 +137,16 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 // that it won't allow renames.
 func TestRenameInMySQL80(t *testing.T) {
 	t.Parallel()
-	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS renamet1, _renamet1_new`)
-	table := `CREATE TABLE renamet1 (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, table)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "renamet1",
+		`CREATE TABLE renamet1 (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
 
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "renamet1"
-	migration.Alter = "CHANGE name nameNew varchar(255) not null"
-
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestRunner(t, "renamet1", "CHANGE name nameNew varchar(255) not null")
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 // TestUniqueOnNonUniqueData tests that we:
@@ -254,32 +154,18 @@ func TestRenameInMySQL80(t *testing.T) {
 // 2. The error does not blame spirit, but is instead suggestive of user-data error.
 func TestUniqueOnNonUniqueData(t *testing.T) {
 	t.Parallel()
-	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS uniquet1, _uniquet1_new`)
-	testutils.RunSQL(t, `CREATE TABLE uniquet1 (id int not null primary key auto_increment, b int not null, pad1 varbinary(1024));`)
-	testutils.RunSQL(t, `INSERT INTO uniquet1 SELECT NULL, 1, RANDOM_BYTES(1024) from dual;`)
-	testutils.RunSQL(t, `INSERT INTO uniquet1 SELECT NULL, 1, RANDOM_BYTES(1024) from uniquet1 a join uniquet1 b join uniquet1 c limit 100000;`)
-	testutils.RunSQL(t, `INSERT INTO uniquet1 SELECT NULL, 1, RANDOM_BYTES(1024) from uniquet1 a join uniquet1 b join uniquet1 c limit 100000;`)
-	testutils.RunSQL(t, `INSERT INTO uniquet1 SELECT NULL, 1, RANDOM_BYTES(1024) from uniquet1 a join uniquet1 b join uniquet1 c limit 100000;`)
-	testutils.RunSQL(t, `INSERT INTO uniquet1 SELECT NULL, 1, RANDOM_BYTES(1024) from uniquet1 a join uniquet1 b join uniquet1 c limit 100000;`)
-	testutils.RunSQL(t, `UPDATE uniquet1 SET b = id;`)
-	testutils.RunSQL(t, `UPDATE uniquet1 SET b = 12345 ORDER BY RAND() LIMIT 2;`)
-	migration := &Migration{}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	tt := testutils.NewTestTable(t, "uniquet1",
+		`CREATE TABLE uniquet1 (id int not null primary key auto_increment, b int not null, pad1 varbinary(1024))`)
+	tt.SeedRows(t, "INSERT INTO uniquet1 (b, pad1) SELECT 1, RANDOM_BYTES(1024)", 100000)
+	// Make almost-unique with 2 duplicates.
+	testutils.RunSQL(t, `UPDATE uniquet1 SET b = id`)
+	testutils.RunSQL(t, `UPDATE uniquet1 SET b = 12345 ORDER BY RAND() LIMIT 2`)
 
-	migration.Host = cfg.Addr
-	migration.Username = cfg.User
-	migration.Password = &cfg.Passwd
-	migration.Database = cfg.DBName
-	migration.Threads = 2
-	migration.Table = "uniquet1"
-	migration.Alter = "ADD UNIQUE (b)"
-	err = migration.Run()
+	m := NewTestRunner(t, "uniquet1", "ADD UNIQUE (b)")
+	err := m.Run(t.Context())
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
+	assert.NoError(t, m.Close())
 }
 
 func TestGeneratedColumns(t *testing.T) {
@@ -296,29 +182,19 @@ func TestGeneratedColumns(t *testing.T) {
 }
 
 func testGeneratedColumns(t *testing.T, enableBuffered bool) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1generated, _t1generated_new`)
-	table := `CREATE TABLE t1generated (
-id int not null primary key auto_increment,
-b int not null,
-c int GENERATED ALWAYS AS  (b + 1),
-d int
-)`
-	testutils.RunSQL(t, table)
-	testutils.RunSQL(t, `insert into t1generated (b, d) values (1, 10), (2, 20), (3, 30)`)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    "t1generated",
-		Alter:    "ENGINE=InnoDB",
-		Buffered: enableBuffered,
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	tt := testutils.NewTestTable(t, "t1generated",
+		`CREATE TABLE t1generated (
+			id int not null primary key auto_increment,
+			b int not null,
+			c int GENERATED ALWAYS AS (b + 1),
+			d int
+		)`)
+	tt.SeedRows(t, "INSERT INTO t1generated (b, d) SELECT 1, 10", 3)
+
+	m := NewTestRunner(t, "t1generated", "ENGINE=InnoDB",
+		WithThreads(1), WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 func TestStoredGeneratedColumns(t *testing.T) {
@@ -335,20 +211,19 @@ func TestStoredGeneratedColumns(t *testing.T) {
 }
 
 func testStoredGeneratedColumns(t *testing.T, enableBuffered bool) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1stored, _t1stored_new`)
-	table := `CREATE TABLE t1stored (
-  id bigint NOT NULL AUTO_INCREMENT,
-  pa bigint DEFAULT NULL,
-  p1 bigint DEFAULT NULL,
-  p2 bigint DEFAULT NULL,
-  s1 tinyint(1) GENERATED ALWAYS AS (if((pa is not null),1,NULL)) STORED,
-  s2 tinyint(1) GENERATED ALWAYS AS (if((p1 is not null),1,NULL)) STORED,
-  s3 tinyint(1) GENERATED ALWAYS AS (if((p2 is not null),1,NULL)) STORED,
-  s4 tinyint(1) GENERATED ALWAYS AS (if((pa <> p2),1,NULL)) STORED,
-  p3 int not null,
-  PRIMARY KEY (id)
-);`
-	testutils.RunSQL(t, table)
+	testutils.NewTestTable(t, "t1stored",
+		`CREATE TABLE t1stored (
+			id bigint NOT NULL AUTO_INCREMENT,
+			pa bigint DEFAULT NULL,
+			p1 bigint DEFAULT NULL,
+			p2 bigint DEFAULT NULL,
+			s1 tinyint(1) GENERATED ALWAYS AS (if((pa is not null),1,NULL)) STORED,
+			s2 tinyint(1) GENERATED ALWAYS AS (if((p1 is not null),1,NULL)) STORED,
+			s3 tinyint(1) GENERATED ALWAYS AS (if((p2 is not null),1,NULL)) STORED,
+			s4 tinyint(1) GENERATED ALWAYS AS (if((pa <> p2),1,NULL)) STORED,
+			p3 int not null,
+			PRIMARY KEY (id)
+		)`)
 	//nolint: dupword
 	testutils.RunSQL(t, `INSERT INTO t1stored (pa, p1, p2, p3)
 VALUES
@@ -364,17 +239,8 @@ VALUES
 (1, NULL, NULL, 90),
 (NULL, NULL, NULL, 89)
 `)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Buffered: enableBuffered,
-		Statement: `ALTER TABLE t1stored
+	// Uses Statement field because the ALTER modifies a stored generated column expression.
+	m := NewTestRunnerFromStatement(t, `ALTER TABLE t1stored
 MODIFY COLUMN s4 TINYINT(1)
 GENERATED ALWAYS AS (
 IF(
@@ -384,10 +250,9 @@ IF(
  1,
  NULL
 )
-) STORED`,
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+) STORED`, WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 type testcase struct {
@@ -425,27 +290,18 @@ func testBinaryChecksum(t *testing.T, enableBuffered bool) {
 		{"blob", "binary(100)"},
 	}
 	for _, test := range tests {
-		testutils.RunSQL(t, `DROP TABLE IF EXISTS t1varbin, _t1varbin_new`)
-		table := fmt.Sprintf(`CREATE TABLE t1varbin (
-	 id int not null primary key auto_increment,
-    b %s not null
-	)`, test.OldType)
-		testutils.RunSQL(t, table)
-		testutils.RunSQL(t, `insert into t1varbin values (null, 'abcdefg')`)
-		cfg, err := mysql.ParseDSN(testutils.DSN())
-		assert.NoError(t, err)
-		migration := &Migration{
-			Host:     cfg.Addr,
-			Username: cfg.User,
-			Password: &cfg.Passwd,
-			Database: cfg.DBName,
-			Threads:  1,
-			Buffered: enableBuffered,
-			Table:    "t1varbin",
-			Alter:    fmt.Sprintf("CHANGE b b %s not null", test.NewType), //nolint: dupword
-		}
-		err = migration.Run()
-		assert.NoError(t, err)
+		tt := testutils.NewTestTable(t, "t1varbin",
+			fmt.Sprintf(`CREATE TABLE t1varbin (
+				id int not null primary key auto_increment,
+				b %s not null
+			)`, test.OldType))
+		tt.SeedRows(t, "INSERT INTO t1varbin (b) SELECT 'abcdefg'", 1)
+
+		m := NewTestRunner(t, "t1varbin",
+			fmt.Sprintf("CHANGE b b %s not null", test.NewType), //nolint: dupword
+			WithThreads(1), WithBuffered(enableBuffered))
+		require.NoError(t, m.Run(t.Context()))
+		assert.NoError(t, m.Close())
 	}
 }
 
@@ -466,74 +322,42 @@ func TestConvertCharset(t *testing.T) {
 }
 
 func testConvertCharset(t *testing.T, enableBuffered bool) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1charset, _t1charset_new`)
-	table := `CREATE TABLE t1charset (
-	 id int not null primary key auto_increment,
-    b varchar(100) not null
-	) charset=latin1`
-	testutils.RunSQL(t, table)
+	testutils.NewTestTable(t, "t1charset",
+		`CREATE TABLE t1charset (
+			id int not null primary key auto_increment,
+			b varchar(100) not null
+		) charset=latin1`)
+	// These specific characters test latin1→utf8mb4 multi-byte conversion.
 	testutils.RunSQL(t, `insert into t1charset values (null, 'à'), (null, '€')`)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Buffered: enableBuffered,
-		Table:    "t1charset",
-		Alter:    "CONVERT TO CHARACTER SET UTF8MB4",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+
+	m := NewTestRunner(t, "t1charset", "CONVERT TO CHARACTER SET UTF8MB4",
+		WithThreads(1), WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 
 	// Because utf8mb4 is the superset, it doesn't matter that that's
 	// what the checksum casts to. We should be able to convert back as well.
-	migration = &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Buffered: enableBuffered,
-		Table:    "t1charset",
-		Alter:    "CONVERT TO CHARACTER SET latin1",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	m = NewTestRunner(t, "t1charset", "CONVERT TO CHARACTER SET latin1",
+		WithThreads(1), WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 func TestStmtWorkflow(t *testing.T) {
 	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1s, _t1s_new`)
-	table := `CREATE TABLE t1s (
-	 id int not null primary key auto_increment,
-    b varchar(100) not null
-	)`
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: table, // CREATE TABLE.
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
-	// We can also specify ALTER options in the statement.
-	migration = &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: "ALTER TABLE t1s ADD COLUMN c int", // ALTER TABLE.
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+
+	// CREATE TABLE via Statement path.
+	migration := NewTestMigration(t, WithStatement(`CREATE TABLE t1s (
+		id int not null primary key auto_increment,
+		b varchar(100) not null
+	)`))
+	require.NoError(t, migration.Run())
+
+	// ALTER TABLE via Statement path.
+	r := NewTestRunnerFromStatement(t, "ALTER TABLE t1s ADD COLUMN c int")
+	require.NoError(t, r.Run(t.Context()))
+	assert.NoError(t, r.Close())
 }
 
 // TestUnparsableStatements tests that the behavior is expected in cases
@@ -544,117 +368,64 @@ func TestStmtWorkflow(t *testing.T) {
 func TestUnparsableStatements(t *testing.T) {
 	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1parse, _t1parse_new`)
-	table := `CREATE TABLE t1parse (id int not null primary key auto_increment, b BLOB DEFAULT ('abc'))`
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: table,
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+
+	// CREATE TABLE with BLOB DEFAULT — works via Statement path.
+	m := NewTestMigration(t,
+		WithStatement(`CREATE TABLE t1parse (id int not null primary key auto_increment, b BLOB DEFAULT ('abc'))`))
+	require.NoError(t, m.Run())
 
 	// Try again as ALTER TABLE, with --statement
-	migration = &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: "ALTER TABLE t1parse ADD COLUMN c BLOB DEFAULT ('abc')",
-	}
-	err = migration.Run()
+	m = NewTestMigration(t, WithThreads(1),
+		WithStatement("ALTER TABLE t1parse ADD COLUMN c BLOB DEFAULT ('abc')"))
+	err := m.Run()
 	assert.Error(t, err)
 	// this is permitted by MySQL now, it's the TiDB parser that won't allow it.
 	// TODO: we should figure this out so that usage between --statement and --alter is orthogonal.
 	assert.ErrorContains(t, err, "can't have a default value")
 
 	// With ALTER TABLE as --table and --alter
-	migration = &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    "t1parse",
-		Alter:    "ADD COLUMN c BLOB DEFAULT ('abc')",
-	}
-	err = migration.Run()
-	assert.NoError(t, err) // in this context it works! This is a problem.
+	m = NewTestMigration(t, WithThreads(1),
+		WithTable("t1parse"), WithAlter("ADD COLUMN c BLOB DEFAULT ('abc')"))
+	require.NoError(t, m.Run()) // in this context it works! This is a problem.
 
 	// With CREATE TRIGGER.
-	migration = &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: "CREATE TRIGGER ins_sum BEFORE INSERT ON t1parse FOR EACH ROW SET @sum = @sum + NEW.b;",
-	}
-	err = migration.Run()
+	m = NewTestMigration(t, WithThreads(1),
+		WithStatement("CREATE TRIGGER ins_sum BEFORE INSERT ON t1parse FOR EACH ROW SET @sum = @sum + NEW.b;"))
+	err = m.Run()
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "line 1 column 14 near \"TRIGGER")
 
-	//https://github.com/pingcap/tidb/pull/61498
-	migration = &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    "t1parse",
-		Alter:    `ADD COLUMN src_col timestamp NULL DEFAULT NULL, add column new_col timestamp NULL DEFAULT(src_col)`}
-	err = migration.Run()
-	assert.NoError(t, err)
+	// https://github.com/pingcap/tidb/pull/61498
+	m = NewTestMigration(t, WithThreads(1),
+		WithTable("t1parse"),
+		WithAlter(`ADD COLUMN src_col timestamp NULL DEFAULT NULL, add column new_col timestamp NULL DEFAULT(src_col)`))
+	require.NoError(t, m.Run())
 }
 
 func TestCreateIndexIsRewritten(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1createindex, _t1createindex_new`)
-	tbl := `CREATE TABLE t1createindex (
-	 id int not null primary key auto_increment,
-	 b int not null
-	)`
-	testutils.RunSQL(t, tbl)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	require.NotEmpty(t, cfg.DBName)
-	migration := &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: "CREATE INDEX idx ON " + cfg.DBName + ".t1createindex (b)",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "t1createindex",
+		`CREATE TABLE t1createindex (
+			id int not null primary key auto_increment,
+			b int not null
+		)`)
+
+	m := NewTestRunnerFromStatement(t, "CREATE INDEX idx ON test.t1createindex (b)", WithThreads(1))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 func TestSchemaNameIncluded(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1schemaname, _t1schemaname_new`)
-	tbl := `CREATE TABLE t1schemaname (
-	 id int not null primary key auto_increment,
-	b int not null
-	)`
-	testutils.RunSQL(t, tbl)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: "ALTER TABLE test.t1schemaname ADD COLUMN c int",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "t1schemaname",
+		`CREATE TABLE t1schemaname (
+			id int not null primary key auto_increment,
+			b int not null
+		)`)
+
+	m := NewTestRunnerFromStatement(t, "ALTER TABLE test.t1schemaname ADD COLUMN c int", WithThreads(1))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 // TestSecondaryEngineAttribute tests that we can add a secondary engine attribute
@@ -663,25 +434,18 @@ func TestSchemaNameIncluded(t *testing.T) {
 // https://github.com/block/spirit/issues/405
 func TestSecondaryEngineAttribute(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1secondary, _t1secondary_new`)
-	tbl := `CREATE /*vt+ QUERY_TIMEOUT_MS=0 */ TABLE t1secondary (
-	id int not null primary key auto_increment,
-	title VARCHAR(250)
-	)`
-	testutils.RunSQL(t, tbl)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:      cfg.Addr,
-		Username:  cfg.User,
-		Password:  &cfg.Passwd,
-		Database:  cfg.DBName,
-		Threads:   1,
-		Statement: `ALTER TABLE t1secondary ADD KEY (title) SECONDARY_ENGINE_ATTRIBUTE='{"type":"spann", "distance":"l2", "product_quantization":{"dimensions":96}}'`,
-		// ForceKill is now enabled by default, and this happens to be instant, which tests this code path too.
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	testutils.NewTestTable(t, "t1secondary",
+		`CREATE /*vt+ QUERY_TIMEOUT_MS=0 */ TABLE t1secondary (
+			id int not null primary key auto_increment,
+			title VARCHAR(250)
+		)`)
+
+	// ForceKill is now enabled by default, and this happens to be instant, which tests this code path too.
+	m := NewTestRunnerFromStatement(t,
+		`ALTER TABLE t1secondary ADD KEY (title) SECONDARY_ENGINE_ATTRIBUTE='{"type":"spann", "distance":"l2", "product_quantization":{"dimensions":96}}'`,
+		WithThreads(1))
+	require.NoError(t, m.Run(t.Context()))
+	assert.NoError(t, m.Close())
 }
 
 // TestLargeNumberOfMultiChanges tests the interaction between force kill and multiple table changes.
@@ -695,19 +459,10 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 		testutils.RunSQL(t, fmt.Sprintf(`CREATE TABLE mt_%d (id int not null primary key auto_increment, b INT NOT NULL)`, i))
 		alterStmts = append(alterStmts, fmt.Sprintf(`ALTER TABLE mt_%d ENGINE=InnoDB`, i))
 	}
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		TargetChunkTime: 2 * time.Second,
-		Statement:       strings.Join(alterStmts, "; "),
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+
+	m := NewTestMigration(t, WithTargetChunkTime(2*time.Second),
+		WithStatement(strings.Join(alterStmts, "; ")))
+	require.NoError(t, m.Run())
 }
 
 func TestBufferedMultiTableMigration(t *testing.T) {
@@ -715,52 +470,39 @@ func TestBufferedMultiTableMigration(t *testing.T) {
 		t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
 	}
 	// Create two tables with data
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS bmt_t1, _bmt_t1_new, _bmt_t1_old`)
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS bmt_t2, _bmt_t2_new, _bmt_t2_old`)
-	testutils.RunSQL(t, `CREATE TABLE bmt_t1 (
-		id int not null primary key auto_increment,
-		name varchar(100) not null,
-		val int not null
-	)`)
-	testutils.RunSQL(t, `CREATE TABLE bmt_t2 (
-		id int not null primary key auto_increment,
-		description varchar(200) not null,
-		amount decimal(10,2) not null
-	)`)
+	tt1 := testutils.NewTestTable(t, "bmt_t1",
+		`CREATE TABLE bmt_t1 (
+			id int not null primary key auto_increment,
+			name varchar(100) not null,
+			val int not null
+		)`)
+	tt2 := testutils.NewTestTable(t, "bmt_t2",
+		`CREATE TABLE bmt_t2 (
+			id int not null primary key auto_increment,
+			description varchar(200) not null,
+			amount decimal(10,2) not null
+		)`)
 	// Insert enough rows to trigger multiple chunks
 	for i := range 100 {
 		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO bmt_t1 (name, val) VALUES ('row_%d', %d)`, i, i*10))
 		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO bmt_t2 (description, amount) VALUES ('item_%d', %d.%d)`, i, i, i%100))
 	}
 
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		TargetChunkTime: 100 * time.Millisecond,
-		Buffered:        true,
-		Statement:       "ALTER TABLE bmt_t1 ADD COLUMN extra int DEFAULT 0; ALTER TABLE bmt_t2 ADD COLUMN extra int DEFAULT 0",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestMigration(t,
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(true),
+		WithStatement("ALTER TABLE bmt_t1 ADD COLUMN extra int DEFAULT 0; ALTER TABLE bmt_t2 ADD COLUMN extra int DEFAULT 0"))
+	require.NoError(t, m.Run())
 
 	// Verify both tables were altered correctly
-	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
-	defer func() { assert.NoError(t, db.Close()) }()
-
 	var count1 int
-	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM bmt_t1 WHERE extra = 0`).Scan(&count1)
-	assert.NoError(t, err)
+	err := tt1.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM bmt_t1 WHERE extra = 0`).Scan(&count1)
+	require.NoError(t, err)
 	assert.Equal(t, 100, count1)
 
 	var count2 int
-	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM bmt_t2 WHERE extra = 0`).Scan(&count2)
-	assert.NoError(t, err)
+	err = tt2.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM bmt_t2 WHERE extra = 0`).Scan(&count2)
+	require.NoError(t, err)
 	assert.Equal(t, 100, count2)
 }
 
@@ -1119,4 +861,166 @@ password = mysqlpass
 	assert.Equal(t, "cli-db", migration.Database)
 	assert.Equal(t, "PREFERRED", migration.TLSMode)
 	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+// --- Configuration validation tests (moved from runner_test.go) ---
+
+func TestBadOptions(t *testing.T) {
+	t.Parallel()
+	_, err := NewRunner(&Migration{})
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "table name is required")
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+
+	_, err = NewRunner(&Migration{
+		Host: cfg.Addr,
+	})
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "table name is required")
+	_, err = NewRunner(&Migration{
+		Host:     cfg.Addr,
+		Database: "mytable",
+	})
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "table name is required")
+	_, err = NewRunner(&Migration{
+		Host:     cfg.Addr,
+		Database: "mydatabase",
+		Table:    "mytable",
+	})
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "alter statement is required")
+}
+
+func TestBadAlter(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "bot1",
+		`CREATE TABLE bot1 (
+			id int(11) NOT NULL AUTO_INCREMENT,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
+	testutils.NewTestTable(t, "bot2",
+		`CREATE TABLE bot2 (
+			id int(11) NOT NULL,
+			name varchar(255) NOT NULL,
+			PRIMARY KEY (id)
+		)`)
+
+	migration := NewTestMigration(t, WithTable("bot1"), WithAlter("badalter"))
+	m, err := NewRunner(migration)
+	assert.Error(t, err)
+	assert.Nil(t, m)
+
+	m2 := NewTestRunner(t, "bot1", "RENAME COLUMN name TO name2, ADD INDEX(name)")
+	err = m2.Run(t.Context())
+	assert.Error(t, err)
+	assert.NoError(t, m2.Close())
+
+	m2 = NewTestRunner(t, "bot1", "CHANGE name name2 VARCHAR(255), ADD INDEX(name)")
+	err = m2.Run(t.Context())
+	assert.Error(t, err)
+	assert.NoError(t, m2.Close())
+
+	m2 = NewTestRunner(t, "bot1", "CHANGE name name VARCHAR(200), ADD INDEX(name)") //nolint: dupword
+	err = m2.Run(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m2.Close())
+
+	m2 = NewTestRunner(t, "bot2", "DROP PRIMARY KEY")
+	err = m2.Run(t.Context())
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "dropping primary key")
+	assert.NoError(t, m2.Close())
+}
+
+func TestDefaultPort(t *testing.T) {
+	t.Parallel()
+	m, err := NewRunner(&Migration{
+		Host:     "localhost",
+		Username: "root",
+		Password: mkPtr("mypassword"),
+		Database: "test",
+		Threads:  2,
+		Table:    "t1",
+		Alter:    "DROP COLUMN b, ENGINE=InnoDB",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "localhost:3306", m.migration.Host)
+	m.SetLogger(slog.Default())
+}
+
+func TestPasswordMasking(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "basic DSN with password", input: "user:password@tcp(localhost:3306)/database", expected: "user:***@tcp(localhost:3306)/database"},
+		{name: "DSN with complex password", input: "myuser:c0mplex!Pa$$w0rd@tcp(db.example.com:3306)/mydb", expected: "myuser:***@tcp(db.example.com:3306)/mydb"},
+		{name: "DSN without password", input: "user@tcp(localhost:3306)/database", expected: "user@tcp(localhost:3306)/database"},
+		{name: "DSN with empty password", input: "user:@tcp(localhost:3306)/database", expected: "user:***@tcp(localhost:3306)/database"},
+		{name: "empty DSN", input: "", expected: ""},
+		{name: "malformed DSN without @", input: "user:password", expected: "user:password"},
+		{name: "DSN with colon in password", input: "user:pass:word@tcp(localhost:3306)/database", expected: "user:***@tcp(localhost:3306)/database"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := maskPasswordInDSN(tt.input)
+			assert.Equal(t, tt.expected, result, "Password masking failed for input: %s", tt.input)
+		})
+	}
+}
+
+func TestDSN(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		user     string
+		password string
+		host     string
+		schema   string
+	}{
+		{name: "simple password", user: "root", password: "secret", host: "127.0.0.1:3306", schema: "testdb"},
+		{name: "password with @", user: "root", password: "p@ssword", host: "127.0.0.1:3306", schema: "testdb"},
+		{name: "password with multiple @", user: "root", password: "p@ss@word", host: "127.0.0.1:3306", schema: "testdb"},
+		{name: "password with special characters", user: "root", password: "p@ss:word/with#special!chars", host: "127.0.0.1:3306", schema: "testdb"},
+		{name: "empty password", user: "root", password: "", host: "127.0.0.1:3306", schema: "testdb"},
+		{name: "AWS IAM-style token", user: "iam_user", password: "aaa@bbb.ccc.us-east-1.rds.amazonaws.com:3306/?Action=connect&DBUser=iam_user", host: "mydb.cluster-xyz.us-east-1.rds.amazonaws.com:3306", schema: "production"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pw := tt.password
+			r := &Runner{
+				migration: &Migration{
+					Username: tt.user,
+					Password: &pw,
+					Host:     tt.host,
+				},
+				changes: []*change{
+					{
+						stmt: &statement.AbstractStatement{
+							Schema: tt.schema,
+						},
+					},
+				},
+			}
+
+			dsn := r.dsn()
+
+			cfg, err := mysql.ParseDSN(dsn)
+			require.NoError(t, err)
+			assert.Equal(t, tt.user, cfg.User)
+			assert.Equal(t, tt.password, cfg.Passwd)
+			assert.Equal(t, tt.host, cfg.Addr)
+			assert.Equal(t, tt.schema, cfg.DBName)
+			assert.Equal(t, "tcp", cfg.Net)
+		})
+	}
 }

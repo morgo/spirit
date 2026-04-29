@@ -12,11 +12,13 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCutOver(t *testing.T) {
@@ -415,4 +417,226 @@ func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return trx.Commit()
+}
+
+// --- Cutover lifecycle tests (skip/drop, deferred cutover) ---
+
+func TestSkipDropAfterCutover(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "skipdrop_test",
+		`CREATE TABLE skipdrop_test (
+			pk int UNSIGNED NOT NULL,
+			PRIMARY KEY(pk)
+		)`)
+
+	m := NewTestRunner(t, "skipdrop_test", "ENGINE=InnoDB",
+		WithThreads(4), WithSkipDropAfterCutover())
+	require.NoError(t, m.Run(t.Context()))
+
+	query := fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
+	var tableCount int
+	err := m.db.QueryRowContext(t.Context(), query).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, tableCount)
+	assert.NoError(t, m.Close())
+}
+
+func TestDropAfterCutover(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "drop_test",
+		`CREATE TABLE drop_test (
+			pk int UNSIGNED NOT NULL,
+			PRIMARY KEY(pk)
+		)`)
+
+	m := NewTestRunner(t, "drop_test", "ENGINE=InnoDB", WithThreads(4))
+	require.NoError(t, m.Run(t.Context()))
+
+	query := fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
+	var tableCount int
+	err := m.db.QueryRowContext(t.Context(), query).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, tableCount)
+	assert.NoError(t, m.Close())
+}
+
+func TestDeferCutOver(t *testing.T) {
+	t.Skip("skipping: this test waits for sentinelWaitLimit to expire, which is too slow with the current 48 hour limit")
+	t.Parallel()
+
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	tableName := `deferred_cutover`
+	newName := fmt.Sprintf("_%s_new", tableName)
+	checkpointTableName := fmt.Sprintf("_%s_chkpnt", tableName)
+
+	dropStmt := `DROP TABLE IF EXISTS %s`
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(dropStmt, checkpointTableName))
+
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
+	assert.NoError(t, err)
+	m, err := NewRunner(&Migration{
+		Host:                 cfg.Addr,
+		Username:             cfg.User,
+		Password:             &cfg.Passwd,
+		Database:             cfg.DBName,
+		Threads:              4,
+		Table:                "deferred_cutover",
+		Alter:                "ENGINE=InnoDB",
+		SkipDropAfterCutover: false,
+		DeferCutOver:         true,
+		RespectSentinel:      true,
+	})
+	assert.NoError(t, err)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		err = m.Run(t.Context())
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
+	})
+
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
+	wg.Wait()
+
+	sql := fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, newName)
+	var tableCount int
+	err = m.db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, tableCount)
+	assert.NoError(t, m.Close())
+}
+
+func TestDeferCutOverE2E(t *testing.T) {
+	t.Parallel()
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+
+	c := make(chan error)
+	tableName := `deferred_cutover_e2e`
+
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
+	assert.NoError(t, err)
+	m, err := NewRunner(&Migration{
+		Host:                 cfg.Addr,
+		Username:             cfg.User,
+		Password:             &cfg.Passwd,
+		Database:             dbName,
+		Threads:              1,
+		Table:                "deferred_cutover_e2e",
+		Alter:                "ENGINE=InnoDB",
+		SkipDropAfterCutover: false,
+		DeferCutOver:         true,
+		RespectSentinel:      true,
+	})
+	assert.NoError(t, err)
+	go func() {
+		err := m.Run(t.Context())
+		assert.NoError(t, err)
+		c <- err
+	}()
+
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
+	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	for {
+		var rowCount int
+		sql := fmt.Sprintf(
+			`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+			WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`, dbName, sentinelTableName)
+		err = db.QueryRowContext(t.Context(), sql).Scan(&rowCount)
+		assert.NoError(t, err)
+		if rowCount > 0 {
+			break
+		}
+	}
+
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+
+	err = <-c
+	assert.NoError(t, err)
+
+	sql := fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
+	var tableCount int
+	err = db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, tableCount)
+	assert.NoError(t, m.Close())
+}
+
+func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
+	t.Parallel()
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+
+	c := make(chan error)
+	tableName := `deferred_cutover_e2e_stage`
+
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s () values (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	assert.NoError(t, err)
+	m, err := NewRunner(&Migration{
+		Host:                 cfg.Addr,
+		Username:             cfg.User,
+		Password:             &cfg.Passwd,
+		Database:             dbName,
+		Threads:              1,
+		Table:                "deferred_cutover_e2e_stage",
+		Alter:                "ENGINE=InnoDB",
+		SkipDropAfterCutover: false,
+		DeferCutOver:         true,
+		RespectSentinel:      true,
+	})
+	assert.NoError(t, err)
+	go func() {
+		err := m.Run(t.Context())
+		assert.NoError(t, err)
+		c <- err
+	}()
+
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
+	assert.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
+
+	binlogPos := m.replClient.GetBinlogApplyPosition()
+	for range 4 {
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("insert into %s (id) select null from %s a, %s b, %s c limit 1000", tableName, tableName, tableName, tableName))
+		assert.NoError(t, m.replClient.BlockWait(t.Context()))
+		assert.NoError(t, m.replClient.Flush(t.Context()))
+		newBinlogPos := m.replClient.GetBinlogApplyPosition()
+		assert.Equal(t, 1, newBinlogPos.Compare(binlogPos))
+		binlogPos = newBinlogPos
+	}
+
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+
+	err = <-c
+	assert.NoError(t, err)
+
+	sql := fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())
+	var tableCount int
+	err = db.QueryRowContext(t.Context(), sql).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, tableCount)
+	assert.NoError(t, m.Close())
 }
