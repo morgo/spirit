@@ -7,7 +7,7 @@ import (
 )
 
 func init() {
-	registerCheck("createtablename", createTableNameCheck, ScopePreflight)
+	registerCheck("createtablename", createTableNameCheck, ScopeStatement)
 }
 
 // createTableNameCheck validates that CREATE TABLE statements do not exceed

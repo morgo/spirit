@@ -180,14 +180,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		// We only allow non-ALTERs (i.e. CREATE TABLE, DROP TABLE, RENAME TABLE)
 		// in single table mode.
 		if !r.changes[0].stmt.IsAlterTable() {
-			// Validate table name length for CREATE TABLE statements.
-			// Enforce the same limit as ALTER TABLE (64 - longest Spirit suffix)
-			// so that a future migration on this table will be possible.
-			if r.changes[0].stmt.IsCreateTable() {
-				tableName := r.changes[0].stmt.Table
-				if len(tableName) > check.MaxMigratableTableNameLength {
-					return fmt.Errorf("table name %q exceeds the maximum length of %d characters that Spirit can manage", tableName, check.MaxMigratableTableNameLength)
-				}
+			if err := r.runChecks(ctx, check.ScopeStatement); err != nil {
+				return err
 			}
 			err := dbconn.Exec(ctx, r.db, r.changes[0].stmt.Statement)
 			if err != nil {
