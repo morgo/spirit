@@ -12,12 +12,9 @@ import (
 )
 
 func TestCheckTableNameConstants(t *testing.T) {
-	// Calculated extra chars should always be greater than 0
-	assert.Positive(t, NameFormatNormalExtraChars)
+	assert.Positive(t, MaxMigratableTableNameLength)
 	assert.Positive(t, NameFormatTimestampExtraChars)
-
-	// Calculated extra chars should be less than the max table name length
-	assert.Less(t, NameFormatNormalExtraChars, utils.MaxTableNameLength)
+	assert.Less(t, MaxMigratableTableNameLength, utils.MaxTableNameLength)
 	assert.Less(t, NameFormatTimestampExtraChars, utils.MaxTableNameLength)
 }
 
@@ -42,16 +39,15 @@ func TestCheckTableName(t *testing.T) {
 	assert.ErrorContains(t, testTableName(longName, false), "table name must be less than")
 	assert.ErrorContains(t, testTableName(longName, true), "table name must be less than")
 
-	// A table name at the normal max length should pass regardless of SkipDropAfterCutover.
+	// A table name at the max migratable length should pass regardless of SkipDropAfterCutover.
 	// The SkipDropAfterCutover case is handled by truncation in oldTableName(), not by
 	// rejecting the table name at preflight.
-	normalMax := utils.MaxTableNameLength - NameFormatNormalExtraChars
-	exactFitName := strings.Repeat("x", normalMax)
+	exactFitName := strings.Repeat("x", MaxMigratableTableNameLength)
 	assert.NoError(t, testTableName(exactFitName, false))
 	assert.NoError(t, testTableName(exactFitName, true))
 
-	// One character over the normal max should fail
-	tooLongName := strings.Repeat("x", normalMax+1)
+	// One character over the max should fail
+	tooLongName := strings.Repeat("x", MaxMigratableTableNameLength+1)
 	assert.ErrorContains(t, testTableName(tooLongName, false), "table name must be less than")
 	assert.ErrorContains(t, testTableName(tooLongName, true), "table name must be less than")
 }
@@ -60,7 +56,7 @@ func TestTruncateTableName(t *testing.T) {
 	// Short name that doesn't need truncation
 	assert.Equal(t, "mytable", utils.TruncateTableName("mytable", 21))
 
-	// Name that exactly fits
+	// Name that exactly fits (64 - 21 = 43)
 	name43 := strings.Repeat("a", 43)
 	assert.Equal(t, name43, utils.TruncateTableName(name43, 21))
 
@@ -69,7 +65,7 @@ func TestTruncateTableName(t *testing.T) {
 	assert.Equal(t, strings.Repeat("b", 43), utils.TruncateTableName(name56, 21))
 
 	// Verify that the truncated name + suffix fits within MaxTableNameLength
-	longName := strings.Repeat("c", 56)
+	longName := strings.Repeat("c", MaxMigratableTableNameLength)
 	truncated := utils.TruncateTableName(longName, NameFormatTimestampExtraChars)
 	result := fmt.Sprintf(NameFormatOldTimeStamp, truncated, "20060102_150405")
 	assert.LessOrEqual(t, len(result), utils.MaxTableNameLength)

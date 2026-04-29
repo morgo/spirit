@@ -292,7 +292,7 @@ func TestOldTableNameTruncation(t *testing.T) {
 		},
 		{
 			name:                 "max normal length with skip drop - requires truncation",
-			tableName:            strings.Repeat("c", utils.MaxTableNameLength-check.NameFormatNormalExtraChars),
+			tableName:            strings.Repeat("c", check.MaxMigratableTableNameLength),
 			skipDropAfterCutover: true,
 			expectMaxLen:         utils.MaxTableNameLength,
 		},
