@@ -24,6 +24,11 @@ var (
 	// formats. These vars are calculated in the `init` function below.
 	NameFormatNormalExtraChars    = 0
 	NameFormatTimestampExtraChars = 0
+
+	// MaxMigratableTableNameLength is the maximum table name length that Spirit
+	// can manage, accounting for the longest metadata suffix (e.g. _<table>_chkpnt).
+	// Calculated in init().
+	MaxMigratableTableNameLength = 0
 )
 
 func init() {
@@ -39,6 +44,8 @@ func init() {
 
 	// Calculate the number of extra characters needed for table names with the old timestamp format
 	NameFormatTimestampExtraChars = len(strings.ReplaceAll(NameFormatOldTimeStamp, "%s", "")) + len(NameFormatTimestamp)
+
+	MaxMigratableTableNameLength = utils.MaxTableNameLength - NameFormatNormalExtraChars
 }
 
 func tableNameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {

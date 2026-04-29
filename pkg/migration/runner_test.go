@@ -435,9 +435,10 @@ func TestCreateTableNameLength(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	assert.NoError(t, err)
 
-	// A CREATE TABLE with a table name exceeding MySQL's 64-character limit should be rejected.
-	longName := "this_is_a_really_long_table_name_that_exceeds_sixty_four_characters_total"
-	assert.Greater(t, len(longName), 64)
+	// A CREATE TABLE with a table name exceeding Spirit's manageable limit (56 chars)
+	// should be rejected, since Spirit needs room for metadata suffixes like _<table>_chkpnt.
+	longName := strings.Repeat("z", 57)
+	assert.Greater(t, len(longName), check.MaxMigratableTableNameLength)
 
 	m, err := NewRunner(&Migration{
 		Host:      cfg.Addr,
@@ -450,14 +451,12 @@ func TestCreateTableNameLength(t *testing.T) {
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "exceeds MySQL's maximum length of 64 characters")
+	assert.ErrorContains(t, err, "exceeds the maximum length of 56 characters that Spirit can manage")
 	assert.NoError(t, m.Close())
 
-	// A CREATE TABLE with a table name at exactly 64 characters should be allowed
-	// (MySQL will accept it, and we don't need to reserve space for shadow tables
-	// since CREATE TABLE doesn't go through the online schema change path).
-	exactName := strings.Repeat("x", 64)
-	assert.Equal(t, 64, len(exactName))
+	// A CREATE TABLE with a table name at exactly the max manageable length (56 chars)
+	// should be allowed.
+	exactName := strings.Repeat("x", check.MaxMigratableTableNameLength)
 	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", exactName))
 
 	m, err = NewRunner(&Migration{

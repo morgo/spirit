@@ -23,7 +23,6 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
-	"github.com/block/spirit/pkg/utils"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 )
 
@@ -182,10 +181,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		// in single table mode.
 		if !r.changes[0].stmt.IsAlterTable() {
 			// Validate table name length for CREATE TABLE statements.
+			// Enforce the same limit as ALTER TABLE (64 - longest Spirit suffix)
+			// so that a future migration on this table will be possible.
 			if r.changes[0].stmt.IsCreateTable() {
 				tableName := r.changes[0].stmt.Table
-				if len(tableName) > utils.MaxTableNameLength {
-					return fmt.Errorf("table name %q exceeds MySQL's maximum length of %d characters", tableName, utils.MaxTableNameLength)
+				if len(tableName) > check.MaxMigratableTableNameLength {
+					return fmt.Errorf("table name %q exceeds the maximum length of %d characters that Spirit can manage", tableName, check.MaxMigratableTableNameLength)
 				}
 			}
 			err := dbconn.Exec(ctx, r.db, r.changes[0].stmt.Statement)

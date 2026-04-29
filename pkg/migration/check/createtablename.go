@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-
-	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {
@@ -13,14 +11,16 @@ func init() {
 }
 
 // createTableNameCheck validates that CREATE TABLE statements do not exceed
-// MySQL's maximum table name length of 64 characters.
+// the maximum table name length that Spirit can manage. This is MySQL's
+// 64-character limit minus the longest Spirit metadata suffix (e.g. _<table>_chkpnt),
+// ensuring that a future ALTER TABLE via Spirit will be possible.
 func createTableNameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	if r.Statement == nil || !r.Statement.IsCreateTable() {
 		return nil
 	}
 	tableName := r.Statement.Table
-	if len(tableName) > utils.MaxTableNameLength {
-		return fmt.Errorf("table name %q exceeds MySQL's maximum length of %d characters", tableName, utils.MaxTableNameLength)
+	if len(tableName) > MaxMigratableTableNameLength {
+		return fmt.Errorf("table name %q exceeds the maximum length of %d characters that Spirit can manage", tableName, MaxMigratableTableNameLength)
 	}
 	return nil
 }

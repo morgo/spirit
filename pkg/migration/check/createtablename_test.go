@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,17 +26,17 @@ func TestCreateTableNameCheck(t *testing.T) {
 	r = Resources{Statement: shortStmt}
 	assert.NoError(t, createTableNameCheck(t.Context(), r, slog.Default()))
 
-	// CREATE TABLE with exactly 64 characters should pass
-	name64 := strings.Repeat("x", 64)
-	stmt64 := statement.MustNew("CREATE TABLE `" + name64 + "` (id INT NOT NULL PRIMARY KEY)")[0]
-	r = Resources{Statement: stmt64}
+	// CREATE TABLE with exactly the max manageable length should pass
+	nameMax := strings.Repeat("x", MaxMigratableTableNameLength)
+	stmtMax := statement.MustNew("CREATE TABLE `" + nameMax + "` (id INT NOT NULL PRIMARY KEY)")[0]
+	r = Resources{Statement: stmtMax}
 	assert.NoError(t, createTableNameCheck(t.Context(), r, slog.Default()))
 
-	// CREATE TABLE with more than 64 characters should fail
-	name65 := strings.Repeat("y", utils.MaxTableNameLength+1)
-	stmt65 := statement.MustNew("CREATE TABLE `" + name65 + "` (id INT NOT NULL PRIMARY KEY)")[0]
-	r = Resources{Statement: stmt65}
+	// CREATE TABLE with one character over the max should fail
+	nameTooLong := strings.Repeat("y", MaxMigratableTableNameLength+1)
+	stmtTooLong := statement.MustNew("CREATE TABLE `" + nameTooLong + "` (id INT NOT NULL PRIMARY KEY)")[0]
+	r = Resources{Statement: stmtTooLong}
 	err := createTableNameCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "exceeds MySQL's maximum length of 64 characters")
+	assert.ErrorContains(t, err, "exceeds the maximum length of 56 characters that Spirit can manage")
 }
