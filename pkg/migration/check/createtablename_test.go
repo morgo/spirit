@@ -1,6 +1,7 @@
 package check
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -38,5 +39,5 @@ func TestCreateTableNameCheck(t *testing.T) {
 	r = Resources{Statement: stmtTooLong}
 	err := createTableNameCheck(t.Context(), r, slog.Default())
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "exceeds the maximum length of 56 characters that Spirit can manage")
+	assert.ErrorContains(t, err, fmt.Sprintf("exceeds the maximum length of %d characters that Spirit can manage", MaxMigratableTableNameLength))
 }

@@ -451,7 +451,7 @@ func TestCreateTableNameLength(t *testing.T) {
 	assert.NoError(t, err)
 	err = m.Run(t.Context())
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "exceeds the maximum length of 56 characters that Spirit can manage")
+	assert.ErrorContains(t, err, fmt.Sprintf("exceeds the maximum length of %d characters that Spirit can manage", check.MaxMigratableTableNameLength))
 	assert.NoError(t, m.Close())
 
 	// A CREATE TABLE with a table name at exactly the max manageable length (56 chars)

@@ -42,6 +42,9 @@ func UnhashKeyToString(key string) string {
 // it is returned unchanged.
 func TruncateTableName(tableName string, suffixLength int) string {
 	maxLen := MaxTableNameLength - suffixLength
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(tableName) > maxLen {
 		return tableName[:maxLen]
 	}

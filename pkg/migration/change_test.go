@@ -333,9 +333,12 @@ func TestOldTableNameTruncation(t *testing.T) {
 	}
 }
 
-func TestOldTableNameTruncationPreservesUniqueness(t *testing.T) {
-	// Two different long table names that share a prefix should still produce
-	// different old table names because the timestamp is always included.
+func TestOldTableNameTruncationCollision(t *testing.T) {
+	// Two different long table names that share a common prefix longer than
+	// MaxMigratableTableNameLength will produce the same old table name when
+	// truncated. This is acceptable because:
+	// 1. Table names > 56 chars cannot be created via Spirit (createTableNameCheck).
+	// 2. Concurrent migrations on the same table are not possible.
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
 
 	c1 := &change{
@@ -363,9 +366,9 @@ func TestOldTableNameTruncationPreservesUniqueness(t *testing.T) {
 	assert.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
 	assert.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
 
-	// With the same start time and truncated names, they will be the same
-	// (since the distinguishing suffix is truncated). This is acceptable because
-	// SkipDropAfterCutover migrations with the same start time on the same table
-	// cannot run concurrently.
+	// These collide because the distinguishing suffix is truncated.
+	// In practice this cannot happen since Spirit enforces a 56-char
+	// table name limit, so the truncation only removes characters
+	// beyond position 43 (which is still unique for valid table names).
 	assert.Equal(t, result1, result2)
 }
