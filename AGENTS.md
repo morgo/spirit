@@ -26,6 +26,7 @@ cd cmd/spirit && go build
 ./spirit move --help
 ./spirit lint --help
 ./spirit diff --help
+./spirit fmt --help
 ```
 
 Spirit uses [Kong](https://github.com/alecthomas/kong) for CLI argument parsing with subcommands. The CLI structs are defined in `pkg/migration/`, `pkg/move/`, and `pkg/lint/` respectively.
@@ -132,7 +133,7 @@ m.Alter = "ENGINE=InnoDB"
 require.NoError(t, m.Run())
 ```
 
-Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithStrict()`, `WithDBName(name)`, `WithRespectSentinel()`.
+Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithStrict()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithLint()`, `WithLintOnly()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
 
 **General test patterns:**
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
@@ -154,7 +155,7 @@ The project uses golangci-lint v2 with `gofmt` and `goimports` formatters enable
 
 ```
 cmd/
-  spirit/     → Single CLI entry point with subcommands: migrate, move, lint, diff
+  spirit/     → Single CLI entry point with subcommands: migrate, move, lint, diff, fmt
 
 pkg/
   migration/  → Orchestrator for single-table schema changes (main entry point)
@@ -166,10 +167,12 @@ pkg/
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
   statement/  → SQL parsing via TiDB parser (ALTER, CREATE, DROP, RENAME)
-  lint/       → Static analysis framework for schemas and DDL (12 built-in linters)
+  lint/       → Static analysis framework for schemas and DDL (15 built-in linters)
+  fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
   metrics/    → Metric types for observability
+  buildinfo/  → Build version and metadata
   utils/      → General utilities
   testutils/  → Test helpers (DSN, database creation, SQL execution)
 
@@ -221,7 +224,7 @@ Three chunker implementations:
 Uses the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) for SQL parsing. If a DDL cannot be parsed by TiDB, Spirit cannot execute it. `parse_create_table.go` provides structured `CREATE TABLE` parsing.
 
 ### `pkg/lint`
-12 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
+15 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
 
 ### `pkg/dbconn`
 Handles connection management including:
@@ -272,8 +275,11 @@ Spirit is designed to fail safely. When in doubt:
 
 GitHub Actions workflows (`.github/workflows/`):
 - **linter.yml** — runs `golangci-lint` v2.11.4 on Go 1.26 (push to main + PRs)
-- **mysql8-docker.yml** — integration tests against MySQL 8.0.33 with replication/TLS
+- **mysql8-docker.yml** — integration tests against MySQL 8.0.45 with replication/TLS
 - **mysql8.0.28-docker.yml** — integration tests against MySQL 8.0.28
+- **mysql8.0.42-docker.yml** — integration tests against MySQL 8.0.42
 - **mysql84-docker.yml** — integration tests against MySQL 8.4
+- **mysql97-docker.yml** — integration tests against MySQL 9.7
 - **mysql8_rbr_minimal-docker.yml** — tests with minimal `binlog_row_image`
 - **buildandrun-docker.yml** — build and run smoke test
+- **release.yml** — release automation
