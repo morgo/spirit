@@ -1028,6 +1028,7 @@ func (c *Client) BlockWait(ctx context.Context) error {
 
 	prevPos := c.getBufferedPos()
 	first := true
+	stallCount := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -1037,13 +1038,21 @@ func (c *Client) BlockWait(ctx context.Context) error {
 		default:
 			currPos := c.getBufferedPos()
 			if currPos.Compare(prevPos) <= 0 && !first {
-				// we skip flushing on the first iteration because c.getCurrentBinlogPosition already flushes the binary log
-
-				c.logger.Debug("buffered position has not advanced, flushing binary logs")
-				if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
-					return err // it could be context cancelled, return it
+				// Position hasn't advanced. Only flush after multiple consecutive
+				// stalls to avoid unnecessary flushes when the binlog syncer is
+				// just slightly behind (e.g., under CI load). getCurrentBinlogPosition
+				// already flushes once at the start, so a brief stall is expected.
+				stallCount++
+				if stallCount >= 3 {
+					c.logger.Debug("buffered position has not advanced, flushing binary logs")
+					if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
+						return err // it could be context cancelled, return it
+					}
+					c.flushedBinlogs.Add(1)
+					stallCount = 0
 				}
-				c.flushedBinlogs.Add(1)
+			} else {
+				stallCount = 0
 			}
 			prevPos = currPos
 			first = false
