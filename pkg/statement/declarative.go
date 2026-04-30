@@ -17,11 +17,12 @@ import (
 // definitions, compute the minimal set of changes. It is used by spirit's diff
 // subcommand, strata, and GAP.
 //
-// The returned statements are ordered by table name, with CREATE/ALTER
-// statements before DROP statements. This ordering is a correctness property:
-// it ensures the output is safe to execute sequentially (e.g. a table
-// referenced by a foreign key will not be dropped before the referencing
-// ALTER runs).
+// The returned statements are ordered as CREATE → ALTER → DROP (within each
+// group, tables are sorted alphabetically). This ordering is a correctness
+// property: it ensures the output is safe to execute sequentially (e.g. an
+// ALTER that adds a foreign key referencing a newly-created table will run
+// after the CREATE, and a table referenced by a FK won't be dropped before
+// the referencing ALTER runs).
 //
 // If opts is nil, NewDiffOptions() defaults are used for table diffs.
 func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOptions) ([]*AbstractStatement, error) {
@@ -41,7 +42,8 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 	}
 	sort.Strings(desiredNames)
 
-	var changes []*AbstractStatement
+	var creates []*AbstractStatement
+	var alters []*AbstractStatement
 	var drops []*AbstractStatement
 
 	// Tables in desired: create if new, diff if existing.
@@ -54,7 +56,7 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse CREATE TABLE for new table %q: %w", name, err)
 			}
-			changes = append(changes, stmts...)
+			creates = append(creates, stmts...)
 			continue
 		}
 
@@ -63,7 +65,7 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 		if err != nil {
 			return nil, err
 		}
-		changes = append(changes, diffs...)
+		alters = append(alters, diffs...)
 	}
 
 	// Tables in current but not in desired — emit DROP TABLE.
@@ -83,9 +85,12 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 		drops = append(drops, stmts...)
 	}
 
-	// CREATE/ALTER first, then DROP.
-	changes = append(changes, drops...)
-	return changes, nil
+	// Order: CREATE first, then ALTER, then DROP.
+	result := make([]*AbstractStatement, 0, len(creates)+len(alters)+len(drops))
+	result = append(result, creates...)
+	result = append(result, alters...)
+	result = append(result, drops...)
+	return result, nil
 }
 
 // diffTable computes the ALTER TABLE diff for a single table, recovering from
