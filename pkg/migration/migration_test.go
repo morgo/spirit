@@ -19,8 +19,6 @@ import (
 	"go.uber.org/goleak"
 )
 
-
-
 func TestMain(m *testing.M) {
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
