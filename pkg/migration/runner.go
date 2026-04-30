@@ -415,13 +415,9 @@ func (r *Runner) prepareForCutover(ctx context.Context) error {
 // We redundantly run checks, once per change.
 func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 	for _, change := range r.changes {
-		var firstReplica *sql.DB
-		if len(r.replicas) > 0 {
-			firstReplica = r.replicas[0]
-		}
 		if err := check.RunChecks(ctx, check.Resources{
 			DB:              r.db,
-			Replica:         firstReplica,
+			Replicas:        r.replicas,
 			Table:           change.table,
 			Statement:       change.stmt,
 			TargetChunkTime: r.migration.TargetChunkTime,

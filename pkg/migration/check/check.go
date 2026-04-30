@@ -29,7 +29,7 @@ const (
 
 type Resources struct {
 	DB                   *sql.DB
-	Replica              *sql.DB
+	Replicas             []*sql.DB
 	Table                *table.TableInfo
 	Statement            *statement.AbstractStatement
 	TargetChunkTime      time.Duration
