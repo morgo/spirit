@@ -64,7 +64,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Between cancel and Close() every resource is freed.
+	// Close() before cancel() to free resources before context cancellation.
 	require.NoError(t, m.Close())
 	cancel()
 	<-done
@@ -700,12 +700,15 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 // - If this is done correctly, then on resume the DELETE will no longer be ignored.
 func TestResumeFromCheckpointPhantom(t *testing.T) {
 	t.Parallel()
-	tt := testutils.NewTestTable(t, "phantomtest", `CREATE TABLE phantomtest (
+	testutils.NewTestTable(t, "phantomtest", `CREATE TABLE phantomtest (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		pad varbinary(1024) NOT NULL,
 		PRIMARY KEY (id)
 	)`)
-	tt.SeedRows(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024)", 100000)
+	// Exactly 10 rows needed — the test asserts MaxValue() == "10".
+	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM dual")
+	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM phantomtest a, phantomtest b, phantomtest c LIMIT 100000")
+	testutils.RunSQL(t, "INSERT INTO phantomtest (pad) SELECT RANDOM_BYTES(1024) FROM phantomtest a, phantomtest b, phantomtest c LIMIT 100000")
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -954,7 +957,7 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	var tableName string
-	err = db.QueryRowContext(t.Context(), "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = '_cleanup_test_new'").Scan(&tableName)
+	err = db.QueryRowContext(t.Context(), "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_cleanup_test_new'").Scan(&tableName)
 	require.NoError(t, err, "_cleanup_test_new table should exist after checkpoint")
 
 	// Close() before cancel() to avoid race conditions (see other tests)
