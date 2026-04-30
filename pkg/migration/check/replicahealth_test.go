@@ -20,13 +20,15 @@ func TestReplicaHealth(t *testing.T) {
 	err := replicaHealth(t.Context(), r, slog.Default())
 	assert.NoError(t, err) // if no replicas, it returns no error.
 
-	// use a non-replica. this will return an error.
+	// use a non-replica. this will return an error identifying which thread
+	// is not running and on which host.
 	nonReplica, err := sql.Open("mysql", testutils.DSN())
 	assert.NoError(t, err)
 	r.Replicas = []*sql.DB{nonReplica}
 	err = replicaHealth(t.Context(), r, slog.Default())
 	assert.Error(t, err)
-	assert.ErrorContains(t, err, "replica is not healthy")
+	assert.ErrorIs(t, err, ErrReplicaNotHealthy)
+	assert.Contains(t, err.Error(), "IO thread not running") // specific thread identified
 
 	// use an actual replica
 	replicaDSN := os.Getenv("REPLICA_DSN")
