@@ -92,6 +92,9 @@ func TestCheckpoint(t *testing.T) {
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS cpt1, _cpt1_new, _cpt1_chkpnt`)
 	testutils.RunSQL(t, tbl)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP TABLE IF EXISTS cpt1, _cpt1_new, _cpt1_chkpnt`)
+	})
 	testutils.RunSQL(t, `insert into cpt1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM dual`)
 	testutils.RunSQL(t, `insert into cpt1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM cpt1`)
 	testutils.RunSQL(t, `insert into cpt1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM cpt1 a JOIN cpt1 b JOIN cpt1 c`)
@@ -226,15 +229,12 @@ func TestCheckpoint(t *testing.T) {
 
 func TestCheckpointRestore(t *testing.T) {
 	t.Parallel()
-	tbl := `CREATE TABLE cpt2 (
+	testutils.NewTestTable(t, "cpt2", `CREATE TABLE cpt2 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
-		pad VARCHAR(100) NOT NULL default 0)`
+		pad VARCHAR(100) NOT NULL default 0)`)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS cpt2, _cpt2_new, _cpt2_chkpnt`)
-	testutils.RunSQL(t, tbl)
 
 	r, err := NewRunner(&Migration{
 		Host:     cfg.Addr,
@@ -298,22 +298,15 @@ func TestCheckpointRestore(t *testing.T) {
 func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	tbl := `CREATE TABLE binarypk (
+	tt := testutils.NewTestTable(t, "binarypk", `CREATE TABLE binarypk (
  main_id varbinary(16) NOT NULL,
  sub_id varchar(36) CHARACTER SET latin1 COLLATE latin1_swedish_ci GENERATED ALWAYS AS (jsonbody->>'$._id') STORED NOT NULL,
  jsonbody json NOT NULL,
  PRIMARY KEY (main_id,sub_id)
-);`
+)`)
+	tt.SeedRows(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024)))`, 10000)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS binarypk, _binarypk_new, _binarypk_chkpnt`)
-	testutils.RunSQL(t, tbl)
-	testutils.RunSQL(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024))) from dual`)
-	testutils.RunSQL(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024))) from binarypk a JOIN binarypk b JOIN binarypk c LIMIT 10000;`)
-	testutils.RunSQL(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024))) from binarypk a JOIN binarypk b JOIN binarypk c LIMIT 10000;`)
-	testutils.RunSQL(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024))) from binarypk a JOIN binarypk b JOIN binarypk c LIMIT 10000;`)
-	testutils.RunSQL(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024))) from binarypk a JOIN binarypk b JOIN binarypk c LIMIT 10000;`)
 
 	r, err := NewRunner(&Migration{
 		Host:             cfg.Addr,
@@ -431,18 +424,11 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 
 func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	t.Parallel()
-	tbl := `CREATE TABLE cpt1difft1 (
+	tt := testutils.NewTestTable(t, "cpt1difft1", `CREATE TABLE cpt1difft1 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
-		pad VARCHAR(100) NOT NULL default 0)`
-
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS cpt1difft1, cpt1difft1_new, _cpt1difft1_chkpnt`)
-	testutils.RunSQL(t, tbl)
-	testutils.RunSQL(t, `insert into cpt1difft1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM dual`)
-	testutils.RunSQL(t, `insert into cpt1difft1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM cpt1difft1`)
-	testutils.RunSQL(t, `insert into cpt1difft1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM cpt1difft1 a JOIN cpt1difft1 b JOIN cpt1difft1 c`)
-	testutils.RunSQL(t, `insert into cpt1difft1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM cpt1difft1 a JOIN cpt1difft1 b JOIN cpt1difft1 c`)
-	testutils.RunSQL(t, `insert into cpt1difft1 (id2,pad) SELECT 1, REPEAT('a', 100) FROM cpt1difft1 a JOIN cpt1difft1 LIMIT 1000`)
+		pad VARCHAR(100) NOT NULL default 0)`)
+	tt.SeedRows(t, `INSERT INTO cpt1difft1 (id2, pad) SELECT 1, REPEAT('a', 100)`, 1000)
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
@@ -577,8 +563,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 
 func TestResumeFromCheckpointE2ECompositeVarcharPK(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS compositevarcharpk, _compositevarcharpk_chkpnt`)
-	testutils.RunSQL(t, `CREATE TABLE compositevarcharpk (
+	testutils.NewTestTable(t, "compositevarcharpk", `CREATE TABLE compositevarcharpk (
   token varchar(128) NOT NULL,
   version varchar(255) NOT NULL,
   state varchar(255) NOT NULL,
@@ -586,7 +571,7 @@ func TestResumeFromCheckpointE2ECompositeVarcharPK(t *testing.T) {
   created_at datetime(3) NOT NULL,
   updated_at datetime(3) NOT NULL,
   PRIMARY KEY (token,version)
-	);`)
+	)`)
 	// This table has a composite varchar PK with specific seeding patterns
 	// that can't use SeedRows (need unique tokens and specific version values).
 	testutils.RunSQL(t, `INSERT INTO compositevarcharpk VALUES

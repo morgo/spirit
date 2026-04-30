@@ -22,37 +22,35 @@ import (
 )
 
 func TestCutOver(t *testing.T) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS cutovert1, _cutovert1_new, _cutovert1_old, _cutovert1_chkpnt`)
-	tbl := `CREATE TABLE cutovert1 (
+	t.Parallel()
+	testutils.NewTestTable(t, "cutovert1", `CREATE TABLE cutovert1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, tbl)
-	tbl = `CREATE TABLE _cutovert1_new (
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _cutovert1_new (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, tbl)
+	)`)
 	testutils.RunSQL(t, `CREATE TABLE _cutovert1_chkpnt (a int)`) // for binlog advancement
 
-	// The structure is the same, but insert 2 rows in t1 so
-	// we can differentiate after the cutover.
+	// Insert 2 rows in t1 so we can differentiate after the cutover.
 	testutils.RunSQL(t, `INSERT INTO cutovert1 VALUES (1, 2), (2,2)`)
 
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
-	assert.Equal(t, 0, db.Stats().InUse) // no connections in use.
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
 
-	t1 := table.NewTableInfo(db, "test", "cutovert1")
-	assert.NoError(t, t1.SetInfo(t.Context())) // required to extract PK.
-	t1new := table.NewTableInfo(db, "test", "_cutovert1_new")
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
+
+	t1 := table.NewTableInfo(db, cfg.DBName, "cutovert1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t1new := table.NewTableInfo(db, cfg.DBName, "_cutovert1_new")
 	t1old := "_cutovert1_old"
 	logger := slog.Default()
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
 	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -61,10 +59,9 @@ func TestCutOver(t *testing.T) {
 	})
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
-	assert.NoError(t, err)
-	assert.NoError(t, feed.AddSubscription(t1, t1new, chunker))
-	// the feed must be started.
-	assert.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
+	require.NoError(t, feed.Run(t.Context()))
 
 	cutoverConfig := []*cutoverConfig{
 		{
@@ -74,59 +71,50 @@ func TestCutOver(t *testing.T) {
 		},
 	}
 	cutover, err := NewCutOver(db, cutoverConfig, feed, dbconn.NewDBConfig(), logger)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NoError(t, cutover.Run(t.Context()))
+	require.Equal(t, 0, db.Stats().InUse) // all connections are returned
 
-	err = cutover.Run(t.Context())
-	assert.NoError(t, err)
-
-	assert.Equal(t, 0, db.Stats().InUse) // all connections are returned
-
-	// Verify that t1 has no rows (its lost because we only did cutover, not copy-rows)
-	// and t1_old has 2 row.
-	// Verify that t2 has one row.
+	// Verify that t1 has no rows (lost because we only did cutover, not copy-rows)
+	// and t1_old has 2 rows.
 	var count int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cutovert1").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 0, count)
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _cutovert1_old").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 2, count)
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cutovert1").Scan(&count))
+	require.Equal(t, 0, count)
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _cutovert1_old").Scan(&count))
+	require.Equal(t, 2, count)
 }
 
 func TestMDLLockFails(t *testing.T) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS mdllocks, _mdllocks_new, _mdllocks_old, _mdllocks_chkpnt`)
-	tbl := `CREATE TABLE mdllocks (
+	t.Parallel()
+	testutils.NewTestTable(t, "mdllocks", `CREATE TABLE mdllocks (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, tbl)
-	tbl = `CREATE TABLE _mdllocks_new (
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _mdllocks_new (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, tbl)
+	)`)
 	testutils.RunSQL(t, `CREATE TABLE _mdllocks_chkpnt (a int)`) // for binlog advancement
-	// The structure is the same, but insert 2 rows in t1 so
-	// we can differentiate after the cutover.
 	testutils.RunSQL(t, `INSERT INTO mdllocks VALUES (1, 2), (2,2)`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
 
 	config := dbconn.NewDBConfig()
 	config.MaxRetries = 2
 	config.LockWaitTimeout = 1
 
 	db, err := dbconn.New(testutils.DSN(), config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	t1 := table.NewTableInfo(db, "test", "mdllocks")
-	assert.NoError(t, t1.SetInfo(t.Context())) // required to extract PK.
-	t1new := table.NewTableInfo(db, "test", "_mdllocks_new")
+	t1 := table.NewTableInfo(db, cfg.DBName, "mdllocks")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t1new := table.NewTableInfo(db, cfg.DBName, "_mdllocks_new")
 	t1old := "test_old"
 	logger := slog.Default()
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
 	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -135,10 +123,9 @@ func TestMDLLockFails(t *testing.T) {
 	})
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
-	assert.NoError(t, err)
-	assert.NoError(t, feed.AddSubscription(t1, t1new, chunker))
-	// the feed must be started.
-	assert.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
+	require.NoError(t, feed.Run(t.Context()))
 
 	cutoverConfig := []*cutoverConfig{
 		{
@@ -148,51 +135,49 @@ func TestMDLLockFails(t *testing.T) {
 		},
 	}
 	cutover, err := NewCutOver(db, cutoverConfig, feed, config, logger)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	// Before we cutover, we READ LOCK the table.
-	// This will not fail the table lock but it will fail the rename.
+	// READ LOCK the table — this won't fail the table lock but will fail the rename.
 	trx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = trx.ExecContext(t.Context(), "LOCK TABLES mdllocks READ")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	// Start the cutover. It will retry in a loop and fail
-	// after about 15 seconds (3 sec timeout * 5 retries)
-	// or in 5.7 it might fail because it can't find the RENAME in the processlist.
+	// Cutover retries in a loop and fails after ~15s (3s timeout * 5 retries).
 	err = cutover.Run(t.Context())
-	assert.Error(t, err)
-	assert.NoError(t, trx.Rollback())
+	require.Error(t, err)
+	require.NoError(t, trx.Rollback())
 }
 
 func TestInvalidOptions(t *testing.T) {
+	t.Parallel()
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	logger := slog.Default()
 
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS invalid_t1, _invalid_t1_new`)
-	tbl := `CREATE TABLE invalid_t1 (
+	testutils.NewTestTable(t, "invalid_t1", `CREATE TABLE invalid_t1 (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, tbl)
-	tbl = `CREATE TABLE _invalid_t1_new (
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _invalid_t1_new (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`
-	testutils.RunSQL(t, tbl)
-	// Invalid options
+	)`)
+
+	// Invalid options — empty config.
 	_, err = NewCutOver(db, []*cutoverConfig{{}}, nil, dbconn.NewDBConfig(), logger)
-	assert.Error(t, err)
-	t1 := table.NewTableInfo(db, "test", "invalid_t1")
-	assert.NoError(t, t1.SetInfo(t.Context())) // required to extract PK.
-	t1new := table.NewTableInfo(db, "test", "_invalid_t1_new")
+	require.Error(t, err)
+
+	t1 := table.NewTableInfo(db, cfg.DBName, "invalid_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t1new := table.NewTableInfo(db, cfg.DBName, "_invalid_t1_new")
 	t1old := "test_old"
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
 	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -200,21 +185,24 @@ func TestInvalidOptions(t *testing.T) {
 		ServerID:        repl.NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
-	assert.NoError(t, err)
-	assert.NoError(t, feed.AddSubscription(t1, t1new, chunker))
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
 
+	// Invalid options — nil table.
 	_, err = NewCutOver(db, []*cutoverConfig{{
 		table:        nil,
 		newTable:     t1new,
 		oldTableName: t1old,
 	}}, feed, dbconn.NewDBConfig(), logger)
-	assert.Error(t, err)
+	require.Error(t, err)
+
+	// Invalid options — empty old table name.
 	_, err = NewCutOver(db, []*cutoverConfig{{
 		table:        nil,
 		newTable:     t1new,
 		oldTableName: "",
 	}}, feed, dbconn.NewDBConfig(), logger)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 // TestCutoverAtomicityWithConcurrentWrites tests that if we modify the cutover
@@ -229,9 +217,7 @@ func TestInvalidOptions(t *testing.T) {
 // there are concurrent writes happening that are trying to introduce it.
 func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	t.Parallel()
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS t1concurrent, _t1concurrent_new, _t1concurrent_old`)
-
-	table := `CREATE TABLE t1concurrent (
+	tt := testutils.NewTestTable(t, "t1concurrent", `CREATE TABLE t1concurrent (
 		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
 		x_token VARCHAR(36) NOT NULL,
 		cents INT NOT NULL,
@@ -252,20 +238,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 		UNIQUE KEY idx_x_token (x_token),
 		KEY idx_s_token (s_token),
 		KEY idx_r_token (r_token)
-	)`
-	testutils.RunSQL(t, table)
-
-	// Insert some initial data
+	)`)
 	testutils.RunSQL(t, `INSERT INTO t1concurrent (x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
 		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`)
-
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-
-	// Open connection for concurrent writes
-	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
-	defer utils.CloseAndLog(db)
 
 	// Start concurrent write load
 	ctx, cancel := context.WithCancel(t.Context())
@@ -279,7 +254,7 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// Start write threads
 	for range numThreads {
 		wg.Go(func() {
-			migrationConcurrentWriteThread(ctx, db, &writeCount, &errorCount)
+			migrationConcurrentWriteThread(ctx, tt.DB, &writeCount, &errorCount)
 		})
 	}
 
@@ -287,21 +262,13 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Create and configure the migration with a custom cutover algorithm
-	// that intentionally fails after renaming the original table
-	migration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         2,
-		Table:           "t1concurrent",
-		Alter:           "ENGINE=InnoDB",
-		TargetChunkTime: 100 * time.Millisecond,
-		useTestCutover:  true, // indicates we want the test cutover
-	}
+	// that intentionally fails after renaming the original table.
+	migration := NewTestMigration(t, WithTable("t1concurrent"), WithAlter("ENGINE=InnoDB"),
+		WithThreads(2), WithTargetChunkTime(100*time.Millisecond))
+	migration.useTestCutover = true
 
-	// Run the migration - we expect it to fail with our intentional error
-	err = migration.Run()
+	// Run the migration — we expect it to fail with our intentional error.
+	err := migration.Run()
 
 	// Stop the write threads
 	// When the migration "fails" they won't be able to insert anyway,
@@ -315,18 +282,18 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// The migration should fail - either with our intentional error or because
 	// the table doesn't exist after the partial rename
-	assert.Error(t, err, "Migration should fail")
+	require.Error(t, err, "Migration should fail")
 
 	// The partial cutover should have renamed t1concurrent to _t1concurrent_old
 	// Let's verify both tables exist
 	var oldTableExists, newTableExists bool
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_old'").Scan(&oldTableExists)
-	assert.NoError(t, err)
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_new'").Scan(&newTableExists)
-	assert.NoError(t, err)
+	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_old'").Scan(&oldTableExists)
+	require.NoError(t, err)
+	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_new'").Scan(&newTableExists)
+	require.NoError(t, err)
 
-	assert.True(t, oldTableExists, "The _old table should exist after partial cutover")
-	assert.True(t, newTableExists, "The _new table should exist after partial cutover")
+	require.True(t, oldTableExists, "The _old table should exist after partial cutover")
+	require.True(t, newTableExists, "The _new table should exist after partial cutover")
 
 	// Verify that the old table (_old) and the new table (_new) have identical checksums.
 	// This proves that all changes were captured correctly up to the point of cutover.
@@ -337,8 +304,8 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	var oldChecksum, newChecksum string
 	assert.Eventually(t, func() bool {
-		err1 := db.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_old")).Scan(&oldChecksum)
-		err2 := db.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_new")).Scan(&newChecksum)
+		err1 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_old")).Scan(&oldChecksum)
+		err2 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_new")).Scan(&newChecksum)
 		return err1 == nil && err2 == nil && oldChecksum == newChecksum
 	}, 5*time.Second, 250*time.Millisecond, "Checksums should eventually match between old and new tables")
 
@@ -346,13 +313,13 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// Also verify row counts match
 	var oldCount, newCount int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _t1concurrent_old").Scan(&oldCount)
-	assert.NoError(t, err)
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _t1concurrent_new").Scan(&newCount)
-	assert.NoError(t, err)
+	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _t1concurrent_old").Scan(&oldCount)
+	require.NoError(t, err)
+	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _t1concurrent_new").Scan(&newCount)
+	require.NoError(t, err)
 
 	t.Logf("Old table count: %d, New table count: %d", oldCount, newCount)
-	assert.Equal(t, oldCount, newCount, "Row counts should match")
+	require.Equal(t, oldCount, newCount, "Row counts should match")
 }
 
 // migrationConcurrentWriteThread simulates concurrent write load during migration
@@ -435,7 +402,6 @@ func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
 	)`, tableName))
 
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
-		WithThreads(4),
 		WithSkipDropAfterCutover())
 	require.NoError(t, m.Run(t.Context()))
 
@@ -448,6 +414,8 @@ func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, oldName)).Scan(&tableCount))
 	require.Equal(t, 1, tableCount, "old table should exist after SkipDropAfterCutover")
+	// Clean up the timestamped _old table that SkipDropAfterCutover leaves behind.
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", oldName))
 	require.NoError(t, m.Close())
 }
 
@@ -481,7 +449,6 @@ func TestSkipDropAfterCutover(t *testing.T) {
 	)`)
 
 	m := NewTestRunner(t, "skipdrop_test", "ENGINE=InnoDB",
-		WithThreads(4),
 		WithSkipDropAfterCutover())
 	require.NoError(t, m.Run(t.Context()))
 
@@ -490,6 +457,8 @@ func TestSkipDropAfterCutover(t *testing.T) {
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())).Scan(&tableCount))
 	require.Equal(t, 1, tableCount)
+	// Clean up the timestamped _old table that SkipDropAfterCutover leaves behind.
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", m.changes[0].oldTableName()))
 	require.NoError(t, m.Close())
 }
 
@@ -501,7 +470,7 @@ func TestDropAfterCutover(t *testing.T) {
 		PRIMARY KEY(pk)
 	)`)
 
-	m := NewTestRunner(t, "drop_test", "ENGINE=InnoDB", WithThreads(4))
+	m := NewTestRunner(t, "drop_test", "ENGINE=InnoDB")
 	require.NoError(t, m.Run(t.Context()))
 
 	var tableCount int
@@ -526,7 +495,6 @@ func TestDeferCutOver(t *testing.T) {
 
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
 		WithDBName(dbName),
-		WithThreads(4),
 		WithDeferCutOver(),
 		WithRespectSentinel())
 
@@ -563,7 +531,6 @@ func TestDeferCutOverE2E(t *testing.T) {
 
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
 		WithDBName(dbName),
-		WithThreads(1),
 		WithDeferCutOver(),
 		WithRespectSentinel())
 
@@ -614,7 +581,6 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
 		WithDBName(dbName),
-		WithThreads(1),
 		WithDeferCutOver(),
 		WithRespectSentinel())
 

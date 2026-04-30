@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,26 +15,13 @@ import (
 func runRenameTest(t *testing.T, tableName, createTable, insertData, alter string, verifyFunc func(t *testing.T, db *sql.DB)) {
 	t.Helper()
 	dbName, _ := testutils.CreateUniqueTestDatabase(t)
-	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("DROP TABLE IF EXISTS %s, _%s_new", tableName, tableName))
 	testutils.RunSQLInDatabase(t, dbName, createTable)
 	if insertData != "" {
 		testutils.RunSQLInDatabase(t, dbName, insertData)
 	}
 
-	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
-	require.NoError(t, err)
-
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    tableName,
-		Alter:    alter,
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName), WithAlter(alter))
+	require.NoError(t, m.Run())
 
 	if verifyFunc != nil {
 		db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
@@ -253,20 +239,8 @@ func TestRenameColumnLargerDataset(t *testing.T) {
 	}
 	// Should have 16 rows now
 
-	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
-	require.NoError(t, err)
-
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    tableName,
-		Alter:    "RENAME COLUMN old_name TO new_name",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName), WithAlter("RENAME COLUMN old_name TO new_name"))
+	require.NoError(t, m.Run())
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
 	require.NoError(t, err)
@@ -301,23 +275,14 @@ func TestRenameColumnPKBlocked(t *testing.T) {
 	)`, tableName))
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (name) VALUES ('test')", tableName))
 
-	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
-	require.NoError(t, err)
-
 	// CHANGE COLUMN with type change on PK forces Spirit's copy algorithm,
 	// which should be blocked by the preflight check.
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    tableName,
-		Alter:    "CHANGE COLUMN id new_id BIGINT NOT NULL AUTO_INCREMENT",
-	}
-	err = migration.Run()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "renaming primary key column")
+	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
+		WithAlter("CHANGE COLUMN id new_id BIGINT NOT NULL AUTO_INCREMENT"),
+		WithThreads(1))
+	err := m.Run()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "renaming primary key column")
 }
 
 // TestRenameColumnChangeColumnWithTypeChange tests CHANGE COLUMN that renames + changes type on multiple columns.
@@ -452,21 +417,10 @@ func TestRenameColumnForceCopyPath(t *testing.T) {
 	}
 	// Should have 32 rows
 
-	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(dbName))
-	require.NoError(t, err)
-
 	// CHANGE COLUMN with type change forces the copy algorithm
-	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    tableName,
-		Alter:    "CHANGE COLUMN old_name new_name varchar(200) NOT NULL",
-	}
-	err = migration.Run()
-	assert.NoError(t, err)
+	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
+		WithAlter("CHANGE COLUMN old_name new_name varchar(200) NOT NULL"))
+	require.NoError(t, m.Run())
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
 	require.NoError(t, err)
