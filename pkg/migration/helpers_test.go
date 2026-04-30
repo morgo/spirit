@@ -17,13 +17,16 @@ func mkPtr[T any](t T) *T {
 }
 
 // mkIniFile creates a temporary INI file with the given content for testing.
-func mkIniFile(t *testing.T, content string) *os.File {
+// mkIniFile creates a temporary INI config file with the given content and returns its path.
+// The file is automatically cleaned up when the test finishes (via t.TempDir()).
+func mkIniFile(t *testing.T, content string) string {
 	t.Helper()
 	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
 	require.NoError(t, err)
 	_, err = tmpFile.WriteString(content)
 	require.NoError(t, err)
-	return tmpFile
+	require.NoError(t, tmpFile.Close())
+	return tmpFile.Name()
 }
 
 // waitForStatus polls until the runner reaches the target status or times out.
@@ -118,6 +121,51 @@ func WithDBName(name string) RunnerOption {
 func WithRespectSentinel() RunnerOption {
 	return func(m *Migration) {
 		m.RespectSentinel = true
+	}
+}
+
+// WithLint enables linting during migration.
+func WithLint() RunnerOption {
+	return func(m *Migration) {
+		m.Lint = true
+	}
+}
+
+// WithLintOnly enables lint-only mode (no migration).
+func WithLintOnly() RunnerOption {
+	return func(m *Migration) {
+		m.LintOnly = true
+	}
+}
+
+// WithHost overrides the host address.
+func WithHost(host string) RunnerOption {
+	return func(m *Migration) {
+		m.Host = host
+	}
+}
+
+// WithReplicaDSN sets the replica DSN for lag monitoring.
+func WithReplicaDSN(dsn string) RunnerOption {
+	return func(m *Migration) {
+		m.ReplicaDSN = dsn
+	}
+}
+
+// WithReplicaMaxLag sets the maximum replica lag tolerance.
+func WithReplicaMaxLag(d time.Duration) RunnerOption {
+	return func(m *Migration) {
+		m.ReplicaMaxLag = d
+	}
+}
+
+// WithConfFile creates a temporary INI config file with the given content
+// and sets it on the migration. The file is automatically cleaned up via t.TempDir().
+func WithConfFile(t *testing.T, content string) RunnerOption {
+	t.Helper()
+	path := mkIniFile(t, content)
+	return func(m *Migration) {
+		m.ConfFile = path
 	}
 }
 

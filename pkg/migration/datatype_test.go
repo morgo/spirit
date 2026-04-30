@@ -47,8 +47,14 @@ func TestChangeDatatypeDataLoss(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestChangeDatatypeLossyNoAutoInc tests a lossy datatype change on a non-auto-increment PK
-// where data exceeds the target type's range.
+// TestChangeDatatypeLossyNoAutoInc is a good test of how much the chunker will
+// boil the ocean:
+//   - There is a MIN(key)=1 and a MAX(key)=8589934592
+//   - There is no auto-increment so the chunker is allowed to expand each chunk
+//     based on estimated rows (which is low).
+//
+// Only the key=8589934592 will fail to be converted. The generated number of
+// chunks should be very low because of prefetching.
 func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	t.Parallel()
 	testutils.NewTestTable(t, "lossychange2", `CREATE TABLE lossychange2 (
@@ -165,9 +171,21 @@ func TestTpConversion(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestEnumReorder tests that ENUM value reordering is handled correctly.
-// In unbuffered mode, the migration succeeds because string values are used.
-// In buffered mode, the migration is refused because binlog replay uses ordinals.
+// TestEnumReorder tests that reordering ENUM values in an ALTER TABLE
+// produces correct data after migration.
+//
+// This test only works correctly in unbuffered mode because of the way
+// ENUM values are represented in the binlog. We test *both* unbuffered and buffered modes
+// though and we accept a pre-flight failure as a "pass", since it's not corruption.
+// i.e. it's OK to refuse changes you can't handle.
+//
+// The unbuffered path uses REPLACE INTO ... SELECT (SQL-level string operations) which
+// handles ENUM reordering correctly. The buffered path uses UpsertRows with raw binlog
+// values, where ENUM values are represented as int64 ordinals. If the ENUM is reordered,
+// the ordinals map to different string values in the target table, causing data corruption.
+//
+// This test exercises both the copier path (initial data) and the binlog
+// replay path (concurrent DML during migration) to verify correctness.
 func TestEnumReorder(t *testing.T) {
 	t.Run("unbuffered", func(t *testing.T) {
 		testEnumReorder(t, false)
@@ -387,12 +405,12 @@ func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 // as long as the primary key itself doesn't change (no ADD/DROP PRIMARY KEY).
 
 func TestAlterPKIntToBigInt(t *testing.T) {
+	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigInt(t, false) })
 	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigInt(t, true) })
 }
 
 func testAlterPKIntToBigInt(t *testing.T, enableBuffered bool) {
-	t.Parallel()
 	tt := testutils.NewTestTable(t, "altpk_int2big", `CREATE TABLE altpk_int2big (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		name varchar(255) NOT NULL,
@@ -418,12 +436,12 @@ func testAlterPKIntToBigInt(t *testing.T, enableBuffered bool) {
 }
 
 func TestAlterPKIntToBigIntUnsigned(t *testing.T) {
+	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntUnsigned(t, false) })
 	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigIntUnsigned(t, true) })
 }
 
 func testAlterPKIntToBigIntUnsigned(t *testing.T, enableBuffered bool) {
-	t.Parallel()
 	tt := testutils.NewTestTable(t, "altpk_int2bigu", `CREATE TABLE altpk_int2bigu (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		name varchar(255) NOT NULL
@@ -444,12 +462,12 @@ func testAlterPKIntToBigIntUnsigned(t *testing.T, enableBuffered bool) {
 }
 
 func TestAlterPKTinyIntToInt(t *testing.T) {
+	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKTinyIntToInt(t, false) })
 	t.Run("buffered", func(t *testing.T) { testAlterPKTinyIntToInt(t, true) })
 }
 
 func testAlterPKTinyIntToInt(t *testing.T, enableBuffered bool) {
-	t.Parallel()
 	tt := testutils.NewTestTable(t, "altpk_tiny2int", `CREATE TABLE altpk_tiny2int (
 		id tinyint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		data varchar(100) NOT NULL
@@ -470,12 +488,12 @@ func testAlterPKTinyIntToInt(t *testing.T, enableBuffered bool) {
 }
 
 func TestAlterPKIntToBigIntWithDML(t *testing.T) {
+	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntWithDML(t, false) })
 	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigIntWithDML(t, true) })
 }
 
 func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
-	t.Parallel()
 	tt := testutils.NewTestTable(t, "altpk_dml", `CREATE TABLE altpk_dml (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		name varchar(255) NOT NULL,
@@ -485,7 +503,7 @@ func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
 
 	m := NewTestRunner(t, "altpk_dml", "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
 		WithThreads(2),
-		WithTargetChunkTime(50*time.Millisecond),
+		WithTargetChunkTime(100*time.Millisecond),
 		WithBuffered(enableBuffered))
 
 	var wg sync.WaitGroup
@@ -512,12 +530,12 @@ func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
 }
 
 func TestAlterPKCompositeDatatypeChange(t *testing.T) {
+	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKCompositeDatatypeChange(t, false) })
 	t.Run("buffered", func(t *testing.T) { testAlterPKCompositeDatatypeChange(t, true) })
 }
 
 func testAlterPKCompositeDatatypeChange(t *testing.T, enableBuffered bool) {
-	t.Parallel()
 	tt := testutils.NewTestTable(t, "altpk_comp", `CREATE TABLE altpk_comp (
 		id1 int NOT NULL,
 		id2 int NOT NULL,
@@ -546,12 +564,12 @@ func testAlterPKCompositeDatatypeChange(t *testing.T, enableBuffered bool) {
 }
 
 func TestAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T) {
+	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t, false) })
 	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t, true) })
 }
 
 func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enableBuffered bool) {
-	t.Parallel()
 	tt := testutils.NewTestTable(t, "altpk_multi", `CREATE TABLE altpk_multi (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		name varchar(100) NOT NULL,
@@ -562,7 +580,7 @@ func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enable
 	m := NewTestRunner(t, "altpk_multi",
 		"MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT, MODIFY COLUMN name VARCHAR(255) NOT NULL",
 		WithThreads(2),
-		WithTargetChunkTime(50*time.Millisecond),
+		WithTargetChunkTime(100*time.Millisecond),
 		WithBuffered(enableBuffered))
 
 	var wg sync.WaitGroup

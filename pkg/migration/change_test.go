@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,26 +31,19 @@ func TestMultiChangesDifferentSchemas(t *testing.T) {
 	testutils.RunSQL(t, `CREATE TABLE multichange2 (id int not null primary key auto_increment, b INT NOT NULL)`)
 	testutils.RunSQL(t, `CREATE TABLE multichange3 (id int not null primary key auto_increment, b INT NOT NULL)`)
 
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	migration := &Migration{
-		Host:            cfg.Addr,
-		Username:        cfg.User,
-		Password:        &cfg.Passwd,
-		Database:        cfg.DBName,
-		Threads:         4,
-		TargetChunkTime: 2 * time.Second,
-		Statement:       "ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT",
-	}
-	assert.Error(t, migration.Run())
+	migration := NewTestMigration(t,
+		WithThreads(4),
+		WithTargetChunkTime(2*time.Second),
+		WithStatement("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
+	require.Error(t, migration.Run())
 	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
-	assert.Error(t, migration.Run())
+	require.Error(t, migration.Run())
 	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"
-	assert.Error(t, migration.Run())
+	require.Error(t, migration.Run())
 	migration.Statement = "ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
-	assert.Error(t, migration.Run()) // even this is an error because we have schema + explicit DB.
+	require.Error(t, migration.Run()) // even this is an error because we have schema + explicit DB.
 	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"
-	assert.NoError(t, migration.Run())
+	require.NoError(t, migration.Run())
 }
 
 // TestAutoIncrementEmptyTable tests that AUTO_INCREMENT is preserved when migrating
@@ -70,9 +62,6 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 			PRIMARY KEY (id)
 		) ENGINE=InnoDB AUTO_INCREMENT=2979716`, tableName))
 
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-
 	testDB, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(testDB)
@@ -80,8 +69,8 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	// Verify table is empty but has AUTO_INCREMENT set
 	var autoIncValue sql.NullInt64
 	err = testDB.QueryRowContext(t.Context(),
-		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		cfg.DBName, tableName).Scan(&autoIncValue)
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
 	require.True(t, autoIncValue.Valid, "AUTO_INCREMENT should be set")
 	require.Equal(t, int64(2979716), autoIncValue.Int64, "AUTO_INCREMENT should be 2979716")
@@ -92,16 +81,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	require.Equal(t, 0, rowCount, "Table should be empty")
 
 	// Run migration with an ALTER that forces copy algorithm
-	r, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    tableName,
-		Alter:    "ADD COLUMN test_col VARCHAR(255), ADD UNIQUE INDEX uk_test_col (test_col)",
-	})
-	require.NoError(t, err)
+	r := NewTestRunner(t, tableName, "ADD COLUMN test_col VARCHAR(255), ADD UNIQUE INDEX uk_test_col (test_col)")
 	defer utils.CloseAndLog(r)
 
 	ctx := t.Context()
@@ -133,8 +113,8 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 
 	// Verify final AUTO_INCREMENT value
 	err = testDB.QueryRowContext(t.Context(),
-		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		cfg.DBName, tableName).Scan(&autoIncValue)
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
 	assert.True(t, autoIncValue.Valid)
 	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979716), "Final AUTO_INCREMENT should be >= 2979716")
@@ -164,9 +144,6 @@ func TestAutoIncrementWithRows(t *testing.T) {
 		('user2'),
 		('user3')`, tableName))
 
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-
 	testDB, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(testDB)
@@ -174,8 +151,8 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	// Verify table has rows and AUTO_INCREMENT is set
 	var autoIncValue sql.NullInt64
 	err = testDB.QueryRowContext(t.Context(),
-		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		cfg.DBName, tableName).Scan(&autoIncValue)
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
 	require.True(t, autoIncValue.Valid)
 	require.Equal(t, int64(2979719), autoIncValue.Int64, "AUTO_INCREMENT should be 2979719 (3 rows inserted)")
@@ -196,23 +173,13 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	}
 	_ = rows.Close()
 	expectedExistingIDs := []int64{2979716, 2979717, 2979718}
-	assert.Equal(t, expectedExistingIDs, existingIDs)
+	require.Equal(t, expectedExistingIDs, existingIDs)
 
 	// Run migration
-	r, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    tableName,
-		Alter:    "ADD COLUMN test_col VARCHAR(255), ADD UNIQUE INDEX uk_test_col (test_col)",
-	})
-	require.NoError(t, err)
+	r := NewTestRunner(t, tableName, "ADD COLUMN test_col VARCHAR(255), ADD UNIQUE INDEX uk_test_col (test_col)")
 	defer utils.CloseAndLog(r)
 
-	ctx := t.Context()
-	err = r.Run(ctx)
+	err = r.Run(t.Context())
 	require.NoError(t, err)
 
 	// Verify existing rows are preserved
@@ -250,8 +217,8 @@ func TestAutoIncrementWithRows(t *testing.T) {
 
 	// Verify final AUTO_INCREMENT
 	err = testDB.QueryRowContext(t.Context(),
-		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		cfg.DBName, tableName).Scan(&autoIncValue)
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
 	assert.True(t, autoIncValue.Valid)
 	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
