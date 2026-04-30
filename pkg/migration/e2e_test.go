@@ -234,6 +234,7 @@ func TestCreateTableNameLength(t *testing.T) {
 // TestAddUniqueIndexChecksumEnabled tests that adding a UNIQUE index on non-unique data
 // fails with a checksum error, and succeeds after the duplicate is removed.
 func TestAddUniqueIndexChecksumEnabled(t *testing.T) {
+	t.Parallel()
 	tt := testutils.NewTestTable(t, "uniqmytable", `CREATE TABLE uniqmytable (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
@@ -397,7 +398,6 @@ func TestPreventConcurrentRuns(t *testing.T) {
 
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
 		WithDBName(dbName),
-		WithThreads(4),
 		WithDeferCutOver(),
 		WithRespectSentinel())
 	defer utils.CloseAndLog(m)

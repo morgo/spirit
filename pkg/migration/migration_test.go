@@ -345,7 +345,8 @@ func TestCreateIndexIsRewritten(t *testing.T) {
 		b int not null
 	)`)
 
-	m := NewTestMigration(t, WithStatement("CREATE INDEX idx ON test.t1createindex (b)"))
+	m := NewTestMigration(t)
+	m.Statement = fmt.Sprintf("CREATE INDEX idx ON %s.t1createindex (b)", m.Database)
 	require.NoError(t, m.Run())
 }
 
@@ -356,7 +357,8 @@ func TestSchemaNameIncluded(t *testing.T) {
 		b int not null
 	)`)
 
-	m := NewTestMigration(t, WithStatement("ALTER TABLE test.t1schemaname ADD COLUMN c int"))
+	m := NewTestMigration(t)
+	m.Statement = fmt.Sprintf("ALTER TABLE %s.t1schemaname ADD COLUMN c int", m.Database)
 	require.NoError(t, m.Run())
 }
 
@@ -379,18 +381,20 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 func TestLargeNumberOfMultiChanges(t *testing.T) {
 	var alterStmts []string
 	for i := range 50 {
-		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS mt_%d`, i))
+		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS mt_%d, _mt_%d_new, _mt_%d_old, _mt_%d_chkpnt`, i, i, i, i))
 		testutils.RunSQL(t, fmt.Sprintf(`CREATE TABLE mt_%d (id int not null primary key auto_increment, b INT NOT NULL)`, i))
 		alterStmts = append(alterStmts, fmt.Sprintf(`ALTER TABLE mt_%d ENGINE=InnoDB`, i))
 	}
+	t.Cleanup(func() {
+		for i := range 50 {
+			// only need to drop success artifacts
+			testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS mt_%d`, i))
+		}
+	})
 
 	m := NewTestMigration(t, WithTargetChunkTime(2*time.Second),
 		WithStatement(strings.Join(alterStmts, "; ")))
 	require.NoError(t, m.Run())
-	// cleanup
-	for i := range 50 {
-		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS mt_%d`, i))
-	}
 }
 
 func TestBufferedMultiTableMigration(t *testing.T) {
@@ -407,10 +411,12 @@ func TestBufferedMultiTableMigration(t *testing.T) {
 		description varchar(200) not null,
 		amount decimal(10,2) not null
 	)`)
-	for i := range 100 {
-		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO bmt_t1 (name, val) VALUES ('row_%d', %d)`, i, i*10))
-		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO bmt_t2 (description, amount) VALUES ('item_%d', %d.%d)`, i, i, i%100))
-	}
+	testutils.RunSQL(t, `INSERT INTO bmt_t1 (name, val) SELECT CONCAT('row_', seq), seq*10 FROM (
+		WITH RECURSIVE seq_cte AS (SELECT 0 AS seq UNION ALL SELECT seq+1 FROM seq_cte WHERE seq < 99)
+		SELECT seq FROM seq_cte) t`)
+	testutils.RunSQL(t, `INSERT INTO bmt_t2 (description, amount) SELECT CONCAT('item_', seq), seq + (seq % 100) / 100.0 FROM (
+		WITH RECURSIVE seq_cte AS (SELECT 0 AS seq UNION ALL SELECT seq+1 FROM seq_cte WHERE seq < 99)
+		SELECT seq FROM seq_cte) t`)
 
 	m := NewTestMigration(t, WithBuffered(true),
 		WithStatement("ALTER TABLE bmt_t1 ADD COLUMN extra int DEFAULT 0; ALTER TABLE bmt_t2 ADD COLUMN extra int DEFAULT 0"))
@@ -427,6 +433,7 @@ func TestBufferedMultiTableMigration(t *testing.T) {
 }
 
 func TestMigrationParamsDefaultsUsed(t *testing.T) {
+	t.Parallel()
 	migration := &Migration{Table: "test_table", Alter: "ENGINE=INNODB"}
 
 	_, err := migration.normalizeOptions()
@@ -441,6 +448,7 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 }
 
 func TestMigrationParamsCLIUsed(t *testing.T) {
+	t.Parallel()
 	migration := &Migration{
 		Host:               "cli-host:3306",
 		Username:           "cli-user",
@@ -464,6 +472,7 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 }
 
 func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
+	t.Parallel()
 	migration := &Migration{
 		Password: mkPtr(""),
 		Table:    "test_table",
@@ -482,6 +491,7 @@ func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
 }
 
 func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
+	t.Parallel()
 	migration := &Migration{
 		Host:     "localhost:3306",
 		Username: "defaultuser",
@@ -498,6 +508,7 @@ func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
 }
 
 func TestMigrationParamsIniFilePreferCommandLineOptions(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 user = fileuser
 password = filepass
@@ -532,6 +543,7 @@ tls-ca = /path/from/file
 }
 
 func TestMigrationParamsIniFileNoCommandLineOptions(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 user = fileuser
 password = filepass
@@ -560,6 +572,7 @@ tls-ca = /path/to/cert
 }
 
 func TestMigrationParamsIniFileUseDefaultPort(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 user = fileuser
 password = filepass
@@ -587,6 +600,7 @@ tls-ca = /path/to/another/ca
 }
 
 func TestMigrationParamsIniFileOnlyUserSpecifiedInFile(t *testing.T) {
+	t.Parallel()
 	// Test with only username in creds file
 	confPath := mkIniFile(t, `[client]
 user = fileuser
@@ -613,6 +627,7 @@ user = fileuser
 }
 
 func TestMigrationParamsIniFileOnlyPasswordSpecifiedInFile(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 password = filepass
 `)
@@ -638,6 +653,7 @@ password = filepass
 }
 
 func TestMigrationParamsIniFileEmptyPasswordPassedThrough(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 password =
 `)
@@ -664,6 +680,7 @@ password =
 }
 
 func TestMigrationParamsIniFileEmptyPasswordOverridenByCommandLine(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 password =
 `)
@@ -691,6 +708,7 @@ password =
 }
 
 func TestMigrationParamsIniFileOnlyPortUsedFromFile(t *testing.T) {
+	t.Parallel()
 	confPath := mkIniFile(t, `[client]
 port=1234
 `)
@@ -718,6 +736,7 @@ port=1234
 }
 
 func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
+	t.Parallel()
 	// Test with empty client section
 	confPath := mkIniFile(t, `[client]
 `)
@@ -745,6 +764,7 @@ func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
 }
 
 func TestMigrationParamsIniFileHasNoClientSection(t *testing.T) {
+	t.Parallel()
 	// Test with no client section at all
 	confPath := mkIniFile(t, `[mysql]
 user = mysqluser

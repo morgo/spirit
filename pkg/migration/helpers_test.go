@@ -16,7 +16,6 @@ func mkPtr[T any](t T) *T {
 	return &t
 }
 
-// mkIniFile creates a temporary INI file with the given content for testing.
 // mkIniFile creates a temporary INI config file with the given content and returns its path.
 // The file is automatically cleaned up when the test finishes (via t.TempDir()).
 func mkIniFile(t *testing.T, content string) string {

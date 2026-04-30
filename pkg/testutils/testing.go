@@ -109,7 +109,8 @@ func RunSQL(t *testing.T, stmt string) {
 	defer func() {
 		_ = db.Close()
 	}()
-	_, err = db.ExecContext(t.Context(), stmt)
+	// Might be run in cleanup, use Background context
+	_, err = db.ExecContext(context.Background(), stmt)
 	assert.NoError(t, err)
 }
 

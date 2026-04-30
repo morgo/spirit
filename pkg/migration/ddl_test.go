@@ -181,26 +181,23 @@ func TestAlterExtendVarcharE2E(t *testing.T) {
 // TestMigrationWithSQLCommentsInStatement verifies that Spirit correctly handles
 // SQL comments prepended to ALTER TABLE statements.
 func TestMigrationWithSQLCommentsInStatement(t *testing.T) {
+	t.Parallel()
 	tt := testutils.NewTestTable(t, "t1_comment_test", `CREATE TABLE t1_comment_test (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		a INT
 	)`)
 	testutils.RunSQL(t, "INSERT INTO t1_comment_test (a) VALUES (1), (2), (3)")
-
-	statementWithComments := `-- Migration for JIRA-1234
+	m := NewTestMigration(t, WithStatement(`-- Migration for JIRA-1234
 -- Author: someone@block.xyz
 -- Date: 2025-07-01
 -- This migration adds an index on column a
 -- for improved query performance on the dashboard.
-ALTER TABLE t1_comment_test ADD INDEX idx_a (a)`
-
-	m := NewTestMigration(t, WithStatement(statementWithComments))
+ALTER TABLE t1_comment_test ADD INDEX idx_a (a)`))
 	r, err := NewRunner(m)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, r.Close()) }()
+	defer utils.CloseAndLog(r)
 	require.Len(t, r.changes, 1)
 	require.Equal(t, "ADD INDEX `idx_a`(`a`)", r.changes[0].stmt.Alter)
-
 	require.NoError(t, m.Run())
 
 	// Verify the index was actually created.

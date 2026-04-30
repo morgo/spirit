@@ -26,14 +26,15 @@ func TestMultiChangesDifferentSchemas(t *testing.T) {
 	testutils.RunSQL(t, `CREATE DATABASE multichangedb1`)
 	testutils.RunSQL(t, `CREATE TABLE multichangedb1.multichange1 (id int not null primary key auto_increment, b INT NOT NULL)`)
 
-	// from the test schema
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS multichange2, multichange3`)
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS multichange2, multichange3, _multichange2_new, _multichange3_new`)
 	testutils.RunSQL(t, `CREATE TABLE multichange2 (id int not null primary key auto_increment, b INT NOT NULL)`)
 	testutils.RunSQL(t, `CREATE TABLE multichange3 (id int not null primary key auto_increment, b INT NOT NULL)`)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP TABLE IF EXISTS multichange2, multichange3, _multichange2_new, _multichange3_new`)
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS multichangedb1`)
+	})
 
 	migration := NewTestMigration(t,
-		WithThreads(4),
-		WithTargetChunkTime(2*time.Second),
 		WithStatement("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
 	require.Error(t, migration.Run())
 	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
@@ -53,6 +54,9 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 
 	tableName := "test_empty_table"
 	testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_new, _%s_old`, tableName, tableName, tableName))
+	t.Cleanup(func() {
+		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_new, _%s_old`, tableName, tableName, tableName))
+	})
 
 	// Create EMPTY table with high AUTO_INCREMENT value
 	testutils.RunSQL(t, fmt.Sprintf(`
@@ -128,6 +132,9 @@ func TestAutoIncrementWithRows(t *testing.T) {
 
 	tableName := "test_with_rows"
 	testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_new, _%s_old`, tableName, tableName, tableName))
+	t.Cleanup(func() {
+		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_new, _%s_old`, tableName, tableName, tableName))
+	})
 
 	// Create table with high AUTO_INCREMENT value
 	testutils.RunSQL(t, fmt.Sprintf(`
@@ -225,6 +232,7 @@ func TestAutoIncrementWithRows(t *testing.T) {
 }
 
 func TestOldTableNameTruncation(t *testing.T) {
+	t.Parallel()
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
 
 	tests := []struct {
@@ -301,6 +309,7 @@ func TestOldTableNameTruncation(t *testing.T) {
 }
 
 func TestOldTableNameTruncationCollision(t *testing.T) {
+	t.Parallel()
 	// Two different long table names that share a common prefix longer than
 	// MaxMigratableTableNameLength will produce the same old table name when
 	// truncated. This is acceptable because:
