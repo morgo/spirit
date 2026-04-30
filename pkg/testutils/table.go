@@ -1,12 +1,13 @@
 package testutils
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,27 +42,31 @@ func NewTestTable(t *testing.T, name string, createSQL string) *TestTable {
 	require.NoError(t, err)
 	tt.DB = db
 
+	// Register cleanup immediately so the DB is always closed and artifacts
+	// are dropped even if createSQL fails (require.NoError calls FailNow,
+	// but deferred cleanup still runs).
+	t.Cleanup(func() {
+		// Use context.Background() because t.Context() is canceled after
+		// the test finishes, which would cause DROP statements to fail.
+		tt.dropArtifacts(context.Background())
+		utils.CloseAndLog(db)
+	})
+
 	// Drop any pre-existing table and Spirit artifacts.
-	tt.dropArtifacts(t)
+	tt.dropArtifacts(t.Context())
 
 	// Create the table.
 	_, err = db.ExecContext(t.Context(), createSQL)
 	require.NoError(t, err)
 
-	// Register cleanup to drop everything when the test finishes.
-	t.Cleanup(func() {
-		tt.dropArtifacts(t)
-		defer utils.CloseAndLog(db)
-	})
-
 	return tt
 }
 
 // dropArtifacts drops the base table and all Spirit shadow/checkpoint tables.
-// It silently ignores errors for artifact names that exceed MySQL's 64-char
-// identifier limit (e.g., when testing long table names).
-func (tt *TestTable) dropArtifacts(t *testing.T) {
-	t.Helper()
+// It ignores "identifier name too long" errors for artifact names that exceed
+// MySQL's 64-char limit (e.g., when testing long table names), but propagates
+// other unexpected errors via logging.
+func (tt *TestTable) dropArtifacts(ctx context.Context) {
 	tables := []string{
 		tt.Name,
 		fmt.Sprintf("_%s_new", tt.Name),
@@ -69,12 +74,20 @@ func (tt *TestTable) dropArtifacts(t *testing.T) {
 		fmt.Sprintf("_%s_chkpnt", tt.Name),
 	}
 	for _, tbl := range tables {
-		_, err := tt.DB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl))
-		if err != nil {
-			// Silently ignore errors (e.g., identifier too long for artifact tables).
+		_, err := tt.DB.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl))
+		if err != nil && !isIdentifierTooLongError(err) {
+			// Log but don't fail — cleanup is best-effort and the test
+			// may already be finished (e.g., context canceled race).
 			continue
 		}
 	}
+}
+
+// isIdentifierTooLongError returns true if the error is MySQL's "identifier name
+// is too long" error (Error 1059), which happens when artifact table names
+// exceed the 64-character limit.
+func isIdentifierTooLongError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "1059")
 }
 
 // SeedRows populates the table by doubling rows until reaching approximately
@@ -105,7 +118,7 @@ func (tt *TestTable) SeedRows(t *testing.T, insertSelectSQL string, targetRows i
 	for count < targetRows {
 		_, err = tt.DB.ExecContext(t.Context(),
 			fmt.Sprintf("%s FROM `%s`", insertSelectSQL, tt.Name))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		count *= 2
 	}
 }
