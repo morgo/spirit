@@ -12,11 +12,13 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCutOver(t *testing.T) {
@@ -415,4 +417,238 @@ func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return trx.Commit()
+}
+
+// --- Cutover lifecycle tests (extracted from runner_test.go) ---
+
+// TestSkipDropAfterCutoverLongTableName tests that SkipDropAfterCutover works
+// with table names at the maximum manageable length (56 chars), truncating the
+// old table name to fit within MySQL's 64-char limit.
+func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
+	t.Parallel()
+	tableName := "a_fifty_six_character_table_name_that_fits_normal_limits"
+	require.Equal(t, 56, len(tableName))
+
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+		pk int UNSIGNED NOT NULL AUTO_INCREMENT,
+		PRIMARY KEY(pk)
+	)`, tableName))
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithThreads(4),
+		WithSkipDropAfterCutover())
+	require.NoError(t, m.Run(t.Context()))
+
+	// Verify the old table exists (with truncated name + timestamp)
+	oldName := m.changes[0].oldTableName()
+	require.LessOrEqual(t, len(oldName), 64, "old table name should fit within 64 chars")
+
+	var tableCount int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, oldName)).Scan(&tableCount))
+	require.Equal(t, 1, tableCount, "old table should exist after SkipDropAfterCutover")
+	require.NoError(t, m.Close())
+}
+
+// TestForRemainingTableArtifacts tests that after a migration completes,
+// no _new, _old, or _chkpnt tables remain.
+func TestForRemainingTableArtifacts(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "remainingtbl", `CREATE TABLE remainingtbl (
+		id INT NOT NULL PRIMARY KEY,
+		name varchar(255) NOT NULL
+	)`)
+
+	m := NewTestRunner(t, "remainingtbl", "ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+
+	// Only the base table should remain — no _new, _old, or _chkpnt.
+	var tables string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT GROUP_CONCAT(table_name) FROM information_schema.tables 
+		WHERE table_schema=DATABASE() AND table_name LIKE '%remainingtbl%' ORDER BY table_name`).Scan(&tables))
+	require.Equal(t, "remainingtbl", tables)
+}
+
+// TestSkipDropAfterCutover tests that the old table is preserved when SkipDropAfterCutover is set.
+func TestSkipDropAfterCutover(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "skipdrop_test", `CREATE TABLE skipdrop_test (
+		pk int UNSIGNED NOT NULL,
+		PRIMARY KEY(pk)
+	)`)
+
+	m := NewTestRunner(t, "skipdrop_test", "ENGINE=InnoDB",
+		WithThreads(4),
+		WithSkipDropAfterCutover())
+	require.NoError(t, m.Run(t.Context()))
+
+	var tableCount int
+	require.NoError(t, m.db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())).Scan(&tableCount))
+	require.Equal(t, 1, tableCount)
+	require.NoError(t, m.Close())
+}
+
+// TestDropAfterCutover tests that the old table is dropped when SkipDropAfterCutover is false.
+func TestDropAfterCutover(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "drop_test", `CREATE TABLE drop_test (
+		pk int UNSIGNED NOT NULL,
+		PRIMARY KEY(pk)
+	)`)
+
+	m := NewTestRunner(t, "drop_test", "ENGINE=InnoDB", WithThreads(4))
+	require.NoError(t, m.Run(t.Context()))
+
+	var tableCount int
+	require.NoError(t, m.db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())).Scan(&tableCount))
+	require.Equal(t, 0, tableCount)
+	require.NoError(t, m.Close())
+}
+
+// TestDeferCutOver tests that deferred cutover times out waiting for the sentinel table.
+func TestDeferCutOver(t *testing.T) {
+	t.Skip("skipping: this test waits for sentinelWaitLimit to expire, which is too slow with the current 48 hour limit")
+	t.Parallel()
+
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	tableName := `deferred_cutover`
+
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id) SELECT null FROM %s a, %s b, %s c LIMIT 1000", tableName, tableName, tableName, tableName))
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithDBName(dbName),
+		WithThreads(4),
+		WithDeferCutOver(),
+		WithRespectSentinel())
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		err := m.Run(t.Context())
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
+	})
+
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
+	wg.Wait()
+
+	newName := fmt.Sprintf("_%s_new", tableName)
+	var tableCount int
+	require.NoError(t, m.db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, newName)).Scan(&tableCount))
+	require.Equal(t, 1, tableCount)
+	require.NoError(t, m.Close())
+}
+
+// TestDeferCutOverE2E tests the full deferred cutover flow: migration waits for
+// sentinel table, operator drops it, migration completes.
+func TestDeferCutOverE2E(t *testing.T) {
+	t.Parallel()
+
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	tableName := `deferred_cutover_e2e`
+
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id) SELECT null FROM %s a, %s b, %s c LIMIT 1000", tableName, tableName, tableName, tableName))
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithDBName(dbName),
+		WithThreads(1),
+		WithDeferCutOver(),
+		WithRespectSentinel())
+
+	c := make(chan error)
+	go func() {
+		c <- m.Run(t.Context())
+	}()
+
+	// Wait until the sentinel table exists.
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	require.Eventually(t, func() bool {
+		var rowCount int
+		_ = db.QueryRowContext(t.Context(), fmt.Sprintf(
+			`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+			WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`, dbName, sentinelTableName)).Scan(&rowCount)
+		return rowCount > 0
+	}, 30*time.Second, 10*time.Millisecond, "sentinel table should appear within 30s")
+
+	// Drop the sentinel table — migration should complete.
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+
+	err = <-c
+	require.NoError(t, err)
+
+	// Old table should be dropped (SkipDropAfterCutover is false).
+	var tableCount int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())).Scan(&tableCount))
+	require.Equal(t, 0, tableCount)
+	require.NoError(t, m.Close())
+}
+
+// TestDeferCutOverE2EBinlogAdvance tests that during the sentinel wait phase,
+// the binlog position continues to advance as new DML arrives.
+func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
+	t.Parallel()
+
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	tableName := `deferred_cutover_e2e_stage`
+
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tableName))
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id) SELECT null FROM %s a, %s b, %s c LIMIT 1000", tableName, tableName, tableName, tableName))
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithDBName(dbName),
+		WithThreads(1),
+		WithDeferCutOver(),
+		WithRespectSentinel())
+
+	c := make(chan error)
+	go func() {
+		c <- m.Run(t.Context())
+	}()
+
+	db, err := dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
+
+	// Verify binlog position advances while waiting.
+	binlogPos := m.replClient.GetBinlogApplyPosition()
+	for range 4 {
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id) SELECT null FROM %s a, %s b, %s c LIMIT 1000", tableName, tableName, tableName, tableName))
+		require.NoError(t, m.replClient.BlockWait(t.Context()))
+		require.NoError(t, m.replClient.Flush(t.Context()))
+		newBinlogPos := m.replClient.GetBinlogApplyPosition()
+		require.Equal(t, 1, newBinlogPos.Compare(binlogPos))
+		binlogPos = newBinlogPos
+	}
+
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+
+	err = <-c
+	require.NoError(t, err)
+
+	var tableCount int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())).Scan(&tableCount))
+	require.Equal(t, 0, tableCount)
+	require.NoError(t, m.Close())
 }
