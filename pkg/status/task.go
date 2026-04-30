@@ -45,6 +45,27 @@ func continuallyDumpStatus(ctx context.Context, task Task, logger *slog.Logger) 
 }
 
 func continuallyDumpCheckpoint(ctx context.Context, task Task, logger *slog.Logger) {
+	// Attempt an immediate checkpoint write so that even short-lived
+	// migrations have a recovery point. If the watermark isn't ready
+	// yet (e.g. copier hasn't started), we just fall through to the
+	// periodic loop which will retry.
+	if err := task.DumpCheckpoint(ctx); err != nil {
+		switch {
+		case errors.Is(err, ErrWatermarkNotReady):
+			// Non-fatal: watermark not ready yet, fall through to periodic loop.
+		case errors.Is(err, context.Canceled):
+			// Context already canceled, no point entering the loop.
+			return
+		default:
+			if task.Progress().CurrentState >= CutOver {
+				return
+			}
+			logger.Error("error writing checkpoint", "error", err)
+			task.Cancel()
+			return
+		}
+	}
+
 	ticker := time.NewTicker(CheckpointDumpInterval)
 	defer ticker.Stop()
 	for {
