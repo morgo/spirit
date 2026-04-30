@@ -26,22 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// waitForStatus polls the runner's status until it reaches at least the target
-// state. It waits for status >= target (not ==) so that it is resilient to races
-// where the status advances past the target before the poll observes it.
-func waitForStatus(t *testing.T, m *Runner, target status.State) {
-	t.Helper()
-	timeout := time.After(30 * time.Second)
-	for m.status.Get() < target {
-		select {
-		case <-timeout:
-			t.Fatalf("timeout waiting for status >= %s, current status: %s", target, m.status.Get())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
 func TestVarcharNonBinaryComparable(t *testing.T) {
 	t.Parallel()
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS nonbinarycompatt1, _nonbinarycompatt1_new`)
