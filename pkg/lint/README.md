@@ -29,9 +29,8 @@ if lint.HasErrors(violations) {
     // Handle errors
 }
 
-// Filter violations
-errors := lint.FilterBySeverity(violations, lint.SeverityError)
-warnings := lint.FilterBySeverity(violations, lint.SeverityWarning)
+// Filter violations by linter
+flagViolations := lint.FilterByLinter(violations, "has_fk")
 ```
 
 ### Creating a Custom Linter
@@ -58,7 +57,6 @@ func init() {
 type MyCustomLinter struct{}
 
 func (l *MyCustomLinter) Name() string        { return "my_custom" }
-func (l *MyCustomLinter) Category() string    { return "naming" }
 func (l *MyCustomLinter) Description() string { return "Checks naming conventions" }
 func (l *MyCustomLinter) String() string      { return l.Name() }
 
@@ -159,7 +157,6 @@ type Location struct {
 - `Enable(name string)` - Enable a linter by name
 - `Disable(name string)` - Disable a linter by name
 - `List()` - Get all registered linter names
-- `ListByCategory(category string)` - Get linters in a category
 - `Get(name string)` - Get a linter by name
 
 ### Execution
@@ -167,12 +164,11 @@ type Location struct {
 - `RunLinters(createTables, alterStatements, config) ([]Violation, error)` - Run all enabled linters, returns violations and any configuration errors
 - `HasErrors(violations)` - Check if any violations are errors
 - `HasWarnings(violations)` - Check if any violations are warnings
-- `FilterBySeverity(violations, severity)` - Filter by severity level
 - `FilterByLinter(violations, name)` - Filter by linter name
 
 ## Built-in Linters
 
-The `lint` package includes 11 built-in linters covering schema design, data types, and safety best practices.
+The `lint` package includes 15 built-in linters covering schema design, data types, and safety best practices.
 
 ### allow_charset
 
@@ -616,6 +612,30 @@ CREATE TABLE users (
 ALTER TABLE users ADD COLUMN legacy_date DATETIME DEFAULT '0000-00-00 00:00:00';
 ```
 
+### has_timestamp
+
+**Severity**: Warning  
+**Configurable**: No  
+**Checks**: CREATE TABLE, ALTER TABLE (ADD/MODIFY/CHANGE COLUMN)
+
+Detects TIMESTAMP columns, which have problematic behavior in MySQL (automatic initialization, timezone conversion, limited range to 2038). Recommends using DATETIME instead.
+
+### redundant_indexes
+
+**Severity**: Warning  
+**Configurable**: No  
+**Checks**: CREATE TABLE
+
+Detects redundant indexes where one index is a prefix of another (e.g., INDEX(a) is redundant if INDEX(a, b) exists). Also detects duplicate indexes with the same column list.
+
+### rename_column
+
+**Severity**: Warning  
+**Configurable**: No  
+**Checks**: ALTER TABLE
+
+Detects column renames via RENAME COLUMN or CHANGE COLUMN. Column renames cannot be done atomically across application pods and break ORMs that generate column names at compile time. Recommends using ADD COLUMN + DROP COLUMN instead.
+
 ---
 
 ## Linter Summary Table
@@ -627,10 +647,13 @@ ALTER TABLE users ADD COLUMN legacy_date DATETIME DEFAULT '0000-00-00 00:00:00';
 | `auto_inc_capacity` | ✅ | ✅ | ❌ | Warning |
 | `has_fk` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
+| `has_timestamp` | ❌ | ✅ | ✅ | Warning |
 | `invisible_index_before_drop` | ✅ | ❌ | ✅ | Warning |
 | `multiple_alter_table` | ❌ | ❌ | ✅ | Warning |
 | `name_case` | ❌ | ✅ | ✅ | Warning |
 | `primary_key` | ✅ | ✅ | ❌ | Warning |
+| `redundant_indexes` | ❌ | ✅ | ❌ | Warning |
+| `rename_column` | ❌ | ❌ | ✅ | Warning |
 | `reserved_words` | ❌ | ✅ | ✅ | Warning |
 | `unsafe` | ✅ | ❌ | ✅ | Warning |
 | `zero_date` | ❌ | ✅ | ✅ | Warning |
