@@ -381,3 +381,208 @@ func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 
 	require.Error(t, migrationErr)
 }
+
+// --- Primary Key Datatype Change Tests (issue #360) ---
+// Spirit supports changing the datatype on a primary key column (e.g. INT→BIGINT)
+// as long as the primary key itself doesn't change (no ADD/DROP PRIMARY KEY).
+
+func TestAlterPKIntToBigInt(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigInt(t, false) })
+	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigInt(t, true) })
+}
+
+func testAlterPKIntToBigInt(t *testing.T, enableBuffered bool) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "altpk_int2big", `CREATE TABLE altpk_int2big (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name varchar(255) NOT NULL,
+		val int NOT NULL DEFAULT 0
+	)`)
+	tt.SeedRows(t, "INSERT INTO altpk_int2big (name, val) SELECT 'a', 1", 3)
+
+	m := NewTestRunner(t, "altpk_int2big", "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
+		WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM altpk_int2big").Scan(&count))
+	require.GreaterOrEqual(t, count, 3)
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_int2big' AND COLUMN_NAME='id'",
+	).Scan(&colType))
+	require.Equal(t, "bigint", colType)
+}
+
+func TestAlterPKIntToBigIntUnsigned(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntUnsigned(t, false) })
+	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigIntUnsigned(t, true) })
+}
+
+func testAlterPKIntToBigIntUnsigned(t *testing.T, enableBuffered bool) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "altpk_int2bigu", `CREATE TABLE altpk_int2bigu (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name varchar(255) NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO altpk_int2bigu (name) SELECT 'a'", 5)
+
+	m := NewTestRunner(t, "altpk_int2bigu", "MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT",
+		WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_int2bigu' AND COLUMN_NAME='id'",
+	).Scan(&colType))
+	require.Equal(t, "bigint unsigned", colType)
+}
+
+func TestAlterPKTinyIntToInt(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testAlterPKTinyIntToInt(t, false) })
+	t.Run("buffered", func(t *testing.T) { testAlterPKTinyIntToInt(t, true) })
+}
+
+func testAlterPKTinyIntToInt(t *testing.T, enableBuffered bool) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "altpk_tiny2int", `CREATE TABLE altpk_tiny2int (
+		id tinyint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		data varchar(100) NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO altpk_tiny2int (data) SELECT 'test'", 50)
+
+	m := NewTestRunner(t, "altpk_tiny2int", "MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT",
+		WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_tiny2int' AND COLUMN_NAME='id'",
+	).Scan(&colType))
+	require.Equal(t, "int unsigned", colType)
+}
+
+func TestAlterPKIntToBigIntWithDML(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntWithDML(t, false) })
+	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigIntWithDML(t, true) })
+}
+
+func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "altpk_dml", `CREATE TABLE altpk_dml (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name varchar(255) NOT NULL,
+		val int NOT NULL DEFAULT 0
+	)`)
+	tt.SeedRows(t, "INSERT INTO altpk_dml (name, val) SELECT 'seed', 1", 4096)
+
+	m := NewTestRunner(t, "altpk_dml", "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
+		WithThreads(2),
+		WithTargetChunkTime(50*time.Millisecond),
+		WithBuffered(enableBuffered))
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+		}
+		for i := range 100 {
+			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO altpk_dml (name, val) VALUES ('dml_%d', %d)", i, i))
+			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("UPDATE altpk_dml SET val = val + 1 WHERE id = %d", i+1))
+			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("DELETE FROM altpk_dml WHERE id = %d", i+4000))
+		}
+	})
+
+	require.NoError(t, m.Run(t.Context()))
+	wg.Wait()
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_dml' AND COLUMN_NAME='id'",
+	).Scan(&colType))
+	require.Equal(t, "bigint", colType)
+}
+
+func TestAlterPKCompositeDatatypeChange(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testAlterPKCompositeDatatypeChange(t, false) })
+	t.Run("buffered", func(t *testing.T) { testAlterPKCompositeDatatypeChange(t, true) })
+}
+
+func testAlterPKCompositeDatatypeChange(t *testing.T, enableBuffered bool) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "altpk_comp", `CREATE TABLE altpk_comp (
+		id1 int NOT NULL,
+		id2 int NOT NULL,
+		data varchar(100) NOT NULL,
+		PRIMARY KEY (id1, id2)
+	)`)
+	// Composite PK needs unique pairs — can't use SeedRows.
+	for i := range 200 {
+		testutils.RunSQL(t, fmt.Sprintf("INSERT INTO altpk_comp (id1, id2, data) VALUES (%d, %d, 'row%d')", i/10, i%10, i))
+	}
+
+	m := NewTestRunner(t, "altpk_comp", "MODIFY COLUMN id1 BIGINT NOT NULL",
+		WithBuffered(enableBuffered))
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_comp' AND COLUMN_NAME='id1'",
+	).Scan(&colType))
+	require.Equal(t, "bigint", colType)
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM altpk_comp").Scan(&count))
+	require.Equal(t, 200, count)
+}
+
+func TestAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t, false) })
+	t.Run("buffered", func(t *testing.T) { testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t, true) })
+}
+
+func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enableBuffered bool) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "altpk_multi", `CREATE TABLE altpk_multi (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name varchar(100) NOT NULL,
+		val int NOT NULL DEFAULT 0
+	)`)
+	tt.SeedRows(t, "INSERT INTO altpk_multi (name, val) SELECT 'seed', 1", 4096)
+
+	m := NewTestRunner(t, "altpk_multi",
+		"MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT, MODIFY COLUMN name VARCHAR(255) NOT NULL",
+		WithThreads(2),
+		WithTargetChunkTime(50*time.Millisecond),
+		WithBuffered(enableBuffered))
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+		}
+		for i := range 50 {
+			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO altpk_multi (name, val) VALUES ('dml_%d', %d)", i, i))
+			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("UPDATE altpk_multi SET name = 'updated' WHERE id = %d", i+1))
+		}
+	})
+
+	require.NoError(t, m.Run(t.Context()))
+	wg.Wait()
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_multi' AND COLUMN_NAME='id'",
+	).Scan(&colType))
+	require.Equal(t, "bigint", colType)
+}
