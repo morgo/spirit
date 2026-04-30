@@ -47,8 +47,14 @@ func TestChangeDatatypeDataLoss(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestChangeDatatypeLossyNoAutoInc tests a lossy datatype change on a non-auto-increment PK
-// where data exceeds the target type's range.
+// TestChangeDatatypeLossyNoAutoInc is a good test of how much the chunker will
+// boil the ocean:
+//   - There is a MIN(key)=1 and a MAX(key)=8589934592
+//   - There is no auto-increment so the chunker is allowed to expand each chunk
+//     based on estimated rows (which is low).
+//
+// Only the key=8589934592 will fail to be converted. The generated number of
+// chunks should be very low because of prefetching.
 func TestChangeDatatypeLossyNoAutoInc(t *testing.T) {
 	t.Parallel()
 	testutils.NewTestTable(t, "lossychange2", `CREATE TABLE lossychange2 (
@@ -165,9 +171,21 @@ func TestTpConversion(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestEnumReorder tests that ENUM value reordering is handled correctly.
-// In unbuffered mode, the migration succeeds because string values are used.
-// In buffered mode, the migration is refused because binlog replay uses ordinals.
+// TestEnumReorder tests that reordering ENUM values in an ALTER TABLE
+// produces correct data after migration.
+//
+// This test only works correctly in unbuffered mode because of the way
+// ENUM values are represented in the binlog. We test *both* unbuffered and buffered modes
+// though and we accept a pre-flight failure as a "pass", since it's not corruption.
+// i.e. it's OK to refuse changes you can't handle.
+//
+// The unbuffered path uses REPLACE INTO ... SELECT (SQL-level string operations) which
+// handles ENUM reordering correctly. The buffered path uses UpsertRows with raw binlog
+// values, where ENUM values are represented as int64 ordinals. If the ENUM is reordered,
+// the ordinals map to different string values in the target table, causing data corruption.
+//
+// This test exercises both the copier path (initial data) and the binlog
+// replay path (concurrent DML during migration) to verify correctness.
 func TestEnumReorder(t *testing.T) {
 	t.Run("unbuffered", func(t *testing.T) {
 		testEnumReorder(t, false)

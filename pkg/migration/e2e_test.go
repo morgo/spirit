@@ -60,6 +60,8 @@ func TestVarbinary(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
+// TestDataFromBadSqlMode tests that data previously inserted like 0000-00-00
+// can still be migrated. From https://github.com/block/spirit/issues/277
 func TestDataFromBadSqlMode(t *testing.T) {
 	t.Parallel()
 	testutils.NewTestTable(t, "badsqlt1", `CREATE TABLE badsqlt1 (

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -1106,4 +1107,163 @@ password = mysqlpass
 	assert.Equal(t, "cli-db", migration.Database)
 	assert.Equal(t, "PREFERRED", migration.TLSMode)
 	assert.Empty(t, migration.TLSCertificatePath)
+}
+
+// --- Configuration and validation tests (extracted from runner_test.go) ---
+
+// TestBadOptions tests that NewRunner validates required fields.
+func TestBadOptions(t *testing.T) {
+	t.Parallel()
+	_, err := NewRunner(&Migration{})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "table name is required")
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	_, err = NewRunner(&Migration{Host: cfg.Addr})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "table name is required")
+
+	_, err = NewRunner(&Migration{Host: cfg.Addr, Database: "mytable"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "table name is required")
+
+	_, err = NewRunner(&Migration{Host: cfg.Addr, Database: "mydatabase", Table: "mytable"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "alter statement is required")
+}
+
+// TestBadAlter tests various invalid ALTER statement scenarios.
+func TestBadAlter(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "bot1", `CREATE TABLE bot1 (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.NewTestTable(t, "bot2", `CREATE TABLE bot2 (
+		id int(11) NOT NULL,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+
+	// Completely invalid ALTER — should fail at parse time.
+	m := NewTestMigration(t, WithTable("bot1"), WithAlter("badalter"))
+	r, err := NewRunner(m)
+	require.Nil(t, r)
+	require.Error(t, err)
+
+	// RENAME COLUMN + ADD INDEX referencing old name — MySQL rejects this.
+	runner := NewTestRunner(t, "bot1", "RENAME COLUMN name TO name2, ADD INDEX(name)")
+	err = runner.Run(t.Context())
+	require.Error(t, err)
+	require.NoError(t, runner.Close())
+
+	// CHANGE COLUMN + ADD INDEX referencing old name — same issue.
+	runner = NewTestRunner(t, "bot1", "CHANGE name name2 VARCHAR(255), ADD INDEX(name)")
+	err = runner.Run(t.Context())
+	require.Error(t, err)
+	require.NoError(t, runner.Close())
+
+	// CHANGE without rename (valid) — should succeed.
+	runner = NewTestRunner(t, "bot1", "CHANGE name name VARCHAR(200), ADD INDEX(name)") //nolint: dupword
+	err = runner.Run(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, runner.Close())
+
+	// DROP PRIMARY KEY — not supported.
+	runner = NewTestRunner(t, "bot2", "DROP PRIMARY KEY")
+	err = runner.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "dropping primary key")
+	require.NoError(t, runner.Close())
+}
+
+// TestDefaultPort tests that the default MySQL port (3306) is appended when not specified.
+func TestDefaultPort(t *testing.T) {
+	t.Parallel()
+	m, err := NewRunner(&Migration{
+		Host:     "localhost",
+		Username: "root",
+		Password: mkPtr("mypassword"),
+		Database: "test",
+		Threads:  2,
+		Table:    "t1",
+		Alter:    "DROP COLUMN b, ENGINE=InnoDB",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "localhost:3306", m.migration.Host)
+}
+
+// TestPasswordMasking tests that passwords are masked in DSN strings.
+func TestPasswordMasking(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"basic DSN with password", "user:password@tcp(localhost:3306)/database", "user:***@tcp(localhost:3306)/database"},
+		{"DSN with complex password", "myuser:c0mplex!Pa$$w0rd@tcp(db.example.com:3306)/mydb", "myuser:***@tcp(db.example.com:3306)/mydb"},
+		{"DSN without password", "user@tcp(localhost:3306)/database", "user@tcp(localhost:3306)/database"},
+		{"DSN with empty password", "user:@tcp(localhost:3306)/database", "user:***@tcp(localhost:3306)/database"},
+		{"empty DSN", "", ""},
+		{"malformed DSN without @", "user:password", "user:password"},
+		{"DSN with colon in password", "user:pass:word@tcp(localhost:3306)/database", "user:***@tcp(localhost:3306)/database"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.expected, maskPasswordInDSN(tc.input))
+		})
+	}
+}
+
+// TestDSN tests that DSN construction correctly round-trips all fields,
+// including passwords with special characters.
+func TestDSN(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		user     string
+		password string
+		host     string
+		schema   string
+	}{
+		{"simple password", "root", "secret", "127.0.0.1:3306", "testdb"},
+		{"password with @", "root", "p@ssword", "127.0.0.1:3306", "testdb"},
+		{"password with multiple @", "root", "p@ss@word", "127.0.0.1:3306", "testdb"},
+		{"password with special characters", "root", "p@ss:word/with#special!chars", "127.0.0.1:3306", "testdb"},
+		{"empty password", "root", "", "127.0.0.1:3306", "testdb"},
+		{"AWS IAM-style token", "iam_user", "aaa@bbb.ccc.us-east-1.rds.amazonaws.com:3306/?Action=connect&DBUser=iam_user", "mydb.cluster-xyz.us-east-1.rds.amazonaws.com:3306", "production"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pw := tc.password
+			r := &Runner{
+				migration: &Migration{
+					Username: tc.user,
+					Password: &pw,
+					Host:     tc.host,
+				},
+				changes: []*change{
+					{
+						stmt: &statement.AbstractStatement{
+							Schema: tc.schema,
+						},
+					},
+				},
+			}
+			dsn := r.dsn()
+			cfg, err := mysql.ParseDSN(dsn)
+			require.NoError(t, err)
+			require.Equal(t, tc.user, cfg.User)
+			require.Equal(t, tc.password, cfg.Passwd)
+			require.Equal(t, tc.host, cfg.Addr)
+			require.Equal(t, tc.schema, cfg.DBName)
+			require.Equal(t, "tcp", cfg.Net)
+		})
+	}
 }
