@@ -18,19 +18,6 @@ import (
 	"go.uber.org/goleak"
 )
 
-func mkPtr[T any](t T) *T {
-	return &t
-}
-
-func mkIniFile(t *testing.T, content string) *os.File {
-	tmpFile, err := os.CreateTemp(t.TempDir(), "test_creds_*.cnf")
-	require.NoError(t, err)
-	_, err = tmpFile.WriteString(content)
-	require.NoError(t, err)
-
-	return tmpFile
-}
-
 func TestMain(m *testing.M) {
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
