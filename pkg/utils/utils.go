@@ -10,6 +10,9 @@ import (
 
 const (
 	PrimaryKeySeparator = "-#-" // used to hash a composite primary key
+
+	// MaxTableNameLength is the maximum table name length in MySQL.
+	MaxTableNameLength = 64
 )
 
 // HashKey is used to convert a composite key into a string
@@ -32,4 +35,18 @@ func UnhashKeyToString(key string) string {
 		str[i] = "'" + sqlescape.EscapeString(v) + "'"
 	}
 	return "(" + strings.Join(str, ",") + ")"
+}
+
+// TruncateTableName truncates a table name to fit within MySQL's 64-character limit,
+// reserving space for a suffix of the given length. If the table name already fits,
+// it is returned unchanged.
+func TruncateTableName(tableName string, suffixLength int) string {
+	maxLen := MaxTableNameLength - suffixLength
+	if maxLen <= 0 {
+		return ""
+	}
+	if len(tableName) > maxLen {
+		return tableName[:maxLen]
+	}
+	return tableName
 }

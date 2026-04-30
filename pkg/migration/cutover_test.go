@@ -640,3 +640,34 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 	assert.Equal(t, 0, tableCount)
 	assert.NoError(t, m.Close())
 }
+
+func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
+	t.Parallel()
+
+	// A table name at the normal max (56 chars) should work with SkipDropAfterCutover.
+	// Previously this would have been rejected because the timestamp format exceeds 64 chars,
+	// but now we truncate the table name portion in the old table name.
+	tableName := "a_fifty_six_character_table_name_that_fits_normal_limits"
+	assert.Equal(t, 56, len(tableName))
+
+	testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+		pk int UNSIGNED NOT NULL AUTO_INCREMENT,
+		PRIMARY KEY(pk)
+	)`, tableName))
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithThreads(4), WithSkipDropAfterCutover())
+	require.NoError(t, m.Run(t.Context()))
+
+	// Verify the old table exists (with truncated name + timestamp)
+	oldName := m.changes[0].oldTableName()
+	assert.LessOrEqual(t, len(oldName), 64, "old table name should fit within 64 chars")
+
+	var tableCount int
+	err := m.db.QueryRowContext(t.Context(), fmt.Sprintf(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, oldName)).Scan(&tableCount)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, tableCount, "old table should exist after SkipDropAfterCutover")
+	assert.NoError(t, m.Close())
+}

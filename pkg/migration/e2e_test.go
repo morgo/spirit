@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -457,4 +458,31 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 
 	require.Error(t, gErr)
 	require.NoError(t, m.Close())
+}
+
+func TestCreateTableNameLength(t *testing.T) {
+	t.Parallel()
+
+	// A CREATE TABLE with a table name exceeding Spirit's manageable limit (56 chars)
+	// should be rejected, since Spirit needs room for metadata suffixes like _<table>_chkpnt.
+	longName := strings.Repeat("z", 57)
+	assert.Greater(t, len(longName), check.MaxMigratableTableNameLength)
+
+	m := NewTestRunnerFromStatement(t,
+		fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL PRIMARY KEY)", longName))
+	err := m.Run(t.Context())
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, fmt.Sprintf("exceeds the maximum length of %d characters that Spirit can manage", check.MaxMigratableTableNameLength))
+	assert.NoError(t, m.Close())
+
+	// A CREATE TABLE with a table name at exactly the max manageable length (56 chars)
+	// should be allowed.
+	exactName := strings.Repeat("x", check.MaxMigratableTableNameLength)
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", exactName))
+
+	m = NewTestRunnerFromStatement(t,
+		fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL PRIMARY KEY)", exactName))
+	err = m.Run(t.Context())
+	assert.NoError(t, err)
+	assert.NoError(t, m.Close())
 }
