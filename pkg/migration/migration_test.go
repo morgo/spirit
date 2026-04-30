@@ -951,3 +951,52 @@ func TestDSN(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitReplicaDSNs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "empty",
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:     "single DSN",
+			input:    "root:pass@tcp(localhost:3307)/test",
+			expected: []string{"root:pass@tcp(localhost:3307)/test"},
+		},
+		{
+			name:  "two DSNs",
+			input: "root:pass@tcp(replica1:3306)/db,root:pass@tcp(replica2:3306)/db",
+			expected: []string{
+				"root:pass@tcp(replica1:3306)/db",
+				"root:pass@tcp(replica2:3306)/db",
+			},
+		},
+		{
+			name:  "three DSNs with spaces",
+			input: "root:pass@tcp(r1:3306)/db, root:pass@tcp(r2:3306)/db , root:pass@tcp(r3:3306)/db",
+			expected: []string{
+				"root:pass@tcp(r1:3306)/db",
+				"root:pass@tcp(r2:3306)/db",
+				"root:pass@tcp(r3:3306)/db",
+			},
+		},
+		{
+			name:     "trailing comma",
+			input:    "root:pass@tcp(localhost:3306)/db,",
+			expected: []string{"root:pass@tcp(localhost:3306)/db"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result := splitReplicaDSNs(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
