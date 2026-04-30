@@ -270,9 +270,18 @@ There are some restrictions to `--statement`:
 - Type: Boolean
 - Default value: `false`
 
-By default, Spirit will automatically clean up these old checkpoints before starting the schema change. This allows schema changes to always be possible to proceed forward, at the risk of lost progress.
+> **⚠️ Not recommended.** In most cases, the default behavior (idempotent restart) is safer and more convenient. `--strict` was added for a specific internal use case and is generally the wrong choice for new deployments. If a previous migration was interrupted, the default behavior will safely clean up and restart, which is almost always what you want.
 
-When set to `true`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the alter statement matches the `--alter` parameter. If the validation fails, Spirit will exit and prevent the schema change process from proceeding.
+By default, Spirit will automatically clean up old checkpoints before starting the schema change. This allows schema changes to always proceed forward, at the cost of potentially lost progress from a previous incomplete run.
+
+When set to `true`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the alter statement matches the `--alter` parameter. If the validation fails (e.g., the ALTER was changed between runs, or the binlog position is no longer available), Spirit will exit with an error rather than silently restarting from scratch.
+
+The scenarios where `--strict` causes Spirit to fail rather than restart are:
+- The `--alter` statement changed between runs (checkpoint has a different ALTER)
+- The binlog file referenced by the checkpoint has been purged from the server
+- The checkpoint is too old to safely resume (replaying binlogs would be slower than restarting)
+
+In all of these cases, the default (non-strict) behavior is to log a warning and start fresh, which is usually the correct action.
 
 ### table
 
