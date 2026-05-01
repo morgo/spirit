@@ -41,7 +41,7 @@ type Migration struct {
 	SkipDropAfterCutover bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
 	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
 	SkipForceKill        bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
-	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected" optional:"" default:"false"`
+	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected. Not recommended for most users; the default idempotent restart behavior is safer." optional:"" default:"false"`
 	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
 	Lint                 bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
 	LintOnly             bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
