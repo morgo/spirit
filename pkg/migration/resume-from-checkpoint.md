@@ -56,12 +56,14 @@ What happens next depends on whether strict mode is enabled:
 The tradeoff of falling back to `newMigration()` is that all copy progress is lost. For a large table this could mean hours of wasted work. To avoid this:
 
 - **Keep binlog retention longer than your longest expected migration pause.** If you expect to pause migrations for up to a week, make sure `binlog_expire_logs_seconds` is set to at least 7 days. The MySQL 8.0 default is 30 days (`2592000`), which is usually sufficient.
-- **Use `--strict` mode if losing progress silently is unacceptable.** In strict mode, Spirit surfaces both DDL mismatches (`status.ErrMismatchedAlter`) and binlog expiry (`status.ErrBinlogNotFound`) as errors. Callers can use `errors.Is()` to handle each case.
+- **Consider `--strict` mode only if you have automation that handles the errors it produces.** In strict mode, Spirit surfaces both DDL mismatches (`status.ErrMismatchedAlter`) and binlog expiry (`status.ErrBinlogNotFound`) as errors instead of restarting. This is generally not recommended for most users — the default behavior of discarding stale checkpoints and restarting is safer and simpler. See [strict](../docs/migrate.md#strict) for more details.
 - **Be aware of your binlog retention window.** If Spirit is paused longer than the retention period, the checkpoint's binlog file will be purged and resume will fail. Some managed MySQL services disable retention by default.
 
 ## Strict mode
 
-By default, Spirit treats checkpoint resume as best-effort. If the checkpoint is invalid for any reason — mismatched DDL statement, expired binlog, corrupt checkpoint data — Spirit discards it and starts a new migration.
+> **Note:** `--strict` is not recommended for most users. The default idempotent restart behavior (discard stale checkpoint, restart from scratch) is safer and requires no special error handling. Only use `--strict` if you have automation that can programmatically handle the specific errors it produces.
+
+By default, Spirit treats checkpoint resume as best-effort. If the checkpoint is invalid for any reason — mismatched DDL statement, expired binlog, corrupt checkpoint data — Spirit discards it and starts a new migration. This is the recommended behavior.
 
 With `Strict: true`, Spirit returns a hard error for two specific resume failures:
 
