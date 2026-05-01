@@ -3,35 +3,66 @@ package check
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/block/spirit/pkg/utils"
 )
 
+// ErrReplicaNotHealthy is returned when a replica's IO or SQL thread is not running.
+var ErrReplicaNotHealthy = fmt.Errorf("replica is not healthy")
+
 func init() {
 	registerCheck("replicahealth", replicaHealth, ScopePostSetup|ScopeCutover)
 }
 
-// replicaHealth checks SHOW REPLICA STATUS for Yes and Yes.
-// It should be run at various stages of the migration if a replica is present.
+// replicaHealth checks SHOW REPLICA STATUS for Yes and Yes on all replicas.
+// It should be run at various stages of the migration if replicas are present.
 func replicaHealth(ctx context.Context, r Resources, logger *slog.Logger) error {
-	if r.Replica == nil {
+	if len(r.Replicas) == 0 {
 		return nil // The user is not using the replica DSN feature.
 	}
-	rows, err := r.Replica.QueryContext(ctx, "SHOW REPLICA STATUS")
-	if err != nil {
-		return err
-	}
-	defer utils.CloseAndLog(rows)
-	status, err := scanToMap(rows)
-	if err != nil {
-		return err
-	}
-	if status["Replica_IO_Running"].String != "Yes" || status["Replica_SQL_Running"].String != "Yes" {
-		return errors.New("replica is not healthy")
+	for _, replica := range r.Replicas {
+		rows, err := replica.QueryContext(ctx, "SHOW REPLICA STATUS")
+		if err != nil {
+			return err
+		}
+		status, err := scanToMap(rows)
+		utils.CloseAndLog(rows)
+		if err != nil {
+			return err
+		}
+		if status == nil {
+			host := replicaHost(ctx, replica)
+			return fmt.Errorf("%w: SHOW REPLICA STATUS returned no rows on %s (not a replica?)", ErrReplicaNotHealthy, host)
+		}
+
+		ioRunning := status["Replica_IO_Running"].String
+		sqlRunning := status["Replica_SQL_Running"].String
+
+		if ioRunning != "Yes" {
+			ioState := status["Replica_IO_State"].String
+			host := replicaHost(ctx, replica)
+			return fmt.Errorf("%w: IO thread not running on %s (Replica_IO_State: %s)", ErrReplicaNotHealthy, host, ioState)
+		}
+		if sqlRunning != "Yes" {
+			sqlState := status["Replica_SQL_Running_State"].String
+			host := replicaHost(ctx, replica)
+			return fmt.Errorf("%w: SQL thread not running on %s (Replica_SQL_Running_State: %s)", ErrReplicaNotHealthy, host, sqlState)
+		}
 	}
 	return nil
+}
+
+// replicaHost attempts to identify the replica by querying @@hostname and @@port.
+// Falls back to "unknown" if the query fails.
+func replicaHost(ctx context.Context, db *sql.DB) string {
+	var hostname string
+	var port int
+	if err := db.QueryRowContext(ctx, "SELECT @@hostname, @@port").Scan(&hostname, &port); err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%s:%d", hostname, port)
 }
 
 func scanToMap(rows *sql.Rows) (map[string]sql.NullString, error) {
