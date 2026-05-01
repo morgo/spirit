@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -283,6 +284,17 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// The migration should fail - either with our intentional error or because
 	// the table doesn't exist after the partial rename
 	require.Error(t, err, "Migration should fail")
+
+	// useTestCutover also flips FixDifferences off (see runner.go), so if the
+	// copy + applier path lost rows during the migration the checksum step
+	// surfaces it as "checksum mismatch" before partial cutover runs. That's
+	// the dominant signal we want for issue #746 — checksum's Warn logs name
+	// the diverged PKs via inspectDifferences. Treat the error as a real
+	// failure here so CI reports it; the partial cutover never ran, so the
+	// _old/_new comparison below isn't applicable.
+	if strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("issue #746 reproduced at checksum step (FixDifferences disabled via useTestCutover): %v — see preceding 'inspection revealed row does not exist in target' Warn logs for missing PKs", err)
+	}
 
 	// The partial cutover should have renamed t1concurrent to _t1concurrent_old
 	// Let's verify both tables exist
