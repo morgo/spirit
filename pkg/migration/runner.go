@@ -566,9 +566,14 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		TargetChunkTime: r.migration.TargetChunkTime,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
-		FixDifferences:  true, // we want to repair the differences.
-		MaxRetries:      3,
-		YieldTimeout:    r.migration.ChecksumYieldTimeout,
+		// In production we always want the checksum to repair differences. The
+		// useTestCutover hook (only set by TestCutoverAtomicityWithConcurrentWrites)
+		// flips this off so any copy-phase / applier-path row loss surfaces as a
+		// checksum-mismatch error before cutover, instead of being silently
+		// repaired. This is what makes that test a real probe of issue #746.
+		FixDifferences: !r.migration.useTestCutover,
+		MaxRetries:     3,
+		YieldTimeout:   r.migration.ChecksumYieldTimeout,
 	})
 
 	return err
