@@ -153,7 +153,12 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
 	assert.NoError(t, err)
 	err = checker.Run(t.Context())
-	assert.ErrorContains(t, err, "checksum failed")
+	// Adding a UNIQUE INDEX to non-unique data: every attempt finds row
+	// differences (and recopies don't help), so we exhaust retries on the
+	// "found differences" path. The migration layer wraps this into a more
+	// user-friendly "lossy unique-index" message; here we just assert the
+	// underlying checksum-layer error.
+	assert.ErrorContains(t, err, "checksum found differences on every attempt")
 }
 
 func TestFixCorrupt(t *testing.T) {
