@@ -140,6 +140,11 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, m.setup(t.Context()))
 
+	// Pin chunk size so a slow first chunk under CI load can't shrink the
+	// chunker via the panic path and cause the second chunk to come back
+	// with both bounds (see issue #766).
+	disableDynamicChunking(t, m.copyChunker)
+
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
 	// Since we want to checkpoint after a few chunks.
@@ -921,6 +926,11 @@ func TestE2EBinlogSubscribingRogueValues(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, m.setup(t.Context()))
+
+	// Pin chunk size so a slow first chunk under CI load can't shrink the
+	// chunker via the panic path and cause the second chunk to come back
+	// with both bounds (see issue #772).
+	disableDynamicChunking(t, m.copyChunker)
 
 	// Now we are ready to start copying rows.
 	// Instead of calling m.copyRows() we will step through it manually.
