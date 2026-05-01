@@ -6,10 +6,22 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/status"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
+
+// disableDynamicChunking turns off the chunker's adaptive resizing so the
+// caller sees a stable ChunkSize regardless of per-chunk timing under CI
+// load. Tests that assert exact chunk boundaries should call this after
+// setup; production callers should leave dynamic chunking on.
+func disableDynamicChunking(t *testing.T, c table.Chunker) {
+	t.Helper()
+	setter, ok := c.(interface{ SetDynamicChunking(bool) })
+	require.True(t, ok, "copyChunker does not expose SetDynamicChunking")
+	setter.SetDynamicChunking(false)
+}
 
 // mkPtr returns a pointer to the given value. Useful for optional fields.
 func mkPtr[T any](t T) *T {
