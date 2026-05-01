@@ -34,17 +34,19 @@ func TestMultiChangesDifferentSchemas(t *testing.T) {
 		testutils.RunSQL(t, `DROP DATABASE IF EXISTS multichangedb1`)
 	})
 
-	migration := NewTestMigration(t,
-		WithStatement("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
-	require.Error(t, migration.Run())
-	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
-	require.Error(t, migration.Run())
-	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"
-	require.Error(t, migration.Run())
-	migration.Statement = "ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
-	require.Error(t, migration.Run()) // even this is an error because we have schema + explicit DB.
-	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"
-	require.NoError(t, migration.Run())
+	// Build a fresh *Migration per Run. Reusing a single *Migration across
+	// multiple Run() calls is not a supported production path, and stale
+	// internal state from prior failed Runs (replication subscriptions,
+	// useTestCutover bookkeeping, etc.) has been observed to surface in
+	// the next Run as transient checksum failures. See block/spirit#769.
+	run := func(statement string) error {
+		return NewTestMigration(t, WithStatement(statement)).Run()
+	}
+	require.Error(t, run("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
+	require.Error(t, run("ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"))
+	require.Error(t, run("ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
+	require.Error(t, run("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT")) // even this is an error because we have schema + explicit DB.
+	require.NoError(t, run("ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
 }
 
 // TestAutoIncrementEmptyTable tests that AUTO_INCREMENT is preserved when migrating
