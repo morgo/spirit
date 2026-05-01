@@ -30,7 +30,7 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 		ChunkerTarget: ChunkerDefaultTarget,
 		logger:        slog.Default(),
 	}
-	chunker.setDynamicChunking(false)
+	chunker.SetDynamicChunking(false)
 
 	assert.NoError(t, t1.PrimaryKeyIsMemoryComparable())
 	t1.keyColumnsMySQLTp[0] = "varchar"
@@ -90,7 +90,7 @@ func TestLowWatermark(t *testing.T) {
 		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
 		logger:                 slog.Default(),
 	}
-	chunker.setDynamicChunking(false)
+	chunker.SetDynamicChunking(false)
 
 	assert.NoError(t, chunker.Open())
 
@@ -318,7 +318,7 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 		ChunkerTarget: time.Second,
 		logger:        slog.Default(),
 	}
-	chunker.setDynamicChunking(true)
+	chunker.SetDynamicChunking(true)
 	assert.NoError(t, chunker.Open())
 	assert.False(t, chunker.chunkPrefetchingEnabled)
 
@@ -354,7 +354,7 @@ func TestOptimisticChunkerReset(t *testing.T) {
 		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
 		logger:                 slog.Default(),
 	}
-	chunker.setDynamicChunking(false)
+	chunker.SetDynamicChunking(false)
 
 	// Test that Reset() fails when chunker is not open
 	err := chunker.Reset()
