@@ -795,7 +795,7 @@ func TestHasTimestampLinter_String(t *testing.T) {
 // --- Registration ---
 
 func TestHasTimestampLinter_Registered(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasTimestampLinter{})
 
 	names := List()
