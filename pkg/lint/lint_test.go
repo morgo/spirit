@@ -54,7 +54,7 @@ func (m *mockConfigurableLinter) DefaultConfig() map[string]string {
 
 func TestRegister(t *testing.T) {
 	// Reset registry before test
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{
 		name:        "test_linter",
@@ -74,7 +74,7 @@ func TestRegister(t *testing.T) {
 }
 
 func TestRegisterMultiple(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter1 := &mockLinter{name: "linter1"}
 	linter2 := &mockLinter{name: "linter2"}
@@ -92,7 +92,7 @@ func TestRegisterMultiple(t *testing.T) {
 }
 
 func TestEnableDisable(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	Register(linter)
@@ -112,7 +112,7 @@ func TestEnableDisable(t *testing.T) {
 }
 
 func TestEnableDisableNonexistent(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	err := Enable("nonexistent")
 	assert.Error(t, err)
@@ -124,7 +124,7 @@ func TestEnableDisableNonexistent(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{
 		name:        "test_linter",
@@ -139,7 +139,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestGetNonexistent(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	_, err := Get("nonexistent")
 	assert.Error(t, err)
@@ -147,7 +147,7 @@ func TestGetNonexistent(t *testing.T) {
 }
 
 func TestRunLinters_Empty(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	violations, err := RunLinters(nil, nil, Config{})
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func TestRunLinters_Empty(t *testing.T) {
 }
 
 func TestRunLinters_SingleLinter(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{
 		name: "test_linter",
@@ -181,7 +181,7 @@ func TestRunLinters_SingleLinter(t *testing.T) {
 }
 
 func TestRunLinters_MultipleLinters(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter1 := &mockLinter{
 		name: "linter1",
@@ -207,7 +207,7 @@ func TestRunLinters_MultipleLinters(t *testing.T) {
 }
 
 func TestRunLinters_WithConfig_Disabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{
 		name: "test_linter",
@@ -229,7 +229,7 @@ func TestRunLinters_WithConfig_Disabled(t *testing.T) {
 }
 
 func TestRunLinters_WithConfig_Enabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{
 		name: "test_linter",
@@ -255,7 +255,7 @@ func TestRunLinters_WithConfig_Enabled(t *testing.T) {
 }
 
 func TestRunLinters_ConfigurableLinter(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockConfigurableLinter{}
 	linter.name = "configurable_linter"
@@ -283,7 +283,7 @@ func TestRunLinters_ConfigurableLinter(t *testing.T) {
 }
 
 func TestRunLinters_ConfigurableLinter_NoConfig(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockConfigurableLinter{}
 	linter.name = "configurable_linter"
@@ -351,7 +351,7 @@ func TestFilterByLinter(t *testing.T) {
 }
 
 func TestListSorted(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	// Register in non-alphabetical order
 	Register(&mockLinter{name: "zebra"})
@@ -363,6 +363,8 @@ func TestListSorted(t *testing.T) {
 }
 
 func TestReset(t *testing.T) {
+	captureInitialLintRegistry()
+	t.Cleanup(restoreInitialLintRegistry)
 	Reset()
 
 	Register(&mockLinter{name: "linter1"})
@@ -486,7 +488,7 @@ func TestConfigBool_Invalid(t *testing.T) {
 // DefaultConfig tests
 
 func TestRunLinters_AppliesDefaultConfig(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -503,7 +505,7 @@ func TestRunLinters_AppliesDefaultConfig(t *testing.T) {
 }
 
 func TestRunLinters_UserConfigOverridesDefault(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -528,7 +530,7 @@ func TestRunLinters_UserConfigOverridesDefault(t *testing.T) {
 // LintOnlyChanges tests
 
 func TestRunLinters_LintOnlyChanges_False(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -571,7 +573,7 @@ func TestRunLinters_LintOnlyChanges_False(t *testing.T) {
 }
 
 func TestRunLinters_LintOnlyChanges_True(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -613,7 +615,7 @@ func TestRunLinters_LintOnlyChanges_True(t *testing.T) {
 }
 
 func TestRunLinters_LintOnlyChanges_MultipleChangedTables(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -665,7 +667,7 @@ func TestRunLinters_LintOnlyChanges_MultipleChangedTables(t *testing.T) {
 }
 
 func TestRunLinters_LintOnlyChanges_NoChanges(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -689,7 +691,7 @@ func TestRunLinters_LintOnlyChanges_NoChanges(t *testing.T) {
 }
 
 func TestRunLinters_LintOnlyChanges_ViolationWithoutLocation(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -725,7 +727,7 @@ func TestRunLinters_LintOnlyChanges_ViolationWithoutLocation(t *testing.T) {
 // IgnoreTables tests
 
 func TestRunLinters_IgnoreTables_Empty(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -754,7 +756,7 @@ func TestRunLinters_IgnoreTables_Empty(t *testing.T) {
 }
 
 func TestRunLinters_IgnoreTables_SingleTable(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -787,7 +789,7 @@ func TestRunLinters_IgnoreTables_SingleTable(t *testing.T) {
 }
 
 func TestRunLinters_IgnoreTables_MultipleTables(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -827,7 +829,7 @@ func TestRunLinters_IgnoreTables_MultipleTables(t *testing.T) {
 }
 
 func TestRunLinters_IgnoreTables_AllTables(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -859,7 +861,7 @@ func TestRunLinters_IgnoreTables_AllTables(t *testing.T) {
 }
 
 func TestRunLinters_IgnoreTables_ViolationWithoutLocation(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -893,7 +895,7 @@ func TestRunLinters_IgnoreTables_ViolationWithoutLocation(t *testing.T) {
 }
 
 func TestRunLinters_IgnoreTables_FalseValue(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -927,7 +929,7 @@ func TestRunLinters_IgnoreTables_FalseValue(t *testing.T) {
 // Combined tests for LintOnlyChanges and IgnoreTables
 
 func TestRunLinters_LintOnlyChanges_And_IgnoreTables(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{
@@ -977,7 +979,7 @@ func TestRunLinters_LintOnlyChanges_And_IgnoreTables(t *testing.T) {
 }
 
 func TestRunLinters_LintOnlyChanges_And_IgnoreTables_NoResults(t *testing.T) {
-	Reset()
+	resetForTest(t)
 
 	linter := &mockLinter{name: "test_linter"}
 	linter.violations = []Violation{

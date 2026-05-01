@@ -319,6 +319,44 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Logf("Old table count: %d, New table count: %d", oldCount, newCount)
+	// On any divergence, log enough information for issue #746 follow-up:
+	// (a) which IDs are missing from _new, (b) which rows have stale data in _new,
+	// (c) the max id in _old, so we can tell whether the missing rows are the
+	// latest (cutover-window race) or scattered through the range (copy-phase race).
+	if oldChecksum != newChecksum || oldCount != newCount {
+		var maxOld int
+		_ = tt.DB.QueryRowContext(t.Context(), "SELECT IFNULL(MAX(id),0) FROM _t1concurrent_old").Scan(&maxOld)
+		t.Logf("max(id) in _old=%d", maxOld)
+		missingRows, _ := tt.DB.QueryContext(t.Context(),
+			`SELECT o.id, o.x_token, o.version, o.created_at, o.updated_at
+			   FROM _t1concurrent_old o LEFT JOIN _t1concurrent_new n ON n.id = o.id
+			   WHERE n.id IS NULL ORDER BY o.id`)
+		if missingRows != nil {
+			defer func() { _ = missingRows.Close() }()
+			for missingRows.Next() {
+				var id, version int
+				var xtoken, createdAt, updatedAt string
+				_ = missingRows.Scan(&id, &xtoken, &version, &createdAt, &updatedAt)
+				t.Logf("MISSING in _new: id=%d x_token=%s version=%d created_at=%s updated_at=%s",
+					id, xtoken, version, createdAt, updatedAt)
+			}
+		}
+		divergedRows, _ := tt.DB.QueryContext(t.Context(),
+			`SELECT o.id, o.version AS old_v, n.version AS new_v, o.updated_at AS old_u, n.updated_at AS new_u
+			   FROM _t1concurrent_old o JOIN _t1concurrent_new n ON n.id = o.id
+			   WHERE o.version != n.version OR o.updated_at != n.updated_at
+			   ORDER BY o.id`)
+		if divergedRows != nil {
+			defer func() { _ = divergedRows.Close() }()
+			for divergedRows.Next() {
+				var id, oldV, newV int
+				var oldU, newU string
+				_ = divergedRows.Scan(&id, &oldV, &newV, &oldU, &newU)
+				t.Logf("DIVERGED: id=%d old.version=%d new.version=%d old.updated_at=%s new.updated_at=%s",
+					id, oldV, newV, oldU, newU)
+			}
+		}
+	}
 	require.Equal(t, oldCount, newCount, "Row counts should match")
 }
 

@@ -194,7 +194,7 @@ func TestMultipleAlterTableLinter_EmptyStatements(t *testing.T) {
 }
 
 func TestMultipleAlterTableLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&MultipleAlterTableLinter{})
 
 	sql := `ALTER TABLE users ADD COLUMN age INT;
@@ -210,7 +210,7 @@ func TestMultipleAlterTableLinter_Integration(t *testing.T) {
 }
 
 func TestMultipleAlterTableLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&MultipleAlterTableLinter{})
 
 	sql := `ALTER TABLE users ADD COLUMN age INT;

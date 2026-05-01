@@ -39,7 +39,7 @@ type Runner struct {
 	migration       *Migration
 	db              *sql.DB
 	dbConfig        *dbconn.DBConfig
-	replica         *sql.DB
+	replicas        []*sql.DB
 	checkpointTable *table.TableInfo
 
 	// Changes enccapsulates all changes
@@ -417,7 +417,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 	for _, change := range r.changes {
 		if err := check.RunChecks(ctx, check.Resources{
 			DB:              r.db,
-			Replica:         r.replica,
+			Replicas:        r.replicas,
 			Table:           change.table,
 			Statement:       change.stmt,
 			TargetChunkTime: r.migration.TargetChunkTime,
@@ -448,6 +448,23 @@ func (r *Runner) dsn() string {
 	cfg.Addr = r.migration.Host
 	cfg.DBName = r.changes[0].stmt.Schema
 	return cfg.FormatDSN()
+}
+
+// splitReplicaDSNs splits a comma-separated list of replica DSNs.
+// A single DSN returns a single-element slice. Empty string returns nil.
+func splitReplicaDSNs(dsnList string) []string {
+	if dsnList == "" {
+		return nil
+	}
+	parts := strings.Split(dsnList, ",")
+	dsns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			dsns = append(dsns, trimmed)
+		}
+	}
+	return dsns
 }
 
 // maskPasswordInDSN masks the password in any DSN string for safe logging
@@ -606,7 +623,20 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	return nil
 }
 
+// closeReplicas closes all open replica database connections.
+func (r *Runner) closeReplicas() error {
+	for _, replica := range r.replicas {
+		if err := replica.Close(); err != nil {
+			return err
+		}
+	}
+	r.replicas = nil
+	return nil
+}
+
 // setupThrottler sets up the replication throttler if a replica DSN is configured.
+// Multiple replica DSNs can be specified as a comma-separated list; Spirit will
+// monitor all of them and throttle on the slowest one.
 // This is common logic shared between resume and new migration paths.
 func (r *Runner) setupThrottler(ctx context.Context) error {
 	if r.migration.useTestThrottler {
@@ -619,8 +649,13 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		return nil // No replica DSN specified, use default NOOP throttler
 	}
 
-	var err error
-	// Create a separate DB config for replica connection
+	// Split comma-separated DSNs to support multiple replicas.
+	dsns := splitReplicaDSNs(r.migration.ReplicaDSN)
+	if len(dsns) == 0 {
+		return fmt.Errorf("--replica-dsn was specified but contains no valid DSNs: %q", r.migration.ReplicaDSN)
+	}
+
+	// Create a separate DB config for replica connections
 	replicaDBConfig := dbconn.NewDBConfig()
 	replicaDBConfig.LockWaitTimeout = r.dbConfig.LockWaitTimeout
 	replicaDBConfig.InterpolateParams = r.dbConfig.InterpolateParams
@@ -628,38 +663,37 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	replicaDBConfig.MaxOpenConnections = r.dbConfig.MaxOpenConnections
 
 	// Copy TLS settings from main DB config to replica config
-	// This allows the DSN enhancement to use the correct TLS settings
 	replicaDBConfig.TLSMode = r.dbConfig.TLSMode
 	replicaDBConfig.TLSCertificatePath = r.dbConfig.TLSCertificatePath
 
-	// Enhance replica DSN with TLS settings if not already present
-	// This preserves any explicit TLS configuration in the replica DSN
-	// while providing sensible defaults from the main DB configuration
-	enhancedReplicaDSN, err := dbconn.EnhanceDSNWithTLS(r.migration.ReplicaDSN, replicaDBConfig)
-	if err != nil {
-		r.logger.Warn("could not enhance replica DSN with TLS settings",
-			"error", err,
-		)
-		// Continue with original DSN if enhancement fails
-		enhancedReplicaDSN = r.migration.ReplicaDSN
+	var throttlers []throttler.Throttler
+	for _, dsn := range dsns {
+		// Enhance replica DSN with TLS settings if not already present
+		enhancedDSN, err := dbconn.EnhanceDSNWithTLS(dsn, replicaDBConfig)
+		if err != nil {
+			r.logger.Warn("could not enhance replica DSN with TLS settings",
+				"dsn", maskPasswordInDSN(dsn),
+				"error", err,
+			)
+			enhancedDSN = dsn
+		}
+
+		replicaDB, err := dbconn.NewWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
+		if err != nil {
+			_ = r.closeReplicas()
+			return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(dsn), err)
+		}
+		r.replicas = append(r.replicas, replicaDB)
+
+		replicaThrottler, err := throttler.NewReplicationThrottler(replicaDB, r.migration.ReplicaMaxLag, r.logger)
+		if err != nil {
+			_ = r.closeReplicas()
+			return fmt.Errorf("could not create replication throttler (DSN: %s): %w", maskPasswordInDSN(dsn), err)
+		}
+		throttlers = append(throttlers, replicaThrottler)
 	}
 
-	r.replica, err = dbconn.NewWithConnectionType(enhancedReplicaDSN, replicaDBConfig, "replica database")
-	if err != nil {
-		return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(r.migration.ReplicaDSN), err)
-	}
-
-	// An error here means the connection to the replica is not valid, or it can't be detected
-	// This is fatal because if a user specifies a replica throttler, and it can't be used,
-	// we should not proceed.
-	r.throttler, err = throttler.NewReplicationThrottler(r.replica, r.migration.ReplicaMaxLag, r.logger)
-	if err != nil {
-		r.logger.Warn("could not create replication throttler",
-			"error", err,
-		)
-		return err
-	}
-
+	r.throttler = throttler.NewMultiThrottler(throttlers...)
 	r.copier.SetThrottler(r.throttler)
 	return r.throttler.Open(ctx)
 }
@@ -865,11 +899,8 @@ func (r *Runner) Close() error {
 			return err
 		}
 	}
-	if r.replica != nil {
-		err := r.replica.Close()
-		if err != nil {
-			return err
-		}
+	if err := r.closeReplicas(); err != nil {
+		return err
 	}
 	if r.db != nil {
 		err := r.db.Close()
