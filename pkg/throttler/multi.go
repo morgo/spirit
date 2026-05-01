@@ -3,6 +3,7 @@ package throttler
 import (
 	"context"
 	"errors"
+	"sync"
 )
 
 // multiThrottler wraps multiple throttlers and throttles if any child is throttled.
@@ -29,10 +30,16 @@ func NewMultiThrottler(throttlers ...Throttler) Throttler {
 }
 
 func (m *multiThrottler) Open(ctx context.Context) error {
+	var opened []Throttler
 	for _, t := range m.throttlers {
 		if err := t.Open(ctx); err != nil {
+			// Close any already-opened throttlers to avoid resource leaks.
+			for i := len(opened) - 1; i >= 0; i-- {
+				_ = opened[i].Close()
+			}
 			return err
 		}
+		opened = append(opened, t)
 	}
 	return nil
 }
@@ -58,14 +65,18 @@ func (m *multiThrottler) IsThrottled() bool {
 }
 
 // BlockWait blocks until all child throttlers are unthrottled.
-// It delegates to the slowest child — once the slowest is done waiting,
-// all others should already be unthrottled.
+// It waits on all throttled children concurrently so the total wait time
+// is bounded by the slowest replica, not the sum of all replicas.
 func (m *multiThrottler) BlockWait(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, t := range m.throttlers {
 		if t.IsThrottled() {
-			t.BlockWait(ctx)
+			wg.Go(func() {
+				t.BlockWait(ctx)
+			})
 		}
 	}
+	wg.Wait()
 }
 
 // UpdateLag updates lag on all child throttlers.

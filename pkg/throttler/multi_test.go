@@ -90,6 +90,23 @@ func TestMultiThrottler_Open_Error(t *testing.T) {
 	assert.False(t, t2.opened.Load())
 }
 
+func TestMultiThrottler_Open_PartialFailure_CleansUp(t *testing.T) {
+	// First throttler opens successfully, second fails.
+	// The first should be closed on cleanup.
+	t1 := &testThrottler{}
+	t2 := &testThrottler{openErr: errors.New("connection refused")}
+	multi := NewMultiThrottler(t1, t2)
+
+	err := multi.Open(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connection refused")
+	// First throttler was opened successfully and should have been closed during cleanup
+	assert.True(t, t1.opened.Load())
+	assert.True(t, t1.closed.Load())
+	// Second throttler's Open was attempted but failed
+	assert.False(t, t2.closed.Load(), "failed throttler should not be closed")
+}
+
 func TestMultiThrottler_Close(t *testing.T) {
 	t1 := &testThrottler{}
 	t2 := &testThrottler{}

@@ -991,6 +991,11 @@ func TestSplitReplicaDSNs(t *testing.T) {
 			input:    "root:pass@tcp(localhost:3306)/db,",
 			expected: []string{"root:pass@tcp(localhost:3306)/db"},
 		},
+		{
+			name:     "only commas and spaces",
+			input:    " , , , ",
+			expected: []string{},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

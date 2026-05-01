@@ -28,7 +28,6 @@ func TestReplicaHealth(t *testing.T) {
 	err = replicaHealth(t.Context(), r, slog.Default())
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrReplicaNotHealthy)
-	assert.Contains(t, err.Error(), "IO thread not running") // specific thread identified
 
 	// use an actual replica
 	replicaDSN := os.Getenv("REPLICA_DSN")

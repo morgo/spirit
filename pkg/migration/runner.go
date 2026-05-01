@@ -623,6 +623,17 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	return nil
 }
 
+// closeReplicas closes all open replica database connections.
+func (r *Runner) closeReplicas() error {
+	for _, replica := range r.replicas {
+		if err := replica.Close(); err != nil {
+			return err
+		}
+	}
+	r.replicas = nil
+	return nil
+}
+
 // setupThrottler sets up the replication throttler if a replica DSN is configured.
 // Multiple replica DSNs can be specified as a comma-separated list; Spirit will
 // monitor all of them and throttle on the slowest one.
@@ -640,6 +651,9 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 
 	// Split comma-separated DSNs to support multiple replicas.
 	dsns := splitReplicaDSNs(r.migration.ReplicaDSN)
+	if len(dsns) == 0 {
+		return fmt.Errorf("--replica-dsn was specified but contains no valid DSNs: %q", r.migration.ReplicaDSN)
+	}
 
 	// Create a separate DB config for replica connections
 	replicaDBConfig := dbconn.NewDBConfig()
@@ -666,12 +680,14 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 
 		replicaDB, err := dbconn.NewWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
 		if err != nil {
+			_ = r.closeReplicas()
 			return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(dsn), err)
 		}
 		r.replicas = append(r.replicas, replicaDB)
 
 		replicaThrottler, err := throttler.NewReplicationThrottler(replicaDB, r.migration.ReplicaMaxLag, r.logger)
 		if err != nil {
+			_ = r.closeReplicas()
 			return fmt.Errorf("could not create replication throttler (DSN: %s): %w", maskPasswordInDSN(dsn), err)
 		}
 		throttlers = append(throttlers, replicaThrottler)
@@ -883,10 +899,8 @@ func (r *Runner) Close() error {
 			return err
 		}
 	}
-	for _, replica := range r.replicas {
-		if err := replica.Close(); err != nil {
-			return err
-		}
+	if err := r.closeReplicas(); err != nil {
+		return err
 	}
 	if r.db != nil {
 		err := r.db.Close()

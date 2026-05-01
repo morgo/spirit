@@ -32,6 +32,10 @@ func replicaHealth(ctx context.Context, r Resources, logger *slog.Logger) error 
 		if err != nil {
 			return err
 		}
+		if status == nil {
+			host := replicaHost(ctx, replica)
+			return fmt.Errorf("%w: SHOW REPLICA STATUS returned no rows on %s (not a replica?)", ErrReplicaNotHealthy, host)
+		}
 
 		ioRunning := status["Replica_IO_Running"].String
 		sqlRunning := status["Replica_SQL_Running"].String
