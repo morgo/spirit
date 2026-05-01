@@ -80,9 +80,16 @@ func TestExtractFromStatement(t *testing.T) {
 	assert.Equal(t, "ADD UNIQUE INDEX `an index` (`id`)", abstractStmt[0].Alter)
 	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `a table` ADD UNIQUE INDEX `an index` (`id`)", abstractStmt[0].Statement)
 
-	_, err = New("CREATE INDEX idx ON t1 ((`a` IS NULL))")
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "cannot convert functional index to ALTER TABLE statement")
+	// Test functional index is rewritten.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 ((`a` IS NULL))")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` ((`a` IS NULL))", abstractStmt[0].Alter)
+	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD INDEX `idx` ((`a` IS NULL))", abstractStmt[0].Statement)
+
+	// Test mixed functional + plain columns.
+	abstractStmt, err = New("CREATE INDEX idx ON t1 (a, (LOWER(`b`)))")
+	assert.NoError(t, err)
+	assert.Equal(t, "ADD INDEX `idx` (`a`, (LOWER(`b`)))", abstractStmt[0].Alter)
 
 	// Test create index with prefix length.
 	abstractStmt, err = New("CREATE INDEX idx ON t1 (name(10))")

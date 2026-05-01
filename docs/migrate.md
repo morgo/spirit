@@ -192,8 +192,11 @@ The password to use when connecting to MySQL. To connect to MySQL without any pa
 - Type: String
 - Default value: ``
 - Example: `root:mypassword@tcp(localhost:3307)/test`
+- Multiple replicas: `root:pass@tcp(replica1:3306)/db,root:pass@tcp(replica2:3306)/db`
 
-Used in combination with [replica-max-lag](#replica-max-lag). This is the host which Spirit will connect to to determine if the copy should be throttled to ensure replica health.
+Used in combination with [replica-max-lag](#replica-max-lag). This is the host (or hosts) which Spirit will connect to to determine if the copy should be throttled to ensure replica health.
+
+Multiple replica DSNs can be specified as a comma-separated list. When multiple replicas are configured, Spirit monitors all of them and throttles based on the **slowest** replica (i.e., the one with the highest lag). This is useful for environments with multiple read replicas where you want to ensure none of them fall too far behind.
 
 #### Replica TLS Behavior
 

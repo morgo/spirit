@@ -22,10 +22,11 @@ func TestReplicaPrivileges(t *testing.T) {
 		Statement: statement.MustNew("ALTER TABLE test RENAME TO newtablename")[0],
 	}
 	err := replicaPrivilegeCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // if no replica, it returns no error.
+	assert.NoError(t, err) // if no replicas, it returns no error.
 
-	r.Replica, err = sql.Open("mysql", replicaDSN)
+	replicaDB, err := sql.Open("mysql", replicaDSN)
 	assert.NoError(t, err) // no error
+	r.Replicas = []*sql.DB{replicaDB}
 	err = replicaPrivilegeCheck(t.Context(), r, slog.Default())
 	assert.NoError(t, err) // user has privileges
 }

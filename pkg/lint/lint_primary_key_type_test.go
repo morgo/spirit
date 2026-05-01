@@ -282,7 +282,7 @@ func TestPrimaryKeyLinter_EmptyInput(t *testing.T) {
 }
 
 func TestPrimaryKeyLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
@@ -300,7 +300,7 @@ func TestPrimaryKeyLinter_Integration(t *testing.T) {
 }
 
 func TestPrimaryKeyLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
@@ -897,7 +897,7 @@ func TestPrimaryKeyLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
 }
 
 func TestPrimaryKeyLinter_IntegrationWithConfig(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (

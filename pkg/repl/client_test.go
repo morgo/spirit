@@ -24,6 +24,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Tests run at Debug level so diagnostic logs in the binlog applier
+	// path (HasChanged add/drop, deltaMap.Flush stmt + affected_rows) are
+	// captured in CI output. See issue #746.
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	maxRecreateAttempts = 3
 	goleak.VerifyTestMain(m)
 }

@@ -2,6 +2,7 @@ package migration
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -19,6 +20,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Tests run at Debug level so diagnostic logs in the binlog applier
+	// path (HasChanged add/drop, deltaMap.Flush stmt + affected_rows) and
+	// the copier (per-chunk affected_rows) are captured in CI output.
+	// See issue #746.
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
 	sentinelCheckInterval = 100 * time.Millisecond
@@ -948,6 +954,60 @@ func TestDSN(t *testing.T) {
 			require.Equal(t, tc.host, cfg.Addr)
 			require.Equal(t, tc.schema, cfg.DBName)
 			require.Equal(t, "tcp", cfg.Net)
+		})
+	}
+}
+
+func TestSplitReplicaDSNs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "empty",
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:     "single DSN",
+			input:    "root:pass@tcp(localhost:3307)/test",
+			expected: []string{"root:pass@tcp(localhost:3307)/test"},
+		},
+		{
+			name:  "two DSNs",
+			input: "root:pass@tcp(replica1:3306)/db,root:pass@tcp(replica2:3306)/db",
+			expected: []string{
+				"root:pass@tcp(replica1:3306)/db",
+				"root:pass@tcp(replica2:3306)/db",
+			},
+		},
+		{
+			name:  "three DSNs with spaces",
+			input: "root:pass@tcp(r1:3306)/db, root:pass@tcp(r2:3306)/db , root:pass@tcp(r3:3306)/db",
+			expected: []string{
+				"root:pass@tcp(r1:3306)/db",
+				"root:pass@tcp(r2:3306)/db",
+				"root:pass@tcp(r3:3306)/db",
+			},
+		},
+		{
+			name:     "trailing comma",
+			input:    "root:pass@tcp(localhost:3306)/db,",
+			expected: []string{"root:pass@tcp(localhost:3306)/db"},
+		},
+		{
+			name:     "only commas and spaces",
+			input:    " , , , ",
+			expected: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result := splitReplicaDSNs(tc.input)
+			assert.Equal(t, tc.expected, result)
 		})
 	}
 }
