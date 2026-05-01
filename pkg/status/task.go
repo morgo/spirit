@@ -32,15 +32,8 @@ type Task interface {
 // after Run() returns (see #773).
 func WatchTask(ctx context.Context, task Task, logger *slog.Logger) (wait func()) {
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		continuallyDumpStatus(ctx, task, logger)
-	}()
-	go func() {
-		defer wg.Done()
-		continuallyDumpCheckpoint(ctx, task, logger)
-	}()
+	wg.Go(func() { continuallyDumpStatus(ctx, task, logger) })
+	wg.Go(func() { continuallyDumpCheckpoint(ctx, task, logger) })
 	return wg.Wait
 }
 
