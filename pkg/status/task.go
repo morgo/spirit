@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -22,9 +23,25 @@ type Task interface {
 // WatchTask periodically does the status reporting for a task.
 // This includes writing to the logger the current state,
 // and dumping checkpoints.
-func WatchTask(ctx context.Context, task Task, logger *slog.Logger) {
-	go continuallyDumpStatus(ctx, task, logger)
-	go continuallyDumpCheckpoint(ctx, task, logger)
+//
+// It returns a wait function the caller can invoke during shutdown
+// to block until the spawned goroutines have exited. This avoids races
+// where a still-running checkpoint goroutine writes a fresh row after
+// the caller has closed/torn down the surrounding state — a pattern
+// that has produced flakes in tests that mutate the checkpoint table
+// after Run() returns (see #773).
+func WatchTask(ctx context.Context, task Task, logger *slog.Logger) (wait func()) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		continuallyDumpStatus(ctx, task, logger)
+	}()
+	go func() {
+		defer wg.Done()
+		continuallyDumpCheckpoint(ctx, task, logger)
+	}()
+	return wg.Wait
 }
 
 func continuallyDumpStatus(ctx context.Context, task Task, logger *slog.Logger) {
