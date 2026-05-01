@@ -108,8 +108,9 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				for _, lockName := range mdl.lockNames {
 					logger.Info("releasing metadata lock", "lock_name", lockName)
-					stmt := sqlescape.MustEscapeSQL("DO RELEASE_LOCK(%?)", lockName)
-					if _, err := mdl.db.ExecContext(releaseCtx, stmt); err != nil {
+					var released sql.NullInt64
+					stmt := sqlescape.MustEscapeSQL("SELECT RELEASE_LOCK(%?)", lockName)
+					if err := mdl.db.QueryRowContext(releaseCtx, stmt).Scan(&released); err != nil {
 						logger.Warn("could not release metadata lock", "lock_name", lockName, "error", err)
 					}
 				}
