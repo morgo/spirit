@@ -64,10 +64,12 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Close() before cancel() to free resources before context cancellation.
-	require.NoError(t, m.Close())
+	// Cancel first, wait for Run to return (so deferred MDL release runs and
+	// no in-flight goroutine can trip fatalError → dropCheckpoint), then Close
+	// to tear down the remaining resources.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO bigintpk (name,b) VALUES('t', 't')")
@@ -414,9 +416,11 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 
 	require.NoError(t, r.checksum(t.Context()))       // run the checksum, the original Run is blocked on sentinel.
 	require.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
-	require.NoError(t, r.Close())                     // close the run first to avoid race conditions.
-	cancel()                                          // unblock the original waiting on sentinel.
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
+	cancel() // unblocks the goroutine that was waiting on sentinel.
 	<-done
+	require.NoError(t, r.Close())
 
 	// drop the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, `DROP TABLE _spirit_sentinel`)
@@ -559,10 +563,11 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Close() before cancel() to avoid race conditions.
-	require.NoError(t, m.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO chkpresumetest (pad) SELECT RANDOM_BYTES(1024) FROM chkpresumetest LIMIT 1000")
@@ -617,10 +622,11 @@ FROM compositevarcharpk a WHERE version='1'`)
 
 	waitForCheckpoint(t, m)
 
-	// Close() before cancel() to avoid race conditions.
-	require.NoError(t, m.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	m2 := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
@@ -656,10 +662,11 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Cancel context first to signal goroutines to stop, then Close() to clean up resources.
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
+	<-done
 	require.NoError(t, m.Close())
-	<-done // Wait for the goroutine to finish
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM resumestricttest LIMIT 1000")
@@ -881,10 +888,11 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, lock)
 
-	// Close() before cancel() to avoid race conditions.
-	require.NoError(t, runner.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, runner.Close())
 
 	// Manually create the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _spirit_sentinel (id int unsigned primary key)")
@@ -958,10 +966,11 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	err = db.QueryRowContext(t.Context(), "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_cleanup_test_new'").Scan(&tableName)
 	require.NoError(t, err, "_cleanup_test_new table should exist after checkpoint")
 
-	// Close() before cancel() to avoid race conditions (see other tests)
-	require.NoError(t, m.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Now corrupt the checkpoint by setting an invalid binlog position.
 	// This simulates binlog expiry between stop and start.
@@ -998,9 +1007,9 @@ func TestResumeFromCheckpointStrictBinlogExpired(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Corrupt binlog name to simulate expiry
 	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999`)
@@ -1042,9 +1051,9 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
 	testutils.RunSQL(t, `UPDATE _chkpttooold_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
@@ -1081,9 +1090,9 @@ func TestResumeFromCheckpointStrictTooOld(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
 	testutils.RunSQL(t, `UPDATE _strictoldtest_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
@@ -1123,9 +1132,9 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Do NOT backdate the checkpoint - it was just created, so it's fresh.
 	// The migration should resume from checkpoint successfully.
