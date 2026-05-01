@@ -2,6 +2,7 @@ package copier
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Tests run at Debug level so diagnostic logs in the copier
+	// (per-chunk affected_rows, applier callback) are captured in CI
+	// output. See issue #746.
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	goleak.VerifyTestMain(m)
 }
 
