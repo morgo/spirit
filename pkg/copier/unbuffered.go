@@ -58,6 +58,9 @@ func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	if affectedRows, err = dbconn.RetryableTransaction(ctx, c.db, true, c.dbConfig, query); err != nil {
 		return err
 	}
+	c.logger.Debug("CopyChunk completed",
+		"table", chunk.Table.TableName, "chunk", chunk.String(),
+		"affected_rows", affectedRows, "duration", time.Since(startTime))
 	// Send feedback which can be used by the chunker
 	// and infoschema to create a low watermark.
 	chunkProcessingTime := time.Since(startTime)

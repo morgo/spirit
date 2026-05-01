@@ -55,10 +55,13 @@ func (s *deltaMap) HasChanged(key, _ []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
-		s.c.logger.Debug("key above watermark", "key", key[0])
+		s.c.logger.Debug("HasChanged dropped above-high-watermark",
+			"table", s.table.TableName, "key", key[0], "deleted", deleted)
 		return
 	}
 	s.changes[utils.HashKey(key)] = mapChange{isDelete: deleted, originalKey: key}
+	s.c.logger.Debug("HasChanged added to delta map",
+		"table", s.table.TableName, "key", key[0], "deleted", deleted, "delta_len", len(s.changes))
 }
 
 func (s *deltaMap) createDeleteStmt(deleteKeys []string) statement {
@@ -116,7 +119,8 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 		// When underLock=true (during cutover), we must flush all changes regardless of watermark.
 		// Use originalKey to preserve typed values for watermark comparison
 		if !underLock && s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
-			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
+			s.c.logger.Debug("Flush skipped not-below-low-watermark",
+				"table", s.table.TableName, "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
 		}
@@ -141,7 +145,10 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 		// Execute under lock means it is a final flush
 		// We need to use the lock connection to do this
 		// so there is no parallelism.
-		if err := lock.ExecUnderLock(ctx, extractStmt(stmts)...); err != nil {
+		execStmts := extractStmt(stmts)
+		s.c.logger.Debug("Flush underLock executing",
+			"table", s.table.TableName, "stmt_count", len(execStmts), "keys_flushed", len(keysFlushed))
+		if err := lock.ExecUnderLock(ctx, execStmts...); err != nil {
 			return false, err
 		}
 	} else {
@@ -155,8 +162,13 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 			st := stmt
 			g.Go(func() error {
 				startTime := time.Now()
-				_, err := dbconn.RetryableTransaction(errGrpCtx, s.c.db, false, dbconn.NewDBConfig(), st.stmt)
+				affected, err := dbconn.RetryableTransaction(errGrpCtx, s.c.db, false, dbconn.NewDBConfig(), st.stmt)
 				s.c.feedback(st.numKeys, time.Since(startTime))
+				if st.stmt != "" {
+					s.c.logger.Debug("Flush stmt executed",
+						"table", s.table.TableName, "num_keys", st.numKeys,
+						"affected_rows", affected, "err", err, "stmt", st.stmt)
+				}
 				return err
 			})
 		}
