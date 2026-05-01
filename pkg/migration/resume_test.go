@@ -129,17 +129,6 @@ func TestCheckpoint(t *testing.T) {
 		require.NoError(t, r.changes[0].dropOldTable(t.Context()))
 		return r
 	}
-	// disableDynamicChunking turns off the optimistic chunker's adaptive
-	// resizing so this test sees a stable ChunkSize=1000 regardless of
-	// per-chunk timing under CI load. The test asserts watermark contents,
-	// not chunker auto-sizing behavior.
-	disableDynamicChunking := func(c table.Chunker) {
-		t.Helper()
-		setter, ok := c.(interface{ SetDynamicChunking(bool) })
-		require.True(t, ok, "copyChunker does not expose SetDynamicChunking")
-		setter.SetDynamicChunking(false)
-	}
-
 	r := preSetup()
 	// migrationRunner.Run usually calls r.Setup() here.
 	// Which first checks if the table can be restored from checkpoint.
@@ -147,7 +136,7 @@ func TestCheckpoint(t *testing.T) {
 	require.Error(t, r.resumeFromCheckpoint(t.Context()))
 	// So we proceed with the initial steps.
 	require.NoError(t, r.newMigration(t.Context()))
-	disableDynamicChunking(r.copyChunker)
+	disableDynamicChunking(t, r.copyChunker)
 
 	// Now we are ready to start copying rows.
 	// Instead of calling r.copyRows() we will step through it manually.
@@ -207,7 +196,7 @@ func TestCheckpoint(t *testing.T) {
 	// Start the binary log feed just before copy rows starts.
 	// replClient.Run() is already called in resumeFromCheckpoint.
 	require.NoError(t, r.resumeFromCheckpoint(t.Context()))
-	disableDynamicChunking(r.copyChunker)
+	disableDynamicChunking(t, r.copyChunker)
 	// This opens the table at the checkpoint (table.OpenAtWatermark())
 	// which sets the chunkPtr at the LowerBound. It also has to position
 	// the watermark to this point so new watermarks "align" correctly.

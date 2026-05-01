@@ -993,14 +993,3 @@ func TestE2EBinlogSubscribingRogueValues(t *testing.T) {
 	require.Equal(t, "postChecksum", m.status.Get().String())
 	// All done!
 }
-
-// disableDynamicChunking turns off the chunker's adaptive resizing so the
-// caller sees a stable ChunkSize regardless of per-chunk timing under CI
-// load. Tests that assert exact chunk boundaries should call this after
-// setup; production callers should leave dynamic chunking on.
-func disableDynamicChunking(t *testing.T, c table.Chunker) {
-	t.Helper()
-	setter, ok := c.(interface{ SetDynamicChunking(bool) })
-	require.True(t, ok, "copyChunker does not expose SetDynamicChunking")
-	setter.SetDynamicChunking(false)
-}
