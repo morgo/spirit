@@ -54,6 +54,11 @@ const (
 	backoffMultiplier = 2
 	// Sleep time between position checks in BlockWait
 	blockWaitSleep = 100 * time.Millisecond
+	// Number of consecutive blockWaitSleep intervals where the buffered position
+	// hasn't advanced before BlockWait flushes binary logs to nudge the syncer.
+	// 3 * blockWaitSleep (~300ms) tolerates brief syncer lag (e.g. CI load) while
+	// remaining negligible relative to DefaultTimeout.
+	blockWaitStallThreshold = 3
 )
 
 var (
@@ -1043,7 +1048,7 @@ func (c *Client) BlockWait(ctx context.Context) error {
 				// just slightly behind (e.g., under CI load). getCurrentBinlogPosition
 				// already flushes once at the start, so a brief stall is expected.
 				stallCount++
-				if stallCount >= 3 {
+				if stallCount >= blockWaitStallThreshold {
 					c.logger.Debug("buffered position has not advanced, flushing binary logs")
 					if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
 						return err // it could be context cancelled, return it
