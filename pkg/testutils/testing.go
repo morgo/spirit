@@ -5,7 +5,10 @@ package testutils
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -100,25 +103,81 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 func RunSQLInDatabase(t *testing.T, dbName, stmt string) {
 	t.Helper()
 	dsn := DSNForDatabase(dbName)
-	db, err := sql.Open("mysql", dsn)
-	assert.NoError(t, err)
-	defer func() {
-		_ = db.Close()
-	}()
-	_, err = db.ExecContext(t.Context(), stmt)
+	err := execWithRetry(t.Context(), dsn, stmt)
 	assert.NoError(t, err)
 }
 
 func RunSQL(t *testing.T, stmt string) {
 	t.Helper()
-	db, err := sql.Open("mysql", DSN())
-	assert.NoError(t, err)
-	defer func() {
-		_ = db.Close()
-	}()
 	// Might be run in cleanup, use Background context
-	_, err = db.ExecContext(context.Background(), stmt)
+	err := execWithRetry(context.Background(), DSN(), stmt)
 	assert.NoError(t, err)
+}
+
+// execWithRetry opens a DB pool, executes stmt, and closes the pool.
+//
+// Under heavy parallel test load we have observed transient
+// "invalid connection" failures (mysql.ErrInvalidConn) on the very first
+// query against a freshly-opened pool — likely the server briefly
+// dropping the connection during the handshake, or a TCP RST. See #771.
+//
+// We do NOT retry the Exec itself, since the mysql driver returns
+// ErrInvalidConn for failures both before and after the query was sent
+// to the server, and a blind Exec retry could double-apply a
+// non-idempotent statement (INSERT, CREATE TABLE, etc.). Instead we
+// front the Exec with a Ping that we *do* retry — Ping has no
+// side-effects, so retrying it is always safe. Once Ping succeeds we
+// know the pool has a verified live connection, and the subsequent
+// Exec is highly unlikely to hit the same transient handshake glitch.
+func execWithRetry(ctx context.Context, dsn, stmt string) error {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	const maxPingAttempts = 4
+	for attempt := 0; attempt < maxPingAttempts; attempt++ {
+		if attempt > 0 {
+			// Brief randomized backoff so a thundering herd of parallel
+			// helpers don't all retry simultaneously.
+			delay := time.Duration(20*(1<<attempt))*time.Millisecond +
+				time.Duration(rand.Intn(50))*time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		err = db.PingContext(ctx)
+		if err == nil {
+			break
+		}
+		if !isTransientConnError(err) {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, stmt)
+	return err
+}
+
+// isTransientConnError reports whether err looks like a transient
+// connection-level failure that is safe to retry. We deliberately match
+// on a small whitelist (driver.ErrBadConn and mysql.ErrInvalidConn) plus
+// a substring fallback because the mysql driver returns ErrInvalidConn
+// wrapped in op-specific contexts in some code paths.
+func isTransientConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) {
+		return true
+	}
+	return strings.Contains(err.Error(), "invalid connection")
 }
 
 var (
