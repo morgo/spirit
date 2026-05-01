@@ -365,7 +365,7 @@ func TestUnsafeLinter_CreateIndex(t *testing.T) {
 }
 
 func TestUnsafeLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&UnsafeLinter{})
 
 	sql := `DROP TABLE users`
@@ -387,7 +387,7 @@ func TestUnsafeLinter_Integration(t *testing.T) {
 }
 
 func TestUnsafeLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&UnsafeLinter{})
 
 	sql := `DROP TABLE users`
