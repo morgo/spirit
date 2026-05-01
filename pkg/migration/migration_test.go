@@ -99,6 +99,7 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 	if replicaDSN == "" {
 		t.Skip("skipping replica tests because REPLICA_DSN not set")
 	}
+	testutils.WaitForReplicaHealthy(t, replicaDSN, 30*time.Second)
 	testutils.NewTestTable(t, "replicatest", `CREATE TABLE replicatest (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,

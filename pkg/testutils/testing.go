@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
@@ -149,6 +150,74 @@ func IsMinimalRBRTestRunner(t *testing.T) bool {
 		}
 	})
 	return isRBRTestRunnerCached
+}
+
+// WaitForReplicaHealthy polls SHOW REPLICA STATUS until both the IO and SQL
+// threads report Yes, or the timeout elapses. On timeout it skips the test
+// with an infra-attribution message — when the replica isn't running at the
+// start of a test, that's almost always a CI setup issue, not a Spirit bug,
+// so failing late inside m.Run() is misleading.
+func WaitForReplicaHealthy(t *testing.T, dsn string, timeout time.Duration) {
+	t.Helper()
+	db, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	deadline := time.Now().Add(timeout)
+	var lastIO, lastSQL, lastIOState string
+	for {
+		ioRunning, sqlRunning, ioState, err := readReplicaStatus(t.Context(), db)
+		if err == nil {
+			if ioRunning == "Yes" && sqlRunning == "Yes" {
+				return
+			}
+			lastIO, lastSQL, lastIOState = ioRunning, sqlRunning, ioState
+		}
+		if time.Now().After(deadline) {
+			t.Skipf("test infra: replica not healthy after %s "+
+				"(Replica_IO_Running=%q Replica_SQL_Running=%q Replica_IO_State=%q lastErr=%v); "+
+				"this indicates a CI setup issue, not a Spirit bug",
+				timeout, lastIO, lastSQL, lastIOState, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func readReplicaStatus(ctx context.Context, db *sql.DB) (ioRunning, sqlRunning, ioState string, err error) {
+	rows, err := db.QueryContext(ctx, "SHOW REPLICA STATUS")
+	if err != nil {
+		return "", "", "", err
+	}
+	defer func() { _ = rows.Close() }()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", "", "", err
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", "", "", err
+		}
+		return "", "", "", fmt.Errorf("SHOW REPLICA STATUS returned no rows")
+	}
+	values := make([]any, len(cols))
+	for i := range values {
+		values[i] = new(sql.NullString)
+	}
+	if err := rows.Scan(values...); err != nil {
+		return "", "", "", err
+	}
+	for i, name := range cols {
+		v := values[i].(*sql.NullString).String
+		switch name {
+		case "Replica_IO_Running":
+			ioRunning = v
+		case "Replica_SQL_Running":
+			sqlRunning = v
+		case "Replica_IO_State":
+			ioState = v
+		}
+	}
+	return ioRunning, sqlRunning, ioState, nil
 }
 
 // EvenOddHasher is a test hash function that shards assuming -80 and 80- shards.
