@@ -73,6 +73,12 @@ type Runner struct {
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
 
+	// watchTaskWait blocks until the WatchTask goroutines (status/checkpoint
+	// dumpers) have exited. Set in startBackgroundRoutines and invoked from
+	// Close() before tearing down the database connection so that no late
+	// checkpoint INSERT can race with post-Close cleanup.
+	watchTaskWait func()
+
 	// MetricsSink
 	metricsSink metrics.Sink
 }
@@ -716,8 +722,10 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go change.table.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
 	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
-	// Start go routines for checkpointing and dumping status
-	status.WatchTask(ctx, r, r.logger)
+	// Start go routines for checkpointing and dumping status. The returned
+	// wait function is invoked from Close() so we can be sure no late
+	// checkpoint INSERT lands after teardown begins.
+	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
 }
 
 // setup performs all the initial steps to prepare for the migration,
@@ -889,6 +897,21 @@ func (r *Runner) createSentinelTable(ctx context.Context) error {
 
 func (r *Runner) Close() error {
 	r.status.Set(status.Close)
+	// Cancel the migration context so background goroutines started in
+	// startBackgroundRoutines (notably the status.WatchTask checkpoint
+	// dumper) observe ctx.Done() and exit. This is normally already done
+	// by Run's deferred cancel, but Close() may be called via paths that
+	// don't run that defer; calling it here is idempotent and cheap.
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+	}
+	// Wait for the status/checkpoint dumper goroutines to exit *before*
+	// tearing down the database connection, so a late DumpCheckpoint INSERT
+	// cannot land in the checkpoint table after the caller assumes Close()
+	// has fully quiesced the runner.
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	for _, change := range r.changes {
 		err := change.Close()
 		if err != nil {

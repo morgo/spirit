@@ -87,6 +87,11 @@ type Runner struct {
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
 	dbConfig   *dbconn.DBConfig
+
+	// watchTaskWait blocks until the WatchTask goroutines have exited.
+	// Set in startBackgroundRoutines and invoked from Close() so that
+	// late status/checkpoint goroutine activity cannot race with teardown.
+	watchTaskWait func()
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -100,6 +105,17 @@ func NewRunner(m *Move) (*Runner, error) {
 }
 
 func (r *Runner) Close() error {
+	// Cancel the runner context so background goroutines (status.WatchTask)
+	// observe ctx.Done() and exit. Idempotent.
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+	}
+	// Wait for the status/checkpoint dumper goroutines to exit before
+	// tearing down connections, so a late DumpCheckpoint cannot race with
+	// post-Close cleanup.
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	if r.copyChunker != nil {
 		if err := r.copyChunker.Close(); err != nil {
 			return err
@@ -725,8 +741,10 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 	}
 
-	// Start go routines for checkpointing and dumping status
-	status.WatchTask(ctx, r, r.logger)
+	// Start go routines for checkpointing and dumping status. The returned
+	// wait function is invoked from Close() so we can be sure no late
+	// checkpoint INSERT lands after teardown begins.
+	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
 }
 
 // fatalError is the callback provided to the replication client.
