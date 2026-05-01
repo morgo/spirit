@@ -134,8 +134,16 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 	}, nil
 }
 
-// Start initializes all shard workers and begins processing
+// Start initializes all shard workers and begins processing.
 // This method is idempotent and can restart the applier after Stop() is called.
+//
+// Lifecycle: callers MUST call Stop() to terminate the per-shard write workers
+// and the single feedbackCoordinator. Cancelling the ctx passed here does NOT
+// by itself shut down the goroutine pipeline — it only aborts in-flight writes.
+// Workers for a shard exit when its chunkletBuffer is closed (by Stop), and the
+// coordinator exits when every shard's chunkletCompletions has been closed
+// (by the last worker's defer per shard). Failing to call Stop() will leak
+// goroutines.
 func (a *ShardedApplier) Start(ctx context.Context) error {
 	a.Lock()
 	defer a.Unlock()

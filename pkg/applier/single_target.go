@@ -87,9 +87,16 @@ func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApp
 	}, nil
 }
 
-// Start initializes the applier's async write workers and begins processing
-// This does not control the synchronous methods like UpsertRows/DeleteKeys
+// Start initializes the applier's async write workers and begins processing.
+// This does not control the synchronous methods like UpsertRows/DeleteKeys.
 // This method is idempotent - calling it multiple times is safe.
+//
+// Lifecycle: callers MUST call Stop() to terminate the write workers and
+// feedbackCoordinator. Cancelling the ctx passed here does NOT by itself
+// shut down the goroutine pipeline — it only aborts in-flight writes.
+// Workers exit when chunkletBuffer is closed (by Stop), and the coordinator
+// exits when chunkletCompletions is closed (by the last worker's defer).
+// Failing to call Stop() will leak goroutines.
 func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.Lock()
 	defer a.Unlock()
