@@ -100,10 +100,20 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 		for {
 			select {
 			case <-ctx.Done():
-				// Close the dedicated connection to release all locks
+				// Explicitly release the locks before closing the connection.
+				// Relying on connection close alone leaves a small window where
+				// MySQL has not yet finished tearing down the session, so a
+				// rapid reacquire on a new connection can see the lock as still
+				// held. RELEASE_LOCK on the same session avoids that race.
+				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				for _, lockName := range mdl.lockNames {
 					logger.Info("releasing metadata lock", "lock_name", lockName)
+					stmt := sqlescape.MustEscapeSQL("DO RELEASE_LOCK(%?)", lockName)
+					if _, err := mdl.db.ExecContext(releaseCtx, stmt); err != nil {
+						logger.Warn("could not release metadata lock", "lock_name", lockName, "error", err)
+					}
 				}
+				releaseCancel()
 				// Use select with default to avoid blocking if Close() isn't called
 				select {
 				case mdl.closeCh <- mdl.db.Close():
