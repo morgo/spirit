@@ -174,7 +174,7 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 
 	// Start a single feedback coordinator for all shards
 	a.wg.Add(1)
-	go a.feedbackCoordinator(workerCtx)
+	go a.feedbackCoordinator()
 
 	return nil
 }
@@ -382,18 +382,15 @@ func (a *ShardedApplier) writeWorker(ctx context.Context, shard *shardTarget) {
 			// Write chunklet to this shard
 			affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
 
-			// Send completion
-			completion := shardedChunkletCompletion{
+			// Send completion — always send after attempting the write so the
+			// feedbackCoordinator can track progress. We must not race this
+			// with ctx.Done(); a lost completion leaves pendingWork stuck and
+			// causes Wait() to hang or report incorrect results.
+			shard.chunkletCompletions <- shardedChunkletCompletion{
 				workID:       chunkletData.workID,
 				shardID:      shard.shardID,
 				affectedRows: affectedRows,
 				err:          err,
-			}
-
-			select {
-			case shard.chunkletCompletions <- completion:
-			case <-ctx.Done():
-				return
 			}
 
 		case <-ctx.Done():
@@ -460,25 +457,74 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 }
 
 // feedbackCoordinator tracks chunklet completions from all shards and invokes callbacks when work is done
-func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
+func (a *ShardedApplier) feedbackCoordinator() {
 	defer a.wg.Done()
 	a.logger.Debug("feedbackCoordinator started")
+
+	// processCompletion handles a single chunklet completion.
+	processCompletion := func(completion shardedChunkletCompletion) {
+		a.logger.Debug("feedbackCoordinator received chunklet completion",
+			"workID", completion.workID, "shardID", completion.shardID)
+
+		// Update work completion status
+		a.pendingMutex.Lock()
+		pending, exists := a.pendingWork[completion.workID]
+		if !exists {
+			a.pendingMutex.Unlock()
+			a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
+			return
+		}
+
+		// If there was an error, invoke callback immediately
+		if completion.err != nil {
+			callback := pending.callback
+			// Remove the work from pending map before invoking callback
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+			callback(0, completion.err)
+			return
+		}
+
+		// Update completion count and affected rows
+		pending.completedChunklets++
+		pending.totalAffectedRows += completion.affectedRows
+
+		a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
+			"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
+
+		// Check if all chunklets for this work are complete
+		if pending.completedChunklets == pending.totalChunklets {
+			a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
+
+			// Invoke the callback
+			callback := pending.callback
+			affectedRows := pending.totalAffectedRows
+
+			// Remove completed work from pending map
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+
+			// Invoke callback outside the lock
+			callback(affectedRows, nil)
+		} else {
+			a.pendingMutex.Unlock()
+		}
+	}
 
 	// Create a merged channel to receive completions from all shards
 	mergedCompletions := make(chan shardedChunkletCompletion, defaultBufferSize)
 
-	// Start goroutines to forward completions from each shard to the merged channel
+	// Start goroutines to forward completions from each shard to the merged channel.
+	// These use a simple range loop (no ctx.Done select) to ensure all completions
+	// are forwarded even during shutdown. The shard channels will be closed once all
+	// write workers for that shard finish, which is the authoritative signal.
 	var forwardWg sync.WaitGroup
 	for _, shard := range a.shards {
 		forwardWg.Add(1)
 		go func(s *shardTarget) {
 			defer forwardWg.Done()
 			for completion := range s.chunkletCompletions {
-				select {
-				case mergedCompletions <- completion:
-				case <-ctx.Done():
-					return
-				}
+				mergedCompletions <- completion
 			}
 		}(shard)
 	}
@@ -489,66 +535,15 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 		close(mergedCompletions)
 	}()
 
-	// Process completions
-	for {
-		select {
-		case completion, ok := <-mergedCompletions:
-			if !ok {
-				a.logger.Debug("feedbackCoordinator merged completions channel closed, exiting")
-				return
-			}
-
-			a.logger.Debug("feedbackCoordinator received chunklet completion",
-				"workID", completion.workID, "shardID", completion.shardID)
-
-			// Update work completion status
-			a.pendingMutex.Lock()
-			pending, exists := a.pendingWork[completion.workID]
-			if !exists {
-				a.pendingMutex.Unlock()
-				a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
-				continue
-			}
-
-			// If there was an error, invoke callback immediately
-			if completion.err != nil {
-				callback := pending.callback
-				// Remove the work from pending map before invoking callback
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-				callback(0, completion.err)
-				continue
-			}
-
-			// Update completion count and affected rows
-			pending.completedChunklets++
-			pending.totalAffectedRows += completion.affectedRows
-
-			a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
-				"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
-
-			// Check if all chunklets for this work are complete
-			if pending.completedChunklets == pending.totalChunklets {
-				a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
-
-				// Invoke the callback
-				callback := pending.callback
-				affectedRows := pending.totalAffectedRows
-
-				// Remove completed work from pending map
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-
-				// Invoke callback outside the lock
-				callback(affectedRows, nil)
-			} else {
-				a.pendingMutex.Unlock()
-			}
-
-		case <-ctx.Done():
-			return
-		}
+	// Main loop: process completions until the merged channel is closed.
+	// We do NOT exit on ctx.Done() here because write workers may still be
+	// sending completions after writing data. Exiting early would leave
+	// entries in pendingWork that are never cleared, causing Wait() to hang
+	// or report incorrect results.
+	for completion := range mergedCompletions {
+		processCompletion(completion)
 	}
+	a.logger.Debug("feedbackCoordinator merged completions channel closed, exiting")
 }
 
 // DeleteKeys deletes rows by their key values synchronously, broadcasting to all shards.

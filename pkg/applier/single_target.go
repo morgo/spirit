@@ -124,7 +124,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 
 	// Start feedback coordinator
 	a.wg.Add(1)
-	go a.feedbackCoordinator(workerCtx)
+	go a.feedbackCoordinator()
 
 	return nil
 }
@@ -275,17 +275,14 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context) {
 			// Write chunklet
 			affectedRows, err := a.writeChunklet(ctx, chunkletData)
 
-			// Send completion
-			completion := chunkletCompletion{
+			// Send completion — always send after attempting the write so the
+			// feedbackCoordinator can track progress. We must not race this
+			// with ctx.Done(); a lost completion leaves pendingWork stuck and
+			// causes Wait() to hang or report incorrect results.
+			a.chunkletCompletions <- chunkletCompletion{
 				workID:       chunkletData.workID,
 				affectedRows: affectedRows,
 				err:          err,
-			}
-
-			select {
-			case a.chunkletCompletions <- completion:
-			case <-ctx.Done():
-				return
 			}
 
 		case <-ctx.Done():
@@ -345,68 +342,70 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 }
 
 // feedbackCoordinator tracks chunklet completions and invokes callbacks when work is done
-func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
+func (a *SingleTargetApplier) feedbackCoordinator() {
 	defer a.wg.Done()
 	a.logger.Debug("feedbackCoordinator started")
 
-	for {
-		select {
-		case completion, ok := <-a.chunkletCompletions:
-			if !ok {
-				a.logger.Debug("feedbackCoordinator chunklet completions channel closed, exiting")
-				return
-			}
+	// processCompletion handles a single chunklet completion.
+	processCompletion := func(completion chunkletCompletion) {
+		a.logger.Debug("feedbackCoordinator received chunklet completion", "workID", completion.workID)
 
-			a.logger.Debug("feedbackCoordinator received chunklet completion", "workID", completion.workID)
-
-			// Update work completion status
-			a.pendingMutex.Lock()
-			pending, exists := a.pendingWork[completion.workID]
-			if !exists {
-				a.pendingMutex.Unlock()
-				a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
-				continue
-			}
-
-			// If there was an error, invoke callback immediately
-			if completion.err != nil {
-				callback := pending.callback
-				// Remove the work from pending map before invoking callback
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-				callback(0, completion.err)
-				continue
-			}
-
-			// Update completion count and affected rows
-			pending.completedChunklets++
-			pending.totalAffectedRows += completion.affectedRows
-
-			a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
-				"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
-
-			// Check if all chunklets for this work are complete
-			if pending.completedChunklets == pending.totalChunklets {
-				a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
-
-				// Invoke the callback
-				callback := pending.callback
-				affectedRows := pending.totalAffectedRows
-
-				// Remove completed work from pending map
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-
-				// Invoke callback outside the lock
-				callback(affectedRows, nil)
-			} else {
-				a.pendingMutex.Unlock()
-			}
-
-		case <-ctx.Done():
+		// Update work completion status
+		a.pendingMutex.Lock()
+		pending, exists := a.pendingWork[completion.workID]
+		if !exists {
+			a.pendingMutex.Unlock()
+			a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
 			return
 		}
+
+		// If there was an error, invoke callback immediately
+		if completion.err != nil {
+			callback := pending.callback
+			// Remove the work from pending map before invoking callback
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+			callback(0, completion.err)
+			return
+		}
+
+		// Update completion count and affected rows
+		pending.completedChunklets++
+		pending.totalAffectedRows += completion.affectedRows
+
+		a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
+			"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
+
+		// Check if all chunklets for this work are complete
+		if pending.completedChunklets == pending.totalChunklets {
+			a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
+
+			// Invoke the callback
+			callback := pending.callback
+			affectedRows := pending.totalAffectedRows
+
+			// Remove completed work from pending map
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+
+			// Invoke callback outside the lock
+			callback(affectedRows, nil)
+		} else {
+			a.pendingMutex.Unlock()
+		}
 	}
+
+	// Main loop: process completions until the channel is closed.
+	// We do NOT exit on ctx.Done() here because write workers may still be
+	// sending completions after writing data. Exiting early would leave
+	// entries in pendingWork that are never cleared, causing Wait() to hang
+	// or report incorrect results. The channel will be closed once all write
+	// workers finish (including their deferred close logic), which is the
+	// authoritative signal that no more completions will arrive.
+	for completion := range a.chunkletCompletions {
+		processCompletion(completion)
+	}
+	a.logger.Debug("feedbackCoordinator chunklet completions channel closed, exiting")
 }
 
 // DeleteKeys deletes rows by their key values synchronously.
