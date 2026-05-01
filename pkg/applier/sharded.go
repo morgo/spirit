@@ -285,11 +285,25 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	}
 	a.pendingMutex.Unlock()
 
-	// Send chunklets to their respective shard buffers
+	// Send chunklets to their respective shard buffers.
+	// If ctx is cancelled mid-send, we must clean up pendingWork before
+	// returning. Otherwise the entry remains with totalChunklets > completedChunklets
+	// forever, hanging Wait(). Chunklets already in shard buffers may still be
+	// processed; their completions arrive at the coordinator after pendingWork
+	// has been deleted and are dropped (logged as "unknown work").
 	for _, chunkletData := range allChunklets {
 		select {
 		case a.shards[chunkletData.shardID].chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
+			a.pendingMutex.Lock()
+			pending, exists := a.pendingWork[workID]
+			if exists {
+				delete(a.pendingWork, workID)
+			}
+			a.pendingMutex.Unlock()
+			if exists {
+				pending.callback(0, ctx.Err())
+			}
 			return ctx.Err()
 		}
 	}

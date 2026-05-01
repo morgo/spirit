@@ -175,11 +175,25 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	}
 	a.pendingMutex.Unlock()
 
-	// Send chunklets to buffer
+	// Send chunklets to buffer.
+	// If ctx is cancelled mid-send, we must clean up pendingWork before
+	// returning. Otherwise the entry remains with totalChunklets > completedChunklets
+	// forever, hanging Wait(). Chunklets already in the buffer may still be
+	// processed; their completions arrive at the coordinator after pendingWork
+	// has been deleted and are dropped (logged as "unknown work").
 	for _, chunkletData := range chunklets {
 		select {
 		case a.chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
+			a.pendingMutex.Lock()
+			pending, exists := a.pendingWork[workID]
+			if exists {
+				delete(a.pendingWork, workID)
+			}
+			a.pendingMutex.Unlock()
+			if exists {
+				pending.callback(0, ctx.Err())
+			}
 			return ctx.Err()
 		}
 	}
