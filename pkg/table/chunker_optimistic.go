@@ -207,7 +207,10 @@ func (t *chunkerOptimistic) Open() (err error) {
 	return t.open()
 }
 
-func (t *chunkerOptimistic) setDynamicChunking(newValue bool) {
+// SetDynamicChunking enables (true) or disables (false) the optimistic
+// chunker's dynamic chunk-size adaptation. Disabling is intended for tests
+// that need deterministic chunk sizes; production callers should leave it on.
+func (t *chunkerOptimistic) SetDynamicChunking(newValue bool) {
 	t.Lock()
 	defer t.Unlock()
 	t.disableDynamicChunker = !newValue
