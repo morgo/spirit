@@ -103,12 +103,15 @@ func TestCheckpoint(t *testing.T) {
 
 	preSetup := func() *Runner {
 		r, err := NewRunner(&Migration{
-			Host:             cfg.Addr,
-			Username:         cfg.User,
-			Password:         &cfg.Passwd,
-			Database:         cfg.DBName,
-			Threads:          1,
-			TargetChunkTime:  100 * time.Millisecond,
+			Host:     cfg.Addr,
+			Username: cfg.User,
+			Password: &cfg.Passwd,
+			Database: cfg.DBName,
+			Threads:  1,
+			// Large TargetChunkTime so the optimistic chunker does not
+			// shrink ChunkSize under CI load — this test asserts an exact
+			// ChunkSize=1000 watermark, so dynamic resizing must not kick in.
+			TargetChunkTime:  time.Hour,
 			Table:            "cpt1",
 			Alter:            "ENGINE=InnoDB",
 			useTestThrottler: true,
