@@ -368,35 +368,28 @@ func (a *ShardedApplier) writeWorker(ctx context.Context, shard *shardTarget) {
 		}
 	}()
 
-	for {
-		select {
-		case chunkletData, ok := <-shard.chunkletBuffer:
-			if !ok {
-				a.logger.Debug("writeWorker channel closed, exiting", "shardID", shard.shardID, "workerID", workerID)
-				return
-			}
+	// Drain chunkletBuffer until it is closed by Stop(). We deliberately do not
+	// select on ctx.Done() here: every chunklet that made it into the buffer was
+	// already registered in pendingWork by Apply(), so it MUST produce a
+	// completion or Wait() will hang. If ctx is cancelled, writeChunklet returns
+	// quickly with ctx.Err() and we forward that as an error completion — the
+	// feedbackCoordinator then invokes the callback with the error and clears
+	// pendingWork. Stop() is the canonical shutdown path: it cancels ctx (so
+	// in-flight writes abort) and closes chunkletBuffer (so workers exit).
+	for chunkletData := range shard.chunkletBuffer {
+		a.logger.Debug("writeWorker processing chunklet", "shardID", shard.shardID,
+			"workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
 
-			a.logger.Debug("writeWorker processing chunklet", "shardID", shard.shardID,
-				"workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
+		affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
 
-			// Write chunklet to this shard
-			affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
-
-			// Send completion — always send after attempting the write so the
-			// feedbackCoordinator can track progress. We must not race this
-			// with ctx.Done(); a lost completion leaves pendingWork stuck and
-			// causes Wait() to hang or report incorrect results.
-			shard.chunkletCompletions <- shardedChunkletCompletion{
-				workID:       chunkletData.workID,
-				shardID:      shard.shardID,
-				affectedRows: affectedRows,
-				err:          err,
-			}
-
-		case <-ctx.Done():
-			return
+		shard.chunkletCompletions <- shardedChunkletCompletion{
+			workID:       chunkletData.workID,
+			shardID:      shard.shardID,
+			affectedRows: affectedRows,
+			err:          err,
 		}
 	}
+	a.logger.Debug("writeWorker channel closed, exiting", "shardID", shard.shardID, "workerID", workerID)
 }
 
 // writeChunklet writes a single chunklet to a specific shard
