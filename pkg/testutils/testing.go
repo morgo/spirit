@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,15 +154,14 @@ func IsMinimalRBRTestRunner(t *testing.T) bool {
 }
 
 // WaitForReplicaHealthy polls SHOW REPLICA STATUS until both the IO and SQL
-// threads report Yes, or the timeout elapses. On timeout it skips the test
-// with an infra-attribution message — when the replica isn't running at the
-// start of a test, that's almost always a CI setup issue, not a Spirit bug,
-// so failing late inside m.Run() is misleading.
+// threads report Yes, or the timeout elapses. On timeout it fails the test
+// with an infra-attribution message so a broken CI replica setup is clearly
+// distinguishable from a Spirit migration bug.
 func WaitForReplicaHealthy(t *testing.T, dsn string, timeout time.Duration) {
 	t.Helper()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	defer utils.CloseAndLog(db)
 
 	deadline := time.Now().Add(timeout)
 	var lastIO, lastSQL, lastIOState string
@@ -174,7 +174,7 @@ func WaitForReplicaHealthy(t *testing.T, dsn string, timeout time.Duration) {
 			lastIO, lastSQL, lastIOState = ioRunning, sqlRunning, ioState
 		}
 		if time.Now().After(deadline) {
-			t.Skipf("test infra: replica not healthy after %s "+
+			t.Fatalf("test infra: replica not healthy after %s "+
 				"(Replica_IO_Running=%q Replica_SQL_Running=%q Replica_IO_State=%q lastErr=%v); "+
 				"this indicates a CI setup issue, not a Spirit bug",
 				timeout, lastIO, lastSQL, lastIOState, err)
@@ -188,7 +188,7 @@ func readReplicaStatus(ctx context.Context, db *sql.DB) (ioRunning, sqlRunning, 
 	if err != nil {
 		return "", "", "", err
 	}
-	defer func() { _ = rows.Close() }()
+	defer utils.CloseAndLog(rows)
 	cols, err := rows.Columns()
 	if err != nil {
 		return "", "", "", err
