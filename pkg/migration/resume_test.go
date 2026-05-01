@@ -416,9 +416,11 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 
 	require.NoError(t, r.checksum(t.Context()))       // run the checksum, the original Run is blocked on sentinel.
 	require.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
-	require.NoError(t, r.Close())                     // close the run first to avoid race conditions.
-	cancel()                                          // unblock the original waiting on sentinel.
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
+	cancel() // unblocks the goroutine that was waiting on sentinel.
 	<-done
+	require.NoError(t, r.Close())
 
 	// drop the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, `DROP TABLE _spirit_sentinel`)
