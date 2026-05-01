@@ -210,7 +210,9 @@ func (c *buffered) readWorker(ctx context.Context) error {
 				return
 			}
 
-			c.logger.Debug("applier callback invoked", "chunk", capturedChunk.String(), "affectedRows", affectedRows)
+			c.logger.Debug("applier callback invoked",
+				"table", capturedChunk.Table.TableName, "chunk", capturedChunk.String(),
+				"affected_rows", affectedRows, "duration", time.Since(capturedStartTime))
 
 			// Calculate total time from read start to callback completion (read + write)
 			totalTime := time.Since(capturedStartTime)

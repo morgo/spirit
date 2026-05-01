@@ -2,6 +2,7 @@ package migration
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -19,6 +20,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Tests run at Debug level so diagnostic logs in the binlog applier
+	// path (HasChanged add/drop, deltaMap.Flush stmt + affected_rows) and
+	// the copier (per-chunk affected_rows) are captured in CI output.
+	// See issue #746.
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
 	sentinelCheckInterval = 100 * time.Millisecond

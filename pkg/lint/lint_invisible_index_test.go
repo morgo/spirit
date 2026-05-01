@@ -145,7 +145,7 @@ func TestInvisibleIndexBeforeDropLinter_AlterWithoutDrop(t *testing.T) {
 
 func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
 	// Reset registry and register linter
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -161,7 +161,7 @@ func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationDisabled(t *testing.T) {
 	// Reset registry and register linter
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -340,7 +340,7 @@ func TestInvisibleIndexBeforeDropLinter_DefaultBehavior(t *testing.T) {
 // Integration Tests with RunLinters
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorTrue(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -361,7 +361,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorTrue(t *
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorFalse(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -382,7 +382,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorFalse(t 
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_InvalidConfig(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -404,7 +404,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_InvalidConfig(t *t
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_DisabledLinter(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"
@@ -427,7 +427,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_DisabledLinter(t *
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_EnabledWithConfig(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&InvisibleIndexBeforeDropLinter{})
 
 	sql := "ALTER TABLE users DROP INDEX idx_email"

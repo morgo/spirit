@@ -264,7 +264,7 @@ func TestHasFloatLinter_SimilarTypeNames(t *testing.T) {
 }
 
 func TestHasFloatLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFloatLinter{})
 
 	sql := `CREATE TABLE measurements (
@@ -289,7 +289,7 @@ func TestHasFloatLinter_Integration(t *testing.T) {
 }
 
 func TestHasFloatLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFloatLinter{})
 
 	sql := `CREATE TABLE measurements (

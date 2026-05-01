@@ -367,7 +367,7 @@ func TestHasFKLinter_ForeignKeyWithNoAction(t *testing.T) {
 }
 
 func TestHasFKLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFKLinter{})
 
 	sql := `CREATE TABLE orders (
@@ -393,7 +393,7 @@ func TestHasFKLinter_Integration(t *testing.T) {
 }
 
 func TestHasFKLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFKLinter{})
 
 	sql := `CREATE TABLE orders (

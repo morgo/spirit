@@ -341,17 +341,15 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	if !isCreateIndexStmt {
 		return nil, errors.New("not a CREATE INDEX statement")
 	}
-	var columns []string
+	var parts []string
 	var keyType string
 	for _, part := range ciStmt.IndexPartSpecifications {
-		if part.Column == nil {
-			return nil, errors.New("cannot convert functional index to ALTER TABLE statement; please use ALTER TABLE ADD INDEX … instead")
+		var sb strings.Builder
+		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+		if err := part.Restore(rCtx); err != nil {
+			return nil, fmt.Errorf("could not restore index part: %w", err)
 		}
-		col := fmt.Sprintf("`%s`", part.Column.Name.String())
-		if part.Length > 0 {
-			col = fmt.Sprintf("%s(%d)", col, part.Length)
-		}
-		columns = append(columns, col)
+		parts = append(parts, sb.String())
 	}
 	switch ciStmt.KeyType { //nolint:exhaustive
 	case ast.IndexKeyTypeUnique:
@@ -363,7 +361,7 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	default:
 		keyType = "INDEX"
 	}
-	alterStmt := fmt.Sprintf("ADD %s `%s` (%s)", keyType, ciStmt.IndexName, strings.Join(columns, ", "))
+	alterStmt := fmt.Sprintf("ADD %s `%s` (%s)", keyType, ciStmt.IndexName, strings.Join(parts, ", "))
 	// We hint in the statement that it's been rewritten
 	// and in the stmtNode we reparse from the alterStmt.
 	statement := fmt.Sprintf("/* rewritten from CREATE INDEX */ ALTER TABLE `%s` %s", ciStmt.Table.Name, alterStmt)
