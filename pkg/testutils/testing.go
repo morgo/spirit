@@ -49,10 +49,15 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 
 	// Create a unique database name based on test name and an atomic counter.
 	// The counter ensures uniqueness when called multiple times within the same test.
+	// MySQL limits database names to 64 characters, so we truncate if needed.
 	dbName := fmt.Sprintf("t_%s_%d_%d",
 		strings.ReplaceAll(strings.ToLower(t.Name()), "/", "_"),
 		os.Getpid(),
 		dbCounter.Add(1))
+	if len(dbName) > 64 {
+		dbName = dbName[:64]
+	}
+	t.Log("test database:", dbName)
 
 	// Connect to MySQL without specifying a database
 	baseDSN := DSN()
