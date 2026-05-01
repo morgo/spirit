@@ -17,15 +17,16 @@ import (
 type chunkerComposite struct {
 	sync.Mutex
 
-	Ti             *TableInfo
-	NewTi          *TableInfo // Destination table info
-	chunkSize      uint64
-	chunkPtrs      []Datum  // a list of Ptrs for each of the keys.
-	chunkKeys      []string // all the keys to chunk on (usually all the col names of the PK)
-	keyName        string   // the name of the key we are chunking on
-	where          string   // any additional WHERE conditions.
-	finalChunkSent bool
-	isOpen         bool
+	Ti                    *TableInfo
+	NewTi                 *TableInfo // Destination table info
+	chunkSize             uint64
+	chunkPtrs             []Datum  // a list of Ptrs for each of the keys.
+	chunkKeys             []string // all the keys to chunk on (usually all the col names of the PK)
+	keyName               string   // the name of the key we are chunking on
+	where                 string   // any additional WHERE conditions.
+	finalChunkSent        bool
+	isOpen                bool
+	disableDynamicChunker bool // only used by the test suite
 
 	columnMapping *ColumnMapping
 
@@ -218,6 +219,15 @@ func (t *chunkerComposite) Open() (err error) {
 	return t.open()
 }
 
+// SetDynamicChunking enables (true) or disables (false) the composite
+// chunker's dynamic chunk-size adaptation. Disabling is intended for tests
+// that need deterministic chunk sizes; production callers should leave it on.
+func (t *chunkerComposite) SetDynamicChunking(newValue bool) {
+	t.Lock()
+	defer t.Unlock()
+	t.disableDynamicChunker = !newValue
+}
+
 // OpenAtWatermark opens a table for the resume-from-checkpoint use case.
 // This will set the chunkPtr to a known safe value that is contained within
 // the checkpoint.
@@ -318,8 +328,8 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
-	// We should just skip it.
-	if chunk.ChunkSize != t.chunkSize {
+	// We should just skip it. We also skip if dynamic chunking is disabled.
+	if chunk.ChunkSize != t.chunkSize || t.disableDynamicChunker {
 		return
 	}
 
