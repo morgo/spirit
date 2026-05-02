@@ -278,17 +278,17 @@ func TestReplicaTLSIntegration(t *testing.T) {
 
 	// Test that the replica DSN would be enhanced
 	enhanced, err := dbconn.EnhanceDSNWithTLS(replicaDSN, runner.dbConfig)
-	assert.NoError(t, err)
-	assert.Contains(t, enhanced, "tls=verify_ca")
-	assert.Contains(t, enhanced, "replica.example.com:3306")
+	require.NoError(t, err)
+	require.Contains(t, enhanced, "tls=verify_ca")
+	require.Contains(t, enhanced, "replica.example.com:3306")
 
 	// Verify that the enhancement preserves the original connection details
 	enhancedCfg, err := mysql.ParseDSN(enhanced)
-	assert.NoError(t, err)
-	assert.Equal(t, "replica_user", enhancedCfg.User)
-	assert.Equal(t, "replica_pass", enhancedCfg.Passwd)
-	assert.Equal(t, "replica.example.com:3306", enhancedCfg.Addr)
-	assert.Equal(t, "testdb", enhancedCfg.DBName)
+	require.NoError(t, err)
+	require.Equal(t, "replica_user", enhancedCfg.User)
+	require.Equal(t, "replica_pass", enhancedCfg.Passwd)
+	require.Equal(t, "replica.example.com:3306", enhancedCfg.Addr)
+	require.Equal(t, "testdb", enhancedCfg.DBName)
 }
 
 // generateTestCertForTLS creates a test certificate for TLS testing

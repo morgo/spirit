@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,7 +47,7 @@ func TestRenameColumnSimple(t *testing.T) {
 			var count int
 			err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM rcol_simple WHERE new_name IN ('alice','bob','charlie')").Scan(&count)
 			require.NoError(t, err)
-			assert.Equal(t, 3, count)
+			require.Equal(t, 3, count)
 		},
 	)
 }
@@ -70,13 +69,13 @@ func TestRenameColumnChangeType(t *testing.T) {
 			var sum int64
 			err := db.QueryRowContext(t.Context(), "SELECT SUM(big_val) FROM rcol_chtype").Scan(&sum)
 			require.NoError(t, err)
-			assert.Equal(t, int64(600), sum)
+			require.Equal(t, int64(600), sum)
 
 			// Verify column type changed
 			var colType string
 			err = db.QueryRowContext(t.Context(), "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='rcol_chtype' AND COLUMN_NAME='big_val'").Scan(&colType)
 			require.NoError(t, err)
-			assert.Equal(t, "bigint", colType)
+			require.Equal(t, "bigint", colType)
 		},
 	)
 }
@@ -100,9 +99,9 @@ func TestRenameColumnMultiple(t *testing.T) {
 			var a, b, c string
 			err := db.QueryRowContext(t.Context(), "SELECT renamed_a, col_b, renamed_c FROM rcol_multi ORDER BY id LIMIT 1").Scan(&a, &b, &c)
 			require.NoError(t, err)
-			assert.Equal(t, "a1", a)
-			assert.Equal(t, "b1", b)
-			assert.Equal(t, "c1", c)
+			require.Equal(t, "a1", a)
+			require.Equal(t, "b1", b)
+			require.Equal(t, "c1", c)
 		},
 	)
 }
@@ -129,8 +128,8 @@ func TestRenameColumnWithGeneratedColumnEnd(t *testing.T) {
 			var groupName, fullName string
 			err := db.QueryRowContext(t.Context(), "SELECT group_name, full_name FROM rcol_genend ORDER BY id LIMIT 1").Scan(&groupName, &fullName)
 			require.NoError(t, err)
-			assert.Equal(t, "vip", groupName)
-			assert.Equal(t, "John Doe", fullName) // generated column still works
+			require.Equal(t, "vip", groupName)
+			require.Equal(t, "John Doe", fullName) // generated column still works
 		},
 	)
 }
@@ -159,9 +158,9 @@ func TestRenameColumnWithGeneratedColumnMiddle(t *testing.T) {
 			var desc string
 			err := db.QueryRowContext(t.Context(), "SELECT price, total, item_desc FROM rcol_genmid ORDER BY id LIMIT 1").Scan(&price, &total, &desc)
 			require.NoError(t, err)
-			assert.Equal(t, 100, price)
-			assert.InDelta(t, 110.0, total, 0.01)
-			assert.Equal(t, "item1", desc)
+			require.Equal(t, 100, price)
+			require.InDelta(t, 110.0, total, 0.01)
+			require.Equal(t, "item1", desc)
 		},
 	)
 }
@@ -184,8 +183,8 @@ func TestRenameColumnWithAddColumn(t *testing.T) {
 			var extra int
 			err := db.QueryRowContext(t.Context(), "SELECT new_col, extra FROM rcol_addcol ORDER BY id LIMIT 1").Scan(&newCol, &extra)
 			require.NoError(t, err)
-			assert.Equal(t, "val1", newCol)
-			assert.Equal(t, 0, extra)
+			require.Equal(t, "val1", newCol)
+			require.Equal(t, 0, extra)
 		},
 	)
 }
@@ -208,13 +207,13 @@ func TestRenameColumnWithDropColumn(t *testing.T) {
 			var val string
 			err := db.QueryRowContext(t.Context(), "SELECT renamed_col FROM rcol_dropcol ORDER BY id LIMIT 1").Scan(&val)
 			require.NoError(t, err)
-			assert.Equal(t, "keep1", val)
+			require.Equal(t, "keep1", val)
 
 			// Verify drop_col no longer exists
 			var count int
 			err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='rcol_dropcol' AND COLUMN_NAME='drop_col'").Scan(&count)
 			require.NoError(t, err)
-			assert.Equal(t, 0, count)
+			require.Equal(t, 0, count)
 		},
 	)
 }
@@ -250,13 +249,13 @@ func TestRenameColumnLargerDataset(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 16, count)
+	require.Equal(t, 16, count)
 
 	// Verify data accessible via new column name
 	var name string
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT new_name FROM %s LIMIT 1", tableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "row", name)
+	require.Equal(t, "row", name)
 }
 
 // TestRenameColumnPKBlocked verifies that renaming a PK column is blocked
@@ -304,8 +303,8 @@ func TestRenameColumnChangeColumnWithTypeChange(t *testing.T) {
 			var total int64
 			err := db.QueryRowContext(t.Context(), "SELECT big_text, total FROM rcol_chg_tp ORDER BY id LIMIT 1").Scan(&text, &total)
 			require.NoError(t, err)
-			assert.Equal(t, "hello", text)
-			assert.Equal(t, int64(42), total)
+			require.Equal(t, "hello", text)
+			require.Equal(t, int64(42), total)
 		},
 	)
 }
@@ -332,12 +331,12 @@ func TestRenameColumnWithNullableColumns(t *testing.T) {
 			require.True(t, rows.Next())
 			var val *string
 			require.NoError(t, rows.Scan(&val))
-			assert.Nil(t, val) // first row should be NULL
+			require.Nil(t, val) // first row should be NULL
 
 			require.True(t, rows.Next())
 			require.NoError(t, rows.Scan(&val))
 			require.NotNil(t, val)
-			assert.Equal(t, "has_val", *val)
+			require.Equal(t, "has_val", *val)
 		},
 	)
 }
@@ -360,7 +359,7 @@ func TestRenameColumnCompositeKey(t *testing.T) {
 			var val string
 			err := db.QueryRowContext(t.Context(), "SELECT new_value FROM rcol_compkey WHERE tenant_id=1 AND item_id=2").Scan(&val)
 			require.NoError(t, err)
-			assert.Equal(t, "b", val)
+			require.Equal(t, "b", val)
 		},
 	)
 }
@@ -387,10 +386,10 @@ func TestRenameColumnAllCombined(t *testing.T) {
 			var amount, genCol, extra int
 			err := db.QueryRowContext(t.Context(), "SELECT new_name, amount, gen_col, extra FROM rcol_combo ORDER BY id LIMIT 1").Scan(&name, &amount, &genCol, &extra)
 			require.NoError(t, err)
-			assert.Equal(t, "alice", name)
-			assert.Equal(t, 10, amount)
-			assert.Equal(t, 20, genCol) // generated column should still work
-			assert.Equal(t, 99, extra)  // new column default
+			require.Equal(t, "alice", name)
+			require.Equal(t, 10, amount)
+			require.Equal(t, 20, genCol) // generated column should still work
+			require.Equal(t, 99, extra)  // new column default
 		},
 	)
 }
@@ -430,19 +429,19 @@ func TestRenameColumnForceCopyPath(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 32, count)
+	require.Equal(t, 32, count)
 
 	// Verify data accessible via new column name
 	var name string
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT new_name FROM %s WHERE id=1", tableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "row1", name)
+	require.Equal(t, "row1", name)
 
 	// Verify column type changed
 	var colType string
 	err = db.QueryRowContext(t.Context(), "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME='new_name'", tableName).Scan(&colType)
 	require.NoError(t, err)
-	assert.Equal(t, "varchar(200)", colType)
+	require.Equal(t, "varchar(200)", colType)
 }
 
 // TestRenameColumnEmpty tests rename on an empty table.
@@ -462,7 +461,7 @@ func TestRenameColumnEmpty(t *testing.T) {
 			var count int
 			err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='rcol_empty' AND COLUMN_NAME='new_col'").Scan(&count)
 			require.NoError(t, err)
-			assert.Equal(t, 1, count)
+			require.Equal(t, 1, count)
 		},
 	)
 }
