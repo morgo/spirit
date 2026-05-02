@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestChunk2String(t *testing.T) {
@@ -143,7 +144,7 @@ func TestWatermarkAboveClause(t *testing.T) {
 	// Build a watermark JSON: chunk with upper bound id=100
 	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`
 	clause, err := WatermarkAboveClause(ti, watermark)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`id` > 100", clause)
 
 	// Composite key
@@ -153,7 +154,7 @@ func TestWatermarkAboveClause(t *testing.T) {
 
 	watermark2 := `{"Key":["tenant_id","item_id"],"ChunkSize":1000,"LowerBound":{"Value":["1","50"],"Inclusive":true},"UpperBound":{"Value":["2","100"],"Inclusive":false}}`
 	clause2, err := WatermarkAboveClause(ti2, watermark2)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, clause2, "`tenant_id`")
 	assert.Contains(t, clause2, "`item_id`")
 	// Should be a row constructor comparison: ((tenant_id > 2) OR (tenant_id = 2 AND item_id > 100))
@@ -161,5 +162,5 @@ func TestWatermarkAboveClause(t *testing.T) {
 
 	// Invalid JSON
 	_, err = WatermarkAboveClause(ti, "not-json")
-	assert.Error(t, err)
+	require.Error(t, err)
 }

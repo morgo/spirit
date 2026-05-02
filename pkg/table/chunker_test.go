@@ -6,6 +6,7 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompositeChunker(t *testing.T) {
@@ -18,7 +19,7 @@ func TestCompositeChunker(t *testing.T) {
 	testutils.RunSQL(t, table)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -26,10 +27,10 @@ func TestCompositeChunker(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "composite")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 }
 
@@ -42,7 +43,7 @@ func TestOptimisticChunker(t *testing.T) {
 	testutils.RunSQL(t, table)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -50,10 +51,10 @@ func TestOptimisticChunker(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "optimistic")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerOptimistic{}, chunker)
 }
 
@@ -68,7 +69,7 @@ func TestNewCompositeChunkerWithKeyAndWhere(t *testing.T) {
 	testutils.RunSQL(t, table)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -76,7 +77,7 @@ func TestNewCompositeChunkerWithKeyAndWhere(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "composite")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	// When Key and Where are specified, NewChunker should always return a
 	// composite chunker even though this table has a single-column auto-inc PK.
@@ -84,7 +85,7 @@ func TestNewCompositeChunkerWithKeyAndWhere(t *testing.T) {
 		Key:   "age_idx",
 		Where: "age > 50",
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 	assert.Equal(t, "age_idx", chunker.(*chunkerComposite).keyName)
 	assert.Equal(t, "age > 50", chunker.(*chunkerComposite).where)

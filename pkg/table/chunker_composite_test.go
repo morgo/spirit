@@ -30,7 +30,7 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO composite_binary_t1 (a, b, c) SELECT UUID(), UUID(), 1 FROM composite_binary_t1 a JOIN composite_binary_t1 b JOIN composite_binary_t1 c LIMIT 1000000`) //nolint: dupword
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -38,7 +38,7 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "composite_binary_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	// Assert that the types are correct.
 	assert.Equal(t, []string{"varbinary", "varbinary"}, t1.keyColumnsMySQLTp)
@@ -46,18 +46,18 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 	assert.Equal(t, binaryType, t1.keyDatums[1])
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	chunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotContains(t, "`a` >= ", chunk.String()) // first chunk is special
 	upperBound := chunk.UpperBound.Value
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	previousUpperBound := upperBound
 	upperBound = chunk.UpperBound.Value
 	require.NotEqual(t, previousUpperBound, upperBound)
@@ -72,7 +72,7 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 	)
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	previousUpperBound = upperBound
 	upperBound = chunk.UpperBound.Value
 	require.NotEqual(t, previousUpperBound, upperBound)
@@ -88,7 +88,7 @@ func TestCompositeChunkerCompositeBinary(t *testing.T) {
 
 	// Test it advances again
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	previousUpperBound = upperBound
 	upperBound = chunk.UpperBound.Value
 	require.NotEqual(t, previousUpperBound, upperBound)
@@ -135,7 +135,7 @@ func TestCompositeChunkerBinary(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO composite_t1 (pk, a, b) SELECT UUID(), 1, 1 FROM composite_t1 a JOIN composite_t1 b JOIN composite_t1 c LIMIT 1000000`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -143,32 +143,32 @@ func TestCompositeChunkerBinary(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "composite_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	// Assert that the types are correct.
 	assert.Equal(t, []string{"varbinary"}, t1.keyColumnsMySQLTp)
 	assert.Equal(t, binaryType, t1.keyDatums[0])
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	chunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotContains(t, "`pk` >= ", chunk.String()) // first chunk is special
 	upperBound := chunk.UpperBound.Value[0].String()
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	previousUpperBound := upperBound
 	upperBound = chunk.UpperBound.Value[0].String()
 	require.NotEqual(t, previousUpperBound, upperBound)
 	assert.Equal(t, fmt.Sprintf("`pk` >= %s AND `pk` < %s", previousUpperBound, upperBound), chunk.String())
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	previousUpperBound = upperBound
 	upperBound = chunk.UpperBound.Value[0].String()
 	require.NotEqual(t, previousUpperBound, upperBound)
@@ -176,7 +176,7 @@ func TestCompositeChunkerBinary(t *testing.T) {
 
 	// Test it advances again
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	previousUpperBound = upperBound
 	upperBound = chunk.UpperBound.Value[0].String()
 	require.NotEqual(t, previousUpperBound, upperBound)
@@ -215,7 +215,7 @@ func TestCompositeChunkerInt(t *testing.T) {
 	testutils.RunSQL(t, "ALTER TABLE compositeint_t1 CHANGE COLUMN pk pk int NOT NULL") //nolint: dupword
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -223,31 +223,31 @@ func TestCompositeChunkerInt(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "compositeint_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	// Assert that the types are correct.
 	assert.Equal(t, []string{"int"}, t1.keyColumnsMySQLTp)
 	assert.Equal(t, signedType, t1.keyDatums[0])
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	// This might get messy if different versions skip
 	// auto_inc values differently.
 
 	chunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` < 1008", chunk.String()) // first chunk is special
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 1008 AND `pk` < 2032", chunk.String())
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 2032 AND `pk` < 3033", chunk.String())
 
 	totalChunks := 3 // 3 so far
@@ -278,7 +278,7 @@ func TestCompositeLowWatermark(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO compositewatermark_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositewatermark_t1 a JOIN compositewatermark_t1 b JOIN compositewatermark_t1 c LIMIT 10000`)
 	testutils.RunSQL(t, `INSERT INTO compositewatermark_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositewatermark_t1 a JOIN compositewatermark_t1 b JOIN compositewatermark_t1 c LIMIT 10000`)
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -286,7 +286,7 @@ func TestCompositeLowWatermark(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "compositewatermark_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker := &chunkerComposite{
 		Ti:                     t1,
@@ -296,7 +296,7 @@ func TestCompositeLowWatermark(t *testing.T) {
 	}
 	_, err = chunker.Next()
 	assert.Error(t, err) // not open yet
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 	assert.Error(t, chunker.Open()) // double open should fail
 
 	_, err = chunker.GetLowWatermark()
@@ -304,7 +304,7 @@ func TestCompositeLowWatermark(t *testing.T) {
 
 	assert.Equal(t, StartingChunkSize, int(chunker.chunkSize))
 	chunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` < 1008", chunk.String()) // first chunk
 	_, err = chunker.GetLowWatermark()
 	assert.Error(t, err) // no feedback yet.
@@ -315,75 +315,75 @@ func TestCompositeLowWatermark(t *testing.T) {
 	assert.Error(t, err) // there has been feedback, but watermark is not ready after first chunk.
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 1008 AND `pk` < 2032", chunk.String())
 	chunker.Feedback(chunk, time.Second, 1)
 	assert.Equal(t, 100, int(chunker.chunkSize)) // usually requires 10 feedbacks, but changed because >5x target
 
 	watermark, err := chunker.GetLowWatermark()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// The watermark can be divided into the chunkJSON and the rows.
 	var compositeWM compositeWatermark
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1008\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2032\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 2032 AND `pk` < 2133", chunk.String())
 	chunker.Feedback(chunk, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":100,\"LowerBound\":{\"Value\": [\"2032\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2133\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 
 	chunkAsync1, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 2133 AND `pk` < 2144", chunkAsync1.String())
 
 	chunkAsync2, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 2144 AND `pk` < 2155", chunkAsync2.String())
 
 	chunkAsync3, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 2155 AND `pk` < 2166", chunkAsync3.String())
 
 	chunker.Feedback(chunkAsync2, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":100,\"LowerBound\":{\"Value\": [\"2032\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2133\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 
 	chunker.Feedback(chunkAsync3, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":100,\"LowerBound\":{\"Value\": [\"2032\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2133\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 
 	chunker.Feedback(chunkAsync1, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":10,\"LowerBound\":{\"Value\": [\"2155\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2166\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "`pk` >= 2166 AND `pk` < 2177", chunk.String())
 	watermark, err = chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":10,\"LowerBound\":{\"Value\": [\"2155\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2166\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 	chunker.Feedback(chunk, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
 	assert.JSONEq(t, "{\"Key\":[\"pk\"],\"ChunkSize\":10,\"LowerBound\":{\"Value\": [\"2166\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2177\"],\"Inclusive\":false}}", compositeWM.ChunkJSON)
 
 	// Give enough feedback that the chunk size recalculation runs.
 	assert.Equal(t, 10, int(chunker.chunkSize))
 	for range 50 {
 		chunk, err = chunker.Next()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		if chunk.ChunkSize != 10 {
 			break // feedback has worked
 		}
@@ -410,7 +410,7 @@ func TestCompositeSmallTable(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO compositesmall_t1 (pk, a, b) SELECT UUID(), 1, 1 FROM compositesmall_t1 a JOIN compositesmall_t1 b JOIN compositesmall_t1 c LIMIT 10`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -418,18 +418,18 @@ func TestCompositeSmallTable(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "compositesmall_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.IsType(t, &chunkerComposite{}, chunker)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	chunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "1=1", chunk.String()) // small chunk
-	assert.NoError(t, chunker.Close())
+	require.NoError(t, chunker.Close())
 }
 
 func TestSetKey(t *testing.T) {
@@ -454,7 +454,7 @@ func TestSetKey(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO setkey_t1 SELECT NULL, 1, 1, 'PENDING', NOW(), NOW() FROM setkey_t1 a JOIN setkey_t1 b JOIN setkey_t1 c LIMIT 10000`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -463,19 +463,19 @@ func TestSetKey(t *testing.T) {
 
 	// Test SetKey with PrimaryKey
 	t1 := NewTableInfo(db, "test", "setkey_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	chunkerPK := &chunkerComposite{
 		Ti:            t1,
 		ChunkerTarget: 100 * time.Millisecond,
 		logger:        slog.Default(),
 	}
 	err = chunkerPK.SetKey("PRIMARY", "id < 1008")
-	assert.NoError(t, err)
-	assert.NoError(t, chunkerPK.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunkerPK.Open())
 
 	_, err = chunkerPK.Next()
-	assert.NoError(t, err)
-	assert.NoError(t, chunkerPK.Close())
+	require.NoError(t, err)
+	require.NoError(t, chunkerPK.Close())
 
 	chunker := &chunkerComposite{
 		Ti:            t1,
@@ -483,15 +483,15 @@ func TestSetKey(t *testing.T) {
 		logger:        slog.Default(),
 	}
 	err = chunker.SetKey("s", "status = 'ARCHIVED' AND updated_at < NOW() - INTERVAL 1 DAY")
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 
 	chunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// Because there are zero rows with status archived or updated_at that old,
 	// it returns 1 chunk with 1=1 and the original condition.
 	assert.Equal(t, "1=1 AND (status = 'ARCHIVED' AND updated_at < NOW() - INTERVAL 1 DAY)", chunk.String())
-	assert.NoError(t, chunker.Close())
+	require.NoError(t, chunker.Close())
 
 	// If I reset again with a different condition it should range as chunks.
 	chunker = &chunkerComposite{
@@ -500,30 +500,30 @@ func TestSetKey(t *testing.T) {
 		logger:        slog.Default(),
 	}
 	err = chunker.SetKey("s", "status = 'PENDING' AND updated_at > NOW() - INTERVAL 1 DAY")
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "((`status` < \"PENDING\")\n OR (`status` = \"PENDING\" AND `id` < 1008)) AND (status = 'PENDING' AND updated_at > NOW() - INTERVAL 1 DAY)", chunk.String())
 
 	// Check a chunk with both a lowerbound and upper bound.
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "((`status` > \"PENDING\")\n OR (`status` = \"PENDING\" AND `id` >= 1008)) AND ((`status` < \"PENDING\")\n OR (`status` = \"PENDING\" AND `id` < 2032)) AND (status = 'PENDING' AND updated_at > NOW() - INTERVAL 1 DAY)", chunk.String())
 
 	// repeat ~10 more times without calling Feedback()
 	for range 8 {
 		_, err = chunker.Next()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 	chunk, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "((`status` > \"PENDING\")\n OR (`status` = \"PENDING\" AND `id` >= 10040)) AND (status = 'PENDING' AND updated_at > NOW() - INTERVAL 1 DAY)", chunk.String())
 
 	_, err = chunker.Next()
 	assert.ErrorIs(t, err, ErrTableIsRead)
 
-	assert.NoError(t, chunker.Close())
+	require.NoError(t, chunker.Close())
 
 	// Test other index types.
 	for _, index := range []string{"u", "su", "ui"} {
@@ -533,10 +533,10 @@ func TestSetKey(t *testing.T) {
 			logger:        slog.Default(),
 		}
 		err = chunker.SetKey(index, "updated_at < NOW() - INTERVAL 1 DAY")
-		assert.NoError(t, err)
-		assert.NoError(t, chunker.Open())
+		require.NoError(t, err)
+		require.NoError(t, chunker.Open())
 		chunk, err = chunker.Next()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, "1=1 AND (updated_at < NOW() - INTERVAL 1 DAY)", chunk.String())
 
 		// check the key parts are correct.
@@ -548,7 +548,7 @@ func TestSetKey(t *testing.T) {
 		case "ui":
 			assert.Equal(t, []string{"updated_at", "id"}, chunker.chunkKeys)
 		}
-		assert.NoError(t, chunker.Close())
+		require.NoError(t, chunker.Close())
 	}
 }
 
@@ -590,7 +590,7 @@ func TestSetKeyCompositeKeyMerge(t *testing.T) {
 			INDEX dnc (dob,name,city)
 		)`)
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -598,14 +598,14 @@ func TestSetKeyCompositeKeyMerge(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "setkeycomposite_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	chunker := &chunkerComposite{
 		Ti:            t1,
 		ChunkerTarget: 100 * time.Millisecond,
 		logger:        slog.Default(),
 	}
 	err = chunker.SetKey("dnc", "")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, []string{"dob", "name", "city", "ssn"}, chunker.chunkKeys)
 }
 
@@ -625,7 +625,7 @@ func TestCompositeChunkerReset(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO compositereset_t1 (pk, a, b) SELECT NULL, 1, 1 FROM compositereset_t1 a JOIN compositereset_t1 b JOIN compositereset_t1 c LIMIT 5000`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -634,7 +634,7 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// Create table info and chunker
 	t1 := NewTableInfo(db, "test", "compositereset_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker := &chunkerComposite{
 		Ti:                     t1,
@@ -649,7 +649,7 @@ func TestCompositeChunkerReset(t *testing.T) {
 	assert.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	// Capture initial state after opening
 	initialChunkPtrs := len(chunker.chunkPtrs) // Should be 0 (empty slice)
@@ -659,15 +659,15 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// Process some chunks to change the state
 	chunk1, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, chunk1.String(), "`pk` <") // first chunk
 
 	chunk2, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, chunk2.String(), "`pk` >=") // second chunk has bounds
 
 	chunk3, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, chunk3.String(), "`pk` >=") // third chunk has bounds
 
 	// Give feedback to advance watermark and change state
@@ -683,12 +683,12 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// Verify watermark exists
 	watermark, err := chunker.GetLowWatermark()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotEmpty(t, watermark)
 
 	// Now reset the chunker
 	err = chunker.Reset()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Verify state is reset to initial values
 	assert.Len(t, chunker.chunkPtrs, initialChunkPtrs, "chunkPtrs should be reset to initial value (empty slice)")
@@ -712,15 +712,15 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// Verify that after reset, the chunker produces the same sequence as a fresh chunker
 	resetChunk1, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, chunk1.String(), resetChunk1.String(), "First chunk after reset should match original first chunk")
 
 	resetChunk2, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, chunk2.String(), resetChunk2.String(), "Second chunk after reset should match original second chunk")
 
 	resetChunk3, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, chunk3.String(), resetChunk3.String(), "Third chunk after reset should match original third chunk")
 
 	// Test that reset works even with more complex state changes
@@ -728,19 +728,19 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// The chunk size should change due to panic factor
 	_, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// The chunk size might be reduced due to the slow feedback
 
 	// Reset again
 	err = chunker.Reset()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Verify chunk size is back to initial value
 	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value even after dynamic changes")
 
 	// Verify we can still get the same first chunk
 	finalResetChunk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, chunk1.String(), finalResetChunk.String(), "First chunk after second reset should still match original")
 
 	// Test with custom key and where condition
@@ -753,24 +753,24 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// Set a custom key and where condition
 	err = chunker2.SetKey("PRIMARY", "a = 1")
-	assert.NoError(t, err)
-	assert.NoError(t, chunker2.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunker2.Open())
 
 	// Get a chunk with the custom condition
 	customChunk, err := chunker2.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, customChunk.String(), "a = 1") // Should contain the where condition
 
 	// Reset and verify the custom condition is preserved
 	err = chunker2.Reset()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	resetCustomChunk, err := chunker2.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, customChunk.String(), resetCustomChunk.String(), "Custom chunk should match after reset")
 
-	assert.NoError(t, chunker2.Close())
-	assert.NoError(t, chunker.Close())
+	require.NoError(t, chunker2.Close())
+	require.NoError(t, chunker.Close())
 }
 
 // TestCompositeChunkerWatermarkOptimizations tests KeyAboveHighWatermark and KeyBelowLowWatermark
@@ -808,7 +808,7 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 		SELECT 3, n, 1 FROM seq`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -827,10 +827,10 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	require.Equal(t, 1000, countA1, "Expected 1000 rows for a=1")
 
 	tbl := NewTableInfo(db, "test", "compositewatermarkopt_t1")
-	assert.NoError(t, tbl.SetInfo(t.Context()))
+	require.NoError(t, tbl.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(tbl, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
 	// Before opening, everything is above high watermark
@@ -838,7 +838,7 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	assert.True(t, comp.KeyAboveHighWatermark(100))
 	assert.False(t, comp.KeyBelowLowWatermark(1)) // watermark not ready
 
-	assert.NoError(t, comp.Open())
+	require.NoError(t, comp.Open())
 
 	// After opening but before first chunk, key=1 should still be above
 	assert.True(t, comp.KeyAboveHighWatermark(1))
@@ -926,7 +926,7 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	assert.True(t, comp.KeyBelowLowWatermark(1))
 	assert.True(t, comp.KeyBelowLowWatermark(100))
 
-	assert.NoError(t, comp.Close())
+	require.NoError(t, comp.Close())
 }
 
 // TestCompositeChunkerWatermarkNonNumeric tests that watermark optimizations
@@ -959,7 +959,7 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 		SELECT CONCAT('key', LPAD(n, 5, '0')), n FROM seq`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -974,13 +974,13 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 	t.Logf("VARCHAR test: %d rows inserted", count)
 
 	tbl := NewTableInfo(db, "test", "compositewatermarknn_t1")
-	assert.NoError(t, tbl.SetInfo(t.Context()))
+	require.NoError(t, tbl.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(tbl, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
-	assert.NoError(t, comp.Open())
+	require.NoError(t, comp.Open())
 
 	// Get first chunk
 	chunk1, err := comp.Next()
@@ -1005,7 +1005,7 @@ func TestCompositeChunkerWatermarkNonNumeric(t *testing.T) {
 	// Verify the watermark value is what we expect
 	assert.Equal(t, upperVal, watermarkUpper)
 
-	assert.NoError(t, comp.Close())
+	require.NoError(t, comp.Close())
 }
 
 // TestCompositeChunkerWatermarkDateTime tests that watermark optimizations
@@ -1038,7 +1038,7 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 		SELECT DATE_ADD('2024-01-01 00:00:00', INTERVAL n HOUR), n FROM seq`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -1053,13 +1053,13 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 	t.Logf("DATETIME test: %d rows inserted", count)
 
 	tbl := NewTableInfo(db, "test", "compositewatermarkdt_t1")
-	assert.NoError(t, tbl.SetInfo(t.Context()))
+	require.NoError(t, tbl.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(tbl, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
-	assert.NoError(t, comp.Open())
+	require.NoError(t, comp.Open())
 
 	// Get first chunk
 	chunk1, err := comp.Next()
@@ -1084,7 +1084,7 @@ func TestCompositeChunkerWatermarkDateTime(t *testing.T) {
 	// Verify the watermark value is what we expect
 	assert.Equal(t, upperVal, watermarkUpper)
 
-	assert.NoError(t, comp.Close())
+	require.NoError(t, comp.Close())
 }
 
 // TestCompositeChunkerCollationDifference demonstrates how Go's lexicographic comparison
@@ -1133,7 +1133,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO compositecollation_t1 VALUES ('test', 9003)")
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -1149,7 +1149,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 	// Verify MySQL's collation order vs Go's lexicographic order
 	var mysqlOrder []string
 	rows, err := db.QueryContext(t.Context(), "SELECT DISTINCT name FROM compositecollation_t1 ORDER BY name LIMIT 20")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	for rows.Next() {
 		var name string
 		assert.NoError(t, rows.Scan(&name))
@@ -1163,13 +1163,13 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 	// (uppercase letters have lower byte values than lowercase in ASCII)
 
 	tbl := NewTableInfo(db, "test", "compositecollation_t1")
-	assert.NoError(t, tbl.SetInfo(t.Context()))
+	require.NoError(t, tbl.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(tbl, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
-	assert.NoError(t, comp.Open())
+	require.NoError(t, comp.Open())
 
 	// Get first chunk to establish the watermark
 	chunk1, err := comp.Next()
@@ -1232,7 +1232,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 		t.Logf("  - Safety: Checksum phase uses full table scans without watermarks")
 	}
 
-	assert.NoError(t, comp.Close())
+	require.NoError(t, comp.Close())
 }
 
 // TestCompositeChunkerWatermarkWithOutOfOrderCompletion tests that watermark
@@ -1274,7 +1274,7 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 		SELECT n FROM seq`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -1282,13 +1282,13 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 	}()
 
 	tbl := NewTableInfo(db, "test", "compositewatermarkooo_t1")
-	assert.NoError(t, tbl.SetInfo(t.Context()))
+	require.NoError(t, tbl.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(tbl, ChunkerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
-	assert.NoError(t, comp.Open())
+	require.NoError(t, comp.Open())
 
 	// Get three chunks - need this many to test out-of-order completion
 	chunk1, err := comp.Next()
@@ -1345,7 +1345,7 @@ func TestCompositeChunkerWatermarkWithOutOfOrderCompletion(t *testing.T) {
 	// Now chunk3 range should be below watermark
 	assert.True(t, comp.KeyBelowLowWatermark(chunk3Lower))
 
-	assert.NoError(t, comp.Close())
+	require.NoError(t, comp.Close())
 }
 
 // TestCompositeChunkerCheckpointHighPtr verifies that after OpenAtWatermark,
@@ -1385,7 +1385,7 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 		) SELECT n, 1 FROM seq`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -1393,13 +1393,13 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 	}()
 
 	srcTable := NewTableInfo(db, "test", "composite_ckpt_src")
-	assert.NoError(t, srcTable.SetInfo(t.Context()))
+	require.NoError(t, srcTable.SetInfo(t.Context()))
 
 	dstTable := NewTableInfo(db, "test", "composite_ckpt_dst")
-	assert.NoError(t, dstTable.SetInfo(t.Context()))
+	require.NoError(t, dstTable.SetInfo(t.Context()))
 
 	chunker, err := NewChunker(srcTable, ChunkerConfig{NewTable: dstTable})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
 	// Before OpenAtWatermark: everything should be "above" (no chunks dispatched)
@@ -1407,7 +1407,7 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 
 	// Simulate a watermark at a=200 — the copier had reached this point before interruption.
 	watermark := `{"ChunkJSON":"{\"Key\":[\"a\",\"b\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"100\",\"1\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"200\",\"1\"],\"Inclusive\":false}}","RowsCopied":200}`
-	assert.NoError(t, comp.OpenAtWatermark(watermark))
+	require.NoError(t, comp.OpenAtWatermark(watermark))
 
 	// checkpointHighPtr should now be set to the max value of the destination
 	// table's first PK column (a=500, since dstTable has rows up to a=499).
@@ -1430,5 +1430,5 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 	// Key a=999 is well above — safe to discard.
 	assert.True(t, comp.KeyAboveHighWatermark(999))
 
-	assert.NoError(t, comp.Close())
+	require.NoError(t, comp.Close())
 }

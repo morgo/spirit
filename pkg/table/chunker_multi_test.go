@@ -436,7 +436,7 @@ func TestMultiChunkerReset(t *testing.T) {
 	assert.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	// Capture initial state after opening
 	initialRowsCopied1, initialChunksCopied1, _ := mock1.Progress()
