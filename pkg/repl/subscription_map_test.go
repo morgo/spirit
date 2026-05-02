@@ -282,7 +282,7 @@ func TestKeyChangedOverwrite(t *testing.T) {
 	sub.HasChanged([]any{1}, nil, false) // Insert
 	sub.HasChanged([]any{1}, nil, true)  // Delete
 	sub.HasChanged([]any{1}, nil, false) // Insert again
-	require.Equal(t, 1, sub.Length())     // Should only count once in the map
+	require.Equal(t, 1, sub.Length())    // Should only count once in the map
 
 	// Test with deltaQueue
 	subQueue := &deltaQueue{
