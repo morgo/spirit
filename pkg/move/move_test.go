@@ -29,7 +29,7 @@ func TestBasicMove(t *testing.T) {
 		t.Skip("Skipping test for minimal RBR test runner")
 	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	src := cfg.Clone()
 	src.DBName = "source"
@@ -77,7 +77,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 		t.Skip("Skipping test for minimal RBR test runner")
 	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	src := cfg.Clone()
 	src.DBName = "source_resume"
@@ -98,11 +98,11 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 
 	// reset the target database.
 	db, err := sql.Open("mysql", cfg.FormatDSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "DROP DATABASE IF EXISTS dest_resume")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "CREATE DATABASE dest_resume")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	// test
 	move := &Move{
@@ -113,7 +113,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 		DeferSecondaryIndexes: deferSecondaryIndexes,
 	}
 	r, err := NewRunner(move)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Do all the setup stuff from runnner.Run()
 	// Just don't run copier.Run() or cutover etc.
@@ -121,14 +121,14 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	ctx, r.cancelFunc = context.WithCancel(t.Context())
 	r.dbConfig = dbconn.NewDBConfig()
 	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	srcConfig, err := mysql.ParseDSN(r.move.SourceDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	r.sources = []sourceInfo{{db: srcDB, config: srcConfig, dsn: r.move.SourceDSN}}
 	db, err = dbconn.New(r.move.TargetDSN, r.dbConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	r.targets = []applier.Target{{
 		KeyRange: "0",
 		DB:       db,
@@ -153,7 +153,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	// This will prevent resume.
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 ADD COLUMN extra_col INT DEFAULT 0`)
 	r, err = NewRunner(move)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Error(t, r.Run(t.Context()))
 	assert.NoError(t, r.Close())
 
@@ -162,7 +162,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	move.Threads = 4
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NoError(t, r.Run(t.Context()))
 	assert.NoError(t, r.Close())
 }
@@ -174,7 +174,7 @@ func TestEmptyDatabaseMove(t *testing.T) {
 		t.Skip("Skipping test for minimal RBR test runner")
 	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	src := cfg.Clone()
 	src.DBName = "source_empty"
@@ -209,7 +209,7 @@ func TestEmptyDatabaseMove(t *testing.T) {
 	}
 
 	runner, err := NewRunner(move)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	runner.SetCutover(cutoverFunc)
 
 	// The move should succeed even with no tables

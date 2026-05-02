@@ -72,7 +72,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load
@@ -123,13 +123,13 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	// Verify data was moved correctly
 	var sourceCount, targetCount int
 	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM source_concurrent.xfers_old").Scan(&sourceCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	targetDB, err := sql.Open("mysql", targetDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(targetDB)
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_concurrent.xfers").Scan(&targetCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	t.Logf("Source count: %d, Target count: %d", sourceCount, targetCount)
 	assert.Equal(t, sourceCount, targetCount, "Source and target should have same row count")
@@ -259,7 +259,7 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load

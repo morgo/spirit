@@ -29,7 +29,7 @@ func TestShardedMove(t *testing.T) {
 		t.Skip("Skipping test for minimal RBR test runner")
 	}
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Setup source database
 	src := cfg.Clone()
@@ -52,7 +52,7 @@ func TestShardedMove(t *testing.T) {
 	// Insert test data - we'll use user_id as the sharding column
 	// Insert enough rows to ensure both shards get data
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	for i := 1; i <= 100; i++ {
@@ -70,11 +70,11 @@ func TestShardedMove(t *testing.T) {
 	// Create database connections for each shard
 	dbConfig := dbconn.NewDBConfig()
 	shard0DB, err := dbconn.New(shard0.FormatDSN(), dbConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(shard0DB)
 
 	shard1DB, err := dbconn.New(shard1.FormatDSN(), dbConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(shard1DB)
 
 	// Create a sharding provider that uses user_id as the sharding column
@@ -111,18 +111,18 @@ func TestShardedMove(t *testing.T) {
 		return nil
 	}
 	runner, err := NewRunner(move)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	runner.SetCutover(cutoverFunc)
 
 	// Check initial data before move
 	var initialCount int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM source_sharded.users").Scan(&initialCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	t.Logf("Initial source count: %d", initialCount)
 
 	// Run the sharded move
 	err = runner.Run(t.Context())
-	assert.NoError(t, err, "Sharded move should succeed")
+	require.NoError(t, err, "Sharded move should succeed")
 
 	// Verify cutover was called
 	assert.True(t, cutoverCalled, "Cutover function should have been called")
@@ -130,14 +130,14 @@ func TestShardedMove(t *testing.T) {
 	// Check if users_old exists in source
 	var oldTableCount int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM source_sharded.users_old").Scan(&oldTableCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Verify data distribution across shards
 	var shard0Count, shard1Count int
 	err = shard0DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&shard0Count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = shard1DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&shard1Count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Equal(t, initialCount, oldTableCount, "Source old table should have all rows")
 	assert.Equal(t, initialCount/2, shard0Count, "half the rows in shard 0")
@@ -211,7 +211,7 @@ func TestNtoMShardedMove(t *testing.T) {
 	}
 
 	err = move.Run()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Move.Run() closes the target DB connections, so open fresh ones for verification.
 	verifyTgt0DB, err := dbconn.New(testutils.DSNForDatabase(tgt0Name), dbConfig)
@@ -224,9 +224,9 @@ func TestNtoMShardedMove(t *testing.T) {
 	// Verify: all 100 rows should be across the 2 targets.
 	var tgt0Count, tgt1Count int
 	err = verifyTgt0DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&tgt0Count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = verifyTgt1DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&tgt1Count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Equal(t, 100, tgt0Count+tgt1Count, "total rows across targets should be 100")
 	assert.Equal(t, 50, tgt0Count, "even ids should go to target 0 (-80)")
@@ -235,16 +235,16 @@ func TestNtoMShardedMove(t *testing.T) {
 	// Verify even IDs are on target 0, odd IDs on target 1.
 	var minID, maxID int
 	err = verifyTgt0DB.QueryRowContext(t.Context(), "SELECT MIN(id), MAX(id) FROM users").Scan(&minID, &maxID)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// All even IDs should be on target 0.
 	var oddCount int
 	err = verifyTgt0DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users WHERE id % 2 = 1").Scan(&oddCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 0, oddCount, "target 0 should have no odd IDs")
 
 	var evenCount int
 	err = verifyTgt1DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users WHERE id % 2 = 0").Scan(&evenCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 0, evenCount, "target 1 should have no even IDs")
 }
 

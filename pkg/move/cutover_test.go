@@ -139,7 +139,7 @@ func TestCutOverSingleSource(t *testing.T) {
 	// Verify: t1 renamed to t1_old.
 	var count int
 	err = srcDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1_old").Scan(&count)
-	assert.NoError(t, err, "t1_old should exist")
+	require.NoError(t, err, "t1_old should exist")
 	assert.Equal(t, 10, count, "t1_old should have 10 rows")
 
 	_, err = srcDB.ExecContext(ctx, "SELECT 1 FROM t1")
