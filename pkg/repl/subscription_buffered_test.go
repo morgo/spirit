@@ -12,7 +12,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql2 "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,46 +28,46 @@ func TestBufferedMap(t *testing.T) {
 	require.NoError(t, client.BlockWait(t.Context()))
 
 	// It should show up in the subscription.
-	assert.Equal(t, 1, client.GetDeltaLen())
+	require.Equal(t, 1, client.GetDeltaLen())
 
 	// Inspect the subscription directly.
 	sub, ok := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
 	require.True(t, ok)
-	assert.Equal(t, 1, sub.Length())
+	require.Equal(t, 1, sub.Length())
 
 	// Check the logical row structure
-	assert.False(t, sub.changes["1"].logicalRow.IsDeleted)
-	assert.Equal(t, []any{int32(1), "test"}, sub.changes["1"].logicalRow.RowImage)
+	require.False(t, sub.changes["1"].logicalRow.IsDeleted)
+	require.Equal(t, []any{int32(1), "test"}, sub.changes["1"].logicalRow.RowImage)
 
 	// Now delete the row.
 	testutils.RunSQL(t, fmt.Sprintf("DELETE FROM %s WHERE id = 1", srcTable.QuotedTableName))
 	require.NoError(t, client.BlockWait(t.Context()))
 
-	assert.True(t, sub.changes["1"].logicalRow.IsDeleted)
-	assert.Equal(t, []any(nil), sub.changes["1"].logicalRow.RowImage)
+	require.True(t, sub.changes["1"].logicalRow.IsDeleted)
+	require.Equal(t, []any(nil), sub.changes["1"].logicalRow.RowImage)
 
 	// Now insert 2 more rows:
 	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'test2'), (3, 'test3')", srcTable.QuotedTableName))
 	require.NoError(t, client.BlockWait(t.Context()))
 
-	assert.Equal(t, 3, sub.Length())
-	assert.False(t, sub.changes["2"].logicalRow.IsDeleted)
-	assert.False(t, sub.changes["3"].logicalRow.IsDeleted)
+	require.Equal(t, 3, sub.Length())
+	require.False(t, sub.changes["2"].logicalRow.IsDeleted)
+	require.False(t, sub.changes["3"].logicalRow.IsDeleted)
 
 	// Now flush the changes.
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
-	assert.True(t, allFlushed)
+	require.True(t, allFlushed)
 
 	// The destination table should now have the 2 rows.
 	var name string
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 2", dstTable.QuotedTableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "test2", name)
+	require.Equal(t, "test2", name)
 
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 3", dstTable.QuotedTableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "test3", name)
+	require.Equal(t, "test3", name)
 }
 
 // TestBufferedMapVariableColumns tests the buffered map with a newTable
@@ -123,8 +122,8 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 
 	// It should show up in the subscription.
 	// Flush it.
-	assert.Equal(t, 1, client.GetDeltaLen())
-	assert.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 1, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
 }
 
 // TestBufferedMapIllegalValues tests the buffered map with values that
@@ -186,7 +185,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 
 	// It should show up in the subscription.
 	// Flush it.
-	assert.Equal(t, 4, client.GetDeltaLen())
+	require.Equal(t, 4, client.GetDeltaLen())
 	require.NoError(t, client.Flush(t.Context()))
 
 	// Now we want to check that the tables match,
@@ -197,7 +196,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT BIT_XOR(CRC32(name)) as checksum FROM %s", dstTable.QuotedTableName)).Scan(&checksumDst)
 	require.NoError(t, err)
-	assert.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
+	require.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
 }
 
 // TestBufferedMapFlushUnderLockBypassesWatermark is a regression test for the bug where
@@ -290,27 +289,27 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	// because KeyBelowLowWatermark(5) = (5 < 5) = false
 	sub.HasChanged([]any{5}, []any{5, "at_watermark"}, false)
 
-	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
+	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
 
 	// Verify watermark behavior before flush
-	assert.True(t, mockChunker.KeyBelowLowWatermark(1), "Key 1 should be below watermark")
-	assert.True(t, mockChunker.KeyBelowLowWatermark(3), "Key 3 should be below watermark")
-	assert.True(t, mockChunker.KeyBelowLowWatermark(4), "Key 4 should be below watermark")
-	assert.False(t, mockChunker.KeyBelowLowWatermark(5), "Key 5 should NOT be below watermark (at current position)")
+	require.True(t, mockChunker.KeyBelowLowWatermark(1), "Key 1 should be below watermark")
+	require.True(t, mockChunker.KeyBelowLowWatermark(3), "Key 3 should be below watermark")
+	require.True(t, mockChunker.KeyBelowLowWatermark(4), "Key 4 should be below watermark")
+	require.False(t, mockChunker.KeyBelowLowWatermark(5), "Key 5 should NOT be below watermark (at current position)")
 
 	// First, disable watermark optimization and do a normal flush to populate the new table
 	// This simulates the state after the copier has finished
 	sub.SetWatermarkOptimization(false)
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
-	assert.True(t, allFlushed)
-	assert.Equal(t, 0, sub.Length())
+	require.True(t, allFlushed)
+	require.Equal(t, 0, sub.Length())
 
 	// Verify all rows were copied
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 4, count, "All 4 rows should be in the new table")
+	require.Equal(t, 4, count, "All 4 rows should be in the new table")
 
 	// Now re-enable watermark optimization and add the same changes again
 	// This simulates changes that came in during the final stages of migration
@@ -319,7 +318,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	sub.HasChanged([]any{3}, []any{3, "below_watermark_2_updated"}, false)
 	sub.HasChanged([]any{4}, []any{4, "below_watermark_3_updated"}, false)
 	sub.HasChanged([]any{5}, []any{5, "at_watermark_updated"}, false)
-	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes again")
+	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes again")
 
 	// Create a table lock for underLock=true flush
 	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
@@ -335,8 +334,8 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	// With the bug (before the fix), allFlushed would be false and sub.Length() would be 3
 	// because keys 1, 3, 4 (below watermark) would not be flushed
 	require.NoError(t, err)
-	assert.True(t, allFlushed, "All changes should be flushed when underLock=true - THIS IS THE KEY TEST")
-	assert.Equal(t, 0, sub.Length(), "All changes should be removed from the map after flush - THIS IS THE KEY TEST")
+	require.True(t, allFlushed, "All changes should be flushed when underLock=true - THIS IS THE KEY TEST")
+	require.Equal(t, 0, sub.Length(), "All changes should be removed from the map after flush - THIS IS THE KEY TEST")
 
 	// Note: We don't verify the database state here because the applier operations
 	// are executed under the table lock. The important test is that sub.Length() == 0,
@@ -415,7 +414,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	sub.HasChanged([]any{4}, []any{4, "below_watermark_3"}, false)
 	sub.HasChanged([]any{5}, []any{5, "at_watermark"}, false) // At watermark, not below
 
-	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
+	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
 
 	// Flush WITHOUT lock (underLock=false)
 	// This should respect the watermark optimization:
@@ -423,30 +422,30 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	// Key 5 is at watermark (copier hasn't passed it) → NOT flushed
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
-	assert.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
-	assert.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
+	require.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
+	require.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
 
 	// Verify that 3 rows (below watermark) were copied to the new table
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 3, count, "Only 3 rows below watermark should be in the new table")
+	require.Equal(t, 3, count, "Only 3 rows below watermark should be in the new table")
 
 	// Verify that rows below watermark were copied
 	var name string
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 1", dstTable.QuotedTableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "below_watermark", name)
+	require.Equal(t, "below_watermark", name)
 
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 3", dstTable.QuotedTableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "below_watermark_2", name)
+	require.Equal(t, "below_watermark_2", name)
 
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 4", dstTable.QuotedTableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "below_watermark_3", name)
+	require.Equal(t, "below_watermark_3", name)
 
 	// Verify that the row at watermark was NOT copied
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 5", dstTable.QuotedTableName)).Scan(&name)
-	assert.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
+	require.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
 }

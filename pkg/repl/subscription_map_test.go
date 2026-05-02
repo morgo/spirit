@@ -9,7 +9,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,25 +46,25 @@ func TestSubscriptionDeltaMap(t *testing.T) {
 	}
 
 	// Test initial state
-	assert.Equal(t, 0, sub.Length())
+	require.Equal(t, 0, sub.Length())
 
 	// Test key changes
 	sub.HasChanged([]any{1}, nil, false) // Insert/Replace
-	assert.Equal(t, 1, sub.Length())
+	require.Equal(t, 1, sub.Length())
 
 	sub.HasChanged([]any{2}, nil, true) // Delete
-	assert.Equal(t, 2, sub.Length())
+	require.Equal(t, 2, sub.Length())
 
 	// Test statement generation
 	deleteStmt := sub.createDeleteStmt([]string{"'1'"})
-	assert.Contains(t, deleteStmt.stmt, "DELETE FROM")
-	assert.Contains(t, deleteStmt.stmt, "WHERE")
-	assert.Equal(t, 1, deleteStmt.numKeys)
+	require.Contains(t, deleteStmt.stmt, "DELETE FROM")
+	require.Contains(t, deleteStmt.stmt, "WHERE")
+	require.Equal(t, 1, deleteStmt.numKeys)
 
 	replaceStmt := sub.createReplaceStmt([]string{"'1'"})
-	assert.Contains(t, replaceStmt.stmt, "REPLACE INTO")
-	assert.Contains(t, replaceStmt.stmt, "SELECT")
-	assert.Equal(t, 1, replaceStmt.numKeys)
+	require.Contains(t, replaceStmt.stmt, "REPLACE INTO")
+	require.Contains(t, replaceStmt.stmt, "SELECT")
+	require.Equal(t, 1, replaceStmt.numKeys)
 }
 
 func TestFlushWithLock(t *testing.T) {
@@ -119,7 +118,7 @@ func TestFlushWithLock(t *testing.T) {
 	// Test flush with lock
 	allFlushed, err := sub.Flush(t.Context(), true, lock)
 	require.NoError(t, err)
-	assert.True(t, allFlushed)
+	require.True(t, allFlushed)
 
 	require.NoError(t, lock.Close(t.Context()))
 
@@ -127,7 +126,7 @@ func TestFlushWithLock(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 1, count) // Only ID 1 should be present, ID 2 was deleted
+	require.Equal(t, 1, count) // Only ID 1 should be present, ID 2 was deleted
 }
 
 func TestFlushWithoutLock(t *testing.T) {
@@ -180,13 +179,13 @@ func TestFlushWithoutLock(t *testing.T) {
 	// Test flush without lock
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
-	assert.True(t, allFlushed)
+	require.True(t, allFlushed)
 
 	// Verify the changes were applied
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count) // IDs 1 and 2 should be present, 3 and 4 were deleted
+	require.Equal(t, 2, count) // IDs 1 and 2 should be present, 3 and 4 were deleted
 }
 
 func TestConcurrentKeyChanges(t *testing.T) {
@@ -242,7 +241,7 @@ func TestConcurrentKeyChanges(t *testing.T) {
 	<-done
 	<-done
 
-	assert.Equal(t, 200, sub.Length())
+	require.Equal(t, 200, sub.Length())
 }
 
 func TestKeyChangedOverwrite(t *testing.T) {
@@ -283,7 +282,7 @@ func TestKeyChangedOverwrite(t *testing.T) {
 	sub.HasChanged([]any{1}, nil, false) // Insert
 	sub.HasChanged([]any{1}, nil, true)  // Delete
 	sub.HasChanged([]any{1}, nil, false) // Insert again
-	assert.Equal(t, 1, sub.Length())     // Should only count once in the map
+	require.Equal(t, 1, sub.Length())     // Should only count once in the map
 
 	// Test with deltaQueue
 	subQueue := &deltaQueue{
@@ -297,7 +296,7 @@ func TestKeyChangedOverwrite(t *testing.T) {
 	subQueue.HasChanged([]any{1}, nil, false)
 	subQueue.HasChanged([]any{1}, nil, true)
 	subQueue.HasChanged([]any{1}, nil, false)
-	assert.Equal(t, 3, subQueue.Length()) // Queue maintains all changes
+	require.Equal(t, 3, subQueue.Length()) // Queue maintains all changes
 }
 
 func TestKeyChangedEdgeCases(t *testing.T) {
@@ -337,25 +336,25 @@ func TestKeyChangedEdgeCases(t *testing.T) {
 
 	// Test with string keys
 	sub.HasChanged([]any{"key1"}, nil, false)
-	assert.Equal(t, 1, sub.Length())
+	require.Equal(t, 1, sub.Length())
 
 	// Test with composite keys
 	sub.HasChanged([]any{"prefix", 123}, nil, false)
-	assert.Equal(t, 2, sub.Length())
+	require.Equal(t, 2, sub.Length())
 
 	sub.SetWatermarkOptimization(true)
 
 	// Test exactly at watermark (position 5)
 	sub.HasChanged([]any{5}, nil, false)
-	assert.Equal(t, 3, sub.Length())
+	require.Equal(t, 3, sub.Length())
 
 	// Test one above watermark (position 6 > 5)
 	sub.HasChanged([]any{6}, nil, false)
-	assert.Equal(t, 3, sub.Length()) // Should not increase as it's above watermark
+	require.Equal(t, 3, sub.Length()) // Should not increase as it's above watermark
 
 	// Test with string key when watermark is enabled
 	sub.HasChanged([]any{"key2"}, nil, false)
-	assert.Equal(t, 4, sub.Length()) // Should still process string keys
+	require.Equal(t, 4, sub.Length()) // Should still process string keys
 }
 
 func TestKeyChangedNilAndEmpty(t *testing.T) {
@@ -392,15 +391,15 @@ func TestKeyChangedNilAndEmpty(t *testing.T) {
 
 	// Test with empty string key
 	sub.HasChanged([]any{""}, nil, false)
-	assert.Equal(t, 1, sub.Length())
+	require.Equal(t, 1, sub.Length())
 
 	// Test with empty array as part of composite key
 	sub.HasChanged([]any{"prefix", []string{}}, nil, false)
-	assert.Equal(t, 2, sub.Length())
+	require.Equal(t, 2, sub.Length())
 
 	// Test with zero values
 	sub.HasChanged([]any{0}, nil, false)
-	assert.Equal(t, 3, sub.Length())
+	require.Equal(t, 3, sub.Length())
 }
 
 func TestKeyAboveWatermark(t *testing.T) {
@@ -439,18 +438,18 @@ func TestKeyAboveWatermark(t *testing.T) {
 
 	// Test with watermark optimization disabled
 	sub.HasChanged([]any{1}, nil, false)
-	assert.Equal(t, 1, sub.Length())
+	require.Equal(t, 1, sub.Length())
 
 	// Enable watermark optimization
 	sub.SetWatermarkOptimization(true)
 
 	// Test key below watermark (3 < 5)
 	sub.HasChanged([]any{3}, nil, false)
-	assert.Equal(t, 2, sub.Length())
+	require.Equal(t, 2, sub.Length())
 
 	// Test key above watermark (10 > 5)
 	sub.HasChanged([]any{10}, nil, false)
-	assert.Equal(t, 2, sub.Length()) // Should not increase as key is above watermark
+	require.Equal(t, 2, sub.Length()) // Should not increase as key is above watermark
 }
 
 func TestKeyBelowWatermarkMock(t *testing.T) {
@@ -492,16 +491,16 @@ func TestKeyBelowWatermarkMock(t *testing.T) {
 	sub.HasChanged([]any{1}, nil, false)
 	sub.HasChanged([]any{3}, nil, false)
 	sub.HasChanged([]any{7}, nil, false)
-	assert.Equal(t, 3, sub.Length())
+	require.Equal(t, 3, sub.Length())
 
 	// Test that keys below watermark are identified correctly
 	// Key 3 < 5 (current position), so it should be below watermark
-	assert.True(t, mockChunker.KeyBelowLowWatermark(3))
+	require.True(t, mockChunker.KeyBelowLowWatermark(3))
 	// Key 7 > 5 (current position), so it should not be below watermark
-	assert.False(t, mockChunker.KeyBelowLowWatermark(7))
+	require.False(t, mockChunker.KeyBelowLowWatermark(7))
 
 	// Test with string keys (should return true to allow processing)
-	assert.True(t, mockChunker.KeyBelowLowWatermark("string_key"))
+	require.True(t, mockChunker.KeyBelowLowWatermark("string_key"))
 }
 
 // TestFlushUnderLockBypassesWatermark is a regression test for the bug where
@@ -576,21 +575,21 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// because KeyBelowLowWatermark(5) = (5 < 5) = false
 	sub.HasChanged([]any{5}, nil, false)
 
-	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
+	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
 
 	// Verify watermark behavior before flush
-	assert.True(t, mockChunker.KeyBelowLowWatermark(1), "Key 1 should be below watermark")
-	assert.True(t, mockChunker.KeyBelowLowWatermark(3), "Key 3 should be below watermark")
-	assert.True(t, mockChunker.KeyBelowLowWatermark(4), "Key 4 should be below watermark")
-	assert.False(t, mockChunker.KeyBelowLowWatermark(5), "Key 5 should NOT be below watermark (at current position)")
+	require.True(t, mockChunker.KeyBelowLowWatermark(1), "Key 1 should be below watermark")
+	require.True(t, mockChunker.KeyBelowLowWatermark(3), "Key 3 should be below watermark")
+	require.True(t, mockChunker.KeyBelowLowWatermark(4), "Key 4 should be below watermark")
+	require.False(t, mockChunker.KeyBelowLowWatermark(5), "Key 5 should NOT be below watermark (at current position)")
 
 	// First, disable watermark optimization and do a normal flush to populate the new table
 	// This simulates the state after the copier has finished
 	sub.SetWatermarkOptimization(false)
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
-	assert.True(t, allFlushed)
-	assert.Equal(t, 0, sub.Length())
+	require.True(t, allFlushed)
+	require.Equal(t, 0, sub.Length())
 
 	// Now re-enable watermark optimization and add the same changes again
 	// This simulates changes that came in during the final stages of migration
@@ -599,7 +598,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	sub.HasChanged([]any{3}, nil, false)
 	sub.HasChanged([]any{4}, nil, false)
 	sub.HasChanged([]any{5}, nil, false)
-	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes again")
+	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes again")
 
 	// Create a table lock for underLock=true flush
 	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
@@ -615,8 +614,8 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// With the bug (before the fix), allFlushed would be false and sub.Length() would be 1
 	// because key 5 (at watermark) would not be flushed
 	require.NoError(t, err)
-	assert.True(t, allFlushed, "All changes should be flushed when underLock=true - THIS IS THE KEY TEST")
-	assert.Equal(t, 0, sub.Length(), "All changes should be removed from the map after flush - THIS IS THE KEY TEST")
+	require.True(t, allFlushed, "All changes should be flushed when underLock=true - THIS IS THE KEY TEST")
+	require.Equal(t, 0, sub.Length(), "All changes should be removed from the map after flush - THIS IS THE KEY TEST")
 
 	// Note: We don't verify the database state here because the REPLACE INTO ... SELECT
 	// statement would timeout trying to read from the locked source table.
@@ -677,7 +676,7 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	sub.HasChanged([]any{4}, nil, false)
 	sub.HasChanged([]any{5}, nil, false) // At watermark, not below
 
-	assert.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
+	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
 
 	// Flush WITHOUT lock (underLock=false)
 	// This should respect the watermark optimization
@@ -685,24 +684,24 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	// Key 5 is at watermark (not below) and should NOT be flushed
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
-	assert.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
-	assert.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
+	require.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
+	require.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
 
 	// Verify that only 3 rows (below watermark) were copied to the new table
 	var count int
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 3, count, "Only 3 rows below watermark should be in the new table")
+	require.Equal(t, 3, count, "Only 3 rows below watermark should be in the new table")
 
 	// Verify that the row at watermark was NOT copied
 	var name string
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 5", dstTable.QuotedTableName)).Scan(&name)
-	assert.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
+	require.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
 
 	// Verify that rows below watermark were copied
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 1", dstTable.QuotedTableName)).Scan(&name)
 	require.NoError(t, err)
-	assert.Equal(t, "below_watermark", name)
+	require.Equal(t, "below_watermark", name)
 }
 
 func TestCreateReplaceStmtWithRenames(t *testing.T) {
@@ -744,15 +743,15 @@ func TestCreateReplaceStmtWithRenames(t *testing.T) {
 
 	stmt := sub.createReplaceStmt([]string{"'1'"})
 	// The INSERT side should use target column names (new_name)
-	assert.Contains(t, stmt.stmt, "REPLACE INTO")
-	assert.Contains(t, stmt.stmt, "`new_name`")
+	require.Contains(t, stmt.stmt, "REPLACE INTO")
+	require.Contains(t, stmt.stmt, "`new_name`")
 	// The SELECT side should use source column names (old_name)
-	assert.Contains(t, stmt.stmt, "`old_name`")
+	require.Contains(t, stmt.stmt, "`old_name`")
 
 	// Verify the full structure: REPLACE INTO <target> (<target_cols>) SELECT <source_cols> FROM <source>
 	// Target columns come first (after REPLACE INTO ... (), then source columns after SELECT
 	srcCols, tgtCols := mapping.Columns()
-	assert.Contains(t, stmt.stmt, "REPLACE INTO "+dstTable.QuotedTableName+" ("+tgtCols+") SELECT "+srcCols+" FROM")
+	require.Contains(t, stmt.stmt, "REPLACE INTO "+dstTable.QuotedTableName+" ("+tgtCols+") SELECT "+srcCols+" FROM")
 }
 
 func TestCreateReplaceStmtWithoutRenames(t *testing.T) {
@@ -790,6 +789,6 @@ func TestCreateReplaceStmtWithoutRenames(t *testing.T) {
 	stmt := sub.createReplaceStmt([]string{"'1'"})
 	// Without renames, source and target column lists should be identical
 	srcCols, tgtCols := chunkerForSub.ColumnMapping().Columns()
-	assert.Equal(t, srcCols, tgtCols)
-	assert.Contains(t, stmt.stmt, "REPLACE INTO "+dstTable.QuotedTableName+" ("+tgtCols+") SELECT "+srcCols+" FROM")
+	require.Equal(t, srcCols, tgtCols)
+	require.Contains(t, stmt.stmt, "REPLACE INTO "+dstTable.QuotedTableName+" ("+tgtCols+") SELECT "+srcCols+" FROM")
 }
