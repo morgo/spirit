@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +57,7 @@ func TestBufferedCopier(t *testing.T) {
 
 	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt2").Scan(&checksumDst)
 	require.NoError(t, err)
-	assert.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
+	require.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
 
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 }
@@ -169,7 +168,7 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 
 	// Verify early exit by checking how many chunks were processed
 	_, chunksCopied, _ := copier.GetChunker().Progress()
-	assert.Less(t, chunksCopied, uint64(10))
+	require.Less(t, chunksCopied, uint64(10))
 
 	// Also check destination table is zero
 	var copiedRows int
@@ -263,14 +262,14 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	// We can't precisely measure read time, but we know it should be much less than the delay
 	// So the total should be at least the callback delay
 	actualDuration := feedbackCalls[0].duration
-	assert.GreaterOrEqual(t, actualDuration, callbackDelay,
+	require.GreaterOrEqual(t, actualDuration, callbackDelay,
 		"Chunk timing should include the callback delay (read + write time)")
 
 	// Verify the rows were actually copied
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM timing_test_dst").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 3, count, "All rows should be copied")
+	require.Equal(t, 3, count, "All rows should be copied")
 }
 
 // feedbackCall captures the parameters passed to chunker.Feedback()

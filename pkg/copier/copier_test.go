@@ -71,11 +71,11 @@ func TestCopier(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM copiert2").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 1, count)
+	require.Equal(t, 1, count)
 
 	// Verify that testMetricsSink.Send was called >0 times
 	// It will be 1 with the composite chunker, 3 with optimistic.
-	assert.Positive(t, testMetricsSink.called)
+	require.Positive(t, testMetricsSink.called)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 }
 
@@ -106,7 +106,7 @@ func TestThrottler(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM throttlert2").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 1, count)
+	require.Equal(t, 1, count)
 }
 
 // The expected behavior of the copier is it tolerates non-unique data
@@ -226,7 +226,7 @@ func TestSQLModeAllowZeroInvalidDates(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM invaliddt2").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 1, count)
+	require.Equal(t, 1, count)
 }
 
 func TestLockWaitTimeoutIsRetyable(t *testing.T) {
@@ -361,7 +361,7 @@ func TestCopierFromCheckpoint(t *testing.T) {
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _copierchkpt1_new").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 10, count)
+	require.Equal(t, 10, count)
 }
 
 func TestRangeOptimizationMustApply(t *testing.T) {
