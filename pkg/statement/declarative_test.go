@@ -176,7 +176,7 @@ func TestDeclarativeToImperativeWithOptions(t *testing.T) {
 
 	changes, err := DeclarativeToImperative(current, desired, NewDiffOptions())
 	require.NoError(t, err)
-	assert.Empty(t, changes, "AUTO_INCREMENT differences should be ignored with default options")
+	require.Empty(t, changes, "AUTO_INCREMENT differences should be ignored with default options")
 }
 
 func TestDeclarativeToImperative_OrderingCreateAlterBeforeDrop(t *testing.T) {

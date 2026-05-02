@@ -283,13 +283,13 @@ func TestClassifyUnknown(t *testing.T) {
 
 func TestClassifyInvalid(t *testing.T) {
 	_, err := Classify("NOT VALID SQL HERE !@#$")
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	_, err = Classify("-- just a comment")
-	assert.ErrorIs(t, err, ErrNoStatements)
+	require.ErrorIs(t, err, ErrNoStatements)
 
 	_, err = Classify("")
-	assert.ErrorIs(t, err, ErrNoStatements)
+	require.ErrorIs(t, err, ErrNoStatements)
 }
 
 func TestStatementTypeString(t *testing.T) {

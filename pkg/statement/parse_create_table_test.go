@@ -662,7 +662,7 @@ func Test_Sloppy(t *testing.T) {
 	) ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC COMMENT='E-commerce order tracking table'
 	`
 	ct, err := ParseCreateTable(sql)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// This accounts for the two different primary keys and 2 different unique indexes,
 	// each given once as a column attribute and once as a table constraint.

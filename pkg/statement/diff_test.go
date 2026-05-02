@@ -915,7 +915,7 @@ func TestDiff_DifferentTableNames(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = ct1.Diff(ct2, nil)
-	assert.Error(t, err, "expected error when diffing tables with different names")
+	require.Error(t, err, "expected error when diffing tables with different names")
 }
 
 func TestDiff_DiffOptions(t *testing.T) {
