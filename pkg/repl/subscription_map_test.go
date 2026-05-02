@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSubscriptionDeltaMap(t *testing.T) {
@@ -80,7 +82,7 @@ func TestFlushWithLock(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	client := &Client{
@@ -104,7 +106,7 @@ func TestFlushWithLock(t *testing.T) {
 	}
 
 	// Insert test data
-	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES (1, 'test1'), (2, 'test2')`)
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES (1, 'test1'), (2, 'test2')`, srcTable.QuotedTableName))
 
 	// Add some changes
 	sub.HasChanged([]any{1}, nil, false)
@@ -112,19 +114,19 @@ func TestFlushWithLock(t *testing.T) {
 
 	// Create a table lock
 	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Test flush with lock
 	allFlushed, err := sub.Flush(t.Context(), true, lock)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.True(t, allFlushed)
 
-	assert.NoError(t, lock.Close(t.Context()))
+	require.NoError(t, lock.Close(t.Context()))
 
 	// Verify the changes were applied
 	var count int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-	assert.NoError(t, err)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+	require.NoError(t, err)
 	assert.Equal(t, 1, count) // Only ID 1 should be present, ID 2 was deleted
 }
 
@@ -142,7 +144,7 @@ func TestFlushWithoutLock(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	client := &Client{
@@ -166,8 +168,8 @@ func TestFlushWithoutLock(t *testing.T) {
 	}
 
 	// Insert test data
-	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
-		(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4')`)
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
+		(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4')`, srcTable.QuotedTableName))
 
 	// Add multiple changes to test batch processing
 	sub.HasChanged([]any{1}, nil, false)
@@ -177,13 +179,13 @@ func TestFlushWithoutLock(t *testing.T) {
 
 	// Test flush without lock
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.True(t, allFlushed)
 
 	// Verify the changes were applied
 	var count int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-	assert.NoError(t, err)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+	require.NoError(t, err)
 	assert.Equal(t, 2, count) // IDs 1 and 2 should be present, 3 and 4 were deleted
 }
 
@@ -529,7 +531,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	client := &Client{
@@ -545,7 +547,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// - Keys < 5 are below the low watermark (copier has passed them, safe to flush)
 	// - Keys >= 5 are NOT below the low watermark (copier is at or hasn't reached them)
 	// - Keys > 5 are above the high watermark (copier hasn't reached them, don't track)
-	mockChunker := table.NewMockChunker("subscription_test", 1000)
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
@@ -559,11 +561,11 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	}
 
 	// Insert test data into source table - data must exist before we lock
-	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES 
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
 		(1, 'below_watermark'),
 		(3, 'below_watermark_2'),
 		(5, 'at_watermark'),
-		(4, 'below_watermark_3')`)
+		(4, 'below_watermark_3')`, srcTable.QuotedTableName))
 
 	// Add changes for keys both below and at/above the low watermark
 	// Keys 1, 3, 4 are below watermark (< 5) - these would be flushed normally
@@ -586,7 +588,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// This simulates the state after the copier has finished
 	sub.SetWatermarkOptimization(false)
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.True(t, allFlushed)
 	assert.Equal(t, 0, sub.Length())
 
@@ -601,7 +603,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 
 	// Create a table lock for underLock=true flush
 	lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLogWithContext(t.Context(), lock)
 
 	// Flush with underLock=true
@@ -612,7 +614,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	// THE KEY ASSERTION: With the fix, allFlushed should be true and sub.Length() should be 0
 	// With the bug (before the fix), allFlushed would be false and sub.Length() would be 1
 	// because key 5 (at watermark) would not be flushed
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.True(t, allFlushed, "All changes should be flushed when underLock=true - THIS IS THE KEY TEST")
 	assert.Equal(t, 0, sub.Length(), "All changes should be removed from the map after flush - THIS IS THE KEY TEST")
 
@@ -637,7 +639,7 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	client := &Client{
@@ -649,7 +651,7 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	}
 
 	// Create mock chunker with current position at 5
-	mockChunker := table.NewMockChunker("subscription_test", 1000)
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
@@ -663,11 +665,11 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	}
 
 	// Insert test data into source table
-	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES 
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
 		(1, 'below_watermark'),
 		(3, 'below_watermark_2'),
 		(5, 'at_watermark'),
-		(4, 'below_watermark_3')`)
+		(4, 'below_watermark_3')`, srcTable.QuotedTableName))
 
 	// Add changes for keys both below and at the low watermark
 	sub.HasChanged([]any{1}, nil, false)
@@ -682,24 +684,24 @@ func TestFlushWithoutLockRespectsWatermark(t *testing.T) {
 	// Keys 1, 3, 4 are below watermark and should be flushed
 	// Key 5 is at watermark (not below) and should NOT be flushed
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
 	assert.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
 
 	// Verify that only 3 rows (below watermark) were copied to the new table
 	var count int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-	assert.NoError(t, err)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+	require.NoError(t, err)
 	assert.Equal(t, 3, count, "Only 3 rows below watermark should be in the new table")
 
 	// Verify that the row at watermark was NOT copied
 	var name string
-	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 5").Scan(&name)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 5", dstTable.QuotedTableName)).Scan(&name)
 	assert.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
 
 	// Verify that rows below watermark were copied
-	err = db.QueryRowContext(t.Context(), "SELECT name FROM _subscription_test_new WHERE id = 1").Scan(&name)
-	assert.NoError(t, err)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 1", dstTable.QuotedTableName)).Scan(&name)
+	require.NoError(t, err)
 	assert.Equal(t, "below_watermark", name)
 }
 
@@ -730,7 +732,7 @@ func TestCreateReplaceStmtWithRenames(t *testing.T) {
 		NewTable:      dstTable,
 		ColumnMapping: mapping,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	sub := &deltaMap{
 		c:        client,
@@ -775,7 +777,7 @@ func TestCreateReplaceStmtWithoutRenames(t *testing.T) {
 	}
 
 	chunkerForSub, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	sub := &deltaMap{
 		c:        client,

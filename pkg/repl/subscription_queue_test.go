@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 	dbConfig := dbconn.NewDBConfig()
 	dbConfig.MaxOpenConnections = 32
 	db, err := dbconn.New(testutils.DSN(), dbConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t.Run("empty queue", func(t *testing.T) {
@@ -101,7 +102,7 @@ func TestFlushDeltaQueue(t *testing.T) {
 		}
 
 		allFlushed, err := sub.Flush(t.Context(), false, nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, allFlushed)
 	})
 	t.Run("statement merging", func(t *testing.T) {
@@ -122,12 +123,12 @@ func TestFlushDeltaQueue(t *testing.T) {
 		}
 
 		// Clear the source and destination table
-		testutils.RunSQL(t, "TRUNCATE TABLE _subscription_test_new")
-		testutils.RunSQL(t, "TRUNCATE TABLE subscription_test")
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", dstTable.QuotedTableName))
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", srcTable.QuotedTableName))
 
 		// Insert test data
-		testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
-				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`)
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
+				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`, srcTable.QuotedTableName))
 
 		// Create a sequence: REPLACE<1,2>, DELETE<3>, REPLACE<4,5>
 		sub.HasChanged([]any{1}, nil, false) // Replace
@@ -139,18 +140,18 @@ func TestFlushDeltaQueue(t *testing.T) {
 		// Flush without lock
 		// calls flushDeltaQueue
 		allFlushed, err := sub.Flush(t.Context(), false, nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, allFlushed)
 
 		// Verify the results
 		var count int
-		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-		assert.NoError(t, err)
+		err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+		require.NoError(t, err)
 		assert.Equal(t, 4, count) // Should have 1,2,4,5 but not 3
 
 		// Verify specific IDs
-		rows, err := db.QueryContext(t.Context(), "SELECT id FROM _subscription_test_new ORDER BY id")
-		assert.NoError(t, err)
+		rows, err := db.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", dstTable.QuotedTableName))
+		require.NoError(t, err)
 		defer utils.CloseAndLog(rows)
 
 		var ids []int
@@ -182,11 +183,11 @@ func TestFlushDeltaQueue(t *testing.T) {
 		}
 
 		// Clear the source and destination table
-		testutils.RunSQL(t, "TRUNCATE TABLE _subscription_test_new")
-		testutils.RunSQL(t, "TRUNCATE TABLE subscription_test")
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", dstTable.QuotedTableName))
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", srcTable.QuotedTableName))
 		// Insert test data
-		testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
-				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`)
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
+				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`, srcTable.QuotedTableName))
 
 		// Add 5 replace operations
 		for i := 1; i <= 5; i++ {
@@ -195,13 +196,13 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Flush - should create multiple statements due to batch size
 		allFlushed, err := sub.Flush(t.Context(), false, nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, allFlushed)
 
 		// Verify all records were inserted
 		var count int
-		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-		assert.NoError(t, err)
+		err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+		require.NoError(t, err)
 		assert.Equal(t, 5, count)
 	})
 	t.Run("under lock execution", func(t *testing.T) {
@@ -222,11 +223,11 @@ func TestFlushDeltaQueue(t *testing.T) {
 		}
 
 		// Clear the source and destination table
-		testutils.RunSQL(t, "TRUNCATE TABLE _subscription_test_new")
-		testutils.RunSQL(t, "TRUNCATE TABLE subscription_test")
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", dstTable.QuotedTableName))
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", srcTable.QuotedTableName))
 		// Insert test data
-		testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
-				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`)
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
+				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`, srcTable.QuotedTableName))
 
 		// Add some changes
 		sub.HasChanged([]any{1}, nil, false)
@@ -234,18 +235,18 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Create a table lock
 		lock, err := dbconn.NewTableLock(t.Context(), db, []*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Flush under lock
 		allFlushed, err := sub.Flush(t.Context(), true, lock)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, allFlushed)
-		assert.NoError(t, lock.Close(t.Context()))
+		require.NoError(t, lock.Close(t.Context()))
 
 		// Verify the results
 		var count int
-		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-		assert.NoError(t, err)
+		err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+		require.NoError(t, err)
 		assert.Equal(t, 1, count) // Only ID 1 should be present
 	})
 
@@ -267,11 +268,11 @@ func TestFlushDeltaQueue(t *testing.T) {
 		}
 
 		// Clear the source and destination table
-		testutils.RunSQL(t, "TRUNCATE TABLE _subscription_test_new")
-		testutils.RunSQL(t, "TRUNCATE TABLE subscription_test")
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", dstTable.QuotedTableName))
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", srcTable.QuotedTableName))
 		// Insert test data
-		testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
-				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`)
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
+				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4'), (5, 'test5')`, srcTable.QuotedTableName))
 
 		// Start a goroutine that continuously adds changes
 		done := make(chan bool)
@@ -295,13 +296,13 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Final flush
 		allFlushed, err := sub.Flush(t.Context(), false, nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, allFlushed)
 
 		// Verify that records were inserted
 		var count int
-		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-		assert.NoError(t, err)
+		err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count)
+		require.NoError(t, err)
 		assert.Positive(t, count, "Should have inserted some records")
 	})
 
@@ -323,12 +324,12 @@ func TestFlushDeltaQueue(t *testing.T) {
 		}
 
 		// Clear the source and destination table
-		testutils.RunSQL(t, "TRUNCATE TABLE _subscription_test_new")
-		testutils.RunSQL(t, "TRUNCATE TABLE subscription_test")
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", dstTable.QuotedTableName))
+		testutils.RunSQL(t, fmt.Sprintf("TRUNCATE TABLE %s", srcTable.QuotedTableName))
 
 		// Insert initial data
-		testutils.RunSQL(t, `INSERT INTO subscription_test (id, name) VALUES
-				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4')`)
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
+				(1, 'test1'), (2, 'test2'), (3, 'test3'), (4, 'test4')`, srcTable.QuotedTableName))
 
 		// Create a complex sequence of operations
 		operations := []struct {
@@ -351,12 +352,12 @@ func TestFlushDeltaQueue(t *testing.T) {
 
 		// Flush all changes
 		allFlushed, err := sub.Flush(t.Context(), false, nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, allFlushed)
 
 		// Verify final state
-		rows, err := db.QueryContext(t.Context(), "SELECT id FROM _subscription_test_new ORDER BY id")
-		assert.NoError(t, err)
+		rows, err := db.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", dstTable.QuotedTableName))
+		require.NoError(t, err)
 		defer utils.CloseAndLog(rows)
 
 		var ids []int
