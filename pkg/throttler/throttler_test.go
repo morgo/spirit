@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -24,49 +25,49 @@ func TestThrottlerInterface(t *testing.T) {
 		t.Skip("skipping test because REPLICA_DSN not set")
 	}
 	db, err := sql.Open("mysql", replicaDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	//	NewReplicationThrottler will attach either MySQL 8.0 or MySQL 5.7 throttler
 	loopInterval = 1 * time.Millisecond
 	throttler, err := NewReplicationThrottler(db, 60*time.Second, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, throttler.Open(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, throttler.Open(t.Context()))
 
 	time.Sleep(50 * time.Millisecond)        // make sure the throttler loop can calculate.
 	throttler.BlockWait(t.Context())         // wait for catch up (there's no activity)
 	assert.False(t, throttler.IsThrottled()) // there's a race, but its unlikely to be throttled
 
-	assert.NoError(t, throttler.Close())
+	require.NoError(t, throttler.Close())
 
 	time.Sleep(50 * time.Millisecond) // give it time to shutdown.
 }
 
 func TestNoopThrottler(t *testing.T) {
 	throttler := &Noop{}
-	assert.NoError(t, throttler.Open(t.Context()))
+	require.NoError(t, throttler.Open(t.Context()))
 	throttler.currentLag = 1 * time.Second
 	throttler.lagTolerance = 2 * time.Second
 	assert.False(t, throttler.IsThrottled())
-	assert.NoError(t, throttler.UpdateLag(t.Context()))
+	require.NoError(t, throttler.UpdateLag(t.Context()))
 	throttler.BlockWait(t.Context())
 	throttler.lagTolerance = 100 * time.Millisecond
 	assert.True(t, throttler.IsThrottled())
-	assert.NoError(t, throttler.Close())
+	require.NoError(t, throttler.Close())
 }
 
 func TestMockThrottler(t *testing.T) {
 	throttler := &Mock{}
 
 	// Test Open and Close
-	assert.NoError(t, throttler.Open(t.Context()))
-	assert.NoError(t, throttler.Close())
+	require.NoError(t, throttler.Open(t.Context()))
+	require.NoError(t, throttler.Close())
 
 	// Test IsThrottled always returns true
 	assert.True(t, throttler.IsThrottled())
 
 	// Test UpdateLag returns no error
-	assert.NoError(t, throttler.UpdateLag(t.Context()))
+	require.NoError(t, throttler.UpdateLag(t.Context()))
 
 	// Test BlockWait sleeps for approximately 1 second
 	start := time.Now()

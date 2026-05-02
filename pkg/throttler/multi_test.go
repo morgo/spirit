@@ -13,18 +13,18 @@ import (
 
 func TestNewMultiThrottler_Zero(t *testing.T) {
 	throttler := NewMultiThrottler()
-	assert.IsType(t, &Noop{}, throttler)
+	require.IsType(t, &Noop{}, throttler)
 }
 
 func TestNewMultiThrottler_One(t *testing.T) {
 	single := &Noop{}
 	throttler := NewMultiThrottler(single)
-	assert.Same(t, single, throttler)
+	require.Same(t, single, throttler)
 }
 
 func TestNewMultiThrottler_Multiple(t *testing.T) {
 	throttler := NewMultiThrottler(&Noop{}, &Noop{})
-	assert.IsType(t, &multiThrottler{}, throttler)
+	require.IsType(t, &multiThrottler{}, throttler)
 }
 
 // testThrottler is a configurable throttler for testing.
@@ -136,7 +136,7 @@ func TestMultiThrottler_IsThrottled_NoneThrottled(t *testing.T) {
 	t2 := &testThrottler{}
 	multi := NewMultiThrottler(t1, t2)
 
-	assert.False(t, multi.IsThrottled())
+	require.False(t, multi.IsThrottled())
 }
 
 func TestMultiThrottler_IsThrottled_OneThrottled(t *testing.T) {
@@ -145,7 +145,7 @@ func TestMultiThrottler_IsThrottled_OneThrottled(t *testing.T) {
 	t2.throttled.Store(true)
 	multi := NewMultiThrottler(t1, t2)
 
-	assert.True(t, multi.IsThrottled())
+	require.True(t, multi.IsThrottled())
 }
 
 func TestMultiThrottler_IsThrottled_AllThrottled(t *testing.T) {
@@ -155,7 +155,7 @@ func TestMultiThrottler_IsThrottled_AllThrottled(t *testing.T) {
 	t2.throttled.Store(true)
 	multi := NewMultiThrottler(t1, t2)
 
-	assert.True(t, multi.IsThrottled())
+	require.True(t, multi.IsThrottled())
 }
 
 func TestMultiThrottler_BlockWait_OnlyBlocksThrottled(t *testing.T) {
@@ -198,5 +198,5 @@ func TestMultiThrottler_UpdateLag_ReturnsFirstError(t *testing.T) {
 
 	err := multi.UpdateLag(t.Context())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "lag error")
+	require.Contains(t, err.Error(), "lag error")
 }
