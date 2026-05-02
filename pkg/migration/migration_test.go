@@ -446,12 +446,12 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, defaultUsername, migration.Username)
-	assert.Equal(t, defaultPassword, *migration.Password)
-	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
-	assert.Equal(t, defaultDatabase, migration.Database)
-	assert.Equal(t, defaultTLSMode, migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, defaultUsername, migration.Username)
+	require.Equal(t, defaultPassword, *migration.Password)
+	require.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
+	require.Equal(t, defaultDatabase, migration.Database)
+	require.Equal(t, defaultTLSMode, migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsCLIUsed(t *testing.T) {
@@ -470,12 +470,12 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "VERIFY_CA", migration.TLSMode)
-	assert.Equal(t, "/path/to/ca", migration.TLSCertificatePath)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "VERIFY_CA", migration.TLSMode)
+	require.Equal(t, "/path/to/ca", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
@@ -489,12 +489,12 @@ func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, defaultUsername, migration.Username)
-	assert.Empty(t, *migration.Password)
-	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
-	assert.Equal(t, defaultDatabase, migration.Database)
-	assert.Equal(t, defaultTLSMode, migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, defaultUsername, migration.Username)
+	require.Empty(t, *migration.Password)
+	require.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
+	require.Equal(t, defaultDatabase, migration.Database)
+	require.Equal(t, defaultTLSMode, migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
@@ -541,12 +541,12 @@ tls-ca = /path/from/file
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-host:1234", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "REQUIRED", migration.TLSMode)
-	assert.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-host:1234", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "REQUIRED", migration.TLSMode)
+	require.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileNoCommandLineOptions(t *testing.T) {
@@ -570,12 +570,12 @@ tls-ca = /path/to/cert
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "filepass", *migration.Password)
-	assert.Equal(t, "filehost:5678", migration.Host)
-	assert.Equal(t, "filedb", migration.Database)
-	assert.Equal(t, "REQUIRED", migration.TLSMode)
-	assert.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
+	require.Equal(t, "fileuser", migration.Username)
+	require.Equal(t, "filepass", *migration.Password)
+	require.Equal(t, "filehost:5678", migration.Host)
+	require.Equal(t, "filedb", migration.Database)
+	require.Equal(t, "REQUIRED", migration.TLSMode)
+	require.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileUseDefaultPort(t *testing.T) {
@@ -598,12 +598,12 @@ tls-ca = /path/to/another/ca
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "filepass", *migration.Password)
-	assert.Equal(t, "filehost:3306", migration.Host)
-	assert.Equal(t, "filedb", migration.Database)
-	assert.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
-	assert.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
+	require.Equal(t, "fileuser", migration.Username)
+	require.Equal(t, "filepass", *migration.Password)
+	require.Equal(t, "filehost:3306", migration.Host)
+	require.Equal(t, "filedb", migration.Database)
+	require.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
+	require.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileOnlyUserSpecifiedInFile(t *testing.T) {
@@ -625,12 +625,12 @@ user = fileuser
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "cli-pass", *migration.Password)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "fileuser", migration.Username)
+	require.Equal(t, "cli-pass", *migration.Password)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileOnlyPasswordSpecifiedInFile(t *testing.T) {
@@ -651,12 +651,12 @@ password = filepass
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "filepass", *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "filepass", *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileEmptyPasswordPassedThrough(t *testing.T) {
@@ -678,12 +678,12 @@ password =
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Empty(t, *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Empty(t, *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileEmptyPasswordOverridenByCommandLine(t *testing.T) {
@@ -706,12 +706,12 @@ password =
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileOnlyPortUsedFromFile(t *testing.T) {
@@ -734,12 +734,12 @@ port=1234
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:1234", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:1234", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
@@ -762,12 +762,12 @@ func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileHasNoClientSection(t *testing.T) {
@@ -792,12 +792,12 @@ password = mysqlpass
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 // --- Configuration and validation tests (extracted from runner_test.go) ---
