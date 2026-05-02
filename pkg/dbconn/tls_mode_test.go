@@ -122,7 +122,7 @@ func TestNewCustomTLSConfigModes(t *testing.T) {
 			if tt.expectNil {
 				assert.Nil(t, config)
 			} else {
-				assert.NotNil(t, config)
+				require.NotNil(t, config)
 				assert.Equal(t, tt.expectSkipVerify, config.InsecureSkipVerify)
 
 				if tt.expectRootCAs {
@@ -335,7 +335,7 @@ func TestDBConfigTLSModeDefaults(t *testing.T) {
 func TestTLSModeConfigRegistration(t *testing.T) {
 	// Test that we can register multiple TLS configs without conflict
 	err1 := initRDSTLS()
-	assert.NoError(t, err1)
+	require.NoError(t, err1)
 
 	// Test custom TLS registration
 	config := NewDBConfig()
@@ -343,7 +343,7 @@ func TestTLSModeConfigRegistration(t *testing.T) {
 	config.TLSCertificatePath = ""
 
 	err2 := initCustomTLS(config)
-	assert.NoError(t, err2)
+	require.NoError(t, err2)
 }
 
 // TestVERIFY_CACertificateTrustLogic tests the specific certificate trust logic
@@ -987,7 +987,7 @@ func TestNewCustomTLSConfigCaseInsensitive(t *testing.T) {
 	for _, mode := range testCases {
 		t.Run(mode, func(t *testing.T) {
 			config := NewCustomTLSConfig(certData, mode)
-			assert.NotNil(t, config, "Should create valid TLS config for mode: %s", mode)
+			require.NotNil(t, config, "Should create valid TLS config for mode: %s", mode)
 
 			// All non-DISABLED modes should have some configuration
 			if mode != "disabled" && mode != "DISABLED" && mode != "Disabled" {

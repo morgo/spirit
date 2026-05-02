@@ -10,6 +10,7 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMetadataLock(t *testing.T) {
@@ -17,19 +18,19 @@ func TestMetadataLock(t *testing.T) {
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.NoError(t, err)
-	assert.NotNil(t, mdl)
+	require.NoError(t, err)
+	require.NotNil(t, mdl)
 
 	// Confirm a second lock cannot be acquired
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	assert.ErrorContains(t, err, "lock is held by another connection")
 
 	// Close the original mdl
-	assert.NoError(t, mdl.Close())
+	require.NoError(t, mdl.Close())
 
 	// Confirm a new lock can be acquired
 	mdl3, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NoError(t, mdl3.Close())
 }
 
@@ -40,8 +41,8 @@ func TestMetadataLockContextCancel(t *testing.T) {
 	logger := slog.Default()
 	ctx, cancel := context.WithCancel(t.Context())
 	mdl, err := NewMetadataLock(ctx, testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.NoError(t, err)
-	assert.NotNil(t, mdl)
+	require.NoError(t, err)
+	require.NotNil(t, mdl)
 
 	// Cancel the context
 	cancel()
@@ -51,8 +52,8 @@ func TestMetadataLockContextCancel(t *testing.T) {
 
 	// Confirm the lock is released by acquiring a new one
 	mdl2, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.NoError(t, err)
-	assert.NotNil(t, mdl2)
+	require.NoError(t, err)
+	require.NotNil(t, mdl2)
 	assert.NoError(t, mdl2.Close())
 }
 
@@ -65,8 +66,8 @@ func TestMetadataLockRefresh(t *testing.T) {
 		// override the refresh interval for faster testing
 		mdl.refreshInterval = 1 * time.Second
 	})
-	assert.NoError(t, err)
-	assert.NotNil(t, mdl)
+	require.NoError(t, err)
+	require.NotNil(t, mdl)
 
 	// wait for the refresh to happen
 	time.Sleep(2 * time.Second)
@@ -109,7 +110,7 @@ func TestMetadataLockLength(t *testing.T) {
 	logger := slog.Default()
 
 	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(mdl)
 
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), empty, NewDBConfig(), logger)
@@ -120,7 +121,7 @@ func TestMetadataLockLength(t *testing.T) {
 func simulateConnectionClose(t *testing.T, mdl *MetadataLock, logger *slog.Logger) {
 	// close the existing connection to simulate a network issue
 	err := mdl.CloseDBConnection(logger)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// wait a bit to ensure the connection is closed
 	time.Sleep(1 * time.Second)
@@ -135,8 +136,8 @@ func TestMetadataLockRefreshWithConnIssueSimulation(t *testing.T) {
 	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(mdl *MetadataLock) {
 		mdl.refreshInterval = 2 * time.Second
 	})
-	assert.NoError(t, err)
-	assert.NotNil(t, mdl)
+	require.NoError(t, err)
+	require.NotNil(t, mdl)
 
 	time.Sleep(4 * time.Second)
 

@@ -319,7 +319,7 @@ func TestEnhanceDSNWithTLS_Integration(t *testing.T) {
 	originalDSN := "user:pass@tcp(example.com:3306)/testdb"
 	enhancedDSN, err := EnhanceDSNWithTLS(originalDSN, config)
 
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, enhancedDSN, "tls=custom")
 	assert.Contains(t, enhancedDSN, "example.com:3306")
 	assert.Contains(t, enhancedDSN, "testdb")
@@ -381,7 +381,7 @@ func TestNewDSNTLSPreservation(t *testing.T) {
 
 			inputCfg, _ := mysql.ParseDSN(tt.inputDSN)
 			resultCfg, err := mysql.ParseDSN(result)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			if tt.expectSame {
 				// TLS config from the input DSN should be preserved
@@ -427,10 +427,10 @@ func TestEnhanceDSNWithTLS_SpecialCharPasswords(t *testing.T) {
 			config.TLSCertificatePath = tempFile.Name()
 
 			result, err := EnhanceDSNWithTLS(inputDSN, config)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			cfg, err := mysql.ParseDSN(result)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.password, cfg.Passwd, "password should survive round-trip through EnhanceDSNWithTLS")
 			assert.Equal(t, "custom", cfg.TLSConfig, "TLS config should be added")
 			assert.Equal(t, "user", cfg.User)
@@ -464,10 +464,10 @@ func TestAddTLSParametersToDSN_SpecialCharPasswords(t *testing.T) {
 			config.TLSCertificatePath = tempFile.Name()
 
 			result, err := addTLSParametersToDSN(inputDSN, config)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			cfg, err := mysql.ParseDSN(result)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.password, cfg.Passwd, "password should survive round-trip through addTLSParametersToDSN")
 			assert.Equal(t, "required", cfg.TLSConfig, "TLS config should be set to required")
 		})
