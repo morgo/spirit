@@ -23,36 +23,36 @@ func TestParseCreateTable_BasicTable(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test basic table info
-	assert.Equal(t, "users", ct.GetTableName())
+	require.Equal(t, "users", ct.GetTableName())
 
 	// Test columns
 	columns := ct.GetColumns()
-	assert.Len(t, columns, 4)
+	require.Len(t, columns, 4)
 
 	// Test first column (id)
 	idCol := columns[0]
-	assert.Equal(t, "id", idCol.Name)
-	assert.Contains(t, idCol.Type, "int") // TiDB returns "int(11)" not just "int"
-	assert.True(t, idCol.AutoInc)
-	assert.False(t, idCol.Nullable)
+	require.Equal(t, "id", idCol.Name)
+	require.Contains(t, idCol.Type, "int") // TiDB returns "int(11)" not just "int"
+	require.True(t, idCol.AutoInc)
+	require.False(t, idCol.Nullable)
 
 	// Test second column (name)
 	nameCol := columns[1]
-	assert.Equal(t, "name", nameCol.Name)
-	assert.Contains(t, nameCol.Type, "varchar") // TiDB returns "varchar(255)" not just "varchar"
-	assert.NotNil(t, nameCol.Length)
-	assert.Equal(t, 255, *nameCol.Length)
-	assert.False(t, nameCol.Nullable)
+	require.Equal(t, "name", nameCol.Name)
+	require.Contains(t, nameCol.Type, "varchar") // TiDB returns "varchar(255)" not just "varchar"
+	require.NotNil(t, nameCol.Length)
+	require.Equal(t, 255, *nameCol.Length)
+	require.False(t, nameCol.Nullable)
 
 	// Test indexes (PRIMARY KEY and UNIQUE should be detected)
 	indexes := ct.GetIndexes()
-	assert.GreaterOrEqual(t, len(indexes), 2) // At least PRIMARY KEY and UNIQUE
+	require.GreaterOrEqual(t, len(indexes), 2) // At least PRIMARY KEY and UNIQUE
 
 	// Test table options
 	options := ct.GetTableOptions()
-	assert.Equal(t, "InnoDB", options["engine"])
-	assert.Equal(t, "utf8mb4", options["charset"])
-	assert.Equal(t, "User table", options["comment"])
+	require.Equal(t, "InnoDB", options["engine"])
+	require.Equal(t, "utf8mb4", options["charset"])
+	require.Equal(t, "User table", options["comment"])
 }
 
 func TestSchemaAnalyzer_StructuredAccess(t *testing.T) {
@@ -69,32 +69,32 @@ func TestSchemaAnalyzer_StructuredAccess(t *testing.T) {
 
 	// Test direct structured access
 	createTable := ct.GetCreateTable()
-	assert.Equal(t, "products", createTable.TableName)
+	require.Equal(t, "products", createTable.TableName)
 
 	// Test columns access
 	columns := createTable.Columns
 	require.Len(t, columns, 3)
-	assert.Equal(t, "id", columns[0].Name)
+	require.Equal(t, "id", columns[0].Name)
 
 	// Test table options access
 	options := ct.GetTableOptions()
-	assert.Equal(t, "InnoDB", options["engine"])
+	require.Equal(t, "InnoDB", options["engine"])
 
 	// Test using ByName methods
 	if nameCol := columns.ByName("name"); nameCol != nil {
-		assert.Equal(t, "name", nameCol.Name)
-		assert.Contains(t, nameCol.Type, "varchar")
-		assert.False(t, nameCol.Nullable)
+		require.Equal(t, "name", nameCol.Name)
+		require.Contains(t, nameCol.Type, "varchar")
+		require.False(t, nameCol.Nullable)
 		// Comment parsing might not work perfectly with TiDB parser
 		if nameCol.Comment != nil {
-			assert.Equal(t, "Product name", *nameCol.Comment)
+			require.Equal(t, "Product name", *nameCol.Comment)
 		}
 	} else {
 		t.Error("Should find column 'name'")
 	}
 
 	// Test column count
-	assert.Len(t, columns, 3)
+	require.Len(t, columns, 3)
 
 	// Test finding nullable columns using structured approach
 	var nullableColumns []Column
@@ -105,7 +105,7 @@ func TestSchemaAnalyzer_StructuredAccess(t *testing.T) {
 		}
 	}
 
-	assert.GreaterOrEqual(t, len(nullableColumns), 1) // price should be nullable
+	require.GreaterOrEqual(t, len(nullableColumns), 1) // price should be nullable
 }
 
 func TestSchemaAnalyzer_ComplexConstraints(t *testing.T) {
@@ -124,9 +124,9 @@ func TestSchemaAnalyzer_ComplexConstraints(t *testing.T) {
 	constraints := ct.GetConstraints()
 
 	// Should have at least the FOREIGN KEY constraint
-	assert.GreaterOrEqual(t, len(constraints), 1)
+	require.GreaterOrEqual(t, len(constraints), 1)
 
-	assert.True(t, constraints.HasForeignKeys())
+	require.True(t, constraints.HasForeignKeys())
 
 	// Find the foreign key constraint
 	var fkConstraint *Constraint
@@ -139,8 +139,8 @@ func TestSchemaAnalyzer_ComplexConstraints(t *testing.T) {
 	}
 
 	require.NotNil(t, fkConstraint)
-	assert.Equal(t, "fk_orders_user", fkConstraint.Name)
-	assert.Contains(t, *fkConstraint.Definition, "REFERENCES users")
+	require.Equal(t, "fk_orders_user", fkConstraint.Name)
+	require.Contains(t, *fkConstraint.Definition, "REFERENCES users")
 }
 
 func TestSchemaAnalyzer_UnsignedSupport(t *testing.T) {
@@ -166,36 +166,36 @@ func TestSchemaAnalyzer_UnsignedSupport(t *testing.T) {
 	// Test signed columns (should have Unsigned = nil or false)
 	signedInt := columns.ByName("signed_int")
 	require.NotNil(t, signedInt)
-	assert.Nil(t, signedInt.Unsigned, "signed_int should not have Unsigned field set")
+	require.Nil(t, signedInt.Unsigned, "signed_int should not have Unsigned field set")
 
 	signedBigint := columns.ByName("signed_bigint")
 	require.NotNil(t, signedBigint)
-	assert.Nil(t, signedBigint.Unsigned, "signed_bigint should not have Unsigned field set")
+	require.Nil(t, signedBigint.Unsigned, "signed_bigint should not have Unsigned field set")
 
 	signedTinyint := columns.ByName("signed_tinyint")
 	require.NotNil(t, signedTinyint)
-	assert.Nil(t, signedTinyint.Unsigned, "signed_tinyint should not have Unsigned field set")
+	require.Nil(t, signedTinyint.Unsigned, "signed_tinyint should not have Unsigned field set")
 
 	// Test unsigned columns (should have Unsigned = true)
 	unsignedInt := columns.ByName("unsigned_int")
 	require.NotNil(t, unsignedInt)
 	require.NotNil(t, unsignedInt.Unsigned, "unsigned_int should have Unsigned field set")
-	assert.True(t, *unsignedInt.Unsigned, "unsigned_int should be marked as unsigned")
+	require.True(t, *unsignedInt.Unsigned, "unsigned_int should be marked as unsigned")
 
 	unsignedBigint := columns.ByName("unsigned_bigint")
 	require.NotNil(t, unsignedBigint)
 	require.NotNil(t, unsignedBigint.Unsigned, "unsigned_bigint should have Unsigned field set")
-	assert.True(t, *unsignedBigint.Unsigned, "unsigned_bigint should be marked as unsigned")
+	require.True(t, *unsignedBigint.Unsigned, "unsigned_bigint should be marked as unsigned")
 
 	unsignedTinyint := columns.ByName("unsigned_tinyint")
 	require.NotNil(t, unsignedTinyint)
 	require.NotNil(t, unsignedTinyint.Unsigned, "unsigned_tinyint should have Unsigned field set")
-	assert.True(t, *unsignedTinyint.Unsigned, "unsigned_tinyint should be marked as unsigned")
+	require.True(t, *unsignedTinyint.Unsigned, "unsigned_tinyint should be marked as unsigned")
 
 	// Test id column (should not be unsigned)
 	idCol := columns.ByName("id")
 	require.NotNil(t, idCol)
-	assert.Nil(t, idCol.Unsigned, "id should not have Unsigned field set")
+	require.Nil(t, idCol.Unsigned, "id should not have Unsigned field set")
 }
 
 func TestSchemaAnalyzer_JSONSerialization(t *testing.T) {
@@ -222,13 +222,13 @@ func TestSchemaAnalyzer_JSONSerialization(t *testing.T) {
 	// Verify columns match by comparing key fields
 	require.Len(t, deserializedColumns, 2)
 
-	assert.Equal(t, "id", deserializedColumns[0].Name)
-	assert.Equal(t, "int", deserializedColumns[0].Type)
-	assert.True(t, deserializedColumns[0].PrimaryKey)
+	require.Equal(t, "id", deserializedColumns[0].Name)
+	require.Equal(t, "int", deserializedColumns[0].Type)
+	require.True(t, deserializedColumns[0].PrimaryKey)
 
-	assert.Equal(t, "name", deserializedColumns[1].Name)
-	assert.Contains(t, deserializedColumns[1].Type, "varchar")
-	assert.False(t, deserializedColumns[1].Nullable)
+	require.Equal(t, "name", deserializedColumns[1].Name)
+	require.Contains(t, deserializedColumns[1].Type, "varchar")
+	require.False(t, deserializedColumns[1].Nullable)
 }
 
 func TestSchemaAnalyzer_IndexVisibilityStructured(t *testing.T) {
@@ -269,25 +269,25 @@ func TestSchemaAnalyzer_IndexVisibilityStructured(t *testing.T) {
 	emailIdx := indexes.ByName("idx_email")
 	require.NotNil(t, emailIdx, "Should find idx_email")
 	require.NotNil(t, emailIdx.Invisible)
-	assert.True(t, *emailIdx.Invisible, "idx_email should be invisible")
+	require.True(t, *emailIdx.Invisible, "idx_email should be invisible")
 
 	multiIdx := indexes.ByName("uk_email_multi")
 	require.NotNil(t, multiIdx, "Should find uk_email_multi")
 	require.NotNil(t, multiIdx.Invisible)
-	assert.True(t, *multiIdx.Invisible, "uk_email_multi should be invisible")
+	require.True(t, *multiIdx.Invisible, "uk_email_multi should be invisible")
 	require.NotNil(t, multiIdx.Using)
-	assert.Equal(t, "BTREE", *multiIdx.Using, "uk_email_multi should use BTREE")
+	require.Equal(t, "BTREE", *multiIdx.Using, "uk_email_multi should use BTREE")
 	require.NotNil(t, multiIdx.Comment)
-	assert.Equal(t, "Multi-option unique", *multiIdx.Comment)
+	require.Equal(t, "Multi-option unique", *multiIdx.Comment)
 
 	statusIdx := indexes.ByName("idx_status")
 	require.NotNil(t, statusIdx, "Should find idx_status")
 	require.NotNil(t, statusIdx.Invisible)
-	assert.False(t, *statusIdx.Invisible, "idx_status should be explicitly visible")
+	require.False(t, *statusIdx.Invisible, "idx_status should be explicitly visible")
 
 	nameIdx := indexes.ByName("idx_name")
 	require.NotNil(t, nameIdx, "Should find idx_name")
-	assert.Nil(t, nameIdx.Invisible, "idx_name should have no invisibility setting")
+	require.Nil(t, nameIdx.Invisible, "idx_name should have no invisibility setting")
 
 	// Test finding all invisible indexes using structured approach
 	var invisibleIndexes []Index
@@ -298,7 +298,7 @@ func TestSchemaAnalyzer_IndexVisibilityStructured(t *testing.T) {
 		}
 	}
 
-	assert.Len(t, invisibleIndexes, 2, "Should find exactly 2 invisible indexes")
+	require.Len(t, invisibleIndexes, 2, "Should find exactly 2 invisible indexes")
 
 	// Verify the invisible indexes are the ones we expect
 	invisibleNames := make(map[string]bool)
@@ -306,8 +306,8 @@ func TestSchemaAnalyzer_IndexVisibilityStructured(t *testing.T) {
 		invisibleNames[idx.Name] = true
 	}
 
-	assert.True(t, invisibleNames["idx_email"], "Should include idx_email in invisible indexes")
-	assert.True(t, invisibleNames["uk_email_multi"], "Should include uk_email_multi in invisible indexes")
+	require.True(t, invisibleNames["idx_email"], "Should include idx_email in invisible indexes")
+	require.True(t, invisibleNames["uk_email_multi"], "Should include uk_email_multi in invisible indexes")
 }
 
 // Benchmark to show performance characteristics
@@ -527,46 +527,46 @@ func TestSchemaAnalyzer_EnumAndSetSupport(t *testing.T) {
 	// Test ENUM column with default
 	statusCol := columns.ByName("status")
 	require.NotNil(t, statusCol)
-	assert.Equal(t, "enum", statusCol.Type)
+	require.Equal(t, "enum", statusCol.Type)
 	require.NotNil(t, statusCol.EnumValues)
-	assert.Equal(t, []string{"active", "inactive", "pending"}, statusCol.EnumValues)
-	assert.Nil(t, statusCol.SetValues, "ENUM column should not have SetValues")
+	require.Equal(t, []string{"active", "inactive", "pending"}, statusCol.EnumValues)
+	require.Nil(t, statusCol.SetValues, "ENUM column should not have SetValues")
 	require.NotNil(t, statusCol.Default)
-	assert.Equal(t, "active", *statusCol.Default)
-	assert.True(t, statusCol.Nullable)
+	require.Equal(t, "active", *statusCol.Default)
+	require.True(t, statusCol.Nullable)
 
 	// Test SET column with default
 	permissionsCol := columns.ByName("permissions")
 	require.NotNil(t, permissionsCol)
-	assert.Equal(t, "set", permissionsCol.Type)
+	require.Equal(t, "set", permissionsCol.Type)
 	require.NotNil(t, permissionsCol.SetValues)
-	assert.Equal(t, []string{"read", "write", "execute"}, permissionsCol.SetValues)
-	assert.Nil(t, permissionsCol.EnumValues, "SET column should not have EnumValues")
+	require.Equal(t, []string{"read", "write", "execute"}, permissionsCol.SetValues)
+	require.Nil(t, permissionsCol.EnumValues, "SET column should not have EnumValues")
 	require.NotNil(t, permissionsCol.Default)
-	assert.Equal(t, "read", *permissionsCol.Default)
+	require.Equal(t, "read", *permissionsCol.Default)
 
 	// Test ENUM column NOT NULL
 	priorityCol := columns.ByName("priority")
 	require.NotNil(t, priorityCol)
-	assert.Equal(t, "enum", priorityCol.Type)
+	require.Equal(t, "enum", priorityCol.Type)
 	require.NotNil(t, priorityCol.EnumValues)
-	assert.Equal(t, []string{"low", "medium", "high"}, priorityCol.EnumValues)
-	assert.False(t, priorityCol.Nullable)
+	require.Equal(t, []string{"low", "medium", "high"}, priorityCol.EnumValues)
+	require.False(t, priorityCol.Nullable)
 
 	// Test SET column without default
 	flagsCol := columns.ByName("flags")
 	require.NotNil(t, flagsCol)
-	assert.Equal(t, "set", flagsCol.Type)
+	require.Equal(t, "set", flagsCol.Type)
 	require.NotNil(t, flagsCol.SetValues)
-	assert.Equal(t, []string{"flag1", "flag2", "flag3", "flag4"}, flagsCol.SetValues)
-	assert.Nil(t, flagsCol.Default)
+	require.Equal(t, []string{"flag1", "flag2", "flag3", "flag4"}, flagsCol.SetValues)
+	require.Nil(t, flagsCol.Default)
 
 	// Test regular column (should have no enum/set values)
 	nameCol := columns.ByName("name")
 	require.NotNil(t, nameCol)
-	assert.Contains(t, nameCol.Type, "varchar")
-	assert.Nil(t, nameCol.EnumValues)
-	assert.Nil(t, nameCol.SetValues)
+	require.Contains(t, nameCol.Type, "varchar")
+	require.Nil(t, nameCol.EnumValues)
+	require.Nil(t, nameCol.SetValues)
 }
 
 func TestSchemaAnalyzer_EnumSetJSONSerialization(t *testing.T) {
@@ -596,27 +596,27 @@ func TestSchemaAnalyzer_EnumSetJSONSerialization(t *testing.T) {
 	require.Len(t, deserializedColumns, 3)
 
 	// Check id column
-	assert.Equal(t, "id", deserializedColumns[0].Name)
-	assert.Equal(t, "int", deserializedColumns[0].Type)
-	assert.True(t, deserializedColumns[0].PrimaryKey)
-	assert.Nil(t, deserializedColumns[0].EnumValues)
-	assert.Nil(t, deserializedColumns[0].SetValues)
+	require.Equal(t, "id", deserializedColumns[0].Name)
+	require.Equal(t, "int", deserializedColumns[0].Type)
+	require.True(t, deserializedColumns[0].PrimaryKey)
+	require.Nil(t, deserializedColumns[0].EnumValues)
+	require.Nil(t, deserializedColumns[0].SetValues)
 
 	// Verify enum values are preserved
 	statusCol := deserializedColumns[1]
-	assert.Equal(t, "status", statusCol.Name)
-	assert.Equal(t, "enum", statusCol.Type)
-	assert.Equal(t, []string{"active", "inactive"}, statusCol.EnumValues)
-	assert.Nil(t, statusCol.SetValues)
+	require.Equal(t, "status", statusCol.Name)
+	require.Equal(t, "enum", statusCol.Type)
+	require.Equal(t, []string{"active", "inactive"}, statusCol.EnumValues)
+	require.Nil(t, statusCol.SetValues)
 	require.NotNil(t, statusCol.Default)
-	assert.Equal(t, "active", *statusCol.Default)
+	require.Equal(t, "active", *statusCol.Default)
 
 	// Verify set values are preserved
 	permissionsCol := deserializedColumns[2]
-	assert.Equal(t, "permissions", permissionsCol.Name)
-	assert.Equal(t, "set", permissionsCol.Type)
-	assert.Equal(t, []string{"read", "write"}, permissionsCol.SetValues)
-	assert.Nil(t, permissionsCol.EnumValues)
+	require.Equal(t, "permissions", permissionsCol.Name)
+	require.Equal(t, "set", permissionsCol.Type)
+	require.Equal(t, []string{"read", "write"}, permissionsCol.SetValues)
+	require.Nil(t, permissionsCol.EnumValues)
 }
 
 func TestSchemaAnalyzer_EnumSingleValue(t *testing.T) {
@@ -633,9 +633,9 @@ func TestSchemaAnalyzer_EnumSingleValue(t *testing.T) {
 	require.Len(t, columns, 1)
 
 	statusCol := columns[0]
-	assert.Equal(t, "enum", statusCol.Type)
+	require.Equal(t, "enum", statusCol.Type)
 	require.NotNil(t, statusCol.EnumValues)
-	assert.Equal(t, []string{"only_one"}, statusCol.EnumValues)
+	require.Equal(t, []string{"only_one"}, statusCol.EnumValues)
 }
 
 func Test_Sloppy(t *testing.T) {
@@ -666,37 +666,37 @@ func Test_Sloppy(t *testing.T) {
 
 	// This accounts for the two different primary keys and 2 different unique indexes,
 	// each given once as a column attribute and once as a table constraint.
-	assert.Len(t, ct.GetIndexes(), 7)
+	require.Len(t, ct.GetIndexes(), 7)
 
 	// The "first" index should be the first one defined as a table attribute, not the PK or UNIQUE
 	// index defined as a column attribute.
 	firstIdx := ct.GetCreateTable().Indexes[0]
 	require.NotNil(t, firstIdx)
 	// Unnamed indexes are auto-named after their first column (MySQL convention)
-	assert.Equal(t, "user_id", firstIdx.Name)
-	assert.Equal(t, []string{"user_id", "customerEmail"}, firstIdx.Columns)
-	assert.Nil(t, firstIdx.Comment)
+	require.Equal(t, "user_id", firstIdx.Name)
+	require.Equal(t, []string{"user_id", "customerEmail"}, firstIdx.Columns)
+	require.Nil(t, firstIdx.Comment)
 
-	assert.True(t, ct.GetIndexes().HasInvisible())
+	require.True(t, ct.GetIndexes().HasInvisible())
 	idx_created_at := ct.GetCreateTable().Indexes.ByName("idx_created_at")
 	require.NotNil(t, idx_created_at)
 	require.NotNil(t, idx_created_at.Invisible)
-	assert.True(t, *idx_created_at.Invisible)
+	require.True(t, *idx_created_at.Invisible)
 
 	enum := ct.GetColumns().ByName("order_status")
 	require.NotNil(t, enum)
-	assert.True(t, strings.EqualFold("ENUM", enum.Type))
+	require.True(t, strings.EqualFold("ENUM", enum.Type))
 
 	// Verify enum values are captured
 	require.NotNil(t, enum.EnumValues)
-	assert.Equal(t, []string{"pending", "processing", "shipped", "delivered", "cancelled"}, enum.EnumValues)
-	assert.Equal(t, "pending", *enum.Default)
+	require.Equal(t, []string{"pending", "processing", "shipped", "delivered", "cancelled"}, enum.EnumValues)
+	require.Equal(t, "pending", *enum.Default)
 
 	total_amount := ct.GetColumns().ByName("total_amount")
 	require.NotNil(t, total_amount)
-	assert.Contains(t, strings.ToLower(total_amount.Type), "decimal")
-	assert.NotNil(t, total_amount.Default)
-	assert.Equal(t, "0.00", *total_amount.Default)
+	require.Contains(t, strings.ToLower(total_amount.Type), "decimal")
+	require.NotNil(t, total_amount.Default)
+	require.Equal(t, "0.00", *total_amount.Default)
 }
 
 // ComprehensiveTestCase represents a test case with SQL, expected success, and validation function
@@ -2127,10 +2127,10 @@ func TestCharsetCollationOverride(t *testing.T) {
 	// Verify that charset and collation are captured
 	// The exact behavior depends on how TiDB parser handles these attributes
 	if col.Charset != nil {
-		assert.Equal(t, "utf8", *col.Charset)
+		require.Equal(t, "utf8", *col.Charset)
 	}
 	if col.Collation != nil {
-		assert.Equal(t, "utf8_bin", *col.Collation)
+		require.Equal(t, "utf8_bin", *col.Collation)
 	}
 }
 
@@ -2200,7 +2200,7 @@ func TestComplexTableWithBinaryAndCharset(t *testing.T) {
 
 	ct, err := ParseCreateTable(sql)
 	require.NoError(t, err)
-	assert.Equal(t, "users", ct.GetTableName())
+	require.Equal(t, "users", ct.GetTableName())
 
 	columns := ct.GetColumns()
 	require.Len(t, columns, 8)
@@ -2208,63 +2208,63 @@ func TestComplexTableWithBinaryAndCharset(t *testing.T) {
 	// Test username column (VARCHAR with charset and collation)
 	username := columns.ByName("username")
 	require.NotNil(t, username)
-	assert.Contains(t, username.Type, "varchar")
-	assert.False(t, username.Nullable)
+	require.Contains(t, username.Type, "varchar")
+	require.False(t, username.Nullable)
 	if username.Charset != nil {
-		assert.Equal(t, "utf8mb4", *username.Charset)
+		require.Equal(t, "utf8mb4", *username.Charset)
 	}
 	if username.Collation != nil {
-		assert.Equal(t, "utf8mb4_unicode_ci", *username.Collation)
+		require.Equal(t, "utf8mb4_unicode_ci", *username.Collation)
 	}
 
 	// Test password_hash column (VARBINARY)
 	passwordHash := columns.ByName("password_hash")
 	require.NotNil(t, passwordHash)
-	assert.Equal(t, "varbinary", passwordHash.Type)
-	assert.False(t, passwordHash.Nullable)
+	require.Equal(t, "varbinary", passwordHash.Type)
+	require.False(t, passwordHash.Nullable)
 	require.NotNil(t, passwordHash.Length)
-	assert.Equal(t, 64, *passwordHash.Length)
+	require.Equal(t, 64, *passwordHash.Length)
 
 	// Test email column (VARCHAR with charset)
 	email := columns.ByName("email")
 	require.NotNil(t, email)
-	assert.Contains(t, email.Type, "varchar")
+	require.Contains(t, email.Type, "varchar")
 	if email.Charset != nil {
-		assert.Equal(t, "utf8mb4", *email.Charset)
+		require.Equal(t, "utf8mb4", *email.Charset)
 	}
 
 	// Test profile_data column (BLOB)
 	profileData := columns.ByName("profile_data")
 	require.NotNil(t, profileData)
-	assert.Equal(t, "blob", profileData.Type)
+	require.Equal(t, "blob", profileData.Type)
 
 	// Test bio column (TEXT with charset and collation)
 	bio := columns.ByName("bio")
 	require.NotNil(t, bio)
-	assert.Equal(t, "text", bio.Type)
+	require.Equal(t, "text", bio.Type)
 	if bio.Charset != nil {
-		assert.Equal(t, "utf8mb4", *bio.Charset)
+		require.Equal(t, "utf8mb4", *bio.Charset)
 	}
 	if bio.Collation != nil {
-		assert.Equal(t, "utf8mb4_unicode_ci", *bio.Collation)
+		require.Equal(t, "utf8mb4_unicode_ci", *bio.Collation)
 	}
 
 	// Test session_token column (BINARY)
 	sessionToken := columns.ByName("session_token")
 	require.NotNil(t, sessionToken)
-	assert.Equal(t, "binary", sessionToken.Type)
+	require.Equal(t, "binary", sessionToken.Type)
 	require.NotNil(t, sessionToken.Length)
-	assert.Equal(t, 32, *sessionToken.Length)
+	require.Equal(t, 32, *sessionToken.Length)
 
 	// Test metadata column (MEDIUMBLOB)
 	metadata := columns.ByName("metadata")
 	require.NotNil(t, metadata)
-	assert.Equal(t, "mediumblob", metadata.Type)
+	require.Equal(t, "mediumblob", metadata.Type)
 
 	// Verify table options
 	options := ct.GetTableOptions()
-	assert.Equal(t, "InnoDB", options["engine"])
-	assert.Equal(t, "utf8mb4", options["charset"])
+	require.Equal(t, "InnoDB", options["engine"])
+	require.Equal(t, "utf8mb4", options["charset"])
 }
 
 // TestBinaryTypeJSONSerialization tests that binary types can be serialized
@@ -2291,15 +2291,15 @@ func TestBinaryTypeJSONSerialization(t *testing.T) {
 
 	// Verify data column (VARBINARY)
 	dataCol := deserializedColumns[1]
-	assert.Equal(t, "data", dataCol.Name)
-	assert.Equal(t, "varbinary", dataCol.Type)
+	require.Equal(t, "data", dataCol.Name)
+	require.Equal(t, "varbinary", dataCol.Type)
 	require.NotNil(t, dataCol.Length)
-	assert.Equal(t, 255, *dataCol.Length)
+	require.Equal(t, 255, *dataCol.Length)
 
 	// Verify content column (BLOB)
 	contentCol := deserializedColumns[2]
-	assert.Equal(t, "content", contentCol.Name)
-	assert.Equal(t, "blob", contentCol.Type)
+	require.Equal(t, "content", contentCol.Name)
+	require.Equal(t, "blob", contentCol.Type)
 }
 
 // Helper function to create int pointer

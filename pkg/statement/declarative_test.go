@@ -22,7 +22,7 @@ func assertChangesContain(t *testing.T, changes []*AbstractStatement, expected [
 				break
 			}
 		}
-		assert.True(t, found, "expected some statement to contain %q, got %v", exp, strs)
+		require.True(t, found, "expected some statement to contain %q, got %v", exp, strs)
 	}
 }
 
@@ -229,10 +229,10 @@ func TestDeclarativeToImperative_OrderingCreateAlterBeforeDrop(t *testing.T) {
 	}
 
 	// Additionally verify the exact order of statement types.
-	assert.Contains(t, changes[0].Statement, "CREATE TABLE")
-	assert.Contains(t, changes[1].Statement, "ALTER TABLE")
-	assert.Contains(t, changes[2].Statement, "DROP TABLE")
-	assert.Contains(t, changes[3].Statement, "DROP TABLE")
+	require.Contains(t, changes[0].Statement, "CREATE TABLE")
+	require.Contains(t, changes[1].Statement, "ALTER TABLE")
+	require.Contains(t, changes[2].Statement, "DROP TABLE")
+	require.Contains(t, changes[3].Statement, "DROP TABLE")
 }
 
 func TestToTableSchema(t *testing.T) {
@@ -241,9 +241,9 @@ func TestToTableSchema(t *testing.T) {
 
 	ts, err := ct.ToTableSchema()
 	require.NoError(t, err)
-	assert.Equal(t, "t1", ts.Name)
-	assert.Contains(t, ts.Schema, "CREATE TABLE")
-	assert.Contains(t, ts.Schema, "t1")
-	assert.Contains(t, ts.Schema, "id")
-	assert.Contains(t, ts.Schema, "name")
+	require.Equal(t, "t1", ts.Name)
+	require.Contains(t, ts.Schema, "CREATE TABLE")
+	require.Contains(t, ts.Schema, "t1")
+	require.Contains(t, ts.Schema, "id")
+	require.Contains(t, ts.Schema, "name")
 }
