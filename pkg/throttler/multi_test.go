@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -74,8 +73,8 @@ func TestMultiThrottler_Open(t *testing.T) {
 	multi := NewMultiThrottler(t1, t2)
 
 	require.NoError(t, multi.Open(t.Context()))
-	assert.True(t, t1.opened.Load())
-	assert.True(t, t2.opened.Load())
+	require.True(t, t1.opened.Load())
+	require.True(t, t2.opened.Load())
 }
 
 func TestMultiThrottler_Open_Error(t *testing.T) {
@@ -85,9 +84,9 @@ func TestMultiThrottler_Open_Error(t *testing.T) {
 
 	err := multi.Open(t.Context())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "connection refused")
+	require.Contains(t, err.Error(), "connection refused")
 	// Second throttler should not have been opened
-	assert.False(t, t2.opened.Load())
+	require.False(t, t2.opened.Load())
 }
 
 func TestMultiThrottler_Open_PartialFailure_CleansUp(t *testing.T) {
@@ -99,12 +98,12 @@ func TestMultiThrottler_Open_PartialFailure_CleansUp(t *testing.T) {
 
 	err := multi.Open(t.Context())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "connection refused")
+	require.Contains(t, err.Error(), "connection refused")
 	// First throttler was opened successfully and should have been closed during cleanup
-	assert.True(t, t1.opened.Load())
-	assert.True(t, t1.closed.Load())
+	require.True(t, t1.opened.Load())
+	require.True(t, t1.closed.Load())
 	// Second throttler's Open was attempted but failed
-	assert.False(t, t2.closed.Load(), "failed throttler should not be closed")
+	require.False(t, t2.closed.Load(), "failed throttler should not be closed")
 }
 
 func TestMultiThrottler_Close(t *testing.T) {
@@ -113,8 +112,8 @@ func TestMultiThrottler_Close(t *testing.T) {
 	multi := NewMultiThrottler(t1, t2)
 
 	require.NoError(t, multi.Close())
-	assert.True(t, t1.closed.Load())
-	assert.True(t, t2.closed.Load())
+	require.True(t, t1.closed.Load())
+	require.True(t, t2.closed.Load())
 }
 
 func TestMultiThrottler_Close_CollectsErrors(t *testing.T) {
@@ -124,11 +123,11 @@ func TestMultiThrottler_Close_CollectsErrors(t *testing.T) {
 
 	err := multi.Close()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "err1")
-	assert.Contains(t, err.Error(), "err2")
+	require.Contains(t, err.Error(), "err1")
+	require.Contains(t, err.Error(), "err2")
 	// Both should still be closed
-	assert.True(t, t1.closed.Load())
-	assert.True(t, t2.closed.Load())
+	require.True(t, t1.closed.Load())
+	require.True(t, t2.closed.Load())
 }
 
 func TestMultiThrottler_IsThrottled_NoneThrottled(t *testing.T) {
@@ -167,8 +166,8 @@ func TestMultiThrottler_BlockWait_OnlyBlocksThrottled(t *testing.T) {
 	multi.BlockWait(t.Context())
 
 	// Only t2 should have been waited on
-	assert.False(t, t1.blockWaited.Load())
-	assert.True(t, t2.blockWaited.Load())
+	require.False(t, t1.blockWaited.Load())
+	require.True(t, t2.blockWaited.Load())
 }
 
 func TestMultiThrottler_BlockWait_RespectsContext(t *testing.T) {

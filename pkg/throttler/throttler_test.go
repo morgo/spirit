@@ -10,7 +10,6 @@ import (
 
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -36,7 +35,7 @@ func TestThrottlerInterface(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)        // make sure the throttler loop can calculate.
 	throttler.BlockWait(t.Context())         // wait for catch up (there's no activity)
-	assert.False(t, throttler.IsThrottled()) // there's a race, but its unlikely to be throttled
+	require.False(t, throttler.IsThrottled()) // there's a race, but its unlikely to be throttled
 
 	require.NoError(t, throttler.Close())
 
@@ -48,11 +47,11 @@ func TestNoopThrottler(t *testing.T) {
 	require.NoError(t, throttler.Open(t.Context()))
 	throttler.currentLag = 1 * time.Second
 	throttler.lagTolerance = 2 * time.Second
-	assert.False(t, throttler.IsThrottled())
+	require.False(t, throttler.IsThrottled())
 	require.NoError(t, throttler.UpdateLag(t.Context()))
 	throttler.BlockWait(t.Context())
 	throttler.lagTolerance = 100 * time.Millisecond
-	assert.True(t, throttler.IsThrottled())
+	require.True(t, throttler.IsThrottled())
 	require.NoError(t, throttler.Close())
 }
 
@@ -64,7 +63,7 @@ func TestMockThrottler(t *testing.T) {
 	require.NoError(t, throttler.Close())
 
 	// Test IsThrottled always returns true
-	assert.True(t, throttler.IsThrottled())
+	require.True(t, throttler.IsThrottled())
 
 	// Test UpdateLag returns no error
 	require.NoError(t, throttler.UpdateLag(t.Context()))
@@ -73,8 +72,8 @@ func TestMockThrottler(t *testing.T) {
 	start := time.Now()
 	throttler.BlockWait(t.Context())
 	elapsed := time.Since(start)
-	assert.GreaterOrEqual(t, elapsed, 1*time.Second)
-	assert.Less(t, elapsed, 1500*time.Millisecond) // allow 500ms tolerance for CI scheduling delays
+	require.GreaterOrEqual(t, elapsed, 1*time.Second)
+	require.Less(t, elapsed, 1500*time.Millisecond) // allow 500ms tolerance for CI scheduling delays
 
 	// Test BlockWait respects context cancellation
 	ctx, cancel := context.WithCancel(t.Context())
@@ -82,5 +81,5 @@ func TestMockThrottler(t *testing.T) {
 	start = time.Now()
 	throttler.BlockWait(ctx)
 	elapsed = time.Since(start)
-	assert.Less(t, elapsed, 100*time.Millisecond) // should return almost immediately
+	require.Less(t, elapsed, 100*time.Millisecond) // should return almost immediately
 }
