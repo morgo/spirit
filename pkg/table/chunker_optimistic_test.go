@@ -206,7 +206,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
 	require.Equal(t, uint64(100), chunk.ChunkSize) // immediate change from before
-	chunker.Feedback(chunk, time.Second, 1)       // way too long again, it will reduce to 10
+	chunker.Feedback(chunk, time.Second, 1)        // way too long again, it will reduce to 10
 
 	newChunk, err := chunker.Next()
 	require.NoError(t, err)
@@ -218,7 +218,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	require.Equal(t, uint64(10), chunk.ChunkSize)    // no change
+	require.Equal(t, uint64(10), chunk.ChunkSize)   // no change
 	chunker.Feedback(chunk, 50*time.Microsecond, 1) // must give feedback to advance watermark.
 
 	// Feedback to increase the chunk size is more gradual.

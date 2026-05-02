@@ -115,7 +115,7 @@ func TestComparesTo(t *testing.T) {
 		Inclusive: true,
 	}
 	require.True(t, b1.comparesTo(b2))
-	b2.Inclusive = false              // change operator
+	b2.Inclusive = false               // change operator
 	require.True(t, b1.comparesTo(b2)) // still compares
 	b2.Value = []Datum{{Val: 300, Tp: signedType}}
 	require.False(t, b1.comparesTo(b2))
