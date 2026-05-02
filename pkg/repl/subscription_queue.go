@@ -28,6 +28,10 @@ type deltaQueue struct {
 
 	watermarkOptimization bool
 	chunker               table.MappedChunker
+
+	// Counters for the bookend log emitted on watermark-optimization transitions.
+	keysAdded        atomic.Int64
+	keysDroppedAbove atomic.Int64
 }
 
 // Assert that deltaQueue implements subscription
@@ -53,10 +57,12 @@ func (s *deltaQueue) HasChanged(key, _ []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
+		s.keysDroppedAbove.Add(1)
 		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
 	s.changes = append(s.changes, queuedChange{key: utils.HashKey(key), isDelete: deleted})
+	s.keysAdded.Add(1)
 }
 
 func (s *deltaQueue) createDeleteStmt(deleteKeys []string) statement {
@@ -165,6 +171,15 @@ func (s *deltaQueue) watermarkOptimizationEnabled() bool {
 
 func (s *deltaQueue) SetWatermarkOptimization(enabled bool) {
 	s.Lock()
-	defer s.Unlock()
+	deltaLen := len(s.changes)
 	s.watermarkOptimization = enabled
+	s.Unlock()
+
+	s.c.logger.Info("watermark optimization toggled",
+		"table", s.table.TableName,
+		"enabled", enabled,
+		"keys_added", s.keysAdded.Swap(0),
+		"keys_dropped_above_high", s.keysDroppedAbove.Swap(0),
+		"delta_len", deltaLen,
+	)
 }
