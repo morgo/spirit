@@ -23,7 +23,7 @@ func TestMetadataLock(t *testing.T) {
 
 	// Confirm a second lock cannot be acquired
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.ErrorContains(t, err, "lock is held by another connection")
+	require.ErrorContains(t, err, "lock is held by another connection")
 
 	// Close the original mdl
 	require.NoError(t, mdl.Close())
@@ -31,7 +31,7 @@ func TestMetadataLock(t *testing.T) {
 	// Confirm a new lock can be acquired
 	mdl3, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	assert.NoError(t, mdl3.Close())
+	require.NoError(t, mdl3.Close())
 }
 
 func TestMetadataLockContextCancel(t *testing.T) {
@@ -54,7 +54,7 @@ func TestMetadataLockContextCancel(t *testing.T) {
 	mdl2, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
 	require.NotNil(t, mdl2)
-	assert.NoError(t, mdl2.Close())
+	require.NoError(t, mdl2.Close())
 }
 
 func TestMetadataLockRefresh(t *testing.T) {
@@ -74,10 +74,10 @@ func TestMetadataLockRefresh(t *testing.T) {
 
 	// Confirm the lock is still held
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.ErrorContains(t, err, "lock is held by another connection")
+	require.ErrorContains(t, err, "lock is held by another connection")
 
 	// Close the lock
-	assert.NoError(t, mdl.Close())
+	require.NoError(t, mdl.Close())
 }
 
 func TestComputeLockName(t *testing.T) {
@@ -114,7 +114,7 @@ func TestMetadataLockLength(t *testing.T) {
 	defer utils.CloseAndLog(mdl)
 
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), empty, NewDBConfig(), logger)
-	assert.ErrorContains(t, err, "no tables provided for metadata lock")
+	require.ErrorContains(t, err, "no tables provided for metadata lock")
 }
 
 // simulateConnectionClose simulates a temporary network issue by closing the connection
@@ -149,8 +149,8 @@ func TestMetadataLockRefreshWithConnIssueSimulation(t *testing.T) {
 
 	// confirm the lock is still held by attempting to acquire it with a new connection
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
-	assert.ErrorContains(t, err, "lock is held by another connection")
+	require.ErrorContains(t, err, "lock is held by another connection")
 
 	// close the lock
-	assert.NoError(t, mdl.Close())
+	require.NoError(t, mdl.Close())
 }

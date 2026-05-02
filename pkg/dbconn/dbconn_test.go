@@ -41,12 +41,12 @@ func TestLockWaitTimeouts(t *testing.T) {
 
 	lockWaitTimeout, err := getVariable(trx, "lock_wait_timeout", true)
 	require.NoError(t, err)
-	assert.Equal(t, strconv.Itoa(config.LockWaitTimeout), lockWaitTimeout)
+	require.Equal(t, strconv.Itoa(config.LockWaitTimeout), lockWaitTimeout)
 
 	innodbLockWaitTimeout, err := getVariable(trx, "innodb_lock_wait_timeout", true)
 	require.NoError(t, err)
-	assert.Equal(t, strconv.Itoa(config.InnodbLockWaitTimeout), innodbLockWaitTimeout)
-	assert.NoError(t, trx.Rollback())
+	require.Equal(t, strconv.Itoa(config.InnodbLockWaitTimeout), innodbLockWaitTimeout)
+	require.NoError(t, trx.Rollback())
 }
 
 func TestRetryableTrx(t *testing.T) {
@@ -68,15 +68,15 @@ func TestRetryableTrx(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = RetryableTransaction(t.Context(), db, true, NewDBConfig(), "INSERT INTO test.dbexec (id, colb) VALUES (2, 2)") // duplicate
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// duplicate, but creates a warning. Ignore duplicate warnings set to true.
 	_, err = RetryableTransaction(t.Context(), db, true, NewDBConfig(), "INSERT IGNORE INTO test.dbexec (id, colb) VALUES (2, 2)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// duplicate, but warning not ignored
 	_, err = RetryableTransaction(t.Context(), db, false, NewDBConfig(), "INSERT IGNORE INTO test.dbexec (id, colb) VALUES (2, 2)")
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// start a transaction, acquire a lock for long enough that the first attempt times out
 	// but a retry is successful.
@@ -95,8 +95,8 @@ func TestRetryableTrx(t *testing.T) {
 		assert.NoError(t, err2)
 	}()
 	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 1")
-	assert.NoError(t, err)
-	assert.NoError(t, db.Close())
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
 
 	// Same again, but make the retry unsuccessful
 	config.InnodbLockWaitTimeout = 1
@@ -110,9 +110,9 @@ func TestRetryableTrx(t *testing.T) {
 	_, err = trx.ExecContext(t.Context(), "SELECT * FROM test.dbexec WHERE id = 2 FOR UPDATE")
 	require.NoError(t, err)
 	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 2") // this will fail, since it times out and exhausts retries.
-	assert.Error(t, err)
+	require.Error(t, err)
 	err = trx.Rollback() // now we can rollback.
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestForceExec(t *testing.T) {
@@ -140,11 +140,11 @@ func TestForceExec(t *testing.T) {
 
 	// Under a normal exec applying an instant change will fail due to MDL timeout
 	err = Exec(t.Context(), db, "ALTER TABLE requires_mdl ALGORITHM=INSTANT, ADD COLUMN colc INT")
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// But change it to forceexec and it will work!
 	err = ForceExec(t.Context(), db, []*table.TableInfo{ti}, config, slog.Default(), "ALTER TABLE requires_mdl ALGORITHM=INSTANT, ADD COLUMN colc INT")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestStandardTrx(t *testing.T) {
@@ -158,5 +158,5 @@ func TestStandardTrx(t *testing.T) {
 	var observedConnID int
 	err = trx.QueryRowContext(t.Context(), "SELECT connection_id()").Scan(&observedConnID)
 	require.NoError(t, err)
-	assert.Equal(t, connID, observedConnID)
+	require.Equal(t, connID, observedConnID)
 }

@@ -328,8 +328,8 @@ func TestDBConfigTLSModeDefaults(t *testing.T) {
 	config := NewDBConfig()
 
 	// Test TLS defaults
-	assert.Equal(t, "PREFERRED", config.TLSMode)
-	assert.Empty(t, config.TLSCertificatePath)
+	require.Equal(t, "PREFERRED", config.TLSMode)
+	require.Empty(t, config.TLSCertificatePath)
 }
 
 func TestTLSModeConfigRegistration(t *testing.T) {
@@ -720,12 +720,12 @@ func TestPREFERREDModeDISABLEDFallback(t *testing.T) {
 	// Test original PREFERRED DSN
 	preferredDSN, err := newDSN(baseDSN, config)
 	require.NoError(t, err)
-	assert.Contains(t, preferredDSN, "tls=custom", "PREFERRED should include TLS config")
+	require.Contains(t, preferredDSN, "tls=custom", "PREFERRED should include TLS config")
 
 	// Test fallback DISABLED DSN
 	disabledDSN, err := newDSN(baseDSN, &configCopy)
 	require.NoError(t, err)
-	assert.NotContains(t, disabledDSN, "tls=", "DISABLED fallback should not include any TLS config")
+	require.NotContains(t, disabledDSN, "tls=", "DISABLED fallback should not include any TLS config")
 
 	// Both should have the same non-TLS parameters
 	expectedParams := []string{
@@ -740,8 +740,8 @@ func TestPREFERREDModeDISABLEDFallback(t *testing.T) {
 	}
 
 	for _, param := range expectedParams {
-		assert.Contains(t, preferredDSN, param, "PREFERRED DSN should contain %s", param)
-		assert.Contains(t, disabledDSN, param, "DISABLED fallback DSN should contain %s", param)
+		require.Contains(t, preferredDSN, param, "PREFERRED DSN should contain %s", param)
+		require.Contains(t, disabledDSN, param, "DISABLED fallback DSN should contain %s", param)
 	}
 }
 
@@ -753,9 +753,9 @@ func TestPREFERREDModeConfigConsistency(t *testing.T) {
 	require.NotNil(t, config)
 
 	// PREFERRED mode should use InsecureSkipVerify=true (encryption only)
-	assert.True(t, config.InsecureSkipVerify, "PREFERRED mode should skip certificate verification")
-	assert.Nil(t, config.RootCAs, "PREFERRED mode should not set RootCAs")
-	assert.Nil(t, config.VerifyPeerCertificate, "PREFERRED mode should not use custom verification")
+	require.True(t, config.InsecureSkipVerify, "PREFERRED mode should skip certificate verification")
+	require.Nil(t, config.RootCAs, "PREFERRED mode should not set RootCAs")
+	require.Nil(t, config.VerifyPeerCertificate, "PREFERRED mode should not use custom verification")
 }
 
 func TestGetTLSConfigNameForAllModes(t *testing.T) {

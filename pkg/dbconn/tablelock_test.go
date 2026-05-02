@@ -38,9 +38,9 @@ func TestTableLock(t *testing.T) {
 	// Try to acquire a table that is already locked, should fail because we use WRITE locks now.
 	// But should also fail very quickly because we've set the lock_wait_timeout to 1s.
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
-	assert.NoError(t, lock1.Close(t.Context()))
+	require.NoError(t, lock1.Close(t.Context()))
 }
 
 func TestExecUnderLock(t *testing.T) {
@@ -58,12 +58,12 @@ func TestExecUnderLock(t *testing.T) {
 	lock, err := NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
 	require.NoError(t, err)
 	err = lock.ExecUnderLock(t.Context(), "INSERT INTO testunderlock VALUES (1, 1)", "", "INSERT INTO testunderlock VALUES (2, 2)")
-	assert.NoError(t, err) // pass, under write lock.
+	require.NoError(t, err) // pass, under write lock.
 
 	// Try to execute a statement that is not in the lock transaction though
 	// It is expected to fail.
 	err = Exec(t.Context(), db, "INSERT INTO testunderlock VALUES (3, 3)")
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestTableLockMultiple(t *testing.T) {
@@ -99,11 +99,11 @@ func TestTableLockMultiple(t *testing.T) {
 
 	// Try to acquire a lock on any of the tables - should fail because they're all locked
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tables[0]}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tables[1]}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tables[2]}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// Test we can write to all tables under the lock
 	err = lock1.ExecUnderLock(t.Context(),
@@ -111,19 +111,19 @@ func TestTableLockMultiple(t *testing.T) {
 		"INSERT INTO testlock2 VALUES (1, 1)",
 		"INSERT INTO testlock3 VALUES (1, 1)",
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Release the lock
-	assert.NoError(t, lock1.Close(t.Context()))
+	require.NoError(t, lock1.Close(t.Context()))
 
 	// Verify we can now acquire individual locks
 	lock2, err := NewTableLock(t.Context(), db, []*table.TableInfo{tables[0]}, testConfig(), slog.Default())
 	require.NoError(t, err)
-	assert.NoError(t, lock2.Close(t.Context()))
+	require.NoError(t, lock2.Close(t.Context()))
 
 	// Clean up
 	err = Exec(t.Context(), db, "DROP TABLE testlock1, _testlock1_new, testlock2, _testlock2_new, testlock3, _testlock3_new")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestTableLockFail(t *testing.T) {
@@ -141,7 +141,7 @@ func TestTableLockFail(t *testing.T) {
 	require.NoError(t, err)
 	defer func() {
 		err := trx.Rollback()
-		assert.NoError(t, err, "Failed to rollback transaction")
+		require.NoError(t, err, "Failed to rollback transaction")
 	}()
 
 	_, err = trx.ExecContext(t.Context(), "LOCK TABLES test.testlockfail WRITE")
@@ -153,13 +153,13 @@ func TestTableLockFail(t *testing.T) {
 	cfg.ForceKill = false
 	cfg.MaxRetries = 3 // Set max retries to 3 for this test
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, slog.Default())
-	assert.Error(t, err) // failed to acquire lock
+	require.Error(t, err) // failed to acquire lock
 
 	// Enable force killing to allow retrying with query killing. This will FAIL because we do not kill
 	// connections with explicit table locks.
 	cfg.ForceKill = true
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, slog.Default())
-	assert.Error(t, err) // We won't kill a connection with an explicit table lock, so this should fail after exhausting retries
+	require.Error(t, err) // We won't kill a connection with an explicit table lock, so this should fail after exhausting retries
 }
 
 // TestTableLockCrossSchema verifies that LOCK TABLES on the same table name

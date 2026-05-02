@@ -6,7 +6,6 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,18 +48,18 @@ func TestTrxPool(t *testing.T) {
 	var count int
 	err = trx1.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test.trxpool WHERE id = 3").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 0, count)
+	require.Equal(t, 0, count)
 	err = trx2.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test.trxpool WHERE id = 3").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 0, count)
+	require.Equal(t, 0, count)
 
 	_, err = pool.Get()
-	assert.Error(t, err) // no trx in the pool
+	require.Error(t, err) // no trx in the pool
 
 	pool.Put(trx1)
 	trx3, err := pool.Get()
 	require.NoError(t, err)
 	pool.Put(trx3)
 
-	assert.NoError(t, pool.Close())
+	require.NoError(t, pool.Close())
 }

@@ -320,9 +320,9 @@ func TestEnhanceDSNWithTLS_Integration(t *testing.T) {
 	enhancedDSN, err := EnhanceDSNWithTLS(originalDSN, config)
 
 	require.NoError(t, err)
-	assert.Contains(t, enhancedDSN, "tls=custom")
-	assert.Contains(t, enhancedDSN, "example.com:3306")
-	assert.Contains(t, enhancedDSN, "testdb")
+	require.Contains(t, enhancedDSN, "tls=custom")
+	require.Contains(t, enhancedDSN, "example.com:3306")
+	require.Contains(t, enhancedDSN, "testdb")
 }
 
 // TestNewDSNTLSPreservation tests the critical newDSN function for TLS parameter preservation
