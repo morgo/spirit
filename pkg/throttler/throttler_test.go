@@ -33,8 +33,8 @@ func TestThrottlerInterface(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, throttler.Open(t.Context()))
 
-	time.Sleep(50 * time.Millisecond)        // make sure the throttler loop can calculate.
-	throttler.BlockWait(t.Context())         // wait for catch up (there's no activity)
+	time.Sleep(50 * time.Millisecond)         // make sure the throttler loop can calculate.
+	throttler.BlockWait(t.Context())          // wait for catch up (there's no activity)
 	require.False(t, throttler.IsThrottled()) // there's a race, but its unlikely to be throttled
 
 	require.NoError(t, throttler.Close())
