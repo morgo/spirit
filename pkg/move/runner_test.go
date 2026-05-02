@@ -118,7 +118,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 		writeCount.Load(), errorCount.Load())
 
 	// The move should succeed
-	assert.NoError(t, err, "Move should succeed even with concurrent writes") // not all changes flushed!!
+	require.NoError(t, err, "Move should succeed even with concurrent writes") // not all changes flushed!!
 
 	// Verify data was moved correctly
 	var sourceCount, targetCount int
@@ -132,7 +132,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 	require.NoError(t, err)
 
 	t.Logf("Source count: %d, Target count: %d", sourceCount, targetCount)
-	assert.Equal(t, sourceCount, targetCount, "Source and target should have same row count")
+	require.Equal(t, sourceCount, targetCount, "Source and target should have same row count")
 }
 
 // concurrentWriteThread simulates the load pattern from the load test
@@ -449,5 +449,5 @@ func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 5, count)
+	require.Equal(t, 5, count)
 }

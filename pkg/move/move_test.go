@@ -12,7 +12,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -61,7 +60,7 @@ func TestBasicMove(t *testing.T) {
 		WriteThreads:    2,
 		CreateSentinel:  false,
 	}
-	assert.NoError(t, move.Run())
+	require.NoError(t, move.Run())
 }
 func TestResumeFromCheckpointE2E(t *testing.T) {
 	t.Run("deferFalse", func(t *testing.T) { // known to race.
@@ -143,9 +142,9 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Close everything manually.
 	r.cancelFunc()
-	assert.NoError(t, r.sources[0].db.Close())
-	assert.NoError(t, r.targets[0].DB.Close())
-	assert.NoError(t, r.Close())
+	require.NoError(t, r.sources[0].db.Close())
+	require.NoError(t, r.targets[0].DB.Close())
+	require.NoError(t, r.Close())
 
 	testutils.RunSQL(t, `INSERT INTO source_resume.t1 (val) SELECT RANDOM_BYTES(255) FROM  source_resume.t1 a JOIN  source_resume.t1 b JOIN  source_resume.t1 c LIMIT 100000`)
 
@@ -154,8 +153,8 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 ADD COLUMN extra_col INT DEFAULT 0`)
 	r, err = NewRunner(move)
 	require.NoError(t, err)
-	assert.Error(t, r.Run(t.Context()))
-	assert.NoError(t, r.Close())
+	require.Error(t, r.Run(t.Context()))
+	require.NoError(t, r.Close())
 
 	// Drop the additional column, we should be able to resume now.
 	move.TargetChunkTime = 5 * time.Second
@@ -163,8 +162,8 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 	testutils.RunSQL(t, `ALTER TABLE dest_resume.t1 DROP COLUMN extra_col`)
 	r, err = NewRunner(move)
 	require.NoError(t, err)
-	assert.NoError(t, r.Run(t.Context()))
-	assert.NoError(t, r.Close())
+	require.NoError(t, r.Run(t.Context()))
+	require.NoError(t, r.Close())
 }
 
 // TestEmptyDatabaseMove tests that a move operation succeeds when the source database has no tables.
@@ -214,11 +213,11 @@ func TestEmptyDatabaseMove(t *testing.T) {
 
 	// The move should succeed even with no tables
 	err = runner.Run(t.Context())
-	assert.NoError(t, err, "Move should succeed with empty source database")
+	require.NoError(t, err, "Move should succeed with empty source database")
 
 	// Verify cutover was called
-	assert.True(t, cutoverCalled, "Cutover function should have been called")
+	require.True(t, cutoverCalled, "Cutover function should have been called")
 
 	// Clean up
-	assert.NoError(t, runner.Close())
+	require.NoError(t, runner.Close())
 }
