@@ -10,7 +10,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -145,11 +144,11 @@ func TestShardedApplierIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify callback was invoked
-	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked")
+	require.True(t, callbackInvoked.Load(), "Callback should have been invoked")
 	callbackErrMu.Lock()
 	require.NoError(t, callbackErr, "Callback should not have an error")
 	callbackErrMu.Unlock()
-	assert.Equal(t, int64(10), callbackAffectedRows.Load(), "Should have affected 10 rows")
+	require.Equal(t, int64(10), callbackAffectedRows.Load(), "Should have affected 10 rows")
 
 	// Verify data distribution across shards
 	// Based on our hash function:
@@ -169,8 +168,8 @@ func TestShardedApplierIntegration(t *testing.T) {
 	t.Logf("Shard 1 (target2DB) has %d rows", shard1Count)
 
 	// Verify the distribution
-	assert.Equal(t, 5, shard0Count, "Shard 0 (target1DB) should have 5 rows (even user_ids)")
-	assert.Equal(t, 5, shard1Count, "Shard 1 (target2DB) should have 5 rows (odd user_ids)")
+	require.Equal(t, 5, shard0Count, "Shard 0 (target1DB) should have 5 rows (even user_ids)")
+	require.Equal(t, 5, shard1Count, "Shard 1 (target2DB) should have 5 rows (odd user_ids)")
 
 	// Verify which rows went where
 	rows, err := target1DB.QueryContext(t.Context(), "SELECT user_id FROM users ORDER BY user_id")
@@ -201,12 +200,12 @@ func TestShardedApplierIntegration(t *testing.T) {
 
 	// Verify even user_ids are in shard 0
 	for _, uid := range shard0UserIDs {
-		assert.Equal(t, int64(0), uid%2, "Shard 0 (target1DB) should only have even user_ids, got %d", uid)
+		require.Equal(t, int64(0), uid%2, "Shard 0 (target1DB) should only have even user_ids, got %d", uid)
 	}
 
 	// Verify odd user_ids are in shard 1
 	for _, uid := range shard1UserIDs {
-		assert.Equal(t, int64(1), uid%2, "Shard 1 (target2DB) should only have odd user_ids, got %d", uid)
+		require.Equal(t, int64(1), uid%2, "Shard 1 (target2DB) should only have odd user_ids, got %d", uid)
 	}
 
 	t.Log("✓ Data correctly distributed across shards")
@@ -312,7 +311,7 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 		var count int
 		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&count)
 		require.NoError(t, err)
-		assert.Equal(t, 3, count, "Shard %d should have 3 rows remaining after delete", i)
+		require.Equal(t, 3, count, "Shard %d should have 3 rows remaining after delete", i)
 
 		// Verify the correct rows remain
 		rows, err := db.QueryContext(t.Context(), "SELECT id FROM users ORDER BY id")
@@ -327,7 +326,7 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 		}
 		require.NoError(t, rows.Err())
 
-		assert.Equal(t, []int64{1, 3, 5}, ids, "Shard %d should have ids 1, 3, 5 remaining", i)
+		require.Equal(t, []int64{1, 3, 5}, ids, "Shard %d should have ids 1, 3, 5 remaining", i)
 	}
 
 	t.Log("✓ DeleteKeys correctly broadcast to all shards")
@@ -380,7 +379,7 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	// Delete with empty keys
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), affectedRows)
+	require.Equal(t, int64(0), affectedRows)
 }
 
 // TestShardedApplierUpsertRows tests the UpsertRows method distributes upserts across shards
@@ -485,7 +484,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	var shard0Count int
 	err = target1DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&shard0Count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, shard0Count, "Shard 0 should have 2 rows")
+	require.Equal(t, 2, shard0Count, "Shard 0 should have 2 rows")
 
 	rows, err := target1DB.QueryContext(t.Context(), "SELECT id, user_id, name, value FROM users ORDER BY id")
 	require.NoError(t, err)
@@ -505,10 +504,10 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 		var name string
 		err = rows.Scan(&id, &userID, &name, &value)
 		require.NoError(t, err)
-		assert.Equal(t, shard0Expected[i].id, id)
-		assert.Equal(t, shard0Expected[i].userID, userID)
-		assert.Equal(t, shard0Expected[i].name, name)
-		assert.Equal(t, shard0Expected[i].value, value)
+		require.Equal(t, shard0Expected[i].id, id)
+		require.Equal(t, shard0Expected[i].userID, userID)
+		require.Equal(t, shard0Expected[i].name, name)
+		require.Equal(t, shard0Expected[i].value, value)
 		i++
 	}
 	require.NoError(t, rows.Err())
@@ -517,7 +516,7 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 	var shard1Count int
 	err = target2DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM users").Scan(&shard1Count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, shard1Count, "Shard 1 should have 2 rows")
+	require.Equal(t, 2, shard1Count, "Shard 1 should have 2 rows")
 
 	rows, err = target2DB.QueryContext(t.Context(), "SELECT id, user_id, name, value FROM users ORDER BY id")
 	require.NoError(t, err)
@@ -537,10 +536,10 @@ func TestShardedApplierUpsertRows(t *testing.T) {
 		var name string
 		err = rows.Scan(&id, &userID, &name, &value)
 		require.NoError(t, err)
-		assert.Equal(t, shard1Expected[i].id, id)
-		assert.Equal(t, shard1Expected[i].userID, userID)
-		assert.Equal(t, shard1Expected[i].name, name)
-		assert.Equal(t, shard1Expected[i].value, value)
+		require.Equal(t, shard1Expected[i].id, id)
+		require.Equal(t, shard1Expected[i].userID, userID)
+		require.Equal(t, shard1Expected[i].name, name)
+		require.Equal(t, shard1Expected[i].value, value)
 		i++
 	}
 	require.NoError(t, rows.Err())
@@ -612,7 +611,7 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 
 	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), upsertRows, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), affectedRows)
+	require.Equal(t, int64(2), affectedRows)
 
 	// Verify only non-deleted rows were inserted (both shards combined)
 	var count1, count2 int
@@ -620,7 +619,7 @@ func TestShardedApplierUpsertRowsSkipDeleted(t *testing.T) {
 	require.NoError(t, err)
 	err = target2DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count2)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count1+count2)
+	require.Equal(t, 2, count1+count2)
 }
 
 // The sharded applier only sends a key to one shard, if the user
@@ -658,7 +657,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 		}
 		_, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 		require.Error(t, err, "Should error on overlapping key ranges")
-		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
+		require.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
 
 	// Test case 2: Overlapping ranges "40-80" and "60-a0"
@@ -672,7 +671,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 		}
 		_, err := NewShardedApplier(targets, NewApplierDefaultConfig())
 		require.Error(t, err, "Should error on overlapping key ranges")
-		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
+		require.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
 
 	// Test case 3: Non-overlapping ranges should succeed
@@ -684,8 +683,8 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target2DB, KeyRange: "80-"},
 		}
 		applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
-		assert.NoError(t, err, "Should not error on non-overlapping key ranges")
-		assert.NotNil(t, applier)
+		require.NoError(t, err, "Should not error on non-overlapping key ranges")
+		require.NotNil(t, applier)
 	})
 
 	// Test case 4: Three shards with one overlapping pair
@@ -707,7 +706,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 		}
 		_, err = NewShardedApplier(targets, NewApplierDefaultConfig())
 		require.Error(t, err, "Should error when any two shards overlap")
-		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
+		require.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
 
 	// Test case 5: Adjacent non-overlapping ranges should succeed
@@ -727,8 +726,8 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target3DB, KeyRange: "80-"},
 		}
 		applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
-		assert.NoError(t, err, "Should not error on adjacent non-overlapping ranges")
-		assert.NotNil(t, applier)
+		require.NoError(t, err, "Should not error on adjacent non-overlapping ranges")
+		require.NotNil(t, applier)
 	})
 }
 
@@ -779,5 +778,5 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	// Upsert with empty rows
 	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), []LogicalRow{}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), affectedRows)
+	require.Equal(t, int64(0), affectedRows)
 }
