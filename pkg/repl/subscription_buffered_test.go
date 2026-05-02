@@ -423,6 +423,8 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, allFlushed, "Not all changes should be flushed when watermark optimization is active")
 	assert.Equal(t, 1, sub.Length(), "Key 5 (at watermark) should remain in the map")
+	assert.Equal(t, int64(4), sub.keysAdded.Load(), "all four HasChanged calls should have incremented keysAdded")
+	assert.Equal(t, int64(1), sub.keysSkippedBelow.Load(), "key 5 should be counted as skipped-below-low-watermark")
 
 	// Verify that 3 rows (below watermark) were copied to the new table
 	var count int
