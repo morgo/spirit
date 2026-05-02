@@ -13,7 +13,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,9 +76,9 @@ func TestFixCorruptWithApplier(t *testing.T) {
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []*repl.Client{feed}, config)
 	require.NoError(t, err)
-	assert.Equal(t, "0/3 0.00%", checker.GetProgress())
+	require.Equal(t, "0/3 0.00%", checker.GetProgress())
 	require.NoError(t, checker.Run(t.Context())) // should be fixed!
-	assert.Equal(t, "3/3 100.00%", checker.GetProgress())
+	require.Equal(t, "3/3 100.00%", checker.GetProgress())
 }
 
 func TestDistributedChecksum(t *testing.T) {

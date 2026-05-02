@@ -12,7 +12,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -92,13 +91,13 @@ func TestBasicValidation(t *testing.T) {
 	require.NoError(t, feed.Run(t.Context()))
 
 	_, err = NewChecker(nil, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig()) // no source DBs
-	assert.EqualError(t, err, "at least one source database must be provided")
+	require.EqualError(t, err, "at least one source database must be provided")
 
 	_, err = NewChecker([]*sql.DB{db}, nil, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.EqualError(t, err, "chunker must be non-nil")
+	require.EqualError(t, err, "chunker must be non-nil")
 
 	_, err = NewChecker([]*sql.DB{db}, chunker, nil, NewCheckerDefaultConfig()) // no feed
-	assert.EqualError(t, err, "at least one feed must be provided")
+	require.EqualError(t, err, "at least one feed must be provided")
 }
 
 func TestUnfixableUniqueChecksum(t *testing.T) {
@@ -207,7 +206,7 @@ func TestFixCorrupt(t *testing.T) {
 	// Type assert the checker to *SingleChecker to access differencesFound
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
-	assert.Equal(t, uint64(0), singleChecker.differencesFound.Load()) // this is "0", because we fixed it.
+	require.Equal(t, uint64(0), singleChecker.differencesFound.Load()) // this is "0", because we fixed it.
 
 	// If we run the checker again, it will report zero differences.
 	checker2, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
@@ -216,7 +215,7 @@ func TestFixCorrupt(t *testing.T) {
 	require.NoError(t, err)
 	singleChecker, ok = checker2.(*SingleChecker)
 	require.True(t, ok, "checker2 is not of type *SingleChecker")
-	assert.Equal(t, uint64(0), singleChecker.differencesFound.Load())
+	require.Equal(t, uint64(0), singleChecker.differencesFound.Load())
 }
 
 func TestCorruptChecksum(t *testing.T) {
@@ -429,7 +428,7 @@ func TestYieldTimeout(t *testing.T) {
 
 	// Verify that at least one yield actually occurred.
 	singleChecker := checker.(*SingleChecker)
-	assert.Greater(t, singleChecker.yieldsPerformed.Load(), uint64(0), "expected at least one yield to occur")
+	require.Greater(t, singleChecker.yieldsPerformed.Load(), uint64(0), "expected at least one yield to occur")
 	t.Logf("yields performed: %d", singleChecker.yieldsPerformed.Load())
 }
 
