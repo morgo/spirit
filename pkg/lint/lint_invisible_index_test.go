@@ -18,14 +18,14 @@ func TestInvisibleIndexBeforeDropLinter_DropWithoutInvisible(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "should be made invisible before dropping")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Index)
-	assert.Equal(t, "idx_email", *violations[0].Location.Index)
-	assert.NotNil(t, violations[0].Suggestion)
-	assert.Contains(t, *violations[0].Suggestion, "ALTER INDEX idx_email INVISIBLE")
+	require.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "should be made invisible before dropping")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Index)
+	require.Equal(t, "idx_email", *violations[0].Location.Index)
+	require.NotNil(t, violations[0].Suggestion)
+	require.Contains(t, *violations[0].Suggestion, "ALTER INDEX idx_email INVISIBLE")
 }
 
 func TestInvisibleIndexBeforeDropLinter_DropAfterInvisibleInSameAlter(t *testing.T) {
@@ -38,9 +38,9 @@ func TestInvisibleIndexBeforeDropLinter_DropAfterInvisibleInSameAlter(t *testing
 	violations := linter.Lint(nil, stmts)
 
 	// Making an index invisible in the same ALTER statement where you drop it is obviously not good enough
-	assert.Len(t, violations, 1)
-	assert.IsType(t, &InvisibleIndexBeforeDropLinter{}, violations[0].Linter)
-	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
+	require.Len(t, violations, 1)
+	require.IsType(t, &InvisibleIndexBeforeDropLinter{}, violations[0].Linter)
+	require.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
 }
 
 func TestInvisibleIndexBeforeDropLinter_DropAlreadyInvisibleIndex(t *testing.T) {
@@ -63,7 +63,7 @@ func TestInvisibleIndexBeforeDropLinter_DropAlreadyInvisibleIndex(t *testing.T) 
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
 	// Should not have violations since index is already invisible
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestInvisibleIndexBeforeDropLinter_DropVisibleIndex(t *testing.T) {
@@ -87,7 +87,7 @@ func TestInvisibleIndexBeforeDropLinter_DropVisibleIndex(t *testing.T) {
 
 	// Should have violation since index is visible
 	require.Len(t, violations, 1)
-	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
+	require.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
 }
 
 func TestInvisibleIndexBeforeDropLinter_MultipleDrops(t *testing.T) {
@@ -113,8 +113,8 @@ func TestInvisibleIndexBeforeDropLinter_MultipleDrops(t *testing.T) {
 		}
 	}
 
-	assert.True(t, indexNames["idx_email"])
-	assert.True(t, indexNames["idx_name"])
+	require.True(t, indexNames["idx_email"])
+	require.True(t, indexNames["idx_name"])
 }
 
 func TestInvisibleIndexBeforeDropLinter_NonAlterStatement(t *testing.T) {
@@ -127,7 +127,7 @@ func TestInvisibleIndexBeforeDropLinter_NonAlterStatement(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Should not have violations for non-ALTER statements
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestInvisibleIndexBeforeDropLinter_AlterWithoutDrop(t *testing.T) {
@@ -140,7 +140,7 @@ func TestInvisibleIndexBeforeDropLinter_AlterWithoutDrop(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Should not have violations for ALTER without DROP INDEX
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
@@ -156,7 +156,7 @@ func TestInvisibleIndexBeforeDropLinter_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
+	require.Equal(t, "invisible_index_before_drop", violations[0].Linter.Name())
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationDisabled(t *testing.T) {
@@ -177,14 +177,14 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationDisabled(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should not have violations when disabled
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestInvisibleIndexBeforeDropLinter_Metadata(t *testing.T) {
 	linter := &InvisibleIndexBeforeDropLinter{}
 
-	assert.Equal(t, "invisible_index_before_drop", linter.Name())
-	assert.NotEmpty(t, linter.Description())
+	require.Equal(t, "invisible_index_before_drop", linter.Name())
+	require.NotEmpty(t, linter.Description())
 }
 
 // Configuration Tests
@@ -198,7 +198,7 @@ func TestInvisibleIndexBeforeDropLinter_Configure_ValidRaiseErrorTrue(t *testing
 
 	err := linter.Configure(config)
 	require.NoError(t, err)
-	assert.True(t, linter.raiseError)
+	require.True(t, linter.raiseError)
 }
 
 func TestInvisibleIndexBeforeDropLinter_Configure_ValidRaiseErrorFalse(t *testing.T) {
@@ -210,7 +210,7 @@ func TestInvisibleIndexBeforeDropLinter_Configure_ValidRaiseErrorFalse(t *testin
 
 	err := linter.Configure(config)
 	require.NoError(t, err)
-	assert.False(t, linter.raiseError)
+	require.False(t, linter.raiseError)
 }
 
 func TestInvisibleIndexBeforeDropLinter_Configure_CaseInsensitive(t *testing.T) {
@@ -251,7 +251,7 @@ func TestInvisibleIndexBeforeDropLinter_Configure_InvalidRaiseErrorValue(t *test
 
 	err := linter.Configure(config)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid value for raiseError")
+	require.Contains(t, err.Error(), "invalid value for raiseError")
 }
 
 func TestInvisibleIndexBeforeDropLinter_Configure_UnknownKey(t *testing.T) {
@@ -263,8 +263,8 @@ func TestInvisibleIndexBeforeDropLinter_Configure_UnknownKey(t *testing.T) {
 
 	err := linter.Configure(config)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown config key")
-	assert.Contains(t, err.Error(), "unknownKey")
+	require.Contains(t, err.Error(), "unknown config key")
+	require.Contains(t, err.Error(), "unknownKey")
 }
 
 func TestInvisibleIndexBeforeDropLinter_Configure_MultipleKeys(t *testing.T) {
@@ -277,7 +277,7 @@ func TestInvisibleIndexBeforeDropLinter_Configure_MultipleKeys(t *testing.T) {
 
 	err := linter.Configure(config)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown config key")
+	require.Contains(t, err.Error(), "unknown config key")
 }
 
 func TestInvisibleIndexBeforeDropLinter_DefaultConfig(t *testing.T) {
@@ -285,7 +285,7 @@ func TestInvisibleIndexBeforeDropLinter_DefaultConfig(t *testing.T) {
 
 	defaultConfig := linter.DefaultConfig()
 	require.NotNil(t, defaultConfig)
-	assert.Equal(t, "false", defaultConfig["raiseError"])
+	require.Equal(t, "false", defaultConfig["raiseError"])
 }
 
 // Functional Tests with Configuration
@@ -303,7 +303,7 @@ func TestInvisibleIndexBeforeDropLinter_RaiseErrorTrue_ProducesError(t *testing.
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestInvisibleIndexBeforeDropLinter_RaiseErrorFalse_ProducesWarning(t *testing.T) {
@@ -319,7 +319,7 @@ func TestInvisibleIndexBeforeDropLinter_RaiseErrorFalse_ProducesWarning(t *testi
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestInvisibleIndexBeforeDropLinter_DefaultBehavior(t *testing.T) {
@@ -334,7 +334,7 @@ func TestInvisibleIndexBeforeDropLinter_DefaultBehavior(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	// Default behavior is warning (raiseError defaults to false in struct)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 // Integration Tests with RunLinters
@@ -357,7 +357,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorTrue(t *
 	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorFalse(t *testing.T) {
@@ -378,7 +378,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_RaiseErrorFalse(t 
 	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_InvalidConfig(t *testing.T) {
@@ -398,9 +398,9 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_InvalidConfig(t *t
 		},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid value for raiseError")
+	require.Contains(t, err.Error(), "invalid value for raiseError")
 	// Linter should be skipped due to configuration error
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_DisabledLinter(t *testing.T) {
@@ -423,7 +423,7 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_DisabledLinter(t *
 		},
 	})
 	require.NoError(t, err)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_EnabledWithConfig(t *testing.T) {
@@ -448,5 +448,5 @@ func TestInvisibleIndexBeforeDropLinter_IntegrationWithConfig_EnabledWithConfig(
 	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }

@@ -36,9 +36,9 @@ func TestPlanChanges_NoChanges(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, current, nil, nil)
 	require.NoError(t, err)
-	assert.False(t, plan.HasChanges())
-	assert.False(t, plan.HasErrors())
-	assert.False(t, plan.HasWarnings())
+	require.False(t, plan.HasChanges())
+	require.False(t, plan.HasErrors())
+	require.False(t, plan.HasWarnings())
 }
 
 func TestPlanChanges_AddColumn(t *testing.T) {
@@ -50,12 +50,12 @@ func TestPlanChanges_AddColumn(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Contains(t, plan.Changes[0].Statement, "ALTER TABLE")
-	assert.Equal(t, "t1", plan.Changes[0].TableName)
+	require.Contains(t, plan.Changes[0].Statement, "ALTER TABLE")
+	require.Equal(t, "t1", plan.Changes[0].TableName)
 	// Statement should be semicolon-terminated
-	assert.True(t, plan.Changes[0].Statement[len(plan.Changes[0].Statement)-1] == ';')
+	require.True(t, plan.Changes[0].Statement[len(plan.Changes[0].Statement)-1] == ';')
 }
 
 func TestPlanChanges_NewTable(t *testing.T) {
@@ -68,10 +68,10 @@ func TestPlanChanges_NewTable(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
-	assert.Equal(t, "t2", plan.Changes[0].TableName)
+	require.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
+	require.Equal(t, "t2", plan.Changes[0].TableName)
 }
 
 func TestPlanChanges_DropTable(t *testing.T) {
@@ -84,9 +84,9 @@ func TestPlanChanges_DropTable(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Contains(t, plan.Changes[0].Statement, "DROP TABLE")
+	require.Contains(t, plan.Changes[0].Statement, "DROP TABLE")
 }
 
 func TestPlanChanges_Statements(t *testing.T) {
@@ -100,7 +100,7 @@ func TestPlanChanges_Statements(t *testing.T) {
 	require.NoError(t, err)
 	stmts := plan.Statements()
 	require.Len(t, stmts, 1)
-	assert.Contains(t, stmts[0], "ALTER TABLE")
+	require.Contains(t, stmts[0], "ALTER TABLE")
 }
 
 func TestPlanChanges_WithLintViolations(t *testing.T) {
@@ -124,12 +124,12 @@ func TestPlanChanges_WithLintViolations(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Equal(t, "child", plan.Changes[0].TableName)
+	require.Equal(t, "child", plan.Changes[0].TableName)
 	// The has_fk linter should produce a warning for the child table
-	assert.True(t, plan.HasWarnings(), "expected lint warnings for table with FK")
-	assert.NotEmpty(t, plan.Changes[0].Warnings())
+	require.True(t, plan.HasWarnings(), "expected lint warnings for table with FK")
+	require.NotEmpty(t, plan.Changes[0].Warnings())
 }
 
 func TestPlanChanges_StructuredViolations(t *testing.T) {
@@ -159,14 +159,14 @@ func TestPlanChanges_StructuredViolations(t *testing.T) {
 
 	// Verify structured fields are accessible
 	v := change.Violations[0]
-	assert.Equal(t, "child", v.Location.Table)
-	assert.NotEmpty(t, v.Message)
-	assert.Equal(t, SeverityWarning, v.Severity)
-	assert.Equal(t, "has_foreign_key", v.Linter.Name())
+	require.Equal(t, "child", v.Location.Table)
+	require.NotEmpty(t, v.Message)
+	require.Equal(t, SeverityWarning, v.Severity)
+	require.Equal(t, "has_foreign_key", v.Linter.Name())
 
 	// Severity methods filter correctly
-	assert.Len(t, change.Warnings(), 1)
-	assert.Empty(t, change.Errors())
+	require.Len(t, change.Warnings(), 1)
+	require.Empty(t, change.Errors())
 }
 
 func TestPlanChanges_WithLintConfig(t *testing.T) {
@@ -193,10 +193,10 @@ func TestPlanChanges_WithLintConfig(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, cfg)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	// has_foreign_key is disabled and is the only linter that would fire
 	// on this schema, so there should be no warnings at all.
-	assert.False(t, plan.HasWarnings(), "expected no warnings when has_foreign_key is disabled")
+	require.False(t, plan.HasWarnings(), "expected no warnings when has_foreign_key is disabled")
 	for _, ch := range plan.Changes {
 		assert.Empty(t, ch.Warnings(), "expected no warnings on any change")
 	}
@@ -205,8 +205,8 @@ func TestPlanChanges_WithLintConfig(t *testing.T) {
 func TestPlanChanges_EmptySchemas(t *testing.T) {
 	plan, err := PlanChanges(nil, nil, nil, nil)
 	require.NoError(t, err)
-	assert.False(t, plan.HasChanges())
-	assert.Empty(t, plan.Statements())
+	require.False(t, plan.HasChanges())
+	require.Empty(t, plan.Statements())
 }
 
 func TestPlanChanges_WithInfos(t *testing.T) {
@@ -226,18 +226,18 @@ func TestPlanChanges_WithInfos(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Equal(t, "t1", plan.Changes[0].TableName)
+	require.Equal(t, "t1", plan.Changes[0].TableName)
 
 	// The test_info linter should produce an info for the ALTER TABLE change.
-	assert.True(t, plan.HasInfos(), "expected lint infos from test_info linter")
+	require.True(t, plan.HasInfos(), "expected lint infos from test_info linter")
 	require.NotEmpty(t, plan.Changes[0].Infos())
-	assert.Equal(t, "test_info", plan.Changes[0].Infos()[0].Linter.Name())
-	assert.Contains(t, plan.Changes[0].Infos()[0].Message, "informational suggestion")
+	require.Equal(t, "test_info", plan.Changes[0].Infos()[0].Linter.Name())
+	require.Contains(t, plan.Changes[0].Infos()[0].Message, "informational suggestion")
 
 	// Infos should not appear as warnings or errors.
-	assert.Empty(t, plan.Changes[0].Errors())
+	require.Empty(t, plan.Changes[0].Errors())
 }
 
 func TestPlanChanges_HasInfosFalseWhenNone(t *testing.T) {
@@ -249,10 +249,10 @@ func TestPlanChanges_HasInfosFalseWhenNone(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	// No info-producing linter is registered, so HasInfos should be false.
-	assert.False(t, plan.HasInfos())
-	assert.Empty(t, plan.Changes[0].Infos())
+	require.False(t, plan.HasInfos())
+	require.Empty(t, plan.Changes[0].Infos())
 }
 
 func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
@@ -274,12 +274,12 @@ func TestPlanChanges_InfosNotOnNonAlter(t *testing.T) {
 	}
 	plan, err := PlanChanges(current, desired, nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
+	require.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
 	// The info linter only fires on ALTER, so no infos here.
-	assert.False(t, plan.HasInfos())
-	assert.Empty(t, plan.Changes[0].Infos())
+	require.False(t, plan.HasInfos())
+	require.Empty(t, plan.Changes[0].Infos())
 }
 
 func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
@@ -316,21 +316,21 @@ func TestPlanChanges_MultiStatementSameTable(t *testing.T) {
 		}
 	}
 	require.Len(t, t1Changes, 2, "expected 2 statements for t1 (partition type change)")
-	assert.Contains(t, t1Changes[0].Statement, "REMOVE PARTITIONING")
-	assert.Contains(t, t1Changes[1].Statement, "PARTITION BY")
+	require.Contains(t, t1Changes[0].Statement, "REMOVE PARTITIONING")
+	require.Contains(t, t1Changes[1].Statement, "PARTITION BY")
 
 	// Violations should only be on the last statement.
-	assert.Empty(t, t1Changes[0].Warnings(), "first statement should have no violations")
-	assert.Empty(t, t1Changes[0].Errors(), "first statement should have no violations")
-	assert.Empty(t, t1Changes[0].Infos(), "first statement should have no violations")
-	assert.NotEmpty(t, t1Changes[1].Warnings(), "last statement should carry the FK warning")
-	assert.True(t, plan.HasWarnings())
+	require.Empty(t, t1Changes[0].Warnings(), "first statement should have no violations")
+	require.Empty(t, t1Changes[0].Errors(), "first statement should have no violations")
+	require.Empty(t, t1Changes[0].Infos(), "first statement should have no violations")
+	require.NotEmpty(t, t1Changes[1].Warnings(), "last statement should carry the FK warning")
+	require.True(t, plan.HasWarnings())
 }
 
 func TestTerminatedStmt(t *testing.T) {
-	assert.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1"))
-	assert.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1;"))
-	assert.Equal(t, "SELECT 1;", terminatedStmt("  SELECT 1  "))
-	assert.Equal(t, "", terminatedStmt(""))
-	assert.Equal(t, "", terminatedStmt("   "))
+	require.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1"))
+	require.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1;"))
+	require.Equal(t, "SELECT 1;", terminatedStmt("  SELECT 1  "))
+	require.Equal(t, "", terminatedStmt(""))
+	require.Equal(t, "", terminatedStmt("   "))
 }
