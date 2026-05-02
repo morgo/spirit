@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,26 +35,26 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 	require.NoError(t, t1.PrimaryKeyIsMemoryComparable())
 	t1.keyColumnsMySQLTp[0] = "varchar"
 	t1.keyDatums[0] = unknownType
-	assert.Error(t, t1.PrimaryKeyIsMemoryComparable())
+	require.Error(t, t1.PrimaryKeyIsMemoryComparable())
 	t1.keyColumnsMySQLTp[0] = "bigint"
 	t1.keyDatums[0] = signedType
 	require.NoError(t, t1.PrimaryKeyIsMemoryComparable())
 
-	assert.Equal(t, "`t1`", t1.QuotedTableName)
+	require.Equal(t, "`t1`", t1.QuotedTableName)
 
 	require.NoError(t, chunker.Open())
-	assert.Error(t, chunker.Open())                  // can't open twice.
-	assert.True(t, chunker.KeyAboveHighWatermark(1)) // we haven't started copying.
+	require.Error(t, chunker.Open())                  // can't open twice.
+	require.True(t, chunker.KeyAboveHighWatermark(1)) // we haven't started copying.
 
 	_, err := chunker.Next()
 	require.NoError(t, err)
 
-	assert.True(t, chunker.KeyAboveHighWatermark(100)) // we are at 1
+	require.True(t, chunker.KeyAboveHighWatermark(100)) // we are at 1
 
 	_, err = chunker.Next()
 	require.NoError(t, err)
 
-	assert.False(t, chunker.KeyAboveHighWatermark(100)) // we are at 1001
+	require.False(t, chunker.KeyAboveHighWatermark(100)) // we are at 1001
 
 	for range 999 {
 		_, err = chunker.Next()
@@ -67,8 +66,8 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = chunker.Next()
-	assert.Error(t, err) // err: table is read.
-	assert.Equal(t, "table is read", err.Error())
+	require.Error(t, err) // err: table is read.
+	require.Equal(t, "table is read", err.Error())
 
 	require.NoError(t, chunker.Close())
 }
@@ -96,90 +95,90 @@ func TestLowWatermark(t *testing.T) {
 	require.NoError(t, chunker.Open())
 
 	_, err := chunker.GetLowWatermark()
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	chunk, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` < 1", chunk.String()) // first chunk
+	require.Equal(t, "`id` < 1", chunk.String()) // first chunk
 	_, err = chunker.GetLowWatermark()
-	assert.Error(t, err) // no feedback yet.
+	require.Error(t, err) // no feedback yet.
 	chunker.Feedback(chunk, time.Second, 1)
 	_, err = chunker.GetLowWatermark()
-	assert.Error(t, err) // there has been feedback, but watermark is not ready after first chunk.
+	require.Error(t, err) // there has been feedback, but watermark is not ready after first chunk.
 
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 1 AND `id` < 1001", chunk.String()) // first chunk
+	require.Equal(t, "`id` >= 1 AND `id` < 1001", chunk.String()) // first chunk
 	chunker.Feedback(chunk, time.Second, 1)
 	watermark, err := chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"1001\"],\"Inclusive\":false}}", watermark)
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"1001\"],\"Inclusive\":false}}", watermark)
 
 	// Check key w.r.t. watermark
-	assert.False(t, chunker.KeyAboveHighWatermark(1000))
-	assert.True(t, chunker.KeyAboveHighWatermark(1001))
-	assert.True(t, chunker.KeyBelowLowWatermark(1000)) // 1000 is done, so this is below.
-	assert.False(t, chunker.KeyBelowLowWatermark(1001))
+	require.False(t, chunker.KeyAboveHighWatermark(1000))
+	require.True(t, chunker.KeyAboveHighWatermark(1001))
+	require.True(t, chunker.KeyBelowLowWatermark(1000)) // 1000 is done, so this is below.
+	require.False(t, chunker.KeyBelowLowWatermark(1001))
 
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 1001 AND `id` < 2001", chunk.String()) // first chunk
+	require.Equal(t, "`id` >= 1001 AND `id` < 2001", chunk.String()) // first chunk
 	// Check KeyBelowLowWatermark before and after feedback.
-	assert.False(t, chunker.KeyBelowLowWatermark(1001))
+	require.False(t, chunker.KeyBelowLowWatermark(1001))
 	chunker.Feedback(chunk, time.Second, 1)
-	assert.True(t, chunker.KeyBelowLowWatermark(1001))
+	require.True(t, chunker.KeyBelowLowWatermark(1001))
 	watermark, err = chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
 
 	chunkAsync1, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 2001 AND `id` < 3001", chunkAsync1.String())
-	assert.False(t, chunker.KeyBelowLowWatermark(2001))
+	require.Equal(t, "`id` >= 2001 AND `id` < 3001", chunkAsync1.String())
+	require.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunkAsync2, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 3001 AND `id` < 4001", chunkAsync2.String())
-	assert.False(t, chunker.KeyBelowLowWatermark(2001))
+	require.Equal(t, "`id` >= 3001 AND `id` < 4001", chunkAsync2.String())
+	require.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunkAsync3, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 4001 AND `id` < 5001", chunkAsync3.String())
-	assert.False(t, chunker.KeyBelowLowWatermark(2001))
+	require.Equal(t, "`id` >= 4001 AND `id` < 5001", chunkAsync3.String())
+	require.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunker.Feedback(chunkAsync2, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
 
 	chunker.Feedback(chunkAsync3, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
-	assert.False(t, chunker.KeyBelowLowWatermark(2001))
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
+	require.False(t, chunker.KeyBelowLowWatermark(2001))
 
 	chunker.Feedback(chunkAsync1, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"4001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"5001\"],\"Inclusive\":false}}", watermark)
-	assert.True(t, chunker.KeyBelowLowWatermark(2001))
-	assert.True(t, chunker.KeyBelowLowWatermark(5000))
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"4001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"5001\"],\"Inclusive\":false}}", watermark)
+	require.True(t, chunker.KeyBelowLowWatermark(2001))
+	require.True(t, chunker.KeyBelowLowWatermark(5000))
 
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 5001 AND `id` < 6001", chunk.String()) // should bump immediately
+	require.Equal(t, "`id` >= 5001 AND `id` < 6001", chunk.String()) // should bump immediately
 	watermark, err = chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"4001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"5001\"],\"Inclusive\":false}}", watermark)
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"4001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"5001\"],\"Inclusive\":false}}", watermark)
 
 	chunker.Feedback(chunk, time.Second, 1)
 	watermark, err = chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"5001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"6001\"],\"Inclusive\":false}}", watermark)
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"5001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"6001\"],\"Inclusive\":false}}", watermark)
 
 	// Test that we have applied all stored chunks and the map is empty,
 	// as we gave Feedback for all chunks.
-	assert.Empty(t, chunker.lowerBoundWatermarkMap)
+	require.Empty(t, chunker.lowerBoundWatermarkMap)
 }
 
 func TestOptimisticDynamicChunking(t *testing.T) {
@@ -206,12 +205,12 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(100), chunk.ChunkSize) // immediate change from before
+	require.Equal(t, uint64(100), chunk.ChunkSize) // immediate change from before
 	chunker.Feedback(chunk, time.Second, 1)       // way too long again, it will reduce to 10
 
 	newChunk, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), newChunk.ChunkSize) // immediate change from before
+	require.Equal(t, uint64(10), newChunk.ChunkSize) // immediate change from before
 	// Feedback is only taken if the chunk.ChunkSize matches the current size.
 	// so lets give bad feedback and see no change.
 	newChunk.ChunkSize = 1234
@@ -219,7 +218,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(10), chunk.ChunkSize)    // no change
+	require.Equal(t, uint64(10), chunk.ChunkSize)    // no change
 	chunker.Feedback(chunk, 50*time.Microsecond, 1) // must give feedback to advance watermark.
 
 	// Feedback to increase the chunk size is more gradual.
@@ -227,13 +226,13 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 		chunk, err = chunker.Next()
 		chunker.Feedback(chunk, 50*time.Microsecond, 1) // very short.
 		require.NoError(t, err)
-		assert.Equal(t, uint64(10), chunk.ChunkSize) // no change.
+		require.Equal(t, uint64(10), chunk.ChunkSize) // no change.
 	}
 	// On the 11th piece of feedback *with this chunk size*
 	// it finally changes. But no greater than 50% increase at a time.
 	chunk, err = chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(15), chunk.ChunkSize)
+	require.Equal(t, uint64(15), chunk.ChunkSize)
 	chunker.Feedback(chunk, 50*time.Microsecond, 1)
 
 	// Advance the watermark a little bit.
@@ -247,7 +246,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 	watermark, err := chunker.GetLowWatermark()
 	require.NoError(t, err)
 
-	assert.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":22,\"LowerBound\":{\"Value\": [\"584\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"606\"],\"Inclusive\":false}}", watermark)
+	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":22,\"LowerBound\":{\"Value\": [\"584\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"606\"],\"Inclusive\":false}}", watermark)
 
 	// Start everything over again as t2.
 	t2 := newTableInfo4Test("test", "t1")
@@ -271,7 +270,7 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 	// we would have to worry about off-by-1 errors.
 	chunk, err = chunker2.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "584", chunk.LowerBound.Value[0].String())
+	require.Equal(t, "584", chunk.LowerBound.Value[0].String())
 }
 
 func TestOptimisticPrefetchChunking(t *testing.T) {
@@ -321,14 +320,14 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 	}
 	chunker.SetDynamicChunking(true)
 	require.NoError(t, chunker.Open())
-	assert.False(t, chunker.chunkPrefetchingEnabled)
+	require.False(t, chunker.chunkPrefetchingEnabled)
 
 	for !chunker.finalChunkSent {
 		chunk, err := chunker.Next()
 		require.NoError(t, err)
 		chunker.Feedback(chunk, 100*time.Millisecond, 1) // way too short.
 	}
-	assert.True(t, chunker.chunkPrefetchingEnabled)
+	require.True(t, chunker.chunkPrefetchingEnabled)
 }
 
 func TestOptimisticChunkerReset(t *testing.T) {
@@ -359,8 +358,8 @@ func TestOptimisticChunkerReset(t *testing.T) {
 
 	// Test that Reset() fails when chunker is not open
 	err := chunker.Reset()
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrChunkerNotOpen)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
 	require.NoError(t, chunker.Open())
@@ -374,15 +373,15 @@ func TestOptimisticChunkerReset(t *testing.T) {
 	// Process some chunks to change the state
 	chunk1, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` < 1", chunk1.String()) // first chunk
+	require.Equal(t, "`id` < 1", chunk1.String()) // first chunk
 
 	chunk2, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 1 AND `id` < 1001", chunk2.String())
+	require.Equal(t, "`id` >= 1 AND `id` < 1001", chunk2.String())
 
 	chunk3, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "`id` >= 1001 AND `id` < 2001", chunk3.String())
+	require.Equal(t, "`id` >= 1001 AND `id` < 2001", chunk3.String())
 
 	// Give feedback to advance watermark and change state
 	chunker.Feedback(chunk1, time.Second, 100)
@@ -391,58 +390,58 @@ func TestOptimisticChunkerReset(t *testing.T) {
 
 	// Verify state has changed
 	currentRowsCopied, currentChunksCopied, _ := chunker.Progress()
-	assert.Greater(t, currentRowsCopied, initialRowsCopied)
-	assert.Greater(t, currentChunksCopied, initialChunksCopied)
-	assert.NotEqual(t, initialChunkPtr.String(), chunker.chunkPtr.String())
+	require.Greater(t, currentRowsCopied, initialRowsCopied)
+	require.Greater(t, currentChunksCopied, initialChunksCopied)
+	require.NotEqual(t, initialChunkPtr.String(), chunker.chunkPtr.String())
 
 	// Verify watermark exists
 	watermark, err := chunker.GetLowWatermark()
 	require.NoError(t, err)
-	assert.NotEmpty(t, watermark)
+	require.NotEmpty(t, watermark)
 
 	// Now reset the chunker
 	err = chunker.Reset()
 	require.NoError(t, err)
 
 	// Verify state is reset to initial values
-	assert.Equal(t, initialChunkPtr.String(), chunker.chunkPtr.String(), "chunkPtr should be reset to initial value")
-	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value")
-	assert.Equal(t, initialFinalChunkSent, chunker.finalChunkSent, "finalChunkSent should be reset to initial value")
+	require.Equal(t, initialChunkPtr.String(), chunker.chunkPtr.String(), "chunkPtr should be reset to initial value")
+	require.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value")
+	require.Equal(t, initialFinalChunkSent, chunker.finalChunkSent, "finalChunkSent should be reset to initial value")
 
 	// Verify progress is reset
 	resetRowsCopied, resetChunksCopied, _ := chunker.Progress()
-	assert.Equal(t, initialRowsCopied, resetRowsCopied, "rowsCopied should be reset to initial value")
-	assert.Equal(t, initialChunksCopied, resetChunksCopied, "chunksCopied should be reset to initial value")
+	require.Equal(t, initialRowsCopied, resetRowsCopied, "rowsCopied should be reset to initial value")
+	require.Equal(t, initialChunksCopied, resetChunksCopied, "chunksCopied should be reset to initial value")
 
 	// Verify watermark is cleared
-	assert.Nil(t, chunker.watermark, "watermark should be nil after reset")
-	assert.Empty(t, chunker.lowerBoundWatermarkMap, "lowerBoundWatermarkMap should be empty after reset")
-	assert.Empty(t, chunker.chunkTimingInfo, "chunkTimingInfo should be empty after reset")
-	assert.False(t, chunker.chunkPrefetchingEnabled, "chunkPrefetchingEnabled should be false after reset")
+	require.Nil(t, chunker.watermark, "watermark should be nil after reset")
+	require.Empty(t, chunker.lowerBoundWatermarkMap, "lowerBoundWatermarkMap should be empty after reset")
+	require.Empty(t, chunker.chunkTimingInfo, "chunkTimingInfo should be empty after reset")
+	require.False(t, chunker.chunkPrefetchingEnabled, "chunkPrefetchingEnabled should be false after reset")
 
 	// Verify watermark is not ready after reset
 	_, err = chunker.GetLowWatermark()
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrWatermarkNotReady)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWatermarkNotReady)
 
 	// Verify that after reset, the chunker produces the same sequence as a fresh chunker
 	resetChunk1, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, chunk1.String(), resetChunk1.String(), "First chunk after reset should match original first chunk")
+	require.Equal(t, chunk1.String(), resetChunk1.String(), "First chunk after reset should match original first chunk")
 
 	resetChunk2, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, chunk2.String(), resetChunk2.String(), "Second chunk after reset should match original second chunk")
+	require.Equal(t, chunk2.String(), resetChunk2.String(), "Second chunk after reset should match original second chunk")
 
 	// Verify KeyAboveHighWatermark behavior is reset
 	// In the previous copy we had Next()'ed up to id=2000
 	// Here we have only up to 1001.
-	assert.True(t, chunker.KeyAboveHighWatermark(1500), "KeyAboveHighWatermark not reset correctly")
-	assert.False(t, chunker.KeyAboveHighWatermark(900), "KeyAboveHighWatermark not reset correctly")
+	require.True(t, chunker.KeyAboveHighWatermark(1500), "KeyAboveHighWatermark not reset correctly")
+	require.False(t, chunker.KeyAboveHighWatermark(900), "KeyAboveHighWatermark not reset correctly")
 
 	resetChunk3, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, chunk3.String(), resetChunk3.String(), "Third chunk after reset should match original third chunk")
+	require.Equal(t, chunk3.String(), resetChunk3.String(), "Third chunk after reset should match original third chunk")
 
 	// Test that reset works even with more complex state changes
 	chunker.Feedback(resetChunk1, 5*time.Second, 50) // Very slow feedback to trigger panic reduction
@@ -457,10 +456,10 @@ func TestOptimisticChunkerReset(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify chunk size is back to initial value
-	assert.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value even after dynamic changes")
+	require.Equal(t, initialChunkSize, chunker.chunkSize, "chunkSize should be reset to initial value even after dynamic changes")
 
 	// Verify we can still get the same first chunk
 	finalResetChunk, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, chunk1.String(), finalResetChunk.String(), "First chunk after second reset should still match original")
+	require.Equal(t, chunk1.String(), finalResetChunk.String(), "First chunk after second reset should still match original")
 }

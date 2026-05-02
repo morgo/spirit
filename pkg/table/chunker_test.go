@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,7 +30,7 @@ func TestCompositeChunker(t *testing.T) {
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
 	require.NoError(t, err)
-	assert.IsType(t, &chunkerComposite{}, chunker)
+	require.IsType(t, &chunkerComposite{}, chunker)
 }
 
 func TestOptimisticChunker(t *testing.T) {
@@ -55,7 +54,7 @@ func TestOptimisticChunker(t *testing.T) {
 
 	chunker, err := NewChunker(t1, ChunkerConfig{})
 	require.NoError(t, err)
-	assert.IsType(t, &chunkerOptimistic{}, chunker)
+	require.IsType(t, &chunkerOptimistic{}, chunker)
 }
 
 func TestNewCompositeChunkerWithKeyAndWhere(t *testing.T) {
@@ -86,7 +85,7 @@ func TestNewCompositeChunkerWithKeyAndWhere(t *testing.T) {
 		Where: "age > 50",
 	})
 	require.NoError(t, err)
-	assert.IsType(t, &chunkerComposite{}, chunker)
-	assert.Equal(t, "age_idx", chunker.(*chunkerComposite).keyName)
-	assert.Equal(t, "age > 50", chunker.(*chunkerComposite).where)
+	require.IsType(t, &chunkerComposite{}, chunker)
+	require.Equal(t, "age_idx", chunker.(*chunkerComposite).keyName)
+	require.Equal(t, "age > 50", chunker.(*chunkerComposite).where)
 }
