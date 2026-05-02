@@ -48,29 +48,29 @@ func TestCopier(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO copiert1 VALUES (1, 2, 3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "copiert1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "copiert2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	copierConfig := NewCopierDefaultConfig()
 	testMetricsSink := &TestMetricsSink{}
 	copierConfig.MetricsSink = testMetricsSink
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: copierConfig.TargetChunkTime, Logger: copierConfig.Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, copierConfig)
-	assert.NoError(t, err)
-	assert.NoError(t, copier.Run(t.Context())) // works
+	require.NoError(t, err)
+	require.NoError(t, copier.Run(t.Context())) // works
 
 	// Verify that t2 has one row.
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM copiert2").Scan(&count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 
 	// Verify that testMetricsSink.Send was called >0 times
@@ -86,26 +86,26 @@ func TestThrottler(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO throttlert1 VALUES (1, 2, 3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "throttlert1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "throttlert2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	copier.SetThrottler(&throttler.Noop{})
 	require.NoError(t, chunker.Open())
-	assert.NoError(t, copier.Run(t.Context())) // works
+	require.NoError(t, copier.Run(t.Context())) // works
 
 	// Verify that t2 has one row.
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM throttlert2").Scan(&count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
 
@@ -120,29 +120,29 @@ func TestCopierUniqueDestination(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO copieruniqt1 VALUES (1, 2, 3), (2,2,3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "copieruniqt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "copieruniqt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Because of the checksum, the unique violation will be ignored.
 	// This is because it's not possible to differentiate between a resume from checkpoint
 	// causing a duplicate key, and the DDL being applied causing it.
 	t1 = table.NewTableInfo(db, "test", "copieruniqt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 = table.NewTableInfo(db, "test", "copieruniqt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
-	assert.NoError(t, copier.Run(t.Context())) // works
-	require.Equal(t, 0, db.Stats().InUse)      // no connections in use.
+	require.NoError(t, err)
+	require.NoError(t, copier.Run(t.Context())) // works
+	require.Equal(t, 0, db.Stats().InUse)       // no connections in use.
 }
 
 func TestCopierLossyDataTypeConversion(t *testing.T) {
@@ -152,23 +152,23 @@ func TestCopierLossyDataTypeConversion(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO datatpt1 VALUES (1, 2, 'aaa'), (2,2,'bbb')")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "datatpt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "datatpt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Checksum flag does not affect this error.
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.Contains(t, err.Error(), "unsafe warning")
+	require.ErrorContains(t, err, "unsafe warning")
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 }
 
@@ -179,23 +179,23 @@ func TestCopierNullToNotNullConversion(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO null2notnullt1 VALUES (1, 2, 123), (2,2,NULL)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "null2notnullt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "null2notnullt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Checksum flag does not affect this error.
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.Contains(t, err.Error(), "unsafe warning")
+	require.ErrorContains(t, err, "unsafe warning")
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 }
 
@@ -206,26 +206,26 @@ func TestSQLModeAllowZeroInvalidDates(t *testing.T) {
 	testutils.RunSQL(t, "INSERT IGNORE INTO invaliddt1 VALUES (1, 2, '0000-00-00')")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "invaliddt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "invaliddt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Checksum flag does not affect this error.
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// Verify that t2 has one row.
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM invaliddt2").Scan(&count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
 
@@ -236,13 +236,13 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 	testutils.RunSQL(t, "INSERT IGNORE INTO lockt1 VALUES (1, 2, 3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "lockt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "lockt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	wg1, wg2 := sync.WaitGroup{}, sync.WaitGroup{}
 	wg1.Add(1)
 	// Lock table t2 for 2 seconds.
@@ -259,12 +259,12 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 	})
 	wg1.Wait()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.NoError(t, err) // succeeded within retry.
+	require.NoError(t, err) // succeeded within retry.
 	wg2.Wait()
 }
 
@@ -280,15 +280,15 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 	config.InnodbLockWaitTimeout = 1
 
 	db, err := dbconn.New(testutils.DSN(), config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	require.Equal(t, config.MaxOpenConnections, db.Stats().MaxOpenConnections)
 	require.Equal(t, 0, db.Stats().InUse)
 
 	t1 := table.NewTableInfo(db, "test", "lock2t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "lock2t2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Lock again but for 10 seconds.
 	// This will cause a failure because the retry is less than this (2 retries * 1 sec + backoff)
@@ -307,22 +307,22 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 	})
 	wg1.Wait() // Wait only for the lock to be acquired.
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.Error(t, err) // exceeded retry.
+	require.Error(t, err) // exceeded retry.
 	wg2.Wait()
 }
 
 func TestCopierValidation(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	// Test that NewCopier fails with nil chunker
 	_, err = NewCopier(db, nil, NewCopierDefaultConfig())
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestCopierFromCheckpoint(t *testing.T) {
@@ -333,34 +333,34 @@ func TestCopierFromCheckpoint(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _copierchkpt1_new VALUES (1, 2, 3),(2,3,4),(3,4,5)") // 1-3 row is already copied
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "copierchkpt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t1new := table.NewTableInfo(db, "test", "_copierchkpt1_new")
-	assert.NoError(t, t1new.SetInfo(t.Context()))
+	require.NoError(t, t1new.SetInfo(t.Context()))
 
 	lowWatermark := `{"Key":["a"],"ChunkSize":1,"LowerBound":{"Value":["3"],"Inclusive":true},"UpperBound":{"Value":["4"],"Inclusive":false}}`
 
 	// Create chunker first and open at the checkpoint watermark
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Open chunker at the specified watermark
 	err = chunker.OpenAtWatermark(lowWatermark)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Create copier with the prepared chunker
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, copier.Run(t.Context())) // works
+	require.NoError(t, copier.Run(t.Context())) // works
 
 	// Verify that t1new has 10 rows
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _copierchkpt1_new").Scan(&count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 10, count)
 }
 
@@ -379,32 +379,32 @@ func TestRangeOptimizationMustApply(t *testing.T) {
 	config := dbconn.NewDBConfig()
 	config.RangeOptimizerMaxMemSize = 1024 // 1KB
 	db, err := dbconn.New(testutils.DSN(), config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "rangeoptimizertest")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t1new := table.NewTableInfo(db, "test", "_rangeoptimizertest_new")
-	assert.NoError(t, t1new.SetInfo(t.Context()))
+	require.NoError(t, t1new.SetInfo(t.Context()))
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker.Open())
 	copier, err := NewCopier(db, chunker, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.ErrorContains(t, err, "range_optimizer_max_mem_size") // verify that spirit refuses to run if it encounters range optimizer memory limits.
+	require.ErrorContains(t, err, "range_optimizer_max_mem_size") // verify that spirit refuses to run if it encounters range optimizer memory limits.
 
 	// Now create a new DB config, which should default to be unlimited.
 	db2, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db2)
 	testutils.RunSQL(t, "TRUNCATE _rangeoptimizertest_new")
 	chunker2, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NoError(t, chunker2.Open())
 	copier, err = NewCopier(db2, chunker2, NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = copier.Run(t.Context())
-	assert.NoError(t, err) // works now.
+	require.NoError(t, err) // works now.
 }

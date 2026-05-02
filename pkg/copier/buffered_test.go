@@ -25,14 +25,14 @@ func TestBufferedCopier(t *testing.T) {
 	testutils.RunSQL(t, `INSERT INTO bufferedt1 VALUES (2, 42, 'string with \\ backslash', RANDOM_BYTES(10), JSON_OBJECT('key', 'value\\ \''), NOW(), NOW())`)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
 
 	t1 := table.NewTableInfo(db, "test", "bufferedt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "bufferedt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg := NewCopierDefaultConfig()
 	target := applier.Target{
@@ -42,22 +42,22 @@ func TestBufferedCopier(t *testing.T) {
 	cfg.Applier, err = applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	copier, err := NewCopier(db, chunker, cfg)
-	assert.NoError(t, err)
-	assert.NoError(t, copier.Run(t.Context())) // works.
+	require.NoError(t, err)
+	require.NoError(t, copier.Run(t.Context())) // works.
 
 	// We should expect to have the same number of rows
 	// and a basic checksum confirms a match.
 	var checksumSrc, checksumDst string
 	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt1").Scan(&checksumSrc)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = db.QueryRowContext(t.Context(), "SELECT BIT_XOR(CRC32(CONCAT(a, IFNULL(b, ''), c, d, e, f, g))) as checksum FROM bufferedt2").Scan(&checksumDst)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, checksumSrc, checksumDst, "Checksums do not match between source and destination tables")
 
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
@@ -87,40 +87,40 @@ func TestBufferedCopierCharsetConversion(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO charsetsrc VALUES (NULL, 'à'), (NULL, '€')")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "charsetsrc")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "charsetdst")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg := NewCopierDefaultConfig()
 	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	copier, err := NewCopier(db, chunker, cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// The copy should succeed because we set the connection charset to utf8mb4
 	// On read from the src it will be converted from latin1 to utf8mb4
 	err = copier.Run(t.Context())
-	assert.NoError(t, err, "Charset conversion from latin1 to utf8mb4 should succeed")
+	require.NoError(t, err, "Charset conversion from latin1 to utf8mb4 should succeed")
 
 	// Reverse the copy to show the other direction works too
 	// Start by emptying the "src" table, which is our intended destination.
 	testutils.RunSQL(t, "TRUNCATE TABLE charsetsrc")
 	chunker, err = table.NewChunker(t2, table.ChunkerConfig{NewTable: t1, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	copier, err = NewCopier(db, chunker, cfg)
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 	err = copier.Run(t.Context())
-	assert.NoError(t, err, "Charset conversion from utf8mb4 to latin1 should succeed")
+	require.NoError(t, err, "Charset conversion from utf8mb4 to latin1 should succeed")
 }
 
 // TestBufferedCopierDataTypeConversionError tests that the buffered copier
@@ -143,25 +143,25 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO datatypesrc (id, b) SELECT NULL, 'not_a_number' FROM datatypesrc a JOIN datatypesrc b JOIN datatypesrc c LIMIT 100000")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "datatypesrc")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "datatypedst")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg := NewCopierDefaultConfig()
 	cfg.TargetChunkTime = 10 // Small chunk time to create more chunks
 	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: cfg.TargetChunkTime, Logger: cfg.Logger})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	copier, err := NewCopier(db, chunker, cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Run the copier - should fail with conversion error
 	err = copier.Run(t.Context())
@@ -190,7 +190,7 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 // the callback, and a mock chunker to capture the duration passed to Feedback().
 func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	// Create test tables
@@ -202,9 +202,9 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO timing_test_src VALUES (1, 'test1'), (2, 'test2'), (3, 'test3')")
 
 	t1 := table.NewTableInfo(db, "test", "timing_test_src")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "timing_test_dst")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Create copier config first so we can use its logger
 	cfg := NewCopierDefaultConfig()
@@ -212,7 +212,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	// Create a real chunker (we need real chunk metadata for the copier)
 	realChunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 1000 * time.Millisecond, Logger: cfg.Logger})
 	require.NoError(t, err)
-	assert.NoError(t, realChunker.Open())
+	require.NoError(t, realChunker.Open())
 
 	// Wrap it to capture feedback calls
 	wrappedChunker := &feedbackCapturingChunker{
@@ -252,7 +252,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err = copier.Run(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Get feedback calls from the wrapped chunker
 	feedbackCalls := wrappedChunker.GetFeedbackCalls()
@@ -269,7 +269,7 @@ func TestBufferedCopierChunkTimingIncludesCallbackDelay(t *testing.T) {
 	// Verify the rows were actually copied
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM timing_test_dst").Scan(&count)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 3, count, "All rows should be copied")
 }
 
