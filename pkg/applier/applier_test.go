@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -208,7 +209,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 			{values: []any{int64(1), "test"}},
 		}
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 1, "should create one chunklet")
+		require.Len(t, chunklets, 1, "should create one chunklet")
 		assert.Len(t, chunklets[0], 1, "chunklet should have one row")
 	})
 
@@ -219,7 +220,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 			rows[i] = rowData{values: []any{int64(i), "test"}}
 		}
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 1, "should create one chunklet")
+		require.Len(t, chunklets, 1, "should create one chunklet")
 		assert.Len(t, chunklets[0], 500, "chunklet should have all 500 rows")
 	})
 
@@ -230,7 +231,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 			rows[i] = rowData{values: []any{int64(i), "test"}}
 		}
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 3, "should create 3 chunklets")
+		require.Len(t, chunklets, 3, "should create 3 chunklets")
 		assert.Len(t, chunklets[0], 1000, "first chunklet should have 1000 rows")
 		assert.Len(t, chunklets[1], 1000, "second chunklet should have 1000 rows")
 		assert.Len(t, chunklets[2], 500, "third chunklet should have 500 rows")
@@ -284,7 +285,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 		}
 
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.NotEmpty(t, chunklets, "should create at least one chunklet")
+		require.NotEmpty(t, chunklets, "should create at least one chunklet")
 
 		// Verify all rows are accounted for
 		totalRows := 0
@@ -302,7 +303,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 			rows[i] = rowData{values: []any{int64(i), "test"}}
 		}
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 1, "should create one chunklet for exactly max rows")
+		require.Len(t, chunklets, 1, "should create one chunklet for exactly max rows")
 		assert.Len(t, chunklets[0], chunkletMaxRows, "chunklet should have all rows")
 	})
 
@@ -313,7 +314,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 			rows[i] = rowData{values: []any{int64(i), "test"}}
 		}
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 2, "should create two chunklets")
+		require.Len(t, chunklets, 2, "should create two chunklets")
 		assert.Len(t, chunklets[0], chunkletMaxRows, "first chunklet should have max rows")
 		assert.Len(t, chunklets[1], 1, "second chunklet should have 1 row")
 	})
@@ -330,7 +331,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 		}
 
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 1, "should create one chunklet for single large row")
+		require.Len(t, chunklets, 1, "should create one chunklet for single large row")
 		assert.Len(t, chunklets[0], 1, "chunklet should have the one row")
 	})
 
@@ -348,7 +349,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 		}
 
 		chunklets := splitRowsIntoChunklets(rows)
-		assert.Len(t, chunklets, 1, "should create one chunklet even though row exceeds size limit")
+		require.Len(t, chunklets, 1, "should create one chunklet even though row exceeds size limit")
 		assert.Len(t, chunklets[0], 1, "chunklet should have the one oversized row")
 
 		// Verify the row size does exceed our threshold

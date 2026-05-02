@@ -99,7 +99,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 	err = applier.Start(t.Context())
 	require.NoError(t, err)
 	defer func() {
-		assert.NoError(t, applier.Stop())
+		require.NoError(t, applier.Stop())
 	}()
 
 	// Prepare test data - 10 rows with alternating user_ids
@@ -147,7 +147,7 @@ func TestShardedApplierIntegration(t *testing.T) {
 	// Verify callback was invoked
 	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked")
 	callbackErrMu.Lock()
-	assert.NoError(t, callbackErr, "Callback should not have an error")
+	require.NoError(t, callbackErr, "Callback should not have an error")
 	callbackErrMu.Unlock()
 	assert.Equal(t, int64(10), callbackAffectedRows.Load(), "Should have affected 10 rows")
 
@@ -657,7 +657,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target2DB, KeyRange: "40-c0"},
 		}
 		_, err := NewShardedApplier(targets, NewApplierDefaultConfig())
-		assert.Error(t, err, "Should error on overlapping key ranges")
+		require.Error(t, err, "Should error on overlapping key ranges")
 		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
 
@@ -671,7 +671,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target2DB, KeyRange: "60-a0"},
 		}
 		_, err := NewShardedApplier(targets, NewApplierDefaultConfig())
-		assert.Error(t, err, "Should error on overlapping key ranges")
+		require.Error(t, err, "Should error on overlapping key ranges")
 		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
 
@@ -706,7 +706,7 @@ func TestKeyRangesMustBeNonOverlapping(t *testing.T) {
 			{DB: target3DB, KeyRange: "60-"},
 		}
 		_, err = NewShardedApplier(targets, NewApplierDefaultConfig())
-		assert.Error(t, err, "Should error when any two shards overlap")
+		require.Error(t, err, "Should error when any two shards overlap")
 		assert.Contains(t, err.Error(), "overlap", "Error message should mention overlap")
 	})
 

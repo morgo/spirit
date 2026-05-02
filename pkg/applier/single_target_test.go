@@ -118,7 +118,7 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	// Verify callback was invoked
 	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked")
 	callbackErrMu.Lock()
-	assert.NoError(t, callbackErr, "Callback should not have an error")
+	require.NoError(t, callbackErr, "Callback should not have an error")
 	callbackErrMu.Unlock()
 	assert.Equal(t, int64(4), callbackAffectedRows.Load(), "Should have affected 4 rows")
 
