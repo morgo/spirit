@@ -468,7 +468,7 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 	}
 
 	_, err := migration.normalizeOptions()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Equal(t, "cli-host:3306", migration.Host)
 	assert.Equal(t, "cli-user", migration.Username)
@@ -510,8 +510,8 @@ func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
 	}
 
 	_, err := migration.normalizeOptions()
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "no such file or directory")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no such file or directory")
 }
 
 func TestMigrationParamsIniFilePreferCommandLineOptions(t *testing.T) {
