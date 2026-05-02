@@ -5,7 +5,6 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -198,7 +197,7 @@ func TestPlanChanges_WithLintConfig(t *testing.T) {
 	// on this schema, so there should be no warnings at all.
 	require.False(t, plan.HasWarnings(), "expected no warnings when has_foreign_key is disabled")
 	for _, ch := range plan.Changes {
-		assert.Empty(t, ch.Warnings(), "expected no warnings on any change")
+		require.Empty(t, ch.Warnings(), "expected no warnings on any change")
 	}
 }
 

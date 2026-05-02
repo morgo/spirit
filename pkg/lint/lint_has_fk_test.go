@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -413,7 +412,7 @@ func TestHasFKLinter_IntegrationDisabled(t *testing.T) {
 
 	// HasFKLinter is disabled, so no violations from it
 	for _, v := range violations {
-		assert.NotEqual(t, "has_foreign_key", v.Linter.Name())
+		require.NotEqual(t, "has_foreign_key", v.Linter.Name())
 	}
 }
 
@@ -610,11 +609,11 @@ func TestHasFKLinter_AlterTableAddMultipleForeignKeys(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	for _, v := range violations {
-		assert.Equal(t, "has_foreign_key", v.Linter.Name())
-		assert.Equal(t, SeverityWarning, v.Severity)
-		assert.Equal(t, "order_items", v.Location.Table)
-		assert.NotNil(t, v.Location.Constraint)
-		assert.Contains(t, v.Message, "Adding foreign key constraint")
+		require.Equal(t, "has_foreign_key", v.Linter.Name())
+		require.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, "order_items", v.Location.Table)
+		require.NotNil(t, v.Location.Constraint)
+		require.Contains(t, v.Message, "Adding foreign key constraint")
 	}
 
 	// Verify both constraint names are present
@@ -860,9 +859,9 @@ func TestHasFKLinter_MixedCreateAndAlterStatements(t *testing.T) {
 	for _, v := range violations {
 		switch v.Location.Table {
 		case "orders":
-			assert.Contains(t, v.Message, "has FOREIGN KEY constraint")
+			require.Contains(t, v.Message, "has FOREIGN KEY constraint")
 		case "order_items":
-			assert.Contains(t, v.Message, "Adding foreign key constraint")
+			require.Contains(t, v.Message, "Adding foreign key constraint")
 		}
 	}
 }

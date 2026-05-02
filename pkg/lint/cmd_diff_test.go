@@ -5,7 +5,6 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -238,7 +237,7 @@ func TestDiff_DirToDirIntegration(t *testing.T) {
 
 	// Should NOT have changes for users (unchanged)
 	for _, ch := range plan.Changes {
-		assert.NotEqual(t, "users", ch.TableName, "users table is unchanged, should not appear in plan")
+		require.NotEqual(t, "users", ch.TableName, "users table is unchanged, should not appear in plan")
 	}
 }
 

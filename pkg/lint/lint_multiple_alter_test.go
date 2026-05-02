@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,8 +134,8 @@ func TestMultipleAlterTableLinter_MultipleTables(t *testing.T) {
 	tableNames := make(map[string]bool)
 	for _, v := range violations {
 		tableNames[v.Location.Table] = true
-		assert.Equal(t, "multiple_alter_table", v.Linter.Name())
-		assert.Contains(t, v.Message, "2 separate ALTER TABLE statements")
+		require.Equal(t, "multiple_alter_table", v.Linter.Name())
+		require.Contains(t, v.Message, "2 separate ALTER TABLE statements")
 	}
 
 	require.True(t, tableNames["users"])

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -497,11 +496,11 @@ func TestNameCaseLinter_MultipleRenames(t *testing.T) {
 	for _, v := range violations {
 		if v.Location.Table == "users" {
 			foundUsers = true
-			assert.Contains(t, v.Message, "USERS_NEW")
+			require.Contains(t, v.Message, "USERS_NEW")
 		}
 		if v.Location.Table == "orders" {
 			foundOrders = true
-			assert.Contains(t, v.Message, "Orders_Archive")
+			require.Contains(t, v.Message, "Orders_Archive")
 		}
 	}
 	require.True(t, foundUsers)
@@ -681,7 +680,7 @@ func TestNameCaseLinter_ComplexScenario(t *testing.T) {
 		}
 		if v.Location.Table == "inventory" {
 			foundInventory = true
-			assert.Contains(t, v.Message, "INVENTORY_NEW")
+			require.Contains(t, v.Message, "INVENTORY_NEW")
 		}
 	}
 	require.True(t, foundUsers, "Should find violation in USERS")

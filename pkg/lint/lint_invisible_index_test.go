@@ -105,8 +105,8 @@ func TestInvisibleIndexBeforeDropLinter_MultipleDrops(t *testing.T) {
 	indexNames := make(map[string]bool)
 
 	for _, v := range violations {
-		assert.Equal(t, "invisible_index_before_drop", v.Linter.Name())
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, "invisible_index_before_drop", v.Linter.Name())
+		require.Equal(t, SeverityWarning, v.Severity)
 
 		if v.Location.Index != nil {
 			indexNames[*v.Location.Index] = true

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,8 +68,8 @@ func TestHasTimestampLinter_CreateTableAsChange_MultipleTimestamps(t *testing.T)
 	require.Contains(t, columnNames, "updated_at")
 
 	for _, v := range violations {
-		assert.Equal(t, SeverityError, v.Severity)
-		assert.Equal(t, "has_timestamp", v.Linter.Name())
+		require.Equal(t, SeverityError, v.Severity)
+		require.Equal(t, "has_timestamp", v.Linter.Name())
 	}
 }
 
@@ -224,7 +223,7 @@ func TestHasTimestampLinter_ExistingTable_MultipleTimestamps(t *testing.T) {
 
 	require.Len(t, violations, 2)
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 }
 
@@ -256,7 +255,7 @@ func TestHasTimestampLinter_ExistingTable_MultipleTables(t *testing.T) {
 	// t1=1, t2=0, t3=2 = 3 total, all Warning
 	require.Len(t, violations, 3)
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 }
 
@@ -291,7 +290,7 @@ func TestHasTimestampLinter_AlterAddMultipleTimestampColumns(t *testing.T) {
 
 	require.Len(t, violations, 2)
 	for _, v := range violations {
-		assert.Equal(t, SeverityError, v.Severity)
+		require.Equal(t, SeverityError, v.Severity)
 	}
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
 	require.Contains(t, columnNames, "created_at")
@@ -409,7 +408,7 @@ func TestHasTimestampLinter_AlterExistingTableWithTimestamp(t *testing.T) {
 	// Existing table produces Warning + ALTER on table with TIMESTAMP produces Warning
 	// All should be Warning — no Errors since nothing new is introducing TIMESTAMP
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 
 	// Should have warnings from both the existing table and the ALTER path
@@ -442,7 +441,7 @@ func TestHasTimestampLinter_AlterExistingTableWithMultipleTimestamps(t *testing.
 
 	// All violations should be Warning
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 
 	// Should have warnings mentioning both TIMESTAMP columns
@@ -619,7 +618,7 @@ func TestHasTimestampLinter_AlterModifyTimestampToDatetime(t *testing.T) {
 
 	// No errors — nothing is introducing TIMESTAMP
 	for _, v := range violations {
-		assert.NotEqual(t, SeverityError, v.Severity)
+		require.NotEqual(t, SeverityError, v.Severity)
 	}
 }
 
@@ -680,7 +679,7 @@ func TestHasTimestampLinter_AlterDropAllTimestampColumns(t *testing.T) {
 	var alterPathViolations []Violation
 	for _, v := range violations {
 		// All violations should be Warning from existing table
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 		alterPathViolations = append(alterPathViolations, v)
 	}
 
@@ -722,7 +721,7 @@ func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
 
 	// All should be Warning
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 
 	// Should have warnings mentioning created_at

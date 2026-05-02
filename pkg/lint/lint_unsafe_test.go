@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -330,9 +329,9 @@ func TestUnsafeLinter_AlterTableMultipleUnsafeSpecs(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	for _, v := range violations {
-		assert.Equal(t, "unsafe", v.Linter.Name())
-		assert.Equal(t, SeverityError, v.Severity)
-		assert.Equal(t, "users", v.Location.Table)
+		require.Equal(t, "unsafe", v.Linter.Name())
+		require.Equal(t, SeverityError, v.Severity)
+		require.Equal(t, "users", v.Location.Table)
 	}
 }
 
@@ -403,7 +402,7 @@ func TestUnsafeLinter_IntegrationDisabled(t *testing.T) {
 
 	// UnsafeLinter is disabled, so no violations from it
 	for _, v := range violations {
-		assert.NotEqual(t, "unsafe", v.Linter.Name())
+		require.NotEqual(t, "unsafe", v.Linter.Name())
 	}
 }
 

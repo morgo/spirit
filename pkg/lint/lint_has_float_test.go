@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -308,7 +307,7 @@ func TestHasFloatLinter_IntegrationDisabled(t *testing.T) {
 
 	// HasFloatLinter is disabled, so no violations from it
 	for _, v := range violations {
-		assert.NotEqual(t, "has_float", v.Linter.Name())
+		require.NotEqual(t, "has_float", v.Linter.Name())
 	}
 }
 
@@ -341,8 +340,8 @@ func TestHasFloatLinter_AllFloatTypes(t *testing.T) {
 
 	// Verify all violations are warnings
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
-		assert.Equal(t, "all_floats", v.Location.Table)
+		require.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, "all_floats", v.Location.Table)
 	}
 }
 
