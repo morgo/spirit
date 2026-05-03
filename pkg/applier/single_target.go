@@ -373,13 +373,18 @@ func (a *SingleTargetApplier) feedbackCoordinator() {
 			return
 		}
 
-		// If there was an error, invoke callback immediately
+		// If there was an error, invoke callback immediately.
+		// We invoke the callback *before* removing the work from pendingWork so
+		// that Wait() — which polls len(pendingWork) — cannot return until the
+		// callback has run. Otherwise Wait could see an empty map and return
+		// while a callback is still being invoked on another goroutine.
 		if completion.err != nil {
 			callback := pending.callback
-			// Remove the work from pending map before invoking callback
-			delete(a.pendingWork, completion.workID)
 			a.pendingMutex.Unlock()
 			callback(0, completion.err)
+			a.pendingMutex.Lock()
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
 			return
 		}
 
@@ -394,16 +399,17 @@ func (a *SingleTargetApplier) feedbackCoordinator() {
 		if pending.completedChunklets == pending.totalChunklets {
 			a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
 
-			// Invoke the callback
 			callback := pending.callback
 			affectedRows := pending.totalAffectedRows
 
-			// Remove completed work from pending map
+			// Invoke callback *before* removing the work from pendingWork. See
+			// the comment in the error path above — Wait() must not return
+			// until callbacks have finished running.
+			a.pendingMutex.Unlock()
+			callback(affectedRows, nil)
+			a.pendingMutex.Lock()
 			delete(a.pendingWork, completion.workID)
 			a.pendingMutex.Unlock()
-
-			// Invoke callback outside the lock
-			callback(affectedRows, nil)
 		} else {
 			a.pendingMutex.Unlock()
 		}
