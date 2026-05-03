@@ -51,11 +51,11 @@ import (
 //
 // Tunables (env vars, all optional):
 //
-//	SPIRIT_VISIBILITY_STRESS_DURATION   Go duration string (default 5s)
+//	SPIRIT_VISIBILITY_STRESS_DURATION   Go duration string (default 30s)
 //	SPIRIT_VISIBILITY_STRESS_PRODUCERS  int (default 8)
 //	SPIRIT_VISIBILITY_STRESS_VERBOSE    "1" enables per-event trace logs
 func TestBinlogVisibilityStress(t *testing.T) {
-	duration := envDuration(t, "SPIRIT_VISIBILITY_STRESS_DURATION", 5*time.Second)
+	duration := envDuration(t, "SPIRIT_VISIBILITY_STRESS_DURATION", 30*time.Second)
 	numProducers := envInt(t, "SPIRIT_VISIBILITY_STRESS_PRODUCERS", 8)
 	verbose := os.Getenv("SPIRIT_VISIBILITY_STRESS_VERBOSE") == "1"
 
