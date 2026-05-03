@@ -8,28 +8,28 @@ import (
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHasTriggers(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), `drop table if exists account`)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), `drop trigger if exists ins_sum`)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	sql := `CREATE TABLE account (
 		acct_num INT,
 		amount DECIMAL (10,2),
 		PRIMARY KEY (acct_num)
 	);`
 	_, err = db.ExecContext(t.Context(), sql)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	sql = `CREATE TRIGGER ins_sum BEFORE INSERT ON account
 		FOR EACH ROW SET @sum = @sum + NEW.amount;`
 	_, err = db.ExecContext(t.Context(), sql)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	r := Resources{
 		DB:        db,
@@ -38,10 +38,10 @@ func TestHasTriggers(t *testing.T) {
 	}
 
 	err = hasTriggersCheck(t.Context(), r, slog.Default())
-	assert.ErrorContains(t, err, "tables with triggers associated are not supported") // already has a trigger associated.
+	require.ErrorContains(t, err, "tables with triggers associated are not supported") // already has a trigger associated.
 
 	_, err = db.ExecContext(t.Context(), `drop trigger if exists ins_sum`)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = hasTriggersCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // no longer said to have trigger associated.
+	require.NoError(t, err) // no longer said to have trigger associated.
 }
