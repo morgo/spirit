@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -290,21 +289,21 @@ func TestOldTableNameTruncation(t *testing.T) {
 			}
 
 			result := c.oldTableName()
-			assert.LessOrEqual(t, len(result), tt.expectMaxLen,
+			require.LessOrEqual(t, len(result), tt.expectMaxLen,
 				"oldTableName() result %q (len=%d) exceeds max length %d",
 				result, len(result), tt.expectMaxLen)
-			assert.Greater(t, len(result), 0, "oldTableName() should not be empty")
+			require.Greater(t, len(result), 0, "oldTableName() should not be empty")
 
 			if tt.skipDropAfterCutover {
 				// Should contain the timestamp
-				assert.Contains(t, result, "20250615_103045")
+				require.Contains(t, result, "20250615_103045")
 				// Should have the expected format prefix and suffix
-				assert.True(t, strings.HasPrefix(result, "_"))
-				assert.Contains(t, result, "_old_")
+				require.True(t, strings.HasPrefix(result, "_"))
+				require.Contains(t, result, "_old_")
 			} else {
 				// Should have the simple _<name>_old format
 				expected := fmt.Sprintf(check.NameFormatOld, tt.tableName)
-				assert.Equal(t, expected, result)
+				require.Equal(t, expected, result)
 			}
 		})
 	}

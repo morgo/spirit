@@ -14,7 +14,6 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -405,9 +404,9 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Go(func() {
 		err := m.Run(t.Context())
-		assert.Error(t, err)
+		require.Error(t, err)
 		if !errors.Is(err, context.Canceled) {
-			assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
+			require.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
 		}
 	})
 

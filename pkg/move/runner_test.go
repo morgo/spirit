@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -294,7 +293,7 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 		// But the problem is written to the log as:
 		// ERROR table definition changed during move operation table=source_newtable.new_table
 		// This is clear enough.
-		assert.Error(t, err, "Move should fail when a new table is created")
+		require.Error(t, err, "Move should fail when a new table is created")
 	})
 
 	// Give the move a moment to start

@@ -15,7 +15,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,7 +58,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
@@ -396,7 +395,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := r.Run(ctx)
-		assert.Error(t, err) // context cancelled
+		require.Error(t, err) // context cancelled
 	}()
 	for r.status.Get() < status.WaitingOnSentinelTable {
 		// Wait for the sentinel table.
@@ -547,7 +546,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
@@ -606,7 +605,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
@@ -646,7 +645,7 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
@@ -867,7 +866,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := runner.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, runner)

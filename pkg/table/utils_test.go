@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,7 +68,7 @@ func TestCastableTp(t *testing.T) {
 		{"decimal(6,2)", "decimal(6,2)"},
 	}
 	for _, tp := range tps {
-		assert.Equal(t, tp.expected, castableTp(tp.tp), "tp failed: %s, expected: %s", tp.tp, tp.expected)
+		require.Equal(t, tp.expected, castableTp(tp.tp), "tp failed: %s, expected: %s", tp.tp, tp.expected)
 	}
 }
 

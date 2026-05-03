@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -92,7 +91,7 @@ func TestRetryableTrx(t *testing.T) {
 	go func() {
 		time.Sleep(2 * time.Second)
 		err2 := trx.Rollback()
-		assert.NoError(t, err2)
+		require.NoError(t, err2)
 	}()
 	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 1")
 	require.NoError(t, err)
