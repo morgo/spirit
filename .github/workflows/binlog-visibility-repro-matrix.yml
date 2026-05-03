@@ -1,17 +1,14 @@
-name: binlog-visibility-repro matrix
+name: Binlog visibility stress /w docker-compose
 # Probes whether MySQL honours the binlog_order_commits=ON contract on
 # every version we test elsewhere. Each lane brings up the MySQL
 # container that lane's regular test suite uses, then runs
 # cmd/binlog-visibility-repro until either the first miss is seen
 # (lane fails, exit 1) or -max-duration elapses (lane passes, exit 0).
-#
-# Triggered manually or on pushes to the stress-test branch — never on
-# pull_request, because the suite is intentionally flaky-by-design and
-# would gate unrelated PRs.
 on:
-  workflow_dispatch:
   push:
-    branches: [ stress-test-binlog-visibility ]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   repro:
@@ -21,22 +18,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: MySQL 8.0.28 (Aurora)
+          - name: Binlog visibility stress / MySQL 8.0.28 (Aurora)
             workdir: compose
             files: -f compose.yml -f 8.0.28.yml
-          - name: MySQL 8.0.45 (default)
+          - name: Binlog visibility stress / MySQL 8.0.45 (default)
             workdir: compose
             files: -f compose.yml
-          - name: MySQL 8.0.45 RBR-minimal
+          - name: Binlog visibility stress / MySQL 8.0.45 RBR-minimal
             workdir: compose
             files: -f compose.yml -f 8.0.45-rbr-minimal.yml
-          - name: MySQL 8.0.42 (Aurora LTS)
+          - name: Binlog visibility stress / MySQL 8.0.42 (Aurora LTS)
             workdir: compose/replication-tls
             files: -f replication-ci.yml -f 8.0.42.yml
-          - name: MySQL 8.4 GA
+          - name: Binlog visibility stress / MySQL 8.4 GA
             workdir: compose/replication-tls
             files: -f replication-ci.yml -f 8.4.yml
-          - name: MySQL 9.7
+          - name: Binlog visibility stress / MySQL 9.7
             workdir: compose/replication-tls
             files: -f replication-ci.yml -f 9.7.yml
     steps:
