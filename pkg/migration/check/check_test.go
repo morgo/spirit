@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCheckAPI(t *testing.T) {
@@ -20,14 +20,14 @@ func TestCheckAPI(t *testing.T) {
 	}
 	checkLen := len(checks)
 	registerCheck("mycheck", myfunc, ScopeTesting)
-	assert.Len(t, checks, checkLen+1)
+	require.Len(t, checks, checkLen+1)
 
 	// Can't be duplicate registered because of a map
 	registerCheck("mycheck", myfunc, ScopeTesting)
-	assert.Len(t, checks, checkLen+1)
+	require.Len(t, checks, checkLen+1)
 
-	assert.Equal(t, "test", testVal)
+	require.Equal(t, "test", testVal)
 	err := RunChecks(t.Context(), Resources{}, slog.Default(), ScopeTesting)
-	assert.NoError(t, err)
-	assert.Equal(t, "newval", testVal)
+	require.NoError(t, err)
+	require.Equal(t, "newval", testVal)
 }

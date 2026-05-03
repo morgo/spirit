@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +24,7 @@ func TestHasTimestampLinter_CreateTableAsChange_NoTimestamp(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// No TIMESTAMP columns — no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_SingleTimestamp(t *testing.T) {
@@ -40,15 +39,15 @@ func TestHasTimestampLinter_CreateTableAsChange_SingleTimestamp(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_timestamp", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
-	assert.Contains(t, violations[0].Message, "TIMESTAMP")
-	assert.Contains(t, violations[0].Message, "2038-01-19")
-	assert.Contains(t, violations[0].Message, "DATETIME")
-	assert.Equal(t, "events", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "created_at", *violations[0].Location.Column)
+	require.Equal(t, "has_timestamp", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "created_at")
+	require.Contains(t, violations[0].Message, "TIMESTAMP")
+	require.Contains(t, violations[0].Message, "2038-01-19")
+	require.Contains(t, violations[0].Message, "DATETIME")
+	require.Equal(t, "events", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "created_at", *violations[0].Location.Column)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_MultipleTimestamps(t *testing.T) {
@@ -65,12 +64,12 @@ func TestHasTimestampLinter_CreateTableAsChange_MultipleTimestamps(t *testing.T)
 
 	require.Len(t, violations, 2)
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "created_at")
-	assert.Contains(t, columnNames, "updated_at")
+	require.Contains(t, columnNames, "created_at")
+	require.Contains(t, columnNames, "updated_at")
 
 	for _, v := range violations {
-		assert.Equal(t, SeverityError, v.Severity)
-		assert.Equal(t, "has_timestamp", v.Linter.Name())
+		require.Equal(t, SeverityError, v.Severity)
+		require.Equal(t, "has_timestamp", v.Linter.Name())
 	}
 }
 
@@ -89,8 +88,8 @@ func TestHasTimestampLinter_CreateTableAsChange_MixedDatetimeAndTimestamp(t *tes
 
 	// Only TIMESTAMP should be flagged, not DATETIME or DATE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "updated_at", *violations[0].Location.Column)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "updated_at", *violations[0].Location.Column)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_TimestampWithDefault(t *testing.T) {
@@ -106,7 +105,7 @@ func TestHasTimestampLinter_CreateTableAsChange_TimestampWithDefault(t *testing.
 
 	// Should still flag TIMESTAMP regardless of default value
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_TimestampWithOnUpdate(t *testing.T) {
@@ -121,7 +120,7 @@ func TestHasTimestampLinter_CreateTableAsChange_TimestampWithOnUpdate(t *testing
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_TimestampNullable(t *testing.T) {
@@ -136,7 +135,7 @@ func TestHasTimestampLinter_CreateTableAsChange_TimestampNullable(t *testing.T) 
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_TimestampNotNull(t *testing.T) {
@@ -151,7 +150,7 @@ func TestHasTimestampLinter_CreateTableAsChange_TimestampNotNull(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_CaseInsensitive(t *testing.T) {
@@ -162,14 +161,14 @@ func TestHasTimestampLinter_CreateTableAsChange_CaseInsensitive(t *testing.T) {
 	require.NoError(t, err)
 	violations := linter.Lint(nil, stmts)
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 
 	// Test mixed case
 	stmts, err = statement.New(`CREATE TABLE test2 (id BIGINT UNSIGNED PRIMARY KEY, ts Timestamp)`)
 	require.NoError(t, err)
 	violations = linter.Lint(nil, stmts)
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_CreateTableAsChange_TimestampWithPrecision(t *testing.T) {
@@ -185,8 +184,8 @@ func TestHasTimestampLinter_CreateTableAsChange_TimestampWithPrecision(t *testin
 
 	// TIMESTAMP(6) is still TIMESTAMP
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "created_at")
 }
 
 // --- Existing tables (legacy schemas — Warning) ---
@@ -204,10 +203,10 @@ func TestHasTimestampLinter_ExistingTable_SingleTimestamp(t *testing.T) {
 
 	// Existing tables with TIMESTAMP get Warning — don't boil the ocean
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
-	assert.Contains(t, violations[0].Message, "TIMESTAMP")
-	assert.Contains(t, violations[0].Message, "2038-01-19")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "created_at")
+	require.Contains(t, violations[0].Message, "TIMESTAMP")
+	require.Contains(t, violations[0].Message, "2038-01-19")
 }
 
 func TestHasTimestampLinter_ExistingTable_MultipleTimestamps(t *testing.T) {
@@ -224,7 +223,7 @@ func TestHasTimestampLinter_ExistingTable_MultipleTimestamps(t *testing.T) {
 
 	require.Len(t, violations, 2)
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 }
 
@@ -239,7 +238,7 @@ func TestHasTimestampLinter_ExistingTable_NoTimestamp(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_ExistingTable_MultipleTables(t *testing.T) {
@@ -256,7 +255,7 @@ func TestHasTimestampLinter_ExistingTable_MultipleTables(t *testing.T) {
 	// t1=1, t2=0, t3=2 = 3 total, all Warning
 	require.Len(t, violations, 3)
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 }
 
@@ -271,14 +270,14 @@ func TestHasTimestampLinter_AlterAddTimestampColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_timestamp", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
-	assert.Contains(t, violations[0].Message, "TIMESTAMP")
-	assert.Contains(t, violations[0].Message, "2038-01-19")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "created_at", *violations[0].Location.Column)
+	require.Equal(t, "has_timestamp", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "created_at")
+	require.Contains(t, violations[0].Message, "TIMESTAMP")
+	require.Contains(t, violations[0].Message, "2038-01-19")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "created_at", *violations[0].Location.Column)
 }
 
 func TestHasTimestampLinter_AlterAddMultipleTimestampColumns(t *testing.T) {
@@ -291,11 +290,11 @@ func TestHasTimestampLinter_AlterAddMultipleTimestampColumns(t *testing.T) {
 
 	require.Len(t, violations, 2)
 	for _, v := range violations {
-		assert.Equal(t, SeverityError, v.Severity)
+		require.Equal(t, SeverityError, v.Severity)
 	}
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "created_at")
-	assert.Contains(t, columnNames, "updated_at")
+	require.Contains(t, columnNames, "created_at")
+	require.Contains(t, columnNames, "updated_at")
 }
 
 func TestHasTimestampLinter_AlterAddNonTimestampColumn(t *testing.T) {
@@ -307,7 +306,7 @@ func TestHasTimestampLinter_AlterAddNonTimestampColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// DATETIME should not be flagged
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_AlterAddMixedColumns(t *testing.T) {
@@ -320,8 +319,8 @@ func TestHasTimestampLinter_AlterAddMixedColumns(t *testing.T) {
 
 	// Only the TIMESTAMP column should be flagged
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Equal(t, "created_at", *violations[0].Location.Column)
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "created_at", *violations[0].Location.Column)
 }
 
 func TestHasTimestampLinter_AlterModifyToTimestamp(t *testing.T) {
@@ -333,8 +332,8 @@ func TestHasTimestampLinter_AlterModifyToTimestamp(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "created_at")
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "created_at")
 }
 
 func TestHasTimestampLinter_AlterChangeToTimestamp(t *testing.T) {
@@ -346,8 +345,8 @@ func TestHasTimestampLinter_AlterChangeToTimestamp(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "new_col")
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "new_col")
 }
 
 func TestHasTimestampLinter_AlterModifyToDatetime(t *testing.T) {
@@ -359,7 +358,7 @@ func TestHasTimestampLinter_AlterModifyToDatetime(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Modifying to DATETIME should not be flagged
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_AlterAddTimestampWithDefault(t *testing.T) {
@@ -371,7 +370,7 @@ func TestHasTimestampLinter_AlterAddTimestampWithDefault(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestHasTimestampLinter_AlterAddTimestampWithPrecision(t *testing.T) {
@@ -383,7 +382,7 @@ func TestHasTimestampLinter_AlterAddTimestampWithPrecision(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 // --- ALTER TABLE modifying table with existing TIMESTAMP (Warning) ---
@@ -409,7 +408,7 @@ func TestHasTimestampLinter_AlterExistingTableWithTimestamp(t *testing.T) {
 	// Existing table produces Warning + ALTER on table with TIMESTAMP produces Warning
 	// All should be Warning — no Errors since nothing new is introducing TIMESTAMP
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 
 	// Should have warnings from both the existing table and the ALTER path
@@ -420,7 +419,7 @@ func TestHasTimestampLinter_AlterExistingTableWithTimestamp(t *testing.T) {
 			warningsForCreatedAt++
 		}
 	}
-	assert.GreaterOrEqual(t, warningsForCreatedAt, 1)
+	require.GreaterOrEqual(t, warningsForCreatedAt, 1)
 }
 
 func TestHasTimestampLinter_AlterExistingTableWithMultipleTimestamps(t *testing.T) {
@@ -442,7 +441,7 @@ func TestHasTimestampLinter_AlterExistingTableWithMultipleTimestamps(t *testing.
 
 	// All violations should be Warning
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 
 	// Should have warnings mentioning both TIMESTAMP columns
@@ -452,8 +451,8 @@ func TestHasTimestampLinter_AlterExistingTableWithMultipleTimestamps(t *testing.
 			columnSet[*v.Location.Column] = true
 		}
 	}
-	assert.True(t, columnSet["created_at"])
-	assert.True(t, columnSet["updated_at"])
+	require.True(t, columnSet["created_at"])
+	require.True(t, columnSet["updated_at"])
 }
 
 func TestHasTimestampLinter_AlterExistingTableNoTimestamp(t *testing.T) {
@@ -475,7 +474,7 @@ func TestHasTimestampLinter_AlterExistingTableNoTimestamp(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
 	// No TIMESTAMP anywhere — no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_AlterAddTimestampToTableWithExistingTimestamp(t *testing.T) {
@@ -508,11 +507,11 @@ func TestHasTimestampLinter_AlterAddTimestampToTableWithExistingTimestamp(t *tes
 
 	// Error from ALTER adding updated_at TIMESTAMP
 	require.Len(t, errors, 1)
-	assert.Equal(t, "updated_at", *errors[0].Location.Column)
+	require.Equal(t, "updated_at", *errors[0].Location.Column)
 
 	// Warning from existing table having created_at TIMESTAMP
 	require.Len(t, warnings, 1)
-	assert.Equal(t, "created_at", *warnings[0].Location.Column)
+	require.Equal(t, "created_at", *warnings[0].Location.Column)
 }
 
 // --- ALTER TABLE that fixes TIMESTAMP (no false-positive warnings) ---
@@ -563,12 +562,12 @@ func TestHasTimestampLinter_AlterDropTimestampColumn(t *testing.T) {
 	}
 
 	// created_at appears in both existing table warning and ALTER warning
-	assert.GreaterOrEqual(t, createdAtCount, 1)
+	require.GreaterOrEqual(t, createdAtCount, 1)
 	// updated_at: existing table still warns (it doesn't know about the ALTER),
 	// but the ALTER path should NOT warn about it since it's being dropped.
 	// We expect exactly 1 warning for updated_at (from existing table only),
 	// not 2 (which would mean the ALTER path also warned about it).
-	assert.Equal(t, 1, updatedAtCount, "updated_at should only be warned about from existing table, not from ALTER path")
+	require.Equal(t, 1, updatedAtCount, "updated_at should only be warned about from existing table, not from ALTER path")
 }
 
 func TestHasTimestampLinter_AlterModifyTimestampToDatetime(t *testing.T) {
@@ -613,13 +612,13 @@ func TestHasTimestampLinter_AlterModifyTimestampToDatetime(t *testing.T) {
 	}
 
 	// created_at: 1 from existing table (the ALTER path excludes it since it's being fixed)
-	assert.Equal(t, 1, createdAtCount)
+	require.Equal(t, 1, createdAtCount)
 	// updated_at: 1 from existing table + 1 from ALTER path = 2
-	assert.Equal(t, 2, updatedAtCount)
+	require.Equal(t, 2, updatedAtCount)
 
 	// No errors — nothing is introducing TIMESTAMP
 	for _, v := range violations {
-		assert.NotEqual(t, SeverityError, v.Severity)
+		require.NotEqual(t, SeverityError, v.Severity)
 	}
 }
 
@@ -648,13 +647,13 @@ func TestHasTimestampLinter_AlterChangeTimestampToDatetime(t *testing.T) {
 			errors = append(errors, v)
 		}
 	}
-	assert.Empty(t, errors, "converting TIMESTAMP to DATETIME should not produce errors")
+	require.Empty(t, errors, "converting TIMESTAMP to DATETIME should not produce errors")
 
 	// The ALTER path should not add a warning for old_ts since it's being fixed
 	// Only the existing table warning for old_ts should remain
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "old_ts", *violations[0].Location.Column)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "old_ts", *violations[0].Location.Column)
 }
 
 func TestHasTimestampLinter_AlterDropAllTimestampColumns(t *testing.T) {
@@ -680,7 +679,7 @@ func TestHasTimestampLinter_AlterDropAllTimestampColumns(t *testing.T) {
 	var alterPathViolations []Violation
 	for _, v := range violations {
 		// All violations should be Warning from existing table
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 		alterPathViolations = append(alterPathViolations, v)
 	}
 
@@ -698,7 +697,7 @@ func TestHasTimestampLinter_AlterModifyTimestampToDatetimeNoExisting(t *testing.
 	violations := linter.Lint(nil, stmts)
 
 	// Converting to DATETIME — no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // --- ALTER TABLE with other operations ---
@@ -722,7 +721,7 @@ func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
 
 	// All should be Warning
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	}
 
 	// Should have warnings mentioning created_at
@@ -732,7 +731,7 @@ func TestHasTimestampLinter_AlterAddIndex(t *testing.T) {
 			found = true
 		}
 	}
-	assert.True(t, found)
+	require.True(t, found)
 }
 
 func TestHasTimestampLinter_AlterTableNotInExisting(t *testing.T) {
@@ -745,7 +744,7 @@ func TestHasTimestampLinter_AlterTableNotInExisting(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// No existing table info, no TIMESTAMP being added — no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_AlterDifferentTable(t *testing.T) {
@@ -768,28 +767,28 @@ func TestHasTimestampLinter_AlterDifferentTable(t *testing.T) {
 	// Warning from existing table (users has TIMESTAMP)
 	// No warning from ALTER (orders is not in existingTables)
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "users", violations[0].Location.Table)
 }
 
 // --- Linter metadata ---
 
 func TestHasTimestampLinter_Name(t *testing.T) {
 	linter := &HasTimestampLinter{}
-	assert.Equal(t, "has_timestamp", linter.Name())
+	require.Equal(t, "has_timestamp", linter.Name())
 }
 
 func TestHasTimestampLinter_Description(t *testing.T) {
 	linter := &HasTimestampLinter{}
-	assert.NotEmpty(t, linter.Description())
-	assert.Contains(t, linter.Description(), "TIMESTAMP")
+	require.NotEmpty(t, linter.Description())
+	require.Contains(t, linter.Description(), "TIMESTAMP")
 }
 
 func TestHasTimestampLinter_String(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	str := linter.String()
-	assert.Contains(t, str, "has_timestamp")
-	assert.Contains(t, str, linter.Description())
+	require.Contains(t, str, "has_timestamp")
+	require.Contains(t, str, linter.Description())
 }
 
 // --- Registration ---
@@ -806,7 +805,7 @@ func TestHasTimestampLinter_Registered(t *testing.T) {
 			break
 		}
 	}
-	assert.True(t, found, "has_timestamp linter should be registered")
+	require.True(t, found, "has_timestamp linter should be registered")
 }
 
 // --- Edge cases ---
@@ -819,13 +818,13 @@ func TestHasTimestampLinter_EmptyTable(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_NilInputs(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, nil)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // --- Violation message format ---
@@ -843,10 +842,10 @@ func TestHasTimestampLinter_MessageFormat(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	msg := violations[0].Message
-	assert.True(t, strings.Contains(msg, "my_ts"), "message should contain column name")
-	assert.True(t, strings.Contains(msg, "TIMESTAMP"), "message should contain TIMESTAMP")
-	assert.True(t, strings.Contains(msg, "2038-01-19"), "message should contain overflow date")
-	assert.True(t, strings.Contains(msg, "DATETIME"), "message should suggest DATETIME")
+	require.True(t, strings.Contains(msg, "my_ts"), "message should contain column name")
+	require.True(t, strings.Contains(msg, "TIMESTAMP"), "message should contain TIMESTAMP")
+	require.True(t, strings.Contains(msg, "2038-01-19"), "message should contain overflow date")
+	require.True(t, strings.Contains(msg, "DATETIME"), "message should suggest DATETIME")
 }
 
 func TestHasTimestampLinter_ViolationString(t *testing.T) {
@@ -862,8 +861,8 @@ func TestHasTimestampLinter_ViolationString(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	str := violations[0].String()
-	assert.Contains(t, str, "[ERROR]")
-	assert.Contains(t, str, "has_timestamp")
+	require.Contains(t, str, "[ERROR]")
+	require.Contains(t, str, "has_timestamp")
 }
 
 // --- Other date/time types should NOT be flagged ---
@@ -874,7 +873,7 @@ func TestHasTimestampLinter_DatetimeNotFlagged(t *testing.T) {
 
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_DateNotFlagged(t *testing.T) {
@@ -883,7 +882,7 @@ func TestHasTimestampLinter_DateNotFlagged(t *testing.T) {
 
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_TimeNotFlagged(t *testing.T) {
@@ -892,7 +891,7 @@ func TestHasTimestampLinter_TimeNotFlagged(t *testing.T) {
 
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_YearNotFlagged(t *testing.T) {
@@ -901,5 +900,5 @@ func TestHasTimestampLinter_YearNotFlagged(t *testing.T) {
 
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }

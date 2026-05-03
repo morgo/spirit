@@ -545,13 +545,21 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 
-	// If we haven't dispatched any chunks yet (chunkPtrs is empty),
-	// everything is "above" the high watermark (we haven't started copying yet)
-	// Return true to discard binlog events that are ahead of our progress.
-	// But if checkpointHighPtr is set (resume case), we must not discard
-	// events below it — those rows may already exist in the target.
+	// We haven't claimed any range yet (no chunks dispatched, no resume
+	// checkpoint). The previous behavior returned TRUE here ("everything is
+	// above the high watermark"), which silently dropped binlog events
+	// during the window between SetWatermarkOptimization(true) and the
+	// first chunker.Next() call. The intent was that the chunker's later
+	// SELECT would pick the row up from source, but that only works for
+	// rows committed before the SELECT's snapshot. Rows committed AFTER
+	// the SELECT but BEFORE chunkPtrs is set are invisible to both paths
+	// and lost — see issue #746.
+	//
+	// Per the contract above ("if there is any ambiguity, return FALSE"),
+	// return FALSE: buffer the change. Once chunks start being dispatched,
+	// the watermark logic at flush time routes it correctly.
 	if len(t.chunkPtrs) == 0 && t.checkpointHighPtr.IsNil() {
-		return true
+		return false
 	}
 
 	// If we've sent the final chunk, nothing is above
@@ -589,7 +597,13 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	// Check if key is greater than or equal to the current chunkPtr[0]
 	// Use GreaterThanOrEqual which supports all types (numeric, string, temporal)
 	if len(t.chunkPtrs) == 0 {
-		return true // no chunkPtrs yet, but above checkpointHighPtr
+		// chunkPtrs not dispatched yet, key is above checkpointHighPtr.
+		// Same reasoning as the IsNil branch above: returning TRUE here
+		// would silently drop events for keys that the chunker hasn't
+		// yet dispatched, on the assumption that the later SELECT will
+		// pick them up — which is unsafe for rows committed after the
+		// SELECT's snapshot. Return FALSE so the change is buffered.
+		return false
 	}
 	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
 }

@@ -7,7 +7,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTableCompatibilityCheckPass(t *testing.T) {
@@ -15,13 +15,13 @@ func TestTableCompatibilityCheckPass(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE compat_pass (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255))")
 
 	tblInfo := table.NewTableInfo(db, dbName, "compat_pass")
-	assert.NoError(t, tblInfo.SetInfo(context.Background()))
+	require.NoError(t, tblInfo.SetInfo(context.Background()))
 
 	r := Resources{
 		SourceTables: []*table.TableInfo{tblInfo},
 	}
 	err := tableCompatibilityCheck(context.Background(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestTableCompatibilityCheckNonMemoryComparablePK(t *testing.T) {
@@ -29,15 +29,15 @@ func TestTableCompatibilityCheckNonMemoryComparablePK(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE compat_varchar_pk (id VARCHAR(255) NOT NULL PRIMARY KEY, val INT)")
 
 	tblInfo := table.NewTableInfo(db, dbName, "compat_varchar_pk")
-	assert.NoError(t, tblInfo.SetInfo(context.Background()))
+	require.NoError(t, tblInfo.SetInfo(context.Background()))
 
 	r := Resources{
 		SourceTables: []*table.TableInfo{tblInfo},
 	}
 	err := tableCompatibilityCheck(context.Background(), r, slog.Default())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "non-memory-comparable primary key")
-	assert.Contains(t, err.Error(), "compat_varchar_pk")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "non-memory-comparable primary key")
+	require.Contains(t, err.Error(), "compat_varchar_pk")
 }
 
 func TestTableCompatibilityCheckMultipleTables(t *testing.T) {
@@ -46,18 +46,18 @@ func TestTableCompatibilityCheckMultipleTables(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE bad_table (id VARCHAR(255) NOT NULL PRIMARY KEY, val INT)")
 
 	goodTable := table.NewTableInfo(db, dbName, "good_table")
-	assert.NoError(t, goodTable.SetInfo(context.Background()))
+	require.NoError(t, goodTable.SetInfo(context.Background()))
 
 	badTable := table.NewTableInfo(db, dbName, "bad_table")
-	assert.NoError(t, badTable.SetInfo(context.Background()))
+	require.NoError(t, badTable.SetInfo(context.Background()))
 
 	// Should fail because bad_table has a non-memory-comparable PK
 	r := Resources{
 		SourceTables: []*table.TableInfo{goodTable, badTable},
 	}
 	err := tableCompatibilityCheck(context.Background(), r, slog.Default())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "bad_table")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "bad_table")
 }
 
 func TestTableCompatibilityCheckNoTables(t *testing.T) {
@@ -66,5 +66,5 @@ func TestTableCompatibilityCheckNoTables(t *testing.T) {
 		SourceTables: []*table.TableInfo{},
 	}
 	err := tableCompatibilityCheck(context.Background(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

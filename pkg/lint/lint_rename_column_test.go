@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,7 +15,7 @@ func TestRenameColumnLinter_NoRename(t *testing.T) {
 	linter := &RenameColumnLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestRenameColumnLinter_RenameColumn(t *testing.T) {
@@ -28,15 +27,15 @@ func TestRenameColumnLinter_RenameColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "rename_column", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "old_name")
-	assert.Contains(t, violations[0].Message, "new_name")
-	assert.Contains(t, violations[0].Message, "users")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "old_name", *violations[0].Location.Column)
-	assert.NotNil(t, violations[0].Suggestion)
+	require.Equal(t, "rename_column", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "old_name")
+	require.Contains(t, violations[0].Message, "new_name")
+	require.Contains(t, violations[0].Message, "users")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "old_name", *violations[0].Location.Column)
+	require.NotNil(t, violations[0].Suggestion)
 }
 
 func TestRenameColumnLinter_ChangeColumnWithRename(t *testing.T) {
@@ -48,14 +47,14 @@ func TestRenameColumnLinter_ChangeColumnWithRename(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "rename_column", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "old_col")
-	assert.Contains(t, violations[0].Message, "new_col")
-	assert.Contains(t, violations[0].Message, "CHANGE COLUMN")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "old_col", *violations[0].Location.Column)
+	require.Equal(t, "rename_column", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "old_col")
+	require.Contains(t, violations[0].Message, "new_col")
+	require.Contains(t, violations[0].Message, "CHANGE COLUMN")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "old_col", *violations[0].Location.Column)
 }
 
 func TestRenameColumnLinter_ChangeColumnSameName(t *testing.T) {
@@ -67,7 +66,7 @@ func TestRenameColumnLinter_ChangeColumnSameName(t *testing.T) {
 	linter := &RenameColumnLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestRenameColumnLinter_ModifyColumnNoRename(t *testing.T) {
@@ -79,7 +78,7 @@ func TestRenameColumnLinter_ModifyColumnNoRename(t *testing.T) {
 	linter := &RenameColumnLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestRenameColumnLinter_MultipleRenames(t *testing.T) {
@@ -93,8 +92,8 @@ func TestRenameColumnLinter_MultipleRenames(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 2)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, SeverityWarning, violations[1].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[1].Severity)
 }
 
 func TestRenameColumnLinter_MixedOperations(t *testing.T) {
@@ -110,8 +109,8 @@ func TestRenameColumnLinter_MixedOperations(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "old_name")
-	assert.Contains(t, violations[0].Message, "new_name")
+	require.Contains(t, violations[0].Message, "old_name")
+	require.Contains(t, violations[0].Message, "new_name")
 }
 
 func TestRenameColumnLinter_NonAlterStatement(t *testing.T) {
@@ -123,7 +122,7 @@ func TestRenameColumnLinter_NonAlterStatement(t *testing.T) {
 	linter := &RenameColumnLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestRenameColumnLinter_DropColumn(t *testing.T) {
@@ -134,20 +133,20 @@ func TestRenameColumnLinter_DropColumn(t *testing.T) {
 	linter := &RenameColumnLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestRenameColumnLinter_Name(t *testing.T) {
 	linter := &RenameColumnLinter{}
-	assert.Equal(t, "rename_column", linter.Name())
+	require.Equal(t, "rename_column", linter.Name())
 }
 
 func TestRenameColumnLinter_Description(t *testing.T) {
 	linter := &RenameColumnLinter{}
-	assert.NotEmpty(t, linter.Description())
+	require.NotEmpty(t, linter.Description())
 }
 
 func TestRenameColumnLinter_String(t *testing.T) {
 	linter := &RenameColumnLinter{}
-	assert.Contains(t, linter.String(), "rename_column")
+	require.Contains(t, linter.String(), "rename_column")
 }
