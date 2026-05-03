@@ -135,7 +135,8 @@ func TestCheckConstraintWithDML(t *testing.T) {
 
 	m := NewTestRunner(t, "chk_dml", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
