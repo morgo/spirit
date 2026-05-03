@@ -158,7 +158,76 @@ func TestMovePrivilegesMultipleSources(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// (Removed) TestMovePrivilegesWithRDSSuperuserRole — same rationale as the
-// migration-side counterpart: required `SET GLOBAL activate_all_roles_on_login`
-// which races server-wide with every other Go test binary using the
-// same MySQL. Restore once privilegesCheck is unit-testable.
+// TestMovePrivilegesWithRDSSuperuserRole verifies that rds_superuser_role
+// is tolerated when activate_all_roles_on_login=ON. Same rationale as the
+// migration-side counterpart: only the acceptance path is covered, and
+// the test skips rather than flipping `activate_all_roles_on_login` via
+// `SET GLOBAL` (which races with concurrent test binaries; see #818).
+func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "root"
+	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// Skip if the server doesn't have activate_all_roles_on_login=ON.
+	var activate string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&activate))
+	if activate != "1" {
+		t.Skip("requires activate_all_roles_on_login=ON; SET GLOBAL would race with concurrent test binaries, see #818")
+	}
+
+	// Clean up any previous test artifacts
+	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoverdsroleuser")
+	_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS rds_superuser_role")
+
+	// Create an opaque role that simulates rds_superuser_role on RDS.
+	_, err = db.ExecContext(t.Context(), "CREATE ROLE rds_superuser_role")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS rds_superuser_role")
+	})
+
+	_, err = db.ExecContext(t.Context(), "CREATE USER testmoverdsroleuser")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoverdsroleuser")
+	})
+
+	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testmoverdsroleuser")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testmoverdsroleuser")
+	require.NoError(t, err)
+	// Grant performance_schema and PROCESS directly so the probe queries
+	// succeed. On real RDS, rds_superuser_role grants these, but our test
+	// role is opaque (no actual privileges) so we simulate by granting
+	// them directly.
+	_, err = db.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testmoverdsroleuser")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testmoverdsroleuser")
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), "GRANT rds_superuser_role TO testmoverdsroleuser")
+	require.NoError(t, err)
+
+	config, err = mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "testmoverdsroleuser"
+	config.Passwd = ""
+
+	sourceConfig, err := mysql.ParseDSN(fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+
+	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(lowPrivDB)
+
+	r := Resources{
+		Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}},
+	}
+
+	// With rds_superuser_role granted and activate_all_roles_on_login=ON,
+	// privilegesCheck should pass.
+	err = privilegesCheck(t.Context(), r, slog.Default())
+	require.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
+}
