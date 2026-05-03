@@ -3,7 +3,6 @@ package lint
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,8 +16,8 @@ func TestLintCmd_BuildConfig_NoIgnoreTables(t *testing.T) {
 
 	config, err := buildIgnoreTablesConfig("", source)
 	require.NoError(t, err)
-	assert.False(t, config.LintOnlyChanges)
-	assert.Nil(t, config.IgnoreTables)
+	require.False(t, config.LintOnlyChanges)
+	require.Nil(t, config.IgnoreTables)
 }
 
 func TestLintCmd_BuildConfig_IgnoreTablesRegex(t *testing.T) {
@@ -39,15 +38,15 @@ func TestLintCmd_BuildConfig_IgnoreTablesRegex(t *testing.T) {
 
 	config, err := buildIgnoreTablesConfig("^order", source)
 	require.NoError(t, err)
-	assert.True(t, config.IgnoreTables["orders"])
-	assert.True(t, config.IgnoreTables["order_items"])
-	assert.False(t, config.IgnoreTables["users"])
+	require.True(t, config.IgnoreTables["orders"])
+	require.True(t, config.IgnoreTables["order_items"])
+	require.False(t, config.IgnoreTables["users"])
 }
 
 func TestLintCmd_BuildConfig_IgnoreTablesInvalidRegex(t *testing.T) {
 	_, err := buildIgnoreTablesConfig("[invalid", nil)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid --ignore-tables regex")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid --ignore-tables regex")
 }
 
 func TestLintCmd_LintEntireSchema(t *testing.T) {
@@ -70,10 +69,10 @@ func TestLintCmd_LintEntireSchema(t *testing.T) {
 
 	// Should have has_float violations for both tables
 	userViolations := filterByTable(violations, "users")
-	assert.NotEmpty(t, userViolations, "expected violations for users table")
+	require.NotEmpty(t, userViolations, "expected violations for users table")
 
 	orderViolations := filterByTable(violations, "orders")
-	assert.NotEmpty(t, orderViolations, "expected violations for orders table")
+	require.NotEmpty(t, orderViolations, "expected violations for orders table")
 }
 
 func TestLintCmd_LintEntireSchemaFromDir(t *testing.T) {
@@ -93,7 +92,7 @@ func TestLintCmd_LintEntireSchemaFromDir(t *testing.T) {
 
 	// Should have has_float violation
 	floatViolations := FilterByLinter(violations, "has_float")
-	assert.NotEmpty(t, floatViolations, "expected has_float violation")
+	require.NotEmpty(t, floatViolations, "expected has_float violation")
 }
 
 func TestLintCmd_IgnoreTablesFiltersViolations(t *testing.T) {
@@ -118,9 +117,9 @@ func TestLintCmd_IgnoreTablesFiltersViolations(t *testing.T) {
 
 	// users should be ignored
 	userViolations := filterByTable(violations, "users")
-	assert.Empty(t, userViolations, "expected no violations for users (ignored)")
+	require.Empty(t, userViolations, "expected no violations for users (ignored)")
 
 	// orders should still have violations
 	orderViolations := filterByTable(violations, "orders")
-	assert.NotEmpty(t, orderViolations, "expected violations for orders table")
+	require.NotEmpty(t, orderViolations, "expected violations for orders table")
 }

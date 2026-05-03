@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -249,7 +248,7 @@ func testEnumReorder(t *testing.T, enableBuffered bool) {
 
 	if enableBuffered {
 		require.Error(t, migrationErr)
-		assert.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
+		require.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
 		return
 	}
 
@@ -336,7 +335,7 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	require.NoError(t, m.Close())
 
 	require.Error(t, migrationErr)
-	assert.ErrorContains(t, migrationErr, "unsafe SET value reorder")
+	require.ErrorContains(t, migrationErr, "unsafe SET value reorder")
 }
 
 // TestBufferedMigrationFailsGracefullyWithMinimalRBR verifies that a buffered
