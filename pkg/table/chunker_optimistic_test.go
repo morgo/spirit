@@ -43,8 +43,13 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 	require.Equal(t, "`t1`", t1.QuotedTableName)
 
 	require.NoError(t, chunker.Open())
-	require.Error(t, chunker.Open())                  // can't open twice.
-	require.True(t, chunker.KeyAboveHighWatermark(1)) // we haven't started copying.
+	require.Error(t, chunker.Open()) // can't open twice.
+	// We haven't claimed any range yet (chunkPtr is Nil and there's no
+	// resume checkpoint). Per the contract — "if there is any ambiguity,
+	// it's important to return FALSE" — this returns FALSE so the binlog
+	// applier buffers the change rather than silently dropping it. See
+	// issue #746.
+	require.False(t, chunker.KeyAboveHighWatermark(1))
 
 	_, err := chunker.Next()
 	require.NoError(t, err)
