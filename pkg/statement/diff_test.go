@@ -915,7 +915,7 @@ func TestDiff_DifferentTableNames(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = ct1.Diff(ct2, nil)
-	assert.Error(t, err, "expected error when diffing tables with different names")
+	require.Error(t, err, "expected error when diffing tables with different names")
 }
 
 func TestDiff_DiffOptions(t *testing.T) {
@@ -1118,17 +1118,17 @@ func TestDiff_ChangePartitionType(t *testing.T) {
 	stmts, err := ct1.Diff(ct2, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 2, "changing partition type should produce two statements")
-	assert.Equal(t, "ALTER TABLE `t1` REMOVE PARTITIONING", stmts[0].Statement)
-	assert.Equal(t, "ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 4", stmts[1].Statement)
+	require.Equal(t, "ALTER TABLE `t1` REMOVE PARTITIONING", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `t1` PARTITION BY KEY (`id`) PARTITIONS 4", stmts[1].Statement)
 }
 
 func TestNewDiffOptions(t *testing.T) {
 	opts := NewDiffOptions()
-	assert.True(t, opts.IgnoreAutoIncrement, "IgnoreAutoIncrement should default to true")
-	assert.True(t, opts.IgnoreEngine, "IgnoreEngine should default to true")
-	assert.False(t, opts.IgnoreCharsetCollation, "IgnoreCharsetCollation should default to false")
-	assert.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
-	assert.True(t, opts.IgnoreRowFormat, "IgnoreRowFormat should default to true")
+	require.True(t, opts.IgnoreAutoIncrement, "IgnoreAutoIncrement should default to true")
+	require.True(t, opts.IgnoreEngine, "IgnoreEngine should default to true")
+	require.False(t, opts.IgnoreCharsetCollation, "IgnoreCharsetCollation should default to false")
+	require.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
+	require.True(t, opts.IgnoreRowFormat, "IgnoreRowFormat should default to true")
 }
 
 // TestHelperFunctions tests the helper functions used in diff.go
@@ -1138,11 +1138,11 @@ func TestHelperFunctions(t *testing.T) {
 		str2 := "test"
 		str3 := "different"
 
-		assert.True(t, stringPtrEqual(nil, nil))
-		assert.True(t, stringPtrEqual(&str1, &str2))
-		assert.False(t, stringPtrEqual(&str1, nil))
-		assert.False(t, stringPtrEqual(nil, &str1))
-		assert.False(t, stringPtrEqual(&str1, &str3))
+		require.True(t, stringPtrEqual(nil, nil))
+		require.True(t, stringPtrEqual(&str1, &str2))
+		require.False(t, stringPtrEqual(&str1, nil))
+		require.False(t, stringPtrEqual(nil, &str1))
+		require.False(t, stringPtrEqual(&str1, &str3))
 	})
 
 	t.Run("intPtrEqual", func(t *testing.T) {
@@ -1150,11 +1150,11 @@ func TestHelperFunctions(t *testing.T) {
 		int2 := 10
 		int3 := 20
 
-		assert.True(t, intPtrEqual(nil, nil))
-		assert.True(t, intPtrEqual(&int1, &int2))
-		assert.False(t, intPtrEqual(&int1, nil))
-		assert.False(t, intPtrEqual(nil, &int1))
-		assert.False(t, intPtrEqual(&int1, &int3))
+		require.True(t, intPtrEqual(nil, nil))
+		require.True(t, intPtrEqual(&int1, &int2))
+		require.False(t, intPtrEqual(&int1, nil))
+		require.False(t, intPtrEqual(nil, &int1))
+		require.False(t, intPtrEqual(&int1, &int3))
 	})
 
 	t.Run("boolPtrEqual", func(t *testing.T) {
@@ -1162,36 +1162,36 @@ func TestHelperFunctions(t *testing.T) {
 		bool2 := true
 		bool3 := false
 
-		assert.True(t, boolPtrEqual(nil, nil))
-		assert.True(t, boolPtrEqual(&bool1, &bool2))
-		assert.False(t, boolPtrEqual(&bool1, nil))
-		assert.False(t, boolPtrEqual(nil, &bool1))
-		assert.False(t, boolPtrEqual(&bool1, &bool3))
+		require.True(t, boolPtrEqual(nil, nil))
+		require.True(t, boolPtrEqual(&bool1, &bool2))
+		require.False(t, boolPtrEqual(&bool1, nil))
+		require.False(t, boolPtrEqual(nil, &bool1))
+		require.False(t, boolPtrEqual(&bool1, &bool3))
 	})
 
 	t.Run("needsQuotes", func(t *testing.T) {
 		// Functions and keywords should not be quoted
-		assert.False(t, needsQuotes("NULL"))
-		assert.False(t, needsQuotes("null"))
-		assert.False(t, needsQuotes("CURRENT_TIMESTAMP"))
-		assert.False(t, needsQuotes("current_timestamp"))
-		assert.False(t, needsQuotes("NOW()"))
-		assert.False(t, needsQuotes("now()"))
-		assert.False(t, needsQuotes("CURRENT_TIMESTAMP(6)"))
+		require.False(t, needsQuotes("NULL"))
+		require.False(t, needsQuotes("null"))
+		require.False(t, needsQuotes("CURRENT_TIMESTAMP"))
+		require.False(t, needsQuotes("current_timestamp"))
+		require.False(t, needsQuotes("NOW()"))
+		require.False(t, needsQuotes("now()"))
+		require.False(t, needsQuotes("CURRENT_TIMESTAMP(6)"))
 
 		// Numeric values should not be quoted
-		assert.False(t, needsQuotes("0"))
-		assert.False(t, needsQuotes("123"))
-		assert.False(t, needsQuotes("-456"))
-		assert.False(t, needsQuotes("3.14"))
-		assert.False(t, needsQuotes("-2.5"))
+		require.False(t, needsQuotes("0"))
+		require.False(t, needsQuotes("123"))
+		require.False(t, needsQuotes("-456"))
+		require.False(t, needsQuotes("3.14"))
+		require.False(t, needsQuotes("-2.5"))
 
 		// String values should be quoted
-		assert.True(t, needsQuotes("active"))
-		assert.True(t, needsQuotes("hello world"))
-		assert.True(t, needsQuotes("2023-01-01 00:00:00"))
-		assert.True(t, needsQuotes(""))
-		assert.True(t, needsQuotes("O'Brien"))
+		require.True(t, needsQuotes("active"))
+		require.True(t, needsQuotes("hello world"))
+		require.True(t, needsQuotes("2023-01-01 00:00:00"))
+		require.True(t, needsQuotes(""))
+		require.True(t, needsQuotes("O'Brien"))
 	})
 
 	t.Run("getPreviousColumn", func(t *testing.T) {
@@ -1202,38 +1202,38 @@ func TestHelperFunctions(t *testing.T) {
 			{Name: "created_at"},
 		}
 
-		assert.Equal(t, "", getPreviousColumn(columns, "id"))
-		assert.Equal(t, "id", getPreviousColumn(columns, "name"))
-		assert.Equal(t, "name", getPreviousColumn(columns, "email"))
-		assert.Equal(t, "email", getPreviousColumn(columns, "created_at"))
-		assert.Equal(t, "", getPreviousColumn(columns, "nonexistent"))
+		require.Equal(t, "", getPreviousColumn(columns, "id"))
+		require.Equal(t, "id", getPreviousColumn(columns, "name"))
+		require.Equal(t, "name", getPreviousColumn(columns, "email"))
+		require.Equal(t, "email", getPreviousColumn(columns, "created_at"))
+		require.Equal(t, "", getPreviousColumn(columns, "nonexistent"))
 	})
 
 	t.Run("getPrimaryKeyIndex", func(t *testing.T) {
 		// Table with no primary key
 		ct1, err := ParseCreateTable("CREATE TABLE t1 (id INT, name VARCHAR(100))")
 		require.NoError(t, err)
-		assert.Nil(t, ct1.getPrimaryKeyIndex())
+		require.Nil(t, ct1.getPrimaryKeyIndex())
 
 		// Table with inline primary key (column-level)
 		ct2, err := ParseCreateTable("CREATE TABLE t2 (id INT PRIMARY KEY)")
 		require.NoError(t, err)
-		assert.Nil(t, ct2.getPrimaryKeyIndex()) // inline PK is not in Indexes
+		require.Nil(t, ct2.getPrimaryKeyIndex()) // inline PK is not in Indexes
 
 		// Table with table-level primary key
 		ct3, err := ParseCreateTable("CREATE TABLE t3 (id INT, PRIMARY KEY (id))")
 		require.NoError(t, err)
 		pk := ct3.getPrimaryKeyIndex()
 		require.NotNil(t, pk)
-		assert.Equal(t, "PRIMARY KEY", pk.Type)
-		assert.Equal(t, []string{"id"}, pk.Columns)
+		require.Equal(t, "PRIMARY KEY", pk.Type)
+		require.Equal(t, []string{"id"}, pk.Columns)
 
 		// Table with composite primary key
 		ct4, err := ParseCreateTable("CREATE TABLE t4 (a INT, b INT, PRIMARY KEY (a, b))")
 		require.NoError(t, err)
 		pk = ct4.getPrimaryKeyIndex()
 		require.NotNil(t, pk)
-		assert.Equal(t, "PRIMARY KEY", pk.Type)
-		assert.Equal(t, []string{"a", "b"}, pk.Columns)
+		require.Equal(t, "PRIMARY KEY", pk.Type)
+		require.Equal(t, []string{"a", "b"}, pk.Columns)
 	})
 }

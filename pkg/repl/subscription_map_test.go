@@ -439,17 +439,24 @@ func TestKeyAboveWatermark(t *testing.T) {
 	// Test with watermark optimization disabled
 	sub.HasChanged([]any{1}, nil, false)
 	require.Equal(t, 1, sub.Length())
+	require.Equal(t, int64(1), sub.keysAdded.Load())
+	require.Equal(t, int64(0), sub.keysDroppedAbove.Load())
 
-	// Enable watermark optimization
+	// Enable watermark optimization (resets counters as a side effect of the bookend log)
 	sub.SetWatermarkOptimization(true)
+	require.Equal(t, int64(0), sub.keysAdded.Load())
+	require.Equal(t, int64(0), sub.keysDroppedAbove.Load())
 
 	// Test key below watermark (3 < 5)
 	sub.HasChanged([]any{3}, nil, false)
 	require.Equal(t, 2, sub.Length())
+	require.Equal(t, int64(1), sub.keysAdded.Load())
 
 	// Test key above watermark (10 > 5)
 	sub.HasChanged([]any{10}, nil, false)
 	require.Equal(t, 2, sub.Length()) // Should not increase as key is above watermark
+	require.Equal(t, int64(1), sub.keysAdded.Load(), "above-watermark key must not increment keysAdded")
+	require.Equal(t, int64(1), sub.keysDroppedAbove.Load())
 }
 
 func TestKeyBelowWatermarkMock(t *testing.T) {
@@ -576,6 +583,7 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	sub.HasChanged([]any{5}, nil, false)
 
 	require.Equal(t, 4, sub.Length(), "Should have 4 pending changes")
+	require.Equal(t, int64(4), sub.keysAdded.Load())
 
 	// Verify watermark behavior before flush
 	require.True(t, mockChunker.KeyBelowLowWatermark(1), "Key 1 should be below watermark")
@@ -584,8 +592,10 @@ func TestFlushUnderLockBypassesWatermark(t *testing.T) {
 	require.False(t, mockChunker.KeyBelowLowWatermark(5), "Key 5 should NOT be below watermark (at current position)")
 
 	// First, disable watermark optimization and do a normal flush to populate the new table
-	// This simulates the state after the copier has finished
+	// This simulates the state after the copier has finished. The toggle also resets the
+	// per-phase counters that feed the "watermark optimization toggled" bookend log.
 	sub.SetWatermarkOptimization(false)
+	require.Equal(t, int64(0), sub.keysAdded.Load(), "toggle must reset counters")
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
 	require.True(t, allFlushed)

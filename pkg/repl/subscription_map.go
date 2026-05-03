@@ -30,6 +30,12 @@ type deltaMap struct {
 
 	watermarkOptimization bool
 	chunker               table.MappedChunker
+
+	// Counters for the bookend log emitted on watermark-optimization transitions.
+	// They live outside the mutex so reads/writes from arbitrary callers are safe.
+	keysAdded        atomic.Int64
+	keysDroppedAbove atomic.Int64
+	keysSkippedBelow atomic.Int64
 }
 
 // Assert that deltaMap implements subscription
@@ -55,11 +61,13 @@ func (s *deltaMap) HasChanged(key, _ []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
+		s.keysDroppedAbove.Add(1)
 		s.c.logger.Debug("HasChanged dropped above-high-watermark",
 			"table", s.table.TableName, "key", key[0], "deleted", deleted)
 		return
 	}
 	s.changes[utils.HashKey(key)] = mapChange{isDelete: deleted, originalKey: key}
+	s.keysAdded.Add(1)
 	s.c.logger.Debug("HasChanged added to delta map",
 		"table", s.table.TableName, "key", key[0], "deleted", deleted, "delta_len", len(s.changes))
 }
@@ -119,6 +127,7 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 		// When underLock=true (during cutover), we must flush all changes regardless of watermark.
 		// Use originalKey to preserve typed values for watermark comparison
 		if !underLock && s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+			s.keysSkippedBelow.Add(1)
 			s.c.logger.Debug("Flush skipped not-below-low-watermark",
 				"table", s.table.TableName, "key", change.originalKey[0])
 			allChangesFlushed = false
@@ -193,6 +202,20 @@ func (s *deltaMap) watermarkOptimizationEnabled() bool {
 
 func (s *deltaMap) SetWatermarkOptimization(enabled bool) {
 	s.Lock()
-	defer s.Unlock()
+	deltaLen := len(s.changes)
 	s.watermarkOptimization = enabled
+	s.Unlock()
+
+	// Emit a bookend log so the per-key Debug noise inside HasChanged/Flush can
+	// stay off while still leaving a usable trace of how many keys the watermark
+	// optimization touched in this phase. Counters are reset so the next phase
+	// reports its own numbers.
+	s.c.logger.Info("watermark optimization toggled",
+		"table", s.table.TableName,
+		"enabled", enabled,
+		"keys_added", s.keysAdded.Swap(0),
+		"keys_dropped_above_high", s.keysDroppedAbove.Swap(0),
+		"keys_skipped_not_below_low", s.keysSkippedBelow.Swap(0),
+		"delta_len", deltaLen,
+	)
 }
