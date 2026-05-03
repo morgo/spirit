@@ -38,4 +38,17 @@ func TestConfiguration(t *testing.T) {
 	// restore the binlog row image format.
 	_, err = db.ExecContext(t.Context(), "SET GLOBAL binlog_row_image = ?", binlogRowImage)
 	require.NoError(t, err)
+
+	// binlog_order_commits=OFF allows commit reordering that breaks Spirit's
+	// binlog→applier visibility assumption — Spirit must reject this. See #818.
+	_, err = db.ExecContext(t.Context(), "SET GLOBAL binlog_order_commits = OFF")
+	require.NoError(t, err)
+	defer func() {
+		// Restore — binlog_order_commits is a boolean variable, so use the
+		// literal ON form rather than a parameterised query.
+		_, _ = db.ExecContext(t.Context(), "SET GLOBAL binlog_order_commits = ON")
+	}()
+	err = configurationCheck(t.Context(), r, slog.Default())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "binlog_order_commits must be ON")
 }
