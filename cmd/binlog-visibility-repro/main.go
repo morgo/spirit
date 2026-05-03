@@ -21,21 +21,31 @@
 //  3. Opens a binlog replication connection (go-mysql-org/go-mysql) and
 //     for every WriteRowsEvent on the test table, immediately runs
 //     "SELECT id FROM <table> WHERE id = ?" on a separate connection.
-//  4. Retries any miss once after 50 ms (to distinguish *permanent*
-//     misses from *delayed-visibility* misses; per the contract, both
-//     are violations).
-//  5. Prints a summary; exits 1 if any miss was observed.
+//  4. Stops on the first miss, sleeps -recheck-delay (default 100 ms),
+//     re-runs the SELECT and classifies the miss as *permanent* (still
+//     not visible) or *delayed* (now visible). Both are violations of
+//     the contract; "delayed" is the soft form, "permanent" the hard
+//     form.
+//  5. Prints a summary and exits 1 (miss seen) / 0 (no miss in
+//     -max-duration) / 2 (test infrastructure problem).
 //
-// Bisect summary (the multi-statement transaction matters):
-//   - autocommit INSERT only:        does NOT reproduce in 5s × 5 runs
-//   - BEGIN; INSERT; COMMIT:         does NOT reproduce in 5s × 5 runs
-//   - BEGIN; INSERT; UPDATE; COMMIT: reproduces ~2/3 of 5s runs
+// Producer shape matters. On Docker MySQL 8.0.45 (no -race), short
+// runs (5s × ~16k commits) consistently surface the race only with the
+// INSERT+UPDATE-in-same-transaction shape:
 //
-// We therefore keep the INSERT+UPDATE-in-same-transaction shape as the
-// minimum that surfaces the race.
+//   - autocommit `INSERT … VALUES (…)`:    no reproduction observed
+//   - `BEGIN; INSERT; COMMIT;`:            no reproduction observed
+//   - `BEGIN; INSERT; UPDATE; COMMIT;`:    reproduces (probabilistic)
+//
+// Single-statement transactions, with or without explicit BEGIN/COMMIT,
+// do not reproduce in the same time budget. The minimum producer shape
+// that triggers the race is therefore a multi-statement transaction
+// that INSERTs and then UPDATEs the same row before COMMIT. The repro
+// is still probabilistic — expect "no misses" runs even with the
+// INSERT+UPDATE shape.
 //
 // Build:    go build -o /tmp/repro ./cmd/binlog-visibility-repro
-// Run:      /tmp/repro -dsn 'user:pass@tcp(host:port)/' -duration 30s
+// Run:      /tmp/repro -dsn 'user:pass@tcp(host:port)/' -max-duration 5m
 //
 // The default DSN matches spirit's docker-compose dev image so the
 // binary can be run directly inside spirit's tree for development.
@@ -49,9 +59,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,10 +76,21 @@ import (
 )
 
 func main() {
+	os.Exit(realMain())
+}
+
+// realMain owns all setup and cleanup. It returns the exit code so that
+// main can call os.Exit *after* all of realMain's deferred cleanup runs
+// (otherwise os.Exit short-circuits the defers — gocritic/exitAfterDefer).
+func realMain() int {
 	dsn := flag.String("dsn", "tsandbox:msandbox@tcp(127.0.0.1:8033)/", "MySQL DSN (no database; the program creates and drops its own)")
-	durationFlag := flag.Duration("duration", 30*time.Second, "how long to run the producers")
+	maxDuration := flag.Duration("max-duration", 5*time.Minute, "give up if no miss is seen within this many seconds")
+	recheckDelay := flag.Duration("recheck-delay", 100*time.Millisecond, "after the first miss, wait this long before re-checking the row's visibility")
 	producers := flag.Int("producers", 8, "concurrent producer goroutines")
 	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	cfg, err := mysqldriver.ParseDSN(*dsn)
 	must(err, "parse dsn")
@@ -78,15 +101,19 @@ func main() {
 
 	rootDB, err := sql.Open("mysql", *dsn)
 	must(err, "open root db")
-	defer rootDB.Close()
+	defer closeAndLog("rootDB", rootDB)
 
-	logServerSettings(rootDB)
+	logServerSettings(ctx, rootDB)
 
 	dbName := fmt.Sprintf("binlog_visibility_repro_%d", time.Now().UnixNano())
-	_, err = rootDB.Exec("CREATE DATABASE " + dbName)
+	_, err = rootDB.ExecContext(ctx, "CREATE DATABASE "+dbName)
 	must(err, "create database")
 	defer func() {
-		if _, err := rootDB.Exec("DROP DATABASE IF EXISTS " + dbName); err != nil {
+		// Use a fresh background context for cleanup so we still drop the
+		// database if the main context was cancelled (e.g. ^C, timeout).
+		dropCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := rootDB.ExecContext(dropCtx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
 			log.Printf("cleanup: drop database: %v", err)
 		}
 	}()
@@ -94,11 +121,11 @@ func main() {
 	scopedDSN := scopeDSN(cfg, dbName)
 	scopedDB, err := sql.Open("mysql", scopedDSN)
 	must(err, "open scoped db")
-	defer scopedDB.Close()
+	defer closeAndLog("scopedDB", scopedDB)
 
 	const table = "stress_repro"
-	_, err = scopedDB.Exec(`
-		CREATE TABLE ` + table + ` (
+	_, err = scopedDB.ExecContext(ctx, `
+		CREATE TABLE `+table+` (
 			id BIGINT NOT NULL PRIMARY KEY AUTO_INCREMENT,
 			payload VARCHAR(255) NOT NULL
 		) ENGINE=InnoDB`)
@@ -106,11 +133,11 @@ func main() {
 
 	verifierDB, err := sql.Open("mysql", scopedDSN)
 	must(err, "open verifier db")
-	defer verifierDB.Close()
+	defer closeAndLog("verifierDB", verifierDB)
 	verifierDB.SetMaxOpenConns(8)
 	verifierDB.SetMaxIdleConns(8)
 
-	startPos, err := currentBinlogPosition(rootDB)
+	startPos, err := currentBinlogPosition(ctx, rootDB)
 	must(err, "read binlog position")
 
 	syncer := replication.NewBinlogSyncer(replication.BinlogSyncerConfig{
@@ -125,68 +152,87 @@ func main() {
 	streamer, err := syncer.StartSync(startPos)
 	must(err, "start binlog sync")
 
+	// runCtx is cancelled either by the max-duration timer or by the
+	// verifier when it detects the first miss. Producers and the streamer
+	// derive from it, so a miss shuts everything down quickly.
+	runCtx, cancelRun := context.WithTimeout(ctx, *maxDuration)
+	defer cancelRun()
+
 	r := &run{
-		schema:   dbName,
-		table:    table,
-		verifier: verifierDB,
+		schema:       dbName,
+		table:        table,
+		verifier:     verifierDB,
+		recheckDelay: *recheckDelay,
+		stop:         cancelRun,
 	}
 
-	streamCtx, cancelStream := context.WithCancel(context.Background())
 	var streamWG sync.WaitGroup
 	streamWG.Add(1)
 	go func() {
 		defer streamWG.Done()
-		r.runStreamer(streamCtx, streamer)
+		r.runStreamer(runCtx, streamer)
 	}()
 
-	prodCtx, cancelProd := context.WithTimeout(context.Background(), *durationFlag)
-	defer cancelProd()
 	var prodWG sync.WaitGroup
 	for i := 0; i < *producers; i++ {
 		prodWG.Add(1)
 		go func() {
 			defer prodWG.Done()
-			r.runProducer(prodCtx, scopedDB)
+			r.runProducer(runCtx, scopedDB)
 		}()
 	}
 	prodWG.Wait()
-
-	// Drain trailing events.
-	time.Sleep(500 * time.Millisecond)
-	cancelStream()
 	streamWG.Wait()
 
-	fmt.Printf("\nSUMMARY: producers=%d duration=%s commits=%d events_observed=%d "+
-		"verifier_checks=%d misses_initial=%d misses_permanent=%d producer_errors=%d\n",
-		*producers, *durationFlag,
+	fmt.Printf("\nSUMMARY: producers=%d commits=%d events_observed=%d "+
+		"verifier_checks=%d producer_errors=%d\n",
+		*producers,
 		r.commits.Load(), r.eventsObserved.Load(),
-		r.checks.Load(), r.missesInitial.Load(),
-		r.missesPermanent.Load(), r.producerErrors.Load())
+		r.checks.Load(), r.producerErrors.Load())
 
-	if r.missesInitial.Load() > 0 {
+	switch {
+	case r.firstMissPermanent.Load():
 		fmt.Println("\nFAIL: binlog_order_commits=ON contract was violated.")
-		fmt.Println("A row event was observed in the binlog stream but the corresponding")
-		fmt.Println("row was NOT visible to a fresh autocommit SELECT on a separate connection.")
-		os.Exit(1)
+		fmt.Println("Row event was observed in the binlog stream but the corresponding row")
+		fmt.Printf("was NOT visible to a fresh SELECT even after %s.\n", *recheckDelay)
+		return 1
+	case r.firstMissDelayed.Load():
+		fmt.Println("\nFAIL: binlog_order_commits=ON contract was violated.")
+		fmt.Println("Row event was observed in the binlog stream but the corresponding row")
+		fmt.Printf("only became visible to a fresh SELECT after %s. The visibility lag is\n", *recheckDelay)
+		fmt.Println("transient but it is still a contract violation.")
+		return 1
+	case r.commits.Load() == 0 || r.eventsObserved.Load() == 0:
+		fmt.Println("\nINCONCLUSIVE: no commits or no events observed — check connectivity / log_bin")
+		return 2
+	default:
+		fmt.Printf("\nPASS: no visibility violations observed within %s.\n", *maxDuration)
+		return 0
 	}
-	if r.commits.Load() == 0 || r.eventsObserved.Load() == 0 {
-		fmt.Println("\nFAIL: no commits or no events observed — check connectivity / log_bin")
-		os.Exit(2)
-	}
-	fmt.Println("\nPASS: no visibility violations observed.")
 }
 
 type run struct {
-	schema   string
-	table    string
-	verifier *sql.DB
+	schema       string
+	table        string
+	verifier     *sql.DB
+	recheckDelay time.Duration
 
-	commits         atomic.Int64
-	producerErrors  atomic.Int64
-	eventsObserved  atomic.Int64
-	checks          atomic.Int64
-	missesInitial   atomic.Int64
-	missesPermanent atomic.Int64
+	// stop is invoked once, by the verifier, after the first miss is
+	// classified. Cancelling it tears down all goroutines so realMain can
+	// print the summary and exit.
+	stop context.CancelFunc
+	// firstMissSeen guarantees the "first miss" handling runs exactly
+	// once even if multiple verifier goroutines race to a miss.
+	firstMissSeen atomic.Bool
+	// firstMissPermanent / firstMissDelayed describe the outcome of the
+	// post-miss recheck. Exactly one is true when a miss has been seen.
+	firstMissPermanent atomic.Bool
+	firstMissDelayed   atomic.Bool
+
+	commits        atomic.Int64
+	producerErrors atomic.Int64
+	eventsObserved atomic.Int64
+	checks         atomic.Int64
 }
 
 func (r *run) runProducer(ctx context.Context, db *sql.DB) {
@@ -201,21 +247,14 @@ func (r *run) runProducer(ctx context.Context, db *sql.DB) {
 	}
 }
 
+// oneCommit runs the minimum producer shape that surfaces the race —
+// see the package-level doc-comment for the bisect.
 func (r *run) oneCommit(ctx context.Context, db *sql.DB) error {
-	// Bisect summary (Docker MySQL 8.0.45, no -race, ~16k commits in 5s):
-	//   - autocommit INSERT only:               5/5 PASS
-	//   - BEGIN; INSERT; COMMIT:                5/5 PASS
-	//   - BEGIN; INSERT; UPDATE; COMMIT:        2/3 FAIL  <-- minimal repro
-	//
-	// The repro requires a multi-statement transaction that both INSERTs
-	// AND UPDATEs the same row before COMMIT. Single-statement transactions
-	// (with or without explicit BEGIN/COMMIT) do not reproduce the
-	// visibility race in the same time budget.
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO "+r.table+" (payload) VALUES ('x')"); err != nil {
 		return err
@@ -272,7 +311,14 @@ func (r *run) runStreamer(ctx context.Context, streamer *replication.BinlogStrea
 	}
 }
 
+// verifyVisible is called by the streamer for every WriteRowsEvent on
+// the test table. On the very first miss it classifies it (permanent vs
+// delayed) and then signals the rest of the program to shut down.
+// Subsequent verifier calls become no-ops once a miss has been seen.
 func (r *run) verifyVisible(ctx context.Context, id int64, binlogPos uint32) {
+	if r.firstMissSeen.Load() {
+		return
+	}
 	r.checks.Add(1)
 	visible, err := r.selectByID(ctx, id)
 	if err != nil {
@@ -284,21 +330,38 @@ func (r *run) verifyVisible(ctx context.Context, id int64, binlogPos uint32) {
 	if visible {
 		return
 	}
-	r.missesInitial.Add(1)
-	time.Sleep(50 * time.Millisecond)
-	visibleAfter, err := r.selectByID(ctx, id)
+	// First miss wins. Classify it, then shut everything down via r.stop.
+	if !r.firstMissSeen.CompareAndSwap(false, true) {
+		return
+	}
+	defer r.stop()
+
+	log.Printf("first miss observed: id=%d binlog_pos=%d — row event was "+
+		"delivered by the binlog streamer but a fresh SELECT does not see "+
+		"the row. Re-checking after %s …",
+		id, binlogPos, r.recheckDelay)
+
+	// Use a fresh background context for the re-check so the recheck
+	// itself doesn't get cancelled by r.stop().
+	recheckCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	time.Sleep(r.recheckDelay)
+	visibleAfter, err := r.selectByID(recheckCtx, id)
 	switch {
 	case err != nil:
-		log.Printf("MISSING id=%d binlog_pos=%d retry_error=%v", id, binlogPos, err)
+		log.Printf("recheck error id=%d: %v", id, err)
+		// Treat as permanent so the test still surfaces a problem.
+		r.firstMissPermanent.Store(true)
 	case !visibleAfter:
-		r.missesPermanent.Add(1)
-		log.Printf("MISSING (permanent) id=%d binlog_pos=%d — row event observed "+
-			"but row not visible to fresh SELECT even after 50ms",
-			id, binlogPos)
+		r.firstMissPermanent.Store(true)
+		log.Printf("MISSING (permanent) id=%d binlog_pos=%d — row event "+
+			"observed but row still not visible to a fresh SELECT after %s",
+			id, binlogPos, r.recheckDelay)
 	default:
-		log.Printf("MISSING (delayed) id=%d binlog_pos=%d — row event observed "+
-			"but row only became visible after 50ms",
-			id, binlogPos)
+		r.firstMissDelayed.Store(true)
+		log.Printf("MISSING (delayed) id=%d binlog_pos=%d — row event "+
+			"observed but row only became visible after %s",
+			id, binlogPos, r.recheckDelay)
 	}
 }
 
@@ -315,52 +378,67 @@ func (r *run) selectByID(ctx context.Context, id int64) (bool, error) {
 	return got == id, nil
 }
 
-func currentBinlogPosition(db *sql.DB) (gomysql.Position, error) {
+func currentBinlogPosition(ctx context.Context, db *sql.DB) (gomysql.Position, error) {
+	// MySQL 8.4 deprecated SHOW MASTER STATUS in favour of SHOW BINARY LOG
+	// STATUS. Try the new name first, fall back to the old name.
 	for _, stmt := range []string{"SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"} {
-		rows, err := db.Query(stmt)
-		if err != nil {
-			continue
+		pos, err := readBinlogPositionRow(ctx, db, stmt)
+		if err == nil {
+			return pos, nil
 		}
-		cols, _ := rows.Columns()
-		if !rows.Next() {
-			rows.Close()
-			continue
-		}
-		dest := make([]any, len(cols))
-		for i := range dest {
-			dest[i] = new(sql.NullString)
-		}
-		if err := rows.Scan(dest...); err != nil {
-			rows.Close()
-			return gomysql.Position{}, err
-		}
-		rows.Close()
-		var file, pos string
-		for i, c := range cols {
-			v := dest[i].(*sql.NullString).String
-			switch strings.ToLower(c) {
-			case "file":
-				file = v
-			case "position":
-				pos = v
-			}
-		}
-		if file == "" || pos == "" {
-			continue
-		}
-		p, err := strconv.ParseUint(pos, 10, 32)
-		if err != nil {
-			return gomysql.Position{}, err
-		}
-		return gomysql.Position{Name: file, Pos: uint32(p)}, nil
 	}
 	return gomysql.Position{}, errors.New("could not read current binlog position")
 }
 
-func logServerSettings(db *sql.DB) {
-	var v string
+func readBinlogPositionRow(ctx context.Context, db *sql.DB, stmt string) (gomysql.Position, error) {
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return gomysql.Position{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	cols, err := rows.Columns()
+	if err != nil {
+		return gomysql.Position{}, err
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return gomysql.Position{}, err
+		}
+		return gomysql.Position{}, errors.New("no rows from " + stmt)
+	}
+	dest := make([]any, len(cols))
+	for i := range dest {
+		dest[i] = new(sql.NullString)
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return gomysql.Position{}, err
+	}
+	var file, pos string
+	for i, c := range cols {
+		v := dest[i].(*sql.NullString).String
+		switch strings.ToLower(c) {
+		case "file":
+			file = v
+		case "position":
+			pos = v
+		}
+	}
+	if file == "" || pos == "" {
+		return gomysql.Position{}, fmt.Errorf("%s: missing File/Position columns", stmt)
+	}
+	p, err := strconv.ParseUint(pos, 10, 32)
+	if err != nil {
+		return gomysql.Position{}, err
+	}
+	return gomysql.Position{Name: file, Pos: uint32(p)}, nil
+}
+
+func logServerSettings(ctx context.Context, db *sql.DB) {
 	q := func(name string) string {
-		_ = db.QueryRow("SELECT @@global." + name).Scan(&v)
+		var v string
+		if err := db.QueryRowContext(ctx, "SELECT @@global."+name).Scan(&v); err != nil {
+			return "?"
+		}
 		return v
 	}
 	fmt.Printf("server: version=%s binlog_format=%s binlog_row_image=%s log_bin=%s "+
@@ -369,6 +447,15 @@ func logServerSettings(db *sql.DB) {
 		q("version"), q("binlog_format"), q("binlog_row_image"), q("log_bin"),
 		q("gtid_mode"), q("binlog_order_commits"), q("sync_binlog"),
 		q("innodb_flush_log_at_trx_commit"))
+}
+
+// closeAndLog closes c and logs (but does not propagate) any error. Used
+// for *sql.DB cleanup defers where the only failure mode is a connection
+// that's already gone.
+func closeAndLog(name string, c io.Closer) {
+	if err := c.Close(); err != nil {
+		log.Printf("close %s: %v", name, err)
+	}
 }
 
 func scopeDSN(cfg *mysqldriver.Config, dbName string) string {
