@@ -4,20 +4,21 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSeverity_DefaultValue tests that the zero value of Severity is SeverityInfo
 func TestSeverity_DefaultValue(t *testing.T) {
 	var s Severity
-	assert.Equal(t, SeverityInfo, s, "default Severity should be SeverityInfo (0)")
-	assert.Equal(t, 0, int(s), "default Severity should have underlying value of 0")
+	require.Equal(t, SeverityInfo, s, "default Severity should be SeverityInfo (0)")
+	require.Equal(t, 0, int(s), "default Severity should have underlying value of 0")
 }
 
 // TestSeverity_Values tests that the Severity constants have the expected values
 func TestSeverity_Values(t *testing.T) {
-	assert.Equal(t, 0, int(SeverityInfo), "SeverityInfo should be 0")
-	assert.Equal(t, 1, int(SeverityWarning), "SeverityWarning should be 1")
-	assert.Equal(t, 2, int(SeverityError), "SeverityError should be 2")
+	require.Equal(t, 0, int(SeverityInfo), "SeverityInfo should be 0")
+	require.Equal(t, 1, int(SeverityWarning), "SeverityWarning should be 1")
+	require.Equal(t, 2, int(SeverityError), "SeverityError should be 2")
 }
 
 // TestSeverity_String tests the String() method for all Severity levels
@@ -66,7 +67,7 @@ func TestViolation_DefaultSeverity(t *testing.T) {
 		Message: "Test message",
 	}
 
-	assert.Equal(t, SeverityInfo, violation.Severity, "uninitialized Severity should default to SeverityInfo")
+	require.Equal(t, SeverityInfo, violation.Severity, "uninitialized Severity should default to SeverityInfo")
 }
 
 // TestViolation_String tests the String() method for Violation
@@ -205,13 +206,13 @@ func TestViolation_WithContext(t *testing.T) {
 		},
 	}
 
-	assert.NotNil(t, violation.Context)
-	assert.Len(t, violation.Context, 5)
-	assert.Equal(t, "users", violation.Context["table"])
-	assert.Equal(t, "email", violation.Context["column"])
-	assert.Equal(t, "VARCHAR(100)", violation.Context["currentType"])
-	assert.Equal(t, "VARCHAR(255)", violation.Context["suggestedType"])
-	assert.Equal(t, 42, violation.Context["count"])
+	require.NotNil(t, violation.Context)
+	require.Len(t, violation.Context, 5)
+	require.Equal(t, "users", violation.Context["table"])
+	require.Equal(t, "email", violation.Context["column"])
+	require.Equal(t, "VARCHAR(100)", violation.Context["currentType"])
+	require.Equal(t, "VARCHAR(255)", violation.Context["suggestedType"])
+	require.Equal(t, 42, violation.Context["count"])
 }
 
 // TestViolation_EmptyFields tests violations with nil/empty optional fields
@@ -225,22 +226,22 @@ func TestViolation_EmptyFields(t *testing.T) {
 		// Location, Suggestion, and Context are nil/empty
 	}
 
-	assert.Nil(t, violation.Location)
-	assert.Nil(t, violation.Suggestion)
-	assert.Nil(t, violation.Context)
+	require.Nil(t, violation.Location)
+	require.Nil(t, violation.Suggestion)
+	require.Nil(t, violation.Context)
 
 	// String() should still work
 	str := violation.String()
-	assert.Contains(t, str, "[INFO]")
-	assert.Contains(t, str, "test_linter")
-	assert.Contains(t, str, "Test message")
+	require.Contains(t, str, "[INFO]")
+	require.Contains(t, str, "test_linter")
+	require.Contains(t, str, "Test message")
 }
 
 // TestSeverity_Comparison tests that Severity values can be compared
 func TestSeverity_Comparison(t *testing.T) {
-	assert.Less(t, SeverityInfo, SeverityWarning, "SeverityInfo should be less than SeverityWarning")
-	assert.Less(t, SeverityWarning, SeverityError, "SeverityWarning should be less than SeverityError")
-	assert.Less(t, SeverityInfo, SeverityError, "SeverityInfo should be less than SeverityError")
+	require.Less(t, SeverityInfo, SeverityWarning, "SeverityInfo should be less than SeverityWarning")
+	require.Less(t, SeverityWarning, SeverityError, "SeverityWarning should be less than SeverityError")
+	require.Less(t, SeverityInfo, SeverityError, "SeverityInfo should be less than SeverityError")
 }
 
 // TestViolation_ArrayDefaultSeverity tests that violations in an array default to SeverityInfo
@@ -265,9 +266,9 @@ func TestViolation_ArrayDefaultSeverity(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, SeverityInfo, violations[0].Severity, "first violation should default to SeverityInfo")
-	assert.Equal(t, SeverityWarning, violations[1].Severity, "second violation should be SeverityWarning")
-	assert.Equal(t, SeverityInfo, violations[2].Severity, "third violation should default to SeverityInfo")
+	require.Equal(t, SeverityInfo, violations[0].Severity, "first violation should default to SeverityInfo")
+	require.Equal(t, SeverityWarning, violations[1].Severity, "second violation should be SeverityWarning")
+	require.Equal(t, SeverityInfo, violations[2].Severity, "third violation should default to SeverityInfo")
 }
 
 // TestViolation_StructInitialization tests different ways to initialize Violation
@@ -276,7 +277,7 @@ func TestViolation_StructInitialization(t *testing.T) {
 
 	t.Run("Zero value", func(t *testing.T) {
 		var v Violation
-		assert.Equal(t, SeverityInfo, v.Severity)
+		require.Equal(t, SeverityInfo, v.Severity)
 	})
 
 	t.Run("Partial initialization", func(t *testing.T) {
@@ -284,7 +285,7 @@ func TestViolation_StructInitialization(t *testing.T) {
 			Linter:  linter,
 			Message: "test",
 		}
-		assert.Equal(t, SeverityInfo, v.Severity)
+		require.Equal(t, SeverityInfo, v.Severity)
 	})
 
 	t.Run("Explicit SeverityInfo", func(t *testing.T) {
@@ -293,7 +294,7 @@ func TestViolation_StructInitialization(t *testing.T) {
 			Message:  "test",
 			Severity: SeverityInfo,
 		}
-		assert.Equal(t, SeverityInfo, v.Severity)
+		require.Equal(t, SeverityInfo, v.Severity)
 	})
 
 	t.Run("Explicit SeverityWarning", func(t *testing.T) {
@@ -302,7 +303,7 @@ func TestViolation_StructInitialization(t *testing.T) {
 			Message:  "test",
 			Severity: SeverityWarning,
 		}
-		assert.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, SeverityWarning, v.Severity)
 	})
 
 	t.Run("Explicit SeverityError", func(t *testing.T) {
@@ -311,7 +312,7 @@ func TestViolation_StructInitialization(t *testing.T) {
 			Message:  "test",
 			Severity: SeverityError,
 		}
-		assert.Equal(t, SeverityError, v.Severity)
+		require.Equal(t, SeverityError, v.Severity)
 	})
 }
 

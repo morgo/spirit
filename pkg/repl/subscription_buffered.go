@@ -37,6 +37,11 @@ type bufferedMap struct {
 
 	watermarkOptimization bool
 	chunker               table.MappedChunker
+
+	// Counters for the bookend log emitted on watermark-optimization transitions.
+	keysAdded        atomic.Int64
+	keysDroppedAbove atomic.Int64
+	keysSkippedBelow atomic.Int64
 }
 
 // Assert that bufferedMap implements subscription
@@ -62,6 +67,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
+		s.keysDroppedAbove.Add(1)
 		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
@@ -73,6 +79,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 			logicalRow:  applier.LogicalRow{IsDeleted: true},
 			originalKey: key,
 		}
+		s.keysAdded.Add(1)
 		return
 	}
 
@@ -81,6 +88,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		logicalRow:  applier.LogicalRow{RowImage: row},
 		originalKey: key,
 	}
+	s.keysAdded.Add(1)
 }
 
 // Flush writes the pending changes to the new table.
@@ -113,6 +121,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 		// In bufferedMap, we use the low-watermark check to defer flushing keys that are
 		// still being copied (KeyBelowLowWatermark returns false), so this condition skips them.
 		if !underLock && s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+			s.keysSkippedBelow.Add(1)
 			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
@@ -185,6 +194,16 @@ func (s *bufferedMap) watermarkOptimizationEnabled() bool {
 
 func (s *bufferedMap) SetWatermarkOptimization(enabled bool) {
 	s.Lock()
-	defer s.Unlock()
+	deltaLen := len(s.changes)
 	s.watermarkOptimization = enabled
+	s.Unlock()
+
+	s.c.logger.Info("watermark optimization toggled",
+		"table", s.table.TableName,
+		"enabled", enabled,
+		"keys_added", s.keysAdded.Swap(0),
+		"keys_dropped_above_high", s.keysDroppedAbove.Swap(0),
+		"keys_skipped_not_below_low", s.keysSkippedBelow.Swap(0),
+		"delta_len", deltaLen,
+	)
 }

@@ -234,22 +234,22 @@ func TestClassifyMultiStatement(t *testing.T) {
 	results, err := Classify("ALTER TABLE t1 ADD COLUMN a INT; ALTER TABLE t2 ADD COLUMN b INT")
 	require.NoError(t, err)
 	require.Len(t, results, 2)
-	assert.Equal(t, StatementAlterTable, results[0].Type)
-	assert.Equal(t, "t1", results[0].Table)
-	assert.Equal(t, StatementAlterTable, results[1].Type)
-	assert.Equal(t, "t2", results[1].Table)
+	require.Equal(t, StatementAlterTable, results[0].Type)
+	require.Equal(t, "t1", results[0].Table)
+	require.Equal(t, StatementAlterTable, results[1].Type)
+	require.Equal(t, "t2", results[1].Table)
 }
 
 func TestClassifyMixed(t *testing.T) {
 	results, err := Classify("INSERT INTO t1 (a) VALUES (1); ALTER TABLE t2 ADD COLUMN b INT")
 	require.NoError(t, err)
 	require.Len(t, results, 2)
-	assert.Equal(t, StatementInsert, results[0].Type)
-	assert.Equal(t, "t1", results[0].Table)
-	assert.True(t, results[0].Type.IsDML())
-	assert.Equal(t, StatementAlterTable, results[1].Type)
-	assert.Equal(t, "t2", results[1].Table)
-	assert.True(t, results[1].Type.IsDDL())
+	require.Equal(t, StatementInsert, results[0].Type)
+	require.Equal(t, "t1", results[0].Table)
+	require.True(t, results[0].Type.IsDML())
+	require.Equal(t, StatementAlterTable, results[1].Type)
+	require.Equal(t, "t2", results[1].Table)
+	require.True(t, results[1].Type.IsDDL())
 }
 
 func TestClassifyDropMultipleTables(t *testing.T) {
@@ -257,8 +257,8 @@ func TestClassifyDropMultipleTables(t *testing.T) {
 	results, err := Classify("DROP TABLE t1, t2, t3")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-	assert.Equal(t, StatementDropTable, results[0].Type)
-	assert.Equal(t, "t1", results[0].Table)
+	require.Equal(t, StatementDropTable, results[0].Type)
+	require.Equal(t, "t1", results[0].Table)
 }
 
 func TestClassifyTruncateShorthand(t *testing.T) {
@@ -266,8 +266,8 @@ func TestClassifyTruncateShorthand(t *testing.T) {
 	results, err := Classify("TRUNCATE t1")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-	assert.Equal(t, StatementTruncateTable, results[0].Type)
-	assert.Equal(t, "t1", results[0].Table)
+	require.Equal(t, StatementTruncateTable, results[0].Type)
+	require.Equal(t, "t1", results[0].Table)
 }
 
 func TestClassifyUnknown(t *testing.T) {
@@ -275,34 +275,34 @@ func TestClassifyUnknown(t *testing.T) {
 	results, err := Classify("SELECT 1")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-	assert.Equal(t, StatementUnknown, results[0].Type)
-	assert.False(t, results[0].Type.IsDDL())
-	assert.False(t, results[0].Type.IsDML())
-	assert.Equal(t, "UNKNOWN", results[0].Type.String())
+	require.Equal(t, StatementUnknown, results[0].Type)
+	require.False(t, results[0].Type.IsDDL())
+	require.False(t, results[0].Type.IsDML())
+	require.Equal(t, "UNKNOWN", results[0].Type.String())
 }
 
 func TestClassifyInvalid(t *testing.T) {
 	_, err := Classify("NOT VALID SQL HERE !@#$")
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	_, err = Classify("-- just a comment")
-	assert.ErrorIs(t, err, ErrNoStatements)
+	require.ErrorIs(t, err, ErrNoStatements)
 
 	_, err = Classify("")
-	assert.ErrorIs(t, err, ErrNoStatements)
+	require.ErrorIs(t, err, ErrNoStatements)
 }
 
 func TestStatementTypeString(t *testing.T) {
-	assert.Equal(t, "ALTER TABLE", StatementAlterTable.String())
-	assert.Equal(t, "CREATE TABLE", StatementCreateTable.String())
-	assert.Equal(t, "DROP TABLE", StatementDropTable.String())
-	assert.Equal(t, "RENAME TABLE", StatementRenameTable.String())
-	assert.Equal(t, "TRUNCATE TABLE", StatementTruncateTable.String())
-	assert.Equal(t, "CREATE INDEX", StatementCreateIndex.String())
-	assert.Equal(t, "DROP INDEX", StatementDropIndex.String())
-	assert.Equal(t, "CREATE VIEW", StatementCreateView.String())
-	assert.Equal(t, "INSERT", StatementInsert.String())
-	assert.Equal(t, "UPDATE", StatementUpdate.String())
-	assert.Equal(t, "DELETE", StatementDelete.String())
-	assert.Equal(t, "UNKNOWN", StatementUnknown.String())
+	require.Equal(t, "ALTER TABLE", StatementAlterTable.String())
+	require.Equal(t, "CREATE TABLE", StatementCreateTable.String())
+	require.Equal(t, "DROP TABLE", StatementDropTable.String())
+	require.Equal(t, "RENAME TABLE", StatementRenameTable.String())
+	require.Equal(t, "TRUNCATE TABLE", StatementTruncateTable.String())
+	require.Equal(t, "CREATE INDEX", StatementCreateIndex.String())
+	require.Equal(t, "DROP INDEX", StatementDropIndex.String())
+	require.Equal(t, "CREATE VIEW", StatementCreateView.String())
+	require.Equal(t, "INSERT", StatementInsert.String())
+	require.Equal(t, "UPDATE", StatementUpdate.String())
+	require.Equal(t, "DELETE", StatementDelete.String())
+	require.Equal(t, "UNKNOWN", StatementUnknown.String())
 }
