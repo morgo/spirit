@@ -859,6 +859,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 		WithDBName(dbName),
 		WithThreads(1),
 		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler(),
 		WithRespectSentinel())
 
 	ctx, cancel := context.WithCancel(t.Context())

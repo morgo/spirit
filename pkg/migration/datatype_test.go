@@ -213,7 +213,8 @@ func testEnumReorder(t *testing.T, enableBuffered bool) {
 	m := NewTestRunner(t, "enumreorder", "MODIFY COLUMN status ENUM('pending', 'active', 'inactive') NOT NULL",
 		WithThreads(1),
 		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	// Concurrent DML during copy phase to exercise binlog replay.
 	ctx, cancel := context.WithCancel(t.Context())
@@ -301,7 +302,8 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	m := NewTestRunner(t, "setreorder", "MODIFY COLUMN perms SET('execute', 'read', 'write') NOT NULL",
 		WithThreads(1),
 		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	// Concurrent DML during copy phase.
 	ctx, cancel := context.WithCancel(t.Context())
@@ -524,7 +526,8 @@ func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
 	)`)
 	tt.SeedRows(t, "INSERT INTO altpk_dml (name, val) SELECT 'seed', 1", 4096)
 	m := NewTestRunner(t, "altpk_dml", "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -611,7 +614,8 @@ func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enable
 		"MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT, MODIFY COLUMN name VARCHAR(255) NOT NULL",
 		WithThreads(2),
 		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
