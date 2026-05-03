@@ -281,12 +281,10 @@ func (s *stressRun) runStreamer(ctx context.Context, streamer *replication.Binlo
 		if string(rowsEv.Table.Schema) != s.schema || string(rowsEv.Table.Table) != s.table {
 			continue
 		}
-		switch ev.Header.EventType {
-		case replication.WRITE_ROWS_EVENTv0,
-			replication.WRITE_ROWS_EVENTv1,
-			replication.WRITE_ROWS_EVENTv2:
-			// fallthrough to handler below
-		default:
+		et := ev.Header.EventType
+		if et != replication.WRITE_ROWS_EVENTv0 &&
+			et != replication.WRITE_ROWS_EVENTv1 &&
+			et != replication.WRITE_ROWS_EVENTv2 {
 			continue
 		}
 		for _, row := range rowsEv.Rows {
