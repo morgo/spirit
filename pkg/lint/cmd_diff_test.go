@@ -5,7 +5,6 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,10 +36,10 @@ func TestDiff_AddColumn(t *testing.T) {
 
 	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Equal(t, "users", plan.Changes[0].TableName)
-	assert.Contains(t, plan.Changes[0].Statement, "ALTER TABLE")
+	require.Equal(t, "users", plan.Changes[0].TableName)
+	require.Contains(t, plan.Changes[0].Statement, "ALTER TABLE")
 }
 
 func TestDiff_NewTable(t *testing.T) {
@@ -64,10 +63,10 @@ func TestDiff_NewTable(t *testing.T) {
 
 	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Equal(t, "orders", plan.Changes[0].TableName)
-	assert.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
+	require.Equal(t, "orders", plan.Changes[0].TableName)
+	require.Contains(t, plan.Changes[0].Statement, "CREATE TABLE")
 }
 
 func TestDiff_DroppedTable(t *testing.T) {
@@ -91,10 +90,10 @@ func TestDiff_DroppedTable(t *testing.T) {
 
 	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 	require.Len(t, plan.Changes, 1)
-	assert.Equal(t, "orders", plan.Changes[0].TableName)
-	assert.Contains(t, plan.Changes[0].Statement, "DROP TABLE")
+	require.Equal(t, "orders", plan.Changes[0].TableName)
+	require.Contains(t, plan.Changes[0].Statement, "DROP TABLE")
 }
 
 func TestDiff_NoChanges(t *testing.T) {
@@ -116,7 +115,7 @@ func TestDiff_NoChanges(t *testing.T) {
 
 	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.False(t, plan.HasChanges())
+	require.False(t, plan.HasChanges())
 }
 
 func TestDiff_MultipleTables(t *testing.T) {
@@ -150,15 +149,15 @@ func TestDiff_MultipleTables(t *testing.T) {
 
 	plan, err := PlanChanges(mustTableSchemas(t, source), mustTableSchemas(t, target), nil, nil)
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 
 	// Both tables should have changes
 	changedTables := make(map[string]bool)
 	for _, ch := range plan.Changes {
 		changedTables[ch.TableName] = true
 	}
-	assert.True(t, changedTables["users"])
-	assert.True(t, changedTables["orders"])
+	require.True(t, changedTables["users"])
+	require.True(t, changedTables["orders"])
 }
 
 func TestLoadAlterChanges(t *testing.T) {
@@ -167,17 +166,17 @@ func TestLoadAlterChanges(t *testing.T) {
 		"ALTER TABLE orders ADD INDEX idx_date (created_at)",
 	})
 	require.NoError(t, err)
-	assert.Len(t, changes, 2)
-	assert.Equal(t, "users", changes[0].Table)
-	assert.Contains(t, changes[0].Statement, "ALTER TABLE", "expected ALTER TABLE statement for users")
-	assert.Equal(t, "orders", changes[1].Table)
-	assert.Contains(t, changes[1].Statement, "ALTER TABLE", "expected ALTER TABLE statement for orders")
+	require.Len(t, changes, 2)
+	require.Equal(t, "users", changes[0].Table)
+	require.Contains(t, changes[0].Statement, "ALTER TABLE", "expected ALTER TABLE statement for users")
+	require.Equal(t, "orders", changes[1].Table)
+	require.Contains(t, changes[1].Statement, "ALTER TABLE", "expected ALTER TABLE statement for orders")
 }
 
 func TestLoadAlterChanges_InvalidSQL(t *testing.T) {
 	_, err := loadAlterChanges([]string{"NOT VALID SQL AT ALL"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to parse ALTER statement")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to parse ALTER statement")
 }
 
 func TestDiff_DirToDirIntegration(t *testing.T) {
@@ -223,7 +222,7 @@ func TestDiff_DirToDirIntegration(t *testing.T) {
 
 	plan, err := PlanChanges(sourceSchemas, targetSchemas, nil, &Config{LintOnlyChanges: true})
 	require.NoError(t, err)
-	assert.True(t, plan.HasChanges())
+	require.True(t, plan.HasChanges())
 
 	// Should have warnings for orders (has_float, has_fk)
 	var ordersChange *PlannedChange
@@ -234,11 +233,11 @@ func TestDiff_DirToDirIntegration(t *testing.T) {
 		}
 	}
 	require.NotNil(t, ordersChange, "expected a change for orders table")
-	assert.NotEmpty(t, ordersChange.Warnings(), "expected warnings for orders table (has_float, has_fk)")
+	require.NotEmpty(t, ordersChange.Warnings(), "expected warnings for orders table (has_float, has_fk)")
 
 	// Should NOT have changes for users (unchanged)
 	for _, ch := range plan.Changes {
-		assert.NotEqual(t, "users", ch.TableName, "users table is unchanged, should not appear in plan")
+		require.NotEqual(t, "users", ch.TableName, "users table is unchanged, should not appear in plan")
 	}
 }
 
@@ -264,7 +263,7 @@ func TestDiff_AlterIntegration(t *testing.T) {
 
 	// Should have a has_float violation for users
 	floatViolations := FilterByLinter(violations, "has_float")
-	assert.NotEmpty(t, floatViolations, "expected has_float violation")
+	require.NotEmpty(t, floatViolations, "expected has_float violation")
 }
 
 // filterByTable filters violations to only those for a specific table.
