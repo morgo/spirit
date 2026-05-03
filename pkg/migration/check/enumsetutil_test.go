@@ -3,7 +3,7 @@ package check
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseEnumSetValues(t *testing.T) {
@@ -59,11 +59,11 @@ func TestParseEnumSetValues(t *testing.T) {
 		t.Run(tt.input, func(t *testing.T) {
 			result, err := parseEnumSetValues(tt.input)
 			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Nil(t, result)
+				require.Error(t, err)
+				require.Nil(t, result)
 			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expected, result)
+				require.NoError(t, err)
+				require.Equal(t, tt.expected, result)
 			}
 		})
 	}
@@ -71,70 +71,70 @@ func TestParseEnumSetValues(t *testing.T) {
 
 func TestIsEnumOrSetType(t *testing.T) {
 	// ENUM types
-	assert.True(t, isEnumOrSetType("enum('a','b','c')"))
-	assert.True(t, isEnumOrSetType("ENUM('A','B')"))
-	assert.True(t, isEnumOrSetType("Enum('x')"))
+	require.True(t, isEnumOrSetType("enum('a','b','c')"))
+	require.True(t, isEnumOrSetType("ENUM('A','B')"))
+	require.True(t, isEnumOrSetType("Enum('x')"))
 
 	// SET types
-	assert.True(t, isEnumOrSetType("set('read','write')"))
-	assert.True(t, isEnumOrSetType("SET('r','w')"))
-	assert.True(t, isEnumOrSetType("Set('a')"))
+	require.True(t, isEnumOrSetType("set('read','write')"))
+	require.True(t, isEnumOrSetType("SET('r','w')"))
+	require.True(t, isEnumOrSetType("Set('a')"))
 
 	// Non-ENUM/SET types
-	assert.False(t, isEnumOrSetType("varchar(191)"))
-	assert.False(t, isEnumOrSetType("int"))
-	assert.False(t, isEnumOrSetType("bigint"))
-	assert.False(t, isEnumOrSetType("text"))
-	assert.False(t, isEnumOrSetType("decimal(10,2)"))
-	assert.False(t, isEnumOrSetType(""))
+	require.False(t, isEnumOrSetType("varchar(191)"))
+	require.False(t, isEnumOrSetType("int"))
+	require.False(t, isEnumOrSetType("bigint"))
+	require.False(t, isEnumOrSetType("text"))
+	require.False(t, isEnumOrSetType("decimal(10,2)"))
+	require.False(t, isEnumOrSetType(""))
 }
 
 func TestIsEnumType(t *testing.T) {
-	assert.True(t, isEnumType("enum('a','b','c')"))
-	assert.True(t, isEnumType("ENUM('A','B')"))
-	assert.False(t, isEnumType("set('read','write')"))
-	assert.False(t, isEnumType("varchar(191)"))
-	assert.False(t, isEnumType(""))
+	require.True(t, isEnumType("enum('a','b','c')"))
+	require.True(t, isEnumType("ENUM('A','B')"))
+	require.False(t, isEnumType("set('read','write')"))
+	require.False(t, isEnumType("varchar(191)"))
+	require.False(t, isEnumType(""))
 }
 
 func TestIsSetType(t *testing.T) {
-	assert.True(t, isSetType("set('read','write')"))
-	assert.True(t, isSetType("SET('r','w')"))
-	assert.False(t, isSetType("enum('a','b')"))
-	assert.False(t, isSetType("varchar(191)"))
-	assert.False(t, isSetType(""))
+	require.True(t, isSetType("set('read','write')"))
+	require.True(t, isSetType("SET('r','w')"))
+	require.False(t, isSetType("enum('a','b')"))
+	require.False(t, isSetType("varchar(191)"))
+	require.False(t, isSetType(""))
 }
 
 func TestParseSQLQuotedListUnterminated(t *testing.T) {
 	// A quoted string that is never closed should return an error.
 	result, err := parseSQLQuotedList("'abc")
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "unterminated")
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "unterminated")
 }
 
 func TestIsPrefix(t *testing.T) {
 	// Identical
-	assert.True(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "b", "c"}))
+	require.True(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "b", "c"}))
 
 	// Append at end (safe)
-	assert.True(t, isPrefix([]string{"a", "b"}, []string{"a", "b", "c"}))
+	require.True(t, isPrefix([]string{"a", "b"}, []string{"a", "b", "c"}))
 
 	// Empty old (always a prefix)
-	assert.True(t, isPrefix([]string{}, []string{"a", "b"}))
+	require.True(t, isPrefix([]string{}, []string{"a", "b"}))
 
 	// Reorder
-	assert.False(t, isPrefix([]string{"a", "b", "c"}, []string{"c", "a", "b"}))
+	require.False(t, isPrefix([]string{"a", "b", "c"}, []string{"c", "a", "b"}))
 
 	// Insert in middle
-	assert.False(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "x", "b", "c"}))
+	require.False(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "x", "b", "c"}))
 
 	// Remove value
-	assert.False(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "b"}))
+	require.False(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "b"}))
 
 	// Remove from middle
-	assert.False(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "c"}))
+	require.False(t, isPrefix([]string{"a", "b", "c"}, []string{"a", "c"}))
 
 	// Completely different
-	assert.False(t, isPrefix([]string{"a", "b"}, []string{"x", "y", "z"}))
+	require.False(t, isPrefix([]string{"a", "b"}, []string{"x", "y", "z"}))
 }

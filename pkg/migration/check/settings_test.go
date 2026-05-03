@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSettings(t *testing.T) {
@@ -27,26 +27,26 @@ func TestSettings(t *testing.T) {
 	}
 
 	err := settingsCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // all looks good
+	require.NoError(t, err) // all looks good
 
 	r.Threads = 0
 	err = settingsCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	r.Threads = 65
 	err = settingsCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	r.Threads = 2
 	err = settingsCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // all looks good
+	require.NoError(t, err) // all looks good
 
 	r.TargetChunkTime = time.Second * 6
 	err = settingsCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	r.TargetChunkTime = time.Second * 4
 	r.ReplicaMaxLag = time.Second * 5
 	err = settingsCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 }

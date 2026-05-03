@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,15 +35,15 @@ func TestSetReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe SET value reorder")
-	assert.ErrorContains(t, err, "checksum")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET value reorder")
+	require.ErrorContains(t, err, "checksum")
 
 	// Unbuffered + reorder SET: should also fail (checksum always fails for SET reorder)
 	r.Buffered = false
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe SET value reorder")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET value reorder")
 
 	// Buffered + append SET (safe): should pass
 	r = Resources{
@@ -53,12 +52,12 @@ func TestSetReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Unbuffered + append SET (safe): should pass
 	r.Buffered = false
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Buffered + CHANGE COLUMN with reorder: should fail
 	r = Resources{
@@ -67,8 +66,8 @@ func TestSetReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe SET value reorder")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET value reorder")
 
 	// Buffered + remove SET value: should fail
 	r = Resources{
@@ -77,8 +76,8 @@ func TestSetReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe SET value reorder")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET value reorder")
 
 	// Buffered + non-SET column modification: should pass
 	r = Resources{
@@ -87,7 +86,7 @@ func TestSetReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestSetReorderCheckVarcharToSet(t *testing.T) {
@@ -111,12 +110,12 @@ func TestSetReorderCheckVarcharToSet(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Unbuffered + VARCHAR→SET conversion: should also pass
 	r.Buffered = false
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Buffered + CHANGE COLUMN VARCHAR→SET: should pass
 	r = Resources{
@@ -125,5 +124,5 @@ func TestSetReorderCheckVarcharToSet(t *testing.T) {
 		Buffered:  true,
 	}
 	err = setReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

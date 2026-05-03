@@ -10,31 +10,30 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPrivileges(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "CREATE USER testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	config, err = mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "testprivsuser"
 	config.Passwd = ""
 
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// ForceKill is now enabled by default, so we test with it enabled.
 	r := Resources{
@@ -43,49 +42,49 @@ func TestPrivileges(t *testing.T) {
 		ForceKill: true, // default behavior
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // privileges fail, since user has nothing granted.
+	require.Error(t, err) // privileges fail, since user has nothing granted.
 
 	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs replication client
+	require.Error(t, err) // still not enough, needs replication client
 
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// With ForceKill enabled (the default), basic replication privileges are not enough.
 	// We also need the force-kill privileges.
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs force-kill privileges
+	require.Error(t, err) // still not enough, needs force-kill privileges
 
 	_, err = db.ExecContext(t.Context(), "GRANT SELECT on `performance_schema`.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs connection_admin
+	require.Error(t, err) // still not enough, needs connection_admin
 
 	_, err = db.ExecContext(t.Context(), "GRANT CONNECTION_ADMIN ON *.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs PROCESS
+	require.Error(t, err) // still not enough, needs PROCESS
 	t.Log(err)
 
 	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Reconnect before checking again.
 	// There seems to be a race in MySQL where privileges don't show up immediately
 	// That this can work around.
-	assert.NoError(t, lowPrivDB.Close())
+	require.NoError(t, lowPrivDB.Close())
 	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
 	r.DB = lowPrivDB
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // all force-kill privileges granted, should pass now
+	require.NoError(t, err) // all force-kill privileges granted, should pass now
 
 	// Test the root user
 	r = Resources{
@@ -94,7 +93,7 @@ func TestPrivileges(t *testing.T) {
 		ForceKill: true,
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // privileges work fine
+	require.NoError(t, err) // privileges work fine
 }
 
 // TestPrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
@@ -170,8 +169,8 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
-	assert.Contains(t, err.Error(), "CONNECTION_ADMIN")
+	require.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
+	require.Contains(t, err.Error(), "CONNECTION_ADMIN")
 
 	// With activate_all_roles_on_login=ON, rds_superuser_role should be tolerated
 	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
@@ -185,7 +184,7 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	r.DB = lowPrivDB
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
+	require.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
 }
 
 // TestPrivilegesWithSkipForceKill tests that when ForceKill is disabled
@@ -193,25 +192,25 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 // are not required.
 func TestPrivilegesWithSkipForceKill(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "CREATE USER testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	config, err = mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "testprivsskipfk"
 	config.Passwd = ""
 
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
 
 	// With ForceKill disabled (--skip-force-kill), the force-kill privileges
@@ -223,13 +222,13 @@ func TestPrivilegesWithSkipForceKill(t *testing.T) {
 	}
 
 	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Without force-kill, basic privileges should be sufficient.
 	// No CONNECTION_ADMIN, PROCESS, or performance_schema access needed.
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

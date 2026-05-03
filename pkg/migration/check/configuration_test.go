@@ -7,12 +7,12 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfiguration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	r := Resources{
 		DB:    db,
@@ -20,22 +20,22 @@ func TestConfiguration(t *testing.T) {
 	}
 
 	err = configurationCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // all looks good of course.
+	require.NoError(t, err) // all looks good of course.
 
 	// Current binlog row image format.
 	var binlogRowImage string
-	assert.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.binlog_row_image").Scan(&binlogRowImage))
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.binlog_row_image").Scan(&binlogRowImage))
 
 	// Binlog row image is dynamic, so we can change it.
 	// We could probably support NOBLOB with some testing, but it's not
 	// used commonly so its useful for testing.
 	_, err = db.ExecContext(t.Context(), "SET GLOBAL binlog_row_image = 'NOBLOB'")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = configurationCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// restore the binlog row image format.
 	_, err = db.ExecContext(t.Context(), "SET GLOBAL binlog_row_image = ?", binlogRowImage)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
