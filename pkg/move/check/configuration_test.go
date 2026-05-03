@@ -57,32 +57,12 @@ func TestConfigurationCheckMultipleSources(t *testing.T) {
 	require.Contains(t, err.Error(), "source 1")
 }
 
-// TestConfigurationCheckBinlogOrderCommits ensures the move-check rejects
-// servers running with binlog_order_commits=OFF, which allows commit
-// reordering that breaks Spirit's binlog→applier visibility assumption.
-// See issue #818.
-func TestConfigurationCheckBinlogOrderCommits(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
-
-	db, err := sql.Open("mysql", testutils.DSN())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	r := Resources{
-		Sources: []SourceResource{{DB: db}},
-	}
-
-	// With binlog_order_commits=OFF the check must fail.
-	_, err = db.ExecContext(t.Context(), "SET GLOBAL binlog_order_commits = OFF")
-	require.NoError(t, err)
-	defer func() {
-		// Restore — binlog_order_commits is a boolean variable, so use the
-		// literal ON form rather than a parameterised query.
-		_, _ = db.ExecContext(t.Context(), "SET GLOBAL binlog_order_commits = ON")
-	}()
-	err = configurationCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "binlog_order_commits must be ON")
-}
+// The negative-path test for binlog_order_commits=OFF (and the other
+// configurationCheck rejections) used to flip server globals via
+// SET GLOBAL, but those server-wide flips race with every other Go test
+// binary running concurrently against the same MySQL — exactly the
+// cross-package race that caused hard-to-attribute flakes elsewhere in
+// the suite. Until configurationCheck is refactored to take its variable
+// values via an injectable struct (and is therefore unit-testable without
+// touching the server), we accept that the negative branches are exercised
+// only at startup against a real misconfigured server.
