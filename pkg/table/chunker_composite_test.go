@@ -11,7 +11,6 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -537,16 +536,16 @@ func TestSetKey(t *testing.T) {
 		require.NoError(t, chunker.Open())
 		chunk, err = chunker.Next()
 		require.NoError(t, err)
-		assert.Equal(t, "1=1 AND (updated_at < NOW() - INTERVAL 1 DAY)", chunk.String())
+		require.Equal(t, "1=1 AND (updated_at < NOW() - INTERVAL 1 DAY)", chunk.String())
 
 		// check the key parts are correct.
 		switch index {
 		case "u":
-			assert.Equal(t, []string{"updated_at", "id"}, chunker.chunkKeys)
+			require.Equal(t, []string{"updated_at", "id"}, chunker.chunkKeys)
 		case "su":
-			assert.Equal(t, []string{"status", "updated_at", "id"}, chunker.chunkKeys)
+			require.Equal(t, []string{"status", "updated_at", "id"}, chunker.chunkKeys)
 		case "ui":
-			assert.Equal(t, []string{"updated_at", "id"}, chunker.chunkKeys)
+			require.Equal(t, []string{"updated_at", "id"}, chunker.chunkKeys)
 		}
 		require.NoError(t, chunker.Close())
 	}
