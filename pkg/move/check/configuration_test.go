@@ -8,7 +8,7 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfigurationCheck(t *testing.T) {
@@ -17,7 +17,7 @@ func TestConfigurationCheck(t *testing.T) {
 	}
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	// Test with valid configuration
@@ -25,7 +25,7 @@ func TestConfigurationCheck(t *testing.T) {
 		Sources: []SourceResource{{DB: db}},
 	}
 	err = configurationCheck(context.Background(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestConfigurationCheckMultipleSources(t *testing.T) {
@@ -34,11 +34,11 @@ func TestConfigurationCheckMultipleSources(t *testing.T) {
 	}
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	db2, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db2)
 
 	// Multiple valid sources should pass.
@@ -46,13 +46,13 @@ func TestConfigurationCheckMultipleSources(t *testing.T) {
 		Sources: []SourceResource{{DB: db}, {DB: db2}},
 	}
 	err = configurationCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// A nil DB on the second source should fail and reference source 1.
 	r = Resources{
 		Sources: []SourceResource{{DB: db}, {DB: nil}},
 	}
 	err = configurationCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "source 1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "source 1")
 }
