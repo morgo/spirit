@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 
 func TestReplClient(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS replt1, replt2")
@@ -42,13 +42,13 @@ func TestReplClient(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE replt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
 	t1 := table.NewTableInfo(db, "test", "replt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -56,29 +56,29 @@ func TestReplClient(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// Insert into t1.
 	testutils.RunSQL(t, "INSERT INTO replt1 (a, b, c) VALUES (1, 2, 3)")
-	assert.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
 	// There is no chunker attached, so the key above watermark can't apply.
 	// We should observe there are now rows in the changeset.
-	assert.Equal(t, 1, client.GetDeltaLen())
-	assert.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 1, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
 
 	// We should observe there is a row in t2.
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM replt2").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 1, count)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }
 
 func TestReplClientComplex(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS replcomplext1, replcomplext2")
@@ -92,80 +92,80 @@ func TestReplClientComplex(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO replcomplext1 (a, b, c) SELECT NULL, 1, 1 FROM replcomplext1 a JOIN replcomplext1 b JOIN replcomplext1 c LIMIT 100000")
 
 	t1 := table.NewTableInfo(db, "test", "replcomplext1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replcomplext2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, NewClientDefaultConfig())
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: time.Second})
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 	_, err = copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 	client.SetWatermarkOptimization(true)
 
 	// Insert into t1, but because there is no read yet, the key is above the watermark
 	testutils.RunSQL(t, "DELETE FROM replcomplext1 WHERE a BETWEEN 10 and 500")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 0, client.GetDeltaLen())
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 0, client.GetDeltaLen())
 
 	// Read from the copier so that the key is below the watermark
 	// + give feedback
 	chk, err := chunker.Next()
-	assert.NoError(t, err)
-	assert.Equal(t, "`a` < 1", chk.String())
+	require.NoError(t, err)
+	require.Equal(t, "`a` < 1", chk.String())
 	chunker.Feedback(chk, time.Second, 10)
 
 	// read again but don't give feedback
 	chk, err = chunker.Next()
-	assert.NoError(t, err)
-	assert.Equal(t, "`a` >= 1 AND `a` < 1001", chk.String())
+	require.NoError(t, err)
+	require.Equal(t, "`a` >= 1 AND `a` < 1001", chk.String())
 
 	// Now if we delete below 1001 we should see 10 deltas accumulate
 	testutils.RunSQL(t, "DELETE FROM replcomplext1 WHERE a >= 550 AND a < 560")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 10, client.GetDeltaLen()) // 10 keys did not exist on t1
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 10, client.GetDeltaLen()) // 10 keys did not exist on t1
 
 	// Try to flush the changeset
 	// It should be empty, but it's not! This is because of KeyBelowWatermark
-	assert.NoError(t, client.Flush(t.Context()))
-	assert.Equal(t, 10, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 10, client.GetDeltaLen())
 
 	// However after we give feedback, then it should be able to flush these deltas.
 	// This is because the watermark advances above 1000.
 	chunker.Feedback(chk, time.Second, 1000)
-	assert.NoError(t, client.Flush(t.Context()))
-	assert.Equal(t, 0, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 0, client.GetDeltaLen())
 
 	// Accumulate more deltas
 	testutils.RunSQL(t, "DELETE FROM replcomplext1 WHERE a >= 550 AND a < 570")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 10, client.GetDeltaLen()) // 10 keys did not exist on t1
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 10, client.GetDeltaLen()) // 10 keys did not exist on t1
 	testutils.RunSQL(t, "UPDATE replcomplext1 SET b = 213 WHERE a >= 550 AND a < 1001")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 441, client.GetDeltaLen()) // ??
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 441, client.GetDeltaLen()) // ??
 
 	// Final flush
-	assert.NoError(t, client.Flush(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
 
 	// We should observe there is a row in t2.
 	var count int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM replcomplext2").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 431, count) // 441 - 10
+	require.NoError(t, err)
+	require.Equal(t, 431, count) // 441 - 10
 }
 
 func TestReplClientResumeFromImpossible(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS replresumet1, replresumet2, _replresumet1_chkpnt")
@@ -174,13 +174,13 @@ func TestReplClientResumeFromImpossible(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE _replresumet1_chkpnt (a int)") // just used to advance binlog
 
 	t1 := table.NewTableInfo(db, "test", "replresumet1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replresumet2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -188,19 +188,19 @@ func TestReplClientResumeFromImpossible(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 	client.SetFlushedPos(mysql.Position{
 		Name: "impossible",
 		Pos:  uint32(12345),
 	})
 	err = client.Run(t.Context())
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestReplClientResumeFromPoint(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS replresumepointt1, replresumepointt2")
@@ -208,13 +208,13 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE replresumepointt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
 	t1 := table.NewTableInfo(db, "test", "replresumepointt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replresumepointt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -222,18 +222,18 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 	pos, err := client.getCurrentBinlogPosition(t.Context())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	pos.Pos = 4
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Run(t.Context()))
 	client.Close()
 }
 
 func TestReplClientOpts(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS replclientoptst1, replclientoptst2, _replclientoptst1_chkpnt")
@@ -248,13 +248,13 @@ func TestReplClientOpts(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO replclientoptst1 (a, b, c) SELECT NULL, 1, 1 FROM replclientoptst1 a JOIN replclientoptst1 b JOIN replclientoptst1 c LIMIT 100000")
 
 	t1 := table.NewTableInfo(db, "test", "replclientoptst1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replclientoptst2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -262,10 +262,10 @@ func TestReplClientOpts(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.Equal(t, 0, db.Stats().InUse) // no connections in use.
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// Disable key above watermark.
@@ -275,19 +275,19 @@ func TestReplClientOpts(t *testing.T) {
 
 	// Delete more than 10000 keys so the FLUSH has to run in chunks.
 	testutils.RunSQL(t, "DELETE FROM replclientoptst1 WHERE a BETWEEN 10 and 50000")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 49961, client.GetDeltaLen())
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 49961, client.GetDeltaLen())
 	// Flush. We could use client.Flush() but for testing purposes lets use
 	// PeriodicFlush()
 	go client.StartPeriodicFlush(t.Context(), 1*time.Second)
 	time.Sleep(2 * time.Second)
 	client.StopPeriodicFlush()
-	assert.Equal(t, 0, db.Stats().InUse) // all connections are returned
+	require.Equal(t, 0, db.Stats().InUse) // all connections are returned
 
-	assert.Equal(t, 0, client.GetDeltaLen())
+	require.Equal(t, 0, client.GetDeltaLen())
 
 	// The binlog position should have changed.
-	assert.NotEqual(t, startingPos, client.GetBinlogApplyPosition())
+	require.NotEqual(t, startingPos, client.GetBinlogApplyPosition())
 }
 
 // TestReplClientQueue tests the "queue" based approach to buffering changes
@@ -295,7 +295,7 @@ func TestReplClientOpts(t *testing.T) {
 // the buffered map behaves correct for this.
 func TestReplClientQueue(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS replqueuet1, replqueuet2, _replqueuet1_chkpnt")
@@ -310,63 +310,63 @@ func TestReplClientQueue(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO replqueuet1 (a, b, c) SELECT UUID(), 1, 1 FROM replqueuet1 a JOIN replqueuet1 b JOIN replqueuet1 c LIMIT 100000")
 
 	t1 := table.NewTableInfo(db, "test", "replqueuet1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replqueuet2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, NewClientDefaultConfig())
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 1000})
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 	_, err = copier.NewCopier(db, chunker, copier.NewCopierDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// Attach chunker's keyabovewatermark to the repl client
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// Delete from the table, because there is no keyabove watermark
 	// optimization these deletes will be queued immediately.
 	testutils.RunSQL(t, "DELETE FROM replqueuet1 LIMIT 1000")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 1000, client.GetDeltaLen())
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 1000, client.GetDeltaLen())
 
 	// Read from the copier
 	chk, err := chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	prevUpperBound := chk.UpperBound.Value[0].String()
-	assert.Equal(t, "`a` < "+prevUpperBound, chk.String())
+	require.Equal(t, "`a` < "+prevUpperBound, chk.String())
 	// read again
 	chk, err = chunker.Next()
-	assert.NoError(t, err)
-	assert.Equal(t, fmt.Sprintf("`a` >= %s AND `a` < %s", prevUpperBound, chk.UpperBound.Value[0].String()), chk.String())
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("`a` >= %s AND `a` < %s", prevUpperBound, chk.UpperBound.Value[0].String()), chk.String())
 
 	// Accumulate more deltas
 	testutils.RunSQL(t, "INSERT INTO replqueuet1 (a, b, c) SELECT UUID(), 1, 1 FROM replqueuet1 LIMIT 501")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 1501, client.GetDeltaLen())
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 1501, client.GetDeltaLen())
 
 	// Flush the changeset
-	assert.NoError(t, client.Flush(t.Context()))
-	assert.Equal(t, 0, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 0, client.GetDeltaLen())
 
 	// Accumulate more deltas
 	testutils.RunSQL(t, "DELETE FROM replqueuet1 LIMIT 100")
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 100, client.GetDeltaLen())
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 100, client.GetDeltaLen())
 
 	// Final flush
-	assert.NoError(t, client.Flush(t.Context()))
-	assert.Equal(t, 0, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+	require.Equal(t, 0, client.GetDeltaLen())
 }
 
 func TestFeedback(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS feedbackt1, feedbackt2, _feedbackt1_chkpnt")
@@ -375,46 +375,46 @@ func TestFeedback(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE _feedbackt1_chkpnt (a int)") // just used to advance binlog
 
 	t1 := table.NewTableInfo(db, "test", "replqueuet1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "replqueuet2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// initial values expected:
-	assert.Equal(t, time.Millisecond*500, client.targetBatchTime)
-	assert.Equal(t, int64(1000), client.targetBatchSize)
+	require.Equal(t, time.Millisecond*500, client.targetBatchTime)
+	require.Equal(t, int64(1000), client.targetBatchSize)
 
 	// Make it complete 5 times faster than expected
 	// Run 9 times initially.
 	for range 9 {
 		client.feedback(1000, time.Millisecond*100)
 	}
-	assert.Equal(t, int64(1000), client.targetBatchSize) // no change yet
-	client.feedback(0, time.Millisecond*100)             // no keys, should not cause change.
-	assert.Equal(t, int64(1000), client.targetBatchSize) // no change yet
-	client.feedback(1000, time.Millisecond*100)          // 10th time.
-	assert.Equal(t, int64(5000), client.targetBatchSize) // 5x more keys.
+	require.Equal(t, int64(1000), client.targetBatchSize) // no change yet
+	client.feedback(0, time.Millisecond*100)              // no keys, should not cause change.
+	require.Equal(t, int64(1000), client.targetBatchSize) // no change yet
+	client.feedback(1000, time.Millisecond*100)           // 10th time.
+	require.Equal(t, int64(5000), client.targetBatchSize) // 5x more keys.
 
 	// test with slower chunk
 	for range 10 {
 		client.feedback(1000, time.Second)
 	}
-	assert.Equal(t, int64(500), client.targetBatchSize) // less keys.
+	require.Equal(t, int64(500), client.targetBatchSize) // less keys.
 
 	// Test with a way slower chunk.
 	for range 10 {
 		client.feedback(500, time.Second*100)
 	}
-	assert.Equal(t, int64(5), client.targetBatchSize) // equals the minimum.
+	require.Equal(t, int64(5), client.targetBatchSize) // equals the minimum.
 }
 
 // TestBlockWait tests that the BlockWait function will:
@@ -422,7 +422,7 @@ func TestFeedback(t *testing.T) {
 // - block waiting until the repl client is at that position.
 func TestBlockWait(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS blockwaitt1, blockwaitt2, blockwaitt3, _blockwaitt1_chkpnt")
@@ -432,15 +432,15 @@ func TestBlockWait(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE blockwaitt3 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
 	t1 := table.NewTableInfo(db, "test", "blockwaitt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "blockwaitt2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	t3 := table.NewTableInfo(db, "test", "blockwaitt3")
-	assert.NoError(t, t3.SetInfo(t.Context()))
+	require.NoError(t, t3.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -448,9 +448,9 @@ func TestBlockWait(t *testing.T) {
 		ServerID:        NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// We test that BlockWait does not flush the binlog if the buffered position is advancing by
@@ -472,29 +472,29 @@ func TestBlockWait(t *testing.T) {
 	})
 	time.Sleep(3 * time.Second) // should be enough for BlockWait to block for 1 iteration before catching up, but not guaranteed
 	client.flushedBinlogs.Store(0)
-	assert.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
 	cancel()
 	wg.Wait() // ensure goroutine exits before test completes
-	assert.Equal(t, int64(0), client.flushedBinlogs.Load())
+	require.Equal(t, int64(0), client.flushedBinlogs.Load())
 
 	// Insert into t1.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (1, 2, 3)")
-	assert.NoError(t, client.Flush(t.Context()))                              // apply the changes (not required, they only need to be received for block wait to unblock)
-	assert.NoError(t, client.BlockWait(t.Context()))                          // should be quick still.
+	require.NoError(t, client.Flush(t.Context()))                             // apply the changes (not required, they only need to be received for block wait to unblock)
+	require.NoError(t, client.BlockWait(t.Context()))                         // should be quick still.
 	testutils.RunSQL(t, "INSERT INTO blockwaitt1 (a, b, c) VALUES (2, 2, 3)") // don't apply changes.
-	assert.NoError(t, client.BlockWait(t.Context()))                          // should be quick because apply not required.
+	require.NoError(t, client.BlockWait(t.Context()))                         // should be quick because apply not required.
 
 	testutils.RunSQL(t, "ANALYZE TABLE blockwaitt1")
 	testutils.RunSQL(t, "ANALYZE TABLE blockwaitt1")
 
 	// We wait up to 10s again.
 	// although it should be quick.
-	assert.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
 }
 
 func TestDDLNotification(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS ddl_t1, ddl_t2, ddl_t3")
@@ -502,13 +502,13 @@ func TestDDLNotification(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE ddl_t2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
 
 	t1 := table.NewTableInfo(db, "test", "ddl_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "ddl_t2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Use a channel to track cancel calls from the CancelFunc callback.
 	cancelled := make(chan struct{}, 1)
@@ -523,9 +523,9 @@ func TestDDLNotification(t *testing.T) {
 		ServerID: NewServerID(),
 	})
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// Alter the existing table ddl_t2, check that we get notification of it.
@@ -539,7 +539,7 @@ func TestDDLNotification(t *testing.T) {
 // See: https://github.com/block/spirit/issues/417
 func TestCompositePKUpdate(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	// Drop tables if they exist
@@ -578,14 +578,14 @@ func TestCompositePKUpdate(t *testing.T) {
 
 	// Set up table info
 	t1 := table.NewTableInfo(db, "test", "composite_pk_src")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "composite_pk_dst")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Create replication client
 	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
@@ -595,14 +595,14 @@ func TestCompositePKUpdate(t *testing.T) {
 
 	// Add subscription - note that keyAboveWatermark is disabled for composite PKs
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, client.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, client.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// Update the from_id (part of the primary key)
 	testutils.RunSQL(t, `UPDATE composite_pk_src SET from_id = 999 WHERE id IN (1, 3)`)
-	assert.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
 
 	// The update should result in changes being tracked
 	// With binlog_row_image=minimal and PK updates, we expect 4 changes (2 deletes + 2 inserts)
@@ -611,7 +611,7 @@ func TestCompositePKUpdate(t *testing.T) {
 
 	// Flush the changes
 	// This should update the destination table correctly
-	assert.NoError(t, client.Flush(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
 
 	// Verify the data was replicated correctly
 	var count int
@@ -619,32 +619,32 @@ func TestCompositePKUpdate(t *testing.T) {
 	// Check that rows with new from_id exist in destination
 	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM composite_pk_dst
 		WHERE organization_id = 1 AND from_id = 999 AND id IN (1, 3)`).Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 2, count, "Rows with updated from_id should exist in destination")
+	require.NoError(t, err)
+	require.Equal(t, 2, count, "Rows with updated from_id should exist in destination")
 
 	// Check that rows with old from_id don't exist in destination
 	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM composite_pk_dst
 		WHERE (organization_id = 1 AND from_id = 100 AND id = 1)
 		   OR (organization_id = 1 AND from_id = 300 AND id = 3)`).Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 0, count, "Rows with old from_id should not exist in destination")
+	require.NoError(t, err)
+	require.Equal(t, 0, count, "Rows with old from_id should not exist in destination")
 
 	// Verify total row count
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM composite_pk_dst").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 5, count, "Should have all 5 rows in destination")
+	require.NoError(t, err)
+	require.Equal(t, 5, count, "Should have all 5 rows in destination")
 
 	// Now test another PK update
 	testutils.RunSQL(t, `UPDATE composite_pk_src SET from_id = 888 WHERE id = 5`)
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Positive(t, client.GetDeltaLen(), "Should have tracked changes for second PK update")
-	assert.NoError(t, client.Flush(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Positive(t, client.GetDeltaLen(), "Should have tracked changes for second PK update")
+	require.NoError(t, client.Flush(t.Context()))
 
 	// Verify the second update
 	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM composite_pk_dst
 		WHERE organization_id = 2 AND from_id = 888 AND id = 5`).Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 1, count, "Row with updated from_id=888 should exist in destination")
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "Row with updated from_id=888 should exist in destination")
 }
 
 func TestAllChangesFlushed(t *testing.T) {
@@ -669,7 +669,7 @@ func TestAllChangesFlushed(t *testing.T) {
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
-	assert.True(t, client.AllChangesFlushed(), "Should be flushed with no changes")
+	require.True(t, client.AllChangesFlushed(), "Should be flushed with no changes")
 
 	// Test 2: Add a subscription and verify initial state
 	sub := &deltaMap{
@@ -679,16 +679,16 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:  make(map[string]mapChange),
 	}
 	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
-	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
+	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
 	sub.HasChanged([]any{1}, nil, false)
-	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with pending changes")
+	require.False(t, client.AllChangesFlushed(), "Should not be flushed with pending changes")
 
 	// Test 4: Test with buffered position ahead
 	client.bufferedPos = mysql.Position{Name: "binlog.000001", Pos: 100}
 	client.flushedPos = mysql.Position{Name: "binlog.000001", Pos: 50}
-	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with buffered position ahead")
+	require.False(t, client.AllChangesFlushed(), "Should not be flushed with buffered position ahead")
 
 	// Test 5: Test with multiple subscriptions
 	sub2 := &deltaMap{
@@ -699,17 +699,17 @@ func TestAllChangesFlushed(t *testing.T) {
 	}
 	client.subscriptions["test2"] = sub2
 	sub2.HasChanged([]any{2}, nil, false)
-	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
+	require.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
 	// Test 6: Clear changes but keep positions different - should still be considered flushed
 	sub.changes = make(map[string]mapChange)
 	sub2.changes = make(map[string]mapChange)
-	assert.True(t, client.AllChangesFlushed(), "Should be flushed when no pending changes, even with positions different")
+	require.True(t, client.AllChangesFlushed(), "Should be flushed when no pending changes, even with positions different")
 
 	// Test 7: Align positions and verify still flushed
 	client.bufferedPos = mysql.Position{Name: "binlog.000001", Pos: 100}
 	client.flushedPos = mysql.Position{Name: "binlog.000001", Pos: 100}
-	assert.True(t, client.AllChangesFlushed(), "Should be flushed with aligned positions and no changes")
+	require.True(t, client.AllChangesFlushed(), "Should be flushed with aligned positions and no changes")
 
 	// Test 8: Test with queue-based subscription
 	subQueue := &deltaQueue{
@@ -719,10 +719,10 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:  make([]queuedChange, 0),
 	}
 	client.subscriptions["test3"] = subQueue
-	assert.True(t, client.AllChangesFlushed(), "Should be flushed with empty queue")
+	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty queue")
 
 	subQueue.HasChanged([]any{3}, nil, false)
-	assert.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
+	require.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }
 
 // TestMaxRecreateAttemptsError tests that the readStream goroutine sets a stream error
@@ -782,7 +782,7 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	client.streamWG.Wait()
 
 	// Verify that the caller's context was cancelled via the CancelFunc callback.
-	assert.Error(t, ctx.Err(), "caller context should be cancelled")
+	require.Error(t, ctx.Err(), "caller context should be cancelled")
 
 	client.Close()
 }
@@ -848,13 +848,13 @@ func TestNewServerIDConcurrent(t *testing.T) {
 	}
 
 	// Allow up to maxAllowedDuplicates to account for birthday paradox
-	assert.LessOrEqual(t, duplicateCount, maxAllowedDuplicates,
+	require.LessOrEqual(t, duplicateCount, maxAllowedDuplicates,
 		"Should have at most %d duplicate ID(s), but found %d", maxAllowedDuplicates, duplicateCount)
 
 	// Verify we got close to the expected number of unique IDs
 	// With 1 allowed duplicate, we should have at least 9,999 unique IDs
 	minExpectedUnique := numGoroutines*idsPerGoroutine - maxAllowedDuplicates
-	assert.GreaterOrEqual(t, len(ids), minExpectedUnique,
+	require.GreaterOrEqual(t, len(ids), minExpectedUnique,
 		"Should have at least %d unique IDs", minExpectedUnique)
 }
 
@@ -862,7 +862,7 @@ func TestNewServerIDConcurrent(t *testing.T) {
 func TestNewServerIDRange(t *testing.T) {
 	for range 1000 {
 		id := NewServerID()
-		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
+		require.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 	}
 }
 
@@ -870,25 +870,25 @@ func TestNewServerIDRange(t *testing.T) {
 func TestIsMinimalRowImage(t *testing.T) {
 	// Full row image: SkippedColumns is nil
 	e := &replication.RowsEvent{}
-	assert.False(t, isMinimalRowImage(e))
+	require.False(t, isMinimalRowImage(e))
 
 	// Full row image: SkippedColumns has entries but all are empty
 	e = &replication.RowsEvent{
 		SkippedColumns: [][]int{{}, {}},
 	}
-	assert.False(t, isMinimalRowImage(e))
+	require.False(t, isMinimalRowImage(e))
 
 	// Minimal row image: SkippedColumns has entries with skipped column indices
 	e = &replication.RowsEvent{
 		SkippedColumns: [][]int{{1, 2}},
 	}
-	assert.True(t, isMinimalRowImage(e))
+	require.True(t, isMinimalRowImage(e))
 
 	// Minimal row image: mixed - some rows full, some minimal
 	e = &replication.RowsEvent{
 		SkippedColumns: [][]int{{}, {2}},
 	}
-	assert.True(t, isMinimalRowImage(e))
+	require.True(t, isMinimalRowImage(e))
 }
 
 // TestProcessRowsEventMinimalRBRWithApplier tests that processRowsEvent returns
@@ -949,9 +949,9 @@ func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 
 	err = client.processRowsEvent(binlogEvent, rowsEvent)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "minimal RBR event")
-	assert.Contains(t, err.Error(), "binlog_row_image=FULL")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "minimal RBR event")
+	require.Contains(t, err.Error(), "binlog_row_image=FULL")
 
 	// Test 2: Without an applier (delta mode), minimal RBR should NOT return an error
 	client2 := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
@@ -965,7 +965,7 @@ func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
 	require.NoError(t, client2.AddSubscription(t1, t2, chunker))
 
 	err = client2.processRowsEvent(binlogEvent, rowsEvent)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Test 3: With an applier but full row image, should NOT return an error
 	fullRowsEvent := &replication.RowsEvent{
@@ -988,7 +988,7 @@ func TestProcessRowsEventMinimalRBRWithApplier(t *testing.T) {
 	}
 
 	err = client.processRowsEvent(fullBinlogEvent, fullRowsEvent)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestProcessDDLNotification(t *testing.T) {
@@ -1032,32 +1032,32 @@ func TestProcessDDLNotification(t *testing.T) {
 
 		// DDL on the subscribed table should cancel.
 		c.processDDLNotification(dbName, "orders")
-		assert.True(t, cancelled, "should cancel on DDL matching a subscribed table")
+		require.True(t, cancelled, "should cancel on DDL matching a subscribed table")
 
 		// DDL on an unrelated table should not cancel.
 		cancelled = false
 		c.processDDLNotification(dbName, "unrelated_table")
-		assert.False(t, cancelled, "should not cancel on DDL for an unrelated table")
+		require.False(t, cancelled, "should not cancel on DDL for an unrelated table")
 
 		// DDL on a different schema should not cancel.
 		cancelled = false
 		c.processDDLNotification("other_schema", "orders")
-		assert.False(t, cancelled, "should not cancel on DDL in a different schema")
+		require.False(t, cancelled, "should not cancel on DDL in a different schema")
 	})
 
 	t.Run("schema filter without table filter: cancels on any table in schema", func(t *testing.T) {
 		c, cancelled := makeClient("mydb", nil)
 
 		c.processDDLNotification("mydb", "any_table")
-		assert.True(t, *cancelled, "should cancel on any DDL in the filtered schema")
+		require.True(t, *cancelled, "should cancel on any DDL in the filtered schema")
 
 		*cancelled = false
 		c.processDDLNotification("mydb", "another_table")
-		assert.True(t, *cancelled, "should cancel on DDL for any table in the filtered schema")
+		require.True(t, *cancelled, "should cancel on DDL for any table in the filtered schema")
 
 		*cancelled = false
 		c.processDDLNotification("other_schema", "any_table")
-		assert.False(t, *cancelled, "should not cancel on DDL in a different schema")
+		require.False(t, *cancelled, "should not cancel on DDL in a different schema")
 	})
 
 	t.Run("schema filter with table filter: cancels only on specified tables", func(t *testing.T) {
@@ -1065,21 +1065,21 @@ func TestProcessDDLNotification(t *testing.T) {
 
 		// DDL on a filtered table should cancel.
 		c.processDDLNotification("mydb", "orders")
-		assert.True(t, *cancelled, "should cancel on DDL for a filtered table")
+		require.True(t, *cancelled, "should cancel on DDL for a filtered table")
 
 		*cancelled = false
 		c.processDDLNotification("mydb", "customers")
-		assert.True(t, *cancelled, "should cancel on DDL for another filtered table")
+		require.True(t, *cancelled, "should cancel on DDL for another filtered table")
 
 		// DDL on an unrelated table in the same schema should NOT cancel.
 		*cancelled = false
 		c.processDDLNotification("mydb", "unrelated_table")
-		assert.False(t, *cancelled, "should not cancel on DDL for an unrelated table in the same schema")
+		require.False(t, *cancelled, "should not cancel on DDL for an unrelated table in the same schema")
 
 		// DDL in a different schema should NOT cancel.
 		*cancelled = false
 		c.processDDLNotification("other_schema", "orders")
-		assert.False(t, *cancelled, "should not cancel on DDL in a different schema even if table name matches")
+		require.False(t, *cancelled, "should not cancel on DDL in a different schema even if table name matches")
 	})
 
 	t.Run("no cancel func: does not panic", func(t *testing.T) {
@@ -1089,7 +1089,7 @@ func TestProcessDDLNotification(t *testing.T) {
 			subscriptions:   make(map[string]Subscription),
 		}
 		// Should not panic even though callerCancelFunc is nil.
-		assert.NotPanics(t, func() {
+		require.NotPanics(t, func() {
 			c.processDDLNotification("mydb", "some_table")
 		})
 	})
