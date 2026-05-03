@@ -13,13 +13,12 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestFixCorruptWithApplier(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS corruptt1")
@@ -37,16 +36,16 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	destDB.DBName = newDBName
 
 	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(src)
 	dest, err := dbconn.New(destDB.FormatDSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(dest)
 
 	t1 := table.NewTableInfo(src, "test", "corruptt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(dest, newDBName, "corruptt1")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 	target := applier.Target{
 		DB:       dest,
@@ -66,20 +65,20 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	})
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, feed.Run(t.Context()))
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	config.Applier = applier
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []*repl.Client{feed}, config)
-	assert.Equal(t, "0/3 0.00%", checker.GetProgress())
-	assert.NoError(t, err)
-	assert.NoError(t, checker.Run(t.Context())) // should be fixed!
-	assert.Equal(t, "3/3 100.00%", checker.GetProgress())
+	require.NoError(t, err)
+	require.Equal(t, "0/3 0.00%", checker.GetProgress())
+	require.NoError(t, checker.Run(t.Context())) // should be fixed!
+	require.Equal(t, "3/3 100.00%", checker.GetProgress())
 }
 
 func TestDistributedChecksum(t *testing.T) {
@@ -196,7 +195,7 @@ func TestDistributedChecksum(t *testing.T) {
 	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&sourceCount)
 	require.NoError(t, err)
 
-	assert.Equal(t, sourceCount, shard0Count+shard1Count, "Total rows in shards should equal source")
+	require.Equal(t, sourceCount, shard0Count+shard1Count, "Total rows in shards should equal source")
 }
 
 // TestDistributedChecksumNtoM tests the distributed checksum with 2 sources and 2 targets (N:M).

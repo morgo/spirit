@@ -616,7 +616,6 @@ func (c *Client) readStream(ctx context.Context) {
 				Name: currentLogName,
 				Pos:  uint32(event.Position),
 			})
-			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", event.Position)
 			continue
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
@@ -644,8 +643,18 @@ func (c *Client) readStream(ctx context.Context) {
 			for _, ddlTable := range ddlTables {
 				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
+		case *replication.GTIDEvent,
+			*replication.TableMapEvent,
+			*replication.XIDEvent,
+			*replication.FormatDescriptionEvent,
+			*replication.PreviousGTIDsEvent:
+			// Known stream-housekeeping events. We don't act on them here; the
+			// position is still advanced via the LogPos update below. They are
+			// listed explicitly (rather than handled by the default case) so the
+			// default can keep logging genuinely unknown event types — a future
+			// row-event variant we don't recognize could otherwise cause silent
+			// data loss.
 		default:
-			// Log unknown event types for debugging
 			c.logger.Debug("Received unknown event type", "type", fmt.Sprintf("%T", ev.Event))
 		}
 		// Update the buffered position
