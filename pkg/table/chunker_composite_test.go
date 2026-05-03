@@ -833,15 +833,19 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
-	// Before opening, everything is above high watermark
-	require.True(t, comp.KeyAboveHighWatermark(1))
-	require.True(t, comp.KeyAboveHighWatermark(100))
+	// Before opening, no chunks dispatched and no resume checkpoint —
+	// per the ambiguity contract on KeyAboveHighWatermark we must return
+	// FALSE so the binlog applier buffers the change rather than silently
+	// dropping it. See issue #746.
+	require.False(t, comp.KeyAboveHighWatermark(1))
+	require.False(t, comp.KeyAboveHighWatermark(100))
 	require.False(t, comp.KeyBelowLowWatermark(1)) // watermark not ready
 
 	require.NoError(t, comp.Open())
 
-	// After opening but before first chunk, key=1 should still be above
-	require.True(t, comp.KeyAboveHighWatermark(1))
+	// After Open() but before first Next(), still no chunks dispatched,
+	// so the IsNil branch keeps returning FALSE for the same reason.
+	require.False(t, comp.KeyAboveHighWatermark(1))
 	require.False(t, comp.KeyBelowLowWatermark(1))
 
 	// Get first chunk for tenant_id=1
@@ -1402,8 +1406,10 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 	require.NoError(t, err)
 	comp := chunker.(*chunkerComposite)
 
-	// Before OpenAtWatermark: everything should be "above" (no chunks dispatched)
-	require.True(t, comp.KeyAboveHighWatermark(1))
+	// Before OpenAtWatermark: no chunks dispatched and no checkpoint
+	// loaded yet, so the IsNil-both branch returns FALSE per the ambiguity
+	// contract (events buffered, not dropped). See issue #746.
+	require.False(t, comp.KeyAboveHighWatermark(1))
 
 	// Simulate a watermark at a=200 — the copier had reached this point before interruption.
 	watermark := `{"ChunkJSON":"{\"Key\":[\"a\",\"b\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"100\",\"1\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"200\",\"1\"],\"Inclusive\":false}}","RowsCopied":200}`

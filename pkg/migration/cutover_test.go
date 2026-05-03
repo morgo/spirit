@@ -309,17 +309,20 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// Verify that the old table (_old) and the new table (_new) have identical checksums.
 	// This proves that all changes were captured correctly up to the point of cutover.
-	// We use require.Eventually to allow a brief window for any residual replication to
-	// settle. The cutover flushes binlog under lock, but in CI environments the Docker
-	// MySQL containers can have variable I/O latency that delays final event delivery.
+	// The cutover protocol guarantees consistency under the lock — there's no
+	// "residual replication to settle" once FlushUnderTableLock + BlockWait +
+	// AllChangesFlushed have all returned. The previous require.Eventually(5s)
+	// wrapper masked the now-fixed issue #746 (KeyAboveHighWatermark dropping
+	// events in the chunkPtr.IsNil window) but couldn't actually fix it: a
+	// single missing row stays missing after 5 s of polling.
 	checksumQuery := "SELECT BIT_XOR(CRC32(CONCAT_WS(',', id, x_token, cents, currency, s_token, r_token, version, IFNULL(c1,''), IFNULL(c2,''), IFNULL(c3,''), IFNULL(t1,''), IFNULL(t2,''), IFNULL(t3,''), IFNULL(b1,''), IFNULL(b2,''), created_at, updated_at))) FROM %s"
 
 	var oldChecksum, newChecksum string
-	require.Eventually(t, func() bool {
-		err1 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_old")).Scan(&oldChecksum)
-		err2 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_new")).Scan(&newChecksum)
-		return err1 == nil && err2 == nil && oldChecksum == newChecksum
-	}, 5*time.Second, 250*time.Millisecond, "Checksums should eventually match between old and new tables")
+	err1 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_old")).Scan(&oldChecksum)
+	require.NoError(t, err1)
+	err2 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_new")).Scan(&newChecksum)
+	require.NoError(t, err2)
+	require.Equal(t, oldChecksum, newChecksum, "Checksums should match between old and new tables")
 
 	t.Logf("Old table checksum: %s, New table checksum: %s", oldChecksum, newChecksum)
 

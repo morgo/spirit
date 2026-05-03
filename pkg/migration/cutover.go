@@ -124,14 +124,16 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 		return err
 	}
 	defer utils.CloseAndLogWithContext(ctx, tableLock)
-	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
-		return err
-	}
-	// Perform a second FlushUnderTableLock to handle the rare case where
-	// the first flush's own binlog events (from REPLACE INTO/DELETE statements)
-	// need to be read back and processed. The first flush writes changes to
-	// the _new table, which generates binlog events. The second flush ensures
-	// those events are consumed and the positions are fully synchronized.
+	// FlushUnderTableLock itself does flush → BlockWait → flush, so the
+	// flush's own binlog events (REPLACE INTO _new / DELETE FROM _new) are
+	// already read back inside the BlockWait of the same call. The earlier
+	// "second FlushUnderTableLock" workaround was added under the
+	// assumption that an extra round-trip would close a position-bookkeeping
+	// gap, but the real bug was upstream — events were being silently
+	// dropped by KeyAboveHighWatermark in the chunkPtr.IsNil window
+	// (issue #746, fixed in chunker_optimistic.go / chunker_composite.go).
+	// Now that the source of the divergence is gone, a single
+	// FlushUnderTableLock is sufficient.
 	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
 		return err
 	}
