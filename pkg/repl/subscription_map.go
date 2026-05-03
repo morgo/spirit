@@ -177,6 +177,26 @@ func (s *deltaMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Table
 					s.c.logger.Debug("Flush stmt executed",
 						"table", s.table.TableName, "num_keys", st.numKeys,
 						"affected_rows", affected, "err", err, "stmt", st.stmt)
+					// Issue #746 second-bug diagnostic:
+					// REPLACE INTO _new (...) SELECT FROM original WHERE pk IN (...)
+					// reports affected_rows = (rows inserted) + 2*(rows replaced),
+					// so for a SELECT that returns all num_keys rows, affected_rows
+					// is between num_keys (all inserts) and 2*num_keys (all replaces).
+					// affected_rows < num_keys means the SELECT returned fewer rows
+					// than the delta map had keys for — i.e. one or more keys were
+					// in the delta map but not visible in `original` at the
+					// statement's snapshot time. This is the post-PR-#808 second
+					// bug shape; surface it loudly so CI logs flag it.
+					// (Note: this can have false negatives when missing-source rows
+					// happen to coincide with target-side replacements that bump
+					// affected_rows back up. A clean tighter check would require
+					// an explicit COUNT pre-flight, which we avoid for cost.)
+					if err == nil && affected < int64(st.numKeys) {
+						s.c.logger.Warn("issue #746 second-bug: flush saw fewer rows in source than delta map keys",
+							"table", s.table.TableName, "num_keys", st.numKeys,
+							"affected_rows", affected, "missing_at_least", int64(st.numKeys)-affected,
+							"stmt", st.stmt)
+					}
 				}
 				return err
 			})

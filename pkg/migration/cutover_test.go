@@ -18,6 +18,7 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -403,7 +404,13 @@ func runCutoverAtomicityTest(t *testing.T, tableName, schemaTmpl string, buffere
 	require.NoError(t, err1)
 	err2 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, newTable)).Scan(&newChecksum)
 	require.NoError(t, err2)
-	require.Equal(t, oldChecksum, newChecksum, "Checksums should match between old and new tables")
+	// Use assert.Equal (not require.Equal) so the diagnostic block below
+	// still runs when the checksums differ. The block enumerates the
+	// missing/diverged PKs which are the actual signal we need to debug
+	// the second issue-#746 bug; halting here would just print the two
+	// CRC integers and lose the per-PK detail. The final require.Equal
+	// on row counts at the end of the function still fails the test.
+	assert.Equal(t, oldChecksum, newChecksum, "Checksums should match between old and new tables")
 
 	t.Logf("Old table checksum: %s, New table checksum: %s", oldChecksum, newChecksum)
 
