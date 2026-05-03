@@ -74,6 +74,18 @@ services:
       TABLE: t1
       REPLICA_DSN: rsandbox:rsandbox@tcp(mysql_replica)/
 
+  # Standalone reproducer for the binlog_order_commits=ON visibility race.
+  # Not part of the regular test run — invoked explicitly via the
+  # binlog-visibility-repro-matrix workflow. We only depend on the source
+  # MySQL; the replica is unused by the repro.
+  repro:
+    build:
+      context: ../../.
+    command: bash -c "go build -o /tmp/repro ./cmd/binlog-visibility-repro && /tmp/repro -dsn 'tsandbox:msandbox@tcp(mysql:3306)/' -max-duration 5m"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
 volumes:
   mysql-data-dir:
   mysql-replica-data-dir:
