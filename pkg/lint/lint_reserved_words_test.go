@@ -210,9 +210,9 @@ func TestReservedWordsLinter_AlterTableModifyColumn(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.NotEmpty(t, violations, "Expected violation for reserved word")
-	assert.Contains(t, violations[0].Message, "update")
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.NotEmpty(t, violations, "Expected violation for reserved word")
+	require.Contains(t, violations[0].Message, "update")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestReservedWordsLinter_AlterTableChangeColumn(t *testing.T) {
@@ -224,9 +224,9 @@ func TestReservedWordsLinter_AlterTableChangeColumn(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.NotEmpty(t, violations, "Expected violation for reserved word")
-	assert.Contains(t, violations[0].Message, "delete")
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.NotEmpty(t, violations, "Expected violation for reserved word")
+	require.Contains(t, violations[0].Message, "delete")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestReservedWordsLinter_AlterTableRename(t *testing.T) {
@@ -331,7 +331,7 @@ func TestReservedWordsLinter_BothTableAndColumn(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Len(t, violations, 2, "Expected violations for both table and column")
+	require.Len(t, violations, 2, "Expected violations for both table and column")
 
 	// Check that we have one violation for table and one for column
 	hasTableViolation := false
@@ -347,8 +347,8 @@ func TestReservedWordsLinter_BothTableAndColumn(t *testing.T) {
 		}
 	}
 
-	assert.True(t, hasTableViolation, "Expected table name violation")
-	assert.True(t, hasColumnViolation, "Expected column name violation")
+	require.True(t, hasTableViolation, "Expected table name violation")
+	require.True(t, hasColumnViolation, "Expected column name violation")
 }
 
 func TestReservedWordsLinter_NoViolationsForSafeNames(t *testing.T) {
@@ -366,5 +366,5 @@ func TestReservedWordsLinter_NoViolationsForSafeNames(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations, "Expected no violations for safe names")
+	require.Empty(t, violations, "Expected no violations for safe names")
 }

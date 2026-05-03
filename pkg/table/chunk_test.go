@@ -3,7 +3,7 @@ package table
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestChunk2String(t *testing.T) {
@@ -18,7 +18,7 @@ func TestChunk2String(t *testing.T) {
 			Inclusive: false,
 		},
 	}
-	assert.Equal(t, "`id` >= 100 AND `id` < 200", chunk.String())
+	require.Equal(t, "`id` >= 100 AND `id` < 200", chunk.String())
 	chunk = &Chunk{
 		Key: []string{"id"},
 		LowerBound: &Boundary{
@@ -26,7 +26,7 @@ func TestChunk2String(t *testing.T) {
 			Inclusive: false,
 		},
 	}
-	assert.Equal(t, "`id` > 100", chunk.String())
+	require.Equal(t, "`id` > 100", chunk.String())
 	chunk = &Chunk{
 		Key: []string{"id"},
 		UpperBound: &Boundary{
@@ -34,13 +34,13 @@ func TestChunk2String(t *testing.T) {
 			Inclusive: true,
 		},
 	}
-	assert.Equal(t, "`id` <= 200", chunk.String())
+	require.Equal(t, "`id` <= 200", chunk.String())
 
 	// Empty chunks are possible with the composite chunker
 	chunk = &Chunk{
 		Key: []string{"id"},
 	}
-	assert.Equal(t, "1=1", chunk.String())
+	require.Equal(t, "1=1", chunk.String())
 }
 
 func TestBoundary_ValueString(t *testing.T) {
@@ -48,20 +48,20 @@ func TestBoundary_ValueString(t *testing.T) {
 		Value:     []Datum{{Val: 100, Tp: signedType}, {Val: 200, Tp: signedType}},
 		Inclusive: false,
 	}
-	assert.Equal(t, "\"100\",\"200\"", boundary1.valuesString())
+	require.Equal(t, "\"100\",\"200\"", boundary1.valuesString())
 
 	boundary2 := &Boundary{
 		Value:     []Datum{{Val: 100, Tp: signedType}, {Val: 200, Tp: signedType}},
 		Inclusive: true,
 	}
 	// Tests that Inclusive doesn't matter between Boundaries for valuesString
-	assert.Equal(t, boundary2.valuesString(), boundary1.valuesString())
+	require.Equal(t, boundary2.valuesString(), boundary1.valuesString())
 
 	// Tests composite key boundary with mixed types
 	boundary3 := &Boundary{
 		Value: []Datum{{Val: "PENDING", Tp: binaryType}, {Val: 2, Tp: signedType}},
 	}
-	assert.Equal(t, "\"PENDING\",\"2\"", boundary3.valuesString())
+	require.Equal(t, "\"PENDING\",\"2\"", boundary3.valuesString())
 }
 
 func TestCompositeChunks(t *testing.T) {
@@ -76,7 +76,7 @@ func TestCompositeChunks(t *testing.T) {
 			Inclusive: false,
 		},
 	}
-	assert.Equal(t, "((`id1` > 100)\n OR (`id1` = 100 AND `id2` > 200)) AND ((`id1` < 100)\n OR (`id1` = 100 AND `id2` < 300))", chunk.String())
+	require.Equal(t, "((`id1` > 100)\n OR (`id1` = 100 AND `id2` > 200)) AND ((`id1` < 100)\n OR (`id1` = 100 AND `id2` < 300))", chunk.String())
 	// 4 parts to the key - pretty unlikely.
 	chunk = &Chunk{
 		Key: []string{"id1", "id2", "id3", "id4"},
@@ -89,7 +89,7 @@ func TestCompositeChunks(t *testing.T) {
 			Inclusive: false,
 		},
 	}
-	assert.Equal(t, "((`id1` > 100)\n OR (`id1` = 100 AND `id2` > 200)\n OR (`id1` = 100 AND `id2` = 200 AND `id3` > 200)\n OR (`id1` = 100 AND `id2` = 200 AND `id3` = 200 AND `id4` >= 200)) AND ((`id1` < 101)\n OR (`id1` = 101 AND `id2` < 12)\n OR (`id1` = 101 AND `id2` = 12 AND `id3` < 123)\n OR (`id1` = 101 AND `id2` = 12 AND `id3` = 123 AND `id4` < 1))", chunk.String())
+	require.Equal(t, "((`id1` > 100)\n OR (`id1` = 100 AND `id2` > 200)\n OR (`id1` = 100 AND `id2` = 200 AND `id3` > 200)\n OR (`id1` = 100 AND `id2` = 200 AND `id3` = 200 AND `id4` >= 200)) AND ((`id1` < 101)\n OR (`id1` = 101 AND `id2` < 12)\n OR (`id1` = 101 AND `id2` = 12 AND `id3` < 123)\n OR (`id1` = 101 AND `id2` = 12 AND `id3` = 123 AND `id4` < 1))", chunk.String())
 	// A possible scenario when chunking on a non primary key is possible:
 	chunk = &Chunk{
 		Key: []string{"status", "id"},
@@ -102,7 +102,7 @@ func TestCompositeChunks(t *testing.T) {
 			Inclusive: false,
 		},
 	}
-	assert.Equal(t, "((`status` > \"ARCHIVED\")\n OR (`status` = \"ARCHIVED\" AND `id` >= 1234)) AND ((`status` < \"ARCHIVED\")\n OR (`status` = \"ARCHIVED\" AND `id` < 5412))", chunk.String())
+	require.Equal(t, "((`status` > \"ARCHIVED\")\n OR (`status` = \"ARCHIVED\" AND `id` >= 1234)) AND ((`status` < \"ARCHIVED\")\n OR (`status` = \"ARCHIVED\" AND `id` < 5412))", chunk.String())
 }
 
 func TestComparesTo(t *testing.T) {
@@ -114,11 +114,11 @@ func TestComparesTo(t *testing.T) {
 		Value:     []Datum{{Val: 200, Tp: signedType}},
 		Inclusive: true,
 	}
-	assert.True(t, b1.comparesTo(b2))
-	b2.Inclusive = false              // change operator
-	assert.True(t, b1.comparesTo(b2)) // still compares
+	require.True(t, b1.comparesTo(b2))
+	b2.Inclusive = false               // change operator
+	require.True(t, b1.comparesTo(b2)) // still compares
 	b2.Value = []Datum{{Val: 300, Tp: signedType}}
-	assert.False(t, b1.comparesTo(b2))
+	require.False(t, b1.comparesTo(b2))
 
 	// Compound values.
 	b1 = &Boundary{
@@ -129,9 +129,9 @@ func TestComparesTo(t *testing.T) {
 		Value:     []Datum{{Val: 200, Tp: signedType}, {Val: 300, Tp: signedType}},
 		Inclusive: true,
 	}
-	assert.True(t, b1.comparesTo(b2))
+	require.True(t, b1.comparesTo(b2))
 	b2.Value = []Datum{{Val: 200, Tp: signedType}, {Val: 400, Tp: signedType}}
-	assert.False(t, b1.comparesTo(b2))
+	require.False(t, b1.comparesTo(b2))
 }
 
 func TestWatermarkAboveClause(t *testing.T) {
@@ -143,8 +143,8 @@ func TestWatermarkAboveClause(t *testing.T) {
 	// Build a watermark JSON: chunk with upper bound id=100
 	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`
 	clause, err := WatermarkAboveClause(ti, watermark)
-	assert.NoError(t, err)
-	assert.Equal(t, "`id` > 100", clause)
+	require.NoError(t, err)
+	require.Equal(t, "`id` > 100", clause)
 
 	// Composite key
 	ti2 := NewTableInfo(nil, "test", "t2")
@@ -153,13 +153,13 @@ func TestWatermarkAboveClause(t *testing.T) {
 
 	watermark2 := `{"Key":["tenant_id","item_id"],"ChunkSize":1000,"LowerBound":{"Value":["1","50"],"Inclusive":true},"UpperBound":{"Value":["2","100"],"Inclusive":false}}`
 	clause2, err := WatermarkAboveClause(ti2, watermark2)
-	assert.NoError(t, err)
-	assert.Contains(t, clause2, "`tenant_id`")
-	assert.Contains(t, clause2, "`item_id`")
+	require.NoError(t, err)
+	require.Contains(t, clause2, "`tenant_id`")
+	require.Contains(t, clause2, "`item_id`")
 	// Should be a row constructor comparison: ((tenant_id > 2) OR (tenant_id = 2 AND item_id > 100))
-	assert.Equal(t, "((`tenant_id` > 2)\n OR (`tenant_id` = 2 AND `item_id` > 100))", clause2)
+	require.Equal(t, "((`tenant_id` > 2)\n OR (`tenant_id` = 2 AND `item_id` > 100))", clause2)
 
 	// Invalid JSON
 	_, err = WatermarkAboveClause(ti, "not-json")
-	assert.Error(t, err)
+	require.Error(t, err)
 }
