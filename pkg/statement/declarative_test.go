@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -157,7 +156,7 @@ func TestDeclarativeToImperative(t *testing.T) {
 			changes, err := DeclarativeToImperative(tt.current, tt.desired, nil)
 			require.NoError(t, err)
 
-			assert.Len(t, changes, tt.expectedCount)
+			require.Len(t, changes, tt.expectedCount)
 			if tt.contains != nil {
 				assertChangesContain(t, changes, tt.contains)
 			}

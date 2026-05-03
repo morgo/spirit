@@ -9,7 +9,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -210,23 +209,23 @@ func TestTableLockCrossSchema(t *testing.T) {
 
 			// Verify both locks work: write under each lock.
 			err = lock0.ExecUnderLock(t.Context(), "INSERT INTO t1 VALUES (1)")
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			err = lock1.ExecUnderLock(t.Context(), "INSERT INTO t1 VALUES (2)")
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			// Release both locks.
-			assert.NoError(t, lock0.Close(t.Context()))
-			assert.NoError(t, lock1.Close(t.Context()))
+			require.NoError(t, lock0.Close(t.Context()))
+			require.NoError(t, lock1.Close(t.Context()))
 
 			// Verify data landed in the correct schemas.
 			var id0, id1 int
 			err = db0.QueryRowContext(t.Context(), "SELECT id FROM t1").Scan(&id0)
 			require.NoError(t, err)
-			assert.Equal(t, 1, id0)
+			require.Equal(t, 1, id0)
 
 			err = db1.QueryRowContext(t.Context(), "SELECT id FROM t1").Scan(&id1)
 			require.NoError(t, err)
-			assert.Equal(t, 2, id1)
+			require.Equal(t, 2, id1)
 		})
 	}
 }

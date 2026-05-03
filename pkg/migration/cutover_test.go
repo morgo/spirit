@@ -18,7 +18,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -639,8 +638,8 @@ func TestDeferCutOver(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		err := m.Run(t.Context())
-		assert.Error(t, err)
-		assert.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "timed out waiting for sentinel table to be dropped")
 	})
 
 	waitForStatus(t, m, status.WaitingOnSentinelTable)

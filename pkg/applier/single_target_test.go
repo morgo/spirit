@@ -12,7 +12,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -361,12 +360,12 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 			callback := func(affectedRows int64, err error) {
 				atomic.AddInt32(&totalCallbacks, 1)
-				assert.NoError(t, err)
-				assert.Equal(t, int64(rowsPerBatch), affectedRows)
+				require.NoError(t, err)
+				require.Equal(t, int64(rowsPerBatch), affectedRows)
 			}
 
 			err := applier.Apply(t.Context(), chunk, testRows, callback)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		}(batch)
 	}
 

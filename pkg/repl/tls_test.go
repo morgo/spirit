@@ -6,7 +6,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestTLSConfigurationLogic tests the TLS configuration logic in isolation
@@ -116,13 +116,13 @@ func TestTLSConfigurationLogic(t *testing.T) {
 
 			// Verify expectations
 			if tt.expectTLSSet {
-				assert.NotNil(t, client.cfg.TLSConfig, "Expected TLS config to be set")
+				require.NotNil(t, client.cfg.TLSConfig, "Expected TLS config to be set")
 				if client.cfg.TLSConfig != nil {
-					assert.Equal(t, tt.expectServerName, client.cfg.TLSConfig.ServerName,
+					require.Equal(t, tt.expectServerName, client.cfg.TLSConfig.ServerName,
 						"Expected ServerName to match host")
 				}
 			} else {
-				assert.Nil(t, client.cfg.TLSConfig, "Expected TLS config to be nil")
+				require.Nil(t, client.cfg.TLSConfig, "Expected TLS config to be nil")
 			}
 		})
 	}

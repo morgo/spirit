@@ -10,7 +10,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,47 +160,47 @@ func TestReplicaTLSIntegrationScenarios(t *testing.T) {
 
 			// Test TLS enhancement behavior
 			enhancedDSN, err := dbconn.EnhanceDSNWithTLS(scenario.replicaDSN, runner.dbConfig)
-			assert.NoError(t, err, scenario.description)
+			require.NoError(t, err, scenario.description)
 
 			// Verify behavior based on expected scenario
 			switch scenario.expectedBehavior {
 			case "preserve_explicit":
 				// Should preserve original TLS parameter
-				assert.Equal(t, scenario.replicaDSN, enhancedDSN, scenario.description)
-				assert.True(t, scenario.shouldPreserveTLS, "Test setup error: should preserve TLS")
-				assert.False(t, scenario.shouldInheritTLS, "Test setup error: should not inherit TLS")
+				require.Equal(t, scenario.replicaDSN, enhancedDSN, scenario.description)
+				require.True(t, scenario.shouldPreserveTLS, "Test setup error: should preserve TLS")
+				require.False(t, scenario.shouldInheritTLS, "Test setup error: should not inherit TLS")
 
 			case "inherit_main":
 				// Should inherit from main but not be identical to original
-				assert.NotEqual(t, scenario.replicaDSN, enhancedDSN, scenario.description)
-				assert.Contains(t, enhancedDSN, "tls=", "Should contain TLS parameter")
-				assert.True(t, scenario.shouldInheritTLS, "Test setup error: should inherit TLS")
-				assert.False(t, scenario.shouldPreserveTLS, "Test setup error: should not preserve explicit TLS")
+				require.NotEqual(t, scenario.replicaDSN, enhancedDSN, scenario.description)
+				require.Contains(t, enhancedDSN, "tls=", "Should contain TLS parameter")
+				require.True(t, scenario.shouldInheritTLS, "Test setup error: should inherit TLS")
+				require.False(t, scenario.shouldPreserveTLS, "Test setup error: should not preserve explicit TLS")
 
 			case "inherit_rds":
 				// Should inherit RDS-specific TLS configuration
-				assert.NotEqual(t, scenario.replicaDSN, enhancedDSN, scenario.description)
-				assert.Contains(t, enhancedDSN, "tls=rds", "Should use RDS TLS configuration")
+				require.NotEqual(t, scenario.replicaDSN, enhancedDSN, scenario.description)
+				require.Contains(t, enhancedDSN, "tls=rds", "Should use RDS TLS configuration")
 
 			case "preserve_complex":
 				// Should preserve TLS while keeping other parameters
-				assert.Equal(t, scenario.replicaDSN, enhancedDSN, scenario.description)
-				assert.Contains(t, enhancedDSN, "tls=skip-verify", "Should preserve explicit TLS")
-				assert.Contains(t, enhancedDSN, "charset=utf8mb4", "Should preserve other parameters")
-				assert.Contains(t, enhancedDSN, "timeout=30s", "Should preserve other parameters")
+				require.Equal(t, scenario.replicaDSN, enhancedDSN, scenario.description)
+				require.Contains(t, enhancedDSN, "tls=skip-verify", "Should preserve explicit TLS")
+				require.Contains(t, enhancedDSN, "charset=utf8mb4", "Should preserve other parameters")
+				require.Contains(t, enhancedDSN, "timeout=30s", "Should preserve other parameters")
 			}
 
 			// Parse enhanced DSN to verify it's valid
 			parsedDSN, err := mysql.ParseDSN(enhancedDSN)
-			assert.NoError(t, err, "Enhanced DSN should be valid: %s", enhancedDSN)
+			require.NoError(t, err, "Enhanced DSN should be valid: %s", enhancedDSN)
 			if err == nil {
 				// Verify connection details are preserved
 				originalParsed, _ := mysql.ParseDSN(scenario.replicaDSN)
 				if originalParsed != nil {
-					assert.Equal(t, originalParsed.User, parsedDSN.User, "Username should be preserved")
-					assert.Equal(t, originalParsed.Passwd, parsedDSN.Passwd, "Password should be preserved")
-					assert.Equal(t, originalParsed.Addr, parsedDSN.Addr, "Address should be preserved")
-					assert.Equal(t, originalParsed.DBName, parsedDSN.DBName, "Database name should be preserved")
+					require.Equal(t, originalParsed.User, parsedDSN.User, "Username should be preserved")
+					require.Equal(t, originalParsed.Passwd, parsedDSN.Passwd, "Password should be preserved")
+					require.Equal(t, originalParsed.Addr, parsedDSN.Addr, "Address should be preserved")
+					require.Equal(t, originalParsed.DBName, parsedDSN.DBName, "Database name should be preserved")
 				}
 			}
 		})
@@ -285,9 +284,9 @@ func TestTLSConfigurationFlow(t *testing.T) {
 			defer utils.CloseAndLog(runner)
 
 			// Test that runner initializes with correct TLS config
-			assert.Equal(t, tc.migration.TLSMode, runner.migration.TLSMode,
+			require.Equal(t, tc.migration.TLSMode, runner.migration.TLSMode,
 				"Runner should preserve migration TLS mode")
-			assert.Equal(t, tc.migration.TLSCertificatePath, runner.migration.TLSCertificatePath,
+			require.Equal(t, tc.migration.TLSCertificatePath, runner.migration.TLSCertificatePath,
 				"Runner should preserve migration TLS certificate path")
 
 			// Initialize DB config (this normally happens in Run())
@@ -298,17 +297,17 @@ func TestTLSConfigurationFlow(t *testing.T) {
 			// Test main DSN generation using testutils.DSN as base
 			baseDSN := testutils.DSN()
 			mainDSN, err := dbconn.EnhanceDSNWithTLS(baseDSN, runner.dbConfig)
-			assert.NoError(t, err, tc.description)
+			require.NoError(t, err, tc.description)
 			if tc.expectMainTLS != "" {
-				assert.Contains(t, mainDSN, "tls="+tc.expectMainTLS,
+				require.Contains(t, mainDSN, "tls="+tc.expectMainTLS,
 					"Main DSN should contain expected TLS config: %s", tc.description)
 			}
 
 			// Test replica DSN enhancement
 			enhancedReplicaDSN, err := dbconn.EnhanceDSNWithTLS(tc.migration.ReplicaDSN, runner.dbConfig)
-			assert.NoError(t, err, tc.description)
+			require.NoError(t, err, tc.description)
 			if tc.expectReplicaTLS != "" {
-				assert.Contains(t, enhancedReplicaDSN, "tls="+tc.expectReplicaTLS,
+				require.Contains(t, enhancedReplicaDSN, "tls="+tc.expectReplicaTLS,
 					"Replica DSN should contain expected TLS config: %s", tc.description)
 			}
 		})
@@ -364,9 +363,9 @@ func TestTLSErrorHandling(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner, err := NewRunner(test.migration)
 			if test.expectError {
-				assert.Error(t, err, test.description)
+				require.Error(t, err, test.description)
 			} else {
-				assert.NoError(t, err, test.description)
+				require.NoError(t, err, test.description)
 				if err == nil {
 					defer utils.CloseAndLog(runner)
 				}
@@ -406,7 +405,7 @@ func TestConcurrentTLSConfiguration(t *testing.T) {
 	// Verify each runner maintains its own TLS configuration
 	for i, runner := range runners {
 		expectedMode := []string{"DISABLED", "PREFERRED", "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY"}[i%5]
-		assert.Equal(t, expectedMode, runner.migration.TLSMode,
+		require.Equal(t, expectedMode, runner.migration.TLSMode,
 			"Runner %d should maintain its TLS mode", i)
 	}
 
