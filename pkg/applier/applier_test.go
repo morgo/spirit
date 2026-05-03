@@ -191,7 +191,7 @@ func TestEstimateRowSizeZeroValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			size := estimateRowSize(tt.values)
 			// Should have some size even for zero values
-			assert.Positive(t, size, "should have non-zero size")
+			require.Positive(t, size, "should have non-zero size")
 			t.Logf("%s size: %d bytes", tt.name, size)
 		})
 	}

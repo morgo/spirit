@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -242,7 +241,7 @@ func TestZeroDateLinter_NullDefaultCaseInsensitive(t *testing.T) {
 			require.NoError(t, err)
 
 			violations := linter.Lint(nil, stmts)
-			assert.Empty(t, violations, "Should not flag nullable column with NULL default")
+			require.Empty(t, violations, "Should not flag nullable column with NULL default")
 		})
 	}
 }

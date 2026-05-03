@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -442,7 +441,7 @@ func TestConfigBool_ValidTrue(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			result, err := ConfigBool(value, "testKey")
 			require.NoError(t, err)
-			assert.True(t, result)
+			require.True(t, result)
 		})
 	}
 }
@@ -453,7 +452,7 @@ func TestConfigBool_ValidFalse(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			result, err := ConfigBool(value, "testKey")
 			require.NoError(t, err)
-			assert.False(t, result)
+			require.False(t, result)
 		})
 	}
 }
@@ -477,10 +476,10 @@ func TestConfigBool_Invalid(t *testing.T) {
 		t.Run(tt.value, func(t *testing.T) {
 			result, err := ConfigBool(tt.value, tt.key)
 			require.Error(t, err)
-			assert.False(t, result)
-			assert.Contains(t, err.Error(), "invalid value for "+tt.key)
-			assert.Contains(t, err.Error(), tt.value)
-			assert.Contains(t, err.Error(), "expected 'true' or 'false'")
+			require.False(t, result)
+			require.Contains(t, err.Error(), "invalid value for "+tt.key)
+			require.Contains(t, err.Error(), tt.value)
+			require.Contains(t, err.Error(), "expected 'true' or 'false'")
 		})
 	}
 }

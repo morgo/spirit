@@ -9,7 +9,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,8 +96,8 @@ func TestComputeLockName(t *testing.T) {
 
 	for _, test := range tests {
 		lockName := computeLockName(test.table)
-		assert.Contains(t, lockName, test.expected, "Lock name should contain the expected prefix")
-		assert.Len(t, lockName, len(test.expected)+8, "Lock name should have the correct length")
+		require.Contains(t, lockName, test.expected, "Lock name should contain the expected prefix")
+		require.Len(t, lockName, len(test.expected)+8, "Lock name should have the correct length")
 	}
 }
 

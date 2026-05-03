@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1233,7 +1232,7 @@ func TestIsSignedIntType_NonIntegerTypes(t *testing.T) {
 			require.NotNil(t, column)
 
 			// Non-integer types should return false
-			assert.Equal(t, tc.expected, isSignedIntType(column))
+			require.Equal(t, tc.expected, isSignedIntType(column))
 		})
 	}
 }
@@ -1268,7 +1267,7 @@ func TestIsSignedIntType_AllIntegerTypes(t *testing.T) {
 			column := ct.GetColumns().ByName("id")
 			require.NotNil(t, column)
 
-			assert.Equal(t, tc.shouldBeSigned, isSignedIntType(column),
+			require.Equal(t, tc.shouldBeSigned, isSignedIntType(column),
 				"Expected %s to have signed=%v", tc.typeName, tc.shouldBeSigned)
 		})
 	}

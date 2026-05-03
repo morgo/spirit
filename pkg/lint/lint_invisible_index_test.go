@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -237,7 +236,7 @@ func TestInvisibleIndexBeforeDropLinter_Configure_CaseInsensitive(t *testing.T) 
 
 			err := linter.Configure(config)
 			require.NoError(t, err)
-			assert.Equal(t, tt.expected, linter.raiseError)
+			require.Equal(t, tt.expected, linter.raiseError)
 		})
 	}
 }
