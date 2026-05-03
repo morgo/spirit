@@ -112,10 +112,17 @@ func TestReplClientComplex(t *testing.T) {
 	defer client.Close()
 	client.SetWatermarkOptimization(true)
 
-	// Insert into t1, but because there is no read yet, the key is above the watermark
+	// DELETE before the chunker has advanced. Previously this returned 0
+	// because KeyAboveHighWatermark with chunkPtr.IsNil() silently dropped
+	// every event — the bug behind issue #746. Post-fix the events are
+	// buffered into the delta map and will be drained by a later flush
+	// once the chunker advances. (See pkg/table/chunker_optimistic.go.)
 	testutils.RunSQL(t, "DELETE FROM replcomplext1 WHERE a BETWEEN 10 and 500")
 	require.NoError(t, client.BlockWait(t.Context()))
-	require.Equal(t, 0, client.GetDeltaLen())
+	// Number of rows in [10, 500] that actually existed (auto_increment has
+	// small gaps from the previous bulk INSERT … SELECT … LIMIT inserts).
+	preChunkerDeltas := client.GetDeltaLen()
+	require.Positive(t, preChunkerDeltas, "events committed before the chunker advances must accumulate, not silently drop")
 
 	// Read from the copier so that the key is below the watermark
 	// + give feedback
@@ -129,15 +136,19 @@ func TestReplClientComplex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "`a` >= 1 AND `a` < 1001", chk.String())
 
-	// Now if we delete below 1001 we should see 10 deltas accumulate
+	// Delete a small range while the second chunk is in flight. The 491
+	// deltas from the previous DELETE are still buffered, so the count is
+	// the union of the two ranges.
 	testutils.RunSQL(t, "DELETE FROM replcomplext1 WHERE a >= 550 AND a < 560")
 	require.NoError(t, client.BlockWait(t.Context()))
-	require.Equal(t, 10, client.GetDeltaLen()) // 10 keys did not exist on t1
+	require.Equal(t, preChunkerDeltas+10, client.GetDeltaLen())
 
-	// Try to flush the changeset
-	// It should be empty, but it's not! This is because of KeyBelowWatermark
+	// Try to flush the changeset.
+	// Nothing flushes because KeyBelowLowWatermark defers any key whose
+	// chunk hasn't been Feedback'd yet — the watermark is still at upper
+	// bound 1 (only the `a < 1` chunk has been fed back).
 	require.NoError(t, client.Flush(t.Context()))
-	require.Equal(t, 10, client.GetDeltaLen())
+	require.Equal(t, preChunkerDeltas+10, client.GetDeltaLen())
 
 	// However after we give feedback, then it should be able to flush these deltas.
 	// This is because the watermark advances above 1000.

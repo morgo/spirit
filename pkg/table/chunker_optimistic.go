@@ -561,7 +561,26 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 	if t.chunkPtr.IsNil() && t.checkpointHighPtr.IsNil() {
-		return true // every key is above because we haven't started copying.
+		// We haven't claimed any range yet (no chunk advanced, no resume
+		// checkpoint). The previous behavior returned TRUE here ("every key is
+		// above"), which silently dropped binlog events during the window
+		// between SetWatermarkOptimization(true) and the first chunker.Next().
+		// The intent was to rely on the chunker's later SELECT picking the row
+		// up from the source — but that only works if the writer committed
+		// before the SELECT's snapshot. A writer that commits AFTER the
+		// SELECT and BEFORE chunkPtr is set produces a row that the SELECT
+		// misses AND the binlog drops; the row is lost. (Observed in #746
+		// as 4 consecutive missing PKs in chunk [1,1001) on
+		// TestCutoverAtomicityWithConcurrentWrites.)
+		//
+		// Per this method's contract above ("if there is any ambiguity, it's
+		// important to return FALSE"), return FALSE: keep the change in the
+		// delta/buffered map. Once the chunker advances, the watermark logic
+		// at flush time will route it correctly — either flushing it via
+		// REPLACE INTO ... SELECT FROM original (idempotent with anything the
+		// chunker's own SELECT picked up) or deferring it until the chunker
+		// passes its key.
+		return false
 	}
 	if t.finalChunkSent {
 		return false // we're done, so everything is below.
