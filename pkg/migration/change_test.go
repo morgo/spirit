@@ -115,15 +115,15 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	}
 
 	expectedIDs := []int64{2979716, 2979717, 2979718}
-	assert.Equal(t, expectedIDs, insertedIDs, "Inserted IDs should start from 2979716, not 1")
+	require.Equal(t, expectedIDs, insertedIDs, "Inserted IDs should start from 2979716, not 1")
 
 	// Verify final AUTO_INCREMENT value
 	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
 		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
-	assert.True(t, autoIncValue.Valid)
-	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979716), "Final AUTO_INCREMENT should be >= 2979716")
+	require.True(t, autoIncValue.Valid)
+	require.GreaterOrEqual(t, autoIncValue.Int64, int64(2979716), "Final AUTO_INCREMENT should be >= 2979716")
 }
 
 // TestAutoIncrementWithRows tests that AUTO_INCREMENT is preserved when migrating
@@ -201,7 +201,7 @@ func TestAutoIncrementWithRows(t *testing.T) {
 		migratedIDs = append(migratedIDs, id)
 	}
 	_ = rows.Close()
-	assert.Equal(t, expectedExistingIDs, migratedIDs, "Existing IDs should be preserved")
+	require.Equal(t, expectedExistingIDs, migratedIDs, "Existing IDs should be preserved")
 
 	// Insert new rows after migration
 	testutils.RunSQL(t, fmt.Sprintf(`
@@ -222,15 +222,15 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	_ = rows.Close()
 
 	expectedAllIDs := []int64{2979716, 2979717, 2979718, 2979719, 2979720, 2979721}
-	assert.Equal(t, expectedAllIDs, allIDs, "New IDs should continue from 2979719")
+	require.Equal(t, expectedAllIDs, allIDs, "New IDs should continue from 2979719")
 
 	// Verify final AUTO_INCREMENT
 	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
 		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
-	assert.True(t, autoIncValue.Valid)
-	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
+	require.True(t, autoIncValue.Valid)
+	require.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
 }
 
 func TestOldTableNameTruncation(t *testing.T) {
@@ -341,12 +341,12 @@ func TestOldTableNameTruncationCollision(t *testing.T) {
 	// Both should fit within the limit
 	result1 := c1.oldTableName()
 	result2 := c2.oldTableName()
-	assert.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
-	assert.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
+	require.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
+	require.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
 
 	// These collide because the distinguishing suffix is truncated.
 	// In practice this cannot happen since Spirit enforces a 56-char
 	// table name limit, so the truncation only removes characters
 	// beyond position 43 (which is still unique for valid table names).
-	assert.Equal(t, result1, result2)
+	require.Equal(t, result1, result2)
 }

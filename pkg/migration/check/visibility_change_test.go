@@ -5,7 +5,6 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,7 +15,7 @@ func TestVisibilityChange(t *testing.T) {
 		if shouldError {
 			require.Error(t, err)
 			if expectedError != nil {
-				assert.ErrorIs(t, err, expectedError)
+				require.ErrorIs(t, err, expectedError)
 			}
 		} else {
 			require.NoError(t, err)
@@ -28,7 +27,7 @@ func TestVisibilityChange(t *testing.T) {
 		if shouldError {
 			require.Error(t, err)
 			if expectedError != nil {
-				assert.ErrorIs(t, err, expectedError)
+				require.ErrorIs(t, err, expectedError)
 			}
 		} else {
 			require.NoError(t, err)
@@ -104,7 +103,7 @@ func TestVisibilityChange(t *testing.T) {
 	// Test non-ALTER statements (only for direct function)
 	t.Run("non_alter_statement", func(t *testing.T) {
 		err := AlterContainsIndexVisibility(statement.MustNew("CREATE TABLE t1 (id INT)")[0])
-		assert.ErrorIs(t, err, statement.ErrNotAlterTable)
+		require.ErrorIs(t, err, statement.ErrNotAlterTable)
 	})
 }
 
@@ -112,7 +111,7 @@ func TestAlterContainsIndexVisibility_ErrorMessages(t *testing.T) {
 	// Test specific error message content
 	err := AlterContainsIndexVisibility(statement.MustNew("ALTER TABLE t1 ALTER INDEX b INVISIBLE, ADD COLUMN `c` INT")[0])
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVisibilityMixedWithOtherChanges)
-	assert.Contains(t, err.Error(), "the ALTER operation contains a change to index visibility mixed with table-rebuilding operations")
-	assert.Contains(t, err.Error(), "Please split the ALTER statement into separate statements")
+	require.ErrorIs(t, err, ErrVisibilityMixedWithOtherChanges)
+	require.Contains(t, err.Error(), "the ALTER operation contains a change to index visibility mixed with table-rebuilding operations")
+	require.Contains(t, err.Error(), "Please split the ALTER statement into separate statements")
 }

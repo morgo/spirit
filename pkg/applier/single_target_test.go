@@ -116,17 +116,17 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify callback was invoked
-	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked")
+	require.True(t, callbackInvoked.Load(), "Callback should have been invoked")
 	callbackErrMu.Lock()
-	assert.NoError(t, callbackErr, "Callback should not have an error")
+	require.NoError(t, callbackErr, "Callback should not have an error")
 	callbackErrMu.Unlock()
-	assert.Equal(t, int64(4), callbackAffectedRows.Load(), "Should have affected 4 rows")
+	require.Equal(t, int64(4), callbackAffectedRows.Load(), "Should have affected 4 rows")
 
 	// Verify data in target
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 4, count, "Should have 4 rows in target")
+	require.Equal(t, 4, count, "Should have 4 rows in target")
 
 	// Verify specific rows
 	rows, err := targetDB.QueryContext(t.Context(), "SELECT id, name, value, binaryvalue FROM test_table ORDER BY id")
@@ -152,14 +152,14 @@ func TestSingleTargetApplierBasic(t *testing.T) {
 		var binaryvalue []byte
 		err = rows.Scan(&id, &name, &value, &binaryvalue)
 		require.NoError(t, err)
-		assert.Equal(t, expected[i].id, id)
-		assert.Equal(t, expected[i].name, name)
-		assert.Equal(t, expected[i].value, value)
-		assert.Equal(t, expected[i].binaryvalue, binaryvalue)
+		require.Equal(t, expected[i].id, id)
+		require.Equal(t, expected[i].name, name)
+		require.Equal(t, expected[i].value, value)
+		require.Equal(t, expected[i].binaryvalue, binaryvalue)
 		i++
 	}
 	require.NoError(t, rows.Err())
-	assert.Equal(t, 4, i, "Should have read 4 rows")
+	require.Equal(t, 4, i, "Should have read 4 rows")
 }
 
 // TestSingleTargetApplierEmptyRows tests applying empty row set
@@ -210,15 +210,15 @@ func TestSingleTargetApplierEmptyRows(t *testing.T) {
 	var callbackInvoked atomic.Bool
 	callback := func(affectedRows int64, err error) {
 		callbackInvoked.Store(true)
-		assert.NoError(t, err)
-		assert.Equal(t, int64(0), affectedRows)
+		require.NoError(t, err)
+		require.Equal(t, int64(0), affectedRows)
 	}
 
 	err = applier.Apply(t.Context(), chunk, [][]any{}, callback)
 	require.NoError(t, err)
 
 	// Callback should be invoked immediately for empty rows
-	assert.True(t, callbackInvoked.Load(), "Callback should have been invoked immediately for empty rows")
+	require.True(t, callbackInvoked.Load(), "Callback should have been invoked immediately for empty rows")
 }
 
 // TestSingleTargetApplierLargeDataset tests applying a large dataset that spans multiple chunklets
@@ -278,7 +278,7 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	callback := func(affectedRows int64, err error) {
 		callbackInvoked.Store(true)
 		callbackAffectedRows.Store(affectedRows)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	err = applier.Apply(t.Context(), chunk, testRows, callback)
@@ -287,14 +287,14 @@ func TestSingleTargetApplierLargeDataset(t *testing.T) {
 	err = applier.Wait(t.Context())
 	require.NoError(t, err)
 
-	assert.True(t, callbackInvoked.Load())
-	assert.Equal(t, int64(rowCount), callbackAffectedRows.Load())
+	require.True(t, callbackInvoked.Load())
+	require.Equal(t, int64(rowCount), callbackAffectedRows.Load())
 
 	// Verify count
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, rowCount, count)
+	require.Equal(t, rowCount, count)
 }
 
 // TestSingleTargetApplierConcurrentApplies tests multiple concurrent Apply calls
@@ -377,13 +377,13 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all callbacks were invoked
-	assert.Equal(t, int32(numBatches), atomic.LoadInt32(&totalCallbacks))
+	require.Equal(t, int32(numBatches), atomic.LoadInt32(&totalCallbacks))
 
 	// Verify total count
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, numBatches*rowsPerBatch, count)
+	require.Equal(t, numBatches*rowsPerBatch, count)
 }
 
 // TestSingleTargetApplierDeleteKeys tests the DeleteKeys method
@@ -430,13 +430,13 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, keysToDelete, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), affectedRows)
+	require.Equal(t, int64(2), affectedRows)
 
 	// Verify remaining rows
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 3, count)
+	require.Equal(t, 3, count)
 
 	// Verify specific rows remain
 	rows, err := targetDB.QueryContext(t.Context(), "SELECT id, name FROM test_table ORDER BY id")
@@ -458,8 +458,8 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 		var name string
 		err = rows.Scan(&id, &name)
 		require.NoError(t, err)
-		assert.Equal(t, expected[i].id, id)
-		assert.Equal(t, expected[i].name, name)
+		require.Equal(t, expected[i].id, id)
+		require.Equal(t, expected[i].name, name)
 		i++
 	}
 	require.NoError(t, rows.Err())
@@ -498,7 +498,7 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	// Delete with empty keys
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), affectedRows)
+	require.Equal(t, int64(0), affectedRows)
 }
 
 // TestSingleTargetApplierUpsertRows tests the UpsertRows method
@@ -553,7 +553,7 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 	require.NoError(t, err)
 	// MySQL returns 1 for insert, 2 for update in ON DUPLICATE KEY UPDATE
 	// So we expect 1 (update of id=1) + 1 (insert of id=3) = at least 2
-	assert.GreaterOrEqual(t, affectedRows, int64(2))
+	require.GreaterOrEqual(t, affectedRows, int64(2))
 
 	// Verify data
 	rows, err := targetDB.QueryContext(t.Context(), "SELECT id, name, value FROM test_table ORDER BY id")
@@ -576,13 +576,13 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 		var name string
 		err = rows.Scan(&id, &name, &value)
 		require.NoError(t, err)
-		assert.Equal(t, expected[i].id, id)
-		assert.Equal(t, expected[i].name, name)
-		assert.Equal(t, expected[i].value, value)
+		require.Equal(t, expected[i].id, id)
+		require.Equal(t, expected[i].name, name)
+		require.Equal(t, expected[i].value, value)
 		i++
 	}
 	require.NoError(t, rows.Err())
-	assert.Equal(t, 3, i)
+	require.Equal(t, 3, i)
 }
 
 // TestSingleTargetApplierUpsertRowsSkipDeleted tests that deleted rows are skipped
@@ -633,13 +633,13 @@ func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 
 	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), upsertRows, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), affectedRows)
+	require.Equal(t, int64(2), affectedRows)
 
 	// Verify only non-deleted rows were inserted
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	require.Equal(t, 2, count)
 }
 
 // TestSingleTargetApplierUpsertRowsEmpty tests UpsertRows with empty row list
@@ -675,7 +675,7 @@ func TestSingleTargetApplierUpsertRowsEmpty(t *testing.T) {
 	// Upsert with empty rows
 	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), []LogicalRow{}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), affectedRows)
+	require.Equal(t, int64(0), affectedRows)
 }
 
 // TestSingleTargetApplierContextCancellation tests that context cancellation stops processing
@@ -741,8 +741,8 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 
 	// Wait should return context cancelled error
 	err = applier.Wait(cancelCtx)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, context.Canceled)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestSingleTargetApplierWaitTimeout tests Wait with a timeout context
@@ -801,7 +801,7 @@ func TestSingleTargetApplierWaitTimeout(t *testing.T) {
 	err = applier.Wait(timeoutCtx)
 	// Either succeeds or times out, both are acceptable
 	if err != nil {
-		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
 }
 
@@ -850,7 +850,7 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	var callbackInvoked atomic.Bool
 	callback := func(affectedRows int64, err error) {
 		callbackInvoked.Store(true)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	err = applier.Apply(t.Context(), chunk, testRows, callback)
@@ -859,7 +859,7 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	// Wait for work to complete
 	err = applier.Wait(t.Context())
 	require.NoError(t, err)
-	assert.True(t, callbackInvoked.Load())
+	require.True(t, callbackInvoked.Load())
 
 	// Close the applier
 	err = applier.Stop()
@@ -869,5 +869,5 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	var count int
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	require.Equal(t, 2, count)
 }

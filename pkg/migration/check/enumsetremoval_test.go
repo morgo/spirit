@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,14 +35,14 @@ func TestEnumSetRemovalCheckEnumToVarchar(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
-	assert.ErrorContains(t, err, "buffered mode")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.ErrorContains(t, err, "buffered mode")
 
 	// Unbuffered + ENUM→VARCHAR: should pass (unbuffered is safe)
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestEnumSetRemovalCheckEnumToText(t *testing.T) {
@@ -67,8 +66,8 @@ func TestEnumSetRemovalCheckEnumToText(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
 }
 
 func TestEnumSetRemovalCheckEnumToInt(t *testing.T) {
@@ -92,8 +91,8 @@ func TestEnumSetRemovalCheckEnumToInt(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
 }
 
 func TestEnumSetRemovalCheckSetToVarchar(t *testing.T) {
@@ -117,14 +116,14 @@ func TestEnumSetRemovalCheckSetToVarchar(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe SET to non-SET")
-	assert.ErrorContains(t, err, "buffered mode")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET to non-SET")
+	require.ErrorContains(t, err, "buffered mode")
 
 	// Unbuffered + SET→VARCHAR: should pass
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestEnumSetRemovalCheckChangeColumn(t *testing.T) {
@@ -148,8 +147,8 @@ func TestEnumSetRemovalCheckChangeColumn(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
 }
 
 func TestEnumSetRemovalCheckEnumToEnum(t *testing.T) {
@@ -173,7 +172,7 @@ func TestEnumSetRemovalCheckEnumToEnum(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestEnumSetRemovalCheckNonEnumColumn(t *testing.T) {
@@ -197,7 +196,7 @@ func TestEnumSetRemovalCheckNonEnumColumn(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestEnumSetRemovalCheckEnumToSet(t *testing.T) {
@@ -221,14 +220,14 @@ func TestEnumSetRemovalCheckEnumToSet(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM to SET")
-	assert.ErrorContains(t, err, "buffered mode")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to SET")
+	require.ErrorContains(t, err, "buffered mode")
 
 	// Unbuffered + ENUM→SET: should pass
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
@@ -252,12 +251,12 @@ func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe SET to ENUM")
-	assert.ErrorContains(t, err, "buffered mode")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET to ENUM")
+	require.ErrorContains(t, err, "buffered mode")
 
 	// Unbuffered + SET→ENUM: should pass
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
