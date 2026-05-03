@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Mock closers for testing
@@ -38,7 +38,7 @@ func (m *mockContextCloser) Close(ctx context.Context) error {
 
 func TestCloseAndLog(t *testing.T) {
 	t.Run("nil closer should not panic", func(t *testing.T) {
-		assert.NotPanics(t, func() {
+		require.NotPanics(t, func() {
 			CloseAndLog(nil)
 		})
 	})
@@ -46,16 +46,16 @@ func TestCloseAndLog(t *testing.T) {
 	t.Run("successful close", func(t *testing.T) {
 		closer := &mockCloser{shouldFail: false}
 		CloseAndLog(closer)
-		assert.True(t, closer.closed, "Close should have been called")
+		require.True(t, closer.closed, "Close should have been called")
 	})
 
 	t.Run("failed close logs error", func(t *testing.T) {
 		closer := &mockCloser{shouldFail: true}
 		// The function will log an error, but should not panic
-		assert.NotPanics(t, func() {
+		require.NotPanics(t, func() {
 			CloseAndLog(closer)
 		})
-		assert.True(t, closer.closed, "Close should have been called even though it failed")
+		require.True(t, closer.closed, "Close should have been called even though it failed")
 	})
 }
 
@@ -63,7 +63,7 @@ func TestCloseAndLogWithContext(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("nil closer should not panic", func(t *testing.T) {
-		assert.NotPanics(t, func() {
+		require.NotPanics(t, func() {
 			CloseAndLogWithContext(ctx, nil)
 		})
 	})
@@ -71,16 +71,16 @@ func TestCloseAndLogWithContext(t *testing.T) {
 	t.Run("successful close", func(t *testing.T) {
 		closer := &mockContextCloser{shouldFail: false}
 		CloseAndLogWithContext(ctx, closer)
-		assert.True(t, closer.closed, "Close should have been called")
+		require.True(t, closer.closed, "Close should have been called")
 	})
 
 	t.Run("failed close logs error", func(t *testing.T) {
 		closer := &mockContextCloser{shouldFail: true}
 		// The function will log an error, but should not panic
-		assert.NotPanics(t, func() {
+		require.NotPanics(t, func() {
 			CloseAndLogWithContext(ctx, closer)
 		})
-		assert.True(t, closer.closed, "Close should have been called even though it failed")
+		require.True(t, closer.closed, "Close should have been called even though it failed")
 	})
 
 	t.Run("canceled context", func(t *testing.T) {
@@ -88,9 +88,9 @@ func TestCloseAndLogWithContext(t *testing.T) {
 		cancel() // Cancel immediately
 		closer := &mockContextCloser{shouldFail: false}
 		// Should still work even with canceled context
-		assert.NotPanics(t, func() {
+		require.NotPanics(t, func() {
 			CloseAndLogWithContext(canceledCtx, closer)
 		})
-		assert.True(t, closer.closed, "Close should have been called")
+		require.True(t, closer.closed, "Close should have been called")
 	})
 }
