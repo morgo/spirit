@@ -217,7 +217,7 @@ func newTestMigration(t *testing.T, opts ...RunnerOption) *Migration {
 //
 //	m := NewTestRunner(t, "mytable", "ENGINE=InnoDB")
 //	require.NoError(t, m.Run(t.Context()))
-//	assert.NoError(t, m.Close())
+//	require.NoError(t, m.Close())
 //
 //	m := NewTestRunner(t, "mytable", "ADD INDEX idx_a (a)",
 //	    WithThreads(1),
@@ -244,7 +244,7 @@ func NewTestRunner(t *testing.T, table, alter string, opts ...RunnerOption) *Run
 //
 //	m := NewTestRunnerFromStatement(t, "ALTER TABLE mytable ADD COLUMN c INT")
 //	require.NoError(t, m.Run(t.Context()))
-//	assert.NoError(t, m.Close())
+//	require.NoError(t, m.Close())
 func NewTestRunnerFromStatement(t *testing.T, statement string, opts ...RunnerOption) *Runner {
 	t.Helper()
 

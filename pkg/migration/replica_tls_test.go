@@ -10,7 +10,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -128,13 +127,13 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 
 			// Test DSN enhancement directly
 			enhanced, err := dbconn.EnhanceDSNWithTLS(tc.replicaDSN, runner.dbConfig)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			if tc.shouldEnhance {
-				assert.NotEqual(t, tc.replicaDSN, enhanced, tc.description)
-				assert.Contains(t, enhanced, "tls=", tc.description)
+				require.NotEqual(t, tc.replicaDSN, enhanced, tc.description)
+				require.Contains(t, enhanced, "tls=", tc.description)
 			} else {
-				assert.Equal(t, tc.replicaDSN, enhanced, tc.description)
+				require.Equal(t, tc.replicaDSN, enhanced, tc.description)
 			}
 		})
 	}
@@ -220,7 +219,7 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 
 			// Create replication client
 			client := repl.NewClient(db, tc.host, "user", "pass", clientConfig)
-			assert.NotNil(t, client)
+			require.NotNil(t, client)
 
 			// Verify TLS config is stored
 			if tc.tlsMode == "DISABLED" {
@@ -228,9 +227,9 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 				// The actual TLS behavior is tested in the Run() method
 			} else {
 				// For non-disabled modes, the config should be present
-				assert.NotNil(t, clientConfig.DBConfig)
-				assert.Equal(t, tc.tlsMode, clientConfig.DBConfig.TLSMode)
-				assert.Equal(t, tc.tlsCert, clientConfig.DBConfig.TLSCertificatePath)
+				require.NotNil(t, clientConfig.DBConfig)
+				require.Equal(t, tc.tlsMode, clientConfig.DBConfig.TLSMode)
+				require.Equal(t, tc.tlsCert, clientConfig.DBConfig.TLSCertificatePath)
 			}
 		})
 	}

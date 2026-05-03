@@ -15,7 +15,6 @@ import (
 
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,12 +84,12 @@ func CreateUniqueTestDatabase(t *testing.T) (string, *sql.DB) {
 	t.Cleanup(func() {
 		_ = scopedDB.Close()
 		cleanupDB, err := sql.Open("mysql", rootDSN)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		defer func() {
 			_ = cleanupDB.Close()
 		}()
 		_, err = cleanupDB.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 
 	return dbName, scopedDB
@@ -101,24 +100,24 @@ func RunSQLInDatabase(t *testing.T, dbName, stmt string) {
 	t.Helper()
 	dsn := DSNForDatabase(dbName)
 	db, err := sql.Open("mysql", dsn)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		_ = db.Close()
 	}()
 	_, err = db.ExecContext(t.Context(), stmt)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func RunSQL(t *testing.T, stmt string) {
 	t.Helper()
 	db, err := sql.Open("mysql", DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		_ = db.Close()
 	}()
 	// Might be run in cleanup, use Background context
 	_, err = db.ExecContext(context.Background(), stmt)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 var (

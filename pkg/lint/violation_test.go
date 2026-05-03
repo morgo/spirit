@@ -3,7 +3,6 @@ package lint
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,7 +51,7 @@ func TestSeverity_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.severity.String())
+			require.Equal(t, tt.expected, tt.severity.String())
 		})
 	}
 }
@@ -127,7 +126,7 @@ func TestViolation_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.violation.String())
+			require.Equal(t, tt.expected, tt.violation.String())
 		})
 	}
 }
@@ -184,7 +183,7 @@ func TestLocation_String(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.location.String())
+			require.Equal(t, tt.expected, tt.location.String())
 		})
 	}
 }

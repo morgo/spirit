@@ -18,7 +18,6 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	mysql2 "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -841,7 +840,7 @@ func TestNewServerIDConcurrent(t *testing.T) {
 
 	for id := range idChan {
 		// Verify ID is in expected range (at least 1001)
-		assert.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
+		require.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
 
 		// Track duplicates - count every occurrence beyond the first
 		ids[id]++

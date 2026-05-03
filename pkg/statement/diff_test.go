@@ -3,7 +3,6 @@ package statement
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -898,10 +897,10 @@ func TestDiff(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.expected == "" {
-				assert.Nil(t, stmts, "expected nil for identical tables")
+				require.Nil(t, stmts, "expected nil for identical tables")
 			} else {
 				require.Len(t, stmts, 1)
-				assert.Equal(t, tt.expected, stmts[0].Statement)
+				require.Equal(t, tt.expected, stmts[0].Statement)
 			}
 		})
 	}
@@ -1097,10 +1096,10 @@ func TestDiff_DiffOptions(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.expected == "" {
-				assert.Nil(t, stmts, "expected nil diff")
+				require.Nil(t, stmts, "expected nil diff")
 			} else {
 				require.Len(t, stmts, 1)
-				assert.Equal(t, tt.expected, stmts[0].Statement)
+				require.Equal(t, tt.expected, stmts[0].Statement)
 			}
 		})
 	}
