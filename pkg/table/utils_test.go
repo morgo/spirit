@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFindP90(t *testing.T) {
@@ -20,7 +21,7 @@ func TestFindP90(t *testing.T) {
 		1 * time.Second,
 		1 * time.Second,
 	}
-	assert.Equal(t, 3*time.Second, LazyFindP90(times))
+	require.Equal(t, 3*time.Second, LazyFindP90(times))
 }
 
 type castableTpTest struct {
@@ -74,44 +75,44 @@ func TestCastableTp(t *testing.T) {
 
 func TestQuoteCols(t *testing.T) {
 	cols := []string{"a", "b", "c"}
-	assert.Equal(t, "`a`, `b`, `c`", QuoteColumns(cols))
+	require.Equal(t, "`a`, `b`, `c`", QuoteColumns(cols))
 
 	cols = []string{"a"}
-	assert.Equal(t, "`a`", QuoteColumns(cols))
+	require.Equal(t, "`a`", QuoteColumns(cols))
 }
 
 func TestExpandRowConstructorComparison(t *testing.T) {
-	assert.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` >= 2))",
+	require.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` >= 2))",
 		expandRowConstructorComparison([]string{"a", "b"},
 			OpGreaterEqual,
 			[]Datum{{Val: 1, Tp: signedType}, {Val: 2, Tp: signedType}}))
 
-	assert.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` > 2))",
+	require.Equal(t, "((`a` > 1)\n OR (`a` = 1 AND `b` > 2))",
 		expandRowConstructorComparison([]string{"a", "b"},
 			OpGreaterThan,
 			[]Datum{{Val: 1, Tp: signedType}, {Val: 2, Tp: signedType}}))
 
-	assert.Equal(t, "((`a` > \"PENDING\")\n OR (`a` = \"PENDING\" AND `b` > 2))",
+	require.Equal(t, "((`a` > \"PENDING\")\n OR (`a` = \"PENDING\" AND `b` > 2))",
 		expandRowConstructorComparison([]string{"a", "b"},
 			OpGreaterThan,
 			[]Datum{{Val: "PENDING", Tp: binaryType}, {Val: 2, Tp: signedType}}))
 
-	assert.Equal(t, "((`id1` > 2)\n OR (`id1` = 2 AND `id2` > 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` > 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` >= 5))",
+	require.Equal(t, "((`id1` > 2)\n OR (`id1` = 2 AND `id2` > 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` > 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` >= 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpGreaterEqual,
 			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 
-	assert.Equal(t, "((`id1` < 2)\n OR (`id1` = 2 AND `id2` < 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` < 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` <= 5))",
+	require.Equal(t, "((`id1` < 2)\n OR (`id1` = 2 AND `id2` < 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` < 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` <= 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpLessEqual,
 			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 
-	assert.Equal(t, "((`id1` < 2)\n OR (`id1` = 2 AND `id2` < 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` < 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` < 5))",
+	require.Equal(t, "((`id1` < 2)\n OR (`id1` = 2 AND `id2` < 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` < 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` < 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpLessThan,
 			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 
-	assert.Equal(t, "((`id1` > 2)\n OR (`id1` = 2 AND `id2` > 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` > 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` > 5))",
+	require.Equal(t, "((`id1` > 2)\n OR (`id1` = 2 AND `id2` > 2)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` > 4)\n OR (`id1` = 2 AND `id2` = 2 AND `id3` = 4 AND `id4` > 5))",
 		expandRowConstructorComparison([]string{"id1", "id2", "id3", "id4"},
 			OpGreaterThan,
 			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
