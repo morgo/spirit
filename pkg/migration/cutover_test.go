@@ -216,9 +216,20 @@ func TestInvalidOptions(t *testing.T) {
 //
 // This test proves that the window does not introduce inconsistency, even when
 // there are concurrent writes happening that are trying to introduce it.
+//
+// The test runs four times — across the cross product of:
+//   - chunker selection (optimistic vs composite)
+//   - copier mode (unbuffered vs buffered)
+//
+// The optimistic chunker is selected automatically for single-column
+// auto_increment PKs; the composite chunker covers everything else (here we
+// force it via a composite (id, x_token) PK). Buffered mode uses the
+// SingleTargetApplier path; both modes have surfaced the issue-#746
+// dead-zone bug in CI history (see e.g. PRs #801, #797, #795, #804).
 func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	t.Parallel()
-	tt := testutils.NewTestTable(t, "t1concurrent", `CREATE TABLE t1concurrent (
+
+	const optimisticSchema = `CREATE TABLE %s (
 		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
 		x_token VARCHAR(36) NOT NULL,
 		cents INT NOT NULL,
@@ -239,9 +250,72 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 		UNIQUE KEY idx_x_token (x_token),
 		KEY idx_s_token (s_token),
 		KEY idx_r_token (r_token)
-	)`)
-	testutils.RunSQL(t, `INSERT INTO t1concurrent (x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
-		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`)
+	)`
+
+	// Composite-PK schema. Putting x_token in the PK forces NewChunker to
+	// pick the composite chunker instead of the optimistic one (which only
+	// handles a single-column auto_increment PK). Drop the redundant
+	// UNIQUE KEY on x_token since the PK now enforces uniqueness on
+	// (id, x_token).
+	const compositeSchema = `CREATE TABLE %s (
+		id INT NOT NULL AUTO_INCREMENT,
+		x_token VARCHAR(36) NOT NULL,
+		cents INT NOT NULL,
+		currency VARCHAR(3) NOT NULL,
+		s_token VARCHAR(36) NOT NULL,
+		r_token VARCHAR(36) NOT NULL,
+		version INT NOT NULL DEFAULT 1,
+		c1 VARCHAR(20),
+		c2 VARCHAR(200),
+		c3 VARCHAR(10),
+		t1 DATETIME,
+		t2 DATETIME,
+		t3 DATETIME,
+		b1 TINYINT,
+		b2 TINYINT,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (id, x_token),
+		KEY idx_s_token (s_token),
+		KEY idx_r_token (r_token)
+	)`
+
+	cases := []struct {
+		name      string
+		tableName string
+		schema    string
+		buffered  bool
+	}{
+		{"optimistic_unbuffered", "t1concurrent_oub", optimisticSchema, false},
+		{"optimistic_buffered", "t1concurrent_obu", optimisticSchema, true},
+		{"composite_unbuffered", "t1concurrent_cub", compositeSchema, false},
+		{"composite_buffered", "t1concurrent_cbu", compositeSchema, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.buffered && testutils.IsMinimalRBRTestRunner(t) {
+				t.Skip("buffered copier requires binlog_row_image=FULL")
+			}
+			runCutoverAtomicityTest(t, tc.tableName, tc.schema, tc.buffered)
+		})
+	}
+}
+
+// runCutoverAtomicityTest runs the body of the cutover-atomicity probe
+// against an arbitrary table/schema pair, in either unbuffered or buffered
+// copier mode. tableName must be unique per call so the four variants can
+// run in parallel without conflicting on `_<name>_old`/`_<name>_new`.
+func runCutoverAtomicityTest(t *testing.T, tableName, schemaTmpl string, buffered bool) {
+	t.Helper()
+
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(schemaTmpl, tableName))
+
+	insertInitial := fmt.Sprintf(`INSERT INTO %s
+		(x_token, cents, currency, s_token, r_token, version, created_at, updated_at)
+		VALUES ('initial-1', 100, 'USD', 'sender-1', 'receiver-1', 1, NOW(), NOW())`, tableName)
+	testutils.RunSQL(t, insertInitial)
 
 	// Start concurrent write load
 	ctx, cancel := context.WithCancel(t.Context())
@@ -255,7 +329,7 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// Start write threads
 	for range numThreads {
 		wg.Go(func() {
-			migrationConcurrentWriteThread(ctx, tt.DB, &writeCount, &errorCount)
+			migrationConcurrentWriteThread(ctx, tt.DB, tableName, &writeCount, &errorCount)
 		})
 	}
 
@@ -264,8 +338,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// Create and configure the migration with a custom cutover algorithm
 	// that intentionally fails after renaming the original table.
-	migration := NewTestMigration(t, WithTable("t1concurrent"), WithAlter("ENGINE=InnoDB"),
-		WithThreads(2), WithTargetChunkTime(100*time.Millisecond))
+	migration := NewTestMigration(t, WithTable(tableName), WithAlter("ENGINE=InnoDB"),
+		WithThreads(2), WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(buffered))
 	migration.useTestCutover = true
 
 	// Run the migration — we expect it to fail with our intentional error.
@@ -296,12 +371,19 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 		t.Fatalf("issue #746 reproduced at checksum step (FixDifferences disabled via useTestCutover): %v — see preceding 'inspection revealed row does not exist in target' Warn logs for missing PKs", err)
 	}
 
-	// The partial cutover should have renamed t1concurrent to _t1concurrent_old
+	oldTable := "_" + tableName + "_old"
+	newTable := "_" + tableName + "_new"
+
+	// The partial cutover should have renamed tableName to <_old>
 	// Let's verify both tables exist
 	var oldTableExists, newTableExists bool
-	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_old'").Scan(&oldTableExists)
+	err = tt.DB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+		oldTable).Scan(&oldTableExists)
 	require.NoError(t, err)
-	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_t1concurrent_new'").Scan(&newTableExists)
+	err = tt.DB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+		newTable).Scan(&newTableExists)
 	require.NoError(t, err)
 
 	require.True(t, oldTableExists, "The _old table should exist after partial cutover")
@@ -318,9 +400,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	checksumQuery := "SELECT BIT_XOR(CRC32(CONCAT_WS(',', id, x_token, cents, currency, s_token, r_token, version, IFNULL(c1,''), IFNULL(c2,''), IFNULL(c3,''), IFNULL(t1,''), IFNULL(t2,''), IFNULL(t3,''), IFNULL(b1,''), IFNULL(b2,''), created_at, updated_at))) FROM %s"
 
 	var oldChecksum, newChecksum string
-	err1 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_old")).Scan(&oldChecksum)
+	err1 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, oldTable)).Scan(&oldChecksum)
 	require.NoError(t, err1)
-	err2 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, "_t1concurrent_new")).Scan(&newChecksum)
+	err2 := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(checksumQuery, newTable)).Scan(&newChecksum)
 	require.NoError(t, err2)
 	require.Equal(t, oldChecksum, newChecksum, "Checksums should match between old and new tables")
 
@@ -328,9 +410,9 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 
 	// Also verify row counts match
 	var oldCount, newCount int
-	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _t1concurrent_old").Scan(&oldCount)
+	err = tt.DB.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", oldTable)).Scan(&oldCount)
 	require.NoError(t, err)
-	err = tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _t1concurrent_new").Scan(&newCount)
+	err = tt.DB.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", newTable)).Scan(&newCount)
 	require.NoError(t, err)
 
 	t.Logf("Old table count: %d, New table count: %d", oldCount, newCount)
@@ -340,27 +422,28 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	// latest (cutover-window race) or scattered through the range (copy-phase race).
 	if oldChecksum != newChecksum || oldCount != newCount {
 		var maxOld int
-		_ = tt.DB.QueryRowContext(t.Context(), "SELECT IFNULL(MAX(id),0) FROM _t1concurrent_old").Scan(&maxOld)
-		t.Logf("max(id) in _old=%d", maxOld)
+		_ = tt.DB.QueryRowContext(t.Context(),
+			fmt.Sprintf("SELECT IFNULL(MAX(id),0) FROM %s", oldTable)).Scan(&maxOld)
+		t.Logf("max(id) in %s=%d", oldTable, maxOld)
 		missingRows, _ := tt.DB.QueryContext(t.Context(),
-			`SELECT o.id, o.x_token, o.version, o.created_at, o.updated_at
-			   FROM _t1concurrent_old o LEFT JOIN _t1concurrent_new n ON n.id = o.id
-			   WHERE n.id IS NULL ORDER BY o.id`)
+			fmt.Sprintf(`SELECT o.id, o.x_token, o.version, o.created_at, o.updated_at
+			   FROM %s o LEFT JOIN %s n ON n.id = o.id
+			   WHERE n.id IS NULL ORDER BY o.id`, oldTable, newTable))
 		if missingRows != nil {
 			defer func() { _ = missingRows.Close() }()
 			for missingRows.Next() {
 				var id, version int
 				var xtoken, createdAt, updatedAt string
 				_ = missingRows.Scan(&id, &xtoken, &version, &createdAt, &updatedAt)
-				t.Logf("MISSING in _new: id=%d x_token=%s version=%d created_at=%s updated_at=%s",
-					id, xtoken, version, createdAt, updatedAt)
+				t.Logf("MISSING in %s: id=%d x_token=%s version=%d created_at=%s updated_at=%s",
+					newTable, id, xtoken, version, createdAt, updatedAt)
 			}
 		}
 		divergedRows, _ := tt.DB.QueryContext(t.Context(),
-			`SELECT o.id, o.version AS old_v, n.version AS new_v, o.updated_at AS old_u, n.updated_at AS new_u
-			   FROM _t1concurrent_old o JOIN _t1concurrent_new n ON n.id = o.id
+			fmt.Sprintf(`SELECT o.id, o.version AS old_v, n.version AS new_v, o.updated_at AS old_u, n.updated_at AS new_u
+			   FROM %s o JOIN %s n ON n.id = o.id
 			   WHERE o.version != n.version OR o.updated_at != n.updated_at
-			   ORDER BY o.id`)
+			   ORDER BY o.id`, oldTable, newTable))
 		if divergedRows != nil {
 			defer func() { _ = divergedRows.Close() }()
 			for divergedRows.Next() {
@@ -376,13 +459,13 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 }
 
 // migrationConcurrentWriteThread simulates concurrent write load during migration
-func migrationConcurrentWriteThread(ctx context.Context, db *sql.DB, writeCount, errorCount *atomic.Int64) {
+func migrationConcurrentWriteThread(ctx context.Context, db *sql.DB, tableName string, writeCount, errorCount *atomic.Int64) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			if err := doOneMigrationWriteLoop(ctx, db); err != nil {
+			if err := doOneMigrationWriteLoop(ctx, db, tableName); err != nil {
 				errorCount.Add(1)
 				// Continue on error - some errors are expected during cutover
 			} else {
@@ -393,7 +476,7 @@ func migrationConcurrentWriteThread(ctx context.Context, db *sql.DB, writeCount,
 }
 
 // doOneMigrationWriteLoop performs one iteration of insert + update + reads
-func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB) error {
+func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB, tableName string) error {
 	trx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -409,23 +492,25 @@ func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB) error {
 	rtoken := fmt.Sprintf("r-%d", time.Now().UnixNano())
 
 	//nolint: dupword
-	_, err = trx.ExecContext(ctx, `INSERT INTO t1concurrent (x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at)
-		VALUES (?, 100, 'USD', ?, ?, 1, HEX(RANDOM_BYTES(10)), HEX(RANDOM_BYTES(100)), HEX(RANDOM_BYTES(5)), NOW(), NOW(), NOW(), 1, 2, NOW(), NOW())`,
-		xtoken, stoken, rtoken)
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at)
+		VALUES (?, 100, 'USD', ?, ?, 1, HEX(RANDOM_BYTES(10)), HEX(RANDOM_BYTES(100)), HEX(RANDOM_BYTES(5)), NOW(), NOW(), NOW(), 1, 2, NOW(), NOW())`, tableName)
+	_, err = trx.ExecContext(ctx, insertSQL, xtoken, stoken, rtoken)
 	if err != nil {
 		return err
 	}
 
 	// Update
-	_, err = trx.ExecContext(ctx, `UPDATE t1concurrent SET version = 2, updated_at = NOW() WHERE x_token = ?`, xtoken)
+	updateSQL := fmt.Sprintf(`UPDATE %s SET version = 2, updated_at = NOW() WHERE x_token = ?`, tableName)
+	_, err = trx.ExecContext(ctx, updateSQL, xtoken)
 	if err != nil {
 		return err
 	}
 
 	// Do some cached reads
+	selectSQL := fmt.Sprintf(`SELECT id, x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at FROM %s WHERE x_token = ?`, tableName)
 	var rows *sql.Rows
 	for range 10 {
-		rows, err = trx.QueryContext(ctx, `SELECT id, x_token, cents, currency, s_token, r_token, version, c1, c2, c3, t1, t2, t3, b1, b2, created_at, updated_at FROM t1concurrent WHERE x_token = ?`, xtoken)
+		rows, err = trx.QueryContext(ctx, selectSQL, xtoken)
 		if err != nil {
 			return err
 		}
