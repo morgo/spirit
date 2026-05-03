@@ -9,7 +9,6 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,18 +79,18 @@ func TestParseAndPrepare(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tableName, execSQL, err := parseAndPrepare(tc.input)
 			if tc.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantTable, tableName)
+			require.Equal(t, tc.wantTable, tableName)
 			if tc.wantSchemaStr {
 				// Schema should be stripped from execSQL
-				assert.NotContains(t, execSQL, "mydb")
-				assert.Contains(t, execSQL, tc.wantTable)
+				require.NotContains(t, execSQL, "mydb")
+				require.Contains(t, execSQL, tc.wantTable)
 			} else {
 				// Without schema qualifier, original SQL is used as-is
-				assert.Equal(t, tc.input, execSQL)
+				require.Equal(t, tc.input, execSQL)
 			}
 		})
 	}
@@ -111,19 +110,19 @@ func TestCollectSQLFiles(t *testing.T) {
 	t.Run("directory", func(t *testing.T) {
 		files, err := collectSQLFiles([]string{dir})
 		require.NoError(t, err)
-		assert.Len(t, files, 2)
+		require.Len(t, files, 2)
 	})
 
 	t.Run("single file", func(t *testing.T) {
 		files, err := collectSQLFiles([]string{filepath.Join(dir, "users.sql")})
 		require.NoError(t, err)
-		assert.Len(t, files, 1)
+		require.Len(t, files, 1)
 	})
 
 	t.Run("non-sql file silently skipped", func(t *testing.T) {
 		files, err := collectSQLFiles([]string{filepath.Join(dir, "README.md")})
 		require.NoError(t, err)
-		assert.Empty(t, files)
+		require.Empty(t, files)
 	})
 
 	t.Run("mixed glob", func(t *testing.T) {
@@ -134,25 +133,25 @@ func TestCollectSQLFiles(t *testing.T) {
 			filepath.Join(dir, "orders.SQL"),
 		})
 		require.NoError(t, err)
-		assert.Len(t, files, 2)
+		require.Len(t, files, 2)
 	})
 
 	t.Run("nonexistent path", func(t *testing.T) {
 		_, err := collectSQLFiles([]string{"/nonexistent/path"})
-		assert.Error(t, err)
+		require.Error(t, err)
 	})
 
 	t.Run("empty directory", func(t *testing.T) {
 		emptyDir := t.TempDir()
 		files, err := collectSQLFiles([]string{emptyDir})
 		require.NoError(t, err)
-		assert.Empty(t, files)
+		require.Empty(t, files)
 	})
 }
 
 func TestBuildDSN(t *testing.T) {
-	assert.Equal(t, "root@tcp(127.0.0.1:3306)/test", buildDSN("root", "", "127.0.0.1:3306", "test"))
-	assert.Equal(t, "user:pass@tcp(host:3306)/db", buildDSN("user", "pass", "host:3306", "db"))
+	require.Equal(t, "root@tcp(127.0.0.1:3306)/test", buildDSN("root", "", "127.0.0.1:3306", "test"))
+	require.Equal(t, "user:pass@tcp(host:3306)/db", buildDSN("user", "pass", "host:3306", "db"))
 }
 
 // Integration tests — require a running MySQL server.
@@ -168,12 +167,12 @@ func TestCanonicalize_Boolean(t *testing.T) {
 	require.NoError(t, err)
 
 	// The canonical form should have tinyint(1) instead of boolean.
-	assert.Contains(t, canonical, "tinyint(1)")
-	assert.NotContains(t, canonical, "boolean")
+	require.Contains(t, canonical, "tinyint(1)")
+	require.NotContains(t, canonical, "boolean")
 	// Table name should be preserved.
-	assert.Contains(t, canonical, "`bool_test`")
+	require.Contains(t, canonical, "`bool_test`")
 	// Should end with newline.
-	assert.True(t, canonical[len(canonical)-1] == '\n')
+	require.True(t, canonical[len(canonical)-1] == '\n')
 }
 
 func TestCanonicalize_NoChange(t *testing.T) {
@@ -190,7 +189,7 @@ func TestCanonicalize_NoChange(t *testing.T) {
 	second, err := canonicalize(ctx, db, first)
 	require.NoError(t, err)
 
-	assert.Equal(t, first, second, "canonicalize should be idempotent")
+	require.Equal(t, first, second, "canonicalize should be idempotent")
 }
 
 func TestCanonicalize_Serial(t *testing.T) {
@@ -203,8 +202,8 @@ func TestCanonicalize_Serial(t *testing.T) {
 	canonical, err := canonicalize(ctx, db, input)
 	require.NoError(t, err)
 
-	assert.Contains(t, canonical, "bigint unsigned")
-	assert.Contains(t, canonical, "`serial_test`")
+	require.Contains(t, canonical, "bigint unsigned")
+	require.Contains(t, canonical, "`serial_test`")
 }
 
 func TestCanonicalize_PreservesTableName(t *testing.T) {
@@ -216,7 +215,7 @@ func TestCanonicalize_PreservesTableName(t *testing.T) {
 	canonical, err := canonicalize(ctx, db, input)
 	require.NoError(t, err)
 
-	assert.Contains(t, canonical, "`my_important_table`")
+	require.Contains(t, canonical, "`my_important_table`")
 }
 
 func TestCanonicalize_StripsAutoIncrement(t *testing.T) {
@@ -228,10 +227,10 @@ func TestCanonicalize_StripsAutoIncrement(t *testing.T) {
 	canonical, err := canonicalize(ctx, db, input)
 	require.NoError(t, err)
 
-	assert.NotContains(t, canonical, "AUTO_INCREMENT=")
-	assert.NotContains(t, canonical, "12345")
+	require.NotContains(t, canonical, "AUTO_INCREMENT=")
+	require.NotContains(t, canonical, "12345")
 	// But the column should still have AUTO_INCREMENT.
-	assert.Contains(t, canonical, "AUTO_INCREMENT")
+	require.Contains(t, canonical, "AUTO_INCREMENT")
 }
 
 func TestCanonicalize_SchemaQualified(t *testing.T) {
@@ -246,11 +245,11 @@ func TestCanonicalize_SchemaQualified(t *testing.T) {
 	require.NoError(t, err)
 
 	// Schema qualifier should not appear in canonical output.
-	assert.NotContains(t, canonical, "somedb")
+	require.NotContains(t, canonical, "somedb")
 	// Table name should be preserved.
-	assert.Contains(t, canonical, "`qualified_test`")
+	require.Contains(t, canonical, "`qualified_test`")
 	// Boolean should be canonicalized.
-	assert.Contains(t, canonical, "tinyint(1)")
+	require.Contains(t, canonical, "tinyint(1)")
 }
 
 func TestCanonicalize_InvalidSQL(t *testing.T) {
@@ -258,8 +257,8 @@ func TestCanonicalize_InvalidSQL(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := canonicalize(ctx, db, "THIS IS NOT VALID SQL")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not a valid CREATE TABLE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a valid CREATE TABLE")
 }
 
 func TestCanonicalize_NotCreateTable(t *testing.T) {
@@ -267,8 +266,8 @@ func TestCanonicalize_NotCreateTable(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := canonicalize(ctx, db, "ALTER TABLE users ADD COLUMN x INT")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not a valid CREATE TABLE")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a valid CREATE TABLE")
 }
 
 func TestFormatFile_Changed(t *testing.T) {
@@ -282,13 +281,13 @@ func TestFormatFile_Changed(t *testing.T) {
 
 	changed, err := formatFile(ctx, db, path)
 	require.NoError(t, err)
-	assert.True(t, changed, "file should have been changed")
+	require.True(t, changed, "file should have been changed")
 
 	// Read back and verify.
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Contains(t, string(content), "tinyint(1)")
-	assert.NotContains(t, string(content), "boolean")
+	require.Contains(t, string(content), "tinyint(1)")
+	require.NotContains(t, string(content), "boolean")
 }
 
 func TestFormatFile_Unchanged(t *testing.T) {
@@ -307,7 +306,7 @@ func TestFormatFile_Unchanged(t *testing.T) {
 
 	changed, err := formatFile(ctx, db, path)
 	require.NoError(t, err)
-	assert.False(t, changed, "file should not have been changed")
+	require.False(t, changed, "file should not have been changed")
 }
 
 func TestFormatFile_InvalidSQL(t *testing.T) {
@@ -319,7 +318,7 @@ func TestFormatFile_InvalidSQL(t *testing.T) {
 	writeTestFile(t, dir, "bad.sql", "THIS IS NOT VALID SQL")
 
 	_, err := formatFile(ctx, db, path)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestFormatFile_Directory(t *testing.T) {
@@ -338,7 +337,7 @@ func TestFormatFile_Directory(t *testing.T) {
 	// Collect and format all files.
 	files, err := collectSQLFiles([]string{dir})
 	require.NoError(t, err)
-	assert.Len(t, files, 2)
+	require.Len(t, files, 2)
 
 	var changedFiles []string
 	for _, f := range files {
@@ -349,8 +348,8 @@ func TestFormatFile_Directory(t *testing.T) {
 		}
 	}
 
-	assert.Len(t, changedFiles, 1)
-	assert.Contains(t, changedFiles[0], "needs_fix.sql")
+	require.Len(t, changedFiles, 1)
+	require.Contains(t, changedFiles[0], "needs_fix.sql")
 }
 
 func writeTestFile(t *testing.T, dir, name, content string) {

@@ -9,89 +9,88 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestMovePrivileges(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "CREATE USER testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoveprivsuser")
 	})
 
 	config, err = mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "testmoveprivsuser"
 	config.Passwd = ""
 
 	sourceConfig, err := mysql.ParseDSN(fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
 
 	r := Resources{
 		Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // privileges fail, since user has nothing granted.
+	require.Error(t, err) // privileges fail, since user has nothing granted.
 
 	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs replication client
+	require.Error(t, err) // still not enough, needs replication client
 
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Move always uses force-kill, so we need the force-kill privileges too.
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs force-kill privileges
+	require.Error(t, err) // still not enough, needs force-kill privileges
 
 	_, err = db.ExecContext(t.Context(), "GRANT SELECT on `performance_schema`.* TO testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs connection_admin
+	require.Error(t, err) // still not enough, needs connection_admin
 
 	_, err = db.ExecContext(t.Context(), "GRANT CONNECTION_ADMIN ON *.* TO testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs PROCESS
+	require.Error(t, err) // still not enough, needs PROCESS
 
 	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testmoveprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Reconnect before checking again.
-	assert.NoError(t, lowPrivDB.Close())
+	require.NoError(t, lowPrivDB.Close())
 	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
 	r.Sources = []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // all privileges granted, should pass now
+	require.NoError(t, err) // all privileges granted, should pass now
 
 	// Test the root user
 	r = Resources{
 		Sources: []SourceResource{{DB: db, Config: sourceConfig}},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // root privileges work fine
+	require.NoError(t, err) // root privileges work fine
 }
 
 // TestMovePrivilegesMultipleSources verifies that the privileges check iterates
@@ -141,8 +140,8 @@ func TestMovePrivilegesMultipleSources(t *testing.T) {
 
 	// The check should fail on source 1 (the low-privilege user).
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "source 1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "source 1")
 
 	// Verify the check passes when both sources have sufficient privileges.
 	rootDB2, err := sql.Open("mysql", rootDSN)
@@ -156,7 +155,7 @@ func TestMovePrivilegesMultipleSources(t *testing.T) {
 		},
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 // TestMovePrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
@@ -230,8 +229,8 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
-	assert.Contains(t, err.Error(), "CONNECTION_ADMIN")
+	require.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
+	require.Contains(t, err.Error(), "CONNECTION_ADMIN")
 
 	// With activate_all_roles_on_login=ON, rds_superuser_role should be tolerated
 	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
@@ -245,5 +244,5 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	r.Sources = []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
+	require.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
 }
