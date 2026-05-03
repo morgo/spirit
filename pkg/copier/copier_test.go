@@ -16,7 +16,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -249,13 +248,13 @@ func TestLockWaitTimeoutIsRetyable(t *testing.T) {
 	// This should be enough to retry, but it will eventually be successful.
 	wg2.Go(func() {
 		tx, err := db.BeginTx(t.Context(), nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "SELECT a,b,c FROM lockt2 WHERE a = 1 FOR UPDATE")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		wg1.Done()
 		time.Sleep(2 * time.Second)
 		err = tx.Rollback()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 	wg1.Wait()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})
@@ -297,13 +296,13 @@ func TestLockWaitTimeoutRetryExceeded(t *testing.T) {
 	wg1.Add(1)
 	wg2.Go(func() {
 		tx, err := db.BeginTx(t.Context(), nil)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		_, err = tx.ExecContext(t.Context(), "SELECT a,b,c FROM lock2t2 WHERE a = 1 FOR UPDATE")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		wg1.Done()
 		time.Sleep(10 * time.Second)
 		err = tx.Rollback()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 	wg1.Wait() // Wait only for the lock to be acquired.
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: NewCopierDefaultConfig().TargetChunkTime, Logger: NewCopierDefaultConfig().Logger})

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -182,10 +181,10 @@ func TestEnhanceDSNWithTLS(t *testing.T) {
 			result, err := EnhanceDSNWithTLS(tc.inputDSN, tc.config)
 
 			if tc.expectError {
-				assert.Error(t, err, tc.description)
+				require.Error(t, err, tc.description)
 			} else {
-				assert.NoError(t, err, tc.description)
-				assert.Equal(t, tc.expectedResult, result, tc.description)
+				require.NoError(t, err, tc.description)
+				require.Equal(t, tc.expectedResult, result, tc.description)
 			}
 		})
 	}
@@ -237,8 +236,8 @@ func TestEnhanceDSNWithTLS_EdgeCases(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result, err := EnhanceDSNWithTLS(tc.inputDSN, tc.config)
-			assert.NoError(t, err, tc.description)
-			assert.Equal(t, tc.expectedResult, result, tc.description)
+			require.NoError(t, err, tc.description)
+			require.Equal(t, tc.expectedResult, result, tc.description)
 		})
 	}
 }
@@ -293,10 +292,10 @@ func TestAddTLSParametersToDSN(t *testing.T) {
 			result, err := addTLSParametersToDSN(tc.inputDSN, tc.config)
 
 			if tc.expectError {
-				assert.Error(t, err, tc.description)
+				require.Error(t, err, tc.description)
 			} else {
-				assert.NoError(t, err, tc.description)
-				assert.Equal(t, tc.expectedResult, result, tc.description)
+				require.NoError(t, err, tc.description)
+				require.Equal(t, tc.expectedResult, result, tc.description)
 			}
 		})
 	}
@@ -385,17 +384,17 @@ func TestNewDSNTLSPreservation(t *testing.T) {
 
 			if tt.expectSame {
 				// TLS config from the input DSN should be preserved
-				assert.Equal(t, inputCfg.TLSConfig, resultCfg.TLSConfig, tt.description)
+				require.Equal(t, inputCfg.TLSConfig, resultCfg.TLSConfig, tt.description)
 				// Session variables should still be applied
-				assert.NotEmpty(t, resultCfg.Params["sql_mode"], "session variables should be applied even when TLS is preserved")
+				require.NotEmpty(t, resultCfg.Params["sql_mode"], "session variables should be applied even when TLS is preserved")
 			} else {
 				// For REQUIRED mode, verify that TLS was actually added
 				if tt.config.TLSMode == "REQUIRED" {
-					assert.NotEmpty(t, resultCfg.TLSConfig, "Expected TLS config to be set")
+					require.NotEmpty(t, resultCfg.TLSConfig, "Expected TLS config to be set")
 				}
 				// For DISABLED mode, verify that TLS was NOT added
 				if tt.config.TLSMode == "DISABLED" {
-					assert.Empty(t, resultCfg.TLSConfig, "TLS config should not be set when disabled")
+					require.Empty(t, resultCfg.TLSConfig, "TLS config should not be set when disabled")
 				}
 			}
 		})
@@ -431,10 +430,10 @@ func TestEnhanceDSNWithTLS_SpecialCharPasswords(t *testing.T) {
 
 			cfg, err := mysql.ParseDSN(result)
 			require.NoError(t, err)
-			assert.Equal(t, tt.password, cfg.Passwd, "password should survive round-trip through EnhanceDSNWithTLS")
-			assert.Equal(t, "custom", cfg.TLSConfig, "TLS config should be added")
-			assert.Equal(t, "user", cfg.User)
-			assert.Equal(t, "db", cfg.DBName)
+			require.Equal(t, tt.password, cfg.Passwd, "password should survive round-trip through EnhanceDSNWithTLS")
+			require.Equal(t, "custom", cfg.TLSConfig, "TLS config should be added")
+			require.Equal(t, "user", cfg.User)
+			require.Equal(t, "db", cfg.DBName)
 		})
 	}
 }
@@ -468,8 +467,8 @@ func TestAddTLSParametersToDSN_SpecialCharPasswords(t *testing.T) {
 
 			cfg, err := mysql.ParseDSN(result)
 			require.NoError(t, err)
-			assert.Equal(t, tt.password, cfg.Passwd, "password should survive round-trip through addTLSParametersToDSN")
-			assert.Equal(t, "required", cfg.TLSConfig, "TLS config should be set to required")
+			require.Equal(t, tt.password, cfg.Passwd, "password should survive round-trip through addTLSParametersToDSN")
+			require.Equal(t, "required", cfg.TLSConfig, "TLS config should be set to required")
 		})
 	}
 }

@@ -3,7 +3,6 @@ package statement
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -123,10 +122,10 @@ func TestClassify(t *testing.T) {
 			require.Len(t, results, 1)
 
 			c := results[0]
-			assert.Equal(t, tt.wantType, c.Type)
-			assert.Equal(t, tt.wantTable, c.Table)
-			assert.Equal(t, tt.wantDDL, c.Type.IsDDL())
-			assert.Equal(t, tt.wantDML, c.Type.IsDML())
+			require.Equal(t, tt.wantType, c.Type)
+			require.Equal(t, tt.wantTable, c.Table)
+			require.Equal(t, tt.wantDDL, c.Type.IsDDL())
+			require.Equal(t, tt.wantDML, c.Type.IsDML())
 		})
 	}
 }
@@ -223,9 +222,9 @@ func TestClassifySchema(t *testing.T) {
 			results, err := Classify(tt.sql)
 			require.NoError(t, err)
 			require.Len(t, results, 1)
-			assert.Equal(t, tt.wantType, results[0].Type)
-			assert.Equal(t, tt.wantSchema, results[0].Schema)
-			assert.Equal(t, tt.wantTable, results[0].Table)
+			require.Equal(t, tt.wantType, results[0].Type)
+			require.Equal(t, tt.wantSchema, results[0].Schema)
+			require.Equal(t, tt.wantTable, results[0].Table)
 		})
 	}
 }

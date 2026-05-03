@@ -5,7 +5,6 @@ import (
 
 	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,7 +16,7 @@ func TestTableNameLengthLinter_Valid(t *testing.T) {
 	linter := NewTableNameLengthLinter()
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestTableNameLengthLinter_TooLong(t *testing.T) {
@@ -33,10 +32,10 @@ func TestTableNameLengthLinter_TooLong(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "table_name_length", violations[0].Linter.Name())
-	assert.Equal(t, lint.SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "exceeds maximum length")
-	assert.Equal(t, longName, violations[0].Location.Table)
+	require.Equal(t, "table_name_length", violations[0].Linter.Name())
+	require.Equal(t, lint.SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "exceeds maximum length")
+	require.Equal(t, longName, violations[0].Location.Table)
 }
 
 func TestTableNameLengthLinter_ExactlyAtLimit(t *testing.T) {
@@ -51,7 +50,7 @@ func TestTableNameLengthLinter_ExactlyAtLimit(t *testing.T) {
 	linter := NewTableNameLengthLinter()
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Empty(t, violations, "58 character name should be allowed")
+	require.Empty(t, violations, "58 character name should be allowed")
 }
 
 func TestTableNameLengthLinter_Configure(t *testing.T) {
@@ -67,7 +66,7 @@ func TestTableNameLengthLinter_Configure(t *testing.T) {
 
 	// With default config (58), should pass
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 
 	// Configure to max length of 40
 	err = linter.Configure(map[string]string{"maxLength": "40"})
@@ -76,7 +75,7 @@ func TestTableNameLengthLinter_Configure(t *testing.T) {
 	// Now should fail
 	violations = linter.Lint([]*statement.CreateTable{ct}, nil)
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "exceeds maximum length of 40")
+	require.Contains(t, violations[0].Message, "exceeds maximum length of 40")
 }
 
 func TestTableNameLengthLinter_Configure_InvalidConfig(t *testing.T) {
@@ -84,23 +83,23 @@ func TestTableNameLengthLinter_Configure_InvalidConfig(t *testing.T) {
 
 	// Invalid integer
 	err := linter.Configure(map[string]string{"maxLength": "invalid"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must be a valid integer")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be a valid integer")
 
 	// Zero length
 	err = linter.Configure(map[string]string{"maxLength": "0"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must be positive")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be positive")
 
 	// Negative length
 	err = linter.Configure(map[string]string{"maxLength": "-1"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must be positive")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be positive")
 
 	// Unknown key
 	err = linter.Configure(map[string]string{"unknownKey": "value"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown config key")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown config key")
 }
 
 func TestTableNameLengthLinter_DefaultConfig(t *testing.T) {
@@ -108,7 +107,7 @@ func TestTableNameLengthLinter_DefaultConfig(t *testing.T) {
 
 	config := linter.DefaultConfig()
 	require.NotNil(t, config)
-	assert.Equal(t, "58", config["maxLength"])
+	require.Equal(t, "58", config["maxLength"])
 }
 
 func TestDuplicateColumnLinter_NoDuplicates(t *testing.T) {
@@ -119,7 +118,7 @@ func TestDuplicateColumnLinter_NoDuplicates(t *testing.T) {
 	linter := &DuplicateColumnLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestDuplicateColumnLinter_WithDuplicates(t *testing.T) {
@@ -131,12 +130,12 @@ func TestDuplicateColumnLinter_WithDuplicates(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "duplicate_column", violations[0].Linter.Name())
-	assert.Equal(t, lint.SeverityError, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "Duplicate column definition")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "id", *violations[0].Location.Column)
+	require.Equal(t, "duplicate_column", violations[0].Linter.Name())
+	require.Equal(t, lint.SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "Duplicate column definition")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "id", *violations[0].Location.Column)
 }
 
 func TestDuplicateColumnLinter_MultipleDuplicates(t *testing.T) {
@@ -158,8 +157,8 @@ func TestDuplicateColumnLinter_MultipleDuplicates(t *testing.T) {
 		}
 	}
 
-	assert.True(t, duplicates["id"])
-	assert.True(t, duplicates["name"])
+	require.True(t, duplicates["id"])
+	require.True(t, duplicates["name"])
 }
 
 func TestExampleLinters_Integration(t *testing.T) {
@@ -191,8 +190,8 @@ func TestExampleLinters_Integration(t *testing.T) {
 		linterCounts[v.Linter.Name()]++
 	}
 
-	assert.Equal(t, 1, linterCounts["table_name_length"])
-	assert.Equal(t, 1, linterCounts["duplicate_column"])
+	require.Equal(t, 1, linterCounts["table_name_length"])
+	require.Equal(t, 1, linterCounts["duplicate_column"])
 }
 
 func TestExampleLinters_WithConfig(t *testing.T) {
@@ -217,7 +216,7 @@ func TestExampleLinters_WithConfig(t *testing.T) {
 
 	// Should only have violation from duplicate_column linter
 	require.Len(t, violations, 1)
-	assert.Equal(t, "duplicate_column", violations[0].Linter.Name())
+	require.Equal(t, "duplicate_column", violations[0].Linter.Name())
 }
 
 func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
@@ -236,7 +235,7 @@ func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
 	// With default config (58), should pass
 	violations, err := lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{})
 	require.NoError(t, err)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 
 	// Configure max length to 40 via Config.Settings
 	violations, err = lint.RunLinters([]*statement.CreateTable{ct}, nil, lint.Config{
@@ -250,6 +249,6 @@ func TestTableNameLengthLinter_WithConfigSettings(t *testing.T) {
 
 	// Should now have a violation
 	require.Len(t, violations, 1)
-	assert.Equal(t, "table_name_length", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "exceeds maximum length of 40")
+	require.Equal(t, "table_name_length", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "exceeds maximum length of 40")
 }

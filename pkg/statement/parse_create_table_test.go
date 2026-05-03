@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -472,33 +471,33 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 			partition := ct.GetPartition()
 
 			if tc.expected == nil {
-				assert.Nil(t, partition)
+				require.Nil(t, partition)
 				return
 			}
 
 			require.NotNil(t, partition)
-			assert.Equal(t, tc.expected.Type, partition.Type)
-			assert.Equal(t, tc.expected.Partitions, partition.Partitions)
-			assert.Equal(t, tc.expected.Columns, partition.Columns)
+			require.Equal(t, tc.expected.Type, partition.Type)
+			require.Equal(t, tc.expected.Partitions, partition.Partitions)
+			require.Equal(t, tc.expected.Columns, partition.Columns)
 
 			if tc.expected.Expression != nil {
 				require.NotNil(t, partition.Expression)
-				assert.Equal(t, *tc.expected.Expression, *partition.Expression)
+				require.Equal(t, *tc.expected.Expression, *partition.Expression)
 			} else {
-				assert.Nil(t, partition.Expression)
+				require.Nil(t, partition.Expression)
 			}
 
-			assert.Len(t, partition.Definitions, len(tc.expected.Definitions))
+			require.Len(t, partition.Definitions, len(tc.expected.Definitions))
 
 			for i, expectedDef := range tc.expected.Definitions {
 				if i < len(partition.Definitions) {
 					actualDef := partition.Definitions[i]
-					assert.Equal(t, expectedDef.Name, actualDef.Name)
+					require.Equal(t, expectedDef.Name, actualDef.Name)
 
 					if expectedDef.Values != nil {
 						require.NotNil(t, actualDef.Values)
-						assert.Equal(t, expectedDef.Values.Type, actualDef.Values.Type)
-						assert.Equal(t, expectedDef.Values.Values, actualDef.Values.Values)
+						require.Equal(t, expectedDef.Values.Type, actualDef.Values.Type)
+						require.Equal(t, expectedDef.Values.Values, actualDef.Values.Values)
 					}
 				}
 			}
@@ -717,13 +716,13 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			SQL:         "CREATE TABLE foo (a varchar(50), b int);",
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
-				assert.Equal(t, "foo", createTable.GetTableName())
+				require.Equal(t, "foo", createTable.GetTableName())
 				columns := createTable.GetColumns()
-				assert.Len(t, columns, 2)
-				assert.Equal(t, "a", columns[0].Name)
-				assert.Contains(t, columns[0].Type, "varchar")
-				assert.Equal(t, "b", columns[1].Name)
-				assert.Contains(t, columns[1].Type, "int")
+				require.Len(t, columns, 2)
+				require.Equal(t, "a", columns[0].Name)
+				require.Contains(t, columns[0].Type, "varchar")
+				require.Equal(t, "b", columns[1].Name)
+				require.Contains(t, columns[1].Type, "int")
 			},
 		},
 		{
@@ -732,13 +731,13 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				columns := createTable.GetColumns()
-				assert.Len(t, columns, 4)
+				require.Len(t, columns, 4)
 
 				for _, col := range columns {
 					// TiDB parser includes UNSIGNED in the type string as "type(size) UNSIGNED"
-					assert.NotNil(t, col.Unsigned)
-					assert.True(t, *col.Unsigned)
-					assert.Contains(t, col.Type, "int")
+					require.NotNil(t, col.Unsigned)
+					require.True(t, *col.Unsigned)
+					require.Contains(t, col.Type, "int")
 				}
 			},
 		},
@@ -762,7 +761,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, invisibleIndex)
 				require.NotNil(t, invisibleIndex.Invisible)
-				assert.True(t, *invisibleIndex.Invisible)
+				require.True(t, *invisibleIndex.Invisible)
 			},
 		},
 		{
@@ -783,7 +782,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, visibleIndex)
 				// For VISIBLE indexes, Invisible should be nil or false
-				assert.True(t, visibleIndex.Invisible == nil || !*visibleIndex.Invisible)
+				require.True(t, visibleIndex.Invisible == nil || !*visibleIndex.Invisible)
 			},
 		},
 		{
@@ -805,7 +804,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 				require.NotNil(t, testIndex)
 				// Last option should win (VISIBLE), so Invisible should be false
 				require.NotNil(t, testIndex.Invisible)
-				assert.False(t, *testIndex.Invisible)
+				require.False(t, *testIndex.Invisible)
 			},
 		},
 
@@ -828,7 +827,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, btreeIndex)
 				require.NotNil(t, btreeIndex.Using)
-				assert.Equal(t, "BTREE", *btreeIndex.Using)
+				require.Equal(t, "BTREE", *btreeIndex.Using)
 			},
 		},
 		{
@@ -849,7 +848,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, hashIndex)
 				require.NotNil(t, hashIndex.Using)
-				assert.Equal(t, "HASH", *hashIndex.Using)
+				require.Equal(t, "HASH", *hashIndex.Using)
 			},
 		},
 		{
@@ -870,9 +869,9 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, combinedIndex)
 				require.NotNil(t, combinedIndex.Using)
-				assert.Equal(t, "HASH", *combinedIndex.Using)
+				require.Equal(t, "HASH", *combinedIndex.Using)
 				require.NotNil(t, combinedIndex.Invisible)
-				assert.True(t, *combinedIndex.Invisible)
+				require.True(t, *combinedIndex.Invisible)
 			},
 		},
 
@@ -895,7 +894,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, commentIndex)
 				require.NotNil(t, commentIndex.Comment)
-				assert.Equal(t, "Index comment", *commentIndex.Comment)
+				require.Equal(t, "Index comment", *commentIndex.Comment)
 			},
 		},
 
@@ -918,7 +917,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, kbsIndex)
 				require.NotNil(t, kbsIndex.KeyBlockSize)
-				assert.Equal(t, uint64(16), *kbsIndex.KeyBlockSize)
+				require.Equal(t, uint64(16), *kbsIndex.KeyBlockSize)
 			},
 		},
 
@@ -941,7 +940,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				require.NotNil(t, fulltextIndex)
 				require.NotNil(t, fulltextIndex.ParserName)
-				assert.Equal(t, "ngram", *fulltextIndex.ParserName)
+				require.Equal(t, "ngram", *fulltextIndex.ParserName)
 			},
 		},
 
@@ -963,15 +962,15 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 				}
 
 				require.NotNil(t, uniqueIndex)
-				assert.Equal(t, "UNIQUE", uniqueIndex.Type)
+				require.Equal(t, "UNIQUE", uniqueIndex.Type)
 				require.NotNil(t, uniqueIndex.Using)
-				assert.Equal(t, "BTREE", *uniqueIndex.Using)
+				require.Equal(t, "BTREE", *uniqueIndex.Using)
 				require.NotNil(t, uniqueIndex.Comment)
-				assert.Equal(t, "Unique email", *uniqueIndex.Comment)
+				require.Equal(t, "Unique email", *uniqueIndex.Comment)
 				require.NotNil(t, uniqueIndex.KeyBlockSize)
-				assert.Equal(t, uint64(8), *uniqueIndex.KeyBlockSize)
+				require.Equal(t, uint64(8), *uniqueIndex.KeyBlockSize)
 				require.NotNil(t, uniqueIndex.Invisible)
-				assert.True(t, *uniqueIndex.Invisible)
+				require.True(t, *uniqueIndex.Invisible)
 			},
 		},
 
@@ -982,8 +981,8 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				options := createTable.GetTableOptions()
-				assert.Equal(t, "InnoDB", options["engine"])
-				assert.Equal(t, "utf8mb4", options["charset"])
+				require.Equal(t, "InnoDB", options["engine"])
+				require.Equal(t, "utf8mb4", options["charset"])
 			},
 		},
 		{
@@ -995,7 +994,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 				// Note: Table-level KEY_BLOCK_SIZE might not be supported by our parser
 				// This is a known limitation
 				if kbs, exists := options["key_block_size"]; exists {
-					assert.Equal(t, uint64(1024), kbs)
+					require.Equal(t, uint64(1024), kbs)
 				}
 			},
 		},
@@ -1005,7 +1004,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				options := createTable.GetTableOptions()
-				assert.Equal(t, "Test table", options["comment"])
+				require.Equal(t, "Test table", options["comment"])
 			},
 		},
 
@@ -1016,9 +1015,9 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				columns := createTable.GetColumns()
-				assert.Len(t, columns, 1)
-				assert.True(t, columns[0].AutoInc)
-				assert.False(t, columns[0].Nullable) // PRIMARY KEY implies NOT NULL
+				require.Len(t, columns, 1)
+				require.True(t, columns[0].AutoInc)
+				require.False(t, columns[0].Nullable) // PRIMARY KEY implies NOT NULL
 			},
 		},
 		{
@@ -1027,12 +1026,12 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				columns := createTable.GetColumns()
-				assert.Len(t, columns, 1)
+				require.Len(t, columns, 1)
 				// Note: Default values might be parsed differently by TiDB parser
 				// The actual default value parsing depends on the expression parser
 				// For now, we just verify the column was parsed successfully
-				assert.Equal(t, "status", columns[0].Name)
-				assert.Contains(t, columns[0].Type, "varchar")
+				require.Equal(t, "status", columns[0].Name)
+				require.Contains(t, columns[0].Type, "varchar")
 			},
 		},
 		{
@@ -1041,7 +1040,7 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				columns := createTable.GetColumns()
-				assert.Len(t, columns, 1)
+				require.Len(t, columns, 1)
 				// Note: Column comments might be parsed as empty string due to TiDB parser behavior
 				// This is expected based on our earlier investigation
 			},
@@ -1054,8 +1053,8 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, createTable *CreateTable) {
 				columns := createTable.GetColumns()
-				assert.Len(t, columns, 1)
-				assert.Contains(t, columns[0].Type, "char")
+				require.Len(t, columns, 1)
+				require.Contains(t, columns[0].Type, "char")
 			},
 		},
 
@@ -1078,17 +1077,17 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 			ShouldParse: true,
 			Validate: func(t *testing.T, ct *CreateTable) {
 				// Validate table
-				assert.Equal(t, "user_activity", ct.GetTableName())
+				require.Equal(t, "user_activity", ct.GetTableName())
 
 				// Validate columns
 				columns := ct.GetColumns()
-				assert.Len(t, columns, 5)
+				require.Len(t, columns, 5)
 
 				// Validate table options
 				options := ct.GetTableOptions()
-				assert.Equal(t, "InnoDB", options["engine"])
-				assert.Equal(t, "utf8mb4", options["charset"])
-				assert.Equal(t, "User activity tracking", options["comment"])
+				require.Equal(t, "InnoDB", options["engine"])
+				require.Equal(t, "utf8mb4", options["charset"])
+				require.Equal(t, "User activity tracking", options["comment"])
 
 				// Validate indexes
 				indexes := ct.GetIndexes()
@@ -1100,35 +1099,35 @@ func TestComprehensiveParsingFromTiDBTestSuite(t *testing.T) {
 
 				// Check specific indexes
 				userIdIndex := indexMap["idx_user_id"]
-				assert.Equal(t, "INDEX", userIdIndex.Type)
+				require.Equal(t, "INDEX", userIdIndex.Type)
 				require.NotNil(t, userIdIndex.Comment)
-				assert.Equal(t, "User lookup", *userIdIndex.Comment)
+				require.Equal(t, "User lookup", *userIdIndex.Comment)
 
 				timestampIndex := indexMap["idx_timestamp"]
 				require.NotNil(t, timestampIndex.Using)
-				assert.Equal(t, "BTREE", *timestampIndex.Using)
+				require.Equal(t, "BTREE", *timestampIndex.Using)
 
 				activityIndex := indexMap["idx_activity_type"]
 				require.NotNil(t, activityIndex.Invisible)
-				assert.True(t, *activityIndex.Invisible)
+				require.True(t, *activityIndex.Invisible)
 				require.NotNil(t, activityIndex.Comment)
-				assert.Equal(t, "Activity type lookup", *activityIndex.Comment)
+				require.Equal(t, "Activity type lookup", *activityIndex.Comment)
 
 				uniqueIndex := indexMap["uk_user_timestamp"]
-				assert.Equal(t, "UNIQUE", uniqueIndex.Type)
+				require.Equal(t, "UNIQUE", uniqueIndex.Type)
 				require.NotNil(t, uniqueIndex.Using)
-				assert.Equal(t, "BTREE", *uniqueIndex.Using)
+				require.Equal(t, "BTREE", *uniqueIndex.Using)
 				require.NotNil(t, uniqueIndex.KeyBlockSize)
-				assert.Equal(t, uint64(16), *uniqueIndex.KeyBlockSize)
+				require.Equal(t, uint64(16), *uniqueIndex.KeyBlockSize)
 				require.NotNil(t, uniqueIndex.Invisible)
-				assert.True(t, *uniqueIndex.Invisible)
+				require.True(t, *uniqueIndex.Invisible)
 
 				fulltextIndex := indexMap["idx_data"]
-				assert.Equal(t, "FULLTEXT", fulltextIndex.Type)
+				require.Equal(t, "FULLTEXT", fulltextIndex.Type)
 				require.NotNil(t, fulltextIndex.ParserName)
-				assert.Equal(t, "ngram", *fulltextIndex.ParserName)
+				require.Equal(t, "ngram", *fulltextIndex.ParserName)
 				require.NotNil(t, fulltextIndex.Comment)
-				assert.Equal(t, "JSON search", *fulltextIndex.Comment)
+				require.Equal(t, "JSON search", *fulltextIndex.Comment)
 			},
 		},
 
@@ -1204,9 +1203,9 @@ func TestTiDBParserCompatibility(t *testing.T) {
 			_, err := ParseCreateTable(tc.sql)
 
 			if tc.shouldParse {
-				assert.NoError(t, err, "Expected to parse: %s", tc.sql)
+				require.NoError(t, err, "Expected to parse: %s", tc.sql)
 			} else {
-				assert.Error(t, err, "Expected to fail: %s", tc.sql)
+				require.Error(t, err, "Expected to fail: %s", tc.sql)
 			}
 		})
 	}
@@ -1359,7 +1358,7 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 								break
 							}
 						}
-						assert.False(t, found, "Regular index %s should have been removed", idx.Name)
+						require.False(t, found, "Regular index %s should have been removed", idx.Name)
 					}
 				}
 			}
@@ -1373,7 +1372,7 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 						break
 					}
 				}
-				assert.True(t, foundPrimary, "PRIMARY KEY should be kept")
+				require.True(t, foundPrimary, "PRIMARY KEY should be kept")
 			}
 
 			// Check that UNIQUE indexes are kept
@@ -1390,7 +1389,7 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 						modifiedUniqueCount++
 					}
 				}
-				assert.Equal(t, originalUniqueCount, modifiedUniqueCount, "UNIQUE indexes should be kept")
+				require.Equal(t, originalUniqueCount, modifiedUniqueCount, "UNIQUE indexes should be kept")
 			}
 
 			// Check that FULLTEXT indexes are kept
@@ -1407,12 +1406,12 @@ func TestRemoveSecondaryIndexes(t *testing.T) {
 						modifiedFulltextCount++
 					}
 				}
-				assert.Equal(t, originalFulltextCount, modifiedFulltextCount, "FULLTEXT indexes should be kept")
+				require.Equal(t, originalFulltextCount, modifiedFulltextCount, "FULLTEXT indexes should be kept")
 			}
 
 			// Verify the modified SQL is valid by checking it can be parsed
-			assert.NotEmpty(t, modifiedSQL)
-			assert.Contains(t, modifiedSQL, "CREATE TABLE")
+			require.NotEmpty(t, modifiedSQL)
+			require.Contains(t, modifiedSQL, "CREATE TABLE")
 		})
 	}
 }
@@ -1713,16 +1712,16 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			result, err := GetMissingSecondaryIndexes(tc.sourceCreateTable, tc.targetCreateTable, tc.tableName)
 
 			if tc.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				return
 			}
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			if tc.expectEmpty {
-				assert.Empty(t, result, "Expected empty result but got: %s", result)
+				require.Empty(t, result, "Expected empty result but got: %s", result)
 			} else {
-				assert.Equal(t, tc.expectedAlter, result)
+				require.Equal(t, tc.expectedAlter, result)
 			}
 		})
 	}
@@ -1752,7 +1751,7 @@ func TestGetMissingSecondaryIndexes_ErrorCases(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := GetMissingSecondaryIndexes(tc.sourceCreateTable, tc.targetCreateTable, tc.tableName)
-			assert.Error(t, err)
+			require.Error(t, err)
 		})
 	}
 }
@@ -1787,7 +1786,7 @@ func TestRemoveSecondaryIndexes_ErrorCases(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := RemoveSecondaryIndexes(tc.createTable)
-			assert.Error(t, err, "Expected error for invalid CREATE TABLE statement")
+			require.Error(t, err, "Expected error for invalid CREATE TABLE statement")
 		})
 	}
 }
@@ -1838,7 +1837,7 @@ func TestCurrentTimestampPrecision(t *testing.T) {
 			col := ct.Columns.ByName(tc.columnName)
 			require.NotNil(t, col, "column %q not found", tc.columnName)
 			require.NotNil(t, col.Default, "column %q has no default", tc.columnName)
-			assert.Equal(t, tc.expectedDefault, *col.Default)
+			require.Equal(t, tc.expectedDefault, *col.Default)
 		})
 	}
 }
@@ -1898,8 +1897,8 @@ func TestExpressionDefaultParsing(t *testing.T) {
 			col := ct.Columns.ByName(tc.columnName)
 			require.NotNil(t, col, "column %q not found", tc.columnName)
 			require.NotNil(t, col.Default, "column %q has no default", tc.columnName)
-			assert.Equal(t, tc.expectedDefault, *col.Default)
-			assert.Equal(t, tc.expectedIsExpr, col.DefaultIsExpr, "DefaultIsExpr mismatch for %q", tc.columnName)
+			require.Equal(t, tc.expectedDefault, *col.Default)
+			require.Equal(t, tc.expectedIsExpr, col.DefaultIsExpr, "DefaultIsExpr mismatch for %q", tc.columnName)
 		})
 	}
 }
@@ -1971,7 +1970,7 @@ func TestBinaryTypeDetection(t *testing.T) {
 			columns := ct.GetColumns()
 			col := columns.ByName(tc.columnName)
 			require.NotNil(t, col, "Column %s should exist", tc.columnName)
-			assert.Equal(t, tc.expectedType, col.Type, "Column type should be %s", tc.expectedType)
+			require.Equal(t, tc.expectedType, col.Type, "Column type should be %s", tc.expectedType)
 		})
 	}
 }
@@ -2016,13 +2015,13 @@ func TestBinaryTypeWithLength(t *testing.T) {
 			columns := ct.GetColumns()
 			col := columns.ByName(tc.columnName)
 			require.NotNil(t, col)
-			assert.Equal(t, tc.expectedType, col.Type)
+			require.Equal(t, tc.expectedType, col.Type)
 
 			if tc.expectedLength != nil {
 				require.NotNil(t, col.Length, "Length should be set")
-				assert.Equal(t, *tc.expectedLength, *col.Length)
+				require.Equal(t, *tc.expectedLength, *col.Length)
 			} else {
-				assert.Nil(t, col.Length, "Length should not be set")
+				require.Nil(t, col.Length, "Length should not be set")
 			}
 		})
 	}
@@ -2093,16 +2092,16 @@ func TestCharsetCollationExtraction(t *testing.T) {
 
 			if tc.expectedCharset != nil {
 				require.NotNil(t, col.Charset, "Charset should be set")
-				assert.Equal(t, *tc.expectedCharset, *col.Charset)
+				require.Equal(t, *tc.expectedCharset, *col.Charset)
 			} else {
-				assert.Nil(t, col.Charset, "Charset should not be set")
+				require.Nil(t, col.Charset, "Charset should not be set")
 			}
 
 			if tc.expectedCollation != nil {
 				require.NotNil(t, col.Collation, "Collation should be set")
-				assert.Equal(t, *tc.expectedCollation, *col.Collation)
+				require.Equal(t, *tc.expectedCollation, *col.Collation)
 			} else {
-				assert.Nil(t, col.Collation, "Collation should not be set")
+				require.Nil(t, col.Collation, "Collation should not be set")
 			}
 		})
 	}
@@ -2177,7 +2176,7 @@ func TestBinaryTypeNotAppliedToNonTextTypes(t *testing.T) {
 			columns := ct.GetColumns()
 			col := columns.ByName(tc.columnName)
 			require.NotNil(t, col)
-			assert.Equal(t, tc.expectedType, col.Type)
+			require.Equal(t, tc.expectedType, col.Type)
 		})
 	}
 }

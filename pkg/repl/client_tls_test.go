@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,17 +87,17 @@ func TestClientTLSConfiguration(t *testing.T) {
 			}
 
 			// Verify TLS config is stored correctly
-			assert.NotNil(t, client.dbConfig)
-			assert.Equal(t, tc.tlsMode, client.dbConfig.TLSMode)
-			assert.Equal(t, tc.tlsCert, client.dbConfig.TLSCertificatePath)
+			require.NotNil(t, client.dbConfig)
+			require.Equal(t, tc.tlsMode, client.dbConfig.TLSMode)
+			require.Equal(t, tc.tlsCert, client.dbConfig.TLSCertificatePath)
 
 			// Test the TLS mode validation logic that would be used in Run()
 			if tc.tlsMode == "DISABLED" {
 				// For disabled mode, TLS should not be configured in actual connection
-				assert.Equal(t, "DISABLED", client.dbConfig.TLSMode)
+				require.Equal(t, "DISABLED", client.dbConfig.TLSMode)
 			} else {
 				// For other modes, TLS should be configured
-				assert.NotEqual(t, "DISABLED", client.dbConfig.TLSMode)
+				require.NotEqual(t, "DISABLED", client.dbConfig.TLSMode)
 			}
 		})
 	}
@@ -137,7 +136,7 @@ func TestClientTLSModeString(t *testing.T) {
 			case "VERIFY_IDENTITY":
 				result = "verify_identity"
 			}
-			assert.Equal(t, tc.expected, result)
+			require.Equal(t, tc.expected, result)
 		})
 	}
 }

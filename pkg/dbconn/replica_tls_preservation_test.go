@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,13 +115,13 @@ func TestTLSParameterPreservation(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.shouldPreserve {
-				assert.Equal(t, tt.expectedDSN, result, tt.description)
-				assert.Contains(t, result, "tls=", "Expected TLS parameter to be preserved")
+				require.Equal(t, tt.expectedDSN, result, tt.description)
+				require.Contains(t, result, "tls=", "Expected TLS parameter to be preserved")
 			} else {
-				assert.NotEqual(t, tt.replicaDSN, result, tt.description)
+				require.NotEqual(t, tt.replicaDSN, result, tt.description)
 				// For inheritance cases, verify TLS was added based on main config
 				if tt.mainTLSMode != "DISABLED" {
-					assert.Contains(t, result, "tls=", "Expected TLS parameter to be inherited from main config")
+					require.Contains(t, result, "tls=", "Expected TLS parameter to be inherited from main config")
 				}
 			}
 		})
@@ -195,10 +194,10 @@ func TestMixedEnvironmentTLSScenarios(t *testing.T) {
 			result, err := EnhanceDSNWithTLS(scenario.replicaDSN, config)
 
 			if scenario.expectError {
-				assert.Error(t, err, scenario.description)
+				require.Error(t, err, scenario.description)
 			} else {
-				assert.NoError(t, err, scenario.description)
-				assert.Contains(t, result, scenario.expectedTLS, scenario.description)
+				require.NoError(t, err, scenario.description)
+				require.Contains(t, result, scenario.expectedTLS, scenario.description)
 			}
 		})
 	}
@@ -285,9 +284,9 @@ func TestTLSInheritanceBehavior(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.expectedConfig == "" {
-				assert.NotContains(t, result, "tls=", tt.description)
+				require.NotContains(t, result, "tls=", tt.description)
 			} else {
-				assert.Contains(t, result, tt.expectedConfig, tt.description)
+				require.Contains(t, result, tt.expectedConfig, tt.description)
 			}
 		})
 	}
@@ -305,8 +304,8 @@ func TestCaseInsensitiveTLSModes(t *testing.T) {
 			dsn := "user:pass@tcp(host:3306)/db"
 			result, err := EnhanceDSNWithTLS(dsn, config)
 
-			assert.NoError(t, err)
-			assert.Contains(t, result, "tls=required",
+			require.NoError(t, err)
+			require.Contains(t, result, "tls=required",
 				"TLS mode %s should be handled case-insensitively", tlsMode)
 		})
 	}
@@ -354,8 +353,8 @@ func TestTLSParameterEdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := EnhanceDSNWithTLS(tt.dsn, tt.config)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expected, result, tt.description)
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, result, tt.description)
 		})
 	}
 }
@@ -410,7 +409,7 @@ func TestNewDSNTLSPreservationExtensive(t *testing.T) {
 			require.NoError(t, err)
 
 			// Should contain the expected TLS value (either preserved from original DSN or from config)
-			assert.Contains(t, result, "tls="+tt.expectTLSValue, tt.description)
+			require.Contains(t, result, "tls="+tt.expectTLSValue, tt.description)
 		})
 	}
 }
