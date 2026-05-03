@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,7 +21,7 @@ func TestNameCaseLinter_LowercaseTableName(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Lowercase table name - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_UppercaseTableName(t *testing.T) {
@@ -38,10 +37,10 @@ func TestNameCaseLinter_UppercaseTableName(t *testing.T) {
 
 	// Uppercase table name should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "name_case", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "USERS")
-	assert.Contains(t, violations[0].Message, "not lowercase")
-	assert.Equal(t, "USERS", violations[0].Location.Table)
+	require.Equal(t, "name_case", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "USERS")
+	require.Contains(t, violations[0].Message, "not lowercase")
+	require.Equal(t, "USERS", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_MixedCaseTableName(t *testing.T) {
@@ -57,10 +56,10 @@ func TestNameCaseLinter_MixedCaseTableName(t *testing.T) {
 
 	// Mixed case table name should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "name_case", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "UserAccounts")
-	assert.Contains(t, violations[0].Message, "not lowercase")
-	assert.Equal(t, "UserAccounts", violations[0].Location.Table)
+	require.Equal(t, "name_case", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "UserAccounts")
+	require.Contains(t, violations[0].Message, "not lowercase")
+	require.Equal(t, "UserAccounts", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_CamelCaseTableName(t *testing.T) {
@@ -76,9 +75,9 @@ func TestNameCaseLinter_CamelCaseTableName(t *testing.T) {
 
 	// Camel case table name should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "name_case", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "userAccounts")
-	assert.Equal(t, "userAccounts", violations[0].Location.Table)
+	require.Equal(t, "name_case", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "userAccounts")
+	require.Equal(t, "userAccounts", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_TableNameWithUnderscore(t *testing.T) {
@@ -93,7 +92,7 @@ func TestNameCaseLinter_TableNameWithUnderscore(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Lowercase with underscore - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_TableNameWithNumbers(t *testing.T) {
@@ -108,7 +107,7 @@ func TestNameCaseLinter_TableNameWithNumbers(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Lowercase with numbers - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_TableNameWithNumbersAndUppercase(t *testing.T) {
@@ -124,7 +123,7 @@ func TestNameCaseLinter_TableNameWithNumbersAndUppercase(t *testing.T) {
 
 	// Mixed case with numbers should be detected
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "Users2024")
+	require.Contains(t, violations[0].Message, "Users2024")
 }
 
 // Tests for multiple tables
@@ -144,7 +143,7 @@ func TestNameCaseLinter_MultipleTablesAllLowercase(t *testing.T) {
 	violations := linter.Lint(nil, stmts1)
 
 	// All lowercase - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_MultipleTablesMixedCase(t *testing.T) {
@@ -170,8 +169,8 @@ func TestNameCaseLinter_MultipleTablesMixedCase(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "Orders")
-	assert.Contains(t, tables, "Products")
+	require.Contains(t, tables, "Orders")
+	require.Contains(t, tables, "Products")
 }
 
 // Tests for existing tables
@@ -188,7 +187,7 @@ func TestNameCaseLinter_ExistingTableLowercase(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{existingTable}, nil)
 
 	// Lowercase - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_ExistingTableUppercase(t *testing.T) {
@@ -204,7 +203,7 @@ func TestNameCaseLinter_ExistingTableUppercase(t *testing.T) {
 
 	// Uppercase should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "USERS", violations[0].Location.Table)
+	require.Equal(t, "USERS", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_ExistingTableMixedCase(t *testing.T) {
@@ -220,7 +219,7 @@ func TestNameCaseLinter_ExistingTableMixedCase(t *testing.T) {
 
 	// Mixed case should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "UserAccounts", violations[0].Location.Table)
+	require.Equal(t, "UserAccounts", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_MultipleExistingTables(t *testing.T) {
@@ -241,7 +240,7 @@ func TestNameCaseLinter_MultipleExistingTables(t *testing.T) {
 
 	// Should detect one violation (Orders)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "Orders", violations[0].Location.Table)
+	require.Equal(t, "Orders", violations[0].Location.Table)
 }
 
 // Tests for ALTER TABLE RENAME
@@ -255,7 +254,7 @@ func TestNameCaseLinter_AlterTableRenameLowercase(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Renaming to lowercase - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableRenameUppercase(t *testing.T) {
@@ -268,11 +267,11 @@ func TestNameCaseLinter_AlterTableRenameUppercase(t *testing.T) {
 
 	// Renaming to uppercase should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "name_case", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "users")
-	assert.Contains(t, violations[0].Message, "CUSTOMERS")
-	assert.Contains(t, violations[0].Message, "not lowercase")
-	assert.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, "name_case", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "users")
+	require.Contains(t, violations[0].Message, "CUSTOMERS")
+	require.Contains(t, violations[0].Message, "not lowercase")
+	require.Equal(t, "users", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_AlterTableRenameMixedCase(t *testing.T) {
@@ -285,9 +284,9 @@ func TestNameCaseLinter_AlterTableRenameMixedCase(t *testing.T) {
 
 	// Renaming to mixed case should be detected
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "users")
-	assert.Contains(t, violations[0].Message, "UserAccounts")
-	assert.Equal(t, "users", violations[0].Location.Table)
+	require.Contains(t, violations[0].Message, "users")
+	require.Contains(t, violations[0].Message, "UserAccounts")
+	require.Equal(t, "users", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_AlterTableRenameCamelCase(t *testing.T) {
@@ -300,7 +299,7 @@ func TestNameCaseLinter_AlterTableRenameCamelCase(t *testing.T) {
 
 	// Renaming to camel case should be detected
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "userAccounts")
+	require.Contains(t, violations[0].Message, "userAccounts")
 }
 
 func TestNameCaseLinter_AlterTableRenameWithUnderscore(t *testing.T) {
@@ -312,7 +311,7 @@ func TestNameCaseLinter_AlterTableRenameWithUnderscore(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Renaming to lowercase with underscore - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableRenameWithNumbers(t *testing.T) {
@@ -324,7 +323,7 @@ func TestNameCaseLinter_AlterTableRenameWithNumbers(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Renaming to lowercase with numbers - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableRenameToSameName(t *testing.T) {
@@ -336,7 +335,7 @@ func TestNameCaseLinter_AlterTableRenameToSameName(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Renaming to same name - no violations (no actual rename)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableRenameUppercaseToUppercase(t *testing.T) {
@@ -349,7 +348,7 @@ func TestNameCaseLinter_AlterTableRenameUppercaseToUppercase(t *testing.T) {
 
 	// Renaming from uppercase to uppercase should be detected
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "CUSTOMERS")
+	require.Contains(t, violations[0].Message, "CUSTOMERS")
 }
 
 func TestNameCaseLinter_AlterTableRenameUppercaseToLowercase(t *testing.T) {
@@ -361,7 +360,7 @@ func TestNameCaseLinter_AlterTableRenameUppercaseToLowercase(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Renaming from uppercase to lowercase - no violations (fixing the issue)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableRenameMixedCaseToLowercase(t *testing.T) {
@@ -373,7 +372,7 @@ func TestNameCaseLinter_AlterTableRenameMixedCaseToLowercase(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Renaming from mixed case to lowercase - no violations (fixing the issue)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Tests for other ALTER TABLE operations (should not trigger violations)
@@ -387,7 +386,7 @@ func TestNameCaseLinter_AlterTableAddColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ADD COLUMN should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableDropColumn(t *testing.T) {
@@ -399,7 +398,7 @@ func TestNameCaseLinter_AlterTableDropColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// DROP COLUMN should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableModifyColumn(t *testing.T) {
@@ -411,7 +410,7 @@ func TestNameCaseLinter_AlterTableModifyColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// MODIFY COLUMN should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_AlterTableAddIndex(t *testing.T) {
@@ -423,7 +422,7 @@ func TestNameCaseLinter_AlterTableAddIndex(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ADD INDEX should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Tests for combined scenarios
@@ -446,8 +445,8 @@ func TestNameCaseLinter_ExistingAndNewTables(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "USERS")
-	assert.Contains(t, tables, "Orders")
+	require.Contains(t, tables, "USERS")
+	require.Contains(t, tables, "Orders")
 }
 
 func TestNameCaseLinter_CreateAndRename(t *testing.T) {
@@ -468,7 +467,7 @@ func TestNameCaseLinter_CreateAndRename(t *testing.T) {
 
 	// Should only detect the rename violation
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "PRODUCTS_NEW")
+	require.Contains(t, violations[0].Message, "PRODUCTS_NEW")
 }
 
 func TestNameCaseLinter_MultipleRenames(t *testing.T) {
@@ -497,15 +496,15 @@ func TestNameCaseLinter_MultipleRenames(t *testing.T) {
 	for _, v := range violations {
 		if v.Location.Table == "users" {
 			foundUsers = true
-			assert.Contains(t, v.Message, "USERS_NEW")
+			require.Contains(t, v.Message, "USERS_NEW")
 		}
 		if v.Location.Table == "orders" {
 			foundOrders = true
-			assert.Contains(t, v.Message, "Orders_Archive")
+			require.Contains(t, v.Message, "Orders_Archive")
 		}
 	}
-	assert.True(t, foundUsers)
-	assert.True(t, foundOrders)
+	require.True(t, foundUsers)
+	require.True(t, foundOrders)
 }
 
 // Tests for edge cases
@@ -515,7 +514,7 @@ func TestNameCaseLinter_EmptyInput(t *testing.T) {
 	violations := linter.Lint(nil, nil)
 
 	// No tables - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_EmptyTableList(t *testing.T) {
@@ -523,7 +522,7 @@ func TestNameCaseLinter_EmptyTableList(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{}, []*statement.AbstractStatement{})
 
 	// Empty lists - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_SingleCharacterTableName(t *testing.T) {
@@ -535,7 +534,7 @@ func TestNameCaseLinter_SingleCharacterTableName(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Single lowercase character - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_SingleCharacterUppercaseTableName(t *testing.T) {
@@ -548,7 +547,7 @@ func TestNameCaseLinter_SingleCharacterUppercaseTableName(t *testing.T) {
 
 	// Single uppercase character should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "A", violations[0].Location.Table)
+	require.Equal(t, "A", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_TableNameWithSpecialCharacters(t *testing.T) {
@@ -561,7 +560,7 @@ func TestNameCaseLinter_TableNameWithSpecialCharacters(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Lowercase with special characters - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Tests for metadata
@@ -569,9 +568,9 @@ func TestNameCaseLinter_TableNameWithSpecialCharacters(t *testing.T) {
 func TestNameCaseLinter_Metadata(t *testing.T) {
 	linter := &NameCaseLinter{}
 
-	assert.Equal(t, "name_case", linter.Name())
-	assert.NotEmpty(t, linter.Description())
-	assert.Contains(t, linter.Description(), "lowercase")
+	require.Equal(t, "name_case", linter.Name())
+	require.NotEmpty(t, linter.Description())
+	require.Contains(t, linter.Description(), "lowercase")
 }
 
 func TestNameCaseLinter_String(t *testing.T) {
@@ -579,7 +578,7 @@ func TestNameCaseLinter_String(t *testing.T) {
 	str := linter.String()
 
 	// String() should return a non-empty string
-	assert.NotEmpty(t, str)
+	require.NotEmpty(t, str)
 }
 
 // Tests for violation structure
@@ -596,14 +595,14 @@ func TestNameCaseLinter_ViolationStructure(t *testing.T) {
 	v := violations[0]
 
 	// Verify violation structure
-	assert.NotNil(t, v.Linter)
-	assert.Equal(t, "name_case", v.Linter.Name())
-	assert.NotEmpty(t, v.Message)
-	assert.NotNil(t, v.Location)
-	assert.Equal(t, "USERS", v.Location.Table)
-	assert.Nil(t, v.Location.Column)
-	assert.Nil(t, v.Location.Index)
-	assert.Nil(t, v.Location.Constraint)
+	require.NotNil(t, v.Linter)
+	require.Equal(t, "name_case", v.Linter.Name())
+	require.NotEmpty(t, v.Message)
+	require.NotNil(t, v.Location)
+	require.Equal(t, "USERS", v.Location.Table)
+	require.Nil(t, v.Location.Column)
+	require.Nil(t, v.Location.Index)
+	require.Nil(t, v.Location.Constraint)
 }
 
 func TestNameCaseLinter_RenameViolationStructure(t *testing.T) {
@@ -618,14 +617,14 @@ func TestNameCaseLinter_RenameViolationStructure(t *testing.T) {
 	v := violations[0]
 
 	// Verify violation structure for rename
-	assert.NotNil(t, v.Linter)
-	assert.Equal(t, "name_case", v.Linter.Name())
-	assert.NotEmpty(t, v.Message)
-	assert.Contains(t, v.Message, "users")
-	assert.Contains(t, v.Message, "USERS_NEW")
-	assert.Contains(t, v.Message, "renamed")
-	assert.NotNil(t, v.Location)
-	assert.Equal(t, "users", v.Location.Table)
+	require.NotNil(t, v.Linter)
+	require.Equal(t, "name_case", v.Linter.Name())
+	require.NotEmpty(t, v.Message)
+	require.Contains(t, v.Message, "users")
+	require.Contains(t, v.Message, "USERS_NEW")
+	require.Contains(t, v.Message, "renamed")
+	require.NotNil(t, v.Location)
+	require.Equal(t, "users", v.Location.Table)
 }
 
 // Tests for complex scenarios
@@ -681,12 +680,12 @@ func TestNameCaseLinter_ComplexScenario(t *testing.T) {
 		}
 		if v.Location.Table == "inventory" {
 			foundInventory = true
-			assert.Contains(t, v.Message, "INVENTORY_NEW")
+			require.Contains(t, v.Message, "INVENTORY_NEW")
 		}
 	}
-	assert.True(t, foundUsers, "Should find violation in USERS")
-	assert.True(t, foundProducts, "Should find violation in Products")
-	assert.True(t, foundInventory, "Should find violation in INVENTORY_NEW rename")
+	require.True(t, foundUsers, "Should find violation in USERS")
+	require.True(t, foundProducts, "Should find violation in Products")
+	require.True(t, foundInventory, "Should find violation in INVENTORY_NEW rename")
 }
 
 // Tests for ALTER TABLE with RENAME TABLE syntax variant
@@ -718,7 +717,7 @@ func TestNameCaseLinter_TableNameWithPrefix(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Lowercase with prefix - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_TableNameWithPrefixUppercase(t *testing.T) {
@@ -731,7 +730,7 @@ func TestNameCaseLinter_TableNameWithPrefixUppercase(t *testing.T) {
 
 	// Mixed case with prefix should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "TBL_users", violations[0].Location.Table)
+	require.Equal(t, "TBL_users", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_TableNameWithSuffix(t *testing.T) {
@@ -743,7 +742,7 @@ func TestNameCaseLinter_TableNameWithSuffix(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Lowercase with suffix - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_TableNameWithSuffixUppercase(t *testing.T) {
@@ -756,7 +755,7 @@ func TestNameCaseLinter_TableNameWithSuffixUppercase(t *testing.T) {
 
 	// Mixed case with suffix should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "users_TMP", violations[0].Location.Table)
+	require.Equal(t, "users_TMP", violations[0].Location.Table)
 }
 
 // Test for very long table names
@@ -770,7 +769,7 @@ func TestNameCaseLinter_LongTableNameLowercase(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Long lowercase name - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestNameCaseLinter_LongTableNameMixedCase(t *testing.T) {
@@ -783,5 +782,5 @@ func TestNameCaseLinter_LongTableNameMixedCase(t *testing.T) {
 
 	// Long mixed case name should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "VeryLongTableNameWithManyCamelCaseWords", violations[0].Location.Table)
+	require.Equal(t, "VeryLongTableNameWithManyCamelCaseWords", violations[0].Location.Table)
 }

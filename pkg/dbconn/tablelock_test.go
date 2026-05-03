@@ -21,71 +21,71 @@ func testConfig() *DBConfig {
 
 func TestTableLock(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS testlock, _testlock_new")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testlock (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE _testlock_new (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	tbl := &table.TableInfo{SchemaName: "test", TableName: "testlock", QuotedTableName: "`testlock`"}
 
 	lock1, err := NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Try to acquire a table that is already locked, should fail because we use WRITE locks now.
 	// But should also fail very quickly because we've set the lock_wait_timeout to 1s.
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
-	assert.NoError(t, lock1.Close(t.Context()))
+	require.NoError(t, lock1.Close(t.Context()))
 }
 
 func TestExecUnderLock(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS testunderlock, _testunderlock_new")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testunderlock (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE _testunderlock_new (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	tbl := &table.TableInfo{SchemaName: "test", TableName: "testunderlock", QuotedTableName: "`testunderlock`"}
 	lock, err := NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, testConfig(), slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = lock.ExecUnderLock(t.Context(), "INSERT INTO testunderlock VALUES (1, 1)", "", "INSERT INTO testunderlock VALUES (2, 2)")
-	assert.NoError(t, err) // pass, under write lock.
+	require.NoError(t, err) // pass, under write lock.
 
 	// Try to execute a statement that is not in the lock transaction though
 	// It is expected to fail.
 	err = Exec(t.Context(), db, "INSERT INTO testunderlock VALUES (3, 3)")
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestTableLockMultiple(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	// Create multiple test tables
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS testlock1, _testlock1_new, testlock2, _testlock2_new, testlock3, _testlock3_new")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testlock1 (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE _testlock1_new (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testlock2 (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE _testlock2_new (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE testlock3 (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE _testlock3_new (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	tables := []*table.TableInfo{
 		{SchemaName: "test", TableName: "testlock1", QuotedTableName: "`testlock1`"},
@@ -95,15 +95,15 @@ func TestTableLockMultiple(t *testing.T) {
 
 	// Acquire locks on all tables
 	lock1, err := NewTableLock(t.Context(), db, tables, testConfig(), slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Try to acquire a lock on any of the tables - should fail because they're all locked
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tables[0]}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tables[1]}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tables[2]}, testConfig(), slog.Default())
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// Test we can write to all tables under the lock
 	err = lock1.ExecUnderLock(t.Context(),
@@ -111,41 +111,41 @@ func TestTableLockMultiple(t *testing.T) {
 		"INSERT INTO testlock2 VALUES (1, 1)",
 		"INSERT INTO testlock3 VALUES (1, 1)",
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Release the lock
-	assert.NoError(t, lock1.Close(t.Context()))
+	require.NoError(t, lock1.Close(t.Context()))
 
 	// Verify we can now acquire individual locks
 	lock2, err := NewTableLock(t.Context(), db, []*table.TableInfo{tables[0]}, testConfig(), slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, lock2.Close(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, lock2.Close(t.Context()))
 
 	// Clean up
 	err = Exec(t.Context(), db, "DROP TABLE testlock1, _testlock1_new, testlock2, _testlock2_new, testlock3, _testlock3_new")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestTableLockFail(t *testing.T) {
 	db, err := New(testutils.DSN(), testConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS test.testlockfail")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = Exec(t.Context(), db, "CREATE TABLE test.testlockfail (id INT NOT NULL PRIMARY KEY, colb int)")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// We acquire an exclusive lock first, so the tablelock should fail.
 	trx, err := db.BeginTx(t.Context(), nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		err := trx.Rollback()
-		assert.NoError(t, err, "Failed to rollback transaction")
+		require.NoError(t, err, "Failed to rollback transaction")
 	}()
 
 	_, err = trx.ExecContext(t.Context(), "LOCK TABLES test.testlockfail WRITE")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Try to get a table lock - this should fail since we already have an exclusive lock
 	tbl := table.NewTableInfo(db, "test", "testlockfail")
@@ -153,13 +153,13 @@ func TestTableLockFail(t *testing.T) {
 	cfg.ForceKill = false
 	cfg.MaxRetries = 3 // Set max retries to 3 for this test
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, slog.Default())
-	assert.Error(t, err) // failed to acquire lock
+	require.Error(t, err) // failed to acquire lock
 
 	// Enable force killing to allow retrying with query killing. This will FAIL because we do not kill
 	// connections with explicit table locks.
 	cfg.ForceKill = true
 	_, err = NewTableLock(t.Context(), db, []*table.TableInfo{tbl}, cfg, slog.Default())
-	assert.Error(t, err) // We won't kill a connection with an explicit table lock, so this should fail after exhausting retries
+	require.Error(t, err) // We won't kill a connection with an explicit table lock, so this should fail after exhausting retries
 }
 
 // TestTableLockCrossSchema verifies that LOCK TABLES on the same table name
@@ -221,11 +221,11 @@ func TestTableLockCrossSchema(t *testing.T) {
 			// Verify data landed in the correct schemas.
 			var id0, id1 int
 			err = db0.QueryRowContext(t.Context(), "SELECT id FROM t1").Scan(&id0)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, 1, id0)
 
 			err = db1.QueryRowContext(t.Context(), "SELECT id FROM t1").Scan(&id1)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, 2, id1)
 		})
 	}
