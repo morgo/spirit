@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDropAdd(t *testing.T) {
@@ -14,10 +14,10 @@ func TestDropAdd(t *testing.T) {
 		Statement: statement.MustNew("ALTER TABLE t1 DROP COLUMN b, ADD COLUMN b INT")[0],
 	}
 	err = dropAddCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "column b is mentioned 2 times in the same statement")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "column b is mentioned 2 times in the same statement")
 
 	r.Statement = statement.MustNew("ALTER TABLE t1 DROP b1, ADD b2 INT")[0]
 	err = dropAddCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
