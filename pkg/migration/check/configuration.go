@@ -13,7 +13,7 @@ func init() {
 // check the configuration of the database. There are some hard nos,
 // and some suggestions around configuration for performance.
 func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
-	var binlogFormat, innodbAutoincLockMode, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema string
+	var binlogFormat, innodbAutoincLockMode, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema, binlogOrderCommits string
 	err := r.DB.QueryRowContext(ctx,
 		`SELECT @@global.binlog_format,
 		@@global.innodb_autoinc_lock_mode,
@@ -21,7 +21,8 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		@@global.log_bin,
 		@@global.log_slave_updates,
 		@@global.binlog_row_value_options,
-		@@global.performance_schema`).Scan(
+		@@global.performance_schema,
+		@@global.binlog_order_commits`).Scan(
 		&binlogFormat,
 		&innodbAutoincLockMode,
 		&binlogRowImage,
@@ -29,6 +30,7 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		&logSlaveUpdates,
 		&binlogRowValueOptions,
 		&performanceSchema,
+		&binlogOrderCommits,
 	)
 	if err != nil {
 		return err
@@ -72,6 +74,19 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		// support performance_schema = 0 for other cases, but to simplify testing and future
 		// use, we just require it.
 		return errors.New("performance_schema must be enabled")
+	}
+	if binlogOrderCommits != "1" {
+		// binlog_order_commits=ON is the MySQL default. Setting it OFF allows
+		// MySQL to commit transactions to InnoDB in a different order than they
+		// appear in the binlog — specifically, a transaction's row events can
+		// be written to the binlog before that transaction's commit becomes
+		// visible to fresh SELECTs on other connections. Spirit's binlog
+		// applier path (deltaMap/bufferedMap.Flush running REPLACE INTO _new
+		// SELECT FROM original WHERE pk IN (...)) assumes the opposite: when
+		// the streamer delivers a row event, that row is already visible. With
+		// binlog_order_commits=OFF that assumption breaks and rows can be
+		// silently lost during cutover. See issue #818.
+		return errors.New("binlog_order_commits must be ON (this is the MySQL default; setting it OFF allows commit reordering that breaks Spirit's binlog→applier visibility assumption)")
 	}
 	return nil
 }

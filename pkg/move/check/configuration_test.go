@@ -56,3 +56,13 @@ func TestConfigurationCheckMultipleSources(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "source 1")
 }
+
+// The negative-path test for binlog_order_commits=OFF (and the other
+// configurationCheck rejections) used to flip server globals via
+// SET GLOBAL, but those server-wide flips race with every other Go test
+// binary running concurrently against the same MySQL — exactly the
+// cross-package race that caused hard-to-attribute flakes elsewhere in
+// the suite. Until configurationCheck is refactored to take its variable
+// values via an injectable struct (and is therefore unit-testable without
+// touching the server), we accept that the negative branches are exercised
+// only at startup against a real misconfigured server.

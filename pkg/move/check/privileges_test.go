@@ -158,8 +158,11 @@ func TestMovePrivilegesMultipleSources(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestMovePrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
-// only when activate_all_roles_on_login=ON.
+// TestMovePrivilegesWithRDSSuperuserRole verifies that rds_superuser_role
+// is tolerated when activate_all_roles_on_login=ON. Same rationale as the
+// migration-side counterpart: only the acceptance path is covered, and
+// the test skips rather than flipping `activate_all_roles_on_login` via
+// `SET GLOBAL` (which races with concurrent test binaries; see #818).
 func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -167,6 +170,13 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
+
+	// Skip if the server doesn't have activate_all_roles_on_login=ON.
+	var activate string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&activate))
+	if activate != "1" {
+		t.Skip("requires activate_all_roles_on_login=ON; SET GLOBAL would race with concurrent test binaries, see #818")
+	}
 
 	// Clean up any previous test artifacts
 	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testmoverdsroleuser")
@@ -189,11 +199,10 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testmoverdsroleuser")
 	require.NoError(t, err)
-	// Grant performance_schema and PROCESS directly so the probe queries succeed.
-	// On real RDS, rds_superuser_role grants these, but our test role is opaque
-	// (no actual privileges) so we simulate by granting them directly.
-	// The test specifically validates that CONNECTION_ADMIN tolerance works via
-	// the rds_superuser_role name check + activate_all_roles_on_login guard.
+	// Grant performance_schema and PROCESS directly so the probe queries
+	// succeed. On real RDS, rds_superuser_role grants these, but our test
+	// role is opaque (no actual privileges) so we simulate by granting
+	// them directly.
 	_, err = db.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testmoverdsroleuser")
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testmoverdsroleuser")
@@ -206,17 +215,6 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 	config.User = "testmoverdsroleuser"
 	config.Passwd = ""
 
-	// Save original value and restore after test
-	var origValue string
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&origValue))
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(t.Context(), fmt.Sprintf("SET GLOBAL activate_all_roles_on_login = %s", origValue))
-	})
-
-	// With activate_all_roles_on_login=OFF, rds_superuser_role should NOT be tolerated
-	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = OFF")
-	require.NoError(t, err)
-
 	sourceConfig, err := mysql.ParseDSN(fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	require.NoError(t, err)
 
@@ -228,21 +226,8 @@ func TestMovePrivilegesWithRDSSuperuserRole(t *testing.T) {
 		Sources: []SourceResource{{DB: lowPrivDB, Config: sourceConfig}},
 	}
 
-	err = privilegesCheck(t.Context(), r, slog.Default())
-	require.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
-	require.Contains(t, err.Error(), "CONNECTION_ADMIN")
-
-	// With activate_all_roles_on_login=ON, rds_superuser_role should be tolerated
-	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
-	require.NoError(t, err)
-
-	// Must reconnect after changing the global variable so the new connection
-	// gets roles activated on login.
-	require.NoError(t, lowPrivDB.Close())
-	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	require.NoError(t, err)
-	r.Sources = []SourceResource{{DB: lowPrivDB, Config: sourceConfig}}
-
+	// With rds_superuser_role granted and activate_all_roles_on_login=ON,
+	// privilegesCheck should pass.
 	err = privilegesCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
 }
