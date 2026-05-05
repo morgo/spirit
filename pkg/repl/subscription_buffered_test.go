@@ -1040,3 +1040,275 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 	require.Equal(t, int64(1), sub.keysAdded.Load(), "above-watermark key must not increment keysAdded")
 	require.Equal(t, int64(1), sub.keysDroppedAbove.Load())
 }
+
+// TestBufferedMapQueueFlushEmpty verifies that Flush on an empty queue-mode
+// subscription is a no-op and reports allFlushed=true. Trivial path but the
+// previous deltaQueue had explicit coverage for it.
+func TestBufferedMapQueueFlushEmpty(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+	}
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Equal(t, 0, sub.Length())
+}
+
+// TestBufferedMapQueueFlushBatchSizeLimit drives the queue flush with a
+// targetBatchSize smaller than the queue length, so flushQueueLocked must
+// split a same-type segment across multiple applier calls. The end state in
+// the target must still be all rows applied.
+func TestBufferedMapQueueFlushBatchSizeLimit(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 2, // forces the same-type segment to split mid-flush
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+	}
+
+	for i := 1; i <= 5; i++ {
+		k := fmt.Sprintf("k%d", i)
+		sub.HasChanged([]any{k}, []any{k, "v"}, false)
+	}
+	require.Equal(t, 5, sub.Length())
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
+	require.Equal(t, 5, count, "split across batches must still apply every row")
+}
+
+// TestBufferedMapQueueFlushUnderLock verifies that queue-mode flush works
+// when called with a held table lock — the same path used during cutover.
+// Watermark filters are bypassed in the under-lock path; here the queue
+// has no watermark interaction anyway, but exercising the lock-passthrough
+// catches mismatches between flushBatch's lock plumbing and the queue path.
+func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+	}
+
+	// Seed target with "b" so the DELETE has something to remove.
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES ('b', 'stale')`,
+		dstTable.QuotedTableName))
+
+	sub.HasChanged([]any{"a"}, []any{"a", "alpha"}, false)
+	sub.HasChanged([]any{"b"}, nil, true)
+
+	lock, err := dbconn.NewTableLock(t.Context(), db,
+		[]*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+
+	allFlushed, err := sub.Flush(t.Context(), true, lock)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.NoError(t, lock.Close(t.Context()))
+
+	var got []string
+	rows, err := db.QueryContext(t.Context(),
+		fmt.Sprintf("SELECT id FROM %s ORDER BY id", dstTable.QuotedTableName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		got = append(got, id)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"a"}, got, "under-lock flush must apply both insert and delete")
+}
+
+// TestBufferedMapQueueConcurrentFlush interleaves HasChanged from a
+// goroutine with repeated Flush calls to catch races between queue append
+// and queue drain. The deltaQueue test this replaces relied on the same
+// pattern; the bufferedMap mutex guards both sides, so the assertion is
+// "no error and all rows eventually applied".
+func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+	}
+
+	const total = 100
+	done := make(chan struct{})
+	go func() {
+		for i := 1; i <= total; i++ {
+			sub.HasChanged([]any{fmt.Sprintf("k%d", i)}, []any{fmt.Sprintf("k%d", i), "v"}, false)
+			time.Sleep(time.Millisecond)
+		}
+		close(done)
+	}()
+
+	for range 5 {
+		_, err := sub.Flush(t.Context(), false, nil)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	<-done
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
+	require.Equal(t, total, count, "every appended key must end up in target")
+}
