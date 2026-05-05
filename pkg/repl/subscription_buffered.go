@@ -264,12 +264,15 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 		return nil
 	}
 	startTime := time.Now()
+	var deleteAffected, upsertAffected int64
+
 	// Execute deletes
 	if len(deleteKeys) > 0 {
 		affectedRows, err := s.applier.DeleteKeys(ctx, s.table, s.newTable, deleteKeys, lock)
 		if err != nil {
 			return fmt.Errorf("failed to delete keys: %w", err)
 		}
+		deleteAffected = affectedRows
 		s.c.feedback(int(affectedRows), time.Since(startTime))
 	}
 
@@ -279,8 +282,19 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 		if err != nil {
 			return fmt.Errorf("failed to upsert rows: %w", err)
 		}
+		upsertAffected = affectedRows
 		s.c.feedback(int(affectedRows), time.Since(startTime))
 	}
+
+	s.c.logger.Debug("flushBatch executed",
+		"table", s.table.TableName,
+		"underLock", lock != nil,
+		"deleteKeyCount", len(deleteKeys),
+		"deleteAffectedRows", deleteAffected,
+		"upsertRowCount", len(upsertRows),
+		"upsertAffectedRows", upsertAffected,
+		"duration", time.Since(startTime),
+	)
 
 	return nil
 }

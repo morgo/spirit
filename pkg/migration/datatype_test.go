@@ -171,21 +171,15 @@ func TestTpConversion(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestEnumReorder tests that reordering ENUM values in an ALTER TABLE
-// produces correct data after migration.
+// TestEnumReorder verifies that ENUM reordering ALTERs are refused at preflight
+// in both unbuffered and buffered modes.
 //
-// This test only works correctly in unbuffered mode because of the way
-// ENUM values are represented in the binlog. We test *both* unbuffered and buffered modes
-// though and we accept a pre-flight failure as a "pass", since it's not corruption.
-// i.e. it's OK to refuse changes you can't handle.
-//
-// The unbuffered path uses REPLACE INTO ... SELECT (SQL-level string operations) which
-// handles ENUM reordering correctly. The buffered path uses UpsertRows with raw binlog
-// values, where ENUM values are represented as int64 ordinals. If the ENUM is reordered,
-// the ordinals map to different string values in the target table, causing data corruption.
-//
-// This test exercises both the copier path (initial data) and the binlog
-// replay path (concurrent DML during migration) to verify correctness.
+// The binlog replay path (bufferedMap) is now used for any memory-comparable PK
+// regardless of copy mode, and it represents ENUM values as int64 ordinals from
+// the binlog. Reordering the ENUM definition makes those ordinals point at
+// different strings in the target, which would corrupt rows. The preflight
+// check refuses these ALTERs unconditionally — it's better to fail fast than
+// to corrupt data.
 func TestEnumReorder(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) {
@@ -244,33 +238,8 @@ func testEnumReorder(t *testing.T, enableBuffered bool) {
 	<-dmlDone
 	require.NoError(t, m.Close())
 
-	if enableBuffered {
-		require.Error(t, migrationErr)
-		require.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
-		return
-	}
-
-	// Unbuffered mode: migration should succeed and data should be correct.
-	require.NoError(t, migrationErr)
-
-	// Verify that every row has a valid ENUM string value.
-	var activeCount, inactiveCount, pendingCount int
-	err = tt.DB.QueryRowContext(t.Context(), `SELECT
-		SUM(status = 'active'),
-		SUM(status = 'inactive'),
-		SUM(status = 'pending')
-		FROM enumreorder`).Scan(&activeCount, &inactiveCount, &pendingCount)
-	require.NoError(t, err)
-
-	var totalCount int
-	err = tt.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM enumreorder`).Scan(&totalCount)
-	require.NoError(t, err)
-
-	require.Equal(t, totalCount, activeCount+inactiveCount+pendingCount,
-		"all rows should have a valid ENUM value (no empty strings from ordinal corruption)")
-	require.Greater(t, activeCount, 0, "should have 'active' rows")
-	require.Greater(t, inactiveCount, 0, "should have 'inactive' rows")
-	require.Greater(t, pendingCount, 0, "should have 'pending' rows")
+	require.Error(t, migrationErr)
+	require.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
 }
 
 // TestSetReorder mirrors TestEnumReorder but for SET columns.
