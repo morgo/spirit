@@ -13,15 +13,58 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-// The bufferedMap is an experiment to see if we can avoid using REPLACE INTO .. SELECT.
+// The bufferedMap avoids using REPLACE INTO .. SELECT.
 // See: https://github.com/block/spirit/issues/451
 // This has the advantage that we can use spirit for MoveTable operations
 // across different MySQL servers. In combination with Atomic DDL,
 // we have all the components needed for cloning sets of tables between servers.
+//
+// We switched to it being the *only* subscription type because of #746:
+// MySQL does not always have read-after-commit safety, a violation of
+// binlog_order_commits = ON. Storing the row image inline (rather than
+// re-reading source via REPLACE INTO ... SELECT) sidesteps that race.
+//
+// Behaviour switches based on (watermarkOptimizationEnabled,
+// pkIsMemoryComparable, forceEnableBufferedMap):
+//
+//   - pkIsMemoryComparable=true: always map mode. Map-key equality matches
+//     MySQL row identity, so LWW dedup is correct.
+//   - pkIsMemoryComparable=false && forceEnableBufferedMap=false (default):
+//     queue mode at all times. Mirrors the previous deltaQueue behaviour;
+//     keeps the queue path hot in CI (TestCutoverAtomicityWithConcurrentWrites)
+//     so any bug in the queue gets caught before we flip the default.
+//   - pkIsMemoryComparable=false && forceEnableBufferedMap=true: map mode
+//     during the copy phase (watermark on), queue mode post-copy. The
+//     chunker's later SELECT covers in-window case-collision races during
+//     the copy phase.
+//
+// Why queue mode at all? With case-insensitive collations, "A" and "a"
+// hash to distinct keys but resolve to the same row in MySQL, so a map's
+// non-deterministic iteration would apply the events in the wrong order.
+// FIFO ordering applies them in binlog order, which the target's own
+// collation-aware uniqueness then collapses correctly. The queue still
+// stores row images and applies them via the applier — no
+// REPLACE INTO ... SELECT, so #746 stays fixed and cross-server moves
+// stay supported per #607.
+//
+// SetWatermarkOptimization owns the transition: when its toggle changes
+// which store is active, it drains the outgoing store inline. Past that
+// boundary the invariant holds — only the currently-active store may
+// have entries — so HasChanged never has to merge into a stale map and
+// Flush never has to drain both stores in the normal path.
 
 type bufferedChange struct {
 	logicalRow  applier.LogicalRow
 	originalKey []any // preserve original typed key for watermark comparison
+}
+
+// queuedChange preserves the FIFO position of a single row event while
+// still carrying the inline row image — applying via the applier keeps
+// the #746 (read-after-commit) fix intact and lets cross-server moves
+// continue to work for non-memory-comparable PKs (#607).
+type queuedChange struct {
+	key        string
+	logicalRow applier.LogicalRow
 }
 
 type bufferedMap struct {
@@ -33,7 +76,16 @@ type bufferedMap struct {
 	table    *table.TableInfo
 	newTable *table.TableInfo
 
+	// changes accumulates events while in map mode. SetWatermarkOptimization
+	// drains it on a transition out of map mode, so under normal operation
+	// it is empty in queue mode.
 	changes map[string]bufferedChange
+
+	// queue accumulates events while in queue mode. SetWatermarkOptimization
+	// drains it on a transition out of queue mode, so under normal operation
+	// it is empty in map mode. See the file-level comment for when each
+	// mode is selected.
+	queue []queuedChange
 
 	watermarkOptimization bool
 	chunker               table.MappedChunker
@@ -42,6 +94,13 @@ type bufferedMap struct {
 	keysAdded        atomic.Int64
 	keysDroppedAbove atomic.Int64
 	keysSkippedBelow atomic.Int64
+
+	pkIsMemoryComparable bool
+
+	// forceEnableBufferedMap controls whether non-memory-comparable PKs use
+	// the LWW buffered-map dedup during the copy phase. See the file-level
+	// comment and Client.forceEnableBufferedMap for the rationale.
+	forceEnableBufferedMap bool
 }
 
 // Assert that bufferedMap implements subscription
@@ -51,11 +110,29 @@ func (s *bufferedMap) Length() int {
 	s.Lock()
 	defer s.Unlock()
 
-	return len(s.changes)
+	return len(s.changes) + len(s.queue)
 }
 
 func (s *bufferedMap) Tables() []*table.TableInfo {
 	return []*table.TableInfo{s.table, s.newTable}
+}
+
+// queueModeActive reports whether new events should be appended to the
+// FIFO queue rather than the map. Caller must hold s.Lock.
+//
+// Memory-comparable PKs are never queue-mode (map-key equality matches
+// MySQL row identity). For non-memory-comparable PKs, the default is
+// queue full-time so the path is exercised by integration tests; the
+// forceEnableBufferedMap opt-in flips us to map-during-copy /
+// queue-post-copy, which is the optimization we'll eventually default to.
+func (s *bufferedMap) queueModeActive() bool {
+	if s.pkIsMemoryComparable {
+		return false
+	}
+	if !s.forceEnableBufferedMap {
+		return true
+	}
+	return !s.watermarkOptimization
 }
 
 func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
@@ -74,18 +151,19 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 
 	hashedKey := utils.HashKey(key)
 
+	logicalRow := applier.LogicalRow{RowImage: row}
 	if deleted {
-		s.changes[hashedKey] = bufferedChange{
-			logicalRow:  applier.LogicalRow{IsDeleted: true},
-			originalKey: key,
-		}
+		logicalRow = applier.LogicalRow{IsDeleted: true}
+	}
+
+	if s.queueModeActive() {
+		s.queue = append(s.queue, queuedChange{key: hashedKey, logicalRow: logicalRow})
 		s.keysAdded.Add(1)
 		return
 	}
 
-	// Set the logical row to be the new row
 	s.changes[hashedKey] = bufferedChange{
-		logicalRow:  applier.LogicalRow{RowImage: row},
+		logicalRow:  logicalRow,
 		originalKey: key,
 	}
 	s.keysAdded.Add(1)
@@ -96,19 +174,46 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 // are blocked from being collected while we do this. In future we may
 // come up with a more sophisticated approach to allow concurrent
 // collection of changes while we flush.
+//
+// SetWatermarkOptimization drains the outgoing store inline whenever the
+// toggle changes mode, so under normal operation only one of map/queue
+// has entries when Flush runs. Both branches are still iterated as a
+// defensive measure — if the inactive store has anything (e.g. after a
+// failed prior toggle) we drain it before the active one.
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) (allChangesFlushed bool, err error) {
 	s.Lock()
 	defer s.Unlock()
 
-	// We must now apply the changeset to the new table.
+	allChangesFlushed = true
+
+	if len(s.changes) > 0 {
+		mapAllFlushed, err := s.flushMapLocked(ctx, underLock, lock)
+		if err != nil {
+			return false, err
+		}
+		if !mapAllFlushed {
+			allChangesFlushed = false
+		}
+	}
+
+	if len(s.queue) > 0 {
+		if err := s.flushQueueLocked(ctx, underLock, lock); err != nil {
+			return false, err
+		}
+	}
+
+	return allChangesFlushed, nil
+}
+
+// flushMapLocked drains s.changes through the applier. Caller must hold s.Lock.
+func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock) (bool, error) {
 	var deleteKeys []string
 	var upsertRows []applier.LogicalRow
 	var keysFlushed []string
 	var i int64
-	allChangesFlushed = true // assume all changes are flushed unless we find some that are not.
+	allChangesFlushed := true
 	target := atomic.LoadInt64(&s.c.targetBatchSize)
 
-	// Determine which lock to use (nil if not underLock)
 	var lockToUse *dbconn.TableLock
 	if underLock {
 		lockToUse = lock
@@ -134,7 +239,6 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
 		if (i % target) == 0 {
-			// Flush this batch
 			if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
 				return false, err
 			}
@@ -143,13 +247,10 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 		}
 	}
 
-	// Flush any remaining changes
 	if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
 		return false, err
 	}
 
-	// The statements have been executed successfully.
-	// We can now remove the flushed keys from the map.
 	for _, key := range keysFlushed {
 		delete(s.changes, key)
 	}
@@ -162,7 +263,6 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 	if len(deleteKeys) == 0 && len(upsertRows) == 0 {
 		return nil
 	}
-
 	startTime := time.Now()
 	var deleteAffected, upsertAffected int64
 
@@ -199,17 +299,101 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 	return nil
 }
 
+// flushQueueLocked drains s.queue through the applier in FIFO order. We
+// keep the row images that HasChanged stored — the queue only exists to
+// preserve order for non-memory-comparable PKs (collation-equivalent keys
+// like "A" and "a" hash to different map slots but resolve to the same
+// MySQL row, so the map's non-deterministic iteration would apply events
+// out of order). FIFO + the target's collation-aware uniqueness gives the
+// correct end state without a SELECT against source. Caller must hold s.Lock.
+//
+// To preserve order while still batching for throughput, we coalesce
+// consecutive same-type operations into one applier call, e.g.
+// UPSERT<1>, UPSERT<2>, DELETE<3>, UPSERT<4> becomes
+// UpsertRows([1,2]); DeleteKeys([3]); UpsertRows([4]).
+func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
+	if len(s.queue) == 0 {
+		return nil
+	}
+	var lockToUse *dbconn.TableLock
+	if underLock {
+		lockToUse = lock
+	}
+	target := int(atomic.LoadInt64(&s.c.targetBatchSize))
+
+	var deleteKeys []string
+	var upsertRows []applier.LogicalRow
+	flushSegment := func() error {
+		if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
+			return err
+		}
+		deleteKeys = nil
+		upsertRows = nil
+		return nil
+	}
+
+	prevIsDelete := s.queue[0].logicalRow.IsDeleted
+	for _, change := range s.queue {
+		typeFlip := change.logicalRow.IsDeleted != prevIsDelete
+		batchFull := len(deleteKeys)+len(upsertRows) >= target
+		if typeFlip || batchFull {
+			if err := flushSegment(); err != nil {
+				return err
+			}
+		}
+		if change.logicalRow.IsDeleted {
+			deleteKeys = append(deleteKeys, change.key)
+		} else {
+			upsertRows = append(upsertRows, change.logicalRow)
+		}
+		prevIsDelete = change.logicalRow.IsDeleted
+	}
+	if err := flushSegment(); err != nil {
+		return err
+	}
+
+	s.queue = nil
+	return nil
+}
+
 // watermarkOptimizationEnabled returns true if the watermark optimization
 // is enabled. This is already called under a mutex.
 func (s *bufferedMap) watermarkOptimizationEnabled() bool {
 	return s.watermarkOptimization && s.chunker != nil
 }
 
-func (s *bufferedMap) SetWatermarkOptimization(enabled bool) {
+// SetWatermarkOptimization toggles the watermark filter and, if the toggle
+// changes which store is active, drains the *outgoing* store before
+// returning. After a successful call the invariant holds: only the active
+// store may have entries.
+//
+// The decision is driven by store contents rather than the flag delta so
+// the call is idempotent: if a previous attempt failed mid-drain, retrying
+// with the same `enabled` value re-runs the drain.
+func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool) error {
 	s.Lock()
-	deltaLen := len(s.changes)
+	defer s.Unlock()
+
 	s.watermarkOptimization = enabled
-	s.Unlock()
+
+	// After the flip, exactly one store is the "active" store for new
+	// HasChanged calls (see queueModeActive). Drain the other one if it
+	// has leftover entries from the prior mode.
+	if s.queueModeActive() {
+		// Map is the inactive store now.
+		if len(s.changes) > 0 {
+			if _, err := s.flushMapLocked(ctx, false, nil); err != nil {
+				return fmt.Errorf("draining map on watermark toggle: %w", err)
+			}
+		}
+	} else {
+		// Queue is the inactive store now.
+		if len(s.queue) > 0 {
+			if err := s.flushQueueLocked(ctx, false, nil); err != nil {
+				return fmt.Errorf("draining queue on watermark toggle: %w", err)
+			}
+		}
+	}
 
 	s.c.logger.Info("watermark optimization toggled",
 		"table", s.table.TableName,
@@ -217,6 +401,7 @@ func (s *bufferedMap) SetWatermarkOptimization(enabled bool) {
 		"keys_added", s.keysAdded.Swap(0),
 		"keys_dropped_above_high", s.keysDroppedAbove.Swap(0),
 		"keys_skipped_not_below_low", s.keysSkippedBelow.Swap(0),
-		"delta_len", deltaLen,
+		"delta_len", len(s.changes)+len(s.queue),
 	)
+	return nil
 }

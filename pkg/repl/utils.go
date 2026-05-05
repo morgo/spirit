@@ -1,23 +1,10 @@
 package repl
 
 import (
-	"strings"
-
-	"github.com/block/spirit/pkg/utils"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
-
-// pksToRowValueConstructor constructs a statement like this:
-// DELETE FROM x WHERE (s_i_id,s_w_id) in ((7,10),(1,5));
-func pksToRowValueConstructor(d []string) string {
-	var pkValues []string
-	for _, v := range d {
-		pkValues = append(pkValues, utils.UnhashKeyToString(v))
-	}
-	return strings.Join(pkValues, ",")
-}
 
 type statement struct {
 	numKeys int

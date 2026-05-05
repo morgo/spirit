@@ -264,14 +264,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.copyDuration = time.Since(r.copier.StartTime())
 
 	// Disable both watermark optimizations so that all changes can be flushed.
-	// The watermark optimizations can prevent some keys from being flushed,
-	// which would cause flushedPos to not advance, leading to a mismatch
-	// with bufferedPos and causing AllChangesFlushed() to return false.
-	// Note: this line is not strictly required for correctness, since
-	// FlushUnderLock() will now ignore watermark optimizations explicitly,
-	// but having the non-underlock flushes also disable these optimizations
-	// is cleaner.
-	r.replClient.SetWatermarkOptimization(false)
+	// For non-memory-comparable PKs this also drains the buffered map and
+	// switches the subscription into FIFO queue mode (see
+	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+		return err
+	}
 
 	// r.waitOnSentinel may return an error if there is
 	// some unexpected problem checking for the existence of
@@ -554,12 +552,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// Set the binlog position.
 	// Create a binlog subscriber
 	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, &repl.ClientConfig{
-		Logger:          r.logger,
-		Concurrency:     r.migration.Threads,
-		TargetBatchTime: r.migration.TargetChunkTime,
-		CancelFunc:      r.fatalError,
-		ServerID:        repl.NewServerID(),
-		DBConfig:        r.dbConfig, // Pass database configuration to replication client
+		Logger:                 r.logger,
+		Concurrency:            r.migration.Threads,
+		TargetBatchTime:        r.migration.TargetChunkTime,
+		CancelFunc:             r.fatalError,
+		ServerID:               repl.NewServerID(),
+		DBConfig:               r.dbConfig, // Pass database configuration to replication client
+		ForceEnableBufferedMap: r.migration.ForceEnableBufferedMap,
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
@@ -776,7 +775,9 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	// We can enable the key above watermark optimization
-	r.replClient.SetWatermarkOptimization(true)
+	if err := r.replClient.SetWatermarkOptimization(ctx, true); err != nil {
+		return err
+	}
 
 	// Start background monitoring routines (common logic for both paths)
 	r.startBackgroundRoutines(ctx)

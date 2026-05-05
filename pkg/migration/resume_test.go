@@ -796,7 +796,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	// this is normally done in m.setup() but we want to call it in isolation.
 	require.NoError(t, m.resumeFromCheckpoint(ctx))
 	// This is normally done in m.setup()
-	m.replClient.SetWatermarkOptimization(true)
+	require.NoError(t, m.replClient.SetWatermarkOptimization(ctx, true))
 	// doublecheck that the highPtr is 1002 in the _new table and not in the original table.
 	require.Equal(t, "10", m.changes[0].table.MaxValue().String())
 	require.Equal(t, "1002", m.changes[0].newTable.MaxValue().String())
