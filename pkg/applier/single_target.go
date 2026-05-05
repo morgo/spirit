@@ -522,14 +522,29 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 		}
 	}
 
-	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		mapping.TargetTable().QuotedTableName,
-		targetColumnList,
-		strings.Join(valuesClauses, ", "),
-		strings.Join(updateClauses, ", "),
-	)
+	// If every column is part of the PK there's nothing to UPDATE on conflict
+	// (the row's content is the PK and a same-PK conflict means same content).
+	// `INSERT … ON DUPLICATE KEY UPDATE` with an empty clause is a SQL syntax
+	// error, so use `INSERT IGNORE` for that case instead — same semantics.
+	var upsertStmt, upsertPath string
+	if len(updateClauses) == 0 {
+		upsertPath = "insert-ignore"
+		upsertStmt = fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
+			mapping.TargetTable().QuotedTableName,
+			targetColumnList,
+			strings.Join(valuesClauses, ", "),
+		)
+	} else {
+		upsertPath = "on-duplicate-key-update"
+		upsertStmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+			mapping.TargetTable().QuotedTableName,
+			targetColumnList,
+			strings.Join(valuesClauses, ", "),
+			strings.Join(updateClauses, ", "),
+		)
+	}
 
-	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", mapping.TargetTable().TableName)
+	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", mapping.TargetTable().TableName, "path", upsertPath)
 
 	// Execute under lock if provided
 	if lock != nil {

@@ -16,9 +16,6 @@ import (
 )
 
 func TestBufferedMap(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	db, client, srcTable, dstTable := setupBufferedTest(t)
 	defer client.Close()
 	defer utils.CloseAndLog(db)
@@ -73,9 +70,6 @@ func TestBufferedMap(t *testing.T) {
 // TestBufferedMapVariableColumns tests the buffered map with a newTable
 // That doesn't have all the columns of the source table.
 func TestBufferedMapVariableColumns(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
 		name VARCHAR(255) NOT NULL,
@@ -101,12 +95,11 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
-		Applier:         applier,
 	})
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
@@ -129,9 +122,6 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 // TestBufferedMapIllegalValues tests the buffered map with values that
 // need escaping (e.g. quotes, backslashes, nulls).
 func TestBufferedMapIllegalValues(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
 		name VARCHAR(255) NOT NULL,
@@ -161,12 +151,11 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, &ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
-		Applier:         applier,
 	})
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
@@ -213,9 +202,6 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 // With the fix (new code): This test passes because underLock=true bypasses the
 // watermark optimization check, ensuring all changes are flushed.
 func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
 		name VARCHAR(255) NOT NULL,
@@ -347,9 +333,6 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 // flushed, while keys at or above the watermark (copier hasn't passed them) are skipped.
 // This matches the deltaMap behavior.
 func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
 		name VARCHAR(255) NOT NULL,
@@ -450,4 +433,206 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	// Verify that the row at watermark was NOT copied
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 5", dstTable.QuotedTableName)).Scan(&name)
 	require.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
+}
+
+// TestBufferedMapConcurrentHasChanged verifies that the internal lock
+// serializes concurrent HasChanged calls — every key written from two
+// goroutines lands in the map without loss.
+func TestBufferedMapConcurrentHasChanged(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]bufferedChange),
+		chunker:  mockChunker,
+	}
+
+	done := make(chan bool)
+	go func() {
+		for i := range 100 {
+			sub.HasChanged([]any{i}, []any{i, "v"}, false)
+		}
+		done <- true
+	}()
+	go func() {
+		for i := 100; i < 200; i++ {
+			sub.HasChanged([]any{i}, nil, true)
+		}
+		done <- true
+	}()
+	<-done
+	<-done
+
+	require.Equal(t, 200, sub.Length())
+}
+
+// TestBufferedMapKeyOverwriteDedupes pins the LWW dedup contract: writing
+// the same logical key three times (insert/delete/insert) leaves a single
+// entry in the map, with the final write as the resident value.
+func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]bufferedChange),
+		chunker:  mockChunker,
+	}
+
+	sub.HasChanged([]any{1}, []any{1, "first"}, false)
+	sub.HasChanged([]any{1}, nil, true)
+	sub.HasChanged([]any{1}, []any{1, "final"}, false)
+	require.Equal(t, 1, sub.Length(), "map mode must dedupe by key (LWW)")
+
+	hashedKey := utils.HashKey([]any{1})
+	require.False(t, sub.changes[hashedKey].logicalRow.IsDeleted, "final write was an insert, resident entry must not be marked deleted")
+	require.Equal(t, []any{1, "final"}, sub.changes[hashedKey].logicalRow.RowImage, "resident row image must be from the final write")
+}
+
+// TestBufferedMapHasChangedNilAndEmpty exercises HashKey on edge inputs that
+// could trip up encoding regressions: empty strings, composite keys with
+// empty array elements, and zero values.
+func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]bufferedChange),
+		chunker:  mockChunker,
+	}
+
+	sub.HasChanged([]any{""}, nil, false)
+	require.Equal(t, 1, sub.Length(), "empty string key must hash and store")
+
+	sub.HasChanged([]any{"prefix", []string{}}, nil, false)
+	require.Equal(t, 2, sub.Length(), "composite key with empty array element must hash and store")
+
+	sub.HasChanged([]any{0}, nil, false)
+	require.Equal(t, 3, sub.Length(), "zero value key must hash and store")
+}
+
+// TestBufferedMapKeyAboveWatermarkCounters pins the keysAdded / keysDroppedAbove
+// telemetry contract: keys above the high watermark are dropped without
+// entering the map and increment keysDroppedAbove instead of keysAdded.
+// SetWatermarkOptimization resets the counters as a bookend side effect.
+// Below-watermark behaviour and keysSkippedBelow are covered by
+// TestBufferedMapFlushWithoutLockRespectsWatermark.
+func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+	mockChunker.SimulateProgress(0.005) // Current position at 5
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:        client,
+		table:    srcTable,
+		newTable: dstTable,
+		changes:  make(map[string]bufferedChange),
+		chunker:  mockChunker,
+	}
+
+	// Watermark off: every key is accepted regardless of position.
+	sub.HasChanged([]any{1}, []any{1, "v"}, false)
+	require.Equal(t, 1, sub.Length())
+	require.Equal(t, int64(1), sub.keysAdded.Load())
+	require.Equal(t, int64(0), sub.keysDroppedAbove.Load())
+
+	// Toggling watermark optimization resets counters via the bookend log.
+	sub.SetWatermarkOptimization(true)
+	require.Equal(t, int64(0), sub.keysAdded.Load())
+	require.Equal(t, int64(0), sub.keysDroppedAbove.Load())
+
+	// Key below high watermark (3 < 5): accepted.
+	sub.HasChanged([]any{3}, []any{3, "v"}, false)
+	require.Equal(t, 2, sub.Length())
+	require.Equal(t, int64(1), sub.keysAdded.Load())
+
+	// Key above high watermark (10 > 5): dropped, no map entry, no keysAdded bump.
+	sub.HasChanged([]any{10}, []any{10, "v"}, false)
+	require.Equal(t, 2, sub.Length(), "above-watermark key must not enter the map")
+	require.Equal(t, int64(1), sub.keysAdded.Load(), "above-watermark key must not increment keysAdded")
+	require.Equal(t, int64(1), sub.keysDroppedAbove.Load())
 }
