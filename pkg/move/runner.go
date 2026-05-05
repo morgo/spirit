@@ -419,14 +419,15 @@ func (r *Runner) setup(ctx context.Context) error {
 	for i := range r.sources {
 		src := &r.sources[i]
 		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, &repl.ClientConfig{
-			Logger:          r.logger,
-			Concurrency:     r.move.Threads,
-			TargetBatchTime: r.move.TargetChunkTime,
-			CancelFunc:      r.fatalError,
-			DDLFilterSchema: src.config.DBName,
-			DDLFilterTables: r.move.SourceTables,
-			ServerID:        repl.NewServerID(),
-			DBConfig:        r.dbConfig,
+			Logger:                 r.logger,
+			Concurrency:            r.move.Threads,
+			TargetBatchTime:        r.move.TargetChunkTime,
+			CancelFunc:             r.fatalError,
+			DDLFilterSchema:        src.config.DBName,
+			DDLFilterTables:        r.move.SourceTables,
+			ServerID:               repl.NewServerID(),
+			DBConfig:               r.dbConfig,
+			ForceEnableBufferedMap: r.move.ForceEnableBufferedMap,
 		})
 	}
 
@@ -672,7 +673,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	r.startBackgroundRoutines(ctx)
-	r.setWatermarkOptimizationAll(true)
+	if err := r.setWatermarkOptimizationAll(ctx, true); err != nil {
+		return err
+	}
 
 	r.status.Set(status.CopyRows)
 	if err := r.copier.Run(ctx); err != nil {
@@ -680,10 +683,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Disable both watermark optimizations so that all changes can be flushed.
-	// The watermark optimizations can prevent some keys from being flushed,
-	// which would cause flushedPos to not advance, leading to a mismatch
-	// with bufferedPos and causing AllChangesFlushed() to return false.
-	r.setWatermarkOptimizationAll(false)
+	// For non-memory-comparable PKs this also drains the buffered map and
+	// switches the subscription into FIFO queue mode (see
+	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	if err := r.setWatermarkOptimizationAll(ctx, false); err != nil {
+		return err
+	}
 	if err := r.flushAllReplClients(ctx); err != nil {
 		return err
 	}
@@ -1262,11 +1267,16 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 	return nil
 }
 
-// setWatermarkOptimizationAll sets watermark optimization on all replication clients.
-func (r *Runner) setWatermarkOptimizationAll(enabled bool) {
+// setWatermarkOptimizationAll sets watermark optimization on all replication
+// clients. Each subscription may drain its outgoing store on the toggle (see
+// pkg/repl/subscription_buffered.go), so this can return the drain error.
+func (r *Runner) setWatermarkOptimizationAll(ctx context.Context, enabled bool) error {
 	for i := range r.sources {
-		r.sources[i].replClient.SetWatermarkOptimization(enabled)
+		if err := r.sources[i].replClient.SetWatermarkOptimization(ctx, enabled); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // getDeltaLenAll returns the total number of pending changes across all replication clients.

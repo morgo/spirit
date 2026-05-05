@@ -255,6 +255,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 		changes:               make(map[string]bufferedChange),
 		chunker:               mockChunker,
 		watermarkOptimization: true, // Enable watermark optimization
+		pkIsMemoryComparable:  true, // INT PK -> map mode
 	}
 
 	// Insert test data into source table - data must exist before we lock
@@ -285,7 +286,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 
 	// First, disable watermark optimization and do a normal flush to populate the new table
 	// This simulates the state after the copier has finished
-	sub.SetWatermarkOptimization(false)
+	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
 	require.True(t, allFlushed)
@@ -299,7 +300,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 
 	// Now re-enable watermark optimization and add the same changes again
 	// This simulates changes that came in during the final stages of migration
-	sub.SetWatermarkOptimization(true)
+	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), true))
 	sub.HasChanged([]any{1}, []any{1, "below_watermark_updated"}, false)
 	sub.HasChanged([]any{3}, []any{3, "below_watermark_2_updated"}, false)
 	sub.HasChanged([]any{4}, []any{4, "below_watermark_3_updated"}, false)
@@ -382,6 +383,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 		changes:               make(map[string]bufferedChange),
 		chunker:               mockChunker,
 		watermarkOptimization: true, // Enable watermark optimization
+		pkIsMemoryComparable:  true, // INT PK -> map mode
 	}
 
 	// Insert test data into source table
@@ -433,4 +435,404 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	// Verify that the row at watermark was NOT copied
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT name FROM %s WHERE id = 5", dstTable.QuotedTableName)).Scan(&name)
 	require.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
+}
+
+// TestBufferedMapQueueModeRouting verifies the routing under
+// forceEnableBufferedMap=true (the optimization): map during copy,
+// queue post-copy. See subscription_buffered.go for the full state table.
+func TestBufferedMapQueueModeRouting(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	require.Error(t, srcTable.PrimaryKeyIsMemoryComparable(),
+		"VARCHAR PK must be non-memory-comparable for this test")
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                      client,
+		table:                  srcTable,
+		newTable:               dstTable,
+		changes:                make(map[string]bufferedChange),
+		chunker:                mockChunker,
+		pkIsMemoryComparable:   false,
+		forceEnableBufferedMap: true, // exercise the map-during-copy optimization
+	}
+
+	// Watermark optimization on => map mode under the optimization.
+	sub.watermarkOptimization = true
+	sub.HasChanged([]any{"abc"}, []any{"abc", "value"}, false)
+	require.Len(t, sub.changes, 1, "watermark on: event must go to the map")
+	require.Empty(t, sub.queue, "watermark on: queue must remain empty")
+
+	// Watermark optimization off + non-memory-comparable PK => queue mode.
+	// Direct field assignment (rather than SetWatermarkOptimization) so the
+	// existing map entry is preserved — the test asserts the *routing* of
+	// new events, not the drain-on-toggle behaviour.
+	sub.watermarkOptimization = false
+	sub.HasChanged([]any{"def"}, []any{"def", "v1"}, false)
+	sub.HasChanged([]any{"ghi"}, nil, true)
+	require.Len(t, sub.changes, 1, "queue mode: pre-existing map entry preserved (direct field assignment, no drain)")
+	require.Len(t, sub.queue, 2, "queue mode: new events appended to queue in order")
+	require.Equal(t, utils.HashKey([]any{"def"}), sub.queue[0].key)
+	require.False(t, sub.queue[0].logicalRow.IsDeleted)
+	require.Equal(t, []any{"def", "v1"}, sub.queue[0].logicalRow.RowImage,
+		"queue must preserve the row image so the applier can write without re-reading source")
+	require.Equal(t, utils.HashKey([]any{"ghi"}), sub.queue[1].key)
+	require.True(t, sub.queue[1].logicalRow.IsDeleted)
+	require.Equal(t, 3, sub.Length(), "Length reports map+queue combined")
+}
+
+// TestBufferedMapQueueFullTimeDefault verifies that with the default
+// forceEnableBufferedMap=false, non-memory-comparable PKs use the FIFO
+// queue at all times — even during the copy phase. This is the safety
+// default that keeps the queue path warm in CI until we trust the
+// optimization enough to flip the default.
+func TestBufferedMapQueueFullTimeDefault(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+	mockChunker.SimulateProgress(0.5) // make in-range keys below-high-watermark
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                      client,
+		table:                  srcTable,
+		newTable:               dstTable,
+		changes:                make(map[string]bufferedChange),
+		chunker:                mockChunker,
+		watermarkOptimization:  true,  // copy phase
+		pkIsMemoryComparable:   false, // VARCHAR PK
+		forceEnableBufferedMap: false, // default
+	}
+
+	// Even with watermark on (copy phase), the default routes to the queue.
+	sub.HasChanged([]any{"a"}, []any{"a", "v"}, false)
+	require.Empty(t, sub.changes, "default + non-memory-comparable PK: events must not land in the map")
+	require.Len(t, sub.queue, 1, "default + non-memory-comparable PK: events must land in the queue")
+
+	// And when watermark is toggled off, we stay in queue mode (no transition).
+	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
+	require.Len(t, sub.queue, 1, "no mode change: queue contents preserved across the toggle")
+	sub.HasChanged([]any{"b"}, []any{"b", "v2"}, false)
+	require.Len(t, sub.queue, 2, "queue keeps accepting events post-copy")
+	require.Empty(t, sub.changes)
+}
+
+// TestBufferedMapQueueModeFlush exercises the queue-mode flush path end-to-end.
+// Each event carries its row image so the applier writes via UpsertRows /
+// DeleteKeys (no REPLACE INTO ... SELECT). Consecutive same-type ops are
+// coalesced into a single applier call to amortize round-trips, but order
+// across type boundaries is preserved.
+func TestBufferedMapQueueModeFlush(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+		// watermarkOptimization left false so queue mode is active.
+	}
+
+	// Seed target with c so the DELETE has something to remove.
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES ('c', 'stale')`,
+		dstTable.QuotedTableName))
+
+	// UPSERT<a,b>, DELETE<c>, UPSERT<d,e> -- exercises segment coalescing.
+	sub.HasChanged([]any{"a"}, []any{"a", "alpha"}, false)
+	sub.HasChanged([]any{"b"}, []any{"b", "beta"}, false)
+	sub.HasChanged([]any{"c"}, nil, true)
+	sub.HasChanged([]any{"d"}, []any{"d", "delta"}, false)
+	sub.HasChanged([]any{"e"}, []any{"e", "epsilon"}, false)
+	require.Equal(t, 5, sub.Length())
+	require.Empty(t, sub.changes, "queue-mode events must not leak into the map")
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Equal(t, 0, sub.Length())
+
+	// a, b, d, e present in target with the row images we provided; c absent.
+	rows, err := db.QueryContext(t.Context(),
+		fmt.Sprintf("SELECT id, name FROM %s ORDER BY id", dstTable.QuotedTableName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	var got []string
+	for rows.Next() {
+		var id, name string
+		require.NoError(t, rows.Scan(&id, &name))
+		got = append(got, id+"="+name)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"a=alpha", "b=beta", "d=delta", "e=epsilon"}, got)
+}
+
+// TestBufferedMapQueueModeFIFOOrder verifies that when a single logical row
+// is touched multiple times in queue mode, the events apply in binlog order.
+// The map path applies them in non-deterministic order — this is what the
+// queue is here to fix.
+func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+	}
+
+	// INSERT, DELETE, INSERT for the same logical row. End state must reflect
+	// the *final* INSERT (FIFO replay, target's PK uniqueness collapses).
+	sub.HasChanged([]any{"k"}, []any{"k", "first"}, false)
+	sub.HasChanged([]any{"k"}, nil, true)
+	sub.HasChanged([]any{"k"}, []any{"k", "final"}, false)
+	require.Len(t, sub.queue, 3)
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	var name string
+	err = db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT name FROM %s WHERE id = 'k'", dstTable.QuotedTableName)).Scan(&name)
+	require.NoError(t, err)
+	require.Equal(t, "final", name, "FIFO replay must leave the last-INSERT value as the end state")
+}
+
+// TestBufferedMapTransitionDrainsOutgoing verifies that SetWatermarkOptimization
+// drains the outgoing store inline whenever the toggle changes mode. This
+// is the invariant that lets HasChanged write only to the active store and
+// lets Flush reason about a single store in the normal path.
+func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+	mockChunker.MarkAsComplete()
+
+	client := &Client{
+		db:              db,
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                      client,
+		applier:                applierInstance,
+		table:                  srcTable,
+		newTable:               dstTable,
+		changes:                make(map[string]bufferedChange),
+		chunker:                mockChunker,
+		watermarkOptimization:  true,
+		pkIsMemoryComparable:   false,
+		forceEnableBufferedMap: true, // opt into the optimization so transitions actually flip mode
+	}
+
+	// Copy-phase events land in the map (watermark on, queue-mode inactive).
+	sub.HasChanged([]any{"map-1"}, []any{"map-1", "from-map"}, false)
+	sub.HasChanged([]any{"map-2"}, []any{"map-2", "from-map-2"}, false)
+	require.Len(t, sub.changes, 2)
+	require.Empty(t, sub.queue)
+
+	// Flip to queue mode. The toggle must drain the map inline so we leave
+	// with map empty and queue empty (queue gets new events from here on).
+	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
+	require.Empty(t, sub.changes, "outgoing map must be drained inline by the toggle")
+	require.Empty(t, sub.queue)
+
+	// Verify the drain actually wrote to the target.
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
+	require.Equal(t, 2, count, "drain on toggle must apply through the applier")
+
+	// New events go to the queue.
+	sub.HasChanged([]any{"queue-1"}, []any{"queue-1", "from-queue"}, false)
+	require.Empty(t, sub.changes)
+	require.Len(t, sub.queue, 1)
+
+	// Flip back to map mode. The toggle must drain the queue inline.
+	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), true))
+	require.Empty(t, sub.queue, "outgoing queue must be drained inline by the toggle")
+	require.Empty(t, sub.changes)
+
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
+	require.Equal(t, 3, count, "drain on toggle must apply queue contents through the applier")
+}
+
+// TestBufferedMapTogglePassthrough verifies that for memory-comparable PKs
+// SetWatermarkOptimization is a no-op other than flipping the flag — the
+// active store is the map in both states, so there is nothing to drain.
+func TestBufferedMapTogglePassthrough(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+	// Advance so key=1 is below-high-watermark (so HasChanged accepts it)
+	// but at-or-above the low watermark (so flushMapLocked would skip it
+	// while the watermark is on — the property we're testing here is that
+	// a non-mode-changing toggle doesn't drain the map at all).
+	mockChunker.SimulateProgress(0.001)
+
+	client := &Client{
+		logger:          slog.Default(),
+		concurrency:     2,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		c:                    client,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: true,
+	}
+
+	sub.watermarkOptimization = true
+	sub.HasChanged([]any{1}, []any{1, "v"}, false)
+	require.Len(t, sub.changes, 1)
+
+	// Toggle to false. With pkIsMemoryComparable=true the active store is
+	// still the map, so the map keeps its entry — no drain happens.
+	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
+	require.Len(t, sub.changes, 1, "memory-comparable toggle must not drain the map")
+	require.Empty(t, sub.queue)
 }

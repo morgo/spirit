@@ -108,7 +108,7 @@ func TestReplClientComplex(t *testing.T) {
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
-	client.SetWatermarkOptimization(true)
+	require.NoError(t, client.SetWatermarkOptimization(t.Context(), true))
 
 	// DELETE before the chunker has advanced. Previously this returned 0
 	// because KeyAboveHighWatermark with chunkPtr.IsNil() silently dropped
@@ -278,7 +278,7 @@ func TestReplClientOpts(t *testing.T) {
 	defer client.Close()
 
 	// Disable key above watermark.
-	client.SetWatermarkOptimization(false)
+	require.NoError(t, client.SetWatermarkOptimization(t.Context(), false))
 
 	startingPos := client.GetBinlogApplyPosition()
 
@@ -682,10 +682,11 @@ func TestAllChangesFlushed(t *testing.T) {
 
 	// Test 2: Add a subscription and verify initial state
 	sub := &bufferedMap{
-		c:        client,
-		table:    srcTable,
-		newTable: dstTable,
-		changes:  make(map[string]bufferedChange),
+		c:                    client,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		pkIsMemoryComparable: true,
 	}
 	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
@@ -701,10 +702,11 @@ func TestAllChangesFlushed(t *testing.T) {
 
 	// Test 5: Test with multiple subscriptions
 	sub2 := &bufferedMap{
-		c:        client,
-		table:    srcTable,
-		newTable: dstTable,
-		changes:  make(map[string]bufferedChange),
+		c:                    client,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		pkIsMemoryComparable: true,
 	}
 	client.subscriptions["test2"] = sub2
 	sub2.HasChanged([]any{2}, nil, false)
@@ -719,19 +721,6 @@ func TestAllChangesFlushed(t *testing.T) {
 	client.bufferedPos = mysql.Position{Name: "binlog.000001", Pos: 100}
 	client.flushedPos = mysql.Position{Name: "binlog.000001", Pos: 100}
 	require.True(t, client.AllChangesFlushed(), "Should be flushed with aligned positions and no changes")
-
-	// Test 8: Test with queue-based subscription
-	subQueue := &deltaQueue{
-		c:        client,
-		table:    srcTable,
-		newTable: dstTable,
-		changes:  make([]queuedChange, 0),
-	}
-	client.subscriptions["test3"] = subQueue
-	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty queue")
-
-	subQueue.HasChanged([]any{3}, nil, false)
-	require.False(t, client.AllChangesFlushed(), "Should not be flushed with items in queue")
 }
 
 // TestMaxRecreateAttemptsError tests that the readStream goroutine sets a stream error
