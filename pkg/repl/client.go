@@ -249,7 +249,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	// that it needs to act like a FIFO queue. This is a requirement because of edge
 	// cases caused by collations since A == a, but in our map they would
 	// not compare as equal.
-	var pkIsMemoryComparable bool = true
+	var pkIsMemoryComparable = true
 	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
 		pkIsMemoryComparable = false
 	}
