@@ -218,16 +218,27 @@ func TestInvalidOptions(t *testing.T) {
 // This test proves that the window does not introduce inconsistency, even when
 // there are concurrent writes happening that are trying to introduce it.
 //
-// The test runs twice — across the copier mode dimension (unbuffered vs
-// buffered). Both variants now use the buffered replication subscription
-// (the deltaMap path was retired in the same change that landed this test
-// update — it relied on `REPLACE INTO _new ... SELECT FROM original ...`
-// which is subject to the binlog/visibility race in issue #746).
+// The test runs four times — across the cross product of:
+//   - chunker selection (optimistic vs composite)
+//   - copier mode (unbuffered vs buffered)
 //
-// The composite-PK / deltaQueue variants of this test were removed when the
-// buffered replication subscription became the default; we don't yet have a
-// buffered alternative for non-memory-comparable PKs (would need
-// "bufferedQueue"), so they aren't exercised here for now.
+// The optimistic chunker is selected automatically for single-column
+// auto_increment PKs; the composite chunker covers everything else (here we
+// force it via a composite (id, x_token) PK, where x_token is VARCHAR — that
+// makes the PK non-memory-comparable and routes the bufferedMap subscription
+// through its FIFO queue mode for the entire run, copy and post-copy).
+//
+// All variants use the buffered replication subscription. The deltaMap path
+// was retired as part of #746 — it relied on `REPLACE INTO _new ... SELECT
+// FROM original ...` which is subject to the binlog/visibility race. The
+// composite-PK variants were dropped when deltaQueue went away (#821) and
+// are restored here against the unified bufferedMap implementation.
+//
+// We deliberately don't add a `--force-enable-buffered-map=true` variant
+// for the composite-PK case. With the default (false), the queue runs
+// full-time across copy and post-copy phases, which exercises the queue
+// path strictly more than the optimization (where the queue only runs
+// post-copy). The default is the higher-coverage variant.
 func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	t.Parallel()
 
@@ -254,14 +265,45 @@ func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 		KEY idx_r_token (r_token)
 	)`
 
+	// Composite-PK schema. Putting x_token in the PK forces NewChunker to
+	// pick the composite chunker instead of the optimistic one (which only
+	// handles a single-column auto_increment PK), and the VARCHAR component
+	// makes the PK non-memory-comparable so the bufferedMap subscription
+	// routes through its FIFO queue mode. Drop the redundant UNIQUE KEY on
+	// x_token since the PK now enforces uniqueness on (id, x_token).
+	const compositeSchema = `CREATE TABLE %s (
+		id INT NOT NULL AUTO_INCREMENT,
+		x_token VARCHAR(36) NOT NULL,
+		cents INT NOT NULL,
+		currency VARCHAR(3) NOT NULL,
+		s_token VARCHAR(36) NOT NULL,
+		r_token VARCHAR(36) NOT NULL,
+		version INT NOT NULL DEFAULT 1,
+		c1 VARCHAR(20),
+		c2 VARCHAR(200),
+		c3 VARCHAR(10),
+		t1 DATETIME,
+		t2 DATETIME,
+		t3 DATETIME,
+		b1 TINYINT,
+		b2 TINYINT,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (id, x_token),
+		KEY idx_s_token (s_token),
+		KEY idx_r_token (r_token)
+	)`
+
 	cases := []struct {
 		name      string
 		tableName string
 		schema    string
 		buffered  bool
 	}{
-		{"unbuffered", "t1concurrent_ub", optimisticSchema, false},
-		{"buffered", "t1concurrent_bu", optimisticSchema, true},
+		{"optimistic_unbuffered", "t1concurrent_oub", optimisticSchema, false},
+		{"optimistic_buffered", "t1concurrent_obu", optimisticSchema, true},
+		{"composite_unbuffered", "t1concurrent_cub", compositeSchema, false},
+		{"composite_buffered", "t1concurrent_cbu", compositeSchema, true},
 	}
 
 	for _, tc := range cases {
