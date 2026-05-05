@@ -20,6 +20,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [conf](#conf)
 - [database](#database)
 - [defer-cutover](#defer-cutover)
+- [force-enable-buffered-map](#force-enable-buffered-map)
 - [host](#host)
 - [lint](#lint)
 - [lint-only](#lint-only)
@@ -146,6 +147,19 @@ You can resume a migration from checkpoint and Spirit will start waiting again f
 If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table `_spirit_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
+
+### force-enable-buffered-map
+
+- Type: Boolean
+- Default value: `false`
+
+> **⚠️ Experimental.** Correctness relies on the post-cutover checksum to catch and repair any divergence. Leave this off unless you have a specific reason to enable it.
+
+Controls whether the replication subscription uses the LWW (last-write-wins) buffered-map dedup during the copy phase for tables whose primary key is **not memory-comparable** — typically a `VARCHAR` PK using a case-insensitive or otherwise collation-sensitive comparison (e.g. `utf8mb4_0900_ai_ci`). Memory-comparable PKs (integers, binary strings, etc.) always use the buffered map regardless of this flag.
+
+When `false` (the default), tables with non-memory-comparable PKs use a FIFO queue full-time during both the copy and post-copy phases. The FIFO queue replays binlog events in their original order, which is required for collation-sensitive PKs because the in-memory map's hash equality (`"A"` ≠ `"a"`) does not match MySQL's row identity (`"A"` = `"a"` under a CI collation), so map-mode iteration could apply events out of order.
+
+When `true`, Spirit opts into the optimization: buffered-map dedup during the copy phase, FIFO queue post-copy. This can significantly reduce the volume of binlog events Spirit has to apply when the workload re-touches the same logical rows during a long copy, but if the dedup ever produces a wrong end state for a row the divergence is only caught by the post-cutover checksum (which will then re-copy the affected chunks).
 
 ### host
 
