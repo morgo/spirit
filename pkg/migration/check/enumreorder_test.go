@@ -37,12 +37,13 @@ func TestEnumReorderCheck(t *testing.T) {
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM value reorder")
-	require.ErrorContains(t, err, "buffered mode")
 
-	// Unbuffered + reorder ENUM: should pass (unbuffered is safe for ENUM)
+	// Unbuffered + reorder ENUM: should also fail — bufferedMap is now the
+	// binlog replay path for memory-comparable PKs regardless of the copy mode.
 	r.Buffered = false
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
 	// Buffered + append ENUM (safe): should pass
 	r = Resources{

@@ -37,12 +37,13 @@ func TestEnumSetRemovalCheckEnumToVarchar(t *testing.T) {
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
-	require.ErrorContains(t, err, "buffered mode")
 
-	// Unbuffered + ENUM→VARCHAR: should pass (unbuffered is safe)
+	// Unbuffered + ENUM→VARCHAR: should also fail — bufferedMap is now the
+	// binlog replay path for memory-comparable PKs regardless of the copy mode.
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
 }
 
 func TestEnumSetRemovalCheckEnumToText(t *testing.T) {
@@ -118,12 +119,13 @@ func TestEnumSetRemovalCheckSetToVarchar(t *testing.T) {
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe SET to non-SET")
-	require.ErrorContains(t, err, "buffered mode")
 
-	// Unbuffered + SET→VARCHAR: should pass
+	// Unbuffered + SET→VARCHAR: should also fail — bufferedMap is now the
+	// binlog replay path for memory-comparable PKs regardless of the copy mode.
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET to non-SET")
 }
 
 func TestEnumSetRemovalCheckChangeColumn(t *testing.T) {
@@ -222,12 +224,13 @@ func TestEnumSetRemovalCheckEnumToSet(t *testing.T) {
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM to SET")
-	require.ErrorContains(t, err, "buffered mode")
 
-	// Unbuffered + ENUM→SET: should pass
+	// Unbuffered + ENUM→SET: should also fail — bufferedMap is now the
+	// binlog replay path for memory-comparable PKs regardless of the copy mode.
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM to SET")
 }
 
 func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
@@ -253,10 +256,11 @@ func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe SET to ENUM")
-	require.ErrorContains(t, err, "buffered mode")
 
-	// Unbuffered + SET→ENUM: should pass
+	// Unbuffered + SET→ENUM: should also fail — bufferedMap is now the
+	// binlog replay path for memory-comparable PKs regardless of the copy mode.
 	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe SET to ENUM")
 }
