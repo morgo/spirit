@@ -1127,11 +1127,19 @@ func (c *Client) feedback(numberOfKeys int, d time.Duration) {
 // bufferedMap.SetWatermarkOptimization), so this can fail with the drain
 // error. If one subscription fails, subsequent subscriptions are not
 // touched and the caller should treat the operation as not-yet-applied.
+//
+// We snapshot the subscription set under c.Lock and then release it before
+// toggling, so a long-running drain on one subscription doesn't block
+// processRowsEvent from finding subscriptions for unrelated tables.
 func (c *Client) SetWatermarkOptimization(ctx context.Context, newVal bool) error {
 	c.Lock()
-	defer c.Unlock()
-
+	subs := make([]Subscription, 0, len(c.subscriptions))
 	for _, sub := range c.subscriptions {
+		subs = append(subs, sub)
+	}
+	c.Unlock()
+
+	for _, sub := range subs {
 		if err := sub.SetWatermarkOptimization(ctx, newVal); err != nil {
 			return err
 		}

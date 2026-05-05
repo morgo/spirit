@@ -8,10 +8,24 @@ import (
 )
 
 // Subscription defines how the replication changes are tracked. The single
-// implementation is bufferedMap, which holds row images in a hash map by
-// default and falls back to an internal FIFO queue (still row-image-based,
-// still applier-driven) for non-memory-comparable PKs once the watermark
-// optimization is disabled. See pkg/repl/subscription_buffered.go.
+// implementation is bufferedMap; row images come straight from the binlog
+// and are written via the applier (no SELECT-from-source round trip).
+//
+// For non-memory-comparable PKs, bufferedMap routes events through an
+// internal FIFO queue rather than the hash map, since collation-equivalent
+// keys ("A" and "a") hash to different slots but resolve to the same MySQL
+// row — map iteration would apply events out of order. Two routing
+// policies are available, controlled by Client.forceEnableBufferedMap:
+//
+//   - Default (forceEnableBufferedMap=false): queue mode is active full-time
+//     for non-memory-comparable PKs, in both copy and post-copy phases.
+//   - Optimization (forceEnableBufferedMap=true): map mode during the copy
+//     phase (LWW dedup), queue mode post-copy. The transition happens
+//     inside SetWatermarkOptimization, which drains the outgoing store
+//     inline.
+//
+// Memory-comparable PKs always use the map regardless of the flag. See
+// pkg/repl/subscription_buffered.go for the routing rules.
 
 type Subscription interface {
 	HasChanged(key, row []any, deleted bool)
