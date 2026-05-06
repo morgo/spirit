@@ -580,3 +580,39 @@ func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enable
 	).Scan(&colType))
 	require.Equal(t, "bigint", colType)
 }
+
+// TestSpatialGeneratedColumnAndIndex verifies that the parser accepts a combined
+// ALTER TABLE that adds a GEOMETRY generated column with SRID and a SPATIAL INDEX
+// in one statement. Geometry data lives in a text column, so this exercises
+// parsing + DDL execution; binary geometry round-tripping is covered separately
+// in the copier and subscription tests.
+func TestSpatialGeneratedColumnAndIndex(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "t1spatial", `CREATE TABLE t1spatial (
+		id bigint NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		geometry_wkt varchar(500) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO t1spatial (name, geometry_wkt) VALUES
+		('Statue of Liberty', 'POINT(-74.0445 40.6892)'),
+		('Eiffel Tower', 'POINT(2.2945 48.8584)'),
+		('Big Ben', 'POINT(-0.1246 51.5007)'),
+		('Colosseum', 'POINT(12.4924 41.8902)'),
+		('Sydney Opera House', 'POINT(151.2153 -33.8568)'),
+		('Great Wall of China', 'POINT(116.5704 40.4319)'),
+		('Machu Picchu', 'POINT(-72.5450 -13.1631)'),
+		('Taj Mahal', 'POINT(78.0421 27.1751)'),
+		('Christ the Redeemer', 'POINT(-43.2105 -22.9519)'),
+		('Golden Gate Bridge', 'POINT(-122.4783 37.8199)')`)
+
+	m := NewTestRunnerFromStatement(t, `ALTER TABLE t1spatial
+ADD COLUMN points_of_interest GEOMETRY GENERATED ALWAYS AS (ST_GeomFromText(geometry_wkt, 4326, 'axis-order=long-lat')) STORED NOT NULL SRID 4326,
+ADD SPATIAL INDEX idx_points_of_interest (points_of_interest)`)
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM t1spatial`).Scan(&count))
+	require.Equal(t, 10, count)
+}

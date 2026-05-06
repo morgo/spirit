@@ -1318,11 +1318,7 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 // full row images from binlog events, so this verifies the binary geometry
 // representation survives the replication pipeline without corruption due to
 // partial values replicated, strange encoding etc.
-// This test requires full binlog_row_image (non-minimal RBR).
 func TestBufferedMapGeometry(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS subscription_test, _subscription_test_new")
 	testutils.RunSQL(t, `CREATE TABLE subscription_test (
 		id INT NOT NULL,
@@ -1338,32 +1334,33 @@ func TestBufferedMapGeometry(t *testing.T) {
 	)`)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	srcTable := table.NewTableInfo(db, "test", "subscription_test")
-	assert.NoError(t, srcTable.SetInfo(t.Context()))
+	require.NoError(t, srcTable.SetInfo(t.Context()))
 	dstTable := table.NewTableInfo(db, "test", "_subscription_test_new")
-	assert.NoError(t, dstTable.SetInfo(t.Context()))
+	require.NoError(t, dstTable.SetInfo(t.Context()))
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	target := applier.Target{
 		DB:       db,
 		KeyRange: "0",
 		Config:   cfg,
 	}
 	appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	assert.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &ClientConfig{
+	require.NoError(t, err)
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, &ClientConfig{
 		Logger:          slog.Default(),
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        NewServerID(),
-		Applier:         appl,
 	})
-	assert.NoError(t, client.AddSubscription(srcTable, dstTable, nil))
-	assert.NoError(t, client.Run(t.Context()))
+	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
+	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
 	// INSERT geometry data.
@@ -1372,63 +1369,57 @@ func TestBufferedMapGeometry(t *testing.T) {
 		(2, 'Eiffel Tower', ST_GeomFromText('POINT(2.2945 48.8584)', 4326, 'axis-order=long-lat')),
 		(3, 'Big Ben', ST_GeomFromText('POINT(-0.1246 51.5007)', 4326, 'axis-order=long-lat'))
 	`)
-	assert.NoError(t, client.BlockWait(t.Context()))
-	assert.Equal(t, 3, client.GetDeltaLen())
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 3, client.GetDeltaLen())
 
 	// Inspect the buffered subscription directly to verify row images contain geometry data.
 	sub, ok := client.subscriptions["test.subscription_test"].(*bufferedMap)
-	assert.True(t, ok)
-	assert.False(t, sub.changes["1"].logicalRow.IsDeleted)
+	require.True(t, ok)
+	require.False(t, sub.changes["1"].logicalRow.IsDeleted)
 	// The row image should have 3 columns: id, name, location (as binary geometry).
-	assert.Len(t, sub.changes["1"].logicalRow.RowImage, 3)
+	require.Len(t, sub.changes["1"].logicalRow.RowImage, 3)
 
 	// Flush and verify the geometry data was applied correctly.
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	assert.NoError(t, err)
-	assert.True(t, allFlushed)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
 
 	var count int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 3, count)
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count))
+	require.Equal(t, 3, count)
 
 	// Verify the geometry data round-trips correctly via ST_AsText.
 	var wkt string
-	err = db.QueryRowContext(t.Context(),
-		"SELECT ST_AsText(location) FROM _subscription_test_new WHERE id = 1").Scan(&wkt)
-	assert.NoError(t, err)
-	assert.Contains(t, wkt, "POINT")
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT ST_AsText(location) FROM _subscription_test_new WHERE id = 1").Scan(&wkt))
+	require.Contains(t, wkt, "POINT")
 
 	// UPDATE geometry data — move the Eiffel Tower.
 	testutils.RunSQL(t, `UPDATE subscription_test SET location = ST_GeomFromText('POINT(2.3 48.9)', 4326, 'axis-order=long-lat') WHERE id = 2`)
-	assert.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
 	allFlushed, err = sub.Flush(t.Context(), false, nil)
-	assert.NoError(t, err)
-	assert.True(t, allFlushed)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
 
-	err = db.QueryRowContext(t.Context(),
-		"SELECT ST_AsText(location) FROM _subscription_test_new WHERE id = 2").Scan(&wkt)
-	assert.NoError(t, err)
-	assert.Contains(t, wkt, "2.3")
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT ST_AsText(location) FROM _subscription_test_new WHERE id = 2").Scan(&wkt))
+	require.Contains(t, wkt, "2.3")
 
 	// DELETE a row.
 	testutils.RunSQL(t, `DELETE FROM subscription_test WHERE id = 3`)
-	assert.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.BlockWait(t.Context()))
 	allFlushed, err = sub.Flush(t.Context(), false, nil)
-	assert.NoError(t, err)
-	assert.True(t, allFlushed)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
 
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count)
-	assert.NoError(t, err)
-	assert.Equal(t, 2, count)
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count))
+	require.Equal(t, 2, count)
 
 	// Final checksum: verify all geometry data matches.
 	var checksumSrc, checksumDst string
-	err = db.QueryRowContext(t.Context(),
-		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM subscription_test").Scan(&checksumSrc)
-	assert.NoError(t, err)
-	err = db.QueryRowContext(t.Context(),
-		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM _subscription_test_new").Scan(&checksumDst)
-	assert.NoError(t, err)
-	assert.Equal(t, checksumSrc, checksumDst)
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM subscription_test").Scan(&checksumSrc))
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM _subscription_test_new").Scan(&checksumDst))
+	require.Equal(t, checksumSrc, checksumDst)
 }

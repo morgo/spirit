@@ -395,32 +395,34 @@ func TestBufferedCopierGeometry(t *testing.T) {
 	`)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "geomsrc")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "geomdst")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg := NewCopierDefaultConfig()
 	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	chunker, err := table.NewChunker(t1, t2, cfg.TargetChunkTime, cfg.Logger)
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{
+		NewTable:        t2,
+		TargetChunkTime: cfg.TargetChunkTime,
+		Logger:          cfg.Logger,
+	})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 
 	copier, err := NewCopier(db, chunker, cfg)
-	assert.NoError(t, err)
-	assert.NoError(t, copier.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, copier.Run(t.Context()))
 
 	// Verify geometry data was copied correctly by comparing ST_AsText output.
 	var checksumSrc, checksumDst string
-	err = db.QueryRowContext(t.Context(),
-		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM geomsrc").Scan(&checksumSrc)
-	assert.NoError(t, err)
-	err = db.QueryRowContext(t.Context(),
-		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM geomdst").Scan(&checksumDst)
-	assert.NoError(t, err)
-	assert.Equal(t, checksumSrc, checksumDst, "geometry data checksum mismatch after buffered copy")
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM geomsrc").Scan(&checksumSrc))
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM geomdst").Scan(&checksumDst))
+	require.Equal(t, checksumSrc, checksumDst, "geometry data checksum mismatch after buffered copy")
 }

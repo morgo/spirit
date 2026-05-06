@@ -111,11 +111,11 @@ func TestExtractFromStatement(t *testing.T) {
 
 	// Test create spatial index is rewritten.
 	abstractStmt, err = New("CREATE SPATIAL INDEX idx_geom ON t1 (geom)")
-	assert.NoError(t, err)
-	assert.Equal(t, "t1", abstractStmt[0].Table)
-	assert.Equal(t, "ADD SPATIAL INDEX `idx_geom` (`geom`)", abstractStmt[0].Alter)
-	assert.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD SPATIAL INDEX `idx_geom` (`geom`)", abstractStmt[0].Statement)
-	assert.True(t, abstractStmt[0].IsAlterTable()) // StmtNode should be an AlterTableStmt
+	require.NoError(t, err)
+	require.Equal(t, "t1", abstractStmt[0].Table)
+	require.Equal(t, "ADD SPATIAL INDEX `idx_geom` (`geom`)", abstractStmt[0].Alter)
+	require.Equal(t, "/* rewritten from CREATE INDEX */ ALTER TABLE `t1` ADD SPATIAL INDEX `idx_geom` (`geom`)", abstractStmt[0].Statement)
+	require.True(t, abstractStmt[0].IsAlterTable()) // StmtNode should be an AlterTableStmt
 
 	// Test drop index is rewritten.
 	abstractStmt, err = New("DROP INDEX idx ON t1")
