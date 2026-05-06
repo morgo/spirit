@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,7 +21,7 @@ func TestHasFKLinter_NoForeignKey(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// No foreign key - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_SingleForeignKey(t *testing.T) {
@@ -40,14 +39,14 @@ func TestHasFKLinter_SingleForeignKey(t *testing.T) {
 
 	// Should detect the foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "orders")
-	assert.Contains(t, violations[0].Message, "fk_orders_user")
-	assert.Contains(t, violations[0].Message, "FOREIGN KEY")
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Constraint)
-	assert.Equal(t, "fk_orders_user", *violations[0].Location.Constraint)
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "orders")
+	require.Contains(t, violations[0].Message, "fk_orders_user")
+	require.Contains(t, violations[0].Message, "FOREIGN KEY")
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Constraint)
+	require.Equal(t, "fk_orders_user", *violations[0].Location.Constraint)
 }
 
 func TestHasFKLinter_MultipleForeignKeys(t *testing.T) {
@@ -69,21 +68,21 @@ func TestHasFKLinter_MultipleForeignKeys(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	// Check first violation
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "order_items", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Constraint)
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "order_items", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Constraint)
 
 	// Check second violation
-	assert.Equal(t, "has_foreign_key", violations[1].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[1].Severity)
-	assert.Equal(t, "order_items", violations[1].Location.Table)
-	assert.NotNil(t, violations[1].Location.Constraint)
+	require.Equal(t, "has_foreign_key", violations[1].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[1].Severity)
+	require.Equal(t, "order_items", violations[1].Location.Table)
+	require.NotNil(t, violations[1].Location.Constraint)
 
 	// Verify both constraint names are present
 	constraintNames := []string{*violations[0].Location.Constraint, *violations[1].Location.Constraint}
-	assert.Contains(t, constraintNames, "fk_order_items_order")
-	assert.Contains(t, constraintNames, "fk_order_items_product")
+	require.Contains(t, constraintNames, "fk_order_items_order")
+	require.Contains(t, constraintNames, "fk_order_items_product")
 }
 
 func TestHasFKLinter_ForeignKeyWithOnDelete(t *testing.T) {
@@ -100,8 +99,8 @@ func TestHasFKLinter_ForeignKeyWithOnDelete(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE CASCADE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_orders_user")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_orders_user")
 }
 
 func TestHasFKLinter_ForeignKeyWithOnUpdate(t *testing.T) {
@@ -118,8 +117,8 @@ func TestHasFKLinter_ForeignKeyWithOnUpdate(t *testing.T) {
 
 	// Should detect foreign key with ON UPDATE CASCADE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_orders_user")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_orders_user")
 }
 
 func TestHasFKLinter_ForeignKeyWithBothOnDeleteAndOnUpdate(t *testing.T) {
@@ -136,7 +135,7 @@ func TestHasFKLinter_ForeignKeyWithBothOnDeleteAndOnUpdate(t *testing.T) {
 
 	// Should detect foreign key with both ON DELETE and ON UPDATE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_UnnamedForeignKey(t *testing.T) {
@@ -153,10 +152,10 @@ func TestHasFKLinter_UnnamedForeignKey(t *testing.T) {
 
 	// Should detect unnamed foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Constraint)
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Constraint)
 	// Unnamed constraints typically get an empty string or auto-generated name
 }
 
@@ -176,8 +175,8 @@ func TestHasFKLinter_CompositeForeignKey(t *testing.T) {
 
 	// Should detect composite foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_order_details")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_order_details")
 }
 
 func TestHasFKLinter_MultipleTablesWithForeignKeys(t *testing.T) {
@@ -207,8 +206,8 @@ func TestHasFKLinter_MultipleTablesWithForeignKeys(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "orders")
-	assert.Contains(t, tables, "order_items")
+	require.Contains(t, tables, "orders")
+	require.Contains(t, tables, "order_items")
 }
 
 func TestHasFKLinter_MixedTablesWithAndWithoutForeignKeys(t *testing.T) {
@@ -243,8 +242,8 @@ func TestHasFKLinter_MixedTablesWithAndWithoutForeignKeys(t *testing.T) {
 
 	// Should only detect foreign key in orders table
 	require.Len(t, violations, 1)
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.Contains(t, violations[0].Message, "fk_orders_user")
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.Contains(t, violations[0].Message, "fk_orders_user")
 }
 
 func TestHasFKLinter_EmptyInput(t *testing.T) {
@@ -252,7 +251,7 @@ func TestHasFKLinter_EmptyInput(t *testing.T) {
 	violations := linter.Lint(nil, nil)
 
 	// No statements - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_EmptyStatementList(t *testing.T) {
@@ -260,7 +259,7 @@ func TestHasFKLinter_EmptyStatementList(t *testing.T) {
 	violations := linter.Lint(nil, []*statement.AbstractStatement{})
 
 	// Empty list - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_NonCreateTableStatements(t *testing.T) {
@@ -272,7 +271,7 @@ func TestHasFKLinter_NonCreateTableStatements(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ALTER TABLE statements should be ignored
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_TableWithOtherConstraints(t *testing.T) {
@@ -290,7 +289,7 @@ func TestHasFKLinter_TableWithOtherConstraints(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Only FOREIGN KEY constraints should be detected, not UNIQUE or CHECK
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_TableWithMixedConstraints(t *testing.T) {
@@ -311,8 +310,8 @@ func TestHasFKLinter_TableWithMixedConstraints(t *testing.T) {
 
 	// Should only detect the FOREIGN KEY constraint
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_orders_user")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_orders_user")
 }
 
 func TestHasFKLinter_ForeignKeyWithSetNull(t *testing.T) {
@@ -329,7 +328,7 @@ func TestHasFKLinter_ForeignKeyWithSetNull(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE SET NULL
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_ForeignKeyWithRestrict(t *testing.T) {
@@ -346,7 +345,7 @@ func TestHasFKLinter_ForeignKeyWithRestrict(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE RESTRICT
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_ForeignKeyWithNoAction(t *testing.T) {
@@ -363,11 +362,11 @@ func TestHasFKLinter_ForeignKeyWithNoAction(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE NO ACTION
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFKLinter{})
 
 	sql := `CREATE TABLE orders (
@@ -389,11 +388,11 @@ func TestHasFKLinter_Integration(t *testing.T) {
 		}
 	}
 	require.Len(t, hasFKViolations, 1)
-	assert.Equal(t, "has_foreign_key", hasFKViolations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", hasFKViolations[0].Linter.Name())
 }
 
 func TestHasFKLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFKLinter{})
 
 	sql := `CREATE TABLE orders (
@@ -413,16 +412,16 @@ func TestHasFKLinter_IntegrationDisabled(t *testing.T) {
 
 	// HasFKLinter is disabled, so no violations from it
 	for _, v := range violations {
-		assert.NotEqual(t, "has_foreign_key", v.Linter.Name())
+		require.NotEqual(t, "has_foreign_key", v.Linter.Name())
 	}
 }
 
 func TestHasFKLinter_Metadata(t *testing.T) {
 	linter := &HasFKLinter{}
 
-	assert.Equal(t, "has_foreign_key", linter.Name())
-	assert.NotEmpty(t, linter.Description())
-	assert.Contains(t, linter.Description(), "FOREIGN KEY")
+	require.Equal(t, "has_foreign_key", linter.Name())
+	require.NotEmpty(t, linter.Description())
+	require.Contains(t, linter.Description(), "FOREIGN KEY")
 }
 
 func TestHasFKLinter_String(t *testing.T) {
@@ -430,7 +429,7 @@ func TestHasFKLinter_String(t *testing.T) {
 	str := linter.String()
 
 	// String() should return a non-empty string
-	assert.NotEmpty(t, str)
+	require.NotEmpty(t, str)
 }
 
 func TestHasFKLinter_SelfReferencingForeignKey(t *testing.T) {
@@ -448,8 +447,8 @@ func TestHasFKLinter_SelfReferencingForeignKey(t *testing.T) {
 
 	// Should detect self-referencing foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_employees_manager")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_employees_manager")
 }
 
 func TestHasFKLinter_ForeignKeyReferencingDifferentDatabase(t *testing.T) {
@@ -466,7 +465,7 @@ func TestHasFKLinter_ForeignKeyReferencingDifferentDatabase(t *testing.T) {
 
 	// Should detect foreign key even if it references another database
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_ExistingTablesParameter(t *testing.T) {
@@ -492,7 +491,7 @@ func TestHasFKLinter_ExistingTablesParameter(t *testing.T) {
 
 	// Should only check the changes (stmts), not existingTables
 	require.Len(t, violations, 1)
-	assert.Equal(t, "orders", violations[0].Location.Table)
+	require.Equal(t, "orders", violations[0].Location.Table)
 }
 
 func TestHasFKLinter_TableWithEngineAndCharset(t *testing.T) {
@@ -509,7 +508,7 @@ func TestHasFKLinter_TableWithEngineAndCharset(t *testing.T) {
 
 	// Should detect foreign key regardless of table options
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_TemporaryTable(t *testing.T) {
@@ -526,7 +525,7 @@ func TestHasFKLinter_TemporaryTable(t *testing.T) {
 
 	// Should detect foreign key even in temporary tables
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_IfNotExists(t *testing.T) {
@@ -543,7 +542,7 @@ func TestHasFKLinter_IfNotExists(t *testing.T) {
 
 	// Should detect foreign key with IF NOT EXISTS
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_ViolationStructure(t *testing.T) {
@@ -562,16 +561,16 @@ func TestHasFKLinter_ViolationStructure(t *testing.T) {
 	v := violations[0]
 
 	// Verify violation structure
-	assert.NotNil(t, v.Linter)
-	assert.Equal(t, "has_foreign_key", v.Linter.Name())
-	assert.Equal(t, SeverityWarning, v.Severity)
-	assert.NotEmpty(t, v.Message)
-	assert.NotNil(t, v.Location)
-	assert.Equal(t, "orders", v.Location.Table)
-	assert.NotNil(t, v.Location.Constraint)
-	assert.Equal(t, "fk_orders_user", *v.Location.Constraint)
-	assert.Nil(t, v.Location.Column)
-	assert.Nil(t, v.Location.Index)
+	require.NotNil(t, v.Linter)
+	require.Equal(t, "has_foreign_key", v.Linter.Name())
+	require.Equal(t, SeverityWarning, v.Severity)
+	require.NotEmpty(t, v.Message)
+	require.NotNil(t, v.Location)
+	require.Equal(t, "orders", v.Location.Table)
+	require.NotNil(t, v.Location.Constraint)
+	require.Equal(t, "fk_orders_user", *v.Location.Constraint)
+	require.Nil(t, v.Location.Column)
+	require.Nil(t, v.Location.Index)
 }
 
 // Tests for ALTER TABLE handling
@@ -586,14 +585,14 @@ func TestHasFKLinter_AlterTableAddForeignKey(t *testing.T) {
 
 	// Should detect foreign key being added via ALTER TABLE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "Adding foreign key constraint")
-	assert.Contains(t, violations[0].Message, "fk_user_id")
-	assert.Contains(t, violations[0].Message, "orders")
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Constraint)
-	assert.Equal(t, "fk_user_id", *violations[0].Location.Constraint)
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "Adding foreign key constraint")
+	require.Contains(t, violations[0].Message, "fk_user_id")
+	require.Contains(t, violations[0].Message, "orders")
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Constraint)
+	require.Equal(t, "fk_user_id", *violations[0].Location.Constraint)
 }
 
 func TestHasFKLinter_AlterTableAddMultipleForeignKeys(t *testing.T) {
@@ -610,17 +609,17 @@ func TestHasFKLinter_AlterTableAddMultipleForeignKeys(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	for _, v := range violations {
-		assert.Equal(t, "has_foreign_key", v.Linter.Name())
-		assert.Equal(t, SeverityWarning, v.Severity)
-		assert.Equal(t, "order_items", v.Location.Table)
-		assert.NotNil(t, v.Location.Constraint)
-		assert.Contains(t, v.Message, "Adding foreign key constraint")
+		require.Equal(t, "has_foreign_key", v.Linter.Name())
+		require.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, "order_items", v.Location.Table)
+		require.NotNil(t, v.Location.Constraint)
+		require.Contains(t, v.Message, "Adding foreign key constraint")
 	}
 
 	// Verify both constraint names are present
 	constraintNames := []string{*violations[0].Location.Constraint, *violations[1].Location.Constraint}
-	assert.Contains(t, constraintNames, "fk_order_id")
-	assert.Contains(t, constraintNames, "fk_product_id")
+	require.Contains(t, constraintNames, "fk_order_id")
+	require.Contains(t, constraintNames, "fk_product_id")
 }
 
 func TestHasFKLinter_AlterTableAddForeignKeyWithOnDelete(t *testing.T) {
@@ -633,8 +632,8 @@ func TestHasFKLinter_AlterTableAddForeignKeyWithOnDelete(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE CASCADE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_user_id")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_user_id")
 }
 
 func TestHasFKLinter_AlterTableAddForeignKeyWithOnUpdate(t *testing.T) {
@@ -647,8 +646,8 @@ func TestHasFKLinter_AlterTableAddForeignKeyWithOnUpdate(t *testing.T) {
 
 	// Should detect foreign key with ON UPDATE CASCADE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_user_id")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_user_id")
 }
 
 func TestHasFKLinter_AlterTableAddForeignKeyWithBothOnDeleteAndOnUpdate(t *testing.T) {
@@ -661,7 +660,7 @@ func TestHasFKLinter_AlterTableAddForeignKeyWithBothOnDeleteAndOnUpdate(t *testi
 
 	// Should detect foreign key with both ON DELETE and ON UPDATE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_AlterTableAddUnnamedForeignKey(t *testing.T) {
@@ -674,10 +673,10 @@ func TestHasFKLinter_AlterTableAddUnnamedForeignKey(t *testing.T) {
 
 	// Should detect unnamed foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Constraint)
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Constraint)
 }
 
 func TestHasFKLinter_AlterTableAddCompositeForeignKey(t *testing.T) {
@@ -690,8 +689,8 @@ func TestHasFKLinter_AlterTableAddCompositeForeignKey(t *testing.T) {
 
 	// Should detect composite foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_order_details")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_order_details")
 }
 
 func TestHasFKLinter_AlterTableAddColumn(t *testing.T) {
@@ -703,7 +702,7 @@ func TestHasFKLinter_AlterTableAddColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ALTER TABLE ADD COLUMN without foreign key should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableDropForeignKey(t *testing.T) {
@@ -715,7 +714,7 @@ func TestHasFKLinter_AlterTableDropForeignKey(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// DROP FOREIGN KEY should not trigger violations (we only care about adding them)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableAddIndex(t *testing.T) {
@@ -727,7 +726,7 @@ func TestHasFKLinter_AlterTableAddIndex(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ADD INDEX should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableAddUniqueKey(t *testing.T) {
@@ -739,7 +738,7 @@ func TestHasFKLinter_AlterTableAddUniqueKey(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ADD UNIQUE KEY should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableAddCheck(t *testing.T) {
@@ -751,7 +750,7 @@ func TestHasFKLinter_AlterTableAddCheck(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// ADD CHECK constraint should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableMixedConstraints(t *testing.T) {
@@ -767,8 +766,8 @@ func TestHasFKLinter_AlterTableMixedConstraints(t *testing.T) {
 
 	// Should only detect the FOREIGN KEY constraint
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_user_id")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_user_id")
 }
 
 func TestHasFKLinter_AlterTableModifyColumn(t *testing.T) {
@@ -780,7 +779,7 @@ func TestHasFKLinter_AlterTableModifyColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// MODIFY COLUMN should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableChangeColumn(t *testing.T) {
@@ -792,7 +791,7 @@ func TestHasFKLinter_AlterTableChangeColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// CHANGE COLUMN should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_AlterTableRenameTable(t *testing.T) {
@@ -804,7 +803,7 @@ func TestHasFKLinter_AlterTableRenameTable(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// RENAME should not trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFKLinter_MultipleAlterTableStatements(t *testing.T) {
@@ -826,8 +825,8 @@ func TestHasFKLinter_MultipleAlterTableStatements(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "orders")
-	assert.Contains(t, tables, "order_items")
+	require.Contains(t, tables, "orders")
+	require.Contains(t, tables, "order_items")
 }
 
 func TestHasFKLinter_MixedCreateAndAlterStatements(t *testing.T) {
@@ -853,16 +852,16 @@ func TestHasFKLinter_MixedCreateAndAlterStatements(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "orders")
-	assert.Contains(t, tables, "order_items")
+	require.Contains(t, tables, "orders")
+	require.Contains(t, tables, "order_items")
 
 	// Verify messages are appropriate for each type
 	for _, v := range violations {
 		switch v.Location.Table {
 		case "orders":
-			assert.Contains(t, v.Message, "has FOREIGN KEY constraint")
+			require.Contains(t, v.Message, "has FOREIGN KEY constraint")
 		case "order_items":
-			assert.Contains(t, v.Message, "Adding foreign key constraint")
+			require.Contains(t, v.Message, "Adding foreign key constraint")
 		}
 	}
 }
@@ -877,7 +876,7 @@ func TestHasFKLinter_AlterTableAddForeignKeyWithSetNull(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE SET NULL
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_AlterTableAddForeignKeyWithRestrict(t *testing.T) {
@@ -890,7 +889,7 @@ func TestHasFKLinter_AlterTableAddForeignKeyWithRestrict(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE RESTRICT
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_AlterTableAddForeignKeyWithNoAction(t *testing.T) {
@@ -903,7 +902,7 @@ func TestHasFKLinter_AlterTableAddForeignKeyWithNoAction(t *testing.T) {
 
 	// Should detect foreign key with ON DELETE NO ACTION
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_AlterTableSelfReferencingForeignKey(t *testing.T) {
@@ -916,8 +915,8 @@ func TestHasFKLinter_AlterTableSelfReferencingForeignKey(t *testing.T) {
 
 	// Should detect self-referencing foreign key
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
-	assert.Contains(t, violations[0].Message, "fk_manager")
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Contains(t, violations[0].Message, "fk_manager")
 }
 
 func TestHasFKLinter_AlterTableForeignKeyReferencingDifferentDatabase(t *testing.T) {
@@ -930,7 +929,7 @@ func TestHasFKLinter_AlterTableForeignKeyReferencingDifferentDatabase(t *testing
 
 	// Should detect foreign key even if it references another database
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_foreign_key", violations[0].Linter.Name())
+	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 }
 
 func TestHasFKLinter_AlterTableViolationStructure(t *testing.T) {
@@ -945,15 +944,15 @@ func TestHasFKLinter_AlterTableViolationStructure(t *testing.T) {
 	v := violations[0]
 
 	// Verify violation structure for ALTER TABLE
-	assert.NotNil(t, v.Linter)
-	assert.Equal(t, "has_foreign_key", v.Linter.Name())
-	assert.Equal(t, SeverityWarning, v.Severity)
-	assert.NotEmpty(t, v.Message)
-	assert.Contains(t, v.Message, "Adding foreign key constraint")
-	assert.NotNil(t, v.Location)
-	assert.Equal(t, "orders", v.Location.Table)
-	assert.NotNil(t, v.Location.Constraint)
-	assert.Equal(t, "fk_user_id", *v.Location.Constraint)
-	assert.Nil(t, v.Location.Column)
-	assert.Nil(t, v.Location.Index)
+	require.NotNil(t, v.Linter)
+	require.Equal(t, "has_foreign_key", v.Linter.Name())
+	require.Equal(t, SeverityWarning, v.Severity)
+	require.NotEmpty(t, v.Message)
+	require.Contains(t, v.Message, "Adding foreign key constraint")
+	require.NotNil(t, v.Location)
+	require.Equal(t, "orders", v.Location.Table)
+	require.NotNil(t, v.Location.Constraint)
+	require.Equal(t, "fk_user_id", *v.Location.Constraint)
+	require.Nil(t, v.Location.Column)
+	require.Nil(t, v.Location.Index)
 }

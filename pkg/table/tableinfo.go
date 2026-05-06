@@ -385,12 +385,25 @@ func (t *TableInfo) MaxValue() Datum {
 	return t.maxValue
 }
 
-func (t *TableInfo) WrapCastType(col string) string {
+func (t *TableInfo) wrapCastType(col string) (string, error) {
 	tp, ok := t.columnsMySQLTps[col] // the tp keeps the width in this context.
 	if !ok {
-		panic("column not found")
+		return "", fmt.Errorf("column %q not found in table %s", col, t.TableName)
 	}
-	return fmt.Sprintf("CAST(`%s` AS %s)", col, castableTp(tp))
+	return fmt.Sprintf("CAST(`%s` AS %s)", col, castableTp(tp)), nil
+}
+
+// wrapCastTypeAs generates a CAST expression using sqlCol as the column reference
+// in the SQL, but looks up the cast type from typeCol in this table's column types.
+// This is used for column renames where the SQL column name differs from the
+// type-lookup column name (e.g., source table uses old name, but cast type
+// comes from the target table's new name).
+func (t *TableInfo) wrapCastTypeAs(sqlCol, typeCol string) (string, error) {
+	tp, ok := t.columnsMySQLTps[typeCol]
+	if !ok {
+		return "", fmt.Errorf("column %q not found for type lookup in table %s", typeCol, t.TableName)
+	}
+	return fmt.Sprintf("CAST(`%s` AS %s)", sqlCol, castableTp(tp)), nil
 }
 
 func (t *TableInfo) datumTp(col string) datumTp {

@@ -20,6 +20,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [conf](#conf)
 - [database](#database)
 - [defer-cutover](#defer-cutover)
+- [force-enable-buffered-map](#force-enable-buffered-map)
 - [host](#host)
 - [lint](#lint)
 - [lint-only](#lint-only)
@@ -147,6 +148,19 @@ If you start a migration and realize that you forgot to set defer-cutover, worry
 
 Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
 
+### force-enable-buffered-map
+
+- Type: Boolean
+- Default value: `false`
+
+> **⚠️ Experimental.** Correctness relies on the post-cutover checksum to catch and repair any divergence. Leave this off unless you have a specific reason to enable it.
+
+Controls whether the replication subscription uses the LWW (last-write-wins) buffered-map dedup during the copy phase for tables whose primary key is **not memory-comparable** — typically a `VARCHAR` PK using a case-insensitive or otherwise collation-sensitive comparison (e.g. `utf8mb4_0900_ai_ci`). Memory-comparable PKs (integers, binary strings, etc.) always use the buffered map regardless of this flag.
+
+When `false` (the default), tables with non-memory-comparable PKs use a FIFO queue full-time during both the copy and post-copy phases. The FIFO queue replays binlog events in their original order, which is required for collation-sensitive PKs because the in-memory map's hash equality (`"A"` ≠ `"a"`) does not match MySQL's row identity (`"A"` = `"a"` under a CI collation), so map-mode iteration could apply events out of order.
+
+When `true`, Spirit opts into the optimization: buffered-map dedup during the copy phase, FIFO queue post-copy. This can significantly reduce the volume of binlog events Spirit has to apply when the workload re-touches the same logical rows during a long copy, but if the dedup ever produces a wrong end state for a row the divergence is only caught by the post-cutover checksum (which will then re-copy the affected chunks).
+
 ### host
 
 - Type: String
@@ -192,8 +206,11 @@ The password to use when connecting to MySQL. To connect to MySQL without any pa
 - Type: String
 - Default value: ``
 - Example: `root:mypassword@tcp(localhost:3307)/test`
+- Multiple replicas: `root:pass@tcp(replica1:3306)/db,root:pass@tcp(replica2:3306)/db`
 
-Used in combination with [replica-max-lag](#replica-max-lag). This is the host which Spirit will connect to to determine if the copy should be throttled to ensure replica health.
+Used in combination with [replica-max-lag](#replica-max-lag). This is the host (or hosts) which Spirit will connect to to determine if the copy should be throttled to ensure replica health.
+
+Multiple replica DSNs can be specified as a comma-separated list. When multiple replicas are configured, Spirit monitors all of them and throttles based on the **slowest** replica (i.e., the one with the highest lag). This is useful for environments with multiple read replicas where you want to ensure none of them fall too far behind.
 
 #### Replica TLS Behavior
 
@@ -270,9 +287,18 @@ There are some restrictions to `--statement`:
 - Type: Boolean
 - Default value: `false`
 
-By default, Spirit will automatically clean up these old checkpoints before starting the schema change. This allows schema changes to always be possible to proceed forward, at the risk of lost progress.
+> **⚠️ Not recommended.** In most cases, the default behavior (idempotent restart) is safer and more convenient. `--strict` was added for a specific internal use case and is generally the wrong choice for new deployments. If a previous migration was interrupted, the default behavior will safely clean up and restart, which is almost always what you want.
 
-When set to `true`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the alter statement matches the `--alter` parameter. If the validation fails, Spirit will exit and prevent the schema change process from proceeding.
+By default, Spirit will automatically clean up old checkpoints before starting the schema change. This allows schema changes to always proceed forward, at the cost of potentially lost progress from a previous incomplete run.
+
+When set to `true`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the statement being executed matches the statement from the previous run (whether provided via `--alter` or `--statement`). If the validation fails (e.g., the statement was changed between runs, or the binlog position is no longer available), Spirit will exit with an error rather than silently restarting from scratch.
+
+The scenarios where `--strict` causes Spirit to fail rather than restart are:
+- The migration statement changed between runs (checkpoint has a different statement)
+- The binlog file referenced by the checkpoint has been purged from the server
+- The checkpoint is too old to safely resume (replaying binlogs would be slower than restarting)
+
+In all of these cases, the default (non-strict) behavior is to log a warning and start fresh, which is usually the correct action.
 
 ### table
 

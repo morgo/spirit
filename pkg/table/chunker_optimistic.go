@@ -21,6 +21,7 @@ type chunkerOptimistic struct {
 	checkpointHighPtr Datum // the high watermark detected on restore
 	finalChunkSent    bool
 	isOpen            bool
+	columnMapping     *ColumnMapping
 
 	// Dynamic Chunking is time based instead of row based.
 	// It uses *time* to determine the target chunk size.
@@ -49,7 +50,7 @@ type chunkerOptimistic struct {
 	logger *slog.Logger
 }
 
-var _ Chunker = &chunkerOptimistic{}
+var _ MappedChunker = &chunkerOptimistic{}
 
 // nextChunkByPrefetching uses prefetching instead of feedback to determine the chunk size.
 // It is used when the chunker detects that there are very large gaps in the sequence.
@@ -101,6 +102,8 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 			UpperBound: &Boundary{[]Datum{maxVal}, false},
 			Table:      t.Ti,
 			NewTable:   t.NewTi,
+
+			ColumnMapping: t.columnMapping,
 		}, nil
 	}
 	if rows.Err() != nil {
@@ -116,6 +119,8 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 		LowerBound: &Boundary{[]Datum{t.chunkPtr}, true},
 		Table:      t.Ti,
 		NewTable:   t.NewTi,
+
+		ColumnMapping: t.columnMapping,
 	}, nil
 }
 
@@ -139,6 +144,8 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 			UpperBound: &Boundary{[]Datum{t.chunkPtr}, false},
 			Table:      t.Ti,
 			NewTable:   t.NewTi,
+
+			ColumnMapping: t.columnMapping,
 		}, nil
 	}
 	if t.chunkPrefetchingEnabled {
@@ -167,6 +174,8 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 			LowerBound: &Boundary{[]Datum{t.chunkPtr}, true},
 			Table:      t.Ti,
 			NewTable:   t.NewTi,
+
+			ColumnMapping: t.columnMapping,
 		}, nil
 	}
 
@@ -184,6 +193,8 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 		UpperBound: &Boundary{[]Datum{maxVal}, false},
 		Table:      t.Ti,
 		NewTable:   t.NewTi,
+
+		ColumnMapping: t.columnMapping,
 	}, nil
 }
 
@@ -196,7 +207,10 @@ func (t *chunkerOptimistic) Open() (err error) {
 	return t.open()
 }
 
-func (t *chunkerOptimistic) setDynamicChunking(newValue bool) {
+// SetDynamicChunking enables (true) or disables (false) the optimistic
+// chunker's dynamic chunk-size adaptation. Disabling is intended for tests
+// that need deterministic chunk sizes; production callers should leave it on.
+func (t *chunkerOptimistic) SetDynamicChunking(newValue bool) {
 	t.Lock()
 	defer t.Unlock()
 	t.disableDynamicChunker = !newValue
@@ -221,12 +235,27 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	}
 	// Because this chunker only supports single-column primary keys,
 	// we can safely set the checkpointHighPtr as a single value like this.
-	// For high watermark, use the type of old table, not the new one.
-	checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp) // set the high pointer.
-	if err != nil {
-		return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
+	// We need the highest value in the new table so the keyAboveWatermark
+	// optimization stays disabled for keys that may already exist in the
+	// new table from before the resume. This prevents a race where a
+	// delete event is discarded (key "above watermark") but the row was
+	// actually already copied before the checkpoint. i.e.:
+	//   - watermark is at key=100, but a row at key=105 was inserted and copied.
+	//   - immediately after resume there is a delete for key=105 but we incorrectly
+	//     skip it because it is above the watermark.
+	//
+	// When NewTi is nil (the move path), we skip setting checkpointHighPtr
+	// entirely. The move path deletes all rows above the watermark from
+	// the target tables before resuming (see Runner.deleteAboveWatermark),
+	// so there are no phantom rows above the watermark to protect and the
+	// optimization can be enabled immediately.
+	if t.NewTi != nil {
+		checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp)
+		if err != nil {
+			return fmt.Errorf("failed to create checkpointHighPtr: %w", err)
+		}
+		t.checkpointHighPtr = checkpointHighPtr
 	}
-	t.checkpointHighPtr = checkpointHighPtr
 	chunk, err := newChunkFromJSON(t.Ti, cp)
 	if err != nil {
 		return err
@@ -532,7 +561,26 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 	if t.chunkPtr.IsNil() && t.checkpointHighPtr.IsNil() {
-		return true // every key is above because we haven't started copying.
+		// We haven't claimed any range yet (no chunk advanced, no resume
+		// checkpoint). The previous behavior returned TRUE here ("every key is
+		// above"), which silently dropped binlog events during the window
+		// between SetWatermarkOptimization(true) and the first chunker.Next().
+		// The intent was to rely on the chunker's later SELECT picking the row
+		// up from the source — but that only works if the writer committed
+		// before the SELECT's snapshot. A writer that commits AFTER the
+		// SELECT and BEFORE chunkPtr is set produces a row that the SELECT
+		// misses AND the binlog drops; the row is lost. (Observed in #746
+		// as 4 consecutive missing PKs in chunk [1,1001) on
+		// TestCutoverAtomicityWithConcurrentWrites.)
+		//
+		// Per this method's contract above ("if there is any ambiguity, it's
+		// important to return FALSE"), return FALSE: keep the change in the
+		// delta/buffered map. Once the chunker advances, the watermark logic
+		// at flush time will route it correctly — either flushing it via
+		// REPLACE INTO ... SELECT FROM original (idempotent with anything the
+		// chunker's own SELECT picked up) or deferring it until the chunker
+		// passes its key.
+		return false
 	}
 	if t.finalChunkSent {
 		return false // we're done, so everything is below.
@@ -593,4 +641,8 @@ func (t *chunkerOptimistic) Tables() []*TableInfo {
 		return []*TableInfo{t.Ti, t.NewTi}
 	}
 	return []*TableInfo{t.Ti}
+}
+
+func (t *chunkerOptimistic) ColumnMapping() *ColumnMapping {
+	return t.columnMapping
 }

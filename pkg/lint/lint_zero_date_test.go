@@ -4,13 +4,12 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestZeroDateLinter_Name(t *testing.T) {
 	linter := &ZeroDateLinter{}
-	assert.Equal(t, "zero_date", linter.Name())
+	require.Equal(t, "zero_date", linter.Name())
 }
 
 // Test DATE type with zero date default
@@ -22,10 +21,10 @@ func TestZeroDateLinter_DateWithZeroDefault(t *testing.T) {
 
 	violations := linter.Lint(nil, stmts)
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.Equal(t, "birth_date", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "zero default value")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, "birth_date", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "zero default value")
 }
 
 // Test DATETIME type with zero date default
@@ -37,10 +36,10 @@ func TestZeroDateLinter_DateTimeWithZeroDefault(t *testing.T) {
 
 	violations := linter.Lint(nil, stmts)
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "events", violations[0].Location.Table)
-	assert.Equal(t, "event_time", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "zero default value")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "events", violations[0].Location.Table)
+	require.Equal(t, "event_time", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "zero default value")
 }
 
 // Test TIMESTAMP type with zero date default
@@ -52,10 +51,10 @@ func TestZeroDateLinter_TimestampWithZeroDefault(t *testing.T) {
 
 	violations := linter.Lint(nil, stmts)
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "logs", violations[0].Location.Table)
-	assert.Equal(t, "created_at", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "zero default value")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "logs", violations[0].Location.Table)
+	require.Equal(t, "created_at", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "zero default value")
 }
 
 // Test DATE with valid default value (should pass)
@@ -66,7 +65,7 @@ func TestZeroDateLinter_DateWithValidDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test DATETIME with valid default value (should pass)
@@ -77,7 +76,7 @@ func TestZeroDateLinter_DateTimeWithValidDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test nullable DATE with NULL default (should pass)
@@ -88,7 +87,7 @@ func TestZeroDateLinter_NullableDateWithNullDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test nullable DATETIME with NULL default (should pass)
@@ -99,7 +98,7 @@ func TestZeroDateLinter_NullableDateTimeWithNullDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test NOT NULL DATE with valid default (should pass)
@@ -110,7 +109,7 @@ func TestZeroDateLinter_NotNullDateWithValidDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test nullable DATE with no default (should pass)
@@ -121,7 +120,7 @@ func TestZeroDateLinter_NullableDateWithNoDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test DATETIME with CURRENT_TIMESTAMP default (should pass)
@@ -132,7 +131,7 @@ func TestZeroDateLinter_DateTimeWithCurrentTimestamp(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test TIMESTAMP with CURRENT_TIMESTAMP default (should pass)
@@ -143,7 +142,7 @@ func TestZeroDateLinter_TimestampWithCurrentTimestamp(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test multiple columns with mixed violations
@@ -163,8 +162,8 @@ func TestZeroDateLinter_MultipleColumns(t *testing.T) {
 	require.Len(t, violations, 1)
 
 	// First violation: created_at with zero default
-	assert.Equal(t, "created_at", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "zero default value")
+	require.Equal(t, "created_at", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "zero default value")
 }
 
 // Test non-date columns (should pass)
@@ -175,7 +174,7 @@ func TestZeroDateLinter_NonDateColumns(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test table with no date columns (should pass)
@@ -186,7 +185,7 @@ func TestZeroDateLinter_NoDateColumns(t *testing.T) {
 	require.NoError(t, err)
 
 	violations := linter.Lint(nil, stmts)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test with existing tables
@@ -198,8 +197,8 @@ func TestZeroDateLinter_ExistingTables(t *testing.T) {
 
 	violations := linter.Lint([]*statement.CreateTable{existingStmt}, nil)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.Equal(t, "birth_date", *violations[0].Location.Column)
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, "birth_date", *violations[0].Location.Column)
 }
 
 // Test with both existing and new tables
@@ -219,8 +218,8 @@ func TestZeroDateLinter_ExistingAndNewTables(t *testing.T) {
 
 	// Check both violations
 	tables := []string{violations[0].Location.Table}
-	assert.Contains(t, tables, "users")
-	assert.NotContains(t, tables, "events")
+	require.Contains(t, tables, "users")
+	require.NotContains(t, tables, "events")
 }
 
 // Test case sensitivity of NULL default
@@ -242,7 +241,7 @@ func TestZeroDateLinter_NullDefaultCaseInsensitive(t *testing.T) {
 			require.NoError(t, err)
 
 			violations := linter.Lint(nil, stmts)
-			assert.Empty(t, violations, "Should not flag nullable column with NULL default")
+			require.Empty(t, violations, "Should not flag nullable column with NULL default")
 		})
 	}
 }
@@ -295,16 +294,16 @@ func TestZeroDateLinter_AllDateTypes(t *testing.T) {
 		*violations[1].Location.Column,
 		*violations[2].Location.Column,
 	}
-	assert.Contains(t, columns, "date_col")
-	assert.Contains(t, columns, "datetime_col")
-	assert.Contains(t, columns, "timestamp_col")
+	require.Contains(t, columns, "date_col")
+	require.Contains(t, columns, "datetime_col")
+	require.Contains(t, columns, "timestamp_col")
 }
 
 // Test empty table
 func TestZeroDateLinter_EmptyTable(t *testing.T) {
 	linter := &ZeroDateLinter{}
 	violations := linter.Lint(nil, nil)
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Test with ALTER TABLE statements (should be handled by CreateTableStatements)
@@ -325,8 +324,8 @@ func TestZeroDateLinter_AlterTableAddColumn(t *testing.T) {
 
 	// The linter should detect the violation in the modified table
 	if len(violations) > 0 {
-		assert.Equal(t, "users", violations[0].Location.Table)
-		assert.Contains(t, violations[0].Message, "zero default value")
+		require.Equal(t, "users", violations[0].Location.Table)
+		require.Contains(t, violations[0].Message, "zero default value")
 	}
 }
 
@@ -338,5 +337,5 @@ func TestZeroDateLinter_Registration(t *testing.T) {
 	linter, err := Get("zero_date")
 	require.NoError(t, err)
 	require.NotNil(t, linter)
-	assert.IsType(t, &ZeroDateLinter{}, linter)
+	require.IsType(t, &ZeroDateLinter{}, linter)
 }

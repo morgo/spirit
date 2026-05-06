@@ -27,14 +27,12 @@ const (
 	ChunkerDefaultTarget = 100 * time.Millisecond
 )
 
-type Chunker interface { //nolint: interfacebloat
+type Chunker interface {
 	Open() error
 	IsRead() bool
 	Close() error
 	Next() (*Chunk, error)
 	Feedback(chunk *Chunk, duration time.Duration, actualRows uint64)
-	KeyAboveHighWatermark(key0 any) bool
-	KeyBelowLowWatermark(key0 any) bool
 	Progress() (rowsRead uint64, chunksCopied uint64, totalRowsExpected uint64)
 	OpenAtWatermark(watermark string) error
 	GetLowWatermark() (watermark string, err error)
@@ -49,53 +47,80 @@ type Chunker interface { //nolint: interfacebloat
 	Tables() []*TableInfo
 }
 
-func newChunker(t *TableInfo, chunkerTarget time.Duration, logger *slog.Logger) (Chunker, error) {
-	return NewChunker(t, nil, chunkerTarget, logger)
+// MappedChunker is a Chunker that operates on a single source→target table pair
+// and carries a ColumnMapping describing the column relationship between them.
+// The multiChunker does not implement this interface because it wraps multiple
+// independent table pairs, each with their own mapping.
+type MappedChunker interface {
+	Chunker
+	// ColumnMapping returns the column mapping between source and target tables,
+	// including any column renames.
+	ColumnMapping() *ColumnMapping
+	KeyAboveHighWatermark(key0 any) bool
+	KeyBelowLowWatermark(key0 any) bool
 }
 
-func NewChunker(t *TableInfo, newTable *TableInfo, chunkerTarget time.Duration, logger *slog.Logger) (Chunker, error) {
-	if chunkerTarget == 0 {
-		chunkerTarget = ChunkerDefaultTarget
+// ChunkerConfig holds optional configuration for creating a Chunker.
+// Only the source table (passed as the first argument to NewChunker) is required;
+// all other fields have sensible defaults.
+type ChunkerConfig struct {
+	// NewTable is the destination table. If nil, defaults to the source table
+	// (for move operations where there is no distinct new table).
+	NewTable *TableInfo
+	// TargetChunkTime is the target duration for each chunk. Defaults to ChunkerDefaultTarget.
+	TargetChunkTime time.Duration
+	// Logger is the structured logger. Defaults to slog.Default().
+	Logger *slog.Logger
+	// ColumnMapping describes the column relationship between source and target tables,
+	// including any renames. If nil, a default mapping with no renames is created.
+	ColumnMapping *ColumnMapping
+	// Key and Where are used for composite chunkers to specify a non-primary key index.
+	// When Key is set, the composite chunker is always used regardless of whether the
+	// table has an auto-increment primary key.
+	Key   string
+	Where string
+}
+
+// NewChunker creates a new MappedChunker for the given source table.
+// It selects the optimistic chunker for single-column auto-increment primary keys
+// (unless Key/Where overrides are specified), and the composite chunker otherwise.
+func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
+	if config.TargetChunkTime == 0 {
+		config.TargetChunkTime = ChunkerDefaultTarget
 	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
+	}
+	if config.ColumnMapping == nil {
+		config.ColumnMapping = NewColumnMapping(t, config.NewTable, nil)
+	}
+	newTable := config.NewTable
 	if newTable == nil {
 		// This supports moveTable cases where there is no new table per-se.
 		// But the chunker needs a non-nil newTable for some operations,
 		// like resuming from a checkpoint.
 		newTable = t
 	}
-	// Use the optimistic chunker for auto_increment
-	// tables with a single column key.
-	if len(t.KeyColumns) == 1 && t.KeyIsAutoInc {
+	// Use the optimistic chunker for auto_increment tables with a single
+	// column key, unless a specific key/where is requested.
+	if len(t.KeyColumns) == 1 && t.KeyIsAutoInc && config.Key == "" && config.Where == "" {
 		return &chunkerOptimistic{
 			Ti:                     t,
 			NewTi:                  newTable,
-			ChunkerTarget:          chunkerTarget,
+			ChunkerTarget:          config.TargetChunkTime,
+			columnMapping:          config.ColumnMapping,
 			lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-			logger:                 logger,
+			logger:                 config.Logger,
 		}, nil
 	}
-	return newCompositeChunkerWithDestination(t, newTable, chunkerTarget, logger, "", "")
-}
-
-// NewCompositeChunker returns a chunkerComposite ,
-// setting its Key if keyName and where conditions are provided
-func NewCompositeChunker(t *TableInfo, chunkerTarget time.Duration, logger *slog.Logger, keyName string, whereCondition string) (Chunker, error) {
-	return newCompositeChunkerWithDestination(t, nil, chunkerTarget, logger, keyName, whereCondition)
-}
-
-// NewCompositeChunkerWithDestination returns a chunkerComposite with destination table info,
-// setting its Key if keyName and where conditions are provided
-func newCompositeChunkerWithDestination(t *TableInfo, newTable *TableInfo, chunkerTarget time.Duration, logger *slog.Logger, keyName string, whereCondition string) (Chunker, error) {
-	c := chunkerComposite{
+	return &chunkerComposite{
 		Ti:                     t,
 		NewTi:                  newTable,
-		ChunkerTarget:          chunkerTarget,
+		ChunkerTarget:          config.TargetChunkTime,
+		columnMapping:          config.ColumnMapping,
+		keyName:                config.Key,
+		where:                  config.Where,
 		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 logger,
-	}
-	var err error
-	if keyName != "" && whereCondition != "" {
-		err = c.SetKey(keyName, whereCondition)
-	}
-	return &c, err
+		logger:                 config.Logger,
+	}, nil
 }

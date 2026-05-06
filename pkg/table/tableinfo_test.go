@@ -8,7 +8,7 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -24,9 +24,9 @@ func TestOpenOnBinaryType(t *testing.T) {
 	t1.keyDatums = []datumTp{binaryType}
 	t1.KeyIsAutoInc = true
 	t1.Columns = []string{"id", "name"}
-	chunker, err := newChunker(t1, ChunkerDefaultTarget, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 }
 
 func TestOpenOnNoMinMax(t *testing.T) {
@@ -37,9 +37,9 @@ func TestOpenOnNoMinMax(t *testing.T) {
 	t1.keyDatums = []datumTp{binaryType}
 	t1.KeyIsAutoInc = true
 	t1.Columns = []string{"id", "name"}
-	chunker, err := newChunker(t1, 100, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := NewChunker(t1, ChunkerConfig{TargetChunkTime: 100})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
 }
 
 func TestCallingNextChunkWithoutOpen(t *testing.T) {
@@ -50,15 +50,15 @@ func TestCallingNextChunkWithoutOpen(t *testing.T) {
 	t1.keyDatums = []datumTp{binaryType}
 	t1.KeyIsAutoInc = true
 	t1.Columns = []string{"id", "name"}
-	chunker, err := newChunker(t1, 100, slog.Default())
-	assert.NoError(t, err)
+	chunker, err := NewChunker(t1, ChunkerConfig{TargetChunkTime: 100})
+	require.NoError(t, err)
 
 	_, err = chunker.Next()
-	assert.Error(t, err)
+	require.Error(t, err)
 
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 	_, err = chunker.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func newTableInfo4Test(schema, table string) *TableInfo { //nolint: unparam
@@ -77,29 +77,33 @@ func TestDiscovery(t *testing.T) {
 	testutils.RunSQL(t, `insert into discoveryt1 values (1, 'a'), (2, 'b'), (3, 'c')`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		_ = db.Close()
 	}()
 	t1 := NewTableInfo(db, "test", "discoveryt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
-	assert.Equal(t, "discoveryt1", t1.TableName)
-	assert.Equal(t, "test", t1.SchemaName)
-	assert.Equal(t, "id", t1.KeyColumns[0])
+	require.Equal(t, "discoveryt1", t1.TableName)
+	require.Equal(t, "test", t1.SchemaName)
+	require.Equal(t, "id", t1.KeyColumns[0])
 
 	// normalize for mysql 5.7 and 8.0
-	assert.Equal(t, "int", removeWidth(t1.columnsMySQLTps["id"]))
-	assert.Equal(t, "CAST(`id` AS signed)", t1.WrapCastType("id"))
-	assert.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", t1.WrapCastType("name"))
+	require.Equal(t, "int", removeWidth(t1.columnsMySQLTps["id"]))
+	castID, err := t1.wrapCastType("id")
+	require.NoError(t, err)
+	require.Equal(t, "CAST(`id` AS signed)", castID)
+	castName, err := t1.wrapCastType("name")
+	require.NoError(t, err)
+	require.Equal(t, "CAST(`name` AS char CHARACTER SET utf8mb4)", castName)
 
-	assert.Equal(t, "1", t1.minValue.String())
-	assert.Equal(t, "3", t1.maxValue.String())
+	require.Equal(t, "1", t1.minValue.String())
+	require.Equal(t, "3", t1.maxValue.String())
 
 	// Can't check estimated rows (depends on MySQL version etc)
-	assert.Equal(t, []string{"int"}, t1.keyColumnsMySQLTp)
-	assert.True(t, t1.KeyIsAutoInc)
-	assert.Len(t, t1.Columns, 2)
+	require.Equal(t, []string{"int"}, t1.keyColumnsMySQLTp)
+	require.True(t, t1.KeyIsAutoInc)
+	require.Len(t, t1.Columns, 2)
 }
 
 func TestDiscoveryUInt(t *testing.T) {
@@ -113,7 +117,7 @@ func TestDiscoveryUInt(t *testing.T) {
 	testutils.RunSQL(t, `insert into discoveryuintt1 values (1, 'a'), (2, 'b'), (3, 'c')`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -121,19 +125,19 @@ func TestDiscoveryUInt(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "discoveryuintt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
-	assert.Equal(t, "discoveryuintt1", t1.TableName)
-	assert.Equal(t, "test", t1.SchemaName)
-	assert.Equal(t, "id", t1.KeyColumns[0])
+	require.Equal(t, "discoveryuintt1", t1.TableName)
+	require.Equal(t, "test", t1.SchemaName)
+	require.Equal(t, "id", t1.KeyColumns[0])
 
-	assert.Equal(t, "1", t1.minValue.String())
-	assert.Equal(t, "3", t1.maxValue.String())
+	require.Equal(t, "1", t1.minValue.String())
+	require.Equal(t, "3", t1.maxValue.String())
 
 	// Can't check estimated rows (depends on MySQL version etc)
-	assert.Equal(t, []string{"int unsigned"}, t1.keyColumnsMySQLTp)
-	assert.True(t, t1.KeyIsAutoInc)
-	assert.Len(t, t1.Columns, 2)
+	require.Equal(t, []string{"int unsigned"}, t1.keyColumnsMySQLTp)
+	require.True(t, t1.KeyIsAutoInc)
+	require.Len(t, t1.Columns, 2)
 }
 
 func TestDiscoveryNoKeyColumnsOrNoTable(t *testing.T) {
@@ -146,7 +150,7 @@ func TestDiscoveryNoKeyColumnsOrNoTable(t *testing.T) {
 	testutils.RunSQL(t, `insert into discoverynokeyst1 values (1, 'a'), (2, 'b'), (3, 'c')`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -154,10 +158,10 @@ func TestDiscoveryNoKeyColumnsOrNoTable(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "discoverynokeyst1")
-	assert.ErrorContains(t, t1.SetInfo(t.Context()), "no primary key found")
+	require.ErrorContains(t, t1.SetInfo(t.Context()), "no primary key found")
 
 	t2 := NewTableInfo(db, "test", "t2fdsfds")
-	assert.ErrorContains(t, t2.SetInfo(t.Context()), "table test.t2fdsfds does not exist")
+	require.ErrorContains(t, t2.SetInfo(t.Context()), "table test.t2fdsfds does not exist")
 }
 
 func TestDiscoveryBalancesTable(t *testing.T) {
@@ -184,7 +188,7 @@ func TestDiscoveryBalancesTable(t *testing.T) {
 	testutils.RunSQL(t, table)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -192,20 +196,20 @@ func TestDiscoveryBalancesTable(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "balances")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
-	assert.True(t, t1.KeyIsAutoInc)
-	assert.Equal(t, []string{"bigint"}, t1.keyColumnsMySQLTp)
-	assert.Equal(t, []string{"id"}, t1.KeyColumns)
-	assert.Equal(t, "0", t1.minValue.String())
-	assert.Equal(t, "0", t1.maxValue.String())
+	require.True(t, t1.KeyIsAutoInc)
+	require.Equal(t, []string{"bigint"}, t1.keyColumnsMySQLTp)
+	require.Equal(t, []string{"id"}, t1.KeyColumns)
+	require.Equal(t, "0", t1.minValue.String())
+	require.Equal(t, "0", t1.maxValue.String())
 
-	chunker, err := newChunker(t1, 100, slog.Default())
-	assert.NoError(t, err)
+	chunker, err := NewChunker(t1, ChunkerConfig{TargetChunkTime: 100})
+	require.NoError(t, err)
 
-	assert.NoError(t, chunker.Open())
-	assert.Equal(t, "0", t1.minValue.String())
-	assert.Equal(t, "0", t1.maxValue.String())
+	require.NoError(t, chunker.Open())
+	require.Equal(t, "0", t1.minValue.String())
+	require.Equal(t, "0", t1.maxValue.String())
 }
 
 func TestDiscoveryCompositeNonComparable(t *testing.T) {
@@ -219,7 +223,7 @@ func TestDiscoveryCompositeNonComparable(t *testing.T) {
 	testutils.RunSQL(t, `insert into compnoncomparable values (1, 'a'), (2, 'b'), (3, 'c')`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -227,8 +231,8 @@ func TestDiscoveryCompositeNonComparable(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "compnoncomparable")
-	assert.NoError(t, t1.SetInfo(t.Context()))         // still discovers the primary key
-	assert.Error(t, t1.PrimaryKeyIsMemoryComparable()) // but its non comparable
+	require.NoError(t, t1.SetInfo(t.Context()))         // still discovers the primary key
+	require.Error(t, t1.PrimaryKeyIsMemoryComparable()) // but its non comparable
 }
 
 func TestDiscoveryCompositeComparable(t *testing.T) {
@@ -242,7 +246,7 @@ func TestDiscoveryCompositeComparable(t *testing.T) {
 	testutils.RunSQL(t, `insert into compcomparable values (1, 1), (2, 2), (3, 3)`)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -250,16 +254,16 @@ func TestDiscoveryCompositeComparable(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "compcomparable")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
-	assert.True(t, t1.KeyIsAutoInc)
-	assert.Equal(t, []string{"int unsigned", "int"}, t1.keyColumnsMySQLTp)
-	assert.Equal(t, []string{"id", "age"}, t1.KeyColumns)
+	require.True(t, t1.KeyIsAutoInc)
+	require.Equal(t, []string{"int unsigned", "int"}, t1.keyColumnsMySQLTp)
+	require.Equal(t, []string{"id", "age"}, t1.KeyColumns)
 }
 
 func TestStatisticsUpdate(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -294,12 +298,12 @@ func TestStatisticsUpdate(t *testing.T) {
 	go t1.AutoUpdateStatistics(t.Context(), time.Millisecond*10, slog.Default())
 	time.Sleep(time.Millisecond * 100)
 
-	assert.NoError(t, t1.Close())
+	require.NoError(t, t1.Close())
 }
 
 func TestKeyColumnsValuesExtraction(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -317,19 +321,19 @@ func TestKeyColumnsValuesExtraction(t *testing.T) {
 	testutils.RunSQL(t, `insert into colvaluest1 values (1, 'a', 15), (2, 'b', 20), (3, 'c', 25)`)
 
 	t1 := NewTableInfo(db, "test", "colvaluest1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	var id, age int
 	var name string
 
 	err = db.QueryRowContext(t.Context(), "SELECT * FROM `test`.`colvaluest1` ORDER BY id DESC LIMIT 1").Scan(&id, &name, &age)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	row := []any{id, name, age}
 	pkVals, err := t1.PrimaryKeyValues(row)
-	assert.Equal(t, id, pkVals[0])
-	assert.Equal(t, age, pkVals[1])
-	assert.NoError(t, err)
+	require.Equal(t, id, pkVals[0])
+	require.Equal(t, age, pkVals[1])
+	require.NoError(t, err)
 }
 
 func TestDiscoveryGeneratedCols(t *testing.T) {
@@ -347,7 +351,7 @@ func TestDiscoveryGeneratedCols(t *testing.T) {
 	testutils.RunSQL(t, table)
 
 	db, err := sql.Open("mysql", testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Logf("failed to close db: %v", err)
@@ -355,11 +359,11 @@ func TestDiscoveryGeneratedCols(t *testing.T) {
 	}()
 
 	t1 := NewTableInfo(db, "test", "generatedcolst1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 
 	// Can't check estimated rows (depends on MySQL version etc)
-	assert.Equal(t, []string{"id", "name", "b", "c1", "c2", "c3", "d"}, t1.Columns)
-	assert.Equal(t, []string{"id", "name", "b", "d"}, t1.NonGeneratedColumns)
+	require.Equal(t, []string{"id", "name", "b", "c1", "c2", "c3", "d"}, t1.Columns)
+	require.Equal(t, []string{"id", "name", "b", "d"}, t1.NonGeneratedColumns)
 
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS generatedcolst2`)
 	table = `CREATE TABLE generatedcolst2 (
@@ -375,11 +379,11 @@ func TestDiscoveryGeneratedCols(t *testing.T) {
 );`
 	testutils.RunSQL(t, table)
 	t2 := NewTableInfo(db, "test", "generatedcolst2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Can't check estimated rows (depends on MySQL version etc)
-	assert.Equal(t, []string{"id", "pa", "p1", "p2", "s1", "s2", "s3", "s4"}, t2.Columns)
-	assert.Equal(t, []string{"id", "pa", "p1", "p2"}, t2.NonGeneratedColumns)
+	require.Equal(t, []string{"id", "pa", "p1", "p2", "s1", "s2", "s3", "s4"}, t2.Columns)
+	require.Equal(t, []string{"id", "pa", "p1", "p2"}, t2.NonGeneratedColumns)
 }
 
 func TestGetColumnOrdinal(t *testing.T) {
@@ -389,26 +393,26 @@ func TestGetColumnOrdinal(t *testing.T) {
 
 	// Test finding existing columns
 	ordinal, err := t1.GetColumnOrdinal("id")
-	assert.NoError(t, err)
-	assert.Equal(t, 0, ordinal)
+	require.NoError(t, err)
+	require.Equal(t, 0, ordinal)
 
 	ordinal, err = t1.GetColumnOrdinal("name")
-	assert.NoError(t, err)
-	assert.Equal(t, 1, ordinal)
+	require.NoError(t, err)
+	require.Equal(t, 1, ordinal)
 
 	ordinal, err = t1.GetColumnOrdinal("age")
-	assert.NoError(t, err)
-	assert.Equal(t, 2, ordinal)
+	require.NoError(t, err)
+	require.Equal(t, 2, ordinal)
 
 	ordinal, err = t1.GetColumnOrdinal("email")
-	assert.NoError(t, err)
-	assert.Equal(t, 3, ordinal)
+	require.NoError(t, err)
+	require.Equal(t, 3, ordinal)
 
 	// Test finding non-existent column
 	ordinal, err = t1.GetColumnOrdinal("nonexistent")
-	assert.Error(t, err)
-	assert.Equal(t, -1, ordinal)
-	assert.ErrorContains(t, err, "column nonexistent not found in table testtable")
+	require.Error(t, err)
+	require.Equal(t, -1, ordinal)
+	require.ErrorContains(t, err, "column nonexistent not found in table testtable")
 }
 
 func TestGetNonGeneratedColumnOrdinal(t *testing.T) {
@@ -422,49 +426,49 @@ func TestGetNonGeneratedColumnOrdinal(t *testing.T) {
 	// Test finding existing non-generated columns
 	// Note: ordinals are relative to NonGeneratedColumns, not Columns
 	ordinal, err := t1.GetNonGeneratedColumnOrdinal("id")
-	assert.NoError(t, err)
-	assert.Equal(t, 0, ordinal, "id should be at position 0 in NonGeneratedColumns")
+	require.NoError(t, err)
+	require.Equal(t, 0, ordinal, "id should be at position 0 in NonGeneratedColumns")
 
 	ordinal, err = t1.GetNonGeneratedColumnOrdinal("name")
-	assert.NoError(t, err)
-	assert.Equal(t, 1, ordinal, "name should be at position 1 in NonGeneratedColumns")
+	require.NoError(t, err)
+	require.Equal(t, 1, ordinal, "name should be at position 1 in NonGeneratedColumns")
 
 	ordinal, err = t1.GetNonGeneratedColumnOrdinal("age")
-	assert.NoError(t, err)
-	assert.Equal(t, 2, ordinal, "age should be at position 2 in NonGeneratedColumns (skipping name_reversed)")
+	require.NoError(t, err)
+	require.Equal(t, 2, ordinal, "age should be at position 2 in NonGeneratedColumns (skipping name_reversed)")
 
 	ordinal, err = t1.GetNonGeneratedColumnOrdinal("email")
-	assert.NoError(t, err)
-	assert.Equal(t, 3, ordinal, "email should be at position 3 in NonGeneratedColumns")
+	require.NoError(t, err)
+	require.Equal(t, 3, ordinal, "email should be at position 3 in NonGeneratedColumns")
 
 	// Test finding a generated column (should fail)
 	ordinal, err = t1.GetNonGeneratedColumnOrdinal("name_reversed")
-	assert.Error(t, err)
-	assert.Equal(t, -1, ordinal)
-	assert.ErrorContains(t, err, "column name_reversed not found in non-generated columns of table testtable")
+	require.Error(t, err)
+	require.Equal(t, -1, ordinal)
+	require.ErrorContains(t, err, "column name_reversed not found in non-generated columns of table testtable")
 
 	// Test finding non-existent column
 	ordinal, err = t1.GetNonGeneratedColumnOrdinal("nonexistent")
-	assert.Error(t, err)
-	assert.Equal(t, -1, ordinal)
-	assert.ErrorContains(t, err, "column nonexistent not found in non-generated columns of table testtable")
+	require.Error(t, err)
+	require.Equal(t, -1, ordinal)
+	require.ErrorContains(t, err, "column nonexistent not found in non-generated columns of table testtable")
 }
 
 func TestQualifiedName(t *testing.T) {
 	// Without Host, returns schema.table
 	ti := &TableInfo{SchemaName: "mydb", TableName: "orders"}
-	assert.Equal(t, "mydb.orders", ti.QualifiedName())
+	require.Equal(t, "mydb.orders", ti.QualifiedName())
 
 	// With Host, returns host.schema.table
 	ti.Host = "server1:3306"
-	assert.Equal(t, "server1:3306.mydb.orders", ti.QualifiedName())
+	require.Equal(t, "server1:3306.mydb.orders", ti.QualifiedName())
 
 	// Two tables with same schema.table but different hosts are distinct
 	ti2 := &TableInfo{SchemaName: "mydb", TableName: "orders", Host: "server2:3306"}
-	assert.NotEqual(t, ti.QualifiedName(), ti2.QualifiedName())
+	require.NotEqual(t, ti.QualifiedName(), ti2.QualifiedName())
 
 	// Two tables with same name, no host, different schemas are distinct
 	ti3 := &TableInfo{SchemaName: "db1", TableName: "t1"}
 	ti4 := &TableInfo{SchemaName: "db2", TableName: "t1"}
-	assert.NotEqual(t, ti3.QualifiedName(), ti4.QualifiedName())
+	require.NotEqual(t, ti3.QualifiedName(), ti4.QualifiedName())
 }

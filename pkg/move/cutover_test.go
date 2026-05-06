@@ -13,7 +13,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,17 +22,17 @@ func TestNewCutOverValidation(t *testing.T) {
 
 	// No sources.
 	_, err := NewCutOver(nil, nil, dbConfig, logger)
-	assert.ErrorContains(t, err, "at least one source must be provided")
+	require.ErrorContains(t, err, "at least one source must be provided")
 
 	_, err = NewCutOver([]CutOverSource{}, nil, dbConfig, logger)
-	assert.ErrorContains(t, err, "at least one source must be provided")
+	require.ErrorContains(t, err, "at least one source must be provided")
 
 	// Nil DB.
 	_, err = NewCutOver([]CutOverSource{{
 		DB:     nil,
 		Tables: []*table.TableInfo{{}},
 	}}, nil, dbConfig, logger)
-	assert.ErrorContains(t, err, "DB must be non-nil")
+	require.ErrorContains(t, err, "DB must be non-nil")
 
 	// Nil repl client.
 	db, err := dbconn.New(testutils.DSN(), dbConfig)
@@ -45,21 +44,21 @@ func TestNewCutOverValidation(t *testing.T) {
 		ReplClient: nil,
 		Tables:     []*table.TableInfo{{}},
 	}}, nil, dbConfig, logger)
-	assert.ErrorContains(t, err, "repl client must be non-nil")
+	require.ErrorContains(t, err, "repl client must be non-nil")
 
 	// Empty tables.
 	cfg := repl.NewClientDefaultConfig()
 	cfg.CancelFunc = func() bool { return false }
 	srcConfig, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	replClient := repl.NewClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, cfg)
+	replClient := repl.NewClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 
 	_, err = NewCutOver([]CutOverSource{{
 		DB:         db,
 		ReplClient: replClient,
 		Tables:     []*table.TableInfo{},
 	}}, nil, dbConfig, logger)
-	assert.ErrorContains(t, err, "at least one table must be provided")
+	require.ErrorContains(t, err, "at least one table must be provided")
 
 	// Nil table in list.
 	_, err = NewCutOver([]CutOverSource{{
@@ -67,7 +66,7 @@ func TestNewCutOverValidation(t *testing.T) {
 		ReplClient: replClient,
 		Tables:     []*table.TableInfo{nil},
 	}}, nil, dbConfig, logger)
-	assert.ErrorContains(t, err, "table must be non-nil")
+	require.ErrorContains(t, err, "table must be non-nil")
 }
 
 // TestCutOverSingleSource tests the cutover flow with a single source,
@@ -77,10 +76,6 @@ func TestNewCutOverValidation(t *testing.T) {
 // blocks source 1's LOCK TABLES attempt. In production, each source is
 // a separate MySQL server so this is not an issue.
 func TestCutOverSingleSource(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
-
 	srcName, srcDB := testutils.CreateUniqueTestDatabase(t)
 
 	testutils.RunSQLInDatabase(t, srcName, `CREATE TABLE t1 (
@@ -109,7 +104,7 @@ func TestCutOverSingleSource(t *testing.T) {
 
 	cfg := repl.NewClientDefaultConfig()
 	cfg.CancelFunc = func() bool { return false }
-	replClient := repl.NewClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, cfg)
+	replClient := repl.NewClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 	require.NoError(t, replClient.Run(ctx))
 	defer replClient.Close()
 
@@ -134,14 +129,14 @@ func TestCutOverSingleSource(t *testing.T) {
 	err = cutover.Run(ctx)
 	require.NoError(t, err)
 
-	assert.True(t, cutoverFuncCalled, "cutoverFunc should have been called")
+	require.True(t, cutoverFuncCalled, "cutoverFunc should have been called")
 
 	// Verify: t1 renamed to t1_old.
 	var count int
 	err = srcDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1_old").Scan(&count)
-	assert.NoError(t, err, "t1_old should exist")
-	assert.Equal(t, 10, count, "t1_old should have 10 rows")
+	require.NoError(t, err, "t1_old should exist")
+	require.Equal(t, 10, count, "t1_old should have 10 rows")
 
 	_, err = srcDB.ExecContext(ctx, "SELECT 1 FROM t1")
-	assert.Error(t, err, "t1 should not exist after rename")
+	require.Error(t, err, "t1 should not exist after rename")
 }

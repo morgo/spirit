@@ -6,13 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -29,34 +30,33 @@ func TestBasicChecksum(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _basic_checksum_new VALUES (1, 2, 3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "basic_checksum")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_basic_checksum_new")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
-	assert.NoError(t, feed.Run(t.Context()))
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, checker.Run(t.Context()))
+	require.NoError(t, checker.Run(t.Context()))
 }
 
 func TestBasicValidation(t *testing.T) {
@@ -68,38 +68,37 @@ func TestBasicValidation(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO basic_validation2 VALUES (1, 2, 3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "basic_validation")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "basic_validation2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
 
 	_, err = NewChecker(nil, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig()) // no source DBs
-	assert.EqualError(t, err, "at least one source database must be provided")
+	require.EqualError(t, err, "at least one source database must be provided")
 
 	_, err = NewChecker([]*sql.DB{db}, nil, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.EqualError(t, err, "chunker must be non-nil")
+	require.EqualError(t, err, "chunker must be non-nil")
 
 	_, err = NewChecker([]*sql.DB{db}, chunker, nil, NewCheckerDefaultConfig()) // no feed
-	assert.EqualError(t, err, "at least one feed must be provided")
+	require.EqualError(t, err, "at least one feed must be provided")
 }
 
 func TestUnfixableUniqueChecksum(t *testing.T) {
@@ -126,37 +125,41 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 	testutils.RunSQL(t, `INSERT IGNORE INTO uniqfailuret2 SELECT * FROM uniqfailuret1`)       // will not copy all data
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "uniqfailuret1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "uniqfailuret2")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = checker.Run(t.Context())
-	assert.ErrorContains(t, err, "checksum failed")
+	// Adding a UNIQUE INDEX to non-unique data: every attempt finds row
+	// differences (and recopies don't help), so we exhaust retries on the
+	// "found differences" path. The migration layer wraps this into a more
+	// user-friendly "lossy unique-index" message; here we just assert the
+	// underlying checksum-layer error.
+	require.ErrorContains(t, err, "checksum found differences on every attempt")
 }
 
 func TestFixCorrupt(t *testing.T) {
@@ -169,52 +172,51 @@ func TestFixCorrupt(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _fixcorruption_t1_new VALUES (2, 2, 3)") // corrupt
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "fixcorruption_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_fixcorruption_t1_new")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	config.MaxRetries = 2
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = checker.Run(t.Context())
-	assert.NoError(t, err) // yes there is corruption, but it was fixed.
+	require.NoError(t, err) // yes there is corruption, but it was fixed.
 
 	// Type assert the checker to *SingleChecker to access differencesFound
 	singleChecker, ok := checker.(*SingleChecker)
-	assert.True(t, ok, "checker is not of type *SingleChecker")
-	assert.Equal(t, uint64(0), singleChecker.differencesFound.Load()) // this is "0", because we fixed it.
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	require.Equal(t, uint64(0), singleChecker.differencesFound.Load()) // this is "0", because we fixed it.
 
 	// If we run the checker again, it will report zero differences.
 	checker2, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = checker2.Run(t.Context())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	singleChecker, ok = checker2.(*SingleChecker)
-	assert.True(t, ok, "checker2 is not of type *SingleChecker")
-	assert.Equal(t, uint64(0), singleChecker.differencesFound.Load())
+	require.True(t, ok, "checker2 is not of type *SingleChecker")
+	require.Equal(t, uint64(0), singleChecker.differencesFound.Load())
 }
 
 func TestCorruptChecksum(t *testing.T) {
@@ -227,37 +229,36 @@ func TestCorruptChecksum(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _chkpcorruptt1_new VALUES (2, 2, 3)") // corrupt
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "chkpcorruptt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_chkpcorruptt1_new")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
-	assert.True(t, ok, "checker is not of type *SingleChecker")
+	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
-	assert.ErrorContains(t, err, "checksum mismatch")
+	require.ErrorContains(t, err, "checksum mismatch")
 }
 
 func TestBoundaryCases(t *testing.T) {
@@ -269,46 +270,45 @@ func TestBoundaryCases(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _checkert1_new VALUES (1, 2.2, NULL)") // should not compare
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "checkert1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_checkert1_new")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok := checker.(*SingleChecker)
-	assert.True(t, ok, "checker is not of type *SingleChecker")
-	assert.Error(t, singleChecker.runChecksum(t.Context()))
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	require.Error(t, singleChecker.runChecksum(t.Context()))
 
 	// UPDATE t1 to also be NULL
 	testutils.RunSQL(t, "UPDATE checkert1 SET c = NULL")
 	checker, err = NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok = checker.(*SingleChecker)
-	assert.True(t, ok, "checker is not of type *SingleChecker")
-	assert.NoError(t, singleChecker.runChecksum(t.Context()))
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	require.NoError(t, singleChecker.runChecksum(t.Context()))
 }
 
 func TestChangeDataTypeDatetime(t *testing.T) {
@@ -347,34 +347,33 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE IF NOT EXISTS _tdatetime_chkpnt (id int)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "tdatetime")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_tdatetime_new")
-	assert.NoError(t, t2.SetInfo(t.Context())) // fails
+	require.NoError(t, t2.SetInfo(t.Context())) // fails
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
-	assert.NoError(t, err)
-	assert.NoError(t, checker.Run(t.Context())) // fails
+	require.NoError(t, err)
+	require.NoError(t, checker.Run(t.Context())) // fails
 }
 
 func TestYieldTimeout(t *testing.T) {
@@ -390,30 +389,29 @@ func TestYieldTimeout(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _yield_t1_new SELECT * FROM yield_t1")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "yield_t1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_yield_t1_new")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.Concurrency = 1
@@ -424,14 +422,14 @@ func TestYieldTimeout(t *testing.T) {
 	// but short enough to trigger multiple yields over 100k rows.
 	config.YieldTimeout = 100 * time.Millisecond
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// The checksum should still pass despite yielding — it resumes from the watermark.
-	assert.NoError(t, checker.Run(t.Context()))
+	require.NoError(t, checker.Run(t.Context()))
 
 	// Verify that at least one yield actually occurred.
 	singleChecker := checker.(*SingleChecker)
-	assert.Greater(t, singleChecker.yieldsPerformed.Load(), uint64(0), "expected at least one yield to occur")
+	require.Greater(t, singleChecker.yieldsPerformed.Load(), uint64(0), "expected at least one yield to occur")
 	t.Logf("yields performed: %d", singleChecker.yieldsPerformed.Load())
 }
 
@@ -443,34 +441,33 @@ func TestFromWatermark(t *testing.T) {
 	testutils.RunSQL(t, "INSERT INTO _tfromwatermark_new VALUES (1, 2, 3)")
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	t1 := table.NewTableInfo(db, "test", "tfromwatermark")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(db, "test", "_tfromwatermark_new")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	require.NoError(t, err)
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
 	})
 	defer feed.Close()
-	assert.NoError(t, feed.AddSubscription(t1, t2, nil))
-	assert.NoError(t, feed.Run(t.Context()))
-
-	chunker, err := table.NewChunker(t1, t2, 0, slog.Default())
-	assert.NoError(t, err)
-	assert.NoError(t, chunker.Open())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.Watermark = "{\"Key\":[\"a\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"2\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"3\"],\"Inclusive\":false}}"
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
-	assert.NoError(t, err)
-	assert.NoError(t, checker.Run(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, checker.Run(t.Context()))
 }

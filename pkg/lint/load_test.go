@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,15 +25,15 @@ func TestLoadSchemaFromDir_Basic(t *testing.T) {
 
 	tables, err := LoadSchemaFromDir(dir)
 	require.NoError(t, err)
-	assert.Len(t, tables, 2)
+	require.Len(t, tables, 2)
 
 	// Verify table names are parsed
 	names := make(map[string]bool)
 	for _, ct := range tables {
 		names[ct.TableName] = true
 	}
-	assert.True(t, names["users"])
-	assert.True(t, names["orders"])
+	require.True(t, names["users"])
+	require.True(t, names["orders"])
 }
 
 func TestLoadSchemaFromDir_SkipsNonSQL(t *testing.T) {
@@ -50,8 +49,8 @@ func TestLoadSchemaFromDir_SkipsNonSQL(t *testing.T) {
 
 	tables, err := LoadSchemaFromDir(dir)
 	require.NoError(t, err)
-	assert.Len(t, tables, 1)
-	assert.Equal(t, "users", tables[0].TableName)
+	require.Len(t, tables, 1)
+	require.Equal(t, "users", tables[0].TableName)
 }
 
 func TestLoadSchemaFromDir_SkipsDirectories(t *testing.T) {
@@ -67,7 +66,7 @@ func TestLoadSchemaFromDir_SkipsDirectories(t *testing.T) {
 
 	tables, err := LoadSchemaFromDir(dir)
 	require.NoError(t, err)
-	assert.Len(t, tables, 1)
+	require.Len(t, tables, 1)
 }
 
 func TestLoadSchemaFromDir_Empty(t *testing.T) {
@@ -75,7 +74,7 @@ func TestLoadSchemaFromDir_Empty(t *testing.T) {
 
 	tables, err := LoadSchemaFromDir(dir)
 	require.NoError(t, err)
-	assert.Empty(t, tables)
+	require.Empty(t, tables)
 }
 
 func TestLoadSchemaFromDir_InvalidSQL(t *testing.T) {
@@ -84,13 +83,13 @@ func TestLoadSchemaFromDir_InvalidSQL(t *testing.T) {
 	writeFile(t, dir, "bad.sql", "THIS IS NOT VALID SQL")
 
 	_, err := LoadSchemaFromDir(dir)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "bad.sql")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "bad.sql")
 }
 
 func TestLoadSchemaFromDir_NonexistentDir(t *testing.T) {
 	_, err := LoadSchemaFromDir("/nonexistent/path")
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestLoadSchemaFromDir_CaseInsensitiveExtension(t *testing.T) {
@@ -108,7 +107,7 @@ func TestLoadSchemaFromDir_CaseInsensitiveExtension(t *testing.T) {
 
 	tables, err := LoadSchemaFromDir(dir)
 	require.NoError(t, err)
-	assert.Len(t, tables, 2)
+	require.Len(t, tables, 2)
 }
 
 // writeFile is a test helper that creates a file with the given content.

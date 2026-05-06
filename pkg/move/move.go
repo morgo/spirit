@@ -18,6 +18,10 @@ type Move struct {
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 
+	// ForceEnableBufferedMap mirrors pkg/migration.Migration.ForceEnableBufferedMap.
+	// See that field's doc for the full rationale.
+	ForceEnableBufferedMap bool `name:"force-enable-buffered-map" help:"Enable the buffered map during copy even for non-memory comparable PKs. This relies on the checksum to catch and fix mistakes, so it is still considered 'correct', but is experimental for now." default:"false"`
+
 	// SourceTables optionally specifies a list of tables to move.
 	// If empty, all tables in the source database will be moved.
 	// This is useful for Vitess MoveTables operations where only specific tables should be moved.

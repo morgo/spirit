@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +27,7 @@ func TestPrimaryKeyLinter_BigIntUnsigned(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT UNSIGNED is ideal - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_BigIntSigned(t *testing.T) {
@@ -45,15 +44,15 @@ func TestPrimaryKeyLinter_BigIntSigned(t *testing.T) {
 
 	// BIGINT without UNSIGNED should be a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "signed BIGINT")
-	assert.Contains(t, violations[0].Message, "UNSIGNED is preferred")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "id", *violations[0].Location.Column)
-	assert.NotNil(t, violations[0].Suggestion)
-	assert.Contains(t, *violations[0].Suggestion, "BIGINT UNSIGNED")
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "signed BIGINT")
+	require.Contains(t, violations[0].Message, "UNSIGNED is preferred")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "id", *violations[0].Location.Column)
+	require.NotNil(t, violations[0].Suggestion)
+	require.Contains(t, *violations[0].Suggestion, "BIGINT UNSIGNED")
 }
 
 func TestPrimaryKeyLinter_Binary(t *testing.T) {
@@ -68,7 +67,7 @@ func TestPrimaryKeyLinter_Binary(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BINARY is acceptable - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_VarBinary(t *testing.T) {
@@ -83,7 +82,7 @@ func TestPrimaryKeyLinter_VarBinary(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// VARBINARY is acceptable - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_IntError(t *testing.T) {
@@ -99,14 +98,14 @@ func TestPrimaryKeyLinter_IntError(t *testing.T) {
 
 	// INT is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "key column \"id\" has type \"int\"")
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "id", *violations[0].Location.Column)
-	assert.NotNil(t, violations[0].Suggestion)
-	assert.Contains(t, *violations[0].Suggestion, "Change column \"id\" to a supported column type")
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "key column \"id\" has type \"int\"")
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "id", *violations[0].Location.Column)
+	require.NotNil(t, violations[0].Suggestion)
+	require.Contains(t, *violations[0].Suggestion, "Change column \"id\" to a supported column type")
 }
 
 func TestPrimaryKeyLinter_VarcharError(t *testing.T) {
@@ -122,12 +121,12 @@ func TestPrimaryKeyLinter_VarcharError(t *testing.T) {
 
 	// VARCHAR is not acceptable - but for now its a warning
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "Primary key column \"id\" has type \"varchar\"")
-	assert.NotNil(t, violations[0].Context)
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "Primary key column \"id\" has type \"varchar\"")
+	require.NotNil(t, violations[0].Context)
 	// The parser returns lowercase "varchar"
-	assert.Equal(t, "varchar", violations[0].Context["current_type"])
+	require.Equal(t, "varchar", violations[0].Context["current_type"])
 }
 
 func TestPrimaryKeyLinter_CompositePrimaryKey(t *testing.T) {
@@ -144,9 +143,9 @@ func TestPrimaryKeyLinter_CompositePrimaryKey(t *testing.T) {
 
 	// user_id is BIGINT UNSIGNED (good), role_id is INT (error)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "role_id", *violations[0].Location.Column)
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "role_id", *violations[0].Location.Column)
 }
 
 func TestPrimaryKeyLinter_CompositePrimaryKeyAllGood(t *testing.T) {
@@ -162,7 +161,7 @@ func TestPrimaryKeyLinter_CompositePrimaryKeyAllGood(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Both columns are BIGINT UNSIGNED - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_CompositePrimaryKeyMixed(t *testing.T) {
@@ -180,9 +179,9 @@ func TestPrimaryKeyLinter_CompositePrimaryKeyMixed(t *testing.T) {
 
 	// user_id is signed BIGINT (warning)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Equal(t, "user_id", *violations[0].Location.Column)
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "user_id", *violations[0].Location.Column)
 }
 
 func TestPrimaryKeyLinter_NoPrimaryKey(t *testing.T) {
@@ -197,9 +196,9 @@ func TestPrimaryKeyLinter_NoPrimaryKey(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// No primary key - that's an error
-	assert.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Len(t, violations, 1)
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyLinter_MultipleTables(t *testing.T) {
@@ -222,8 +221,8 @@ func TestPrimaryKeyLinter_MultipleTables(t *testing.T) {
 
 	// Only orders table should have a violation
 	require.Len(t, violations, 1)
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyLinter_SmallIntError(t *testing.T) {
@@ -239,7 +238,7 @@ func TestPrimaryKeyLinter_SmallIntError(t *testing.T) {
 
 	// SMALLINT is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyLinter_MediumIntError(t *testing.T) {
@@ -255,7 +254,7 @@ func TestPrimaryKeyLinter_MediumIntError(t *testing.T) {
 
 	// MEDIUMINT is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyLinter_CharError(t *testing.T) {
@@ -271,18 +270,18 @@ func TestPrimaryKeyLinter_CharError(t *testing.T) {
 
 	// CHAR is not acceptable - should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
 }
 
 func TestPrimaryKeyLinter_EmptyInput(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 	violations := linter.Lint(nil, nil)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
@@ -296,11 +295,11 @@ func TestPrimaryKeyLinter_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "primary_key", violations[0].Linter.Name())
+	require.Equal(t, "primary_key", violations[0].Linter.Name())
 }
 
 func TestPrimaryKeyLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
@@ -317,14 +316,14 @@ func TestPrimaryKeyLinter_IntegrationDisabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_Metadata(t *testing.T) {
 	linter := &PrimaryKeyLinter{}
 
-	assert.Equal(t, "primary_key", linter.Name())
-	assert.NotEmpty(t, linter.Description())
+	require.Equal(t, "primary_key", linter.Name())
+	require.NotEmpty(t, linter.Description())
 }
 
 func TestPrimaryKeyLinter_BigIntUnsignedExplicit(t *testing.T) {
@@ -339,7 +338,7 @@ func TestPrimaryKeyLinter_BigIntUnsignedExplicit(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT(20) UNSIGNED is ideal - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_CaseInsensitive(t *testing.T) {
@@ -355,7 +354,7 @@ func TestPrimaryKeyLinter_CaseInsensitive(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Should recognize lowercase bigint unsigned
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_AutoIncrement(t *testing.T) {
@@ -370,7 +369,7 @@ func TestPrimaryKeyLinter_AutoIncrement(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BIGINT UNSIGNED with AUTO_INCREMENT is ideal - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_UUIDAsVarchar(t *testing.T) {
@@ -387,8 +386,8 @@ func TestPrimaryKeyLinter_UUIDAsVarchar(t *testing.T) {
 
 	// VARCHAR for UUID should be an error
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, *violations[0].Suggestion, "Change column \"uuid\" to a supported column type")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, *violations[0].Suggestion, "Change column \"uuid\" to a supported column type")
 }
 
 func TestPrimaryKeyLinter_UUIDAsBinary(t *testing.T) {
@@ -404,7 +403,7 @@ func TestPrimaryKeyLinter_UUIDAsBinary(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BINARY(16) for UUID is correct - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // Tests for Configure functionality
@@ -426,7 +425,7 @@ func TestPrimaryKeyLinter_ConfigureAllowInt(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// INT should be allowed with custom config - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureAllowIntSigned(t *testing.T) {
@@ -448,9 +447,9 @@ func TestPrimaryKeyLinter_ConfigureAllowIntSigned(t *testing.T) {
 
 	// Signed INT should still give warning about signedness
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "signed INT")
-	assert.Contains(t, violations[0].Message, "UNSIGNED is preferred")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "signed INT")
+	require.Contains(t, violations[0].Message, "UNSIGNED is preferred")
 }
 
 func TestPrimaryKeyLinter_ConfigureAllowVarchar(t *testing.T) {
@@ -470,7 +469,7 @@ func TestPrimaryKeyLinter_ConfigureAllowVarchar(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// VARCHAR should be allowed with custom config - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureAllowChar(t *testing.T) {
@@ -490,7 +489,7 @@ func TestPrimaryKeyLinter_ConfigureAllowChar(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// CHAR should be allowed with custom config - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureMultipleTypes(t *testing.T) {
@@ -524,7 +523,7 @@ func TestPrimaryKeyLinter_ConfigureMultipleTypes(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3}, nil)
 
 	// All three types should be allowed - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureWithSpaces(t *testing.T) {
@@ -544,7 +543,7 @@ func TestPrimaryKeyLinter_ConfigureWithSpaces(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Should handle spaces in config - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureCaseInsensitive(t *testing.T) {
@@ -564,7 +563,7 @@ func TestPrimaryKeyLinter_ConfigureCaseInsensitive(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Should handle mixed case in config - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureInvalidType(t *testing.T) {
@@ -575,8 +574,8 @@ func TestPrimaryKeyLinter_ConfigureInvalidType(t *testing.T) {
 
 	// Should return error for invalid type
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported type")
-	assert.Contains(t, err.Error(), "invalidtype")
+	require.Contains(t, err.Error(), "unsupported type")
+	require.Contains(t, err.Error(), "invalidtype")
 }
 
 func TestPrimaryKeyLinter_ConfigureUnknownKey(t *testing.T) {
@@ -587,8 +586,8 @@ func TestPrimaryKeyLinter_ConfigureUnknownKey(t *testing.T) {
 
 	// Should return error for unknown config key
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown config key")
-	assert.Contains(t, err.Error(), "unknownKey")
+	require.Contains(t, err.Error(), "unknown config key")
+	require.Contains(t, err.Error(), "unknownKey")
 }
 
 func TestPrimaryKeyLinter_ConfigureEmptyString(t *testing.T) {
@@ -600,7 +599,7 @@ func TestPrimaryKeyLinter_ConfigureEmptyString(t *testing.T) {
 	// Empty string results in no types being added, so it should error when splitting
 	// Actually, empty string after split gives [""], which is invalid
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported type")
+	require.Contains(t, err.Error(), "unsupported type")
 }
 
 func TestPrimaryKeyLinter_ConfigureOnlyBigInt(t *testing.T) {
@@ -628,8 +627,8 @@ func TestPrimaryKeyLinter_ConfigureOnlyBigInt(t *testing.T) {
 
 	// Only BIGINT allowed, INT should violate
 	require.Len(t, violations, 1)
-	assert.Equal(t, "sessions", violations[0].Location.Table)
-	assert.Contains(t, violations[0].Message, "int") // Parser returns lowercase
+	require.Equal(t, "sessions", violations[0].Location.Table)
+	require.Contains(t, violations[0].Message, "int") // Parser returns lowercase
 }
 
 func TestPrimaryKeyLinter_ConfigureAllIntTypes(t *testing.T) {
@@ -662,7 +661,7 @@ func TestPrimaryKeyLinter_ConfigureAllIntTypes(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4, ct5}, nil)
 
 	// All integer types should be allowed - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureAllStringTypes(t *testing.T) {
@@ -691,7 +690,7 @@ func TestPrimaryKeyLinter_ConfigureAllStringTypes(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4}, nil)
 
 	// All string types should be allowed - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureTemporalTypes(t *testing.T) {
@@ -724,7 +723,7 @@ func TestPrimaryKeyLinter_ConfigureTemporalTypes(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4, ct5}, nil)
 
 	// All temporal types should be allowed - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureOtherTypes(t *testing.T) {
@@ -753,7 +752,7 @@ func TestPrimaryKeyLinter_ConfigureOtherTypes(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2, ct3, ct4}, nil)
 
 	// All configured types should be allowed - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_DefaultConfig(t *testing.T) {
@@ -764,7 +763,7 @@ func TestPrimaryKeyLinter_DefaultConfig(t *testing.T) {
 	require.Contains(t, defaultConfig, "allowedTypes")
 
 	// Default should be BIGINT,BINARY,VARBINARY (uppercase)
-	assert.Equal(t, "BIGINT,BINARY,VARBINARY", defaultConfig["allowedTypes"])
+	require.Equal(t, "BIGINT,BINARY,VARBINARY", defaultConfig["allowedTypes"])
 }
 
 func TestPrimaryKeyLinter_ConfigureOverridesDefault(t *testing.T) {
@@ -787,7 +786,7 @@ func TestPrimaryKeyLinter_ConfigureOverridesDefault(t *testing.T) {
 	})
 	require.NoError(t, err)
 	violations2 := linter2.Lint([]*statement.CreateTable{ct}, nil)
-	assert.Empty(t, violations2)
+	require.Empty(t, violations2)
 }
 
 func TestPrimaryKeyLinter_ConfigureCompositePrimaryKey(t *testing.T) {
@@ -808,7 +807,7 @@ func TestPrimaryKeyLinter_ConfigureCompositePrimaryKey(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// Both INT and SMALLINT should be allowed - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigurePartialComposite(t *testing.T) {
@@ -830,7 +829,7 @@ func TestPrimaryKeyLinter_ConfigurePartialComposite(t *testing.T) {
 
 	// Only INT is allowed, SMALLINT should violate
 	require.Len(t, violations, 1)
-	assert.Equal(t, "role_id", *violations[0].Location.Column)
+	require.Equal(t, "role_id", *violations[0].Location.Column)
 }
 
 func TestPrimaryKeyLinter_ConfigureBinaryStillWorks(t *testing.T) {
@@ -850,7 +849,7 @@ func TestPrimaryKeyLinter_ConfigureBinaryStillWorks(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// BINARY should still work correctly with parser quirk
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
@@ -870,7 +869,7 @@ func TestPrimaryKeyLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// VARBINARY should still work correctly with parser quirk
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
@@ -892,12 +891,12 @@ func TestPrimaryKeyLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
 
 	// Should still warn about signed INT
 	require.Len(t, violations, 1)
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "signed INT")
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "signed INT")
 }
 
 func TestPrimaryKeyLinter_IntegrationWithConfig(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&PrimaryKeyLinter{})
 
 	sql := `CREATE TABLE users (
@@ -921,7 +920,7 @@ func TestPrimaryKeyLinter_IntegrationWithConfig(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Empty(t, violations2)
+	require.Empty(t, violations2)
 }
 
 func TestPrimaryKeyLinter_ConfigureMultipleCalls(t *testing.T) {
@@ -950,7 +949,7 @@ func TestPrimaryKeyLinter_ConfigureMultipleCalls(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2}, nil)
 
 	// Both INT and VARCHAR should be allowed
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestPrimaryKeyLinter_ConfigureSuggestionUpdates(t *testing.T) {
@@ -971,9 +970,9 @@ func TestPrimaryKeyLinter_ConfigureSuggestionUpdates(t *testing.T) {
 
 	// Should suggest the configured allowed types
 	require.Len(t, violations, 1)
-	assert.NotNil(t, violations[0].Suggestion)
-	assert.Contains(t, *violations[0].Suggestion, "INT")
-	assert.Contains(t, *violations[0].Suggestion, "BIGINT")
+	require.NotNil(t, violations[0].Suggestion)
+	require.Contains(t, *violations[0].Suggestion, "INT")
+	require.Contains(t, *violations[0].Suggestion, "BIGINT")
 }
 
 func TestPrimaryKeyLinter_AllSupportedTypes(t *testing.T) {
@@ -993,7 +992,7 @@ func TestPrimaryKeyLinter_AllSupportedTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all types are in the allowed map
-	assert.Len(t, linter.allowedTypes, len(allTypes))
+	require.Len(t, linter.allowedTypes, len(allTypes))
 }
 
 func TestPrimaryKeyLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
@@ -1005,7 +1004,7 @@ func TestPrimaryKeyLinter_ConfigureEmptyAllowedTypes(t *testing.T) {
 
 	// Empty string results in error (same as ConfigureEmptyString test)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported type")
+	require.Contains(t, err.Error(), "unsupported type")
 }
 
 // Tests for isSignedIntType helper function
@@ -1022,7 +1021,7 @@ func TestIsSignedIntType_SignedBigInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// BIGINT without UNSIGNED should be signed
-	assert.True(t, isSignedIntType(column))
+	require.True(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_UnsignedBigInt(t *testing.T) {
@@ -1037,7 +1036,7 @@ func TestIsSignedIntType_UnsignedBigInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// BIGINT UNSIGNED should not be signed
-	assert.False(t, isSignedIntType(column))
+	require.False(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_SignedInt(t *testing.T) {
@@ -1052,7 +1051,7 @@ func TestIsSignedIntType_SignedInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// INT without UNSIGNED should be signed
-	assert.True(t, isSignedIntType(column))
+	require.True(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_UnsignedInt(t *testing.T) {
@@ -1067,7 +1066,7 @@ func TestIsSignedIntType_UnsignedInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// INT UNSIGNED should not be signed
-	assert.False(t, isSignedIntType(column))
+	require.False(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_SignedTinyInt(t *testing.T) {
@@ -1082,7 +1081,7 @@ func TestIsSignedIntType_SignedTinyInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// TINYINT without UNSIGNED should be signed
-	assert.True(t, isSignedIntType(column))
+	require.True(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_UnsignedTinyInt(t *testing.T) {
@@ -1097,7 +1096,7 @@ func TestIsSignedIntType_UnsignedTinyInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// TINYINT UNSIGNED should not be signed
-	assert.False(t, isSignedIntType(column))
+	require.False(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_SignedSmallInt(t *testing.T) {
@@ -1112,7 +1111,7 @@ func TestIsSignedIntType_SignedSmallInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// SMALLINT without UNSIGNED should be signed
-	assert.True(t, isSignedIntType(column))
+	require.True(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_UnsignedSmallInt(t *testing.T) {
@@ -1127,7 +1126,7 @@ func TestIsSignedIntType_UnsignedSmallInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// SMALLINT UNSIGNED should not be signed
-	assert.False(t, isSignedIntType(column))
+	require.False(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_SignedMediumInt(t *testing.T) {
@@ -1142,7 +1141,7 @@ func TestIsSignedIntType_SignedMediumInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// MEDIUMINT without UNSIGNED should be signed
-	assert.True(t, isSignedIntType(column))
+	require.True(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_UnsignedMediumInt(t *testing.T) {
@@ -1157,7 +1156,7 @@ func TestIsSignedIntType_UnsignedMediumInt(t *testing.T) {
 	require.NotNil(t, column)
 
 	// MEDIUMINT UNSIGNED should not be signed
-	assert.False(t, isSignedIntType(column))
+	require.False(t, isSignedIntType(column))
 }
 
 func TestIsSignedIntType_NonIntegerTypes(t *testing.T) {
@@ -1233,7 +1232,7 @@ func TestIsSignedIntType_NonIntegerTypes(t *testing.T) {
 			require.NotNil(t, column)
 
 			// Non-integer types should return false
-			assert.Equal(t, tc.expected, isSignedIntType(column))
+			require.Equal(t, tc.expected, isSignedIntType(column))
 		})
 	}
 }
@@ -1268,7 +1267,7 @@ func TestIsSignedIntType_AllIntegerTypes(t *testing.T) {
 			column := ct.GetColumns().ByName("id")
 			require.NotNil(t, column)
 
-			assert.Equal(t, tc.shouldBeSigned, isSignedIntType(column),
+			require.Equal(t, tc.shouldBeSigned, isSignedIntType(column),
 				"Expected %s to have signed=%v", tc.typeName, tc.shouldBeSigned)
 		})
 	}

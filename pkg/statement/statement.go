@@ -291,6 +291,47 @@ func (a *AbstractStatement) AlterContainsAddUnique() error {
 	return nil
 }
 
+// ColumnRenameMap returns a mapping of old column name → new column name
+// for any RENAME COLUMN or CHANGE COLUMN (with a different name) specs
+// in this ALTER TABLE statement. Returns nil if there are no renames
+// or if this is not an ALTER TABLE statement.
+func (a *AbstractStatement) ColumnRenameMap() map[string]string {
+	alterStmt, ok := (*a.StmtNode).(*ast.AlterTableStmt)
+	if !ok {
+		return nil
+	}
+	var renames map[string]string
+	for _, spec := range alterStmt.Specs {
+		switch spec.Tp { //nolint:exhaustive
+		case ast.AlterTableRenameColumn:
+			// ALTER TABLE t RENAME COLUMN old TO new
+			if spec.OldColumnName != nil && spec.NewColumnName != nil {
+				oldName := spec.OldColumnName.Name.O
+				newName := spec.NewColumnName.Name.O
+				if oldName != newName {
+					if renames == nil {
+						renames = make(map[string]string)
+					}
+					renames[oldName] = newName
+				}
+			}
+		case ast.AlterTableChangeColumn:
+			// ALTER TABLE t CHANGE COLUMN old new <type>
+			if spec.OldColumnName != nil && len(spec.NewColumns) > 0 {
+				oldName := spec.OldColumnName.Name.O
+				newName := spec.NewColumns[0].Name.Name.O
+				if oldName != newName {
+					if renames == nil {
+						renames = make(map[string]string)
+					}
+					renames[oldName] = newName
+				}
+			}
+		}
+	}
+	return renames
+}
+
 func (a *AbstractStatement) TrimAlter() string {
 	return strings.TrimSuffix(strings.TrimSpace(a.Alter), ";")
 }
@@ -300,17 +341,15 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	if !isCreateIndexStmt {
 		return nil, errors.New("not a CREATE INDEX statement")
 	}
-	var columns []string
+	var parts []string
 	var keyType string
 	for _, part := range ciStmt.IndexPartSpecifications {
-		if part.Column == nil {
-			return nil, errors.New("cannot convert functional index to ALTER TABLE statement; please use ALTER TABLE ADD INDEX … instead")
+		var sb strings.Builder
+		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+		if err := part.Restore(rCtx); err != nil {
+			return nil, fmt.Errorf("could not restore index part: %w", err)
 		}
-		col := fmt.Sprintf("`%s`", part.Column.Name.String())
-		if part.Length > 0 {
-			col = fmt.Sprintf("%s(%d)", col, part.Length)
-		}
-		columns = append(columns, col)
+		parts = append(parts, sb.String())
 	}
 	switch ciStmt.KeyType { //nolint:exhaustive
 	case ast.IndexKeyTypeUnique:
@@ -322,7 +361,7 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	default:
 		keyType = "INDEX"
 	}
-	alterStmt := fmt.Sprintf("ADD %s `%s` (%s)", keyType, ciStmt.IndexName, strings.Join(columns, ", "))
+	alterStmt := fmt.Sprintf("ADD %s `%s` (%s)", keyType, ciStmt.IndexName, strings.Join(parts, ", "))
 	// We hint in the statement that it's been rewritten
 	// and in the stmtNode we reparse from the alterStmt.
 	statement := fmt.Sprintf("/* rewritten from CREATE INDEX */ ALTER TABLE `%s` %s", ciStmt.Table.Name, alterStmt)

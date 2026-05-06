@@ -6,7 +6,6 @@ import (
 
 	"github.com/block/spirit/pkg/testutils"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,7 +30,7 @@ func TestLoadSchemaFromDB(t *testing.T) {
 
 	tables, err := LoadSchemaFromDB(t.Context(), db)
 	require.NoError(t, err)
-	assert.Len(t, tables, 2)
+	require.Len(t, tables, 2)
 
 	// Build a map for easier assertions
 	byName := make(map[string]TableSchema)
@@ -39,11 +38,11 @@ func TestLoadSchemaFromDB(t *testing.T) {
 		byName[ts.Name] = ts
 	}
 
-	assert.Contains(t, byName, "users")
-	assert.Contains(t, byName, "orders")
-	assert.Contains(t, byName["users"].Schema, "CREATE TABLE")
-	assert.Contains(t, byName["users"].Schema, "`name` varchar(100)")
-	assert.Contains(t, byName["orders"].Schema, "`amount` decimal(10,2)")
+	require.Contains(t, byName, "users")
+	require.Contains(t, byName, "orders")
+	require.Contains(t, byName["users"].Schema, "CREATE TABLE")
+	require.Contains(t, byName["users"].Schema, "`name` varchar(100)")
+	require.Contains(t, byName["orders"].Schema, "`amount` decimal(10,2)")
 }
 
 func TestLoadSchemaFromDB_EmptyDatabase(t *testing.T) {
@@ -55,7 +54,7 @@ func TestLoadSchemaFromDB_EmptyDatabase(t *testing.T) {
 
 	tables, err := LoadSchemaFromDB(t.Context(), db)
 	require.NoError(t, err)
-	assert.Empty(t, tables)
+	require.Empty(t, tables)
 }
 
 func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
@@ -74,8 +73,8 @@ func TestLoadSchemaFromDB_PreservesAutoIncrement(t *testing.T) {
 	tables, err := LoadSchemaFromDB(t.Context(), db)
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
-	assert.Equal(t, "counters", tables[0].Name)
-	assert.Contains(t, tables[0].Schema, "AUTO_INCREMENT=")
+	require.Equal(t, "counters", tables[0].Name)
+	require.Contains(t, tables[0].Schema, "AUTO_INCREMENT=")
 }
 
 func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
@@ -91,13 +90,13 @@ func TestLoadSchemaFromDB_FilterUnderscoreTables(t *testing.T) {
 	// Without filter: all 3 tables returned.
 	all, err := LoadSchemaFromDB(t.Context(), db)
 	require.NoError(t, err)
-	assert.Len(t, all, 3)
+	require.Len(t, all, 3)
 
 	// With underscore filter: only "users" returned.
 	filtered, err := LoadSchemaFromDB(t.Context(), db, WithoutUnderscoreTables)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "users", filtered[0].Name)
+	require.Equal(t, "users", filtered[0].Name)
 }
 
 func TestLoadSchemaFromDB_FilterArchiveTables(t *testing.T) {
@@ -114,13 +113,13 @@ func TestLoadSchemaFromDB_FilterArchiveTables(t *testing.T) {
 	// Without filter: all 4 tables returned.
 	all, err := LoadSchemaFromDB(t.Context(), db)
 	require.NoError(t, err)
-	assert.Len(t, all, 4)
+	require.Len(t, all, 4)
 
 	// With archive filter: only "users" returned.
 	filtered, err := LoadSchemaFromDB(t.Context(), db, WithoutArchiveTables)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "users", filtered[0].Name)
+	require.Equal(t, "users", filtered[0].Name)
 }
 
 func TestLoadSchemaFromDB_StripAutoIncrement(t *testing.T) {
@@ -137,9 +136,9 @@ func TestLoadSchemaFromDB_StripAutoIncrement(t *testing.T) {
 	tables, err := LoadSchemaFromDB(t.Context(), db, WithStrippedAutoIncrement)
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
-	assert.NotContains(t, tables[0].Schema, "AUTO_INCREMENT=")
+	require.NotContains(t, tables[0].Schema, "AUTO_INCREMENT=")
 	// The column-level AUTO_INCREMENT keyword should still be present.
-	assert.Contains(t, tables[0].Schema, "AUTO_INCREMENT")
+	require.Contains(t, tables[0].Schema, "AUTO_INCREMENT")
 }
 
 func TestLoadSchemaFromDB_CombinedFilters(t *testing.T) {
@@ -162,6 +161,6 @@ func TestLoadSchemaFromDB_CombinedFilters(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "users", filtered[0].Name)
-	assert.NotContains(t, filtered[0].Schema, "AUTO_INCREMENT=")
+	require.Equal(t, "users", filtered[0].Name)
+	require.NotContains(t, filtered[0].Schema, "AUTO_INCREMENT=")
 }

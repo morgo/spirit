@@ -39,6 +39,27 @@ To a certain extent, the chunk size will automatically adjust to small gaps in t
 
 To deal with large gaps, the optimistic chunker also supports a special "prefetching mode". Prefetching mode is enabled when the chunk size has already reached the `100,000` row limit, and each chunk is still only taking 20% of the target time for chunk copying. Prefetching was first developed when we discovered a user with approximately 20 million rows in the table but a large gap between the `AUTO_INCREMENT` value of 20 million and the end of the table (300 billion). You can think of prefetching mode as similar to how the composite chunker works, as it will perform a `SELECT` query to find the next `PRIMARY KEY` value it should use as a pointer. Prefetching is automatically disabled again if the chunk size is ever reduced below the `100,000` row limit.
 
+## MappedChunker Interface
+
+The `MappedChunker` interface extends `Chunker` for chunkers that operate on a single source→target table pair. It adds:
+- `ColumnMapping()` — returns the `ColumnMapping` between source and target tables
+- `KeyAboveHighWatermark()` / `KeyBelowLowWatermark()` — watermark optimizations for binlog filtering
+
+The optimistic and composite chunkers implement `MappedChunker`. The multi chunker does not, because it wraps multiple independent table pairs.
+
+## ColumnMapping
+
+`ColumnMapping` describes the column relationship between a source and target table, including any column renames. It is created via `NewColumnMapping(source, target, renames)` where `renames` is an optional `map[string]string` of old→new column names.
+
+It provides:
+- `Columns()` — returns the comma-separated source and target column lists for `INSERT ... SELECT` and `REPLACE` statements
+- `ColumnsSlice()` — returns the column lists as slices
+- `ChecksumExprs()` — returns expressions for CRC32-based checksum comparison, handling type casting and renamed columns
+- `SourceTable()` / `TargetTable()` — returns the source/target `TableInfo`
+- `SourceColumnIndices()` / `SourceOrdinalIndices()` — returns column index maps for binlog row processing
+
+When no renames are specified, `ColumnMapping` produces identical output to the previous `IntersectNonGeneratedColumns` approach. With renames, it correctly maps old column names in the source to new column names in the target for all SQL generation.
+
 ## Multi Chunker
 
 The multi chunker is a wrapper that coordinates multiple chunkers for parallel table migrations. It is used when chunking multiple tables simultaneously (such as in an atomic schema change, or move operation).

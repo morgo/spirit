@@ -87,6 +87,11 @@ type Runner struct {
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
 	dbConfig   *dbconn.DBConfig
+
+	// watchTaskWait blocks until the WatchTask goroutines have exited.
+	// Set in startBackgroundRoutines and invoked from Close() so that
+	// late status/checkpoint goroutine activity cannot race with teardown.
+	watchTaskWait func()
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -100,6 +105,17 @@ func NewRunner(m *Move) (*Runner, error) {
 }
 
 func (r *Runner) Close() error {
+	// Cancel the runner context so background goroutines (status.WatchTask)
+	// observe ctx.Done() and exit. Idempotent.
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+	}
+	// Wait for the status/checkpoint dumper goroutines to exit before
+	// tearing down connections, so a late DumpCheckpoint cannot race with
+	// post-Close cleanup.
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	if r.copyChunker != nil {
 		if err := r.copyChunker.Close(); err != nil {
 			return err
@@ -252,14 +268,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// to that source's repl client.
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
-			copyChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			chunkerCfg := table.ChunkerConfig{
+				TargetChunkTime: r.move.TargetChunkTime,
+				Logger:          r.logger,
+			}
+			copyChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
 			if err := r.sources[i].replClient.AddSubscription(tbl, nil, copyChunker); err != nil {
 				return err
 			}
-			checksumChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			checksumChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
@@ -294,6 +314,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
 		Applier:         r.applier, // Use the shared applier
+		Buffered:        true,      // move always uses the buffered copier
 	})
 	if err != nil {
 		return err
@@ -325,6 +346,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 			Name: pos.Name,
 			Pos:  pos.Pos,
 		})
+	}
+
+	// Delete rows above the watermark from all target tables before resuming.
+	// When resuming from a checkpoint, the keyAboveWatermark optimization
+	// needs to know the highest key in the target table to avoid discarding
+	// binlog events for keys that were already copied. In the move path the
+	// target is on a different server, so we can't (easily) read its max value.
+	// Instead, we delete everything above the watermark from the targets,
+	// guaranteeing that no rows exist above the copier's resume position.
+	// The copier will re-copy these rows, and the checksum will verify.
+	if err := r.deleteAboveWatermark(ctx, copierWatermark); err != nil {
+		return err
 	}
 
 	if err := r.copyChunker.OpenAtWatermark(copierWatermark); err != nil {
@@ -385,16 +418,16 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
 	for i := range r.sources {
 		src := &r.sources[i]
-		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, &repl.ClientConfig{
-			Logger:          r.logger,
-			Concurrency:     r.move.Threads,
-			TargetBatchTime: r.move.TargetChunkTime,
-			CancelFunc:      r.fatalError,
-			DDLFilterSchema: src.config.DBName,
-			DDLFilterTables: r.move.SourceTables,
-			ServerID:        repl.NewServerID(),
-			Applier:         r.applier,
-			DBConfig:        r.dbConfig,
+		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, &repl.ClientConfig{
+			Logger:                 r.logger,
+			Concurrency:            r.move.Threads,
+			TargetBatchTime:        r.move.TargetChunkTime,
+			CancelFunc:             r.fatalError,
+			DDLFilterSchema:        src.config.DBName,
+			DDLFilterTables:        r.move.SourceTables,
+			ServerID:               repl.NewServerID(),
+			DBConfig:               r.dbConfig,
+			ForceEnableBufferedMap: r.move.ForceEnableBufferedMap,
 		})
 	}
 
@@ -443,14 +476,18 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	// to that source's repl client.
 	for i := range r.sources {
 		for _, tbl := range r.sources[i].tables {
-			copyChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			chunkerCfg := table.ChunkerConfig{
+				TargetChunkTime: r.move.TargetChunkTime,
+				Logger:          r.logger,
+			}
+			copyChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
 			if err := r.sources[i].replClient.AddSubscription(tbl, nil, copyChunker); err != nil {
 				return err
 			}
-			checksumChunker, err := table.NewChunker(tbl, nil, r.move.TargetChunkTime, r.logger)
+			checksumChunker, err := table.NewChunker(tbl, chunkerCfg)
 			if err != nil {
 				return err
 			}
@@ -472,6 +509,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
 		Applier:         r.applier, // Use the shared applier
+		Buffered:        true,      // move always uses the buffered copier
 	})
 	if err != nil {
 		return err
@@ -635,7 +673,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	r.startBackgroundRoutines(ctx)
-	r.setWatermarkOptimizationAll(true)
+	if err := r.setWatermarkOptimizationAll(ctx, true); err != nil {
+		return err
+	}
 
 	r.status.Set(status.CopyRows)
 	if err := r.copier.Run(ctx); err != nil {
@@ -643,10 +683,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Disable both watermark optimizations so that all changes can be flushed.
-	// The watermark optimizations can prevent some keys from being flushed,
-	// which would cause flushedPos to not advance, leading to a mismatch
-	// with bufferedPos and causing AllChangesFlushed() to return false.
-	r.setWatermarkOptimizationAll(false)
+	// For non-memory-comparable PKs this also drains the buffered map and
+	// switches the subscription into FIFO queue mode (see
+	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	if err := r.setWatermarkOptimizationAll(ctx, false); err != nil {
+		return err
+	}
 	if err := r.flushAllReplClients(ctx); err != nil {
 		return err
 	}
@@ -705,8 +747,10 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 	}
 
-	// Start go routines for checkpointing and dumping status
-	status.WatchTask(ctx, r, r.logger)
+	// Start go routines for checkpointing and dumping status. The returned
+	// wait function is invoked from Close() so we can be sure no late
+	// checkpoint INSERT lands after teardown begins.
+	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
 }
 
 // fatalError is the callback provided to the replication client.
@@ -1173,11 +1217,66 @@ func (r *Runner) flushAllReplClients(ctx context.Context) error {
 	return nil
 }
 
-// setWatermarkOptimizationAll sets watermark optimization on all replication clients.
-func (r *Runner) setWatermarkOptimizationAll(enabled bool) {
-	for i := range r.sources {
-		r.sources[i].replClient.SetWatermarkOptimization(enabled)
+// deleteAboveWatermark deletes rows above the copier watermark from all target
+// tables. This is called during resume-from-checkpoint because of a race
+// condition with the keyAboveWatermark optimization:
+//
+// During normal copying, the keyAboveWatermark optimization discards binlog
+// events for keys the copier "hasn't reached yet" — these rows don't exist
+// in the target, so deletes/updates for them can be safely ignored. But after
+// a resume, some rows above the watermark may have already been copied to the
+// target before the interruption. If a DELETE event arrives for one of these
+// rows and keyAboveWatermark discards it, the row remains in the target as
+// a phantom row that no longer exists in the source.
+//
+// In the migration path, this is solved by reading the target table's max
+// value and temporarily disabling the optimization up to that point. In the
+// move path, the target is on a different server, so we can't cheaply read
+// its max value. Instead, we delete everything above the watermark from the
+// targets before resuming. This guarantees no rows exist above the copier's
+// resume position, so the optimization is safe.
+//
+// tl;dr: this is required to prevent a race where:
+//   - watermark is at key=100, but a row at key=105 was inserted and copied.
+//   - immediately after resume there is a delete for key=105 but we incorrectly
+//     skip it because it is above the watermark.
+func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark string) error {
+	for _, src := range r.sourceTables {
+		aboveClause, err := table.WatermarkAboveClause(src, copierWatermark)
+		if err != nil {
+			return fmt.Errorf("failed to parse watermark for table %s: %w", src.TableName, err)
+		}
+		for i, target := range r.targets {
+			deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s",
+				src.QuotedTableName, aboveClause)
+			result, err := target.DB.ExecContext(ctx, deleteStmt)
+			if err != nil {
+				return fmt.Errorf("failed to delete above watermark on target %d table %s: %w", i, src.TableName, err)
+			}
+			rowsDeleted, _ := result.RowsAffected()
+			if rowsDeleted > 0 {
+				r.logger.Info("deleted rows above watermark from target",
+					"target", i,
+					"table", src.TableName,
+					"rowsDeleted", rowsDeleted,
+					"watermark", copierWatermark,
+				)
+			}
+		}
 	}
+	return nil
+}
+
+// setWatermarkOptimizationAll sets watermark optimization on all replication
+// clients. Each subscription may drain its outgoing store on the toggle (see
+// pkg/repl/subscription_buffered.go), so this can return the drain error.
+func (r *Runner) setWatermarkOptimizationAll(ctx context.Context, enabled bool) error {
+	for i := range r.sources {
+		if err := r.sources[i].replClient.SetWatermarkOptimization(ctx, enabled); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // getDeltaLenAll returns the total number of pending changes across all replication clients.

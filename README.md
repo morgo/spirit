@@ -36,7 +36,7 @@ For now, this optimization _only applies_ well when your table has an `auto_incr
 
 ### Change Row Map
 
-As Spirit discovers rows that have been changed via the binary log, it stores them in a map. Or rather, it stores the key, and if the last operation was a `DELETE` or any other operation. This is called the "change row map". Periodically it then flushes the change row map by batching a large `REPLACE INTO new_table .. SELECT FROM old_table` and `DELETE FROM new_table WHERE pk IN (..)` statement.
+As Spirit discovers rows that have been changed via the binary log, it stores them in a map. Or rather, it stores the row, and if the last operation was a `DELETE` or any other operation. This is called the "change row map". Periodically it then flushes the change row map.
 
 In some workloads this can result in significant performance improvements, because updates from the binary log are merged and de-duplicated. i.e. if a row is updated 10 times, it will only be copied once.
 
@@ -94,7 +94,7 @@ This scenario is kind of a worst case for gh-ost since it prioritizes replicatio
 
 ## Unsupported Features
 
-- **`RENAME` column**. Spirit only supports `RENAME` if it applies via the `INSTANT` DDL algorithm (MySQL 8.0+). This might mean that you need to break up some schema changes to perform the `RENAME` operations first, and then the non-`INSTANT` DDL changes after. From a code perspective: rename is tricky to add support for, because the copier can no longer take a simple intersection of columns between the old-and-new table. If you consider more complex DDLs that include a `RENAME` and an `ADD COLUMN` (i.e. `RENAME COLUMN c1 TO n1, ADD COLUMN c1 varchar(100)`) it's easy to get these wrong, leading to data corruption. This is why we do not intend to support this feature.
+- **`RENAME` column**. Some rename operations are intentionally not supported for now. For example, renaming a column and then reusing the same column name in adding a column. These are not impossible to support, but it's easy to get these wrong leading to data corruption. This is why (for now) we do not intend to support all cases.
 - **`ALTER`/NO PRIMARY KEY**. Spirit requires the table to have a primary key, and the primary key can not be altered by the schema change. There might be some flexibility to support UNIQUE keys and some modifications of the primary key in future, but it is not a priority for now.
 - **Lossy conversions**. Spirit does not support adding a `UNIQUE` index on non unique data, shortening a `VARCHAR` to a size less than the longest value, or adding a new `NOT NULL` column without a default value. To perform these changes you must fix the data, and then run the migration.
 - **`FOREIGN KEYS`** or **`TRIGGERS`**. Spirit does not support migrating tables that have `FOREIGN KEYS` or `TRIGGERS`.
@@ -104,10 +104,12 @@ This scenario is kind of a worst case for gh-ost since it prioritizes replicatio
 Spirit works with the default configuration of MySQL 8.0, but checks that you have not changed the following settings:
   - `log-bin`
   - `binlog_format=ROW`
-  - `binlog_row_image=FULL` or `MINIMAL`
+  - `binlog_row_image=FULL`
+  - `binlog_order_commits=ON`
   - `innodb_autoinc_lock_mode=2`
   - `log_slave_updates=1`
   - `performance_schema=1`
+  - `binlog_row_value_options=''`
 
 Spirit requires an account with these privileges:
 

@@ -134,8 +134,16 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 	}, nil
 }
 
-// Start initializes all shard workers and begins processing
+// Start initializes all shard workers and begins processing.
 // This method is idempotent and can restart the applier after Stop() is called.
+//
+// Lifecycle: callers MUST call Stop() to terminate the per-shard write workers
+// and the single feedbackCoordinator. Cancelling the ctx passed here does NOT
+// by itself shut down the goroutine pipeline — it only aborts in-flight writes.
+// Workers for a shard exit when its chunkletBuffer is closed (by Stop), and the
+// coordinator exits when every shard's chunkletCompletions has been closed
+// (by the last worker's defer per shard). Failing to call Stop() will leak
+// goroutines.
 func (a *ShardedApplier) Start(ctx context.Context) error {
 	a.Lock()
 	defer a.Unlock()
@@ -174,7 +182,7 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 
 	// Start a single feedback coordinator for all shards
 	a.wg.Add(1)
-	go a.feedbackCoordinator(workerCtx)
+	go a.feedbackCoordinator()
 
 	return nil
 }
@@ -277,11 +285,25 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	}
 	a.pendingMutex.Unlock()
 
-	// Send chunklets to their respective shard buffers
+	// Send chunklets to their respective shard buffers.
+	// If ctx is cancelled mid-send, we must clean up pendingWork before
+	// returning. Otherwise the entry remains with totalChunklets > completedChunklets
+	// forever, hanging Wait(). Chunklets already in shard buffers may still be
+	// processed; their completions arrive at the coordinator after pendingWork
+	// has been deleted and are dropped (logged as "unknown work").
 	for _, chunkletData := range allChunklets {
 		select {
 		case a.shards[chunkletData.shardID].chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
+			a.pendingMutex.Lock()
+			pending, exists := a.pendingWork[workID]
+			if exists {
+				delete(a.pendingWork, workID)
+			}
+			a.pendingMutex.Unlock()
+			if exists {
+				pending.callback(0, ctx.Err())
+			}
 			return ctx.Err()
 		}
 	}
@@ -368,38 +390,28 @@ func (a *ShardedApplier) writeWorker(ctx context.Context, shard *shardTarget) {
 		}
 	}()
 
-	for {
-		select {
-		case chunkletData, ok := <-shard.chunkletBuffer:
-			if !ok {
-				a.logger.Debug("writeWorker channel closed, exiting", "shardID", shard.shardID, "workerID", workerID)
-				return
-			}
+	// Drain chunkletBuffer until it is closed by Stop(). We deliberately do not
+	// select on ctx.Done() here: every chunklet that made it into the buffer was
+	// already registered in pendingWork by Apply(), so it MUST produce a
+	// completion or Wait() will hang. If ctx is cancelled, writeChunklet returns
+	// quickly with ctx.Err() and we forward that as an error completion — the
+	// feedbackCoordinator then invokes the callback with the error and clears
+	// pendingWork. Stop() is the canonical shutdown path: it cancels ctx (so
+	// in-flight writes abort) and closes chunkletBuffer (so workers exit).
+	for chunkletData := range shard.chunkletBuffer {
+		a.logger.Debug("writeWorker processing chunklet", "shardID", shard.shardID,
+			"workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
 
-			a.logger.Debug("writeWorker processing chunklet", "shardID", shard.shardID,
-				"workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
+		affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
 
-			// Write chunklet to this shard
-			affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
-
-			// Send completion
-			completion := shardedChunkletCompletion{
-				workID:       chunkletData.workID,
-				shardID:      shard.shardID,
-				affectedRows: affectedRows,
-				err:          err,
-			}
-
-			select {
-			case shard.chunkletCompletions <- completion:
-			case <-ctx.Done():
-				return
-			}
-
-		case <-ctx.Done():
-			return
+		shard.chunkletCompletions <- shardedChunkletCompletion{
+			workID:       chunkletData.workID,
+			shardID:      shard.shardID,
+			affectedRows: affectedRows,
+			err:          err,
 		}
 	}
+	a.logger.Debug("writeWorker channel closed, exiting", "shardID", shard.shardID, "workerID", workerID)
 }
 
 // writeChunklet writes a single chunklet to a specific shard
@@ -413,8 +425,8 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	defer cancel()
 
 	// Get the intersected column names
-	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
-	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
+	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
+	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
 
 	// Build VALUES clauses for all rows in the chunklet
 	var valuesClauses []string
@@ -425,7 +437,7 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		}
 		var values []string
 		for i, value := range row.values {
-			columnType, ok := chunkletData.chunk.NewTable.GetColumnMySQLType(columnNames[i])
+			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
@@ -442,13 +454,13 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	// Note: We use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.QuotedTableName,
+		chunkletData.chunk.ColumnMapping.TargetTable().QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
 	a.logger.Debug("writing chunklet to shard", "shardID", shard.shardID,
-		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
+		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert on this shard's database
 	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, true, shard.dbConfig, query)
@@ -460,25 +472,74 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 }
 
 // feedbackCoordinator tracks chunklet completions from all shards and invokes callbacks when work is done
-func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
+func (a *ShardedApplier) feedbackCoordinator() {
 	defer a.wg.Done()
 	a.logger.Debug("feedbackCoordinator started")
+
+	// processCompletion handles a single chunklet completion.
+	processCompletion := func(completion shardedChunkletCompletion) {
+		a.logger.Debug("feedbackCoordinator received chunklet completion",
+			"workID", completion.workID, "shardID", completion.shardID)
+
+		// Update work completion status
+		a.pendingMutex.Lock()
+		pending, exists := a.pendingWork[completion.workID]
+		if !exists {
+			a.pendingMutex.Unlock()
+			a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
+			return
+		}
+
+		// If there was an error, invoke callback immediately
+		if completion.err != nil {
+			callback := pending.callback
+			// Remove the work from pending map before invoking callback
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+			callback(0, completion.err)
+			return
+		}
+
+		// Update completion count and affected rows
+		pending.completedChunklets++
+		pending.totalAffectedRows += completion.affectedRows
+
+		a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
+			"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
+
+		// Check if all chunklets for this work are complete
+		if pending.completedChunklets == pending.totalChunklets {
+			a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
+
+			// Invoke the callback
+			callback := pending.callback
+			affectedRows := pending.totalAffectedRows
+
+			// Remove completed work from pending map
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+
+			// Invoke callback outside the lock
+			callback(affectedRows, nil)
+		} else {
+			a.pendingMutex.Unlock()
+		}
+	}
 
 	// Create a merged channel to receive completions from all shards
 	mergedCompletions := make(chan shardedChunkletCompletion, defaultBufferSize)
 
-	// Start goroutines to forward completions from each shard to the merged channel
+	// Start goroutines to forward completions from each shard to the merged channel.
+	// These use a simple range loop (no ctx.Done select) to ensure all completions
+	// are forwarded even during shutdown. The shard channels will be closed once all
+	// write workers for that shard finish, which is the authoritative signal.
 	var forwardWg sync.WaitGroup
 	for _, shard := range a.shards {
 		forwardWg.Add(1)
 		go func(s *shardTarget) {
 			defer forwardWg.Done()
 			for completion := range s.chunkletCompletions {
-				select {
-				case mergedCompletions <- completion:
-				case <-ctx.Done():
-					return
-				}
+				mergedCompletions <- completion
 			}
 		}(shard)
 	}
@@ -489,66 +550,15 @@ func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 		close(mergedCompletions)
 	}()
 
-	// Process completions
-	for {
-		select {
-		case completion, ok := <-mergedCompletions:
-			if !ok {
-				a.logger.Debug("feedbackCoordinator merged completions channel closed, exiting")
-				return
-			}
-
-			a.logger.Debug("feedbackCoordinator received chunklet completion",
-				"workID", completion.workID, "shardID", completion.shardID)
-
-			// Update work completion status
-			a.pendingMutex.Lock()
-			pending, exists := a.pendingWork[completion.workID]
-			if !exists {
-				a.pendingMutex.Unlock()
-				a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
-				continue
-			}
-
-			// If there was an error, invoke callback immediately
-			if completion.err != nil {
-				callback := pending.callback
-				// Remove the work from pending map before invoking callback
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-				callback(0, completion.err)
-				continue
-			}
-
-			// Update completion count and affected rows
-			pending.completedChunklets++
-			pending.totalAffectedRows += completion.affectedRows
-
-			a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
-				"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
-
-			// Check if all chunklets for this work are complete
-			if pending.completedChunklets == pending.totalChunklets {
-				a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
-
-				// Invoke the callback
-				callback := pending.callback
-				affectedRows := pending.totalAffectedRows
-
-				// Remove completed work from pending map
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-
-				// Invoke callback outside the lock
-				callback(affectedRows, nil)
-			} else {
-				a.pendingMutex.Unlock()
-			}
-
-		case <-ctx.Done():
-			return
-		}
+	// Main loop: process completions until the merged channel is closed.
+	// We do NOT exit on ctx.Done() here because write workers may still be
+	// sending completions after writing data. Exiting early would leave
+	// entries in pendingWork that are never cleared, causing Wait() to hang
+	// or report incorrect results.
+	for completion := range mergedCompletions {
+		processCompletion(completion)
 	}
+	a.logger.Debug("feedbackCoordinator merged completions channel closed, exiting")
 }
 
 // DeleteKeys deletes rows by their key values synchronously, broadcasting to all shards.
@@ -652,7 +662,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 // Note: the sharded applier does not allow any transformations!
 // The targetTable argument is intentionally ignored.
 // This also means that table names between source and target must be the same.
-func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
@@ -661,6 +671,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
 	defer cancel()
 
+	sourceTable := mapping.SourceTable()
 	if sourceTable.ShardingColumn == "" {
 		return 0, errors.New("ShardingColumn not configured in TableInfo")
 	}
@@ -671,19 +682,9 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 	// Find the ordinal position of the sharding column within ALL columns
 	// (since RowImage from binlog contains ALL columns, including generated ones)
 	shardingOrdinal := slices.Index(sourceTable.Columns, sourceTable.ShardingColumn)
+	sourceOrdinal := mapping.SourceOrdinalIndices()
 	if shardingOrdinal == -1 {
 		return 0, fmt.Errorf("sharding column %s not found in columns", sourceTable.ShardingColumn)
-	}
-
-	// Build a map from NonGeneratedColumns to their indices in the full Columns list
-	// This is needed because RowImage contains ALL columns, but we only INSERT non-generated ones
-	var nonGeneratedIndices []int
-	for _, col := range sourceTable.NonGeneratedColumns {
-		idx := slices.Index(sourceTable.Columns, col)
-		if idx == -1 {
-			return 0, fmt.Errorf("non-generated column %s not found in columns", col)
-		}
-		nonGeneratedIndices = append(nonGeneratedIndices, idx)
 	}
 
 	// Group rows by shard
@@ -742,7 +743,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, sourceTable, _ *table.T
 			var valuesClauses []string
 			for _, logicalRow := range r {
 				var values []string
-				for i, colIdx := range nonGeneratedIndices {
+				for i, colIdx := range sourceOrdinal {
 					if colIdx >= len(logicalRow.RowImage) {
 						results <- result{err: fmt.Errorf("column index %d exceeds row image length %d", colIdx, len(logicalRow.RowImage))}
 						return

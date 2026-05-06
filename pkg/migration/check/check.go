@@ -24,11 +24,12 @@ const (
 	ScopeCutover     ScopeFlag = 1 << 3
 	ScopePostCutover ScopeFlag = 1 << 4
 	ScopeTesting     ScopeFlag = 1 << 5
+	ScopeStatement   ScopeFlag = 1 << 6 // checks that only require Statement (no DB/Table)
 )
 
 type Resources struct {
 	DB                   *sql.DB
-	Replica              *sql.DB
+	Replicas             []*sql.DB
 	Table                *table.TableInfo
 	Statement            *statement.AbstractStatement
 	TargetChunkTime      time.Duration

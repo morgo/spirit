@@ -1,10 +1,10 @@
 package utils
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -12,53 +12,40 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-func TestIntersectColumns(t *testing.T) {
-	t1 := table.NewTableInfo(nil, "test", "t1")
-	t1new := table.NewTableInfo(nil, "test", "t1_new")
-	t1.NonGeneratedColumns = []string{"a", "b", "c"}
-	t1new.NonGeneratedColumns = []string{"a", "b", "c"}
-	str := IntersectNonGeneratedColumns(t1, t1new)
-	assert.Equal(t, "`a`, `b`, `c`", str)
-
-	t1new.NonGeneratedColumns = []string{"a", "c"}
-	str = IntersectNonGeneratedColumns(t1, t1new)
-	assert.Equal(t, "`a`, `c`", str)
-
-	t1new.NonGeneratedColumns = []string{"a", "c", "d"}
-	str = IntersectNonGeneratedColumns(t1, t1new)
-	assert.Equal(t, "`a`, `c`", str)
-}
-
-func TestGetIntersectingColumns(t *testing.T) {
-	t1 := table.NewTableInfo(nil, "test", "t1")
-	t1new := table.NewTableInfo(nil, "test", "t1_new")
-	t1.NonGeneratedColumns = []string{"a", "b", "c"}
-	t1new.NonGeneratedColumns = []string{"a", "b", "c"}
-	cols := IntersectNonGeneratedColumnsAsSlice(t1, t1new)
-	assert.Equal(t, []string{"a", "b", "c"}, cols)
-
-	t1new.NonGeneratedColumns = []string{"a", "c"}
-	cols = IntersectNonGeneratedColumnsAsSlice(t1, t1new)
-	assert.Equal(t, []string{"a", "c"}, cols)
-
-	t1new.NonGeneratedColumns = []string{"a", "c", "d"}
-	cols = IntersectNonGeneratedColumnsAsSlice(t1, t1new)
-	assert.Equal(t, []string{"a", "c"}, cols)
-}
-
 func TestHashAndUnhashKey(t *testing.T) {
 	// This func helps put composite keys in a map.
 	key := []any{"1234", "ACDC", "12"}
 	hashed := HashKey(key)
-	assert.Equal(t, "1234-#-ACDC-#-12", hashed)
+	require.Equal(t, "1234-#-ACDC-#-12", hashed)
 	unhashed := UnhashKeyToString(hashed)
 	// unhashed returns as a string, not the original any
-	assert.Equal(t, "('1234','ACDC','12')", unhashed)
+	require.Equal(t, "('1234','ACDC','12')", unhashed)
 
 	// This also works on single keys.
 	key = []any{"1234"}
 	hashed = HashKey(key)
-	assert.Equal(t, "1234", hashed)
+	require.Equal(t, "1234", hashed)
 	unhashed = UnhashKeyToString(hashed)
-	assert.Equal(t, "'1234'", unhashed)
+	require.Equal(t, "'1234'", unhashed)
+}
+
+func TestTruncateTableName(t *testing.T) {
+	// Short name that doesn't need truncation
+	require.Equal(t, "mytable", TruncateTableName("mytable", 21))
+
+	// Name that exactly fits (64 - 21 = 43)
+	name43 := strings.Repeat("a", 43)
+	require.Equal(t, name43, TruncateTableName(name43, 21))
+
+	// Name that exceeds the limit and needs truncation
+	name56 := strings.Repeat("b", 56)
+	require.Equal(t, strings.Repeat("b", 43), TruncateTableName(name56, 21))
+
+	// Zero suffix length means full 64 chars available
+	name64 := strings.Repeat("d", 64)
+	require.Equal(t, name64, TruncateTableName(name64, 0))
+
+	// Name longer than 64 with zero suffix gets truncated to 64
+	name70 := strings.Repeat("e", 70)
+	require.Equal(t, strings.Repeat("e", 64), TruncateTableName(name70, 0))
 }

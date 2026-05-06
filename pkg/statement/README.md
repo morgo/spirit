@@ -80,6 +80,7 @@ stmts, err := statement.New("ALTER TABLE t1 ADD COLUMN c INT")
 - Supports fully qualified table names (`schema.table`)
 - Can parse multiple ALTER statements in one call
 - Parses ALGORITHM and LOCK clauses but does not reject them; callers should invoke `AlterContainsUnsupportedClause` on the resulting `AbstractStatement` if they need to enforce that these clauses are not present (Spirit manages these)
+- Detects column renames via `ColumnRenameMap()`, which returns a map of old→new column names for both `RENAME COLUMN` and `CHANGE COLUMN` syntax
 
 ### CREATE TABLE
 

@@ -285,7 +285,11 @@ func (d Datum) String() string {
 	}
 	// Check if it should be hex encoded
 	if d.IsBinaryString() {
-		return fmt.Sprintf("0x%x", s)
+		// MySQL binary string needs at least one character
+		if len(s) == 0 {
+			return "0x00"
+		}
+		return fmt.Sprintf("%#x", s)
 	}
 	return "\"" + sqlescape.EscapeString(s) + "\""
 }

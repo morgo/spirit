@@ -12,10 +12,11 @@ type MockChunker struct {
 	mu sync.Mutex
 
 	// Configuration
-	tableName string
-	totalRows uint64
-	chunkSize uint64
-	tableInfo *TableInfo
+	tableName     string
+	totalRows     uint64
+	chunkSize     uint64
+	tableInfo     *TableInfo
+	columnMapping *ColumnMapping
 
 	// State
 	isOpen          bool
@@ -41,7 +42,7 @@ type FeedbackCall struct {
 	Timestamp  time.Time
 }
 
-var _ Chunker = &MockChunker{}
+var _ MappedChunker = &MockChunker{}
 
 // NewMockChunker creates a new mock chunker for testing
 func NewMockChunker(tableName string, totalRows uint64) *MockChunker {
@@ -354,4 +355,19 @@ func (m *MockChunker) Tables() []*TableInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return []*TableInfo{m.tableInfo}
+}
+
+func (m *MockChunker) SetColumnMapping(mapping *ColumnMapping) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.columnMapping = mapping
+}
+
+func (m *MockChunker) ColumnMapping() *ColumnMapping {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.columnMapping != nil {
+		return m.columnMapping
+	}
+	return NewColumnMapping(m.tableInfo, m.tableInfo, nil)
 }

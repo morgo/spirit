@@ -87,9 +87,16 @@ func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApp
 	}, nil
 }
 
-// Start initializes the applier's async write workers and begins processing
-// This does not control the synchronous methods like UpsertRows/DeleteKeys
+// Start initializes the applier's async write workers and begins processing.
+// This does not control the synchronous methods like UpsertRows/DeleteKeys.
 // This method is idempotent - calling it multiple times is safe.
+//
+// Lifecycle: callers MUST call Stop() to terminate the write workers and
+// feedbackCoordinator. Cancelling the ctx passed here does NOT by itself
+// shut down the goroutine pipeline — it only aborts in-flight writes.
+// Workers exit when chunkletBuffer is closed (by Stop), and the coordinator
+// exits when chunkletCompletions is closed (by the last worker's defer).
+// Failing to call Stop() will leak goroutines.
 func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.Lock()
 	defer a.Unlock()
@@ -124,7 +131,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 
 	// Start feedback coordinator
 	a.wg.Add(1)
-	go a.feedbackCoordinator(workerCtx)
+	go a.feedbackCoordinator()
 
 	return nil
 }
@@ -168,11 +175,25 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	}
 	a.pendingMutex.Unlock()
 
-	// Send chunklets to buffer
+	// Send chunklets to buffer.
+	// If ctx is cancelled mid-send, we must clean up pendingWork before
+	// returning. Otherwise the entry remains with totalChunklets > completedChunklets
+	// forever, hanging Wait(). Chunklets already in the buffer may still be
+	// processed; their completions arrive at the coordinator after pendingWork
+	// has been deleted and are dropped (logged as "unknown work").
 	for _, chunkletData := range chunklets {
 		select {
 		case a.chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
+			a.pendingMutex.Lock()
+			pending, exists := a.pendingWork[workID]
+			if exists {
+				delete(a.pendingWork, workID)
+			}
+			a.pendingMutex.Unlock()
+			if exists {
+				pending.callback(0, ctx.Err())
+			}
 			return ctx.Err()
 		}
 	}
@@ -262,36 +283,26 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context) {
 		}
 	}()
 
-	for {
-		select {
-		case chunkletData, ok := <-a.chunkletBuffer:
-			if !ok {
-				a.logger.Debug("writeWorker channel closed, exiting", "workerID", workerID)
-				return
-			}
+	// Drain chunkletBuffer until it is closed by Stop(). We deliberately do not
+	// select on ctx.Done() here: every chunklet that made it into the buffer was
+	// already registered in pendingWork by Apply(), so it MUST produce a
+	// completion or Wait() will hang. If ctx is cancelled, writeChunklet returns
+	// quickly with ctx.Err() and we forward that as an error completion — the
+	// feedbackCoordinator then invokes the callback with the error and clears
+	// pendingWork. Stop() is the canonical shutdown path: it cancels ctx (so
+	// in-flight writes abort) and closes chunkletBuffer (so workers exit).
+	for chunkletData := range a.chunkletBuffer {
+		a.logger.Debug("writeWorker processing chunklet", "workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
 
-			a.logger.Debug("writeWorker processing chunklet", "workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
+		affectedRows, err := a.writeChunklet(ctx, chunkletData)
 
-			// Write chunklet
-			affectedRows, err := a.writeChunklet(ctx, chunkletData)
-
-			// Send completion
-			completion := chunkletCompletion{
-				workID:       chunkletData.workID,
-				affectedRows: affectedRows,
-				err:          err,
-			}
-
-			select {
-			case a.chunkletCompletions <- completion:
-			case <-ctx.Done():
-				return
-			}
-
-		case <-ctx.Done():
-			return
+		a.chunkletCompletions <- chunkletCompletion{
+			workID:       chunkletData.workID,
+			affectedRows: affectedRows,
+			err:          err,
 		}
 	}
+	a.logger.Debug("writeWorker channel closed, exiting", "workerID", workerID)
 }
 
 // writeChunklet writes a single chunklet (up to chunkletMaxRows or chunkletMaxSize)
@@ -301,8 +312,8 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	}
 
 	// Get the intersected column names to match with the values
-	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
-	columnList := utils.IntersectNonGeneratedColumns(chunkletData.chunk.Table, chunkletData.chunk.NewTable)
+	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
+	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
 
 	// Build VALUES clauses for all rows in the chunklet
 	var valuesClauses []string
@@ -313,7 +324,7 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		}
 		var values []string
 		for i, value := range row.values {
-			columnType, ok := chunkletData.chunk.NewTable.GetColumnMySQLType(columnNames[i])
+			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
 			if !ok {
 				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
@@ -328,12 +339,12 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 
 	// Build the INSERT statement
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.NewTable.QuotedTableName,
+		chunkletData.chunk.ColumnMapping.TargetTable().QuotedTableName,
 		columnList,
 		strings.Join(valuesClauses, ", "),
 	)
 
-	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.NewTable.TableName)
+	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert
 	result, err := dbconn.RetryableTransaction(ctx, a.target.DB, true, a.dbConfig, query)
@@ -345,68 +356,76 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 }
 
 // feedbackCoordinator tracks chunklet completions and invokes callbacks when work is done
-func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
+func (a *SingleTargetApplier) feedbackCoordinator() {
 	defer a.wg.Done()
 	a.logger.Debug("feedbackCoordinator started")
 
-	for {
-		select {
-		case completion, ok := <-a.chunkletCompletions:
-			if !ok {
-				a.logger.Debug("feedbackCoordinator chunklet completions channel closed, exiting")
-				return
-			}
+	// processCompletion handles a single chunklet completion.
+	processCompletion := func(completion chunkletCompletion) {
+		a.logger.Debug("feedbackCoordinator received chunklet completion", "workID", completion.workID)
 
-			a.logger.Debug("feedbackCoordinator received chunklet completion", "workID", completion.workID)
-
-			// Update work completion status
-			a.pendingMutex.Lock()
-			pending, exists := a.pendingWork[completion.workID]
-			if !exists {
-				a.pendingMutex.Unlock()
-				a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
-				continue
-			}
-
-			// If there was an error, invoke callback immediately
-			if completion.err != nil {
-				callback := pending.callback
-				// Remove the work from pending map before invoking callback
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-				callback(0, completion.err)
-				continue
-			}
-
-			// Update completion count and affected rows
-			pending.completedChunklets++
-			pending.totalAffectedRows += completion.affectedRows
-
-			a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
-				"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
-
-			// Check if all chunklets for this work are complete
-			if pending.completedChunklets == pending.totalChunklets {
-				a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
-
-				// Invoke the callback
-				callback := pending.callback
-				affectedRows := pending.totalAffectedRows
-
-				// Remove completed work from pending map
-				delete(a.pendingWork, completion.workID)
-				a.pendingMutex.Unlock()
-
-				// Invoke callback outside the lock
-				callback(affectedRows, nil)
-			} else {
-				a.pendingMutex.Unlock()
-			}
-
-		case <-ctx.Done():
+		// Update work completion status
+		a.pendingMutex.Lock()
+		pending, exists := a.pendingWork[completion.workID]
+		if !exists {
+			a.pendingMutex.Unlock()
+			a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
 			return
 		}
+
+		// If there was an error, invoke callback immediately.
+		// We invoke the callback *before* removing the work from pendingWork so
+		// that Wait() — which polls len(pendingWork) — cannot return until the
+		// callback has run. Otherwise Wait could see an empty map and return
+		// while a callback is still being invoked on another goroutine.
+		if completion.err != nil {
+			callback := pending.callback
+			a.pendingMutex.Unlock()
+			callback(0, completion.err)
+			a.pendingMutex.Lock()
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+			return
+		}
+
+		// Update completion count and affected rows
+		pending.completedChunklets++
+		pending.totalAffectedRows += completion.affectedRows
+
+		a.logger.Debug("feedbackCoordinator work progress", "workID", completion.workID,
+			"completedChunklets", pending.completedChunklets, "totalChunklets", pending.totalChunklets)
+
+		// Check if all chunklets for this work are complete
+		if pending.completedChunklets == pending.totalChunklets {
+			a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
+
+			callback := pending.callback
+			affectedRows := pending.totalAffectedRows
+
+			// Invoke callback *before* removing the work from pendingWork. See
+			// the comment in the error path above — Wait() must not return
+			// until callbacks have finished running.
+			a.pendingMutex.Unlock()
+			callback(affectedRows, nil)
+			a.pendingMutex.Lock()
+			delete(a.pendingWork, completion.workID)
+			a.pendingMutex.Unlock()
+		} else {
+			a.pendingMutex.Unlock()
+		}
 	}
+
+	// Main loop: process completions until the channel is closed.
+	// We do NOT exit on ctx.Done() here because write workers may still be
+	// sending completions after writing data. Exiting early would leave
+	// entries in pendingWork that are never cleared, causing Wait() to hang
+	// or report incorrect results. The channel will be closed once all write
+	// workers finish (including their deferred close logic), which is the
+	// authoritative signal that no more completions will arrive.
+	for completion := range a.chunkletCompletions {
+		processCompletion(completion)
+	}
+	a.logger.Debug("feedbackCoordinator chunklet completions channel closed, exiting")
 }
 
 // DeleteKeys deletes rows by their key values synchronously.
@@ -456,25 +475,13 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 // UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
 // The rows are LogicalRow structs containing the row images.
 // If lock is non-nil, the upsert is executed under the table lock.
-func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	// For move operations, targetTable may be nil - use sourceTable for both
-	if targetTable == nil {
-		targetTable = sourceTable
-	}
-	// Get the columns that exist in both source and destination tables
-	columnList := utils.IntersectNonGeneratedColumns(sourceTable, targetTable)
-	columnNames := utils.IntersectNonGeneratedColumnsAsSlice(sourceTable, targetTable)
-
-	// Get the intersected column indices
-	var intersectedColumns []int
-	for i, sourceCol := range sourceTable.NonGeneratedColumns {
-		if slices.Contains(targetTable.NonGeneratedColumns, sourceCol) {
-			intersectedColumns = append(intersectedColumns, i)
-		}
-	}
+	_, targetColumnList := mapping.Columns()
+	sourceColumnNames, targetColumnNames := mapping.ColumnsSlice()
+	intersectedColumns := mapping.SourceColumnIndices()
 
 	// Build the VALUES clause from the row images
 	var valuesClauses []string
@@ -489,21 +496,14 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 				return 0, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.RowImage))
 			}
 			// In order to create a datum we need to know the MySQL type,
-			// which we can get from the source table. We just do an initial
-			// safety check to ensure the column index exists in the list
-			// of column names.
-			if i >= len(columnNames) {
-				return 0, fmt.Errorf("column index %d exceeds columnNames length %d", i, len(columnNames))
-			}
-			columnType, ok := sourceTable.GetColumnMySQLType(columnNames[i])
+			// which we can get from the source table.
+			columnType, ok := mapping.SourceTable().GetColumnMySQLType(sourceColumnNames[i])
 			if !ok {
-				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+				return 0, fmt.Errorf("column %s not found in table info", sourceColumnNames[i])
 			}
-			// The value appended here will be escaped
-			// by calling String() on the Datum
 			datum, err := table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType)
 			if err != nil {
-				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
 			values = append(values, datum.String())
 		}
@@ -514,26 +514,37 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, sourceTable, targe
 		return 0, nil
 	}
 
-	// Build the ON DUPLICATE KEY UPDATE clause using MySQL 8.0+ syntax
+	// Build the ON DUPLICATE KEY UPDATE clause using target column names.
 	var updateClauses []string
-	for _, col := range targetTable.NonGeneratedColumns {
-		// Skip primary key columns in the UPDATE clause
-		if !slices.Contains(targetTable.KeyColumns, col) {
-			// Check if this column exists in both tables
-			if slices.Contains(sourceTable.NonGeneratedColumns, col) {
-				updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
-			}
+	for _, col := range targetColumnNames {
+		if !slices.Contains(mapping.TargetTable().KeyColumns, col) {
+			updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
 		}
 	}
 
-	upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-		targetTable.QuotedTableName,
-		columnList,
-		strings.Join(valuesClauses, ", "),
-		strings.Join(updateClauses, ", "),
-	)
+	// If every column is part of the PK there's nothing to UPDATE on conflict
+	// (the row's content is the PK and a same-PK conflict means same content).
+	// `INSERT … ON DUPLICATE KEY UPDATE` with an empty clause is a SQL syntax
+	// error, so use `INSERT IGNORE` for that case instead — same semantics.
+	var upsertStmt, upsertPath string
+	if len(updateClauses) == 0 {
+		upsertPath = "insert-ignore"
+		upsertStmt = fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
+			mapping.TargetTable().QuotedTableName,
+			targetColumnList,
+			strings.Join(valuesClauses, ", "),
+		)
+	} else {
+		upsertPath = "on-duplicate-key-update"
+		upsertStmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+			mapping.TargetTable().QuotedTableName,
+			targetColumnList,
+			strings.Join(valuesClauses, ", "),
+			strings.Join(updateClauses, ", "),
+		)
+	}
 
-	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", targetTable.TableName)
+	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", mapping.TargetTable().TableName, "path", upsertPath)
 
 	// Execute under lock if provided
 	if lock != nil {

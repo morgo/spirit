@@ -14,8 +14,9 @@ type Chunk struct {
 	LowerBound           *Boundary
 	UpperBound           *Boundary
 	AdditionalConditions string
-	Table                *TableInfo // Source table information for this chunk
-	NewTable             *TableInfo // Destination table information for this chunk
+	Table                *TableInfo     // Source table information for this chunk
+	NewTable             *TableInfo     // Destination table information for this chunk
+	ColumnMapping        *ColumnMapping // Column relationship between source and target, including renames
 }
 
 // Boundary is used by chunk for lower or upper boundary
@@ -180,4 +181,24 @@ func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 			Inclusive: chunk.UpperBound.Inclusive,
 		},
 	}, nil
+}
+
+// WatermarkAboveClause parses a watermark JSON string (as produced by
+// GetLowWatermark/checkpoint) and returns a SQL WHERE clause that matches
+// rows strictly above the watermark's upper bound. This is used by the move
+// path to delete rows above the watermark from target tables before resuming,
+// so that the keyAboveWatermark optimization is safe without needing to read
+// the target table's max value.
+//
+// For example, if the watermark upper bound is id=100, this returns
+// something like "`id` > 100".
+func WatermarkAboveClause(ti *TableInfo, watermarkJSON string) (string, error) {
+	chunk, err := newChunkFromJSON(ti, watermarkJSON)
+	if err != nil {
+		return "", fmt.Errorf("could not parse watermark: %w", err)
+	}
+	if chunk.UpperBound == nil {
+		return "", fmt.Errorf("watermark has no upper bound")
+	}
+	return expandRowConstructorComparison(chunk.Key, OpGreaterThan, chunk.UpperBound.Value), nil
 }

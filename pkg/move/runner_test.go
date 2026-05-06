@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,9 +18,6 @@ import (
 // writes, exercising both deferred and non-deferred secondary indexes and
 // reproducing the "not all changes flushed" error seen during cutover.
 func TestMoveWithConcurrentWrites(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
 	testMoveWithConcurrentWrites(t, false)
 	testMoveWithConcurrentWrites(t, true)
 }
@@ -72,7 +68,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load
@@ -118,21 +114,21 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 		writeCount.Load(), errorCount.Load())
 
 	// The move should succeed
-	assert.NoError(t, err, "Move should succeed even with concurrent writes") // not all changes flushed!!
+	require.NoError(t, err, "Move should succeed even with concurrent writes") // not all changes flushed!!
 
 	// Verify data was moved correctly
 	var sourceCount, targetCount int
 	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM source_concurrent.xfers_old").Scan(&sourceCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	targetDB, err := sql.Open("mysql", targetDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(targetDB)
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dest_concurrent.xfers").Scan(&targetCount)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	t.Logf("Source count: %d, Target count: %d", sourceCount, targetCount)
-	assert.Equal(t, sourceCount, targetCount, "Source and target should have same row count")
+	require.Equal(t, sourceCount, targetCount, "Source and target should have same row count")
 }
 
 // concurrentWriteThread simulates the load pattern from the load test
@@ -203,10 +199,6 @@ func doOneWriteLoop(ctx context.Context, db *sql.DB) error {
 // TestMoveWithNewTableCreation verifies that creating a new table in the source database
 // during a move operation causes the move to be cancelled immediately via table notification.
 func TestMoveWithNewTableCreation(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
-
 	sourceDSN := testutils.DSNForDatabase("source_newtable")
 	targetDSN := testutils.DSNForDatabase("dest_newtable")
 
@@ -259,7 +251,7 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 
 	// Open connection to source for concurrent writes
 	sourceDB, err := sql.Open("mysql", sourceDSN)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
 	// Start concurrent write load
@@ -294,7 +286,7 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 		// But the problem is written to the log as:
 		// ERROR table definition changed during move operation table=source_newtable.new_table
 		// This is clear enough.
-		assert.Error(t, err, "Move should fail when a new table is created")
+		require.Error(t, err, "Move should fail when a new table is created")
 	})
 
 	// Give the move a moment to start
@@ -317,10 +309,6 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 // SET binlog_row_image = 'minimal' at the session level, which causes its DML
 // to produce minimal row images in the binlog even though the global setting is FULL.
 func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner (global setting already minimal)")
-	}
-
 	sourceDSN := testutils.DSNForDatabase("source_minrbr")
 	targetDSN := testutils.DSNForDatabase("dest_minrbr")
 
@@ -397,4 +385,198 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	// contain the original "minimal RBR" message depending on which
 	// operation observes the cancellation first.
 	require.Error(t, err)
+}
+
+// TestMoveResumeDeletesAboveWatermark verifies that when a move operation
+// resumes from a checkpoint, rows above the watermark are deleted from the
+// target tables before resuming. This prevents phantom rows from the
+// keyAboveWatermark optimization race condition.
+func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
+	sourceDSN := testutils.DSNForDatabase("source_resume_wm")
+	targetDSN := testutils.DSNForDatabase("dest_resume_wm")
+
+	// Clean up both databases
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_resume_wm`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_resume_wm`)
+
+	// Setup source database with a table and data
+	testutils.RunSQL(t, `CREATE DATABASE source_resume_wm`)
+	testutils.RunSQL(t, `CREATE TABLE source_resume_wm.t1 (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(50) NOT NULL
+	)`)
+	testutils.RunSQL(t, `INSERT INTO source_resume_wm.t1 (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
+
+	// Setup target database with the same table
+	testutils.RunSQL(t, `CREATE DATABASE dest_resume_wm`)
+	testutils.RunSQL(t, `CREATE TABLE dest_resume_wm.t1 (
+		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+		name VARCHAR(50) NOT NULL
+	)`)
+
+	// Run a full move to verify the basic path works end-to-end.
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+	}
+
+	err := move.Run()
+	require.NoError(t, err)
+
+	// Verify all rows were copied
+	targetDB, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	var count int
+	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 5, count)
+}
+
+// TestMoveWithVarcharPK verifies a move on a table with a non-memory-comparable
+// primary key (VARCHAR with a CI collation) — the case from issue #607. The
+// move runs under concurrent writes to exercise the binlog replay path.
+//
+// The two subtests cover both routing modes for non-memory-comparable PKs:
+//
+//   - default (forceEnableBufferedMap=false): FIFO queue full-time. This is
+//     the safe default — the queue replays binlog events in their original
+//     order, which is required for collation-sensitive PKs because the map's
+//     hash equality ("A" ≠ "a") does not match MySQL's row identity ("A" =
+//     "a" under a CI collation).
+//   - force-enable-buffered-map=true: LWW map dedup during copy, FIFO queue
+//     post-copy. This is the experimental optimization, kept honest by the
+//     post-cutover checksum.
+func TestMoveWithVarcharPK(t *testing.T) {
+	t.Run("queue-full-time", func(t *testing.T) {
+		testMoveWithVarcharPK(t, false)
+	})
+	t.Run("force-enable-buffered-map", func(t *testing.T) {
+		testMoveWithVarcharPK(t, true)
+	})
+}
+
+func testMoveWithVarcharPK(t *testing.T, forceEnableBufferedMap bool) {
+	dbSuffix := "queue"
+	if forceEnableBufferedMap {
+		dbSuffix = "bufmap"
+	}
+	srcDB := "source_varcharpk_" + dbSuffix
+	dstDB := "dest_varcharpk_" + dbSuffix
+
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	// VARCHAR PK with utf8mb4_0900_ai_ci — case-insensitive, accent-insensitive.
+	// "A" and "a" hash to different map slots but resolve to the same MySQL
+	// row identity, which is exactly the property the FIFO queue exists to
+	// handle.
+	testutils.RunSQL(t, `CREATE TABLE `+srcDB+`.items (
+		id VARCHAR(64) NOT NULL COLLATE utf8mb4_0900_ai_ci PRIMARY KEY,
+		val VARCHAR(255) NOT NULL,
+		updated_at DATETIME NOT NULL
+	) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
+
+	// Seed enough rows that the copier runs for long enough to interleave
+	// with the concurrent writers. Use UUIDs for PK values to keep them
+	// well-distributed.
+	for range 50 {
+		testutils.RunSQL(t, `INSERT INTO `+srcDB+`.items (id, val, updated_at)
+			VALUES (UUID(), HEX(RANDOM_BYTES(20)), NOW())`)
+	}
+
+	sourceDB, err := sql.Open("mysql", sourceDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(sourceDB)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var writeCount, errorCount atomic.Int64
+
+	// 4 writers doing INSERT / UPDATE / DELETE on VARCHAR PKs while the
+	// move runs. The FIFO queue must replay these in binlog order to land
+	// on the correct end state on the target.
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if err := varcharPKWriteOne(ctx, sourceDB, srcDB); err != nil {
+					errorCount.Add(1)
+				} else {
+					writeCount.Add(1)
+				}
+			}
+		})
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	move := &Move{
+		SourceDSN:              sourceDSN,
+		TargetDSN:              targetDSN,
+		TargetChunkTime:        100 * time.Millisecond,
+		Threads:                2,
+		WriteThreads:           2,
+		CreateSentinel:         false,
+		ForceEnableBufferedMap: forceEnableBufferedMap,
+	}
+	err = move.Run()
+	cancel()
+	wg.Wait()
+
+	t.Logf("forceEnableBufferedMap=%v: %d successful writes, %d errors during move",
+		forceEnableBufferedMap, writeCount.Load(), errorCount.Load())
+	require.NoError(t, err, "move on VARCHAR PK table must succeed (issue #607)")
+
+	// Source/target row counts must match. The internal checksum step inside
+	// move.Run() already proves content equivalence; this is a belt-and-braces
+	// check on top of that.
+	var sourceCount, targetCount int
+	require.NoError(t, sourceDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+srcDB+".items_old").Scan(&sourceCount))
+
+	targetDB, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+dstDB+".items").Scan(&targetCount))
+
+	require.Equal(t, sourceCount, targetCount,
+		"source/target row counts must match after move with VARCHAR PK")
+}
+
+func varcharPKWriteOne(ctx context.Context, db *sql.DB, srcDB string) error {
+	id := uuid.New().String()
+
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO "+srcDB+".items (id, val, updated_at) VALUES (?, HEX(RANDOM_BYTES(20)), NOW())",
+		id); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE "+srcDB+".items SET val = HEX(RANDOM_BYTES(20)), updated_at = NOW() WHERE id = ?",
+		id); err != nil {
+		return err
+	}
+	// Delete ~half the time so we exercise both delete and upsert in the queue.
+	if id[0] < '8' {
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM "+srcDB+".items WHERE id = ?", id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

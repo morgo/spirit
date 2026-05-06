@@ -66,7 +66,7 @@ type Applier interface {
 	// The rows are LogicalRow structs containing the row images.
 	// If lock is non-nil, the upsert is executed under the table lock.
 	// Returns the number of rows affected and any error.
-	UpsertRows(ctx context.Context, sourceTable, targetTable *table.TableInfo, rows []LogicalRow, lock *dbconn.TableLock) (int64, error)
+	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error)
 
 	// Wait blocks until all pending work is complete and all callbacks have been invoked
 	Wait(ctx context.Context) error

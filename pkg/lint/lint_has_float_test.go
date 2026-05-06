@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,7 +22,7 @@ func TestHasFloatLinter_NoFloatOrDouble(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// No FLOAT or DOUBLE - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_FloatColumn(t *testing.T) {
@@ -40,15 +39,15 @@ func TestHasFloatLinter_FloatColumn(t *testing.T) {
 
 	// FLOAT should be detected
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "temperature")
-	assert.Contains(t, violations[0].Message, "measurements")
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "temperature")
+	require.Contains(t, violations[0].Message, "measurements")
 	// The parser returns lowercase type names
-	assert.Contains(t, violations[0].Message, "float")
-	assert.Equal(t, "measurements", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "float")
+	require.Equal(t, "measurements", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_DoubleColumn(t *testing.T) {
@@ -67,26 +66,26 @@ func TestHasFloatLinter_DoubleColumn(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	// First violation
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "latitude")
-	assert.Contains(t, violations[0].Message, "coordinates")
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "latitude")
+	require.Contains(t, violations[0].Message, "coordinates")
 	// The parser returns lowercase type names
-	assert.Contains(t, violations[0].Message, "double")
-	assert.Equal(t, "coordinates", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "latitude", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "double")
+	require.Equal(t, "coordinates", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "latitude", *violations[0].Location.Column)
 
 	// Second violation
-	assert.Equal(t, "has_float", violations[1].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[1].Severity)
-	assert.Contains(t, violations[1].Message, "longitude")
-	assert.Contains(t, violations[1].Message, "coordinates")
+	require.Equal(t, "has_float", violations[1].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[1].Severity)
+	require.Contains(t, violations[1].Message, "longitude")
+	require.Contains(t, violations[1].Message, "coordinates")
 	// The parser returns lowercase type names
-	assert.Contains(t, violations[1].Message, "double")
-	assert.Equal(t, "coordinates", violations[1].Location.Table)
-	assert.NotNil(t, violations[1].Location.Column)
-	assert.Equal(t, "longitude", *violations[1].Location.Column)
+	require.Contains(t, violations[1].Message, "double")
+	require.Equal(t, "coordinates", violations[1].Location.Table)
+	require.NotNil(t, violations[1].Location.Column)
+	require.Equal(t, "longitude", *violations[1].Location.Column)
 }
 
 func TestHasFloatLinter_MixedFloatAndDouble(t *testing.T) {
@@ -107,8 +106,8 @@ func TestHasFloatLinter_MixedFloatAndDouble(t *testing.T) {
 
 	// Check both violations are present
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "value1")
-	assert.Contains(t, columnNames, "value2")
+	require.Contains(t, columnNames, "value1")
+	require.Contains(t, columnNames, "value2")
 }
 
 func TestHasFloatLinter_CaseInsensitive(t *testing.T) {
@@ -125,7 +124,7 @@ func TestHasFloatLinter_CaseInsensitive(t *testing.T) {
 
 	// Should detect lowercase 'float'
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "value")
+	require.Contains(t, violations[0].Message, "value")
 }
 
 func TestHasFloatLinter_CaseInsensitiveDouble(t *testing.T) {
@@ -142,7 +141,7 @@ func TestHasFloatLinter_CaseInsensitiveDouble(t *testing.T) {
 
 	// Should detect lowercase 'double'
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "value")
+	require.Contains(t, violations[0].Message, "value")
 }
 
 func TestHasFloatLinter_MultipleTables(t *testing.T) {
@@ -174,8 +173,8 @@ func TestHasFloatLinter_MultipleTables(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "table1")
-	assert.Contains(t, tables, "table3")
+	require.Contains(t, tables, "table1")
+	require.Contains(t, tables, "table3")
 }
 
 func TestHasFloatLinter_FloatWithPrecision(t *testing.T) {
@@ -191,9 +190,9 @@ func TestHasFloatLinter_FloatWithPrecision(t *testing.T) {
 
 	// FLOAT with precision should still be detected
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "value")
+	require.Contains(t, violations[0].Message, "value")
 	// The parser may normalize the type name
-	assert.Contains(t, strings.ToLower(violations[0].Message), "float")
+	require.Contains(t, strings.ToLower(violations[0].Message), "float")
 }
 
 func TestHasFloatLinter_DoubleWithPrecision(t *testing.T) {
@@ -209,9 +208,9 @@ func TestHasFloatLinter_DoubleWithPrecision(t *testing.T) {
 
 	// DOUBLE with precision should still be detected
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "value")
+	require.Contains(t, violations[0].Message, "value")
 	// The parser may normalize the type name
-	assert.Contains(t, strings.ToLower(violations[0].Message), "double")
+	require.Contains(t, strings.ToLower(violations[0].Message), "double")
 }
 
 func TestHasFloatLinter_EmptyInput(t *testing.T) {
@@ -219,7 +218,7 @@ func TestHasFloatLinter_EmptyInput(t *testing.T) {
 	violations := linter.Lint(nil, nil)
 
 	// No tables - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_EmptyTableList(t *testing.T) {
@@ -227,7 +226,7 @@ func TestHasFloatLinter_EmptyTableList(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{}, nil)
 
 	// Empty list - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_TableWithNoColumns(t *testing.T) {
@@ -241,7 +240,7 @@ func TestHasFloatLinter_TableWithNoColumns(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// No columns - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_SimilarTypeNames(t *testing.T) {
@@ -260,11 +259,11 @@ func TestHasFloatLinter_SimilarTypeNames(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// None of these types should trigger violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_Integration(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFloatLinter{})
 
 	sql := `CREATE TABLE measurements (
@@ -285,11 +284,11 @@ func TestHasFloatLinter_Integration(t *testing.T) {
 		}
 	}
 	require.Len(t, hasFloatViolations, 1)
-	assert.Equal(t, "has_float", hasFloatViolations[0].Linter.Name())
+	require.Equal(t, "has_float", hasFloatViolations[0].Linter.Name())
 }
 
 func TestHasFloatLinter_IntegrationDisabled(t *testing.T) {
-	Reset()
+	resetForTest(t)
 	Register(&HasFloatLinter{})
 
 	sql := `CREATE TABLE measurements (
@@ -308,17 +307,17 @@ func TestHasFloatLinter_IntegrationDisabled(t *testing.T) {
 
 	// HasFloatLinter is disabled, so no violations from it
 	for _, v := range violations {
-		assert.NotEqual(t, "has_float", v.Linter.Name())
+		require.NotEqual(t, "has_float", v.Linter.Name())
 	}
 }
 
 func TestHasFloatLinter_Metadata(t *testing.T) {
 	linter := &HasFloatLinter{}
 
-	assert.Equal(t, "has_float", linter.Name())
-	assert.NotEmpty(t, linter.Description())
-	assert.Contains(t, linter.Description(), "FLOAT")
-	assert.Contains(t, linter.Description(), "DOUBLE")
+	require.Equal(t, "has_float", linter.Name())
+	require.NotEmpty(t, linter.Description())
+	require.Contains(t, linter.Description(), "FLOAT")
+	require.Contains(t, linter.Description(), "DOUBLE")
 }
 
 func TestHasFloatLinter_AllFloatTypes(t *testing.T) {
@@ -341,8 +340,8 @@ func TestHasFloatLinter_AllFloatTypes(t *testing.T) {
 
 	// Verify all violations are warnings
 	for _, v := range violations {
-		assert.Equal(t, SeverityWarning, v.Severity)
-		assert.Equal(t, "all_floats", v.Location.Table)
+		require.Equal(t, SeverityWarning, v.Severity)
+		require.Equal(t, "all_floats", v.Location.Table)
 	}
 }
 
@@ -363,7 +362,7 @@ func TestHasFloatLinter_RealType(t *testing.T) {
 	// If not, this test documents that behavior
 	// The linter currently only checks for FLOAT and DOUBLE explicitly
 	if len(violations) > 0 {
-		assert.Contains(t, violations[0].Message, "value")
+		require.Contains(t, violations[0].Message, "value")
 	}
 }
 
@@ -382,7 +381,7 @@ func TestHasFloatLinter_DecimalNotDetected(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	// DECIMAL and NUMERIC should not be detected
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_MixedCase(t *testing.T) {
@@ -411,7 +410,7 @@ func TestHasFloatLinter_String(t *testing.T) {
 	str := linter.String()
 
 	// String() should return a non-empty string
-	assert.NotEmpty(t, str)
+	require.NotEmpty(t, str)
 }
 
 // Tests for existingTables parameter
@@ -430,12 +429,12 @@ func TestHasFloatLinter_ExistingTableWithFloat(t *testing.T) {
 
 	// Should detect FLOAT in existing table
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "temperature")
-	assert.Contains(t, violations[0].Message, "measurements")
-	assert.Equal(t, "measurements", violations[0].Location.Table)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "temperature")
+	require.Contains(t, violations[0].Message, "measurements")
+	require.Equal(t, "measurements", violations[0].Location.Table)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_ExistingTableWithDouble(t *testing.T) {
@@ -454,8 +453,8 @@ func TestHasFloatLinter_ExistingTableWithDouble(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "latitude")
-	assert.Contains(t, columnNames, "longitude")
+	require.Contains(t, columnNames, "latitude")
+	require.Contains(t, columnNames, "longitude")
 }
 
 func TestHasFloatLinter_ExistingTableNoFloat(t *testing.T) {
@@ -471,7 +470,7 @@ func TestHasFloatLinter_ExistingTableNoFloat(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{existingTable}, nil)
 
 	// No FLOAT or DOUBLE - no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_MultipleExistingTables(t *testing.T) {
@@ -503,8 +502,8 @@ func TestHasFloatLinter_MultipleExistingTables(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "table1")
-	assert.Contains(t, tables, "table3")
+	require.Contains(t, tables, "table1")
+	require.Contains(t, tables, "table3")
 }
 
 // Tests for ALTER TABLE ADD COLUMN
@@ -519,12 +518,12 @@ func TestHasFloatLinter_AlterTableAddFloatColumn(t *testing.T) {
 
 	// Should detect FLOAT in ALTER TABLE ADD COLUMN
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "temperature")
-	assert.Contains(t, violations[0].Message, "measurements")
-	assert.Equal(t, "measurements", violations[0].Location.Table)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "temperature")
+	require.Contains(t, violations[0].Message, "measurements")
+	require.Equal(t, "measurements", violations[0].Location.Table)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableAddDoubleColumn(t *testing.T) {
@@ -537,10 +536,10 @@ func TestHasFloatLinter_AlterTableAddDoubleColumn(t *testing.T) {
 
 	// Should detect DOUBLE in ALTER TABLE ADD COLUMN
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "latitude")
-	assert.Equal(t, "coordinates", violations[0].Location.Table)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "latitude")
+	require.Equal(t, "coordinates", violations[0].Location.Table)
 }
 
 func TestHasFloatLinter_AlterTableAddMultipleFloatColumns(t *testing.T) {
@@ -557,8 +556,8 @@ func TestHasFloatLinter_AlterTableAddMultipleFloatColumns(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "temperature")
-	assert.Contains(t, columnNames, "pressure")
+	require.Contains(t, columnNames, "temperature")
+	require.Contains(t, columnNames, "pressure")
 }
 
 func TestHasFloatLinter_AlterTableAddNonFloatColumn(t *testing.T) {
@@ -570,7 +569,7 @@ func TestHasFloatLinter_AlterTableAddNonFloatColumn(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Should not detect non-float columns
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_AlterTableAddMixedColumns(t *testing.T) {
@@ -586,7 +585,7 @@ func TestHasFloatLinter_AlterTableAddMixedColumns(t *testing.T) {
 
 	// Should only detect the FLOAT column
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableAddFloatWithPrecision(t *testing.T) {
@@ -599,7 +598,7 @@ func TestHasFloatLinter_AlterTableAddFloatWithPrecision(t *testing.T) {
 
 	// Should detect FLOAT with precision
 	require.Len(t, violations, 1)
-	assert.Equal(t, "value", *violations[0].Location.Column)
+	require.Equal(t, "value", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableAddDoubleWithPrecision(t *testing.T) {
@@ -612,7 +611,7 @@ func TestHasFloatLinter_AlterTableAddDoubleWithPrecision(t *testing.T) {
 
 	// Should detect DOUBLE with precision
 	require.Len(t, violations, 1)
-	assert.Equal(t, "value", *violations[0].Location.Column)
+	require.Equal(t, "value", *violations[0].Location.Column)
 }
 
 // Tests for combined scenarios
@@ -641,8 +640,8 @@ func TestHasFloatLinter_ExistingTableAndNewTable(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "existing_table")
-	assert.Contains(t, tables, "new_table")
+	require.Contains(t, tables, "existing_table")
+	require.Contains(t, tables, "new_table")
 }
 
 func TestHasFloatLinter_ExistingTableAndAlterTable(t *testing.T) {
@@ -666,8 +665,8 @@ func TestHasFloatLinter_ExistingTableAndAlterTable(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "temperature")
-	assert.Contains(t, columnNames, "pressure")
+	require.Contains(t, columnNames, "temperature")
+	require.Contains(t, columnNames, "pressure")
 }
 
 func TestHasFloatLinter_MultipleAlterTableStatements(t *testing.T) {
@@ -693,8 +692,8 @@ func TestHasFloatLinter_MultipleAlterTableStatements(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tables, "table1")
-	assert.Contains(t, tables, "table2")
+	require.Contains(t, tables, "table1")
+	require.Contains(t, tables, "table2")
 }
 
 func TestHasFloatLinter_ComplexScenario(t *testing.T) {
@@ -752,9 +751,9 @@ func TestHasFloatLinter_ComplexScenario(t *testing.T) {
 			foundAlter = true
 		}
 	}
-	assert.True(t, foundExisting1, "Should find violation in existing1")
-	assert.True(t, foundNewTable, "Should find violation in new_table")
-	assert.True(t, foundAlter, "Should find violation in ALTER TABLE")
+	require.True(t, foundExisting1, "Should find violation in existing1")
+	require.True(t, foundNewTable, "Should find violation in new_table")
+	require.True(t, foundAlter, "Should find violation in ALTER TABLE")
 }
 
 func TestHasFloatLinter_AlterTableAddColumnWithDefault(t *testing.T) {
@@ -767,7 +766,7 @@ func TestHasFloatLinter_AlterTableAddColumnWithDefault(t *testing.T) {
 
 	// Should detect FLOAT even with DEFAULT value
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableAddColumnNotNull(t *testing.T) {
@@ -780,7 +779,7 @@ func TestHasFloatLinter_AlterTableAddColumnNotNull(t *testing.T) {
 
 	// Should detect FLOAT even with NOT NULL constraint
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableAddColumnAfter(t *testing.T) {
@@ -793,7 +792,7 @@ func TestHasFloatLinter_AlterTableAddColumnAfter(t *testing.T) {
 
 	// Should detect FLOAT even with AFTER clause
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableAddColumnFirst(t *testing.T) {
@@ -806,7 +805,7 @@ func TestHasFloatLinter_AlterTableAddColumnFirst(t *testing.T) {
 
 	// Should detect FLOAT even with FIRST clause
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 // Tests for ALTER TABLE MODIFY COLUMN
@@ -821,12 +820,12 @@ func TestHasFloatLinter_AlterTableModifyColumnToFloat(t *testing.T) {
 
 	// Should detect MODIFY COLUMN to FLOAT
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "temperature")
-	assert.Contains(t, violations[0].Message, "modified")
-	assert.Equal(t, "measurements", violations[0].Location.Table)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "temperature")
+	require.Contains(t, violations[0].Message, "modified")
+	require.Equal(t, "measurements", violations[0].Location.Table)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableModifyColumnToDouble(t *testing.T) {
@@ -839,11 +838,11 @@ func TestHasFloatLinter_AlterTableModifyColumnToDouble(t *testing.T) {
 
 	// Should detect MODIFY COLUMN to DOUBLE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "latitude")
-	assert.Contains(t, violations[0].Message, "modified")
-	assert.Equal(t, "coordinates", violations[0].Location.Table)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "latitude")
+	require.Contains(t, violations[0].Message, "modified")
+	require.Equal(t, "coordinates", violations[0].Location.Table)
 }
 
 func TestHasFloatLinter_AlterTableModifyColumnToNonFloat(t *testing.T) {
@@ -855,7 +854,7 @@ func TestHasFloatLinter_AlterTableModifyColumnToNonFloat(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Should not detect MODIFY COLUMN to DECIMAL
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_AlterTableModifyColumnFloatWithPrecision(t *testing.T) {
@@ -868,7 +867,7 @@ func TestHasFloatLinter_AlterTableModifyColumnFloatWithPrecision(t *testing.T) {
 
 	// Should detect MODIFY COLUMN to FLOAT with precision
 	require.Len(t, violations, 1)
-	assert.Equal(t, "value", *violations[0].Location.Column)
+	require.Equal(t, "value", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableModifyColumnDoubleWithPrecision(t *testing.T) {
@@ -881,7 +880,7 @@ func TestHasFloatLinter_AlterTableModifyColumnDoubleWithPrecision(t *testing.T) 
 
 	// Should detect MODIFY COLUMN to DOUBLE with precision
 	require.Len(t, violations, 1)
-	assert.Equal(t, "value", *violations[0].Location.Column)
+	require.Equal(t, "value", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableModifyColumnWithConstraints(t *testing.T) {
@@ -894,7 +893,7 @@ func TestHasFloatLinter_AlterTableModifyColumnWithConstraints(t *testing.T) {
 
 	// Should detect MODIFY COLUMN to FLOAT even with constraints
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 // Tests for ALTER TABLE CHANGE COLUMN
@@ -909,12 +908,12 @@ func TestHasFloatLinter_AlterTableChangeColumnToFloat(t *testing.T) {
 
 	// Should detect CHANGE COLUMN to FLOAT
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "temperature")
-	assert.Contains(t, violations[0].Message, "modified")
-	assert.Equal(t, "measurements", violations[0].Location.Table)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "temperature")
+	require.Contains(t, violations[0].Message, "modified")
+	require.Equal(t, "measurements", violations[0].Location.Table)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnToDouble(t *testing.T) {
@@ -927,10 +926,10 @@ func TestHasFloatLinter_AlterTableChangeColumnToDouble(t *testing.T) {
 
 	// Should detect CHANGE COLUMN to DOUBLE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "has_float", violations[0].Linter.Name())
-	assert.Equal(t, SeverityWarning, violations[0].Severity)
-	assert.Contains(t, violations[0].Message, "latitude")
-	assert.Equal(t, "coordinates", violations[0].Location.Table)
+	require.Equal(t, "has_float", violations[0].Linter.Name())
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "latitude")
+	require.Equal(t, "coordinates", violations[0].Location.Table)
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnToNonFloat(t *testing.T) {
@@ -942,7 +941,7 @@ func TestHasFloatLinter_AlterTableChangeColumnToNonFloat(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	// Should not detect CHANGE COLUMN to DECIMAL
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnFloatWithPrecision(t *testing.T) {
@@ -955,7 +954,7 @@ func TestHasFloatLinter_AlterTableChangeColumnFloatWithPrecision(t *testing.T) {
 
 	// Should detect CHANGE COLUMN to FLOAT with precision
 	require.Len(t, violations, 1)
-	assert.Equal(t, "value", *violations[0].Location.Column)
+	require.Equal(t, "value", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnDoubleWithPrecision(t *testing.T) {
@@ -968,7 +967,7 @@ func TestHasFloatLinter_AlterTableChangeColumnDoubleWithPrecision(t *testing.T) 
 
 	// Should detect CHANGE COLUMN to DOUBLE with precision
 	require.Len(t, violations, 1)
-	assert.Equal(t, "value", *violations[0].Location.Column)
+	require.Equal(t, "value", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnWithConstraints(t *testing.T) {
@@ -981,7 +980,7 @@ func TestHasFloatLinter_AlterTableChangeColumnWithConstraints(t *testing.T) {
 
 	// Should detect CHANGE COLUMN to FLOAT even with constraints
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 func TestHasFloatLinter_AlterTableChangeColumnSameName(t *testing.T) {
@@ -994,7 +993,7 @@ func TestHasFloatLinter_AlterTableChangeColumnSameName(t *testing.T) {
 
 	// Should detect CHANGE COLUMN even when name doesn't change
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 // Tests for mixed ALTER TABLE operations
@@ -1013,8 +1012,8 @@ func TestHasFloatLinter_AlterTableMixedAddAndModify(t *testing.T) {
 	require.Len(t, violations, 2)
 
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column}
-	assert.Contains(t, columnNames, "pressure")
-	assert.Contains(t, columnNames, "temperature")
+	require.Contains(t, columnNames, "pressure")
+	require.Contains(t, columnNames, "temperature")
 }
 
 func TestHasFloatLinter_AlterTableMixedAddModifyChange(t *testing.T) {
@@ -1032,9 +1031,9 @@ func TestHasFloatLinter_AlterTableMixedAddModifyChange(t *testing.T) {
 	require.Len(t, violations, 3)
 
 	columnNames := []string{*violations[0].Location.Column, *violations[1].Location.Column, *violations[2].Location.Column}
-	assert.Contains(t, columnNames, "pressure")
-	assert.Contains(t, columnNames, "temperature")
-	assert.Contains(t, columnNames, "humidity")
+	require.Contains(t, columnNames, "pressure")
+	require.Contains(t, columnNames, "temperature")
+	require.Contains(t, columnNames, "humidity")
 }
 
 func TestHasFloatLinter_AlterTableMixedWithNonFloat(t *testing.T) {
@@ -1050,7 +1049,7 @@ func TestHasFloatLinter_AlterTableMixedWithNonFloat(t *testing.T) {
 
 	// Should only detect the FLOAT modification
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Equal(t, "temperature", *violations[0].Location.Column)
 }
 
 // Tests for comprehensive scenarios with MODIFY/CHANGE
@@ -1074,8 +1073,8 @@ func TestHasFloatLinter_ComplexScenarioWithModify(t *testing.T) {
 
 	// Should detect the MODIFY to FLOAT
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "modified")
+	require.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "modified")
 }
 
 func TestHasFloatLinter_ComplexScenarioWithChange(t *testing.T) {
@@ -1097,8 +1096,8 @@ func TestHasFloatLinter_ComplexScenarioWithChange(t *testing.T) {
 
 	// Should detect the CHANGE to DOUBLE
 	require.Len(t, violations, 1)
-	assert.Equal(t, "temperature", *violations[0].Location.Column)
-	assert.Contains(t, violations[0].Message, "modified")
+	require.Equal(t, "temperature", *violations[0].Location.Column)
+	require.Contains(t, violations[0].Message, "modified")
 }
 
 func TestHasFloatLinter_AllAlterOperations(t *testing.T) {
@@ -1125,9 +1124,9 @@ func TestHasFloatLinter_AllAlterOperations(t *testing.T) {
 	require.Len(t, violations, 3)
 
 	tables := []string{violations[0].Location.Table, violations[1].Location.Table, violations[2].Location.Table}
-	assert.Contains(t, tables, "t1")
-	assert.Contains(t, tables, "t2")
-	assert.Contains(t, tables, "t3")
+	require.Contains(t, tables, "t1")
+	require.Contains(t, tables, "t2")
+	require.Contains(t, tables, "t3")
 }
 
 func TestHasFloatLinter_UltraComplexScenario(t *testing.T) {
@@ -1205,11 +1204,11 @@ func TestHasFloatLinter_UltraComplexScenario(t *testing.T) {
 			foundChange = true
 		}
 	}
-	assert.True(t, foundExisting1, "Should find violation in existing1.value")
-	assert.True(t, foundNewTable, "Should find violation in new_table.score")
-	assert.True(t, foundAdd, "Should find violation in ADD COLUMN")
-	assert.True(t, foundModify, "Should find violation in MODIFY COLUMN")
-	assert.True(t, foundChange, "Should find violation in CHANGE COLUMN")
+	require.True(t, foundExisting1, "Should find violation in existing1.value")
+	require.True(t, foundNewTable, "Should find violation in new_table.score")
+	require.True(t, foundAdd, "Should find violation in ADD COLUMN")
+	require.True(t, foundModify, "Should find violation in MODIFY COLUMN")
+	require.True(t, foundChange, "Should find violation in CHANGE COLUMN")
 }
 
 // Test for other ALTER TABLE operations (coverage for default case)
@@ -1235,5 +1234,5 @@ func TestHasFloatLinter_AlterTableOtherOperations(t *testing.T) {
 	violations := linter.Lint(nil, stmts1)
 
 	// These operations don't involve column types, so no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }

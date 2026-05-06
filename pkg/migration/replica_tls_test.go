@@ -5,12 +5,12 @@ import (
 	"os"
 	"testing"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -128,13 +128,13 @@ func TestReplicaTLSEnhancement(t *testing.T) {
 
 			// Test DSN enhancement directly
 			enhanced, err := dbconn.EnhanceDSNWithTLS(tc.replicaDSN, runner.dbConfig)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			if tc.shouldEnhance {
-				assert.NotEqual(t, tc.replicaDSN, enhanced, tc.description)
-				assert.Contains(t, enhanced, "tls=", tc.description)
+				require.NotEqual(t, tc.replicaDSN, enhanced, tc.description)
+				require.Contains(t, enhanced, "tls=", tc.description)
 			} else {
-				assert.Equal(t, tc.replicaDSN, enhanced, tc.description)
+				require.Equal(t, tc.replicaDSN, enhanced, tc.description)
 			}
 		})
 	}
@@ -219,8 +219,14 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 			defer utils.CloseAndLog(db)
 
 			// Create replication client
-			client := repl.NewClient(db, tc.host, "user", "pass", clientConfig)
-			assert.NotNil(t, client)
+			appl, err := applier.NewSingleTargetApplier(applier.Target{DB: db}, &applier.ApplierConfig{
+				Logger:   slog.Default(),
+				DBConfig: tlsConfig,
+				Threads:  1,
+			})
+			require.NoError(t, err)
+			client := repl.NewClient(db, tc.host, "user", "pass", appl, clientConfig)
+			require.NotNil(t, client)
 
 			// Verify TLS config is stored
 			if tc.tlsMode == "DISABLED" {
@@ -228,9 +234,9 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 				// The actual TLS behavior is tested in the Run() method
 			} else {
 				// For non-disabled modes, the config should be present
-				assert.NotNil(t, clientConfig.DBConfig)
-				assert.Equal(t, tc.tlsMode, clientConfig.DBConfig.TLSMode)
-				assert.Equal(t, tc.tlsCert, clientConfig.DBConfig.TLSCertificatePath)
+				require.NotNil(t, clientConfig.DBConfig)
+				require.Equal(t, tc.tlsMode, clientConfig.DBConfig.TLSMode)
+				require.Equal(t, tc.tlsCert, clientConfig.DBConfig.TLSCertificatePath)
 			}
 		})
 	}
@@ -278,17 +284,17 @@ func TestReplicaTLSIntegration(t *testing.T) {
 
 	// Test that the replica DSN would be enhanced
 	enhanced, err := dbconn.EnhanceDSNWithTLS(replicaDSN, runner.dbConfig)
-	assert.NoError(t, err)
-	assert.Contains(t, enhanced, "tls=verify_ca")
-	assert.Contains(t, enhanced, "replica.example.com:3306")
+	require.NoError(t, err)
+	require.Contains(t, enhanced, "tls=verify_ca")
+	require.Contains(t, enhanced, "replica.example.com:3306")
 
 	// Verify that the enhancement preserves the original connection details
 	enhancedCfg, err := mysql.ParseDSN(enhanced)
-	assert.NoError(t, err)
-	assert.Equal(t, "replica_user", enhancedCfg.User)
-	assert.Equal(t, "replica_pass", enhancedCfg.Passwd)
-	assert.Equal(t, "replica.example.com:3306", enhancedCfg.Addr)
-	assert.Equal(t, "testdb", enhancedCfg.DBName)
+	require.NoError(t, err)
+	require.Equal(t, "replica_user", enhancedCfg.User)
+	require.Equal(t, "replica_pass", enhancedCfg.Passwd)
+	require.Equal(t, "replica.example.com:3306", enhancedCfg.Addr)
+	require.Equal(t, "testdb", enhancedCfg.DBName)
 }
 
 // generateTestCertForTLS creates a test certificate for TLS testing

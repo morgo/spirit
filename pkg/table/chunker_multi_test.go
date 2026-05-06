@@ -6,32 +6,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewMultiChunker(t *testing.T) {
 	t.Run("EmptyChunkers", func(t *testing.T) {
 		chunker := NewMultiChunker()
-		assert.Nil(t, chunker)
+		require.Nil(t, chunker)
 	})
 
 	t.Run("SingleChunker", func(t *testing.T) {
 		mock := NewMockChunker("table1", 1000)
 		chunker := NewMultiChunker(mock)
-		assert.Equal(t, mock, chunker)
+		require.Equal(t, mock, chunker)
 	})
 
 	t.Run("MultipleChunkers", func(t *testing.T) {
 		mock1 := NewMockChunker("table1", 1000)
 		mock2 := NewMockChunker("table2", 2000)
 		chunker := NewMultiChunker(mock1, mock2)
-		assert.IsType(t, &multiChunker{}, chunker)
+		require.IsType(t, &multiChunker{}, chunker)
 
 		multiChunker := chunker.(*multiChunker)
-		assert.Len(t, multiChunker.chunkers, 2)
-		assert.Contains(t, multiChunker.chunkers, "test.table1")
-		assert.Contains(t, multiChunker.chunkers, "test.table2")
+		require.Len(t, multiChunker.chunkers, 2)
+		require.Contains(t, multiChunker.chunkers, "test.table1")
+		require.Contains(t, multiChunker.chunkers, "test.table2")
 	})
 }
 
@@ -42,13 +41,13 @@ func TestMultiChunkerLifecycle(t *testing.T) {
 
 	t.Run("Open", func(t *testing.T) {
 		err := chunker.Open()
-		assert.NoError(t, err)
-		assert.True(t, chunker.isOpen)
+		require.NoError(t, err)
+		require.True(t, chunker.isOpen)
 
 		// Double open should fail
 		err = chunker.Open()
-		assert.Error(t, err)
-		assert.ErrorIs(t, err, ErrChunkerAlreadyOpen)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrChunkerAlreadyOpen)
 	})
 
 	t.Run("OpenError", func(t *testing.T) {
@@ -58,14 +57,14 @@ func TestMultiChunkerLifecycle(t *testing.T) {
 		chunker2 := NewMultiChunker(mock3, mock4).(*multiChunker)
 
 		err := chunker2.Open()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to open child chunker")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to open child chunker")
 	})
 
 	t.Run("Close", func(t *testing.T) {
 		err := chunker.Close()
-		assert.NoError(t, err)
-		assert.False(t, chunker.isOpen)
+		require.NoError(t, err)
+		require.False(t, chunker.isOpen)
 	})
 
 	t.Run("CloseError", func(t *testing.T) {
@@ -77,8 +76,8 @@ func TestMultiChunkerLifecycle(t *testing.T) {
 		require.NoError(t, err)
 
 		err = chunker2.Close()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to close chunker")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to close chunker")
 	})
 }
 
@@ -102,8 +101,8 @@ func TestMultiChunkerProgressBasedSelection(t *testing.T) {
 		mock3.SimulateProgress(0.9) // 90%
 
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table2", chunk.Table.TableName)
+		require.NoError(t, err)
+		require.Equal(t, "table2", chunk.Table.TableName)
 	})
 
 	t.Run("SelectLargestWhenEqualProgress", func(t *testing.T) {
@@ -113,8 +112,8 @@ func TestMultiChunkerProgressBasedSelection(t *testing.T) {
 		mock3.SimulateProgress(0.0) // 0%, 500 rows
 
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table2", chunk.Table.TableName)
+		require.NoError(t, err)
+		require.Equal(t, "table2", chunk.Table.TableName)
 	})
 
 	t.Run("SkipCompletedChunkers", func(t *testing.T) {
@@ -124,8 +123,8 @@ func TestMultiChunkerProgressBasedSelection(t *testing.T) {
 		mock2.SimulateProgress(0.5) // Only this one is active
 
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table2", chunk.Table.TableName)
+		require.NoError(t, err)
+		require.Equal(t, "table2", chunk.Table.TableName)
 	})
 
 	t.Run("AllChunkersComplete", func(t *testing.T) {
@@ -134,7 +133,7 @@ func TestMultiChunkerProgressBasedSelection(t *testing.T) {
 		mock3.MarkAsComplete()
 
 		_, err := chunker.Next()
-		assert.ErrorIs(t, err, ErrTableIsRead)
+		require.ErrorIs(t, err, ErrTableIsRead)
 	})
 }
 
@@ -147,14 +146,14 @@ func TestMultiChunkerIsRead(t *testing.T) {
 		mock1.MarkAsComplete()
 		mock2.SimulateProgress(0.5) // Still active
 
-		assert.False(t, chunker.IsRead())
+		require.False(t, chunker.IsRead())
 	})
 
 	t.Run("ReadWhenAllComplete", func(t *testing.T) {
 		mock1.MarkAsComplete()
 		mock2.MarkAsComplete()
 
-		assert.True(t, chunker.IsRead())
+		require.True(t, chunker.IsRead())
 	})
 }
 
@@ -173,9 +172,9 @@ func TestMultiChunkerProgress(t *testing.T) {
 
 	rowsCopied, chunksCopied, totalRows := chunker.Progress()
 
-	assert.Equal(t, uint64(1100), rowsCopied) // 500 + 600
-	assert.Equal(t, uint64(8), chunksCopied)  // 5 + 3
-	assert.Equal(t, uint64(3000), totalRows)  // 1000 + 2000
+	require.Equal(t, uint64(1100), rowsCopied) // 500 + 600
+	require.Equal(t, uint64(8), chunksCopied)  // 5 + 3
+	require.Equal(t, uint64(3000), totalRows)  // 1000 + 2000
 }
 
 func TestMultiChunkerFeedbackRouting(t *testing.T) {
@@ -195,7 +194,7 @@ func TestMultiChunkerFeedbackRouting(t *testing.T) {
 
 	chunk1, err := chunker.Next()
 	require.NoError(t, err)
-	assert.Equal(t, "table1", chunk1.Table.TableName)
+	require.Equal(t, "table1", chunk1.Table.TableName)
 
 	// Provide feedback
 	duration := 100 * time.Millisecond
@@ -206,12 +205,12 @@ func TestMultiChunkerFeedbackRouting(t *testing.T) {
 	feedback1 := mock1.GetFeedbackCalls()
 	feedback2 := mock2.GetFeedbackCalls()
 
-	assert.Len(t, feedback1, 1)
-	assert.Empty(t, feedback2)
+	require.Len(t, feedback1, 1)
+	require.Empty(t, feedback2)
 
-	assert.Equal(t, chunk1, feedback1[0].Chunk)
-	assert.Equal(t, duration, feedback1[0].Duration)
-	assert.Equal(t, actualRows, feedback1[0].ActualRows)
+	require.Equal(t, chunk1, feedback1[0].Chunk)
+	require.Equal(t, duration, feedback1[0].Duration)
+	require.Equal(t, actualRows, feedback1[0].ActualRows)
 }
 
 func TestMultiChunkerWatermarkHandling(t *testing.T) {
@@ -225,19 +224,19 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 		mock2.SimulateProgress(0.5) // position 1000
 
 		watermark, err := chunker.GetLowWatermark()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Parse the watermark
 		var watermarks map[string]string
 		err = json.Unmarshal([]byte(watermark), &watermarks)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		assert.Contains(t, watermarks, "test.table1")
-		assert.Contains(t, watermarks, "test.table2")
+		require.Contains(t, watermarks, "test.table1")
+		require.Contains(t, watermarks, "test.table2")
 
 		// Check individual watermarks
-		assert.Equal(t, "300", watermarks["test.table1"])
-		assert.Equal(t, "1000", watermarks["test.table2"])
+		require.Equal(t, "300", watermarks["test.table1"])
+		require.Equal(t, "1000", watermarks["test.table2"])
 	})
 
 	t.Run("OpenAtWatermark", func(t *testing.T) {
@@ -250,21 +249,21 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 		require.NoError(t, err)
 
 		err = chunker.OpenAtWatermark(string(watermarkJSON))
-		assert.NoError(t, err)
-		assert.True(t, chunker.isOpen)
+		require.NoError(t, err)
+		require.True(t, chunker.isOpen)
 
 		// Verify chunkers were opened at correct positions
 		progress1, _, _ := mock1.Progress()
 		progress2, _, _ := mock2.Progress()
-		assert.Equal(t, uint64(300), progress1)
-		assert.Equal(t, uint64(1000), progress2)
+		require.Equal(t, uint64(300), progress1)
+		require.Equal(t, uint64(1000), progress2)
 	})
 
 	t.Run("OpenAtWatermarkError", func(t *testing.T) {
 		// Invalid JSON
 		err := chunker.OpenAtWatermark("invalid json")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "could not parse multi-chunker watermark")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "could not parse multi-chunker watermark")
 	})
 
 	t.Run("OpenAtWatermarkMissingTable", func(t *testing.T) {
@@ -282,15 +281,15 @@ func TestMultiChunkerWatermarkHandling(t *testing.T) {
 
 		chunker2 := NewMultiChunker(mock3, mock4).(*multiChunker)
 		err = chunker2.OpenAtWatermark(string(watermarkJSON))
-		assert.NoError(t, err, "Should handle missing table watermarks gracefully")
+		require.NoError(t, err, "Should handle missing table watermarks gracefully")
 
 		// Verify table1 was opened at watermark position
 		progress1, _, _ := mock3.Progress()
-		assert.Equal(t, uint64(300), progress1, "table1 should resume from watermark position")
+		require.Equal(t, uint64(300), progress1, "table1 should resume from watermark position")
 
 		// Verify table2 was opened from scratch (position 0)
 		progress2, _, _ := mock4.Progress()
-		assert.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
+		require.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
 	})
 }
 
@@ -309,19 +308,9 @@ func TestMultiChunkerTables(t *testing.T) {
 		tableNames[table.TableName] = true
 	}
 
-	assert.Len(t, tableNames, 2) // Only unique table names
-	assert.Contains(t, tableNames, "table1")
-	assert.Contains(t, tableNames, "table2")
-}
-
-func TestMultiChunkerKeyAboveHighWatermark(t *testing.T) {
-	mock1 := NewMockChunker("table1", 1000)
-	mock2 := NewMockChunker("table2", 1000)
-	chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
-
-	// Should always return false (not supported)
-	result := chunker.KeyAboveHighWatermark("any_key")
-	assert.False(t, result)
+	require.Len(t, tableNames, 2) // Only unique table names
+	require.Contains(t, tableNames, "table1")
+	require.Contains(t, tableNames, "table2")
 }
 
 func TestMultiChunkerErrorHandling(t *testing.T) {
@@ -331,7 +320,7 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 		chunker := NewMultiChunker(mock1, mock2).(*multiChunker)
 
 		_, err := chunker.Next()
-		assert.ErrorIs(t, err, ErrTableNotOpen)
+		require.ErrorIs(t, err, ErrTableNotOpen)
 	})
 
 	t.Run("NextError", func(t *testing.T) {
@@ -347,8 +336,8 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 		}()
 
 		_, err := chunker.Next()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "next failed")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "next failed")
 	})
 
 	t.Run("WatermarkError", func(t *testing.T) {
@@ -359,15 +348,15 @@ func TestMultiChunkerErrorHandling(t *testing.T) {
 
 		// With our fix, this should succeed and skip the errored chunker
 		watermark, err := chunker.GetLowWatermark()
-		assert.NoError(t, err, "Should skip chunker with watermark error")
+		require.NoError(t, err, "Should skip chunker with watermark error")
 
 		// Parse the watermark to verify only table2 is included
 		var watermarks map[string]string
 		err = json.Unmarshal([]byte(watermark), &watermarks)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		assert.NotContains(t, watermarks, "test.table1", "Should skip table1 due to watermark error")
-		assert.Contains(t, watermarks, "test.table2", "Should include table2 watermark")
+		require.NotContains(t, watermarks, "test.table1", "Should skip table1 due to watermark error")
+		require.Contains(t, watermarks, "test.table2", "Should include table2 watermark")
 	})
 }
 
@@ -427,7 +416,7 @@ func TestMultiChunkerDeterministicBehavior(t *testing.T) {
 
 		// All runs should produce the same selection order
 		for i := 1; i < len(results); i++ {
-			assert.Equal(t, results[0], results[i], "Selection order should be deterministic")
+			require.Equal(t, results[0], results[i], "Selection order should be deterministic")
 		}
 	})
 }
@@ -442,11 +431,11 @@ func TestMultiChunkerReset(t *testing.T) {
 
 	// Test that Reset() fails when chunker is not open
 	err := chunker.Reset()
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrChunkerNotOpen)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrChunkerNotOpen)
 
 	// Open the chunker
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, chunker.Open())
 
 	// Capture initial state after opening
 	initialRowsCopied1, initialChunksCopied1, _ := mock1.Progress()
@@ -460,14 +449,14 @@ func TestMultiChunkerReset(t *testing.T) {
 
 	// Get chunks from different tables
 	chunk1, err := chunker.Next() // Should select table1 (lowest progress)
-	assert.NoError(t, err)
-	assert.Equal(t, "table1", chunk1.Table.TableName)
+	require.NoError(t, err)
+	require.Equal(t, "table1", chunk1.Table.TableName)
 
 	// Advance table1's progress so table3 becomes lowest
 	mock1.SimulateProgress(0.4)
 	chunk2, err := chunker.Next() // Should select table3 (now lowest progress)
-	assert.NoError(t, err)
-	assert.Equal(t, "table3", chunk2.Table.TableName)
+	require.NoError(t, err)
+	require.Equal(t, "table3", chunk2.Table.TableName)
 
 	// Give feedback to change state
 	chunker.Feedback(chunk1, time.Second, 100)
@@ -478,47 +467,47 @@ func TestMultiChunkerReset(t *testing.T) {
 	currentRowsCopied2, currentChunksCopied2, _ := mock2.Progress()
 	currentRowsCopied3, currentChunksCopied3, _ := mock3.Progress()
 
-	assert.Greater(t, currentRowsCopied1, initialRowsCopied1)
-	assert.Greater(t, currentChunksCopied1, initialChunksCopied1)
-	assert.Greater(t, currentRowsCopied3, initialRowsCopied3)
-	assert.Greater(t, currentChunksCopied3, initialChunksCopied3)
-	assert.Greater(t, currentRowsCopied2, initialRowsCopied2)   // in the mock: rows it based on progress.
-	assert.Equal(t, initialChunksCopied2, currentChunksCopied2) // chunks is based on actual
+	require.Greater(t, currentRowsCopied1, initialRowsCopied1)
+	require.Greater(t, currentChunksCopied1, initialChunksCopied1)
+	require.Greater(t, currentRowsCopied3, initialRowsCopied3)
+	require.Greater(t, currentChunksCopied3, initialChunksCopied3)
+	require.Greater(t, currentRowsCopied2, initialRowsCopied2)   // in the mock: rows it based on progress.
+	require.Equal(t, initialChunksCopied2, currentChunksCopied2) // chunks is based on actual
 
 	// Verify feedback was recorded
 	feedback1 := mock1.GetFeedbackCalls()
 	feedback3 := mock3.GetFeedbackCalls()
-	assert.Len(t, feedback1, 1)
-	assert.Len(t, feedback3, 1)
+	require.Len(t, feedback1, 1)
+	require.Len(t, feedback3, 1)
 
 	// Verify watermark exists
 	watermark, err := chunker.GetLowWatermark()
-	assert.NoError(t, err)
-	assert.NotEmpty(t, watermark)
+	require.NoError(t, err)
+	require.NotEmpty(t, watermark)
 
 	// Now reset the chunker
 	err = chunker.Reset()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Verify all child chunkers are reset to initial values
 	resetRowsCopied1, resetChunksCopied1, _ := mock1.Progress()
 	resetRowsCopied2, resetChunksCopied2, _ := mock2.Progress()
 	resetRowsCopied3, resetChunksCopied3, _ := mock3.Progress()
 
-	assert.Equal(t, initialRowsCopied1, resetRowsCopied1, "mock1 rowsCopied should be reset to initial value")
-	assert.Equal(t, initialChunksCopied1, resetChunksCopied1, "mock1 chunksCopied should be reset to initial value")
-	assert.Equal(t, initialRowsCopied2, resetRowsCopied2, "mock2 rowsCopied should be reset to initial value")
-	assert.Equal(t, initialChunksCopied2, resetChunksCopied2, "mock2 chunksCopied should be reset to initial value")
-	assert.Equal(t, initialRowsCopied3, resetRowsCopied3, "mock3 rowsCopied should be reset to initial value")
-	assert.Equal(t, initialChunksCopied3, resetChunksCopied3, "mock3 chunksCopied should be reset to initial value")
+	require.Equal(t, initialRowsCopied1, resetRowsCopied1, "mock1 rowsCopied should be reset to initial value")
+	require.Equal(t, initialChunksCopied1, resetChunksCopied1, "mock1 chunksCopied should be reset to initial value")
+	require.Equal(t, initialRowsCopied2, resetRowsCopied2, "mock2 rowsCopied should be reset to initial value")
+	require.Equal(t, initialChunksCopied2, resetChunksCopied2, "mock2 chunksCopied should be reset to initial value")
+	require.Equal(t, initialRowsCopied3, resetRowsCopied3, "mock3 rowsCopied should be reset to initial value")
+	require.Equal(t, initialChunksCopied3, resetChunksCopied3, "mock3 chunksCopied should be reset to initial value")
 
 	// Verify feedback history is cleared
 	resetFeedback1 := mock1.GetFeedbackCalls()
 	resetFeedback2 := mock2.GetFeedbackCalls()
 	resetFeedback3 := mock3.GetFeedbackCalls()
-	assert.Empty(t, resetFeedback1, "mock1 feedback should be cleared after reset")
-	assert.Empty(t, resetFeedback2, "mock2 feedback should be cleared after reset")
-	assert.Empty(t, resetFeedback3, "mock3 feedback should be cleared after reset")
+	require.Empty(t, resetFeedback1, "mock1 feedback should be cleared after reset")
+	require.Empty(t, resetFeedback2, "mock2 feedback should be cleared after reset")
+	require.Empty(t, resetFeedback3, "mock3 feedback should be cleared after reset")
 
 	// Verify that after reset, the chunker produces the same selection behavior
 	// Reset progress to same initial state
@@ -527,27 +516,27 @@ func TestMultiChunkerReset(t *testing.T) {
 	mock3.SimulateProgress(0.3) // 30%
 
 	resetChunk1, err := chunker.Next() // Should select table1 (lowest progress) again
-	assert.NoError(t, err)
-	assert.Equal(t, chunk1.Table.TableName, resetChunk1.Table.TableName, "First chunk after reset should be from same table as original")
+	require.NoError(t, err)
+	require.Equal(t, chunk1.Table.TableName, resetChunk1.Table.TableName, "First chunk after reset should be from same table as original")
 
 	// Advance table1's progress so table3 becomes lowest (same as before)
 	mock1.SimulateProgress(0.4)
 	resetChunk2, err := chunker.Next() // Should select table3 again
-	assert.NoError(t, err)
-	assert.Equal(t, chunk2.Table.TableName, resetChunk2.Table.TableName, "Second chunk after reset should be from same table as original")
+	require.NoError(t, err)
+	require.Equal(t, chunk2.Table.TableName, resetChunk2.Table.TableName, "Second chunk after reset should be from same table as original")
 
 	// Test aggregate progress after reset
 	totalRowsCopied, totalChunksCopied, totalRowsExpected := chunker.Progress()
-	assert.Equal(t, uint64(1900), totalRowsCopied)
-	assert.Equal(t, uint64(2), totalChunksCopied)    // 1 + 0 + 1 = 2 chunks processed
-	assert.Equal(t, uint64(3500), totalRowsExpected) // 1000 + 2000 + 500 = 3500
+	require.Equal(t, uint64(1900), totalRowsCopied)
+	require.Equal(t, uint64(2), totalChunksCopied)    // 1 + 0 + 1 = 2 chunks processed
+	require.Equal(t, uint64(3500), totalRowsExpected) // 1000 + 2000 + 500 = 3500
 
 	// Test that reset works with child chunker errors
 	mock1.SetNextError(errors.New("mock error"))
 
 	// Reset should still work even if child chunkers have errors configured
 	err = chunker.Reset()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Clear the error and verify normal operation resumes
 	mock1.SetNextError(nil)
@@ -556,8 +545,8 @@ func TestMultiChunkerReset(t *testing.T) {
 	mock3.SimulateProgress(0.3)
 
 	finalChunk, err := chunker.Next()
-	assert.NoError(t, err)
-	assert.Equal(t, "table1", finalChunk.Table.TableName)
+	require.NoError(t, err)
+	require.Equal(t, "table1", finalChunk.Table.TableName)
 
 	// Test reset with one child chunker reset error
 	mock2.SetNextError(errors.New("reset would fail but we don't call Next"))
@@ -567,11 +556,11 @@ func TestMultiChunkerReset(t *testing.T) {
 	mock2.MarkAsComplete() // This changes state
 
 	err = chunker.Reset()
-	assert.NoError(t, err) // Should still succeed
+	require.NoError(t, err) // Should still succeed
 
 	// Verify the completed chunker was reset (no longer complete)
-	assert.False(t, mock2.isRead(), "mock2 should not be read after reset")
-	assert.NoError(t, chunker.Close())
+	require.False(t, mock2.isRead(), "mock2 should not be read after reset")
+	require.NoError(t, chunker.Close())
 }
 
 // TestMultiChunkerSelectionRegressions tests for specific bugs that were fixed
@@ -598,16 +587,16 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		// The chunker should select table2 (90%) because it has lower progress
 		// This is correct behavior - we want to prioritize the table that's furthest behind
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table2", chunk.Table.TableName, "Should select table with lowest progress (90%)")
+		require.NoError(t, err)
+		require.Equal(t, "table2", chunk.Table.TableName, "Should select table with lowest progress (90%)")
 
 		// Advance table2's progress past table1
 		mock2.SimulateProgress(0.96) // Now table2 is at 96%
 
 		// Now table1 (95.34%) should be selected as it has lower progress
 		chunk, err = chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table1", chunk.Table.TableName, "Should now select table1 as it has lower progress")
+		require.NoError(t, err)
+		require.Equal(t, "table1", chunk.Table.TableName, "Should now select table1 as it has lower progress")
 	})
 
 	t.Run("RegressionFirstChunkerBias", func(t *testing.T) {
@@ -630,16 +619,16 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock3.SimulateProgress(0.20) // 20%
 
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table2", chunk.Table.TableName, "Should select table with lowest progress, not first table")
+		require.NoError(t, err)
+		require.Equal(t, "table2", chunk.Table.TableName, "Should select table with lowest progress, not first table")
 
 		// Advance table2 past table3
 		mock2.SimulateProgress(0.25) // Now 25%
 
 		// table3 should now be selected (20% < 25%)
 		chunk, err = chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table3", chunk.Table.TableName, "Should select table3 as it now has lowest progress")
+		require.NoError(t, err)
+		require.Equal(t, "table3", chunk.Table.TableName, "Should select table3 as it now has lowest progress")
 	})
 
 	t.Run("RegressionNilSelectedChunker", func(t *testing.T) {
@@ -663,9 +652,9 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 
 		// Should successfully select the only active chunker
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table3", chunk.Table.TableName, "Should select the only active chunker")
-		assert.NotNil(t, chunk, "Chunk should not be nil")
+		require.NoError(t, err)
+		require.Equal(t, "table3", chunk.Table.TableName, "Should select the only active chunker")
+		require.NotNil(t, chunk, "Chunk should not be nil")
 	})
 
 	t.Run("RegressionAllChunkersComplete", func(t *testing.T) {
@@ -687,7 +676,7 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 
 		// Should return ErrTableIsRead when all chunkers are complete
 		_, err := chunker.Next()
-		assert.ErrorIs(t, err, ErrTableIsRead, "Should return ErrTableIsRead when all chunkers are complete")
+		require.ErrorIs(t, err, ErrTableIsRead, "Should return ErrTableIsRead when all chunkers are complete")
 	})
 
 	t.Run("RegressionEqualProgressLargestTable", func(t *testing.T) {
@@ -710,8 +699,8 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 		mock3.SimulateProgress(0.0)
 
 		chunk, err := chunker.Next()
-		assert.NoError(t, err)
-		assert.Equal(t, "table2", chunk.Table.TableName, "Should select largest table when progress is equal")
+		require.NoError(t, err)
+		require.Equal(t, "table2", chunk.Table.TableName, "Should select largest table when progress is equal")
 	})
 
 	t.Run("RegressionWatermarkErrorHandling", func(t *testing.T) {
@@ -732,17 +721,17 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 
 		// GetLowWatermark should succeed and include table1 and table3, skip table2
 		watermark, err := chunker.GetLowWatermark()
-		assert.NoError(t, err, "Should not fail when one table has watermark error")
+		require.NoError(t, err, "Should not fail when one table has watermark error")
 
 		// Parse the watermark to verify contents
 		var watermarks map[string]string
 		err = json.Unmarshal([]byte(watermark), &watermarks)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Should contain table1 and table3, but not table2 (error)
-		assert.Contains(t, watermarks, "test.table1", "Should include table1 watermark")
-		assert.Contains(t, watermarks, "test.table3", "Should include table3 watermark")
-		assert.NotContains(t, watermarks, "test.table2", "Should skip table2 due to watermark error")
+		require.Contains(t, watermarks, "test.table1", "Should include table1 watermark")
+		require.Contains(t, watermarks, "test.table3", "Should include table3 watermark")
+		require.NotContains(t, watermarks, "test.table2", "Should skip table2 due to watermark error")
 	})
 
 	t.Run("RegressionOpenAtWatermarkMissingTable", func(t *testing.T) {
@@ -761,14 +750,14 @@ func TestMultiChunkerSelectionRegressions(t *testing.T) {
 
 		// Should succeed - table1 resumes from watermark, table2 starts from scratch
 		err = chunker.OpenAtWatermark(string(watermarkJSON))
-		assert.NoError(t, err, "Should handle missing table watermarks gracefully")
+		require.NoError(t, err, "Should handle missing table watermarks gracefully")
 
 		// Verify table1 was opened at watermark position
 		progress1, _, _ := mock1.Progress()
-		assert.Equal(t, uint64(500), progress1, "table1 should resume from watermark position")
+		require.Equal(t, uint64(500), progress1, "table1 should resume from watermark position")
 
 		// Verify table2 was opened from scratch (position 0)
 		progress2, _, _ := mock2.Progress()
-		assert.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
+		require.Equal(t, uint64(0), progress2, "table2 should start from scratch when no watermark")
 	})
 }

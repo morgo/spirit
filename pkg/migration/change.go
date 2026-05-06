@@ -9,12 +9,19 @@ import (
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 )
 
 type change struct {
 	stmt     *statement.AbstractStatement
 	table    *table.TableInfo
 	newTable *table.TableInfo
+
+	// chunker is the MappedChunker specific to this change.
+	// It is set during initChunkers() and used by setupCopierCheckerAndReplClient()
+	// to pass to AddSubscription, which requires a single-table MappedChunker
+	// (not the multi-chunker wrapper stored on the Runner).
+	chunker table.MappedChunker
 
 	// Store a pointer back to the migration runner
 	// (for compatibility, we want to eventually remove this)
@@ -112,11 +119,15 @@ func (c *change) dropOldTable(ctx context.Context) error {
 
 func (c *change) oldTableName() string {
 	// By default we just set the old table name to _<table>_old
-	// but if they've enabled SkipDropAfterCutover, we add a timestamp
+	// but if they've enabled SkipDropAfterCutover, we add a timestamp.
+	// We truncate the table name portion to ensure the result fits within
+	// MySQL's 64-character table name limit.
 	if !c.runner.migration.SkipDropAfterCutover {
 		return fmt.Sprintf(check.NameFormatOld, c.table.TableName)
 	}
-	return fmt.Sprintf(check.NameFormatOldTimeStamp, c.table.TableName, c.runner.startTime.UTC().Format(check.NameFormatTimestamp))
+	timestamp := c.runner.startTime.UTC().Format(check.NameFormatTimestamp)
+	truncatedName := utils.TruncateTableName(c.table.TableName, check.NameFormatTimestampExtraChars)
+	return fmt.Sprintf(check.NameFormatOldTimeStamp, truncatedName, timestamp)
 }
 
 func (c *change) attemptInstantDDL(ctx context.Context) error {

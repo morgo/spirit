@@ -10,31 +10,30 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPrivileges(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "CREATE USER testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	config, err = mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "testprivsuser"
 	config.Passwd = ""
 
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// ForceKill is now enabled by default, so we test with it enabled.
 	r := Resources{
@@ -43,49 +42,49 @@ func TestPrivileges(t *testing.T) {
 		ForceKill: true, // default behavior
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // privileges fail, since user has nothing granted.
+	require.Error(t, err) // privileges fail, since user has nothing granted.
 
 	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs replication client
+	require.Error(t, err) // still not enough, needs replication client
 
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// With ForceKill enabled (the default), basic replication privileges are not enough.
 	// We also need the force-kill privileges.
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs force-kill privileges
+	require.Error(t, err) // still not enough, needs force-kill privileges
 
 	_, err = db.ExecContext(t.Context(), "GRANT SELECT on `performance_schema`.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs connection_admin
+	require.Error(t, err) // still not enough, needs connection_admin
 
 	_, err = db.ExecContext(t.Context(), "GRANT CONNECTION_ADMIN ON *.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err) // still not enough, needs PROCESS
+	require.Error(t, err) // still not enough, needs PROCESS
 	t.Log(err)
 
 	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testprivsuser")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Reconnect before checking again.
 	// There seems to be a race in MySQL where privileges don't show up immediately
 	// That this can work around.
-	assert.NoError(t, lowPrivDB.Close())
+	require.NoError(t, lowPrivDB.Close())
 	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
 	r.DB = lowPrivDB
 
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // all force-kill privileges granted, should pass now
+	require.NoError(t, err) // all force-kill privileges granted, should pass now
 
 	// Test the root user
 	r = Resources{
@@ -94,11 +93,25 @@ func TestPrivileges(t *testing.T) {
 		ForceKill: true,
 	}
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // privileges work fine
+	require.NoError(t, err) // privileges work fine
 }
 
-// TestPrivilegesWithRDSSuperuserRole tests that rds_superuser_role is tolerated
-// only when activate_all_roles_on_login=ON.
+// TestPrivilegesWithRDSSuperuserRole verifies that rds_superuser_role is
+// tolerated when activate_all_roles_on_login=ON, allowing privilegesCheck
+// to skip the CONNECTION_ADMIN/PROCESS direct-grant check.
+//
+// Scope is intentionally narrow: the test only covers the *acceptance*
+// path. The previous version of this test also covered the rejection
+// path by flipping `activate_all_roles_on_login` OFF and back ON via
+// `SET GLOBAL`, but that races with every other Go test binary running
+// concurrently against the same MySQL (t.Parallel only governs
+// within-binary scheduling; cross-binary parallelism is controlled by
+// `go test -p`). Until privilegesCheck is refactored to be unit-testable
+// without touching server globals, the rejection path is unverified;
+// see #818 for the cleanup proposal.
+//
+// If the test MySQL doesn't have activate_all_roles_on_login=ON the
+// test skips rather than flips the global.
 func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -107,6 +120,15 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
+	// Skip if the server doesn't have activate_all_roles_on_login=ON, since
+	// the role-tolerance path we're testing requires it. We deliberately do
+	// NOT flip it ourselves — see comment above.
+	var activate string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&activate))
+	if activate != "1" {
+		t.Skip("requires activate_all_roles_on_login=ON; SET GLOBAL would race with concurrent test binaries, see #818")
+	}
+
 	// Clean up any previous test artifacts
 	_, _ = db.ExecContext(t.Context(), "DROP USER IF EXISTS testrdsroleuser")
 	_, _ = db.ExecContext(t.Context(), "DROP ROLE IF EXISTS rds_superuser_role")
@@ -114,7 +136,7 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	// Create an opaque role that simulates rds_superuser_role on RDS.
 	// We intentionally do NOT grant CONNECTION_ADMIN to it, because on real
 	// RDS the role is opaque and cannot be inspected. The privilege check
-	// tolerates it by name only.
+	// tolerates it by name only when activate_all_roles_on_login=ON.
 	_, err = db.ExecContext(t.Context(), "CREATE ROLE rds_superuser_role")
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -131,11 +153,12 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testrdsroleuser")
 	require.NoError(t, err)
-	// Grant performance_schema and PROCESS directly so the probe queries succeed.
-	// On real RDS, rds_superuser_role grants these, but our test role is opaque
-	// (no actual privileges) so we simulate by granting them directly.
-	// The test specifically validates that CONNECTION_ADMIN tolerance works via
-	// the rds_superuser_role name check + activate_all_roles_on_login guard.
+	// Grant performance_schema and PROCESS directly so the probe queries
+	// succeed. On real RDS, rds_superuser_role grants these, but our test
+	// role is opaque (no actual privileges) so we simulate by granting
+	// them directly. The test specifically validates that
+	// CONNECTION_ADMIN tolerance works via the rds_superuser_role name
+	// check + activate_all_roles_on_login guard.
 	_, err = db.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testrdsroleuser")
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), "GRANT PROCESS ON *.* TO testrdsroleuser")
@@ -148,17 +171,6 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 	config.User = "testrdsroleuser"
 	config.Passwd = ""
 
-	// Save original value and restore after test
-	var origValue string
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@global.activate_all_roles_on_login").Scan(&origValue))
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(t.Context(), fmt.Sprintf("SET GLOBAL activate_all_roles_on_login = %s", origValue))
-	})
-
-	// With activate_all_roles_on_login=OFF, rds_superuser_role should NOT be tolerated
-	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = OFF")
-	require.NoError(t, err)
-
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
 	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
@@ -169,23 +181,11 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 		ForceKill: true,
 	}
 
+	// With rds_superuser_role granted and activate_all_roles_on_login=ON,
+	// privilegesCheck should pass even though CONNECTION_ADMIN is not
+	// directly granted to the user.
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err, "should fail when activate_all_roles_on_login=OFF")
-	assert.Contains(t, err.Error(), "CONNECTION_ADMIN")
-
-	// With activate_all_roles_on_login=ON, rds_superuser_role should be tolerated
-	_, err = db.ExecContext(t.Context(), "SET GLOBAL activate_all_roles_on_login = ON")
-	require.NoError(t, err)
-
-	// Must reconnect after changing the global variable so the new connection
-	// gets roles activated on login.
-	require.NoError(t, lowPrivDB.Close())
-	lowPrivDB, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	require.NoError(t, err)
-	r.DB = lowPrivDB
-
-	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
+	require.NoError(t, err, "should pass when activate_all_roles_on_login=ON and rds_superuser_role is granted")
 }
 
 // TestPrivilegesWithSkipForceKill tests that when ForceKill is disabled
@@ -193,25 +193,25 @@ func TestPrivilegesWithRDSSuperuserRole(t *testing.T) {
 // are not required.
 func TestPrivilegesWithSkipForceKill(t *testing.T) {
 	config, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "root" // needs grant privilege
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	_, err = db.ExecContext(t.Context(), "DROP USER IF EXISTS testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "CREATE USER testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	config, err = mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	config.User = "testprivsskipfk"
 	config.Passwd = ""
 
 	lowPrivDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(lowPrivDB)
 
 	// With ForceKill disabled (--skip-force-kill), the force-kill privileges
@@ -223,13 +223,13 @@ func TestPrivilegesWithSkipForceKill(t *testing.T) {
 	}
 
 	_, err = db.ExecContext(t.Context(), "GRANT ALL ON test.* TO testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = db.ExecContext(t.Context(), "GRANT REPLICATION CLIENT, REPLICATION SLAVE, RELOAD ON *.* TO testprivsskipfk")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Without force-kill, basic privileges should be sufficient.
 	// No CONNECTION_ADMIN, PROCESS, or performance_schema access needed.
 	err = privilegesCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

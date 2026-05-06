@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -120,21 +119,21 @@ func TestNewCustomTLSConfigModes(t *testing.T) {
 			config := NewCustomTLSConfig(tt.certData, tt.sslMode)
 
 			if tt.expectNil {
-				assert.Nil(t, config)
+				require.Nil(t, config)
 			} else {
-				assert.NotNil(t, config)
-				assert.Equal(t, tt.expectSkipVerify, config.InsecureSkipVerify)
+				require.NotNil(t, config)
+				require.Equal(t, tt.expectSkipVerify, config.InsecureSkipVerify)
 
 				if tt.expectRootCAs {
-					assert.NotNil(t, config.RootCAs, "Expected RootCAs for mode %s", tt.sslMode)
+					require.NotNil(t, config.RootCAs, "Expected RootCAs for mode %s", tt.sslMode)
 				} else {
-					assert.Nil(t, config.RootCAs, "Expected no RootCAs for mode %s", tt.sslMode)
+					require.Nil(t, config.RootCAs, "Expected no RootCAs for mode %s", tt.sslMode)
 				}
 
 				if tt.expectVerifyFunc {
-					assert.NotNil(t, config.VerifyPeerCertificate)
+					require.NotNil(t, config.VerifyPeerCertificate)
 				} else {
-					assert.Nil(t, config.VerifyPeerCertificate)
+					require.Nil(t, config.VerifyPeerCertificate)
 				}
 			}
 		})
@@ -309,16 +308,16 @@ func TestNewDSNWithTLSModes(t *testing.T) {
 			result, err := newDSN(tt.dsn, tt.config)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				return
 			}
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			if tt.expectedTLS != "" {
-				assert.Contains(t, result, tt.expectedTLS)
+				require.Contains(t, result, tt.expectedTLS)
 			} else {
-				assert.NotContains(t, result, "tls=")
+				require.NotContains(t, result, "tls=")
 			}
 		})
 	}
@@ -328,14 +327,14 @@ func TestDBConfigTLSModeDefaults(t *testing.T) {
 	config := NewDBConfig()
 
 	// Test TLS defaults
-	assert.Equal(t, "PREFERRED", config.TLSMode)
-	assert.Empty(t, config.TLSCertificatePath)
+	require.Equal(t, "PREFERRED", config.TLSMode)
+	require.Empty(t, config.TLSCertificatePath)
 }
 
 func TestTLSModeConfigRegistration(t *testing.T) {
 	// Test that we can register multiple TLS configs without conflict
 	err1 := initRDSTLS()
-	assert.NoError(t, err1)
+	require.NoError(t, err1)
 
 	// Test custom TLS registration
 	config := NewDBConfig()
@@ -343,7 +342,7 @@ func TestTLSModeConfigRegistration(t *testing.T) {
 	config.TLSCertificatePath = ""
 
 	err2 := initCustomTLS(config)
-	assert.NoError(t, err2)
+	require.NoError(t, err2)
 }
 
 // TestVERIFY_CACertificateTrustLogic tests the specific certificate trust logic
@@ -400,16 +399,16 @@ func TestVERIFY_CACertificateTrustLogic(t *testing.T) {
 			require.NotNil(t, tlsConfig, tt.description)
 
 			// Verify VERIFY_CA specific behavior
-			assert.True(t, tlsConfig.InsecureSkipVerify, "VERIFY_CA uses InsecureSkipVerify=true with custom verification")
-			assert.NotNil(t, tlsConfig.VerifyPeerCertificate, "VERIFY_CA should have custom verification")
-			assert.NotNil(t, tlsConfig.RootCAs, "VERIFY_CA should have CA bundle")
-			assert.Empty(t, tlsConfig.ServerName, "VERIFY_CA should not set ServerName for hostname flexibility")
+			require.True(t, tlsConfig.InsecureSkipVerify, "VERIFY_CA uses InsecureSkipVerify=true with custom verification")
+			require.NotNil(t, tlsConfig.VerifyPeerCertificate, "VERIFY_CA should have custom verification")
+			require.NotNil(t, tlsConfig.RootCAs, "VERIFY_CA should have CA bundle")
+			require.Empty(t, tlsConfig.ServerName, "VERIFY_CA should not set ServerName for hostname flexibility")
 
 			// Test DSN generation uses custom TLS
 			dsn := "root:password@tcp(192.168.1.100:3306)/test"
 			result, err := newDSN(dsn, config)
-			assert.NoError(t, err, tt.description)
-			assert.Contains(t, result, "tls=verify_ca", "Should use verify_ca TLS config")
+			require.NoError(t, err, tt.description)
+			require.Contains(t, result, "tls=verify_ca", "Should use verify_ca TLS config")
 		})
 	}
 }
@@ -474,28 +473,28 @@ func TestVERIFY_CAHostnameFlexibility(t *testing.T) {
 			// Test the specific behaviors mentioned in documentation
 			switch tt.tlsMode {
 			case "VERIFY_CA":
-				assert.True(t, tlsConfig.InsecureSkipVerify, "VERIFY_CA uses InsecureSkipVerify=true with custom verification")
-				assert.NotNil(t, tlsConfig.VerifyPeerCertificate, "VERIFY_CA should have custom verification function")
-				assert.Empty(t, tlsConfig.ServerName, "VERIFY_CA should not set ServerName (allows hostname mismatches)")
+				require.True(t, tlsConfig.InsecureSkipVerify, "VERIFY_CA uses InsecureSkipVerify=true with custom verification")
+				require.NotNil(t, tlsConfig.VerifyPeerCertificate, "VERIFY_CA should have custom verification function")
+				require.Empty(t, tlsConfig.ServerName, "VERIFY_CA should not set ServerName (allows hostname mismatches)")
 			case "VERIFY_IDENTITY":
-				assert.False(t, tlsConfig.InsecureSkipVerify, "VERIFY_IDENTITY should validate everything")
-				assert.Nil(t, tlsConfig.VerifyPeerCertificate, "VERIFY_IDENTITY uses default verification")
+				require.False(t, tlsConfig.InsecureSkipVerify, "VERIFY_IDENTITY should validate everything")
+				require.Nil(t, tlsConfig.VerifyPeerCertificate, "VERIFY_IDENTITY uses default verification")
 				// ServerName would be set by Go's TLS library during actual connection
 			}
 
 			// Test DSN generation works for all scenarios
 			dsn := fmt.Sprintf("root:password@tcp(%s:3306)/test", tt.host)
 			result, err := newDSN(dsn, config)
-			assert.NoError(t, err, tt.description)
+			require.NoError(t, err, tt.description)
 
 			// Assert the correct TLS config name based on mode
 			switch tt.tlsMode {
 			case "VERIFY_CA":
-				assert.Contains(t, result, "tls=verify_ca", "Should use verify_ca TLS config")
+				require.Contains(t, result, "tls=verify_ca", "Should use verify_ca TLS config")
 			case "VERIFY_IDENTITY":
-				assert.Contains(t, result, "tls=verify_identity", "Should use verify_identity TLS config")
+				require.Contains(t, result, "tls=verify_identity", "Should use verify_identity TLS config")
 			default:
-				assert.Contains(t, result, "tls=custom", "Should use custom TLS config")
+				require.Contains(t, result, "tls=custom", "Should use custom TLS config")
 			}
 		})
 	}
@@ -554,8 +553,8 @@ func TestCertificateAuthorityPrecedence(t *testing.T) {
 
 			dsn := fmt.Sprintf("root:password@tcp(%s:3306)/test", tt.host)
 			result, err := newDSN(dsn, config)
-			assert.NoError(t, err, tt.description)
-			assert.Contains(t, result, tt.expectedTLSType, tt.description)
+			require.NoError(t, err, tt.description)
+			require.Contains(t, result, tt.expectedTLSType, tt.description)
 		})
 	}
 }
@@ -694,7 +693,7 @@ func TestPREFERREDModeDSNGeneration(t *testing.T) {
 			dsn := fmt.Sprintf("root:password@tcp(%s:3306)/test", tt.host)
 			result, err := newDSN(dsn, config)
 			require.NoError(t, err, tt.description)
-			assert.Contains(t, result, tt.expectedTLS, tt.description)
+			require.Contains(t, result, tt.expectedTLS, tt.description)
 		})
 	}
 }
@@ -720,12 +719,12 @@ func TestPREFERREDModeDISABLEDFallback(t *testing.T) {
 	// Test original PREFERRED DSN
 	preferredDSN, err := newDSN(baseDSN, config)
 	require.NoError(t, err)
-	assert.Contains(t, preferredDSN, "tls=custom", "PREFERRED should include TLS config")
+	require.Contains(t, preferredDSN, "tls=custom", "PREFERRED should include TLS config")
 
 	// Test fallback DISABLED DSN
 	disabledDSN, err := newDSN(baseDSN, &configCopy)
 	require.NoError(t, err)
-	assert.NotContains(t, disabledDSN, "tls=", "DISABLED fallback should not include any TLS config")
+	require.NotContains(t, disabledDSN, "tls=", "DISABLED fallback should not include any TLS config")
 
 	// Both should have the same non-TLS parameters
 	expectedParams := []string{
@@ -740,8 +739,8 @@ func TestPREFERREDModeDISABLEDFallback(t *testing.T) {
 	}
 
 	for _, param := range expectedParams {
-		assert.Contains(t, preferredDSN, param, "PREFERRED DSN should contain %s", param)
-		assert.Contains(t, disabledDSN, param, "DISABLED fallback DSN should contain %s", param)
+		require.Contains(t, preferredDSN, param, "PREFERRED DSN should contain %s", param)
+		require.Contains(t, disabledDSN, param, "DISABLED fallback DSN should contain %s", param)
 	}
 }
 
@@ -753,9 +752,9 @@ func TestPREFERREDModeConfigConsistency(t *testing.T) {
 	require.NotNil(t, config)
 
 	// PREFERRED mode should use InsecureSkipVerify=true (encryption only)
-	assert.True(t, config.InsecureSkipVerify, "PREFERRED mode should skip certificate verification")
-	assert.Nil(t, config.RootCAs, "PREFERRED mode should not set RootCAs")
-	assert.Nil(t, config.VerifyPeerCertificate, "PREFERRED mode should not use custom verification")
+	require.True(t, config.InsecureSkipVerify, "PREFERRED mode should skip certificate verification")
+	require.Nil(t, config.RootCAs, "PREFERRED mode should not set RootCAs")
+	require.Nil(t, config.VerifyPeerCertificate, "PREFERRED mode should not use custom verification")
 }
 
 func TestGetTLSConfigNameForAllModes(t *testing.T) {
@@ -799,7 +798,7 @@ func TestGetTLSConfigNameForAllModes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
 			result := getTLSConfigName(tt.mode)
-			assert.Equal(t, tt.expectedName, result, tt.description)
+			require.Equal(t, tt.expectedName, result, tt.description)
 		})
 	}
 }
@@ -867,7 +866,7 @@ func TestPREFERREDModeIntegration(t *testing.T) {
 			require.NoError(t, err, scenario.description)
 
 			expectedTLSParam := "tls=" + scenario.expectedTLSConfig
-			assert.Contains(t, resultDSN, expectedTLSParam, scenario.description)
+			require.Contains(t, resultDSN, expectedTLSParam, scenario.description)
 		})
 	}
 }
@@ -934,9 +933,9 @@ func TestTLSModeCaseInsensitive(t *testing.T) {
 
 			if tc.expectedDSN == "" {
 				// DISABLED mode should not contain any TLS parameters
-				assert.NotContains(t, resultDSN, "tls=")
+				require.NotContains(t, resultDSN, "tls=")
 			} else {
-				assert.Contains(t, resultDSN, tc.expectedDSN)
+				require.Contains(t, resultDSN, tc.expectedDSN)
 			}
 		})
 	}
@@ -968,7 +967,7 @@ func TestTLSConfigCaseInsensitive(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.input, func(t *testing.T) {
 			result := getTLSConfigName(tc.input)
-			assert.Equal(t, tc.expected, result)
+			require.Equal(t, tc.expected, result)
 		})
 	}
 }
@@ -987,11 +986,11 @@ func TestNewCustomTLSConfigCaseInsensitive(t *testing.T) {
 	for _, mode := range testCases {
 		t.Run(mode, func(t *testing.T) {
 			config := NewCustomTLSConfig(certData, mode)
-			assert.NotNil(t, config, "Should create valid TLS config for mode: %s", mode)
+			require.NotNil(t, config, "Should create valid TLS config for mode: %s", mode)
 
 			// All non-DISABLED modes should have some configuration
 			if mode != "disabled" && mode != "DISABLED" && mode != "Disabled" {
-				assert.True(t, config.InsecureSkipVerify || config.RootCAs != nil || config.VerifyPeerCertificate != nil,
+				require.True(t, config.InsecureSkipVerify || config.RootCAs != nil || config.VerifyPeerCertificate != nil,
 					"TLS config should have some security settings for mode: %s", mode)
 			}
 		})

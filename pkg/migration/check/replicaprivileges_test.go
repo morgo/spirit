@@ -8,7 +8,7 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReplicaPrivileges(t *testing.T) {
@@ -22,10 +22,11 @@ func TestReplicaPrivileges(t *testing.T) {
 		Statement: statement.MustNew("ALTER TABLE test RENAME TO newtablename")[0],
 	}
 	err := replicaPrivilegeCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // if no replica, it returns no error.
+	require.NoError(t, err) // if no replicas, it returns no error.
 
-	r.Replica, err = sql.Open("mysql", replicaDSN)
-	assert.NoError(t, err) // no error
+	replicaDB, err := sql.Open("mysql", replicaDSN)
+	require.NoError(t, err) // no error
+	r.Replicas = []*sql.DB{replicaDB}
 	err = replicaPrivilegeCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err) // user has privileges
+	require.NoError(t, err) // user has privileges
 }

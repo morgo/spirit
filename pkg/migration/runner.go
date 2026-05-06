@@ -39,7 +39,7 @@ type Runner struct {
 	migration       *Migration
 	db              *sql.DB
 	dbConfig        *dbconn.DBConfig
-	replica         *sql.DB
+	replicas        []*sql.DB
 	checkpointTable *table.TableInfo
 
 	// Changes enccapsulates all changes
@@ -72,6 +72,12 @@ type Runner struct {
 	// Attached logger
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
+
+	// watchTaskWait blocks until the WatchTask goroutines (status/checkpoint
+	// dumpers) have exited. Set in startBackgroundRoutines and invoked from
+	// Close() before tearing down the database connection so that no late
+	// checkpoint INSERT can race with post-Close cleanup.
+	watchTaskWait func()
 
 	// MetricsSink
 	metricsSink metrics.Sink
@@ -180,6 +186,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		// We only allow non-ALTERs (i.e. CREATE TABLE, DROP TABLE, RENAME TABLE)
 		// in single table mode.
 		if !r.changes[0].stmt.IsAlterTable() {
+			if err := r.runChecks(ctx, check.ScopeStatement); err != nil {
+				return err
+			}
 			err := dbconn.Exec(ctx, r.db, r.changes[0].stmt.Statement)
 			if err != nil {
 				return err
@@ -255,14 +264,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.copyDuration = time.Since(r.copier.StartTime())
 
 	// Disable both watermark optimizations so that all changes can be flushed.
-	// The watermark optimizations can prevent some keys from being flushed,
-	// which would cause flushedPos to not advance, leading to a mismatch
-	// with bufferedPos and causing AllChangesFlushed() to return false.
-	// Note: this line is not strictly required for correctness, since
-	// FlushUnderLock() will now ignore watermark optimizations explicitly,
-	// but having the non-underlock flushes also disable these optimizations
-	// is cleaner.
-	r.replClient.SetWatermarkOptimization(false)
+	// For non-memory-comparable PKs this also drains the buffered map and
+	// switches the subscription into FIFO queue mode (see
+	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+		return err
+	}
 
 	// r.waitOnSentinel may return an error if there is
 	// some unexpected problem checking for the existence of
@@ -414,7 +421,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 	for _, change := range r.changes {
 		if err := check.RunChecks(ctx, check.Resources{
 			DB:              r.db,
-			Replica:         r.replica,
+			Replicas:        r.replicas,
 			Table:           change.table,
 			Statement:       change.stmt,
 			TargetChunkTime: r.migration.TargetChunkTime,
@@ -445,6 +452,23 @@ func (r *Runner) dsn() string {
 	cfg.Addr = r.migration.Host
 	cfg.DBName = r.changes[0].stmt.Schema
 	return cfg.FormatDSN()
+}
+
+// splitReplicaDSNs splits a comma-separated list of replica DSNs.
+// A single DSN returns a single-element slice. Empty string returns nil.
+func splitReplicaDSNs(dsnList string) []string {
+	if dsnList == "" {
+		return nil
+	}
+	parts := strings.Split(dsnList, ",")
+	dsns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			dsns = append(dsns, trimmed)
+		}
+	}
+	return dsns
 }
 
 // maskPasswordInDSN masks the password in any DSN string for safe logging
@@ -487,23 +511,29 @@ func (r *Runner) checkpointTableName() string {
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
-	// Create an applier if using buffered copy or buffered replication
-	var appl applier.Applier
-	if r.migration.Buffered {
-		// Create a SingleTargetApplier for the buffered copier.
-		// The applier is table-aware: each chunk/operation carries its own
-		// table info, so a single applier handles multi-table migrations correctly.
-		appl, err = applier.NewSingleTargetApplier(
-			applier.Target{DB: r.db},
-			&applier.ApplierConfig{
-				Logger:   r.logger,
-				DBConfig: r.dbConfig,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to create applier for buffered copier: %w", err)
-		}
+
+	// We always create an applier — the replication client requires one to
+	// apply row images directly from the binlog (the buffered subscription
+	// path). This is what sidesteps the MySQL binlog/visibility race that
+	// caused silent row loss under load (issue #746): there is no SELECT
+	// FROM original ... after the row event arrives, the row image *is* the
+	// applied state.
+	//
+	// The same applier is handed to the copier, but the copier only uses it
+	// when buffered copy is opted in. Unbuffered copy issues INSERT IGNORE
+	// INTO _new ... SELECT FROM original directly and ignores the applier.
+	appl, err := applier.NewSingleTargetApplier(
+		applier.Target{DB: r.db},
+		&applier.ApplierConfig{
+			Logger:   r.logger,
+			DBConfig: r.dbConfig,
+			Threads:  r.migration.Threads,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create applier: %w", err)
 	}
+
 	// Create copier with the prepared chunker
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:     r.migration.Threads,
@@ -513,6 +543,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		MetricsSink:     r.metricsSink,
 		DBConfig:        r.dbConfig,
 		Applier:         appl,
+		Buffered:        r.migration.Buffered,
 	})
 	if err != nil {
 		return err
@@ -520,14 +551,14 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 
 	// Set the binlog position.
 	// Create a binlog subscriber
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, &repl.ClientConfig{
-		Logger:          r.logger,
-		Concurrency:     r.migration.Threads,
-		TargetBatchTime: r.migration.TargetChunkTime,
-		CancelFunc:      r.fatalError,
-		ServerID:        repl.NewServerID(),
-		DBConfig:        r.dbConfig, // Pass database configuration to replication client
-		Applier:         appl,
+	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, &repl.ClientConfig{
+		Logger:                 r.logger,
+		Concurrency:            r.migration.Threads,
+		TargetBatchTime:        r.migration.TargetChunkTime,
+		CancelFunc:             r.fatalError,
+		ServerID:               repl.NewServerID(),
+		DBConfig:               r.dbConfig, // Pass database configuration to replication client
+		ForceEnableBufferedMap: r.migration.ForceEnableBufferedMap,
 	})
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
@@ -535,7 +566,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		if err := change.newTable.SetInfo(ctx); err != nil {
 			return err
 		}
-		if err := r.replClient.AddSubscription(change.table, change.newTable, r.copyChunker); err != nil {
+		if err := r.replClient.AddSubscription(change.table, change.newTable, change.chunker); err != nil {
 			return err
 		}
 	}
@@ -545,7 +576,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		TargetChunkTime: r.migration.TargetChunkTime,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
-		FixDifferences:  true, // we want to repair the differences.
+		FixDifferences:  true,
 		MaxRetries:      3,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
 	})
@@ -602,7 +633,20 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	return nil
 }
 
+// closeReplicas closes all open replica database connections.
+func (r *Runner) closeReplicas() error {
+	for _, replica := range r.replicas {
+		if err := replica.Close(); err != nil {
+			return err
+		}
+	}
+	r.replicas = nil
+	return nil
+}
+
 // setupThrottler sets up the replication throttler if a replica DSN is configured.
+// Multiple replica DSNs can be specified as a comma-separated list; Spirit will
+// monitor all of them and throttle on the slowest one.
 // This is common logic shared between resume and new migration paths.
 func (r *Runner) setupThrottler(ctx context.Context) error {
 	if r.migration.useTestThrottler {
@@ -615,8 +659,13 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		return nil // No replica DSN specified, use default NOOP throttler
 	}
 
-	var err error
-	// Create a separate DB config for replica connection
+	// Split comma-separated DSNs to support multiple replicas.
+	dsns := splitReplicaDSNs(r.migration.ReplicaDSN)
+	if len(dsns) == 0 {
+		return fmt.Errorf("--replica-dsn was specified but contains no valid DSNs: %q", r.migration.ReplicaDSN)
+	}
+
+	// Create a separate DB config for replica connections
 	replicaDBConfig := dbconn.NewDBConfig()
 	replicaDBConfig.LockWaitTimeout = r.dbConfig.LockWaitTimeout
 	replicaDBConfig.InterpolateParams = r.dbConfig.InterpolateParams
@@ -624,38 +673,37 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	replicaDBConfig.MaxOpenConnections = r.dbConfig.MaxOpenConnections
 
 	// Copy TLS settings from main DB config to replica config
-	// This allows the DSN enhancement to use the correct TLS settings
 	replicaDBConfig.TLSMode = r.dbConfig.TLSMode
 	replicaDBConfig.TLSCertificatePath = r.dbConfig.TLSCertificatePath
 
-	// Enhance replica DSN with TLS settings if not already present
-	// This preserves any explicit TLS configuration in the replica DSN
-	// while providing sensible defaults from the main DB configuration
-	enhancedReplicaDSN, err := dbconn.EnhanceDSNWithTLS(r.migration.ReplicaDSN, replicaDBConfig)
-	if err != nil {
-		r.logger.Warn("could not enhance replica DSN with TLS settings",
-			"error", err,
-		)
-		// Continue with original DSN if enhancement fails
-		enhancedReplicaDSN = r.migration.ReplicaDSN
+	var throttlers []throttler.Throttler
+	for _, dsn := range dsns {
+		// Enhance replica DSN with TLS settings if not already present
+		enhancedDSN, err := dbconn.EnhanceDSNWithTLS(dsn, replicaDBConfig)
+		if err != nil {
+			r.logger.Warn("could not enhance replica DSN with TLS settings",
+				"dsn", maskPasswordInDSN(dsn),
+				"error", err,
+			)
+			enhancedDSN = dsn
+		}
+
+		replicaDB, err := dbconn.NewWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
+		if err != nil {
+			_ = r.closeReplicas()
+			return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(dsn), err)
+		}
+		r.replicas = append(r.replicas, replicaDB)
+
+		replicaThrottler, err := throttler.NewReplicationThrottler(replicaDB, r.migration.ReplicaMaxLag, r.logger)
+		if err != nil {
+			_ = r.closeReplicas()
+			return fmt.Errorf("could not create replication throttler (DSN: %s): %w", maskPasswordInDSN(dsn), err)
+		}
+		throttlers = append(throttlers, replicaThrottler)
 	}
 
-	r.replica, err = dbconn.NewWithConnectionType(enhancedReplicaDSN, replicaDBConfig, "replica database")
-	if err != nil {
-		return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(r.migration.ReplicaDSN), err)
-	}
-
-	// An error here means the connection to the replica is not valid, or it can't be detected
-	// This is fatal because if a user specifies a replica throttler, and it can't be used,
-	// we should not proceed.
-	r.throttler, err = throttler.NewReplicationThrottler(r.replica, r.migration.ReplicaMaxLag, r.logger)
-	if err != nil {
-		r.logger.Warn("could not create replication throttler",
-			"error", err,
-		)
-		return err
-	}
-
+	r.throttler = throttler.NewMultiThrottler(throttlers...)
 	r.copier.SetThrottler(r.throttler)
 	return r.throttler.Open(ctx)
 }
@@ -673,8 +721,10 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go change.table.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
 	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
-	// Start go routines for checkpointing and dumping status
-	status.WatchTask(ctx, r, r.logger)
+	// Start go routines for checkpointing and dumping status. The returned
+	// wait function is invoked from Close() so we can be sure no late
+	// checkpoint INSERT lands after teardown begins.
+	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
 }
 
 // setup performs all the initial steps to prepare for the migration,
@@ -720,7 +770,9 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	// We can enable the key above watermark optimization
-	r.replClient.SetWatermarkOptimization(true)
+	if err := r.replClient.SetWatermarkOptimization(ctx, true); err != nil {
+		return err
+	}
 
 	// Start background monitoring routines (common logic for both paths)
 	r.startBackgroundRoutines(ctx)
@@ -846,6 +898,21 @@ func (r *Runner) createSentinelTable(ctx context.Context) error {
 
 func (r *Runner) Close() error {
 	r.status.Set(status.Close)
+	// Cancel the migration context so background goroutines started in
+	// startBackgroundRoutines (notably the status.WatchTask checkpoint
+	// dumper) observe ctx.Done() and exit. This is normally already done
+	// by Run's deferred cancel, but Close() may be called via paths that
+	// don't run that defer; calling it here is idempotent and cheap.
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+	}
+	// Wait for the status/checkpoint dumper goroutines to exit *before*
+	// tearing down the database connection, so a late DumpCheckpoint INSERT
+	// cannot land in the checkpoint table after the caller assumes Close()
+	// has fully quiesced the runner.
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	for _, change := range r.changes {
 		err := change.Close()
 		if err != nil {
@@ -861,11 +928,8 @@ func (r *Runner) Close() error {
 			return err
 		}
 	}
-	if r.replica != nil {
-		err := r.replica.Close()
-		if err != nil {
-			return err
-		}
+	if err := r.closeReplicas(); err != nil {
+		return err
 	}
 	if r.db != nil {
 		err := r.db.Close()
@@ -1020,15 +1084,30 @@ func (r *Runner) initChunkers() error {
 	copyChunkers := make([]table.Chunker, 0, len(r.changes))
 	checksumChunkers := make([]table.Chunker, 0, len(r.changes))
 	for _, change := range r.changes {
-		copyChunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		columnRenames := change.stmt.ColumnRenameMap()
+		if len(columnRenames) > 0 {
+			r.logger.Info("column renames detected",
+				"table", change.table.TableName,
+				"renames", columnRenames,
+			)
+		}
+		columnMapping := table.NewColumnMapping(change.table, change.newTable, columnRenames)
+		chunkerCfg := table.ChunkerConfig{
+			NewTable:        change.newTable,
+			TargetChunkTime: r.migration.TargetChunkTime,
+			Logger:          r.logger,
+			ColumnMapping:   columnMapping,
+		}
+		var err error
+		change.chunker, err = table.NewChunker(change.table, chunkerCfg)
 		if err != nil {
 			return err
 		}
-		checksumChunker, err := table.NewChunker(change.table, change.newTable, r.migration.TargetChunkTime, r.logger)
+		checksumChunker, err := table.NewChunker(change.table, chunkerCfg)
 		if err != nil {
 			return err
 		}
-		copyChunkers = append(copyChunkers, copyChunker)
+		copyChunkers = append(copyChunkers, change.chunker)
 		checksumChunkers = append(checksumChunkers, checksumChunker)
 	}
 	// We can wrap it the multi-chunker regardless.
