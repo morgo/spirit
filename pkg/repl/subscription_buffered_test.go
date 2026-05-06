@@ -3,6 +3,7 @@ package repl
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -1311,4 +1312,159 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(t.Context(),
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
 	require.Equal(t, total, count, "every appended key must end up in target")
+}
+
+// newBareBufferedMap builds a bufferedMap detached from any Client/applier/DB,
+// for unit tests that exercise only the in-memory accounting and backpressure
+// paths in HasChanged. The bufferedMap is unsafe to flush — these tests
+// drain it manually via direct field manipulation under s.Lock.
+//
+// pkIsMemoryComparable is forced to true so HasChanged routes to the map
+// path; the queue path is exercised by the DB-backed tests above.
+func newBareBufferedMap(softLimitBytes int64) *bufferedMap {
+	sub := &bufferedMap{
+		changes:              make(map[string]bufferedChange),
+		softLimitBytes:       softLimitBytes,
+		pkIsMemoryComparable: true,
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	return sub
+}
+
+// drainBareBufferedMap empties s.changes and s.queue and broadcasts the
+// cond, mimicking what flushMapLocked / flushQueueLocked do at end-of-flush.
+// Caller must NOT hold s.Lock.
+func drainBareBufferedMap(s *bufferedMap) {
+	s.Lock()
+	defer s.Unlock()
+	for k, c := range s.changes {
+		s.sizeBytes -= sizeOfBufferedChange(k, c)
+		delete(s.changes, k)
+	}
+	for _, qc := range s.queue {
+		s.sizeBytes -= sizeOfQueuedChange(qc)
+	}
+	s.queue = nil
+	s.cond.Broadcast()
+}
+
+func TestBufferedMapSizeAccounting(t *testing.T) {
+	sub := newBareBufferedMap(0) // soft limit disabled
+
+	sub.HasChanged([]any{int32(1)}, []any{int32(1), "hello"}, false)
+	require.Len(t, sub.changes, 1)
+	afterFirst := sub.sizeBytes
+	require.Greater(t, afterFirst, int64(0))
+
+	// Overwrite with a different image: should rebalance, not double-count.
+	sub.HasChanged([]any{int32(1)}, []any{int32(1), "longer-string-than-the-first-image"}, false)
+	require.Len(t, sub.changes, 1)
+	require.NotEqual(t, afterFirst, sub.sizeBytes,
+		"overwrite should change accounted size")
+
+	// Insert a second key.
+	sub.HasChanged([]any{int32(2)}, []any{int32(2), "world"}, false)
+	require.Len(t, sub.changes, 2)
+	require.Greater(t, sub.sizeBytes, int64(0))
+
+	// Drain like a flush would: sizeBytes must return to zero.
+	drainBareBufferedMap(sub)
+	require.Equal(t, int64(0), sub.sizeBytes,
+		"sizeBytes must balance after a full drain")
+}
+
+func TestBufferedMapSoftLimitBackpressure(t *testing.T) {
+	sub := newBareBufferedMap(1024)
+
+	// Push the buffer over the soft limit by hand. We can't easily
+	// inject ~1 KiB of accounted bytes via HasChanged without sizing
+	// rows precisely, so set sizeBytes directly.
+	sub.Lock()
+	sub.sizeBytes = 2048
+	sub.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		sub.HasChanged([]any{int32(1)}, []any{int32(1), "x"}, false)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("HasChanged returned without honoring the soft limit")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Drain & broadcast: HasChanged must unblock and complete.
+	sub.Lock()
+	sub.sizeBytes = 0
+	sub.cond.Broadcast()
+	sub.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HasChanged did not unblock after broadcast")
+	}
+
+	require.Equal(t, int64(1), sub.timesParked.Load(),
+		"parking should be counted")
+	sub.Lock()
+	require.Len(t, sub.changes, 1)
+	require.Greater(t, sub.sizeBytes, int64(0))
+	sub.Unlock()
+}
+
+func TestBufferedMapSoftLimitOversizedRowAdmitted(t *testing.T) {
+	sub := newBareBufferedMap(1024) // tiny limit
+
+	// A 16 KiB row admitted into an empty buffer overshoots the limit
+	// by design — the soft limit only blocks new arrivals when the
+	// buffer is already at/above the limit.
+	bigVal := make([]byte, 16*1024)
+	sub.HasChanged([]any{int32(1)}, []any{int32(1), bigVal}, false)
+	require.Len(t, sub.changes, 1)
+	require.Greater(t, sub.sizeBytes, int64(16*1024),
+		"oversized row should be admitted; its bytes accounted")
+	require.Equal(t, int64(0), sub.timesParked.Load(),
+		"first call into an empty buffer must not park")
+
+	// Now the buffer is over-limit; the next caller must park.
+	done := make(chan struct{})
+	go func() {
+		sub.HasChanged([]any{int32(2)}, []any{int32(2), "small"}, false)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("second HasChanged should have parked")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Releasing the oversized row unblocks the waiter.
+	drainBareBufferedMap(sub)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second HasChanged did not unblock after drain")
+	}
+	require.Equal(t, int64(1), sub.timesParked.Load())
+}
+
+func TestEstimateRowSizeCharacterizes(t *testing.T) {
+	// Empty
+	require.Equal(t, int64(0), estimateRowSize(nil))
+	require.Equal(t, int64(0), estimateRowSize([]any{}))
+
+	// Variable-width values dominate the estimate.
+	wideRow := []any{int32(1), make([]byte, 4096), "short"}
+	narrowRow := []any{int32(1), int32(2), int32(3)}
+	require.Greater(t, estimateRowSize(wideRow), estimateRowSize(narrowRow)+4000,
+		"byte-slice contents must be reflected in the estimate")
+
+	// String len matters: a 1000-byte longer string must add ~1000 to the estimate.
+	short := estimateRowSize([]any{"hi"})
+	long := estimateRowSize([]any{"hi" + string(make([]byte, 1000))})
+	require.GreaterOrEqual(t, long-short, int64(1000),
+		"string len must be reflected in the estimate")
 }
