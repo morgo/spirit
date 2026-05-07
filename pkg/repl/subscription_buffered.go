@@ -71,11 +71,13 @@ type bufferedMap struct {
 	sync.Mutex // protects the subscription from changes.
 
 	// cond signals waiters in HasChanged when sizeBytes drops below
-	// softLimitBytes. Broadcast at the end of every flush path. L = &Mutex.
-	// Construction invariant: callers must wire this up before any
-	// HasChanged / Flush / SetWatermarkOptimization invocation, e.g.
+	// softLimitBytes. Broadcast at the end of every flush path. L =
+	// &Mutex. Construction invariant: every call site must wire this
+	// up immediately after the struct literal, e.g.
 	//   sub := &bufferedMap{...}
 	//   sub.cond = sync.NewCond(&sub.Mutex)
+	// HasChanged / Flush / SetWatermarkOptimization will panic on a
+	// nil cond, so a missing init shows up loudly in tests.
 	cond *sync.Cond
 
 	c       *Client         // reference back to the client.
@@ -101,12 +103,13 @@ type bufferedMap struct {
 	sizeBytes int64
 
 	// softLimitBytes is the soft cap before HasChanged blocks waiting
-	// on cond. Zero disables the cap. The limit is "soft" in the sense
-	// that an individual row larger than the limit is still admitted
-	// when the buffer is empty — we only check before adding, so a
-	// single oversized row will exceed the cap, and the next caller
-	// blocks until that row is drained. This preserves forward
-	// progress regardless of row width.
+	// on cond. Zero disables the cap. The limit is checked against the
+	// pre-add sizeBytes, so a row is admitted whenever the buffer is
+	// currently under the cap regardless of how much that row alone
+	// will overshoot it. The cap only blocks *new* arrivals once
+	// sizeBytes is already at or above the limit. This preserves
+	// forward progress regardless of row width, but means peak memory
+	// can briefly exceed the limit by up to one oversized row.
 	softLimitBytes int64
 
 	watermarkOptimization bool
