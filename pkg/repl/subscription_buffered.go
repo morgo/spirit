@@ -70,6 +70,16 @@ type queuedChange struct {
 type bufferedMap struct {
 	sync.Mutex // protects the subscription from changes.
 
+	// cond signals waiters in HasChanged when sizeBytes drops below
+	// softLimitBytes. Broadcast at the end of every flush path. L =
+	// &Mutex. Construction invariant: every call site must wire this
+	// up immediately after the struct literal, e.g.
+	//   sub := &bufferedMap{...}
+	//   sub.cond = sync.NewCond(&sub.Mutex)
+	// HasChanged / Flush / SetWatermarkOptimization will panic on a
+	// nil cond, so a missing init shows up loudly in tests.
+	cond *sync.Cond
+
 	c       *Client         // reference back to the client.
 	applier applier.Applier // applier for writing changes to the target
 
@@ -87,6 +97,21 @@ type bufferedMap struct {
 	// mode is selected.
 	queue []queuedChange
 
+	// sizeBytes is an approximate count of memory currently held by
+	// changes + queue. Maintained by HasChanged and the flush paths;
+	// see estimateRowSize for the accounting.
+	sizeBytes int64
+
+	// softLimitBytes is the soft cap before HasChanged blocks waiting
+	// on cond. Zero disables the cap. The limit is checked against the
+	// pre-add sizeBytes, so a row is admitted whenever the buffer is
+	// currently under the cap regardless of how much that row alone
+	// will overshoot it. The cap only blocks *new* arrivals once
+	// sizeBytes is already at or above the limit. This preserves
+	// forward progress regardless of row width, but means peak memory
+	// can briefly exceed the limit by up to one oversized row.
+	softLimitBytes int64
+
 	watermarkOptimization bool
 	chunker               table.MappedChunker
 
@@ -94,6 +119,7 @@ type bufferedMap struct {
 	keysAdded        atomic.Int64
 	keysDroppedAbove atomic.Int64
 	keysSkippedBelow atomic.Int64
+	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
 
 	pkIsMemoryComparable bool
 
@@ -101,6 +127,62 @@ type bufferedMap struct {
 	// the LWW buffered-map dedup during the copy phase. See the file-level
 	// comment and Client.forceEnableBufferedMap for the rationale.
 	forceEnableBufferedMap bool
+}
+
+// Per-entry overheads applied on top of estimateRowSize so the soft
+// limit tracks closer to real RSS for high-cardinality, narrow-row
+// workloads (where the variable-width contents don't dominate). For
+// wide-row workloads — the OOM scenario this cap was added to defend
+// against — these constants are noise next to the BLOB / large-string
+// payload sizes. Both are approximate; the cap is "soft" anyway.
+const (
+	// bufferedChangeOverhead is the fixed per-entry cost for an item
+	// in s.changes beyond what estimateRowSize captures: the hashed-
+	// key string header (~16 B), the bufferedChange struct laid out
+	// in the map's value slot (LogicalRow + originalKey slice header,
+	// ~56 B), and Go's map bucket overhead (~48 B amortized).
+	bufferedChangeOverhead = 120
+
+	// queuedChangeOverhead is the fixed per-element cost for an item
+	// in s.queue beyond estimateRowSize's contribution: the key
+	// string header (~16 B) and the LogicalRow struct (~32 B). Slice
+	// amortized-growth overhead is not explicitly accounted for.
+	queuedChangeOverhead = 48
+)
+
+// estimateRowSize returns a rough byte estimate for a []any column slice
+// that bufferedMap holds in memory. The estimate is intentionally
+// approximate — we only use it to bound the buffer, not to report exact
+// memory usage. Costs accounted for:
+//   - 24 bytes of slice header
+//   - 16 bytes per element (interface header)
+//   - len(b) for []byte / string values (the dominant cost for wide rows)
+//   - 8 bytes for scalars, attributed to inline storage
+func estimateRowSize(row []any) int64 {
+	if len(row) == 0 {
+		return 0
+	}
+	var n int64 = 24
+	for _, v := range row {
+		n += 16
+		switch x := v.(type) {
+		case []byte:
+			n += int64(len(x))
+		case string:
+			n += int64(len(x))
+		default:
+			n += 8
+		}
+	}
+	return n
+}
+
+func sizeOfBufferedChange(hashedKey string, c bufferedChange) int64 {
+	return bufferedChangeOverhead + int64(len(hashedKey)) + estimateRowSize(c.logicalRow.RowImage) + estimateRowSize(c.originalKey)
+}
+
+func sizeOfQueuedChange(c queuedChange) int64 {
+	return queuedChangeOverhead + int64(len(c.key)) + estimateRowSize(c.logicalRow.RowImage)
 }
 
 // Assert that bufferedMap implements subscription
@@ -143,10 +225,36 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// We enable it once all the setup has been done (since we create a repl client
 	// earlier in setup to ensure binary logs are available).
 	// We then disable the optimization after the copier phase has finished.
+	// Watermark drops happen before the soft-limit wait — those rows never
+	// enter the buffer, so there is no point parking on their behalf.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
 		s.keysDroppedAbove.Add(1)
 		s.c.logger.Debug("key above watermark", "key", key[0])
 		return
+	}
+
+	// Soft backpressure: park while the buffer is at or above the byte
+	// threshold. See softLimitBytes on bufferedMap for the semantics.
+	// We log on entry and exit because parking stalls the binlog reader
+	// — the exit duration is the operator's main signal for binlog-
+	// retention risk, and without these lines a stalled migrator looks
+	// indistinguishable from one that's just slow.
+	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes {
+		s.timesParked.Add(1)
+		s.c.logger.Warn("subscription parked on soft memory limit",
+			"table", s.table.SchemaName+"."+s.table.TableName,
+			"size_bytes", s.sizeBytes,
+			"soft_limit_bytes", s.softLimitBytes,
+		)
+		parkStart := time.Now()
+		for s.sizeBytes >= s.softLimitBytes {
+			s.cond.Wait()
+		}
+		s.c.logger.Info("subscription unparked from soft memory limit",
+			"table", s.table.SchemaName+"."+s.table.TableName,
+			"parked_duration", time.Since(parkStart),
+			"size_bytes", s.sizeBytes,
+		)
 	}
 
 	hashedKey := utils.HashKey(key)
@@ -157,15 +265,25 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	}
 
 	if s.queueModeActive() {
-		s.queue = append(s.queue, queuedChange{key: hashedKey, logicalRow: logicalRow})
+		qc := queuedChange{key: hashedKey, logicalRow: logicalRow}
+		s.queue = append(s.queue, qc)
+		s.sizeBytes += sizeOfQueuedChange(qc)
 		s.keysAdded.Add(1)
 		return
 	}
 
-	s.changes[hashedKey] = bufferedChange{
+	bc := bufferedChange{
 		logicalRow:  logicalRow,
 		originalKey: key,
 	}
+	if old, ok := s.changes[hashedKey]; ok {
+		// Map-mode dedup: subtract the outgoing image's bytes before
+		// the new image takes its place. Keeps sizeBytes balanced
+		// across overwrites.
+		s.sizeBytes -= sizeOfBufferedChange(hashedKey, old)
+	}
+	s.changes[hashedKey] = bc
+	s.sizeBytes += sizeOfBufferedChange(hashedKey, bc)
 	s.keysAdded.Add(1)
 }
 
@@ -251,8 +369,16 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		return false, err
 	}
 
+	var drainedBytes int64
 	for _, key := range keysFlushed {
-		delete(s.changes, key)
+		if c, ok := s.changes[key]; ok {
+			drainedBytes += sizeOfBufferedChange(key, c)
+			delete(s.changes, key)
+		}
+	}
+	if drainedBytes > 0 {
+		s.sizeBytes -= drainedBytes
+		s.cond.Broadcast()
 	}
 	return allChangesFlushed, nil
 }
@@ -333,6 +459,7 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 	}
 
 	prevIsDelete := s.queue[0].logicalRow.IsDeleted
+	var drainedBytes int64
 	for _, change := range s.queue {
 		typeFlip := change.logicalRow.IsDeleted != prevIsDelete
 		batchFull := len(deleteKeys)+len(upsertRows) >= target
@@ -346,6 +473,7 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 		} else {
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
+		drainedBytes += sizeOfQueuedChange(change)
 		prevIsDelete = change.logicalRow.IsDeleted
 	}
 	if err := flushSegment(); err != nil {
@@ -353,6 +481,10 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 	}
 
 	s.queue = nil
+	if drainedBytes > 0 {
+		s.sizeBytes -= drainedBytes
+		s.cond.Broadcast()
+	}
 	return nil
 }
 
@@ -401,7 +533,9 @@ func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool
 		"keys_added", s.keysAdded.Swap(0),
 		"keys_dropped_above_high", s.keysDroppedAbove.Swap(0),
 		"keys_skipped_not_below_low", s.keysSkippedBelow.Swap(0),
+		"times_parked_on_soft_limit", s.timesParked.Swap(0),
 		"delta_len", len(s.changes)+len(s.queue),
+		"size_bytes", s.sizeBytes,
 	)
 	return nil
 }

@@ -42,6 +42,20 @@ const (
 	// Longer values require more memory, but permit more merging.
 	// I expect we will change this to 1hr-24hr in the future.
 	DefaultFlushInterval = 30 * time.Second
+	// DefaultSubscriptionSoftLimitBytes caps the approximate memory held
+	// per subscription before HasChanged starts blocking on the buffered
+	// map's condition variable. The cap is "soft": a single oversized
+	// row admitted when the buffer is empty will exceed the limit, and
+	// the next caller will park until that row drains. This keeps wide
+	// rows (LONGTEXT / BLOB / large JSON) from OOMing the migrator
+	// while still guaranteeing forward progress regardless of row width.
+	// See pkg/repl/subscription_buffered.go for the accounting model.
+	//
+	// Operators should be aware that pausing the binlog reader for an
+	// extended period risks falling past the source's binlog retention
+	// (binlog_expire_logs_seconds). Tune this value, or the source's
+	// retention, accordingly.
+	DefaultSubscriptionSoftLimitBytes = 256 << 20
 	// DefaultTimeout is how long BlockWait is supposed to wait before returning errors.
 	DefaultTimeout = 30 * time.Second
 	// Maximum number of consecutive errors before recreating the streamer
@@ -130,6 +144,11 @@ type Client struct {
 	// ClientConfig.ForceEnableBufferedMap.
 	forceEnableBufferedMap bool
 
+	// subscriptionSoftLimitBytes is the per-subscription byte cap passed
+	// to bufferedMap.softLimitBytes on construction. Zero disables the
+	// cap. See DefaultSubscriptionSoftLimitBytes.
+	subscriptionSoftLimitBytes int64
+
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
@@ -139,23 +158,30 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
+	softLimit := config.SubscriptionSoftLimitBytes
+	if softLimit == 0 {
+		softLimit = DefaultSubscriptionSoftLimitBytes
+	} else if softLimit < 0 {
+		softLimit = 0 // explicit opt-out
+	}
 	return &Client{
-		db:                     db,
-		dbConfig:               config.DBConfig,
-		host:                   host,
-		username:               username,
-		password:               password,
-		logger:                 config.Logger,
-		targetBatchTime:        config.TargetBatchTime,
-		targetBatchSize:        DefaultBatchSize, // initial starting value.
-		concurrency:            config.Concurrency,
-		subscriptions:          make(map[string]Subscription),
-		callerCancelFunc:       config.CancelFunc,
-		ddlFilterSchema:        config.DDLFilterSchema,
-		ddlFilterTables:        toSet(config.DDLFilterTables),
-		serverID:               config.ServerID,
-		applier:                appl,
-		forceEnableBufferedMap: config.ForceEnableBufferedMap,
+		db:                         db,
+		dbConfig:                   config.DBConfig,
+		host:                       host,
+		username:                   username,
+		password:                   password,
+		logger:                     config.Logger,
+		targetBatchTime:            config.TargetBatchTime,
+		targetBatchSize:            DefaultBatchSize, // initial starting value.
+		concurrency:                config.Concurrency,
+		subscriptions:              make(map[string]Subscription),
+		callerCancelFunc:           config.CancelFunc,
+		ddlFilterSchema:            config.DDLFilterSchema,
+		ddlFilterTables:            toSet(config.DDLFilterTables),
+		serverID:                   config.ServerID,
+		applier:                    appl,
+		forceEnableBufferedMap:     config.ForceEnableBufferedMap,
+		subscriptionSoftLimitBytes: softLimit,
 	}
 }
 
@@ -193,6 +219,12 @@ type ClientConfig struct {
 	// TestCutoverAtomicityWithConcurrentWrites. Memory-comparable PKs always use
 	// the buffered map regardless of this flag.
 	ForceEnableBufferedMap bool
+
+	// SubscriptionSoftLimitBytes overrides DefaultSubscriptionSoftLimitBytes
+	// for new subscriptions. Set to a negative value to disable the cap
+	// entirely (HasChanged will never block on memory). Zero (the
+	// zero-value default) means use DefaultSubscriptionSoftLimitBytes.
+	SubscriptionSoftLimitBytes int64
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -253,7 +285,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
 		pkIsMemoryComparable = false
 	}
-	c.subscriptions[subKey] = &bufferedMap{
+	sub := &bufferedMap{
 		table:                  currentTable,
 		newTable:               newTable,
 		changes:                make(map[string]bufferedChange),
@@ -262,7 +294,10 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		applier:                c.applier,
 		pkIsMemoryComparable:   pkIsMemoryComparable,
 		forceEnableBufferedMap: c.forceEnableBufferedMap,
+		softLimitBytes:         c.subscriptionSoftLimitBytes,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	c.subscriptions[subKey] = sub
 	return nil
 }
 
@@ -698,18 +733,27 @@ func (c *Client) processDDLNotification(schema, table string) {
 		}
 	} else {
 		// Check if the schema.table matches any of our subscriptions.
-		// This is the default behavior.
-		matchFound := false
+		// This is the default behavior. Snapshot the subscription set
+		// under c.Lock and inspect it after release — Tables() is a
+		// pure accessor that does not need the client lock.
 		c.Lock()
+		subs := make([]Subscription, 0, len(c.subscriptions))
 		for _, sub := range c.subscriptions {
+			subs = append(subs, sub)
+		}
+		c.Unlock()
+		matchFound := false
+		for _, sub := range subs {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
 				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
 					break
 				}
 			}
+			if matchFound {
+				break
+			}
 		}
-		c.Unlock()
 		if !matchFound {
 			return
 		}
@@ -726,14 +770,18 @@ func (c *Client) processDDLNotification(schema, table string) {
 //   - If there is, it will call the subscription's keyHasChanged method
 //     with the PK that has been changed.
 //
-// We acquire a mutex when processing row events because we don't want a new subscription
-// to be added (uses mutex) and we miss processing for rows on it.
+// We hold c.Lock only for the subscription map lookup. Once we have the
+// subscription pointer, we release the client lock before dispatching to
+// HasChanged. This matters for backpressure: bufferedMap.HasChanged can
+// block on its own condition variable when the buffer is full, and we
+// must not be holding c.Lock while it parks — c.flush() and other
+// callers acquire c.Lock briefly and would otherwise be unable to
+// progress, which would prevent the very flush that would unblock us.
 func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
-	c.Lock()
-	defer c.Unlock()
-
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
+	c.Lock()
 	sub, ok := c.subscriptions[subName]
+	c.Unlock()
 	if !ok {
 		return nil // ignore event, it could be to a _new table.
 	}
