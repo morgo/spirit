@@ -1604,6 +1604,22 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			expectedAlter: "ALTER TABLE `mixed` ADD UNIQUE INDEX `uk_email` (`email`), ADD FULLTEXT INDEX `idx_content` (`content`), ADD INDEX `idx_name` (`name`)",
 		},
 		{
+			name: "Missing SPATIAL index",
+			sourceCreateTable: `CREATE TABLE places (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				location GEOMETRY NOT NULL SRID 4326,
+				SPATIAL INDEX idx_location (location)
+			)`,
+			targetCreateTable: `CREATE TABLE places (
+				id INT PRIMARY KEY,
+				name VARCHAR(100),
+				location GEOMETRY NOT NULL SRID 4326
+			)`,
+			tableName:     "places",
+			expectedAlter: "ALTER TABLE `places` ADD SPATIAL INDEX `idx_location` (`location`)",
+		},
+		{
 			name: "No indexes on either table",
 			sourceCreateTable: `CREATE TABLE simple (
 				id INT PRIMARY KEY,
@@ -2304,4 +2320,28 @@ func TestBinaryTypeJSONSerialization(t *testing.T) {
 // Helper function to create int pointer
 func intPtr(i int) *int {
 	return &i
+}
+
+// TestSpatialIndexParsing verifies that CREATE TABLE with SPATIAL INDEX parses
+// and that the index is exposed with Type="SPATIAL". Without explicit handling
+// in parseIndex, this would panic with "unknown constraint type: 12".
+func TestSpatialIndexParsing(t *testing.T) {
+	ct, err := ParseCreateTable(`CREATE TABLE places (
+		id INT PRIMARY KEY,
+		name VARCHAR(100),
+		location GEOMETRY NOT NULL SRID 4326,
+		SPATIAL INDEX idx_location (location)
+	)`)
+	require.NoError(t, err)
+
+	var spatial *Index
+	for i, idx := range ct.GetIndexes() {
+		if idx.Name == "idx_location" {
+			spatial = &ct.GetIndexes()[i]
+			break
+		}
+	}
+	require.NotNil(t, spatial, "expected SPATIAL index idx_location to be present")
+	require.Equal(t, "SPATIAL", spatial.Type)
+	require.Equal(t, []string{"location"}, spatial.Columns)
 }

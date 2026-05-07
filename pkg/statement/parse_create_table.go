@@ -587,6 +587,8 @@ func (ct *CreateTable) parseIndex(constraint *ast.Constraint) Index {
 		index.Type = "UNIQUE"
 	case ast.ConstraintFulltext:
 		index.Type = "FULLTEXT"
+	case ast.ConstraintSpatial:
+		index.Type = "SPATIAL"
 	default:
 		panic(fmt.Sprintf("unknown constraint type: %d", constraint.Tp))
 	}
@@ -1240,8 +1242,7 @@ func RemoveSecondaryIndexes(createStmt string) (string, error) {
 // GetMissingSecondaryIndexes compares two CREATE TABLE statements (source and target)
 // and returns an ALTER TABLE statement that adds any missing secondary indexes.
 // Returns an empty string if no indexes need to be added.
-// Considers UNIQUE, FULLTEXT, and regular INDEX types. PRIMARY KEY is excluded as it's fundamental to table structure.
-// Note: SPATIAL indexes are not currently supported by the TiDB parser constraint types used in this implementation.
+// Considers UNIQUE, FULLTEXT, SPATIAL, and regular INDEX types. PRIMARY KEY is excluded as it's fundamental to table structure.
 func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName string) (string, error) {
 	// Parse both CREATE TABLE statements
 	sourceCT, err := ParseCreateTable(sourceCreateTable)
@@ -1272,14 +1273,14 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 		if constraint.Tp == ast.ConstraintPrimaryKey {
 			continue
 		}
-		// Include: UNIQUE, FULLTEXT, and regular INDEX
-		// Note: SPATIAL indexes are not currently supported by the TiDB parser constraint types
+		// Include: UNIQUE, FULLTEXT, SPATIAL, and regular INDEX
 		if constraint.Tp != ast.ConstraintKey &&
 			constraint.Tp != ast.ConstraintIndex &&
 			constraint.Tp != ast.ConstraintUniq &&
 			constraint.Tp != ast.ConstraintUniqKey &&
 			constraint.Tp != ast.ConstraintUniqIndex &&
-			constraint.Tp != ast.ConstraintFulltext {
+			constraint.Tp != ast.ConstraintFulltext &&
+			constraint.Tp != ast.ConstraintSpatial {
 			continue
 		}
 
@@ -1305,6 +1306,8 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 			sb.WriteString("ADD UNIQUE INDEX")
 		case ast.ConstraintFulltext:
 			sb.WriteString("ADD FULLTEXT INDEX")
+		case ast.ConstraintSpatial:
+			sb.WriteString("ADD SPATIAL INDEX")
 		default: // ast.ConstraintKey, ast.ConstraintIndex
 			sb.WriteString("ADD INDEX")
 		}
