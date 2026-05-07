@@ -479,6 +479,8 @@ func (l *RedundantIndexLinter) constraintToIndex(constraint *ast.Constraint) *st
 		indexType = "INDEX"
 	case ast.ConstraintFulltext:
 		indexType = "FULLTEXT"
+	case ast.ConstraintSpatial:
+		indexType = "SPATIAL"
 	default:
 		// Not an index constraint (e.g., foreign key, check)
 		return nil
