@@ -235,11 +235,26 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 
 	// Soft backpressure: park while the buffer is at or above the byte
 	// threshold. See softLimitBytes on bufferedMap for the semantics.
+	// We log on entry and exit because parking stalls the binlog reader
+	// — the exit duration is the operator's main signal for binlog-
+	// retention risk, and without these lines a stalled migrator looks
+	// indistinguishable from one that's just slow.
 	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes {
 		s.timesParked.Add(1)
+		s.c.logger.Warn("subscription parked on soft memory limit",
+			"table", s.table.SchemaName+"."+s.table.TableName,
+			"size_bytes", s.sizeBytes,
+			"soft_limit_bytes", s.softLimitBytes,
+		)
+		parkStart := time.Now()
 		for s.sizeBytes >= s.softLimitBytes {
 			s.cond.Wait()
 		}
+		s.c.logger.Info("subscription unparked from soft memory limit",
+			"table", s.table.SchemaName+"."+s.table.TableName,
+			"parked_duration", time.Since(parkStart),
+			"size_bytes", s.sizeBytes,
+		)
 	}
 
 	hashedKey := utils.HashKey(key)

@@ -1342,6 +1342,11 @@ func newBareBufferedMap(softLimitBytes int64) *bufferedMap {
 		changes:              make(map[string]bufferedChange),
 		softLimitBytes:       softLimitBytes,
 		pkIsMemoryComparable: true,
+		// c and table are needed by the park-entry/exit log lines in
+		// HasChanged. Tests don't assert on these but must populate
+		// them or the logging path NPEs.
+		c:     &Client{logger: slog.Default()},
+		table: &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub
@@ -1560,6 +1565,8 @@ func TestBufferedMapQueueModeBackpressure(t *testing.T) {
 		softLimitBytes:         1024,
 		pkIsMemoryComparable:   false, // route to queue
 		forceEnableBufferedMap: false, // default: queue full-time
+		c:                      &Client{logger: slog.Default()},
+		table:                  &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 
