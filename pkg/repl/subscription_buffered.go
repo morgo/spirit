@@ -72,6 +72,10 @@ type bufferedMap struct {
 
 	// cond signals waiters in HasChanged when sizeBytes drops below
 	// softLimitBytes. Broadcast at the end of every flush path. L = &Mutex.
+	// Construction invariant: callers must wire this up before any
+	// HasChanged / Flush / SetWatermarkOptimization invocation, e.g.
+	//   sub := &bufferedMap{...}
+	//   sub.cond = sync.NewCond(&sub.Mutex)
 	cond *sync.Cond
 
 	c       *Client         // reference back to the client.
@@ -122,6 +126,27 @@ type bufferedMap struct {
 	forceEnableBufferedMap bool
 }
 
+// Per-entry overheads applied on top of estimateRowSize so the soft
+// limit tracks closer to real RSS for high-cardinality, narrow-row
+// workloads (where the variable-width contents don't dominate). For
+// wide-row workloads — the OOM scenario this cap was added to defend
+// against — these constants are noise next to the BLOB / large-string
+// payload sizes. Both are approximate; the cap is "soft" anyway.
+const (
+	// bufferedChangeOverhead is the fixed per-entry cost for an item
+	// in s.changes beyond what estimateRowSize captures: the hashed-
+	// key string header (~16 B), the bufferedChange struct laid out
+	// in the map's value slot (LogicalRow + originalKey slice header,
+	// ~56 B), and Go's map bucket overhead (~48 B amortized).
+	bufferedChangeOverhead = 120
+
+	// queuedChangeOverhead is the fixed per-element cost for an item
+	// in s.queue beyond estimateRowSize's contribution: the key
+	// string header (~16 B) and the LogicalRow struct (~32 B). Slice
+	// amortized-growth overhead is not explicitly accounted for.
+	queuedChangeOverhead = 48
+)
+
 // estimateRowSize returns a rough byte estimate for a []any column slice
 // that bufferedMap holds in memory. The estimate is intentionally
 // approximate — we only use it to bound the buffer, not to report exact
@@ -150,21 +175,11 @@ func estimateRowSize(row []any) int64 {
 }
 
 func sizeOfBufferedChange(hashedKey string, c bufferedChange) int64 {
-	return int64(len(hashedKey)) + estimateRowSize(c.logicalRow.RowImage) + estimateRowSize(c.originalKey)
+	return bufferedChangeOverhead + int64(len(hashedKey)) + estimateRowSize(c.logicalRow.RowImage) + estimateRowSize(c.originalKey)
 }
 
 func sizeOfQueuedChange(c queuedChange) int64 {
-	return int64(len(c.key)) + estimateRowSize(c.logicalRow.RowImage)
-}
-
-// ensureCond lazily initializes s.cond. AddSubscription wires it up at
-// construction time, but several tests build *bufferedMap structs directly
-// to exercise specific routing paths — this keeps those test sites
-// working without forcing them through a constructor. Caller must hold s.Lock.
-func (s *bufferedMap) ensureCond() {
-	if s.cond == nil {
-		s.cond = sync.NewCond(&s.Mutex)
-	}
+	return queuedChangeOverhead + int64(len(c.key)) + estimateRowSize(c.logicalRow.RowImage)
 }
 
 // Assert that bufferedMap implements subscription
@@ -202,7 +217,6 @@ func (s *bufferedMap) queueModeActive() bool {
 func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	s.Lock()
 	defer s.Unlock()
-	s.ensureCond()
 
 	// The KeyAboveWatermark optimization has to be enabled
 	// We enable it once all the setup has been done (since we create a repl client
@@ -217,10 +231,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	}
 
 	// Soft backpressure: park while the buffer is at or above the byte
-	// threshold. We check before adding, so a row that is larger than the
-	// limit on its own is still admitted when the buffer is empty — the
-	// next caller will then park until that row is drained. This keeps
-	// forward progress no matter how wide a single row gets.
+	// threshold. See softLimitBytes on bufferedMap for the semantics.
 	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes {
 		s.timesParked.Add(1)
 		for s.sizeBytes >= s.softLimitBytes {
@@ -272,7 +283,6 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) (allChangesFlushed bool, err error) {
 	s.Lock()
 	defer s.Unlock()
-	s.ensureCond()
 
 	allChangesFlushed = true
 
@@ -477,7 +487,6 @@ func (s *bufferedMap) watermarkOptimizationEnabled() bool {
 func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool) error {
 	s.Lock()
 	defer s.Unlock()
-	s.ensureCond()
 
 	s.watermarkOptimization = enabled
 

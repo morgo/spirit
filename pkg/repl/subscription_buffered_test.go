@@ -258,6 +258,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 		watermarkOptimization: true, // Enable watermark optimization
 		pkIsMemoryComparable:  true, // INT PK -> map mode
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Insert test data into source table - data must exist before we lock
 	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
@@ -386,6 +387,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 		watermarkOptimization: true, // Enable watermark optimization
 		pkIsMemoryComparable:  true, // INT PK -> map mode
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Insert test data into source table
 	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES
@@ -476,6 +478,7 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 		pkIsMemoryComparable:   false,
 		forceEnableBufferedMap: true, // exercise the map-during-copy optimization
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Watermark optimization on => map mode under the optimization.
 	sub.watermarkOptimization = true
@@ -540,6 +543,7 @@ func TestBufferedMapQueueFullTimeDefault(t *testing.T) {
 		pkIsMemoryComparable:   false, // VARCHAR PK
 		forceEnableBufferedMap: false, // default
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Even with watermark on (copy phase), the default routes to the queue.
 	sub.HasChanged([]any{"a"}, []any{"a", "v"}, false)
@@ -603,6 +607,7 @@ func TestBufferedMapQueueModeFlush(t *testing.T) {
 		pkIsMemoryComparable: false,
 		// watermarkOptimization left false so queue mode is active.
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Seed target with c so the DELETE has something to remove.
 	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES ('c', 'stale')`,
@@ -684,6 +689,7 @@ func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: false,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// INSERT, DELETE, INSERT for the same logical row. End state must reflect
 	// the *final* INSERT (FIFO replay, target's PK uniqueness collapses).
@@ -753,6 +759,7 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 		pkIsMemoryComparable:   false,
 		forceEnableBufferedMap: true, // opt into the optimization so transitions actually flip mode
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Copy-phase events land in the map (watermark on, queue-mode inactive).
 	sub.HasChanged([]any{"map-1"}, []any{"map-1", "from-map"}, false)
@@ -826,6 +833,7 @@ func TestBufferedMapTogglePassthrough(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: true,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	sub.watermarkOptimization = true
 	sub.HasChanged([]any{1}, []any{1, "v"}, false)
@@ -871,6 +879,7 @@ func TestBufferedMapConcurrentHasChanged(t *testing.T) {
 		changes:  make(map[string]bufferedChange),
 		chunker:  mockChunker,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	done := make(chan bool)
 	go func() {
@@ -925,6 +934,7 @@ func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: true,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	sub.HasChanged([]any{1}, []any{1, "first"}, false)
 	sub.HasChanged([]any{1}, nil, true)
@@ -969,6 +979,7 @@ func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
 		changes:  make(map[string]bufferedChange),
 		chunker:  mockChunker,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	sub.HasChanged([]any{""}, nil, false)
 	require.Equal(t, 1, sub.Length(), "empty string key must hash and store")
@@ -1018,6 +1029,7 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: true,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Watermark off: every key is accepted regardless of position.
 	sub.HasChanged([]any{1}, []any{1, "v"}, false)
@@ -1088,6 +1100,7 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: false,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
@@ -1142,6 +1155,7 @@ func TestBufferedMapQueueFlushBatchSizeLimit(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: false,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	for i := 1; i <= 5; i++ {
 		k := fmt.Sprintf("k%d", i)
@@ -1207,6 +1221,7 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: false,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Seed target with "b" so the DELETE has something to remove.
 	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (id, name) VALUES ('b', 'stale')`,
@@ -1286,6 +1301,7 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 		chunker:              mockChunker,
 		pkIsMemoryComparable: false,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
 	const total = 100
 	done := make(chan struct{})
@@ -1467,6 +1483,184 @@ func TestEstimateRowSizeCharacterizes(t *testing.T) {
 	long := estimateRowSize([]any{"hi" + string(make([]byte, 1000))})
 	require.GreaterOrEqual(t, long-short, int64(1000),
 		"string len must be reflected in the estimate")
+}
+
+// TestBufferedMapRealFlushWakesParked exercises the full HasChanged →
+// park → real Flush → broadcast → resume cycle against a live DB-backed
+// subscription. The bare-helper tests above broadcast by hand; this one
+// proves that the actual flushMapLocked broadcast wakes a waiter, which
+// is the production code path.
+func TestBufferedMapRealFlushWakesParked(t *testing.T) {
+	db, client, srcTable, _ := setupBufferedTest(t)
+	defer client.Close()
+	defer utils.CloseAndLog(db)
+
+	sub, ok := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
+	require.True(t, ok)
+
+	// Seed one buffered change so sizeBytes > 0, then crank the soft
+	// limit down to 1 byte. The next HasChanged caller is guaranteed
+	// to park.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	sub.Lock()
+	require.Greater(t, sub.sizeBytes, int64(0), "seed change must be accounted")
+	sub.softLimitBytes = 1
+	sub.Unlock()
+
+	// Park a HasChanged caller. Calling sub.HasChanged directly (not
+	// via the binlog) keeps the test deterministic and isolates the
+	// wake from any other binlog activity.
+	done := make(chan struct{})
+	go func() {
+		sub.HasChanged([]any{int32(2)}, []any{int32(2), "post-flush"}, false)
+		close(done)
+	}()
+
+	// Confirm the goroutine actually parked rather than racing through.
+	require.Eventually(t, func() bool {
+		return sub.timesParked.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "HasChanged should have parked on soft limit")
+	select {
+	case <-done:
+		t.Fatal("HasChanged returned without honoring the soft limit")
+	default:
+	}
+
+	// Real flush against the DB. flushMapLocked must drain the seed
+	// row, decrement sizeBytes, and broadcast the cond — the parked
+	// goroutine then re-checks and proceeds.
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("real Flush() did not wake the parked HasChanged")
+	}
+
+	// The post-flush row was admitted after the wake; it must be in
+	// the map and accounted.
+	sub.Lock()
+	_, present := sub.changes[utils.HashKey([]any{int32(2)})]
+	require.True(t, present, "post-flush row must be admitted after wake")
+	require.Greater(t, sub.sizeBytes, int64(0))
+	sub.Unlock()
+}
+
+// TestBufferedMapQueueModeBackpressure exercises the soft-limit park/wake
+// cycle against the queue path, mirroring the map-mode coverage in
+// TestBufferedMapSoftLimitBackpressure. Queue mode is reached via a
+// non-memory-comparable PK with the default forceEnableBufferedMap=false
+// (queue full-time).
+func TestBufferedMapQueueModeBackpressure(t *testing.T) {
+	sub := &bufferedMap{
+		changes:                make(map[string]bufferedChange),
+		softLimitBytes:         1024,
+		pkIsMemoryComparable:   false, // route to queue
+		forceEnableBufferedMap: false, // default: queue full-time
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+
+	// First call must land in the queue and be accounted.
+	sub.HasChanged([]any{"k1"}, []any{"k1", "v1"}, false)
+	sub.Lock()
+	require.Empty(t, sub.changes, "queue-mode events must not enter the map")
+	require.Len(t, sub.queue, 1)
+	require.Greater(t, sub.sizeBytes, int64(0), "queue-mode HasChanged must account bytes")
+	// Push the buffer over the soft limit.
+	sub.sizeBytes = 2048
+	sub.Unlock()
+
+	// The next caller parks.
+	done := make(chan struct{})
+	go func() {
+		sub.HasChanged([]any{"k2"}, []any{"k2", "v2"}, false)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("queue-mode HasChanged returned without honoring the soft limit")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Drain the queue by hand and broadcast — flushQueueLocked does
+	// the same in production. The parker must wake and complete.
+	sub.Lock()
+	for _, qc := range sub.queue {
+		sub.sizeBytes -= sizeOfQueuedChange(qc)
+	}
+	sub.queue = nil
+	sub.sizeBytes = 0
+	sub.cond.Broadcast()
+	sub.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("queue-mode HasChanged did not unblock after drain")
+	}
+
+	require.Equal(t, int64(1), sub.timesParked.Load())
+	sub.Lock()
+	require.Len(t, sub.queue, 1, "post-wake row must land in the queue")
+	require.Greater(t, sub.sizeBytes, int64(0), "post-wake bytes must be accounted in queue mode")
+	sub.Unlock()
+}
+
+// TestProcessRowsEventDoesNotDeadlockOnPark is a regression test for the
+// client-lock release in processRowsEvent. The previous implementation
+// held c.Lock for the duration of sub.HasChanged, which deadlocked when
+// HasChanged parked on the soft limit: c.flush() acquires c.Lock briefly
+// to snapshot bufferedPos, and could no longer make progress to drain
+// the buffer that would unblock the park. The fix is to release c.Lock
+// immediately after the subscription map lookup. This test pins that
+// invariant by forcing a binlog-driven HasChanged to park, then
+// asserting client.Flush completes within a bounded time.
+func TestProcessRowsEventDoesNotDeadlockOnPark(t *testing.T) {
+	db, client, srcTable, dstTable := setupBufferedTest(t)
+	defer client.Close()
+	defer utils.CloseAndLog(db)
+
+	sub, ok := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
+	require.True(t, ok)
+
+	// Seed a row so sizeBytes > 0, then drop the soft limit. Any
+	// further HasChanged from the binlog reader will park.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	sub.Lock()
+	sub.softLimitBytes = 1
+	sub.Unlock()
+
+	// Trigger a second INSERT. The binlog reader will pick this up
+	// asynchronously, route it through processRowsEvent, call
+	// sub.HasChanged — which must park on the soft limit.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'parked')", srcTable.QuotedTableName))
+	require.Eventually(t, func() bool {
+		return sub.timesParked.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond, "binlog-driven HasChanged should park on soft limit")
+
+	// While HasChanged is parked from inside processRowsEvent,
+	// client.Flush must still make progress. With the lock-release
+	// fix it returns; without it, c.flush() blocks on c.Lock and the
+	// select hits the timeout.
+	flushDone := make(chan error, 1)
+	go func() { flushDone <- client.Flush(t.Context()) }()
+	select {
+	case err := <-flushDone:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("client.Flush blocked while HasChanged was parked — processRowsEvent likely held c.Lock during park")
+	}
+
+	// Sanity: both rows ended up in the destination, proving the
+	// parked HasChanged actually completed after the wake.
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
+	require.Equal(t, 2, count)
 }
 
 // TestBufferedMapGeometry tests that GEOMETRY column data (binary spatial values)

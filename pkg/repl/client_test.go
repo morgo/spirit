@@ -688,6 +688,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
 	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
@@ -708,6 +709,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
+	sub2.cond = sync.NewCond(&sub2.Mutex)
 	client.subscriptions["test2"] = sub2
 	sub2.HasChanged([]any{2}, nil, false)
 	require.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
@@ -896,12 +898,14 @@ func TestProcessDDLNotification(t *testing.T) {
 			callerCancelFunc: func() bool { cancelled = true; return true },
 			subscriptions:    make(map[string]Subscription),
 		}
-		c.subscriptions[dbName+".orders"] = &bufferedMap{
+		sub := &bufferedMap{
 			table:    tbl,
 			newTable: newTbl,
 			changes:  make(map[string]bufferedChange),
 			c:        c,
 		}
+		sub.cond = sync.NewCond(&sub.Mutex)
+		c.subscriptions[dbName+".orders"] = sub
 
 		// DDL on the subscribed table should cancel.
 		c.processDDLNotification(dbName, "orders")
