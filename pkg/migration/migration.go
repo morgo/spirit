@@ -72,6 +72,12 @@ type Migration struct {
 	CheckpointMaxAge     time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 	ChecksumYieldTimeout time.Duration `name:"checksum-yield-timeout" help:"Maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth)" optional:"" default:"24h"`
 
+	// MaxCommitLatency throttles when observed commit latency exceeds this
+	// threshold. Currently auto-enabled only on Aurora (auto-detected); the
+	// default 100ms is intentionally a high upper bound to only cut the most
+	// extreme tail latencies. See issue #468.
+	MaxCommitLatency time.Duration `name:"max-commit-latency" help:"Throttle when average commit latency exceeds this threshold (currently only auto-enabled on Aurora)" optional:"" default:"100ms"`
+
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`
 	// Used for tests so we can concurrently execute without issues even though
