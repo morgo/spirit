@@ -644,9 +644,12 @@ func (r *Runner) closeReplicas() error {
 	return nil
 }
 
-// setupThrottler sets up the replication throttler if a replica DSN is configured.
-// Multiple replica DSNs can be specified as a comma-separated list; Spirit will
-// monitor all of them and throttle on the slowest one.
+// setupThrottler sets up the throttlers used to pace the copier:
+//   - one replication throttler per --replica-dsn (slowest wins)
+//   - a commit-latency throttler if the source is detected as Aurora and
+//     --max-commit-latency is positive (issue #468)
+//
+// Multiple replica DSNs can be specified as a comma-separated list.
 // This is common logic shared between resume and new migration paths.
 func (r *Runner) setupThrottler(ctx context.Context) error {
 	if r.migration.useTestThrottler {
@@ -655,14 +658,62 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		r.copier.SetThrottler(r.throttler)
 		return r.throttler.Open(ctx)
 	}
-	if r.migration.ReplicaDSN == "" {
-		return nil // No replica DSN specified, use default NOOP throttler
+
+	var throttlers []throttler.Throttler
+
+	if r.migration.ReplicaDSN != "" {
+		replicaThrottlers, err := r.buildReplicaThrottlers()
+		if err != nil {
+			return err
+		}
+		throttlers = append(throttlers, replicaThrottlers...)
 	}
 
-	// Split comma-separated DSNs to support multiple replicas.
+	if r.migration.MaxCommitLatency > 0 {
+		isAurora, err := throttler.IsAurora(ctx, r.db)
+		if err != nil {
+			// Probe failure (e.g., performance_schema disabled, no privileges)
+			// is non-fatal — Aurora-only feature on a non-Aurora server, or
+			// a perf-schema-locked Aurora user. Log at Debug so operators can
+			// diagnose if they expected throttling, without alerting users
+			// who don't care.
+			r.logger.Debug("Aurora probe failed, skipping commit-latency throttler", "error", err)
+		} else if isAurora {
+			cl, err := throttler.NewCommitLatencyThrottler(r.db, r.migration.MaxCommitLatency, r.logger)
+			if err != nil {
+				_ = r.closeReplicas()
+				return fmt.Errorf("could not create commit-latency throttler: %w", err)
+			}
+			r.logger.Info("Aurora detected, enabling commit-latency throttler",
+				"threshold", r.migration.MaxCommitLatency)
+			throttlers = append(throttlers, cl)
+		}
+	}
+
+	if len(throttlers) == 0 {
+		return nil // use default Noop throttler
+	}
+
+	r.throttler = throttler.NewMultiThrottler(throttlers...)
+	r.copier.SetThrottler(r.throttler)
+	if err := r.throttler.Open(ctx); err != nil {
+		// multiThrottler already closes child throttlers on partial Open
+		// failure, but the *sql.DB connections backing replica throttlers
+		// are owned by r.replicas — clean those up too rather than leaving
+		// them dangling until Runner.Close() runs.
+		_ = r.closeReplicas()
+		return fmt.Errorf("opening throttlers: %w", err)
+	}
+	return nil
+}
+
+// buildReplicaThrottlers opens the configured replica DSN(s) and returns a
+// throttler per replica. Replica connections are tracked on the runner so
+// they get closed alongside the main DB.
+func (r *Runner) buildReplicaThrottlers() ([]throttler.Throttler, error) {
 	dsns := splitReplicaDSNs(r.migration.ReplicaDSN)
 	if len(dsns) == 0 {
-		return fmt.Errorf("--replica-dsn was specified but contains no valid DSNs: %q", r.migration.ReplicaDSN)
+		return nil, fmt.Errorf("--replica-dsn was specified but contains no valid DSNs: %q", r.migration.ReplicaDSN)
 	}
 
 	// Create a separate DB config for replica connections
@@ -676,7 +727,7 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	replicaDBConfig.TLSMode = r.dbConfig.TLSMode
 	replicaDBConfig.TLSCertificatePath = r.dbConfig.TLSCertificatePath
 
-	var throttlers []throttler.Throttler
+	throttlers := make([]throttler.Throttler, 0, len(dsns))
 	for _, dsn := range dsns {
 		// Enhance replica DSN with TLS settings if not already present
 		enhancedDSN, err := dbconn.EnhanceDSNWithTLS(dsn, replicaDBConfig)
@@ -691,21 +742,18 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		replicaDB, err := dbconn.NewWithConnectionType(enhancedDSN, replicaDBConfig, "replica database")
 		if err != nil {
 			_ = r.closeReplicas()
-			return fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(dsn), err)
+			return nil, fmt.Errorf("failed to connect to replica database (DSN: %s): %w", maskPasswordInDSN(dsn), err)
 		}
 		r.replicas = append(r.replicas, replicaDB)
 
 		replicaThrottler, err := throttler.NewReplicationThrottler(replicaDB, r.migration.ReplicaMaxLag, r.logger)
 		if err != nil {
 			_ = r.closeReplicas()
-			return fmt.Errorf("could not create replication throttler (DSN: %s): %w", maskPasswordInDSN(dsn), err)
+			return nil, fmt.Errorf("could not create replication throttler (DSN: %s): %w", maskPasswordInDSN(dsn), err)
 		}
 		throttlers = append(throttlers, replicaThrottler)
 	}
-
-	r.throttler = throttler.NewMultiThrottler(throttlers...)
-	r.copier.SetThrottler(r.throttler)
-	return r.throttler.Open(ctx)
+	return throttlers, nil
 }
 
 // startBackgroundRoutines starts the background routines needed for migration monitoring.
