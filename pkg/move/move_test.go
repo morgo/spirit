@@ -261,3 +261,48 @@ func TestMoveReservedWordPK(t *testing.T) {
 	}
 	require.NoError(t, move.Run())
 }
+
+// TestMoveReservedWordTableName covers issue #828 — moving a table whose
+// name is itself a MySQL reserved word (e.g. `order`). The migration paths
+// rely on QuotedTableName being backtick-quoted; this test guards against
+// any SQL builder regressing to the unquoted TableName.
+func TestMoveReservedWordTableName(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	src := cfg.Clone()
+	src.DBName = "source_reserved_table_name"
+	dest := cfg.Clone()
+	dest.DBName = "dest_reserved_table_name"
+
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_reserved_table_name`)
+	testutils.RunSQL(t, `CREATE DATABASE source_reserved_table_name`)
+	testutils.RunSQL(t, "CREATE TABLE source_reserved_table_name.`order` ("+
+		"id BIGINT NOT NULL AUTO_INCREMENT, "+
+		"v VARCHAR(64) NOT NULL, "+
+		"PRIMARY KEY (id)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO source_reserved_table_name.`order` (v) "+
+		"VALUES ('a'),('b'),('c'),('d'),('e'),('f')")
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_reserved_table_name`)
+	testutils.RunSQL(t, `CREATE DATABASE dest_reserved_table_name`)
+	testutils.RunSQL(t, "CREATE TABLE dest_reserved_table_name.`order` ("+
+		"id BIGINT NOT NULL AUTO_INCREMENT, "+
+		"v VARCHAR(64) NOT NULL, "+
+		"PRIMARY KEY (id)"+
+		") ENGINE=InnoDB")
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 5 * time.Second,
+		Threads:         2,
+		WriteThreads:    2,
+		CreateSentinel:  false,
+	}
+	require.NoError(t, move.Run())
+}

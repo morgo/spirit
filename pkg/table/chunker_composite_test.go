@@ -1503,3 +1503,42 @@ func TestCompositeChunkerReservedWordPK(t *testing.T) {
 	}
 	require.NoError(t, chunker2.Close())
 }
+
+// TestCompositeChunkerReservedWordTableName covers issue #828 from the
+// table-name angle, paired with the reserved-word PK columns case.
+func TestCompositeChunkerReservedWordTableName(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS `order`")
+	testutils.RunSQL(t, "CREATE TABLE `order` ("+
+		"a BIGINT NOT NULL, "+
+		"b VARCHAR(64) NOT NULL, "+
+		"v TEXT, "+
+		"PRIMARY KEY (a, b)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO `order` (a, b, v) "+
+		"VALUES (1,'x','one'),(2,'x','two'),(3,'y','three'),(4,'z','four')")
+	t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS `order`") })
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := NewTableInfo(db, "test", "order")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Equal(t, "`order`", t1.QuotedTableName)
+	require.Equal(t, []string{"a", "b"}, t1.KeyColumns)
+
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	require.IsType(t, &chunkerComposite{}, chunker)
+	require.NoError(t, chunker.Open())
+
+	for {
+		chunk, err := chunker.Next()
+		if err != nil {
+			require.ErrorIs(t, err, ErrTableIsRead)
+			break
+		}
+		require.NotNil(t, chunk)
+	}
+	require.NoError(t, chunker.Close())
+}

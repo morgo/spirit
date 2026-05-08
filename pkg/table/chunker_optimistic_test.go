@@ -508,3 +508,51 @@ func TestOptimisticChunkerPrefetchReservedWord(t *testing.T) {
 
 	require.NoError(t, opt.Close())
 }
+
+// TestOptimisticChunkerReservedWordTableName covers issue #828 from the
+// table-name angle. Even though TableInfo backtick-wraps QuotedTableName
+// at construction, this test guards against any future regression where a
+// SQL builder forgets to use QuotedTableName.
+func TestOptimisticChunkerReservedWordTableName(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS `order`")
+	testutils.RunSQL(t, "CREATE TABLE `order` ("+
+		"id BIGINT NOT NULL AUTO_INCREMENT, "+
+		"v VARCHAR(64) NOT NULL, "+
+		"PRIMARY KEY (id)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO `order` (v) VALUES ('a'),('b'),('c'),('d'),('e')")
+	t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS `order`") })
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := NewTableInfo(db, "test", "order")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Equal(t, "`order`", t1.QuotedTableName)
+	require.True(t, t1.KeyIsAutoInc)
+
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	opt, ok := chunker.(*chunkerOptimistic)
+	require.True(t, ok)
+	require.NoError(t, opt.Open())
+
+	// Walk the chunker — this exercises Next() on the standard path.
+	for {
+		_, err := opt.Next()
+		if err != nil {
+			require.ErrorIs(t, err, ErrTableIsRead)
+			break
+		}
+	}
+
+	// Also exercise the prefetch path explicitly.
+	opt.chunkPrefetchingEnabled = true
+	opt.chunkPtr = Datum{Val: int64(0), Tp: signedType}
+	opt.finalChunkSent = false
+	_, err = opt.nextChunkByPrefetching()
+	require.NoError(t, err)
+
+	require.NoError(t, opt.Close())
+}
