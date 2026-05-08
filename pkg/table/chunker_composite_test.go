@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 
 	"github.com/stretchr/testify/require"
 )
@@ -1455,11 +1456,7 @@ func TestCompositeChunkerReservedWordPK(t *testing.T) {
 
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
-	defer func() {
-		if err := db.Close(); err != nil {
-			t.Logf("failed to close db: %v", err)
-		}
-	}()
+	defer utils.CloseAndLog(db)
 
 	t1 := NewTableInfo(db, "test", "reserved_word_pk_t1")
 	require.NoError(t, t1.SetInfo(t.Context()))
