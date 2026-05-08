@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,7 +121,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	}
 	sourceRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		sourceChecksumCols,
-		strings.Join(chunk.Table.KeyColumns, ", "),
+		table.QuoteColumns(chunk.Table.KeyColumns),
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	))
@@ -146,7 +145,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 
 	targetRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		targetChecksumCols,
-		strings.Join(chunk.NewTable.KeyColumns, ", "),
+		table.QuoteColumns(chunk.NewTable.KeyColumns),
 		chunk.NewTable.QuotedTableName,
 		chunk.String(),
 	))

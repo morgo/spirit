@@ -309,7 +309,8 @@ func (t *TableInfo) setMinMax(ctx context.Context) error {
 	if t.keyDatums[0] == binaryType {
 		return nil // we don't min/max binary types for now.
 	}
-	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", t.KeyColumns[0], t.KeyColumns[0], t.QuotedTableName)
+	quotedKey := "`" + t.KeyColumns[0] + "`"
+	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", quotedKey, quotedKey, t.QuotedTableName)
 	var minimum, maximum string
 	err := t.db.QueryRowContext(ctx, query).Scan(&minimum, &maximum)
 	if err != nil {

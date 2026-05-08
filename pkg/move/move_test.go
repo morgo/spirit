@@ -212,3 +212,52 @@ func TestEmptyDatabaseMove(t *testing.T) {
 	// Clean up
 	require.NoError(t, runner.Close())
 }
+
+// TestMoveReservedWordPK is a regression test for issue #828. Moving a
+// table whose primary key contains columns named with MySQL reserved
+// words used to fail because the chunker_composite prefetch query joined
+// chunkKeys without backticks. The move path drives the same chunker, so
+// it failed on the first chunk fetch.
+func TestMoveReservedWordPK(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	src := cfg.Clone()
+	src.DBName = "source_reserved_word"
+	dest := cfg.Clone()
+	dest.DBName = "dest_reserved_word"
+
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_reserved_word`)
+	testutils.RunSQL(t, `CREATE DATABASE source_reserved_word`)
+	testutils.RunSQL(t, "CREATE TABLE source_reserved_word.osm_points_of_interest ("+
+		"osm_id BIGINT NOT NULL, "+
+		"`key` VARCHAR(64) NOT NULL, "+
+		"`value` TEXT, "+
+		"PRIMARY KEY (osm_id, `key`)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO source_reserved_word.osm_points_of_interest (osm_id, `key`, `value`) "+
+		"VALUES (1,'amenity','restaurant'),(2,'amenity','cafe'),(3,'shop','grocery'),"+
+		"(4,'tourism','hotel'),(5,'amenity','pub'),(6,'shop','bakery')")
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_reserved_word`)
+	testutils.RunSQL(t, `CREATE DATABASE dest_reserved_word`)
+	testutils.RunSQL(t, "CREATE TABLE dest_reserved_word.osm_points_of_interest ("+
+		"osm_id BIGINT NOT NULL, "+
+		"`key` VARCHAR(64) NOT NULL, "+
+		"`value` TEXT, "+
+		"PRIMARY KEY (osm_id, `key`)"+
+		") ENGINE=InnoDB")
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 5 * time.Second,
+		Threads:         2,
+		WriteThreads:    2,
+		CreateSentinel:  false,
+	}
+	require.NoError(t, move.Run())
+}

@@ -1437,3 +1437,49 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 
 	require.NoError(t, comp.Close())
 }
+
+// TestCompositeChunkerReservedWordPK is a regression test for issue #828.
+// The chunker_composite prefetch query joined chunkKeys without backticks,
+// which produced a SQL syntax error when the primary key contained columns
+// whose names are MySQL reserved words (e.g. `key`, `value`).
+func TestCompositeChunkerReservedWordPK(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS reserved_word_pk_t1")
+	testutils.RunSQL(t, "CREATE TABLE reserved_word_pk_t1 ("+
+		"osm_id BIGINT NOT NULL, "+
+		"`key` VARCHAR(64) NOT NULL, "+
+		"`value` TEXT, "+
+		"PRIMARY KEY (osm_id, `key`)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO reserved_word_pk_t1 (osm_id, `key`, `value`) "+
+		"VALUES (1,'amenity','restaurant'),(2,'amenity','cafe'),(3,'shop','grocery')")
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	t1 := NewTableInfo(db, "test", "reserved_word_pk_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Equal(t, []string{"osm_id", "key"}, t1.KeyColumns)
+
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	require.IsType(t, &chunkerComposite{}, chunker)
+	require.NoError(t, chunker.Open())
+
+	// Walk the chunker to completion. Before the fix, the very first call to
+	// Next() failed with: Error 1064 (42000) ... near 'key,value FROM ...
+	// ORDER BY osm_id,key' because the column list was unquoted.
+	for {
+		chunk, err := chunker.Next()
+		if err != nil {
+			require.ErrorIs(t, err, ErrTableIsRead)
+			break
+		}
+		require.NotNil(t, chunk)
+	}
+	require.NoError(t, chunker.Close())
+}

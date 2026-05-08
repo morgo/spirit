@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,23 +85,24 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 	// Start prefetching the next chunk
 	// First assume it's the first chunk, we can overwrite this
 	// just below.
+	quotedChunkKeys := QuoteColumns(t.chunkKeys)
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) %s ORDER BY %s LIMIT 1 OFFSET %d",
-		strings.Join(t.chunkKeys, ","),
+		quotedChunkKeys,
 		t.Ti.QuotedTableName,
 		t.keyName,
 		t.additionalConditionsSQL(false),
-		strings.Join(t.chunkKeys, ","),
+		quotedChunkKeys,
 		t.chunkSize,
 	)
 	if !t.isFirstChunk() {
 		// This is not the first chunk, since we have pointers set.
 		query = fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) WHERE %s %s ORDER BY %s LIMIT 1 OFFSET %d",
-			strings.Join(t.chunkKeys, ","),
+			quotedChunkKeys,
 			t.Ti.QuotedTableName,
 			t.keyName,
 			expandRowConstructorComparison(t.chunkKeys, OpGreaterThan, t.chunkPtrs),
 			t.additionalConditionsSQL(true),
-			strings.Join(t.chunkKeys, ","), // order by
+			quotedChunkKeys, // order by
 			t.chunkSize,
 		)
 	}

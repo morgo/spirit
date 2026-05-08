@@ -57,7 +57,7 @@ var _ MappedChunker = &chunkerOptimistic{}
 // When this mode is enabled, the chunkSize is "reset" to 1000 rows, so we know that
 // t.chunkSize is reliable. It is also expanded again based on feedback.
 func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
-	key := t.Ti.KeyColumns[0]
+	key := "`" + t.Ti.KeyColumns[0] + "`"
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
 		key, t.Ti.QuotedTableName, key, key, t.chunkSize,
 	)

@@ -455,3 +455,26 @@ func TestMigrationCancelledFromTableModification(t *testing.T) {
 	require.Error(t, gErr)
 	require.NoError(t, m.Close())
 }
+
+// TestReservedWordPKMigration is a regression test for issue #828.
+// Migrating a table whose primary key includes columns named with MySQL
+// reserved words (like `key`/`value`) used to fail with a SQL syntax error
+// when the chunker_composite prefetch query joined chunkKeys without
+// backticks.
+func TestReservedWordPKMigration(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "reserved_word_pk_migrate", "CREATE TABLE reserved_word_pk_migrate ("+
+		"osm_id BIGINT NOT NULL, "+
+		"`key` VARCHAR(64) NOT NULL, "+
+		"`value` TEXT, "+
+		"PRIMARY KEY (osm_id, `key`)"+
+		")")
+	tt.SeedRows(t, "INSERT INTO reserved_word_pk_migrate (osm_id, `key`, `value`) "+
+		"SELECT FLOOR(RAND()*1000000), CONCAT('amenity_', UUID()), 'restaurant'", 4096)
+
+	m := NewTestRunner(t, "reserved_word_pk_migrate", "ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+	require.False(t, m.usedInstantDDL)
+	require.False(t, m.usedInplaceDDL)
+	require.NoError(t, m.Close())
+}
