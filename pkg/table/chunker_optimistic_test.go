@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -467,4 +468,91 @@ func TestOptimisticChunkerReset(t *testing.T) {
 	finalResetChunk, err := chunker.Next()
 	require.NoError(t, err)
 	require.Equal(t, chunk1.String(), finalResetChunk.String(), "First chunk after second reset should still match original")
+}
+
+// TestOptimisticChunkerPrefetchReservedWord is a regression test for
+// issue #828 covering the optimistic chunker's prefetch path. Before the
+// fix, nextChunkByPrefetching emitted bare column names in SELECT and ORDER
+// BY, which fails when the auto-inc PK column has a reserved-word name.
+func TestOptimisticChunkerPrefetchReservedWord(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS reserved_word_optimistic_t1")
+	testutils.RunSQL(t, "CREATE TABLE reserved_word_optimistic_t1 ("+
+		"`key` BIGINT NOT NULL AUTO_INCREMENT, "+
+		"v VARCHAR(64) NOT NULL, "+
+		"PRIMARY KEY (`key`)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO reserved_word_optimistic_t1 (v) VALUES ('a'),('b'),('c'),('d'),('e')")
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := NewTableInfo(db, "test", "reserved_word_optimistic_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Equal(t, []string{"key"}, t1.KeyColumns)
+	require.True(t, t1.KeyIsAutoInc)
+
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	opt, ok := chunker.(*chunkerOptimistic)
+	require.True(t, ok, "expected optimistic chunker for auto-inc single-column PK")
+	require.NoError(t, opt.Open())
+
+	// Force the prefetch path. nextChunkByPrefetching is what builds the
+	// query that previously broke with reserved-word PK column names.
+	opt.chunkPrefetchingEnabled = true
+	opt.chunkPtr = Datum{Val: int64(0), Tp: signedType}
+
+	_, err = opt.nextChunkByPrefetching()
+	require.NoError(t, err, "prefetch query must succeed when PK column is a reserved word")
+
+	require.NoError(t, opt.Close())
+}
+
+// TestOptimisticChunkerReservedWordTableName covers issue #828 from the
+// table-name angle. Even though TableInfo backtick-wraps QuotedTableName
+// at construction, this test guards against any future regression where a
+// SQL builder forgets to use QuotedTableName.
+func TestOptimisticChunkerReservedWordTableName(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS `order`")
+	testutils.RunSQL(t, "CREATE TABLE `order` ("+
+		"id BIGINT NOT NULL AUTO_INCREMENT, "+
+		"v VARCHAR(64) NOT NULL, "+
+		"PRIMARY KEY (id)"+
+		") ENGINE=InnoDB")
+	testutils.RunSQL(t, "INSERT INTO `order` (v) VALUES ('a'),('b'),('c'),('d'),('e')")
+	t.Cleanup(func() { testutils.RunSQL(t, "DROP TABLE IF EXISTS `order`") })
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := NewTableInfo(db, "test", "order")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Equal(t, "`order`", t1.QuotedTableName)
+	require.True(t, t1.KeyIsAutoInc)
+
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	opt, ok := chunker.(*chunkerOptimistic)
+	require.True(t, ok)
+	require.NoError(t, opt.Open())
+
+	// Walk the chunker — this exercises Next() on the standard path.
+	for {
+		_, err := opt.Next()
+		if err != nil {
+			require.ErrorIs(t, err, ErrTableIsRead)
+			break
+		}
+	}
+
+	// Also exercise the prefetch path explicitly.
+	opt.chunkPrefetchingEnabled = true
+	opt.chunkPtr = Datum{Val: int64(0), Tp: signedType}
+	opt.finalChunkSent = false
+	_, err = opt.nextChunkByPrefetching()
+	require.NoError(t, err)
+
+	require.NoError(t, opt.Close())
 }
