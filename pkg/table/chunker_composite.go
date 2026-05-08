@@ -86,10 +86,11 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 	// First assume it's the first chunk, we can overwrite this
 	// just below.
 	quotedChunkKeys := QuoteColumns(t.chunkKeys)
+	quotedKeyName := QuoteColumns([]string{t.keyName})
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) %s ORDER BY %s LIMIT 1 OFFSET %d",
 		quotedChunkKeys,
 		t.Ti.QuotedTableName,
-		t.keyName,
+		quotedKeyName,
 		t.additionalConditionsSQL(false),
 		quotedChunkKeys,
 		t.chunkSize,
@@ -99,7 +100,7 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 		query = fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) WHERE %s %s ORDER BY %s LIMIT 1 OFFSET %d",
 			quotedChunkKeys,
 			t.Ti.QuotedTableName,
-			t.keyName,
+			quotedKeyName,
 			expandRowConstructorComparison(t.chunkKeys, OpGreaterThan, t.chunkPtrs),
 			t.additionalConditionsSQL(true),
 			quotedChunkKeys, // order by

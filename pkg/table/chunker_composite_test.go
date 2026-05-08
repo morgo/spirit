@@ -1440,16 +1440,20 @@ func TestCompositeChunkerCheckpointHighPtr(t *testing.T) {
 }
 
 // TestCompositeChunkerReservedWordPK is a regression test for issue #828.
-// The chunker_composite prefetch query joined chunkKeys without backticks,
-// which produced a SQL syntax error when the primary key contained columns
-// whose names are MySQL reserved words (e.g. `key`, `value`).
+// The chunker_composite prefetch query joined chunkKeys without backticks
+// and passed t.keyName into FORCE INDEX(...) unquoted, which produced a
+// SQL syntax error when either the PK columns or the index name was a
+// MySQL reserved word (e.g. `key`, `value`).
 func TestCompositeChunkerReservedWordPK(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS reserved_word_pk_t1")
+	// Note: the secondary index is intentionally named `key` to also cover
+	// the FORCE INDEX (reserved-word) code path.
 	testutils.RunSQL(t, "CREATE TABLE reserved_word_pk_t1 ("+
 		"osm_id BIGINT NOT NULL, "+
 		"`key` VARCHAR(64) NOT NULL, "+
 		"`value` TEXT, "+
-		"PRIMARY KEY (osm_id, `key`)"+
+		"PRIMARY KEY (osm_id, `key`), "+
+		"KEY `key` (`key`)"+
 		") ENGINE=InnoDB")
 	testutils.RunSQL(t, "INSERT INTO reserved_word_pk_t1 (osm_id, `key`, `value`) "+
 		"VALUES (1,'amenity','restaurant'),(2,'amenity','cafe'),(3,'shop','grocery')")
@@ -1462,14 +1466,13 @@ func TestCompositeChunkerReservedWordPK(t *testing.T) {
 	require.NoError(t, t1.SetInfo(t.Context()))
 	require.Equal(t, []string{"osm_id", "key"}, t1.KeyColumns)
 
+	// Walk the PRIMARY chunker to completion. Before the fix, the very first
+	// call to Next() failed with: Error 1064 (42000) ... near 'key,value FROM
+	// ... ORDER BY osm_id,key' because the column list was unquoted.
 	chunker, err := NewChunker(t1, ChunkerConfig{})
 	require.NoError(t, err)
 	require.IsType(t, &chunkerComposite{}, chunker)
 	require.NoError(t, chunker.Open())
-
-	// Walk the chunker to completion. Before the fix, the very first call to
-	// Next() failed with: Error 1064 (42000) ... near 'key,value FROM ...
-	// ORDER BY osm_id,key' because the column list was unquoted.
 	for {
 		chunk, err := chunker.Next()
 		if err != nil {
@@ -1479,4 +1482,24 @@ func TestCompositeChunkerReservedWordPK(t *testing.T) {
 		require.NotNil(t, chunk)
 	}
 	require.NoError(t, chunker.Close())
+
+	// Now exercise the FORCE INDEX (reserved-word) code path by chunking on
+	// the secondary index named `key`. Before the fix, FORCE INDEX (key)
+	// failed because the index name was not quoted.
+	chunker2 := &chunkerComposite{
+		Ti:            t1,
+		ChunkerTarget: 100 * time.Millisecond,
+		logger:        slog.Default(),
+	}
+	require.NoError(t, chunker2.SetKey("key", ""))
+	require.NoError(t, chunker2.Open())
+	for {
+		chunk, err := chunker2.Next()
+		if err != nil {
+			require.ErrorIs(t, err, ErrTableIsRead)
+			break
+		}
+		require.NotNil(t, chunk)
+	}
+	require.NoError(t, chunker2.Close())
 }
