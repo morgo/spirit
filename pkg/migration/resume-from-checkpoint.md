@@ -11,12 +11,12 @@ Spirit writes a checkpoint every 50 seconds to a table named `_<table>_chkpnt` i
 ```sql
 CREATE TABLE _tablename_chkpnt (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    copier_watermark TEXT,             -- where row copy left off (JSON)
-    checksum_watermark TEXT,           -- where checksum left off (JSON, if applicable)
-    binlog_name VARCHAR(255),          -- e.g., "mysql-bin.000042"
-    binlog_pos INT,                    -- e.g., 4567
-    statement TEXT,                    -- the DDL statement being executed
-    original_table_name VARCHAR(64),   -- full untruncated table name (single-table only)
+    copier_watermark TEXT,                                  -- where row copy left off (JSON)
+    checksum_watermark TEXT,                                -- where checksum left off (JSON, if applicable)
+    binlog_name VARCHAR(255),                               -- e.g., "mysql-bin.000042"
+    binlog_pos INT,                                         -- e.g., 4567
+    statement TEXT,                                         -- the DDL statement being executed
+    original_table_name VARCHAR(64) NOT NULL DEFAULT '',    -- full untruncated table name (single-table only; '' for multi-table)
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```

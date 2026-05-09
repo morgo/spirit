@@ -12,8 +12,10 @@ const (
 
 // AuxTableName builds a deterministic auxiliary table name for the given
 // original table name and suffix (e.g. "_chkpnt", "_new", "_old"). The
-// returned name is `_<table><suffix>`. If the result would exceed MySQL's
-// 64-character limit, the original table name portion is truncated.
+// returned name is `_<table><suffix>`, with the table-name portion
+// deterministically truncated when needed and the result hard-capped at
+// MySQL's 64-character identifier limit (a defensive guard against an
+// abusively long suffix; in practice callers pass small suffixes).
 //
 // Truncation is deterministic: the same (tableName, suffix) input always
 // produces the same output. Two distinct table names that share a long
@@ -21,7 +23,11 @@ const (
 // out-of-band (e.g. in the checkpoint) so collisions can be detected.
 func AuxTableName(tableName, suffix string) string {
 	truncated := TruncateTableName(tableName, 1+len(suffix))
-	return "_" + truncated + suffix
+	result := "_" + truncated + suffix
+	if len(result) > MaxTableNameLength {
+		result = result[:MaxTableNameLength]
+	}
+	return result
 }
 
 // CheckpointTableName returns the auxiliary checkpoint table name for the

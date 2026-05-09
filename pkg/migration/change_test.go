@@ -324,7 +324,7 @@ func TestOldTableNameTruncationCollision(t *testing.T) {
 	// same _old_<timestamp> name once the suffix is truncated away. This is
 	// the documented trade-off of deterministic truncation. Resume safety
 	// for the checkpoint table is provided by the original_table_name column
-	// (see TestResumeFromDifferentTableCheckpoint); the old table is named
+	// (see TestResumeRejectsCheckpointFromDifferentTable); the old table is named
 	// only for human archaeology when SkipDropAfterCutover is set.
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
 	prefix := strings.Repeat("x", 50)

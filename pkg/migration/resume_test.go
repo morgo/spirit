@@ -1173,3 +1173,41 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 		"resume should be skipped when checkpoint records a different original table name")
 	require.NoError(t, m2.Close())
 }
+
+// TestResumeFromCheckpointStrictCollision asserts that under --strict, a
+// truncation-collision (different original_table_name) surfaces as
+// ErrCheckpointCollision rather than silently starting a fresh migration.
+func TestResumeFromCheckpointStrictCollision(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "strictcollision", `CREATE TABLE strictcollision (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	tt.SeedRows(t, "INSERT INTO strictcollision (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
+
+	m := NewTestRunner(t, "strictcollision", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.Run(ctx)
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
+
+	testutils.RunSQL(t, `UPDATE _strictcollision_chkpnt SET original_table_name = 'someothertable'`)
+
+	m2 := NewTestRunner(t, "strictcollision", "ENGINE=InnoDB",
+		WithThreads(2),
+		WithStrict())
+	err := m2.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorIs(t, err, status.ErrCheckpointCollision)
+	require.NoError(t, m2.Close())
+}

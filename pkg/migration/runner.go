@@ -793,9 +793,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		// changes would be lost in the replication gap.
 		// A checkpoint that is too old means replaying binlogs would be
 		// slower than starting fresh.
+		// A truncation collision means the checkpoint belongs to a
+		// different long table that shares our truncated prefix.
 		// In all cases, strict mode surfaces the error rather than
 		// silently restarting from scratch.
-		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound) || errors.Is(err, status.ErrCheckpointTooOld)) {
+		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound) || errors.Is(err, status.ErrCheckpointTooOld) || errors.Is(err, status.ErrCheckpointCollision)) {
 			return err
 		}
 
@@ -1026,7 +1028,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Cross-check the stored original table name to guard against resuming
 	// from another table's checkpoint.
 	if len(r.changes) == 1 && originalTableName != "" && originalTableName != r.changes[0].table.TableName {
-		return fmt.Errorf("checkpoint belongs to a different table %q, refusing to resume", originalTableName)
+		return fmt.Errorf("%w: stored=%q expected=%q", status.ErrCheckpointCollision, originalTableName, r.changes[0].table.TableName)
 	}
 
 	// Validate the checkpoint's binlog position is still available on the server

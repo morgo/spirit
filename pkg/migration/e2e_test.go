@@ -193,7 +193,7 @@ func TestTableLength(t *testing.T) {
 	var leftover int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
 		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME LIKE ?`, "\\_"+tableName[:50]+"%").Scan(&leftover))
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME LIKE ? ESCAPE '|'`, "|_"+tableName[:50]+"%").Scan(&leftover))
 	require.Equal(t, 0, leftover, "no auxiliary _new/_chkpnt/_old tables should remain")
 	require.NoError(t, m.Close())
 }

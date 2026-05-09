@@ -35,6 +35,12 @@ func TestAuxTableName(t *testing.T) {
 
 	// Determinism: same input → same output.
 	require.Equal(t, AuxTableName(name64, "_chkpnt"), AuxTableName(name64, "_chkpnt"))
+
+	// Defensive cap: even an abusively long suffix must not produce a
+	// result longer than MaxTableNameLength.
+	hugeSuffix := strings.Repeat("z", 200)
+	out := AuxTableName("t", hugeSuffix)
+	require.LessOrEqual(t, len(out), MaxTableNameLength)
 }
 
 func TestAuxTableNameTypedHelpers(t *testing.T) {
