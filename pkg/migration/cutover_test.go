@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -551,12 +552,12 @@ func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB, tableName string) 
 // --- Cutover lifecycle tests (extracted from runner_test.go) ---
 
 // TestSkipDropAfterCutoverLongTableName tests that SkipDropAfterCutover works
-// with table names at the maximum manageable length (56 chars), truncating the
-// old table name to fit within MySQL's 64-char limit.
+// with table names at MySQL's 64-character limit. The old table name is
+// produced via deterministic truncation so it always fits within 64 chars.
 func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
 	t.Parallel()
-	tableName := "a_fifty_six_character_table_name_that_fits_normal_limits"
-	require.Equal(t, 56, len(tableName))
+	tableName := "tbl_" + strings.Repeat("a", 60)
+	require.Equal(t, 64, len(tableName))
 
 	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
 		pk int UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -573,7 +574,7 @@ func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
 
 	var tableCount int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
-		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, oldName)).Scan(&tableCount))
 	require.Equal(t, 1, tableCount, "old table should exist after SkipDropAfterCutover")
 	// Clean up the timestamped _old table that SkipDropAfterCutover leaves behind.

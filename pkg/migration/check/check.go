@@ -24,7 +24,6 @@ const (
 	ScopeCutover     ScopeFlag = 1 << 3
 	ScopePostCutover ScopeFlag = 1 << 4
 	ScopeTesting     ScopeFlag = 1 << 5
-	ScopeStatement   ScopeFlag = 1 << 6 // checks that only require Statement (no DB/Table)
 )
 
 type Resources struct {

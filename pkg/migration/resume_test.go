@@ -1132,3 +1132,44 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	require.True(t, m2.usedResumeFromCheckpoint) // Should have resumed because checkpoint is fresh
 	require.NoError(t, m2.Close())
 }
+
+// TestResumeRejectsCheckpointFromDifferentTable verifies that the
+// original_table_name column is checked when resuming. If a checkpoint row
+// records a different table name than the one we're migrating, resume must
+// refuse to use it. This protects against the rare collision where two
+// distinct long table names truncate to the same checkpoint table name.
+func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chkptmismatch", `CREATE TABLE chkptmismatch (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	tt.SeedRows(t, "INSERT INTO chkptmismatch (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
+
+	// First run: produce a real checkpoint via normal flow.
+	m := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.Run(ctx)
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
+
+	// Tamper: pretend the checkpoint belongs to a different table.
+	testutils.RunSQL(t, `UPDATE _chkptmismatch_chkpnt SET original_table_name = 'someothertable'`)
+
+	// Resume must refuse and fall back to a fresh migration.
+	m2 := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB", WithThreads(2))
+	require.NoError(t, m2.Run(t.Context()))
+	require.False(t, m2.usedResumeFromCheckpoint,
+		"resume should be skipped when checkpoint records a different original table name")
+	require.NoError(t, m2.Close())
+}
