@@ -2,14 +2,8 @@ name: MySQL 8.0.45 (with replicas) /w docker-compose
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,6 +11,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Detect non-docs changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+
       - name: Test
+        if: steps.filter.outputs.code == 'true'
         run: docker compose -f replication-ci.yml up mysql mysql_replica test --abort-on-container-exit
         working-directory: compose/replication-tls
+
+      - name: Skip — documentation-only change
+        if: steps.filter.outputs.code != 'true'
+        run: echo "Documentation-only change detected; skipping tests."
