@@ -82,8 +82,8 @@ Practical implications:
 
 - **Upgrading Spirit mid-migration** (older binary → newer binary). The newer binary's `Scan` expects a different number of columns than the on-disk checkpoint provides, so the read fails.
 - **Rolling back Spirit mid-migration** (newer binary → older binary). Same failure mode in reverse.
-- **Effect without `--strict`:** Spirit logs the read error and falls through to `newMigration()`, restarting the copy from scratch. All checkpoint progress is lost silently.
-- **Effect with `--strict`:** the failure is a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error rather than one of the typed `status.Err…` values. It does not currently surface as a distinct strict-mode error class.
+- **Effect in both `--strict` and non-strict mode:** the read returns a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error. This error is not one of the typed `status.Err…` values that strict mode promotes (`ErrMismatchedAlter`, `ErrBinlogNotFound`, `ErrCheckpointTooOld`), so Spirit logs the error and falls through to `newMigration()` regardless of strict mode. The copy restarts from scratch and all checkpoint progress is lost silently.
+- **Operator implication:** do **not** rely on `--strict` alerting to catch a Spirit upgrade or rollback. Strict mode does not currently distinguish a cross-version checkpoint schema mismatch from a healthy fresh start.
 
 Operational guidance:
 
