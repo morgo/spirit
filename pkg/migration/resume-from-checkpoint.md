@@ -73,3 +73,22 @@ With `Strict: true`, Spirit returns a hard error for two specific resume failure
 Both errors work with `errors.Is()`, letting callers handle each case differently. See [strict](../docs/migrate.md#strict) for more details.
 
 Other resume failures (missing shadow table, corrupt checkpoint data) still fall through to `newMigration()` in both modes, since these typically indicate there was nothing valid to resume.
+
+## Cross-version compatibility
+
+Checkpoint tables are version-specific. Spirit deliberately uses `SELECT *` when reading the checkpoint, so any change to the checkpoint schema (e.g. columns added, removed, or reordered in a newer release) will cause the read to fail. This is by design — Spirit does not attempt to migrate or backfill checkpoint data across versions.
+
+Practical implications:
+
+- **Upgrading Spirit mid-migration** (older binary → newer binary). The newer binary's `Scan` expects a different number of columns than the on-disk checkpoint provides, so the read fails.
+- **Rolling back Spirit mid-migration** (newer binary → older binary). Same failure mode in reverse.
+- **Effect without `--strict`:** Spirit logs the read error and falls through to `newMigration()`, restarting the copy from scratch. All checkpoint progress is lost silently.
+- **Effect with `--strict`:** the failure is a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error rather than one of the typed `status.Err…` values. It does not currently surface as a distinct strict-mode error class.
+
+Operational guidance:
+
+- Prefer to finish in-flight migrations on the same Spirit version they were started with.
+- If you must upgrade or roll back mid-migration, expect the copy to restart from zero. Plan binlog retention and operational windows accordingly.
+- Treat any Spirit version change as equivalent to a `binlog_expire_logs_seconds` event for the purposes of capacity planning.
+
+This is an intentional safety boundary: silently reading a checkpoint with a different schema risks misinterpreting fields and corrupting the migration. We prefer to lose progress loudly than to corrupt data silently.
