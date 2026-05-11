@@ -6,16 +6,18 @@ As noted in the [threads](../docs/migrate.md#threads) and [target-chunk-time](..
 
 ## How checkpointing works
 
-Spirit writes a checkpoint every 50 seconds to a table named `_<table>_chkpnt` in the same database as the table being migrated:
+Spirit writes a checkpoint every 50 seconds to a table named `_<table>_chkpnt` in the same database as the table being migrated. If the original table name is long enough that `_<table>_chkpnt` would exceed MySQL's 64-character identifier limit, the table-name portion is deterministically truncated; the full original name is recorded in the `original_table_name` column so resume can detect collisions.
 
 ```sql
 CREATE TABLE _tablename_chkpnt (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    copier_watermark TEXT,      -- where row copy left off (JSON)
-    checksum_watermark TEXT,    -- where checksum left off (JSON, if applicable)
-    binlog_name VARCHAR(255),   -- e.g., "mysql-bin.000042"
-    binlog_pos INT,             -- e.g., 4567
-    statement TEXT              -- the DDL statement being executed
+    copier_watermark TEXT,                                  -- where row copy left off (JSON)
+    checksum_watermark TEXT,                                -- where checksum left off (JSON, if applicable)
+    binlog_name VARCHAR(255),                               -- e.g., "mysql-bin.000042"
+    binlog_pos INT,                                         -- e.g., 4567
+    statement TEXT,                                         -- the DDL statement being executed
+    original_table_name VARCHAR(64) NOT NULL DEFAULT '',    -- full untruncated table name (single-table only; '' for multi-table)
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -26,11 +28,12 @@ The checkpoint captures everything needed to resume: where the copier was, the b
 When a new Runner starts (`Runner.Run()` → `setup()`), it always attempts `resumeFromCheckpoint()` first. This performs several validation steps before committing to the resume path:
 
 1. **Check `_<table>_new` exists** — if the shadow table is gone, there's nothing to resume.
-2. **Read checkpoint table** — fetch the saved watermarks, binlog position, and statement.
+2. **Read checkpoint table** — fetch the saved watermarks, binlog position, statement, and `original_table_name`.
 3. **Validate DDL statement matches** — the checkpoint must be for the same alter. In `--strict` mode, a mismatch is a hard error. In non-strict mode, Spirit discards the checkpoint and starts fresh.
-4. **Validate binlog file still exists** — queries `SHOW BINARY LOGS` to verify the checkpoint's binlog file hasn't been purged. If it has, resume is not possible and Spirit falls back to `newMigration()`.
-5. **Set up copier, checker, and replication client** — create the replication client and add subscriptions for each table.
-6. **Start binlog streaming** — `replClient.Run()` begins streaming from the saved position.
+4. **Validate `original_table_name` matches** (single-table mode) — guards against the rare collision where two long table names truncate to the same checkpoint table name. A mismatch causes Spirit to discard the checkpoint and start fresh.
+5. **Validate binlog file still exists** — queries `SHOW BINARY LOGS` to verify the checkpoint's binlog file hasn't been purged. If it has, resume is not possible and Spirit falls back to `newMigration()`.
+6. **Set up copier, checker, and replication client** — create the replication client and add subscriptions for each table.
+7. **Start binlog streaming** — `replClient.Run()` begins streaming from the saved position.
 
 If any step fails (and strict mode is not enabled), Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch. This means resume is best-effort — Spirit will always make forward progress even if the checkpoint is unusable.
 
@@ -73,3 +76,22 @@ With `Strict: true`, Spirit returns a hard error for two specific resume failure
 Both errors work with `errors.Is()`, letting callers handle each case differently. See [strict](../docs/migrate.md#strict) for more details.
 
 Other resume failures (missing shadow table, corrupt checkpoint data) still fall through to `newMigration()` in both modes, since these typically indicate there was nothing valid to resume.
+
+## Cross-version compatibility
+
+Checkpoint tables are version-specific. Spirit deliberately uses `SELECT *` when reading the checkpoint, so any change to the checkpoint schema (e.g. columns added, removed, or reordered in a newer release) will cause the read to fail. This is by design — Spirit does not attempt to migrate or backfill checkpoint data across versions.
+
+Practical implications:
+
+- **Upgrading Spirit mid-migration** (older binary → newer binary). The newer binary's `Scan` expects a different number of columns than the on-disk checkpoint provides, so the read fails.
+- **Rolling back Spirit mid-migration** (newer binary → older binary). Same failure mode in reverse.
+- **Effect in both `--strict` and non-strict mode:** the read returns a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error. This error is not one of the typed `status.Err…` values that strict mode promotes (`ErrMismatchedAlter`, `ErrBinlogNotFound`, `ErrCheckpointTooOld`), so Spirit logs the error and falls through to `newMigration()` regardless of strict mode. The copy restarts from scratch and all checkpoint progress is lost silently.
+- **Operator implication:** do **not** rely on `--strict` alerting to catch a Spirit upgrade or rollback. Strict mode does not currently distinguish a cross-version checkpoint schema mismatch from a healthy fresh start.
+
+Operational guidance:
+
+- Prefer to finish in-flight migrations on the same Spirit version they were started with.
+- If you must upgrade or roll back mid-migration, expect the copy to restart from zero. Plan binlog retention and operational windows accordingly.
+- Treat any Spirit version change as equivalent to a `binlog_expire_logs_seconds` event for the purposes of capacity planning.
+
+This is an intentional safety boundary: silently reading a checkpoint with a different schema risks misinterpreting fields and corrupting the migration. We prefer to lose progress loudly than to corrupt data silently.

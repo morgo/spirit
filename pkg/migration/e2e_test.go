@@ -174,60 +174,28 @@ func TestOnline(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestTableLength tests that Spirit rejects table names exceeding 56 characters.
+// TestTableLength exercises Spirit on a table name that is right at MySQL's
+// 64-character limit. Auxiliary names (_new, _chkpnt, _old) are produced by
+// deterministic truncation so the migration succeeds end-to-end.
 func TestTableLength(t *testing.T) {
 	t.Parallel()
-	testutils.NewTestTable(t, "thisisareallylongtablenamethisisareallylongtablename60charac",
-		`CREATE TABLE thisisareallylongtablenamethisisareallylongtablename60charac (
+	tableName := strings.Repeat("a", utils.MaxTableNameLength)
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
 		PRIMARY KEY (id)
-	)`)
+	)`, tableName))
 
-	m := NewTestRunner(t, "thisisareallylongtablenamethisisareallylongtablename60charac", "ENGINE=InnoDB")
-	err := m.Run(t.Context())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "table name must be less than 56 characters")
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB")
+	require.NoError(t, m.Run(t.Context()))
+
+	// All auxiliary tables should have been cleaned up; only the base table remains.
+	var leftover int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME LIKE ? ESCAPE '|'`, "|_"+tableName[:50]+"%").Scan(&leftover))
+	require.Equal(t, 0, leftover, "no auxiliary _new/_chkpnt/_old tables should remain")
 	require.NoError(t, m.Close())
-
-	// Run again — same error (tests that first run didn't leave artifacts that block second run)
-	m = NewTestRunner(t, "thisisareallylongtablenamethisisareallylongtablename60charac", "ENGINE=InnoDB")
-	err = m.Run(t.Context())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "table name must be less than 56 characters")
-	require.NoError(t, m.Close())
-}
-
-// TestCreateTableNameLength tests that CREATE TABLE statements with long names are rejected.
-func TestCreateTableNameLength(t *testing.T) {
-	t.Parallel()
-
-	// A CREATE TABLE with a table name exceeding Spirit's manageable limit (56 chars)
-	// should be rejected.
-	longName := strings.Repeat("z", 57)
-	require.Greater(t, len(longName), check.MaxMigratableTableNameLength)
-
-	m := NewTestMigration(t, WithStatement(fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL PRIMARY KEY)", longName)))
-	err := m.Run()
-	require.Error(t, err)
-	require.ErrorContains(t, err, fmt.Sprintf("exceeds the maximum length of %d characters that Spirit can manage", check.MaxMigratableTableNameLength))
-
-	// A CREATE TABLE with a table name at exactly the max manageable length (56 chars)
-	// should be allowed.
-	exactName := strings.Repeat("x", check.MaxMigratableTableNameLength)
-	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", exactName))
-	defer func() {
-		// Use background context — t.Context() is canceled during cleanup.
-		db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-		if err == nil {
-			_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", exactName))
-			_ = db.Close()
-		}
-	}()
-
-	m = NewTestMigration(t, WithStatement(fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL PRIMARY KEY)", exactName)))
-	err = m.Run()
-	require.NoError(t, err)
 }
 
 // TestAddUniqueIndexChecksumEnabled tests that adding a UNIQUE index on non-unique data
