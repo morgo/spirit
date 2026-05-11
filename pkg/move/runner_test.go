@@ -506,6 +506,13 @@ func testMoveWithVarcharPK(t *testing.T, forceEnableBufferedMap bool) {
 	// 4 writers doing INSERT / UPDATE / DELETE on VARCHAR PKs while the
 	// move runs. The FIFO queue must replay these in binlog order to land
 	// on the correct end state on the target.
+	//
+	// A short delay between iterations rate-limits the writers to ~400 ops/sec
+	// total. Without this, an uncapped tight loop generates binlog faster than
+	// the reader can drain it on slow CI runners — the source position
+	// outruns the buffered position indefinitely and Flush()'s BlockWait loop
+	// never converges below binlogTrivialThreshold, eventually tripping the
+	// 10-minute test timeout (issue #834).
 	for range 4 {
 		wg.Go(func() {
 			for {
@@ -519,6 +526,7 @@ func testMoveWithVarcharPK(t *testing.T, forceEnableBufferedMap bool) {
 				} else {
 					writeCount.Add(1)
 				}
+				time.Sleep(10 * time.Millisecond)
 			}
 		})
 	}
