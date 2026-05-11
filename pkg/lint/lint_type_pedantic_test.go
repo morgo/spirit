@@ -492,6 +492,103 @@ func TestTypePedantic_PostState_AlterChangeColumnRenameAndRetype(t *testing.T) {
 	require.Equal(t, "customer_id", *violations[0].Location.Column)
 }
 
+func TestTypePedantic_PostState_DropPrimaryKeyClearsInlineFlag(t *testing.T) {
+	// Bug from PR #836 review: DROP PRIMARY KEY was only scrubbing the
+	// Indexes slice, but inline `id BIGINT PRIMARY KEY` produces no entry
+	// there — GetIndexes() synthesizes it from col.PrimaryKey. Without
+	// clearing the flag, the column kept counting as indexed in post-state.
+	existing := parseTables(t,
+		`CREATE TABLE customers (customer_key BIGINT UNSIGNED PRIMARY KEY)`,
+		`CREATE TABLE orders (customer_key BIGINT UNSIGNED PRIMARY KEY)`,
+		`CREATE TABLE returns (customer_key INT PRIMARY KEY)`,
+	)
+	// Baseline: requireIndexed sees inline PKs → mismatch on returns is flagged.
+	require.Len(t, filterRule(newTypePedantic(t).Lint(existing, nil), "same_name"), 1)
+
+	// After dropping the PK on every table, none of the customer_key columns
+	// are indexed anymore — the same-name group should be silently skipped.
+	stmts, err := statement.New(`
+		ALTER TABLE customers DROP PRIMARY KEY;
+		ALTER TABLE orders DROP PRIMARY KEY;
+		ALTER TABLE returns DROP PRIMARY KEY;
+	`)
+	require.NoError(t, err)
+	require.Empty(t, filterRule(newTypePedantic(t).Lint(existing, stmts), "same_name"),
+		"DROP PRIMARY KEY should have cleared the inline PK flag")
+}
+
+func TestTypePedantic_PostState_DropIndexClearsInlineUnique(t *testing.T) {
+	// Parallel to the DROP PRIMARY KEY fix: an inline `col TYPE UNIQUE`
+	// produces an implicit index named after the column. DROP INDEX <col>
+	// must clear the inline Unique flag too, otherwise GetIndexes() keeps
+	// synthesizing the implicit index in post-state.
+	existing := parseTables(t,
+		`CREATE TABLE a (id BIGINT UNSIGNED PRIMARY KEY, email VARCHAR(255) UNIQUE)`,
+		`CREATE TABLE b (id BIGINT UNSIGNED PRIMARY KEY, email VARCHAR(255) UNIQUE)`,
+		`CREATE TABLE c (id BIGINT UNSIGNED PRIMARY KEY, email VARCHAR(500) UNIQUE)`,
+	)
+	require.Len(t, filterRule(newTypePedantic(t).Lint(existing, nil), "same_name"), 1,
+		"baseline: inline UNIQUE makes email indexed in all three tables")
+
+	stmts, err := statement.New(`
+		ALTER TABLE a DROP INDEX email;
+		ALTER TABLE b DROP INDEX email;
+		ALTER TABLE c DROP INDEX email;
+	`)
+	require.NoError(t, err)
+	require.Empty(t, filterRule(newTypePedantic(t).Lint(existing, stmts), "same_name"),
+		"DROP INDEX <colname> should clear the inline UNIQUE flag")
+}
+
+func TestTypePedantic_PostState_ModifyColumnPreservesPrimaryKey(t *testing.T) {
+	// MODIFY COLUMN retypes the column but doesn't drop the PRIMARY KEY.
+	// In our model the inline PK lives on col.PrimaryKey; replacing the
+	// column with a fresh parse from the spec would drop the flag unless
+	// we explicitly preserve it.
+	existing := parseTables(t,
+		`CREATE TABLE customers (id BIGINT UNSIGNED PRIMARY KEY)`,
+		`CREATE TABLE orders (id INT PRIMARY KEY)`,
+	)
+	// Baseline: orders.id (INT) mismatches customers.id (BIGINT UNSIGNED) on
+	// the inferred-FK rule via order_id-style lookup wouldn't apply here, but
+	// the same-name rule on `id` is silenced by default ignoreColumns. So we
+	// look at the rule via a follow-up MODIFY: after retyping orders.id to
+	// BIGINT UNSIGNED, it should still register as indexed (PK preserved).
+	stmts, err := statement.New(`ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL`)
+	require.NoError(t, err)
+
+	// Configure ignoreColumns="" so `id` is not skipped, letting us observe
+	// that the post-state PK is preserved.
+	l := &TypePedanticLinter{}
+	require.NoError(t, l.Configure(map[string]string{"ignoreColumns": ""}))
+	violations := filterRule(l.Lint(existing, stmts), "same_name")
+	require.Empty(t, violations, "post-MODIFY orders.id should match customers.id and still be indexed")
+}
+
+func TestTypePedantic_PostState_ChangeColumnPreservesUnique(t *testing.T) {
+	// CHANGE COLUMN renames + retypes; inline UNIQUE on the old column
+	// should carry over so the post-state still considers it indexed.
+	existing := parseTables(t,
+		`CREATE TABLE a (id BIGINT UNSIGNED PRIMARY KEY, email VARCHAR(255) UNIQUE)`,
+		`CREATE TABLE b (id BIGINT UNSIGNED PRIMARY KEY, email VARCHAR(255) UNIQUE)`,
+		`CREATE TABLE c (id BIGINT UNSIGNED PRIMARY KEY, email VARCHAR(255) UNIQUE)`,
+	)
+	// CHANGE COLUMN renames email → contact_email and bumps the length.
+	stmts, err := statement.New(`ALTER TABLE c CHANGE COLUMN email contact_email VARCHAR(500) NOT NULL`)
+	require.NoError(t, err)
+
+	// `contact_email` only exists in c, so no same-name group there.
+	// `email` exists in a and b only after the CHANGE — they still agree.
+	require.Empty(t, filterRule(newTypePedantic(t).Lint(existing, stmts), "same_name"))
+
+	// Now make c's renamed column mismatch a/b on a still-shared name:
+	stmts, err = statement.New(`ALTER TABLE c MODIFY COLUMN email VARCHAR(1000) NOT NULL`)
+	require.NoError(t, err)
+	violations := filterRule(newTypePedantic(t).Lint(existing, stmts), "same_name")
+	require.Len(t, violations, 1, "post-MODIFY c.email should still be indexed via preserved UNIQUE flag")
+	require.Equal(t, "c", violations[0].Location.Table)
+}
+
 func TestTypePedantic_Configure_PartialDoesNotResetOtherFields(t *testing.T) {
 	// Calling Configure twice with disjoint keys should compose: the second
 	// call shouldn't leave state from a missing key undefined.

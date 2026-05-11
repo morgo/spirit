@@ -206,10 +206,15 @@ func (l *TypePedanticLinter) buildPostState(existing []*statement.CreateTable, c
 
 // tpApplyAlter returns a shallow clone of t with the relevant subset of alter
 // specs applied. The original table is not mutated.
+//
+// Note: GetIndexes() synthesizes PRIMARY KEY / UNIQUE entries from inline
+// column-level flags (col.PrimaryKey, col.Unique), so the drop paths below
+// must clear those flags in addition to scrubbing cloned.Indexes — otherwise
+// the synthesis would resurrect the dropped index in the post-state.
 func tpApplyAlter(t *statement.CreateTable, at *ast.AlterTableStmt) *statement.CreateTable {
 	cloned := *t
-	cloned.Columns = append([]statement.Column(nil), t.Columns...)
-	cloned.Indexes = append([]statement.Index(nil), t.Indexes...)
+	cloned.Columns = append(statement.Columns(nil), t.Columns...)
+	cloned.Indexes = append(statement.Indexes(nil), t.Indexes...)
 
 	for _, spec := range at.Specs {
 		switch spec.Tp { //nolint:exhaustive
@@ -237,11 +242,26 @@ func tpApplyAlter(t *statement.CreateTable, at *ast.AlterTableStmt) *statement.C
 			}
 			if idx, ok := tpIndexFromConstraint(spec.Constraint); ok {
 				cloned.Indexes = append(cloned.Indexes, idx)
+				// An inline-flag column whose constraint we just promoted to
+				// the table-level Indexes list could be double-counted. The
+				// duplication is harmless for the indexed-column set (a set,
+				// not a multiset), so we don't dedupe here.
 			}
 		case ast.AlterTableDropIndex:
+			before := len(cloned.Indexes)
 			cloned.Indexes = tpRemoveIndex(cloned.Indexes, spec.Name, "")
+			if len(cloned.Indexes) == before {
+				// Nothing removed at the table level — this may target an
+				// implicit index created by an inline column-level UNIQUE,
+				// whose server-assigned index name is the column's name.
+				cloned.Columns = tpClearInlineUniqueByName(cloned.Columns, spec.Name)
+			}
 		case ast.AlterTableDropPrimaryKey:
 			cloned.Indexes = tpRemoveIndex(cloned.Indexes, "", "PRIMARY KEY")
+			// Inline `col TYPE PRIMARY KEY` never appears in t.Indexes; it
+			// only surfaces via GetIndexes() synthesizing from this flag.
+			// Clearing it here makes the post-state honor DROP PRIMARY KEY.
+			cloned.Columns = tpClearAllInlinePrimaryKey(cloned.Columns)
 		}
 	}
 	return &cloned
@@ -266,7 +286,7 @@ func tpColumnFromAst(colDef *ast.ColumnDef) statement.Column {
 	return col
 }
 
-func tpRemoveColumn(cols []statement.Column, name string) []statement.Column {
+func tpRemoveColumn(cols statement.Columns, name string) statement.Columns {
 	out := cols[:0]
 	for _, c := range cols {
 		if !strings.EqualFold(c.Name, name) {
@@ -276,14 +296,52 @@ func tpRemoveColumn(cols []statement.Column, name string) []statement.Column {
 	return out
 }
 
-func tpReplaceColumn(cols []statement.Column, oldName string, newCol statement.Column) []statement.Column {
+// tpReplaceColumn substitutes newCol in place of the column named oldName,
+// preserving any inline PRIMARY KEY / UNIQUE flags from the old definition.
+// MySQL semantics: MODIFY / CHANGE COLUMN re-types a column but does not drop
+// existing constraints on it; those are removed only via DROP PRIMARY KEY /
+// DROP INDEX. The new column def from the parser doesn't carry those over.
+func tpReplaceColumn(cols statement.Columns, oldName string, newCol statement.Column) statement.Columns {
 	for i, c := range cols {
 		if strings.EqualFold(c.Name, oldName) {
+			if c.PrimaryKey && !newCol.PrimaryKey {
+				newCol.PrimaryKey = true
+			}
+			if c.Unique && !newCol.Unique {
+				newCol.Unique = true
+			}
 			cols[i] = newCol
 			return cols
 		}
 	}
 	return append(cols, newCol)
+}
+
+// tpClearAllInlinePrimaryKey clears the inline PrimaryKey flag from every
+// column. Used by DROP PRIMARY KEY since inline `col TYPE PRIMARY KEY` only
+// shows up via GetIndexes() synthesizing from this flag.
+func tpClearAllInlinePrimaryKey(cols statement.Columns) statement.Columns {
+	for i := range cols {
+		cols[i].PrimaryKey = false
+	}
+	return cols
+}
+
+// tpClearInlineUniqueByName clears col.Unique on the column whose name matches
+// the dropped index name. MySQL names the implicit index for an inline
+// `col TYPE UNIQUE` after the column itself, so DROP INDEX <colname> can
+// target it. We only run this when no table-level index of that name existed.
+func tpClearInlineUniqueByName(cols statement.Columns, indexName string) statement.Columns {
+	if indexName == "" {
+		return cols
+	}
+	for i := range cols {
+		if strings.EqualFold(cols[i].Name, indexName) && cols[i].Unique {
+			cols[i].Unique = false
+			break
+		}
+	}
+	return cols
 }
 
 func tpIndexFromConstraint(c *ast.Constraint) (statement.Index, bool) {
@@ -311,7 +369,7 @@ func tpIndexFromConstraint(c *ast.Constraint) (statement.Index, bool) {
 	}, true
 }
 
-func tpRemoveIndex(indexes []statement.Index, name, typeMatch string) []statement.Index {
+func tpRemoveIndex(indexes statement.Indexes, name, typeMatch string) statement.Indexes {
 	out := indexes[:0]
 	for _, idx := range indexes {
 		if name != "" && strings.EqualFold(idx.Name, name) {
