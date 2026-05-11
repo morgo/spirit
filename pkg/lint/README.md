@@ -168,7 +168,7 @@ type Location struct {
 
 ## Built-in Linters
 
-The `lint` package includes 15 built-in linters covering schema design, data types, and safety best practices.
+The `lint` package includes 16 built-in linters covering schema design, data types, and safety best practices.
 
 ### allow_charset
 
@@ -499,6 +499,59 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ---
 
+### type_pedantic
+
+**Severity**: Warning (same-name rule), Error (inferred FK rule) — both configurable  
+**Configurable**: Yes  
+**Checks**: CREATE TABLE, ALTER TABLE (ADD/MODIFY/CHANGE/DROP COLUMN, ADD/DROP INDEX)
+
+Cross-table column type consistency checks. Unlike most linters in this package, `type_pedantic` looks at the entire schema rather than a single table — it needs the full set of `existingTables` to spot inconsistencies. The linter operates on a **post-state view** of the schema: existing tables with pending CREATE TABLE and ALTER TABLE changes applied, so it's useful both for whole-schema audits (`spirit lint --source-dir`) and for ALTER-driven migration flows. Two rules are bundled:
+
+**Rule 1 — Same-name columns must match types.** Columns sharing a name across tables (e.g. `customer_id` in both `orders` and `returns`) should use the same MySQL type, including signedness and width. When one type clearly dominates the schema, the minority occurrences are flagged against that majority. When the top counts are tied (e.g. 2 BIGINT vs 2 INT), every occurrence is flagged as "inconsistent" with the conflicting types listed — the linter doesn't silently pick a winner by alphabet. By default `id` is excluded, since `id` is intentionally typed differently across unrelated tables in many schemas — use the `primary_key` linter for PK type enforcement. By default Rule 1 also fires only when at least one table in the column-name group indexes the column (see `requireIndexed` below for the rationale).
+
+**Rule 2 — Inferred foreign keys must match the referenced `id` type.** A column named `{table}_id` is treated as an implicit foreign key to `{table}.id`. The linter tries the literal base name and English pluralizations: `base+s`, `base+es` for sibilant- and o-stems (so `address_id → addresses`, `process_id → processes`, `bus_id → buses`, `tomato_id → tomatoes`), and `base[:-1]+ies` for y-stems (so `category_id → categories`). Mismatches default to an Error because JOINs across mismatched types force implicit casts and prevent index use. `requireIndexed` does not gate this rule — the referenced `id` is always indexed. The suggestion advises growing the smaller side rather than shrinking the larger, since the underlying problem is often an undersized PK on the target.
+
+**Configuration Options:**
+
+- `checkSameName` (string `"true"`/`"false"`): Enable Rule 1. Default: `"true"`.
+- `checkInferredFK` (string `"true"`/`"false"`): Enable Rule 2. Default: `"true"`.
+- `requireIndexed` (string `"true"`/`"false"`): Restrict Rule 1 to column-name groups where at least one occurrence is indexed (any position in any index, including inline column-level `PRIMARY KEY`/`UNIQUE`). Default: `"true"`. **Why:** the real cost of a type mismatch is on JOINs and lookups, where mismatched types force implicit casts and prevent index use. On unindexed columns the schema isn't paying that cost in the first place, so flagging them is mostly false positives — incidental name collisions on scalars like `status`, `name`, or `value` that happen to share a name across unrelated tables.
+- `ignoreColumns` (string): Comma-separated column names (case-insensitive) excluded from **both** rules. Default: `"id"`.
+- `fkSeverity` (string `"error"`/`"warning"`/`"info"`): Severity for Rule 2 violations. Default: `"error"`.
+- `sameNameSeverity` (string `"error"`/`"warning"`/`"info"`): Severity for Rule 1 violations. Default: `"warning"`.
+
+**Examples:**
+
+```sql
+-- Rule 1: same-name mismatch
+CREATE TABLE orders   (id BIGINT UNSIGNED PRIMARY KEY, customer_id BIGINT UNSIGNED);
+CREATE TABLE invoices (id BIGINT UNSIGNED PRIMARY KEY, customer_id BIGINT UNSIGNED);
+CREATE TABLE returns  (id BIGINT UNSIGNED PRIMARY KEY, customer_id INT);
+-- ⚠️ returns.customer_id (INT) doesn't match the majority type (BIGINT UNSIGNED)
+
+-- Rule 2: inferred FK mismatch
+CREATE TABLE customers (id BIGINT UNSIGNED PRIMARY KEY);
+CREATE TABLE orders    (id BIGINT UNSIGNED PRIMARY KEY, customer_id INT UNSIGNED);
+-- ❌ orders.customer_id (INT UNSIGNED) doesn't match customers.id (BIGINT UNSIGNED)
+```
+
+**Configuration Example:**
+
+```go
+violations, err := lint.RunLinters(tables, stmts, lint.Config{
+    Settings: map[string]map[string]string{
+        "type_pedantic": {
+            "ignoreColumns":   "id,created_at,updated_at",
+            "fkSeverity":      "warning", // downgrade FK rule to a warning
+            "requireIndexed":  "false",   // also lint unindexed columns (noisier)
+            "checkSameName":   "false",   // disable Rule 1 entirely
+        },
+    },
+})
+```
+
+---
+
 ### reserved_words
 
 **Severity**: Warning  
@@ -655,6 +708,7 @@ Detects column renames via RENAME COLUMN or CHANGE COLUMN. Column renames cannot
 | `redundant_indexes` | ❌ | ✅ | ❌ | Warning |
 | `rename_column` | ❌ | ❌ | ✅ | Warning |
 | `reserved_words` | ❌ | ✅ | ✅ | Warning |
+| `type_pedantic` | ✅ | ✅ | ✅ | Warning / Error |
 | `unsafe` | ✅ | ❌ | ✅ | Warning |
 | `zero_date` | ❌ | ✅ | ✅ | Warning |
 
