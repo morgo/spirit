@@ -138,12 +138,6 @@ type Client struct {
 	logger     *slog.Logger
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
-	// forceEnableBufferedMap, when true, lets new subscriptions use LWW
-	// buffered-map dedup during the copy phase even for non-memory-comparable
-	// PKs (queue-mode kicks in only post-copy). Default false — see
-	// ClientConfig.ForceEnableBufferedMap.
-	forceEnableBufferedMap bool
-
 	// subscriptionSoftLimitBytes is the per-subscription byte cap passed
 	// to bufferedMap.softLimitBytes on construction. Zero disables the
 	// cap. See DefaultSubscriptionSoftLimitBytes.
@@ -180,7 +174,6 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 		ddlFilterTables:            toSet(config.DDLFilterTables),
 		serverID:                   config.ServerID,
 		applier:                    appl,
-		forceEnableBufferedMap:     config.ForceEnableBufferedMap,
 		subscriptionSoftLimitBytes: softLimit,
 	}
 }
@@ -211,14 +204,6 @@ type ClientConfig struct {
 	// tables in the same schema should not trigger cancellation.
 	// If empty (and DDLFilterSchema is set), all tables in the schema trigger cancellation.
 	DDLFilterTables []string
-
-	// ForceEnableBufferedMap, when true, lets subscriptions for non-memory-comparable
-	// PKs use the LWW buffered-map dedup during the copy phase, falling back to
-	// the FIFO queue only post-copy. Default false: those subscriptions run the
-	// FIFO queue full-time so it is exercised by integration tests like
-	// TestCutoverAtomicityWithConcurrentWrites. Memory-comparable PKs always use
-	// the buffered map regardless of this flag.
-	ForceEnableBufferedMap bool
 
 	// SubscriptionSoftLimitBytes overrides DefaultSubscriptionSoftLimitBytes
 	// for new subscriptions. Set to a negative value to disable the cap
@@ -286,15 +271,14 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		pkIsMemoryComparable = false
 	}
 	sub := &bufferedMap{
-		table:                  currentTable,
-		newTable:               newTable,
-		changes:                make(map[string]bufferedChange),
-		c:                      c,
-		chunker:                chunker,
-		applier:                c.applier,
-		pkIsMemoryComparable:   pkIsMemoryComparable,
-		forceEnableBufferedMap: c.forceEnableBufferedMap,
-		softLimitBytes:         c.subscriptionSoftLimitBytes,
+		table:                currentTable,
+		newTable:             newTable,
+		changes:              make(map[string]bufferedChange),
+		c:                    c,
+		chunker:              chunker,
+		applier:              c.applier,
+		pkIsMemoryComparable: pkIsMemoryComparable,
+		softLimitBytes:       c.subscriptionSoftLimitBytes,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	c.subscriptions[subKey] = sub

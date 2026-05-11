@@ -55,20 +55,6 @@ type Migration struct {
 	// using INSERT IGNORE .. SELECT. This is also required for cross-server moves.
 	Buffered bool `name:"buffered" help:"Use the buffered copier based on the lock-free DBLog algorithm" optional:"" default:"false"`
 
-	// ForceEnableBufferedMap controls whether the LWW buffered-map mode of the
-	// replication subscription is used during the copy phase for tables with
-	// non-memory-comparable primary keys (e.g. VARCHAR with a CI collation).
-	//
-	// Default false: the FIFO queue runs full-time for those tables, mirroring
-	// the previous deltaQueue performance characteristics. We keep the queue
-	// hot in CI (notably TestCutoverAtomicityWithConcurrentWrites) so any bug
-	// in the queue path is caught before we flip the default.
-	//
-	// Set true to opt into the optimization: buffered-map dedup during copy,
-	// FIFO queue post-copy. Memory-comparable PKs always use the buffered map
-	// regardless of this flag.
-	ForceEnableBufferedMap bool `name:"force-enable-buffered-map" help:"Enable the buffered map during copy even for non-memory comparable PKs. This relies on the checksum to catch and fix mistakes, so it is still considered 'correct', but is experimental for now." optional:"" default:"false"`
-
 	CheckpointMaxAge     time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 	ChecksumYieldTimeout time.Duration `name:"checksum-yield-timeout" help:"Maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth)" optional:"" default:"24h"`
 

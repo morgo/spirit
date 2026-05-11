@@ -15,7 +15,6 @@ This will copy all tables from the source database to the target database, verif
 
 - [create-sentinel](#create-sentinel)
 - [defer-secondary-indexes](#defer-secondary-indexes)
-- [force-enable-buffered-map](#force-enable-buffered-map)
 - [source-dsn](#source-dsn)
 - [target-chunk-time](#target-chunk-time)
 - [target-dsn](#target-dsn)
@@ -35,13 +34,6 @@ When set to `true`, a sentinel table (`_spirit_sentinel`) is created on the **so
 - Default value: `false`
 
 When set to `true`, target tables are created without secondary indexes. The indexes are restored from the source schema just before cutover. This can significantly speed up the initial data load for tables with many secondary indexes.
-
-### force-enable-buffered-map
-
-- Type: Boolean
-- Default value: `false`
-
-See the [migrate documentation](migrate.md#force-enable-buffered-map) for the full rationale. In short: this flag controls whether tables with non-memory-comparable primary keys (e.g. `VARCHAR` with a case-insensitive collation) use the LWW buffered-map dedup during the copy phase. The default is a FIFO queue full-time for those tables, which is the safer choice; setting this to `true` is experimental and relies on the post-cutover checksum to catch and repair any divergence.
 
 ### source-dsn
 

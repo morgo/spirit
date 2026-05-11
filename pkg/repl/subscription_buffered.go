@@ -25,18 +25,14 @@ import (
 // re-reading source via REPLACE INTO ... SELECT) sidesteps that race.
 //
 // Behaviour switches based on (watermarkOptimizationEnabled,
-// pkIsMemoryComparable, forceEnableBufferedMap):
+// pkIsMemoryComparable):
 //
 //   - pkIsMemoryComparable=true: always map mode. Map-key equality matches
 //     MySQL row identity, so LWW dedup is correct.
-//   - pkIsMemoryComparable=false && forceEnableBufferedMap=false (default):
-//     queue mode at all times. Mirrors the previous deltaQueue behaviour;
-//     keeps the queue path hot in CI (TestCutoverAtomicityWithConcurrentWrites)
-//     so any bug in the queue gets caught before we flip the default.
-//   - pkIsMemoryComparable=false && forceEnableBufferedMap=true: map mode
-//     during the copy phase (watermark on), queue mode post-copy. The
-//     chunker's later SELECT covers in-window case-collision races during
-//     the copy phase.
+//   - pkIsMemoryComparable=false: map mode during the copy phase
+//     (watermark on), queue mode post-copy. The chunker's later SELECT
+//     covers in-window case-collision races during the copy phase; the
+//     post-cutover checksum repairs any divergence that slips through.
 //
 // Why queue mode at all? With case-insensitive collations, "A" and "a"
 // hash to distinct keys but resolve to the same row in MySQL, so a map's
@@ -122,11 +118,6 @@ type bufferedMap struct {
 	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
 
 	pkIsMemoryComparable bool
-
-	// forceEnableBufferedMap controls whether non-memory-comparable PKs use
-	// the LWW buffered-map dedup during the copy phase. See the file-level
-	// comment and Client.forceEnableBufferedMap for the rationale.
-	forceEnableBufferedMap bool
 }
 
 // Per-entry overheads applied on top of estimateRowSize so the soft
@@ -203,16 +194,11 @@ func (s *bufferedMap) Tables() []*table.TableInfo {
 // FIFO queue rather than the map. Caller must hold s.Lock.
 //
 // Memory-comparable PKs are never queue-mode (map-key equality matches
-// MySQL row identity). For non-memory-comparable PKs, the default is
-// queue full-time so the path is exercised by integration tests; the
-// forceEnableBufferedMap opt-in flips us to map-during-copy /
-// queue-post-copy, which is the optimization we'll eventually default to.
+// MySQL row identity). Non-memory-comparable PKs run in map mode during
+// the copy phase (watermark on) and switch to queue mode post-copy.
 func (s *bufferedMap) queueModeActive() bool {
 	if s.pkIsMemoryComparable {
 		return false
-	}
-	if !s.forceEnableBufferedMap {
-		return true
 	}
 	return !s.watermarkOptimization
 }

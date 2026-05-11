@@ -53,9 +53,10 @@ Applied:        UpsertRows({id=1, ...}); DeleteKeys({id=2});
 #### FIFO fallback for non-memory-comparable primary keys
 
 For tables with non-memory-comparable primary keys (e.g. `VARCHAR` with a
-case-insensitive collation), the subscription falls back to an internal
-FIFO queue. The queue still stores row images inline and applies them via
-the applier — there is no `REPLACE INTO ... SELECT`, so the #746 fix and
+case-insensitive collation), the subscription uses LWW buffered-map dedup
+during the copy phase and switches to an internal FIFO queue post-copy.
+The queue still stores row images inline and applies them via the
+applier — there is no `REPLACE INTO ... SELECT`, so the #746 fix and
 cross-server move support ([issue #607](https://github.com/block/spirit/issues/607))
 are preserved. The queue exists only to preserve binlog order:
 collation-equivalent keys like `"A"` and `"a"` hash to different map slots
@@ -64,26 +65,16 @@ would apply events out of order. FIFO replay through the applier preserves
 binlog order; the target's own collation-aware uniqueness then collapses
 the events onto the right row.
 
-Two routing policies are available, controlled by the
-`--force-enable-buffered-map` migration flag (and the equivalent
-`Move.ForceEnableBufferedMap` field):
+During the copy phase the chunker's own SELECT covers in-window
+case-collision races, so LWW map dedup is safe and considerably faster.
+When the watermark optimization is disabled at the end of the copy phase,
+`SetWatermarkOptimization` drains the map inline and the subscription
+switches into queue mode for the cutover/checksum window. The
+post-cutover checksum (with `FixDifferences=true`) repairs any residual
+divergence.
 
-- **Default (`--force-enable-buffered-map=false`):** queue-mode runs
-  full-time for non-memory-comparable PKs, in both copy and post-copy
-  phases. This mirrors the previous `deltaQueue` performance
-  characteristics but keeps the queue path warm in CI (especially
-  `TestCutoverAtomicityWithConcurrentWrites`) so any bug in the queue
-  surfaces against real workloads before we trust it as a corner-case
-  path.
-- **Optimization (`--force-enable-buffered-map=true`):** during the copy
-  phase the subscription uses LWW buffered-map dedup (faster, works
-  because the chunker's own SELECT covers in-window case-collision
-  races). When the watermark optimization is disabled at the end of the
-  copy phase, `SetWatermarkOptimization` drains the map inline and the
-  subscription switches into queue mode for the cutover/checksum window.
-
-Memory-comparable PKs always use the buffered map regardless of the
-flag, since map-key equality matches MySQL row identity.
+Memory-comparable PKs always use the buffered map, since map-key
+equality matches MySQL row identity.
 
 ## Features
 
