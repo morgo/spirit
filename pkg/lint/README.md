@@ -90,7 +90,7 @@ func (l *MyCustomLinter) Lint(existingTables []*statement.CreateTable, changes [
 violations, err := lint.RunLinters(tables, stmts, lint.Config{
     Enabled: map[string]bool{
         "invisible_index_before_drop": false,
-        "primary_key_type":            true,
+        "primary_key":                 true,
     },
 })
 if err != nil {
@@ -106,7 +106,7 @@ Some linters support additional configuration options via the `Settings` field. 
 violations, err := lint.RunLinters(tables, stmts, lint.Config{
     Settings: map[string]map[string]string{
         "invisible_index_before_drop": {
-            "raiseError": "true",  // Make violations errors instead of warnings
+            "raiseError": "false",  // Demote violations from errors to warnings (default is "true")
         },
     },
 })
@@ -389,7 +389,7 @@ ALTER TABLE users DROP INDEX idx_email;
 violations, err := lint.RunLinters(tables, stmts, lint.Config{
     Settings: map[string]map[string]string{
         "invisible_index_before_drop": {
-            "raiseError": "true",  // Violations will be errors
+            "raiseError": "false",  // Demote violations to warnings (default is "true")
         },
     },
 })
