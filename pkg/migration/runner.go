@@ -23,6 +23,7 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
+	"github.com/block/spirit/pkg/utils"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 )
 
@@ -186,9 +187,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		// We only allow non-ALTERs (i.e. CREATE TABLE, DROP TABLE, RENAME TABLE)
 		// in single table mode.
 		if !r.changes[0].stmt.IsAlterTable() {
-			if err := r.runChecks(ctx, check.ScopeStatement); err != nil {
-				return err
-			}
 			err := dbconn.Exec(ctx, r.db, r.changes[0].stmt.Statement)
 			if err != nil {
 				return err
@@ -505,7 +503,7 @@ func (r *Runner) checkpointTableName() string {
 	if len(r.changes) > 1 {
 		return checkpointTableName
 	}
-	return fmt.Sprintf(check.NameFormatCheckpoint, r.changes[0].table.TableName)
+	return utils.CheckpointTableName(r.changes[0].table.TableName)
 }
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
@@ -795,9 +793,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		// changes would be lost in the replication gap.
 		// A checkpoint that is too old means replaying binlogs would be
 		// slower than starting fresh.
+		// A truncation collision means the checkpoint belongs to a
+		// different long table that shares our truncated prefix.
 		// In all cases, strict mode surfaces the error rather than
 		// silently restarting from scratch.
-		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound) || errors.Is(err, status.ErrCheckpointTooOld)) {
+		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound) || errors.Is(err, status.ErrCheckpointTooOld) || errors.Is(err, status.ErrCheckpointCollision)) {
 			return err
 		}
 
@@ -863,6 +863,9 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.changes[0].table.SchemaName, cpName); err != nil {
 		return err
 	}
+	// original_table_name records the full untruncated table name (single-table
+	// migrations only) so resume can detect the rare case where two long table
+	// names truncate to the same checkpoint table name. Empty for multi-table.
 	if err := dbconn.Exec(ctx, r.db, `CREATE TABLE %n.%n (
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
@@ -870,6 +873,7 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	binlog_name VARCHAR(255),
 	binlog_pos INT,
 	statement TEXT,
+	original_table_name VARCHAR(64) NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`,
 		r.changes[0].table.SchemaName, cpName); err != nil {
@@ -991,7 +995,7 @@ func (r *Runner) Close() error {
 func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Check that the new table(s) exists and are readable.
 	for _, change := range r.changes {
-		newName := fmt.Sprintf(check.NameFormatNew, change.table.TableName)
+		newName := utils.NewTableName(change.table.TableName)
 		if err := dbconn.Exec(ctx, r.db, "SELECT 1 FROM %n.%n LIMIT 1", change.stmt.Schema, newName); err != nil {
 			return fmt.Errorf("could not find new table '%s' to resume from checkpoint", newName)
 		}
@@ -1003,10 +1007,10 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// we do not support recovery.
 	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.changes[0].stmt.Schema, r.checkpointTableName())
-	var copierWatermark, binlogName, statement, checksumWatermark string
+	var copierWatermark, binlogName, statement, checksumWatermark, originalTableName string
 	var id, binlogPos int
 	var createdAtStr string
-	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &createdAtStr)
+	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
@@ -1017,6 +1021,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// multi and non-multi table migrations.
 	if r.migration.Statement != statement {
 		return status.ErrMismatchedAlter
+	}
+
+	// In single-table mode the checkpoint table name is built by deterministic
+	// truncation, so two long table names that share a prefix can collide.
+	// Cross-check the stored original table name to guard against resuming
+	// from another table's checkpoint.
+	if len(r.changes) == 1 && originalTableName != "" && originalTableName != r.changes[0].table.TableName {
+		return fmt.Errorf("%w: stored=%q expected=%q", status.ErrCheckpointCollision, originalTableName, r.changes[0].table.TableName)
 	}
 
 	// Validate the checkpoint's binlog position is still available on the server
@@ -1045,7 +1057,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Initialize and call SetInfo on all the new tables, since we need the column info
 	for _, change := range r.changes {
 		// Initialize newTable with the expected new table name
-		newName := fmt.Sprintf(check.NameFormatNew, change.table.TableName)
+		newName := utils.NewTableName(change.table.TableName)
 		change.newTable = table.NewTableInfo(r.db, change.stmt.Schema, newName)
 		if err := change.newTable.SetInfo(ctx); err != nil {
 			return err
@@ -1245,7 +1257,11 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		"log-file", binlog.Name,
 		"log-pos", binlog.Pos,
 	)
-	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement) VALUES (%?, %?, %?, %?, %?)",
+	originalTableName := ""
+	if len(r.changes) == 1 {
+		originalTableName = r.changes[0].table.TableName
+	}
+	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement, original_table_name) VALUES (%?, %?, %?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		copierWatermark,
@@ -1253,6 +1269,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		binlog.Name,
 		binlog.Pos,
 		r.migration.Statement,
+		originalTableName,
 	)
 	if err != nil {
 		return status.ErrCouldNotWriteCheckpoint

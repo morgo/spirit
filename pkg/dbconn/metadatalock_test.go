@@ -101,6 +101,44 @@ func TestComputeLockName(t *testing.T) {
 	}
 }
 
+// TestComputeLockNameAuxPrefixCollision pins the safety contract that two
+// distinct long table names whose auxiliary table names would collide under
+// truncation also share the same MDL lock name. This is what causes a second
+// concurrent migration on a colliding table to fail fast on GET_LOCK instead
+// of silently clobbering the first migration's _new / _chkpnt.
+func TestComputeLockNameAuxPrefixCollision(t *testing.T) {
+	// Two tables that share the first 56 characters (the truncation budget
+	// for `_<table>_chkpnt`) but differ after that.
+	common := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 56 'a'
+	a := &table.TableInfo{SchemaName: "test", TableName: common + "_one"}
+	b := &table.TableInfo{SchemaName: "test", TableName: common + "_two"}
+	require.Equal(t, computeLockName(a), computeLockName(b),
+		"truncation-colliding tables must share an MDL lock name")
+
+	// Tables that diverge before the 56-char boundary must not collide.
+	c := &table.TableInfo{SchemaName: "test", TableName: "first_" + common}
+	d := &table.TableInfo{SchemaName: "test", TableName: "second" + common}
+	require.NotEqual(t, computeLockName(c), computeLockName(d),
+		"non-colliding tables must keep distinct MDL lock names")
+}
+
+// TestMetadataLockAuxPrefixCollision verifies the contention behavior end-to-end:
+// concurrent attempts on truncation-colliding tables fail with the standard
+// "lock is held" error rather than racing through to aux-table creation.
+func TestMetadataLockAuxPrefixCollision(t *testing.T) {
+	common := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 56 'a'
+	tablesA := []*table.TableInfo{{SchemaName: "test", TableName: common + "_one"}}
+	tablesB := []*table.TableInfo{{SchemaName: "test", TableName: common + "_two"}}
+	logger := slog.Default()
+
+	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), tablesA, NewDBConfig(), logger)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(mdl)
+
+	_, err = NewMetadataLock(t.Context(), testutils.DSN(), tablesB, NewDBConfig(), logger)
+	require.ErrorContains(t, err, "lock is held by another connection")
+}
+
 func TestMetadataLockLength(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "thisisareallylongtablenamethisisareallylongtablenamethisisareallylongtablename"}
 	lockTables := []*table.TableInfo{&lockTableInfo}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/utils"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
@@ -185,13 +186,20 @@ func computeLockName(table *table.TableInfo) string {
 		schemaNamePart = schemaNamePart[:20]
 	}
 
-	tableNamePart := table.TableName
+	// Key the lock on the truncated table-name prefix that Spirit uses when
+	// generating auxiliary table names (_<table>_chkpnt, _<table>_new, etc).
+	// Two migrations whose auxiliary tables would collide under truncation
+	// produce the same lock name and serialize. For tables short enough that
+	// no truncation occurs, this is identical to the original table name.
+	auxPrefix := utils.TruncateTableName(table.TableName, 1+len("_chkpnt"))
+
+	tableNamePart := auxPrefix
 	if len(tableNamePart) > 32 {
 		tableNamePart = tableNamePart[:32]
 	}
 
 	hash := sha1.New()
-	hash.Write([]byte(table.SchemaName + table.TableName))
+	hash.Write([]byte(table.SchemaName + auxPrefix))
 	hashPart := hex.EncodeToString(hash.Sum(nil))[:8]
 
 	return fmt.Sprintf("%s.%s-%s", schemaNamePart, tableNamePart, hashPart)

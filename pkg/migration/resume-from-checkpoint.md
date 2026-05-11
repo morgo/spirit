@@ -6,16 +6,18 @@ As noted in the [threads](../docs/migrate.md#threads) and [target-chunk-time](..
 
 ## How checkpointing works
 
-Spirit writes a checkpoint every 50 seconds to a table named `_<table>_chkpnt` in the same database as the table being migrated:
+Spirit writes a checkpoint every 50 seconds to a table named `_<table>_chkpnt` in the same database as the table being migrated. If the original table name is long enough that `_<table>_chkpnt` would exceed MySQL's 64-character identifier limit, the table-name portion is deterministically truncated; the full original name is recorded in the `original_table_name` column so resume can detect collisions.
 
 ```sql
 CREATE TABLE _tablename_chkpnt (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    copier_watermark TEXT,      -- where row copy left off (JSON)
-    checksum_watermark TEXT,    -- where checksum left off (JSON, if applicable)
-    binlog_name VARCHAR(255),   -- e.g., "mysql-bin.000042"
-    binlog_pos INT,             -- e.g., 4567
-    statement TEXT              -- the DDL statement being executed
+    copier_watermark TEXT,                                  -- where row copy left off (JSON)
+    checksum_watermark TEXT,                                -- where checksum left off (JSON, if applicable)
+    binlog_name VARCHAR(255),                               -- e.g., "mysql-bin.000042"
+    binlog_pos INT,                                         -- e.g., 4567
+    statement TEXT,                                         -- the DDL statement being executed
+    original_table_name VARCHAR(64) NOT NULL DEFAULT '',    -- full untruncated table name (single-table only; '' for multi-table)
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -26,11 +28,12 @@ The checkpoint captures everything needed to resume: where the copier was, the b
 When a new Runner starts (`Runner.Run()` → `setup()`), it always attempts `resumeFromCheckpoint()` first. This performs several validation steps before committing to the resume path:
 
 1. **Check `_<table>_new` exists** — if the shadow table is gone, there's nothing to resume.
-2. **Read checkpoint table** — fetch the saved watermarks, binlog position, and statement.
+2. **Read checkpoint table** — fetch the saved watermarks, binlog position, statement, and `original_table_name`.
 3. **Validate DDL statement matches** — the checkpoint must be for the same alter. In `--strict` mode, a mismatch is a hard error. In non-strict mode, Spirit discards the checkpoint and starts fresh.
-4. **Validate binlog file still exists** — queries `SHOW BINARY LOGS` to verify the checkpoint's binlog file hasn't been purged. If it has, resume is not possible and Spirit falls back to `newMigration()`.
-5. **Set up copier, checker, and replication client** — create the replication client and add subscriptions for each table.
-6. **Start binlog streaming** — `replClient.Run()` begins streaming from the saved position.
+4. **Validate `original_table_name` matches** (single-table mode) — guards against the rare collision where two long table names truncate to the same checkpoint table name. A mismatch causes Spirit to discard the checkpoint and start fresh.
+5. **Validate binlog file still exists** — queries `SHOW BINARY LOGS` to verify the checkpoint's binlog file hasn't been purged. If it has, resume is not possible and Spirit falls back to `newMigration()`.
+6. **Set up copier, checker, and replication client** — create the replication client and add subscriptions for each table.
+7. **Start binlog streaming** — `replClient.Run()` begins streaming from the saved position.
 
 If any step fails (and strict mode is not enabled), Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch. This means resume is best-effort — Spirit will always make forward progress even if the checkpoint is unusable.
 

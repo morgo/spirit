@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
@@ -29,7 +28,7 @@ type change struct {
 }
 
 func (c *change) createNewTable(ctx context.Context) error {
-	newName := fmt.Sprintf(check.NameFormatNew, c.table.TableName)
+	newName := utils.NewTableName(c.table.TableName)
 	// drop the newName if we've decided to call this func.
 	if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.table.SchemaName, newName); err != nil {
 		return err
@@ -118,16 +117,11 @@ func (c *change) dropOldTable(ctx context.Context) error {
 }
 
 func (c *change) oldTableName() string {
-	// By default we just set the old table name to _<table>_old
-	// but if they've enabled SkipDropAfterCutover, we add a timestamp.
-	// We truncate the table name portion to ensure the result fits within
-	// MySQL's 64-character table name limit.
 	if !c.runner.migration.SkipDropAfterCutover {
-		return fmt.Sprintf(check.NameFormatOld, c.table.TableName)
+		return utils.OldTableName(c.table.TableName)
 	}
-	timestamp := c.runner.startTime.UTC().Format(check.NameFormatTimestamp)
-	truncatedName := utils.TruncateTableName(c.table.TableName, check.NameFormatTimestampExtraChars)
-	return fmt.Sprintf(check.NameFormatOldTimeStamp, truncatedName, timestamp)
+	timestamp := c.runner.startTime.UTC().Format(utils.NameFormatTimestamp)
+	return utils.OldTableNameWithTimestamp(c.table.TableName, timestamp)
 }
 
 func (c *change) attemptInstantDDL(ctx context.Context) error {

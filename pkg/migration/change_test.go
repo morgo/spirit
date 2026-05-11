@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -267,8 +266,14 @@ func TestOldTableNameTruncation(t *testing.T) {
 			expectMaxLen:         utils.MaxTableNameLength,
 		},
 		{
-			name:                 "max normal length with skip drop - requires truncation",
-			tableName:            strings.Repeat("c", check.MaxMigratableTableNameLength),
+			name:                 "64-char name without skip drop - requires truncation",
+			tableName:            strings.Repeat("c", utils.MaxTableNameLength),
+			skipDropAfterCutover: false,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+		{
+			name:                 "64-char name with skip drop - requires truncation",
+			tableName:            strings.Repeat("d", utils.MaxTableNameLength),
 			skipDropAfterCutover: true,
 			expectMaxLen:         utils.MaxTableNameLength,
 		},
@@ -301,9 +306,13 @@ func TestOldTableNameTruncation(t *testing.T) {
 				require.True(t, strings.HasPrefix(result, "_"))
 				require.Contains(t, result, "_old_")
 			} else {
-				// Should have the simple _<name>_old format
-				expected := fmt.Sprintf(check.NameFormatOld, tt.tableName)
-				require.Equal(t, expected, result)
+				// _<name>_old, possibly with the table name portion truncated to fit.
+				require.True(t, strings.HasPrefix(result, "_"))
+				require.True(t, strings.HasSuffix(result, "_old"))
+				// Short names should be reproduced exactly.
+				if 1+len(tt.tableName)+len("_old") <= utils.MaxTableNameLength {
+					require.Equal(t, "_"+tt.tableName+"_old", result)
+				}
 			}
 		})
 	}
@@ -311,41 +320,28 @@ func TestOldTableNameTruncation(t *testing.T) {
 
 func TestOldTableNameTruncationCollision(t *testing.T) {
 	t.Parallel()
-	// Two different long table names that share a common prefix longer than
-	// MaxMigratableTableNameLength will produce the same old table name when
-	// truncated. This is acceptable because:
-	// 1. Table names > 56 chars cannot be created via Spirit (createTableNameCheck).
-	// 2. Concurrent migrations on the same table are not possible.
+	// Two long table names that share a 50-char common prefix produce the
+	// same _old_<timestamp> name once the suffix is truncated away. This is
+	// the documented trade-off of deterministic truncation. Resume safety
+	// for the checkpoint table is provided by the original_table_name column
+	// (see TestResumeRejectsCheckpointFromDifferentTable); the old table is named
+	// only for human archaeology when SkipDropAfterCutover is set.
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
+	prefix := strings.Repeat("x", 50)
 
 	c1 := &change{
-		table: &table.TableInfo{
-			TableName: strings.Repeat("x", 56) + "_table1",
-		},
-		runner: &Runner{
-			migration: &Migration{SkipDropAfterCutover: true},
-			startTime: startTime,
-		},
+		table:  &table.TableInfo{TableName: prefix + "_aaaaaaaaaaa"},
+		runner: &Runner{migration: &Migration{SkipDropAfterCutover: true}, startTime: startTime},
 	}
 	c2 := &change{
-		table: &table.TableInfo{
-			TableName: strings.Repeat("x", 56) + "_table2",
-		},
-		runner: &Runner{
-			migration: &Migration{SkipDropAfterCutover: true},
-			startTime: startTime,
-		},
+		table:  &table.TableInfo{TableName: prefix + "_bbbbbbbbbbb"},
+		runner: &Runner{migration: &Migration{SkipDropAfterCutover: true}, startTime: startTime},
 	}
 
-	// Both should fit within the limit
 	result1 := c1.oldTableName()
 	result2 := c2.oldTableName()
 	require.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
 	require.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
-
-	// These collide because the distinguishing suffix is truncated.
-	// In practice this cannot happen since Spirit enforces a 56-char
-	// table name limit, so the truncation only removes characters
-	// beyond position 43 (which is still unique for valid table names).
-	require.Equal(t, result1, result2)
+	require.Equal(t, result1, result2,
+		"distinct long table names with a shared prefix collide after truncation")
 }
