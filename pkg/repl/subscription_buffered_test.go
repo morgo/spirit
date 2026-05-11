@@ -440,9 +440,9 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	require.Error(t, err, "Row with id=5 (at watermark) should NOT exist yet")
 }
 
-// TestBufferedMapQueueModeRouting verifies the routing under
-// forceEnableBufferedMap=true (the optimization): map during copy,
-// queue post-copy. See subscription_buffered.go for the full state table.
+// TestBufferedMapQueueModeRouting verifies the routing for non-memory-
+// comparable PKs: map during copy, queue post-copy. See
+// subscription_buffered.go for the full state table.
 func TestBufferedMapQueueModeRouting(t *testing.T) {
 	t1 := `CREATE TABLE subscription_test (
 		id VARCHAR(64) NOT NULL,
@@ -470,17 +470,16 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                      client,
-		table:                  srcTable,
-		newTable:               dstTable,
-		changes:                make(map[string]bufferedChange),
-		chunker:                mockChunker,
-		pkIsMemoryComparable:   false,
-		forceEnableBufferedMap: true, // exercise the map-during-copy optimization
+		c:                    client,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 
-	// Watermark optimization on => map mode under the optimization.
+	// Watermark optimization on => map mode (copy phase).
 	sub.watermarkOptimization = true
 	sub.HasChanged([]any{"abc"}, []any{"abc", "value"}, false)
 	require.Len(t, sub.changes, 1, "watermark on: event must go to the map")
@@ -502,60 +501,6 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 	require.Equal(t, utils.HashKey([]any{"ghi"}), sub.queue[1].key)
 	require.True(t, sub.queue[1].logicalRow.IsDeleted)
 	require.Equal(t, 3, sub.Length(), "Length reports map+queue combined")
-}
-
-// TestBufferedMapQueueFullTimeDefault verifies that with the default
-// forceEnableBufferedMap=false, non-memory-comparable PKs use the FIFO
-// queue at all times — even during the copy phase. This is the safety
-// default that keeps the queue path warm in CI until we trust the
-// optimization enough to flip the default.
-func TestBufferedMapQueueFullTimeDefault(t *testing.T) {
-	t1 := `CREATE TABLE subscription_test (
-		id VARCHAR(64) NOT NULL,
-		name VARCHAR(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	t2 := `CREATE TABLE _subscription_test_new (
-		id VARCHAR(64) NOT NULL,
-		name VARCHAR(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	srcTable, dstTable := setupTestTables(t, t1, t2)
-
-	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
-	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
-	mockChunker.SimulateProgress(0.5) // make in-range keys below-high-watermark
-
-	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
-	}
-
-	sub := &bufferedMap{
-		c:                      client,
-		table:                  srcTable,
-		newTable:               dstTable,
-		changes:                make(map[string]bufferedChange),
-		chunker:                mockChunker,
-		watermarkOptimization:  true,  // copy phase
-		pkIsMemoryComparable:   false, // VARCHAR PK
-		forceEnableBufferedMap: false, // default
-	}
-	sub.cond = sync.NewCond(&sub.Mutex)
-
-	// Even with watermark on (copy phase), the default routes to the queue.
-	sub.HasChanged([]any{"a"}, []any{"a", "v"}, false)
-	require.Empty(t, sub.changes, "default + non-memory-comparable PK: events must not land in the map")
-	require.Len(t, sub.queue, 1, "default + non-memory-comparable PK: events must land in the queue")
-
-	// And when watermark is toggled off, we stay in queue mode (no transition).
-	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
-	require.Len(t, sub.queue, 1, "no mode change: queue contents preserved across the toggle")
-	sub.HasChanged([]any{"b"}, []any{"b", "v2"}, false)
-	require.Len(t, sub.queue, 2, "queue keeps accepting events post-copy")
-	require.Empty(t, sub.changes)
 }
 
 // TestBufferedMapQueueModeFlush exercises the queue-mode flush path end-to-end.
@@ -749,15 +694,14 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                      client,
-		applier:                applierInstance,
-		table:                  srcTable,
-		newTable:               dstTable,
-		changes:                make(map[string]bufferedChange),
-		chunker:                mockChunker,
-		watermarkOptimization:  true,
-		pkIsMemoryComparable:   false,
-		forceEnableBufferedMap: true, // opt into the optimization so transitions actually flip mode
+		c:                     client,
+		applier:               applierInstance,
+		table:                 srcTable,
+		newTable:              dstTable,
+		changes:               make(map[string]bufferedChange),
+		chunker:               mockChunker,
+		watermarkOptimization: true,
+		pkIsMemoryComparable:  false,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 
@@ -1557,16 +1501,16 @@ func TestBufferedMapRealFlushWakesParked(t *testing.T) {
 // TestBufferedMapQueueModeBackpressure exercises the soft-limit park/wake
 // cycle against the queue path, mirroring the map-mode coverage in
 // TestBufferedMapSoftLimitBackpressure. Queue mode is reached via a
-// non-memory-comparable PK with the default forceEnableBufferedMap=false
-// (queue full-time).
+// non-memory-comparable PK with the watermark optimization off (post-copy
+// phase).
 func TestBufferedMapQueueModeBackpressure(t *testing.T) {
 	sub := &bufferedMap{
-		changes:                make(map[string]bufferedChange),
-		softLimitBytes:         1024,
-		pkIsMemoryComparable:   false, // route to queue
-		forceEnableBufferedMap: false, // default: queue full-time
-		c:                      &Client{logger: slog.Default()},
-		table:                  &table.TableInfo{SchemaName: "test", TableName: "bare"},
+		changes:               make(map[string]bufferedChange),
+		softLimitBytes:        1024,
+		pkIsMemoryComparable:  false, // route to queue
+		watermarkOptimization: false, // post-copy: queue mode active
+		c:                     &Client{logger: slog.Default()},
+		table:                 &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 

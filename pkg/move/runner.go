@@ -419,15 +419,14 @@ func (r *Runner) setup(ctx context.Context) error {
 	for i := range r.sources {
 		src := &r.sources[i]
 		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, &repl.ClientConfig{
-			Logger:                 r.logger,
-			Concurrency:            r.move.Threads,
-			TargetBatchTime:        r.move.TargetChunkTime,
-			CancelFunc:             r.fatalError,
-			DDLFilterSchema:        src.config.DBName,
-			DDLFilterTables:        r.move.SourceTables,
-			ServerID:               repl.NewServerID(),
-			DBConfig:               r.dbConfig,
-			ForceEnableBufferedMap: r.move.ForceEnableBufferedMap,
+			Logger:          r.logger,
+			Concurrency:     r.move.Threads,
+			TargetBatchTime: r.move.TargetChunkTime,
+			CancelFunc:      r.fatalError,
+			DDLFilterSchema: src.config.DBName,
+			DDLFilterTables: r.move.SourceTables,
+			ServerID:        repl.NewServerID(),
+			DBConfig:        r.dbConfig,
 		})
 	}
 
