@@ -90,7 +90,7 @@ func TestAutoIncCapacity_AboveThreshold_TinyInt(t *testing.T) {
 	// 220 is above 85% of 255 (216)
 	require.Len(t, violations, 1)
 	require.Equal(t, "auto_inc_capacity", violations[0].Linter.Name())
-	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 	require.Equal(t, "users", violations[0].Location.Table)
 	require.NotNil(t, violations[0].Location.Column)
 	require.Equal(t, "id", *violations[0].Location.Column)
@@ -581,7 +581,7 @@ func TestAutoIncCapacity_ViolationStructure(t *testing.T) {
 
 	require.NotNil(t, v.Linter)
 	require.Equal(t, "auto_inc_capacity", v.Linter.Name())
-	require.Equal(t, SeverityWarning, v.Severity)
+	require.Equal(t, SeverityError, v.Severity)
 	require.NotEmpty(t, v.Message)
 	require.Contains(t, v.Message, "AUTO_INCREMENT")
 	require.NotNil(t, v.Location)

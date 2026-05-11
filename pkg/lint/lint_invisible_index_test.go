@@ -284,7 +284,7 @@ func TestInvisibleIndexBeforeDropLinter_DefaultConfig(t *testing.T) {
 
 	defaultConfig := linter.DefaultConfig()
 	require.NotNil(t, defaultConfig)
-	require.Equal(t, "false", defaultConfig["raiseError"])
+	require.Equal(t, "true", defaultConfig["raiseError"])
 }
 
 // Functional Tests with Configuration

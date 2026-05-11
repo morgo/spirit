@@ -31,7 +31,7 @@ func TestMultipleAlterTableLinter_TwoAltersOnSameTable(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	require.Equal(t, "multiple_alter_table", violations[0].Linter.Name())
-	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityInfo, violations[0].Severity)
 	require.Contains(t, violations[0].Message, "2 separate ALTER TABLE statements")
 	require.Equal(t, "users", violations[0].Location.Table)
 	require.NotNil(t, violations[0].Suggestion)
@@ -266,5 +266,5 @@ func TestMultipleAlterTableLinter_SeverityIsInfo(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	// This is INFO level because it's an optimization suggestion, not an error
-	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityInfo, violations[0].Severity)
 }
