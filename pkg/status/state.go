@@ -12,6 +12,7 @@ var (
 	ErrMismatchedAlter         = errors.New("alter statement in checkpoint table does not match the alter statement specified here")
 	ErrBinlogNotFound          = errors.New("checkpoint binlog file not found on server")
 	ErrCheckpointTooOld        = errors.New("checkpoint is too old to safely resume")
+	ErrCheckpointCollision     = errors.New("checkpoint belongs to a different table (truncation collision)")
 	ErrCouldNotWriteCheckpoint = errors.New("could not write checkpoint")
 	ErrWatermarkNotReady       = errors.New("watermark not ready")
 )
