@@ -15,7 +15,8 @@ func init() {
 
 // PrimaryKeyLinter checks that primary keys are defined and use appropriate data types.
 // Primary keys should be BIGINT (preferably UNSIGNED) or BINARY/VARBINARY, but the linter can be configured to allow other types.
-// Missing PK and other types are flagged as errors, and signed int types are flagged as a warning.
+// Severity is scoped by source: existing tables produce SeverityWarning (don't block ALTERs on legacy schemas),
+// while CREATE TABLE statements in the incoming changes produce SeverityError (enforce standards on new tables).
 type PrimaryKeyLinter struct {
 	allowedTypes map[string]struct{}
 }
