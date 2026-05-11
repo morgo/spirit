@@ -7,11 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,17 +32,19 @@ func TestMultiChangesDifferentSchemas(t *testing.T) {
 		testutils.RunSQL(t, `DROP DATABASE IF EXISTS multichangedb1`)
 	})
 
-	migration := NewTestMigration(t,
-		WithStatement("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
-	require.Error(t, migration.Run())
-	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
-	require.Error(t, migration.Run())
-	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"
-	require.Error(t, migration.Run())
-	migration.Statement = "ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"
-	require.Error(t, migration.Run()) // even this is an error because we have schema + explicit DB.
-	migration.Statement = "ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"
-	require.NoError(t, migration.Run())
+	// Build a fresh *Migration per Run. Reusing a single *Migration across
+	// multiple Run() calls is not a supported production path, and stale
+	// internal state from prior failed Runs (replication subscriptions,
+	// useTestCutover bookkeeping, etc.) has been observed to surface in
+	// the next Run as transient checksum failures. See block/spirit#769.
+	run := func(statement string) error {
+		return NewTestMigration(t, WithStatement(statement)).Run()
+	}
+	require.Error(t, run("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT, ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
+	require.Error(t, run("ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT"))
+	require.Error(t, run("ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
+	require.Error(t, run("ALTER TABLE multichangedb1.multichange1 ADD COLUMN a INT")) // even this is an error because we have schema + explicit DB.
+	require.NoError(t, run("ALTER TABLE multichange2 ADD COLUMN a INT; ALTER TABLE multichange3 ADD COLUMN a INT"))
 }
 
 // TestAutoIncrementEmptyTable tests that AUTO_INCREMENT is preserved when migrating
@@ -113,15 +113,15 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 	}
 
 	expectedIDs := []int64{2979716, 2979717, 2979718}
-	assert.Equal(t, expectedIDs, insertedIDs, "Inserted IDs should start from 2979716, not 1")
+	require.Equal(t, expectedIDs, insertedIDs, "Inserted IDs should start from 2979716, not 1")
 
 	// Verify final AUTO_INCREMENT value
 	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
 		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
-	assert.True(t, autoIncValue.Valid)
-	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979716), "Final AUTO_INCREMENT should be >= 2979716")
+	require.True(t, autoIncValue.Valid)
+	require.GreaterOrEqual(t, autoIncValue.Int64, int64(2979716), "Final AUTO_INCREMENT should be >= 2979716")
 }
 
 // TestAutoIncrementWithRows tests that AUTO_INCREMENT is preserved when migrating
@@ -199,7 +199,7 @@ func TestAutoIncrementWithRows(t *testing.T) {
 		migratedIDs = append(migratedIDs, id)
 	}
 	_ = rows.Close()
-	assert.Equal(t, expectedExistingIDs, migratedIDs, "Existing IDs should be preserved")
+	require.Equal(t, expectedExistingIDs, migratedIDs, "Existing IDs should be preserved")
 
 	// Insert new rows after migration
 	testutils.RunSQL(t, fmt.Sprintf(`
@@ -220,15 +220,15 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	_ = rows.Close()
 
 	expectedAllIDs := []int64{2979716, 2979717, 2979718, 2979719, 2979720, 2979721}
-	assert.Equal(t, expectedAllIDs, allIDs, "New IDs should continue from 2979719")
+	require.Equal(t, expectedAllIDs, allIDs, "New IDs should continue from 2979719")
 
 	// Verify final AUTO_INCREMENT
 	err = testDB.QueryRowContext(t.Context(),
 		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
 		tableName).Scan(&autoIncValue)
 	require.NoError(t, err)
-	assert.True(t, autoIncValue.Valid)
-	assert.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
+	require.True(t, autoIncValue.Valid)
+	require.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
 }
 
 func TestOldTableNameTruncation(t *testing.T) {
@@ -266,8 +266,14 @@ func TestOldTableNameTruncation(t *testing.T) {
 			expectMaxLen:         utils.MaxTableNameLength,
 		},
 		{
-			name:                 "max normal length with skip drop - requires truncation",
-			tableName:            strings.Repeat("c", check.MaxMigratableTableNameLength),
+			name:                 "64-char name without skip drop - requires truncation",
+			tableName:            strings.Repeat("c", utils.MaxTableNameLength),
+			skipDropAfterCutover: false,
+			expectMaxLen:         utils.MaxTableNameLength,
+		},
+		{
+			name:                 "64-char name with skip drop - requires truncation",
+			tableName:            strings.Repeat("d", utils.MaxTableNameLength),
 			skipDropAfterCutover: true,
 			expectMaxLen:         utils.MaxTableNameLength,
 		},
@@ -288,21 +294,25 @@ func TestOldTableNameTruncation(t *testing.T) {
 			}
 
 			result := c.oldTableName()
-			assert.LessOrEqual(t, len(result), tt.expectMaxLen,
+			require.LessOrEqual(t, len(result), tt.expectMaxLen,
 				"oldTableName() result %q (len=%d) exceeds max length %d",
 				result, len(result), tt.expectMaxLen)
-			assert.Greater(t, len(result), 0, "oldTableName() should not be empty")
+			require.Greater(t, len(result), 0, "oldTableName() should not be empty")
 
 			if tt.skipDropAfterCutover {
 				// Should contain the timestamp
-				assert.Contains(t, result, "20250615_103045")
+				require.Contains(t, result, "20250615_103045")
 				// Should have the expected format prefix and suffix
-				assert.True(t, strings.HasPrefix(result, "_"))
-				assert.Contains(t, result, "_old_")
+				require.True(t, strings.HasPrefix(result, "_"))
+				require.Contains(t, result, "_old_")
 			} else {
-				// Should have the simple _<name>_old format
-				expected := fmt.Sprintf(check.NameFormatOld, tt.tableName)
-				assert.Equal(t, expected, result)
+				// _<name>_old, possibly with the table name portion truncated to fit.
+				require.True(t, strings.HasPrefix(result, "_"))
+				require.True(t, strings.HasSuffix(result, "_old"))
+				// Short names should be reproduced exactly.
+				if 1+len(tt.tableName)+len("_old") <= utils.MaxTableNameLength {
+					require.Equal(t, "_"+tt.tableName+"_old", result)
+				}
 			}
 		})
 	}
@@ -310,41 +320,28 @@ func TestOldTableNameTruncation(t *testing.T) {
 
 func TestOldTableNameTruncationCollision(t *testing.T) {
 	t.Parallel()
-	// Two different long table names that share a common prefix longer than
-	// MaxMigratableTableNameLength will produce the same old table name when
-	// truncated. This is acceptable because:
-	// 1. Table names > 56 chars cannot be created via Spirit (createTableNameCheck).
-	// 2. Concurrent migrations on the same table are not possible.
+	// Two long table names that share a 50-char common prefix produce the
+	// same _old_<timestamp> name once the suffix is truncated away. This is
+	// the documented trade-off of deterministic truncation. Resume safety
+	// for the checkpoint table is provided by the original_table_name column
+	// (see TestResumeRejectsCheckpointFromDifferentTable); the old table is named
+	// only for human archaeology when SkipDropAfterCutover is set.
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
+	prefix := strings.Repeat("x", 50)
 
 	c1 := &change{
-		table: &table.TableInfo{
-			TableName: strings.Repeat("x", 56) + "_table1",
-		},
-		runner: &Runner{
-			migration: &Migration{SkipDropAfterCutover: true},
-			startTime: startTime,
-		},
+		table:  &table.TableInfo{TableName: prefix + "_aaaaaaaaaaa"},
+		runner: &Runner{migration: &Migration{SkipDropAfterCutover: true}, startTime: startTime},
 	}
 	c2 := &change{
-		table: &table.TableInfo{
-			TableName: strings.Repeat("x", 56) + "_table2",
-		},
-		runner: &Runner{
-			migration: &Migration{SkipDropAfterCutover: true},
-			startTime: startTime,
-		},
+		table:  &table.TableInfo{TableName: prefix + "_bbbbbbbbbbb"},
+		runner: &Runner{migration: &Migration{SkipDropAfterCutover: true}, startTime: startTime},
 	}
 
-	// Both should fit within the limit
 	result1 := c1.oldTableName()
 	result2 := c2.oldTableName()
-	assert.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
-	assert.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
-
-	// These collide because the distinguishing suffix is truncated.
-	// In practice this cannot happen since Spirit enforces a 56-char
-	// table name limit, so the truncation only removes characters
-	// beyond position 43 (which is still unique for valid table names).
-	assert.Equal(t, result1, result2)
+	require.LessOrEqual(t, len(result1), utils.MaxTableNameLength)
+	require.LessOrEqual(t, len(result2), utils.MaxTableNameLength)
+	require.Equal(t, result1, result2,
+		"distinct long table names with a shared prefix collide after truncation")
 }

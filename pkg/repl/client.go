@@ -42,6 +42,20 @@ const (
 	// Longer values require more memory, but permit more merging.
 	// I expect we will change this to 1hr-24hr in the future.
 	DefaultFlushInterval = 30 * time.Second
+	// DefaultSubscriptionSoftLimitBytes caps the approximate memory held
+	// per subscription before HasChanged starts blocking on the buffered
+	// map's condition variable. The cap is "soft": a single oversized
+	// row admitted when the buffer is empty will exceed the limit, and
+	// the next caller will park until that row drains. This keeps wide
+	// rows (LONGTEXT / BLOB / large JSON) from OOMing the migrator
+	// while still guaranteeing forward progress regardless of row width.
+	// See pkg/repl/subscription_buffered.go for the accounting model.
+	//
+	// Operators should be aware that pausing the binlog reader for an
+	// extended period risks falling past the source's binlog retention
+	// (binlog_expire_logs_seconds). Tune this value, or the source's
+	// retention, accordingly.
+	DefaultSubscriptionSoftLimitBytes = 256 << 20
 	// DefaultTimeout is how long BlockWait is supposed to wait before returning errors.
 	DefaultTimeout = 30 * time.Second
 	// Maximum number of consecutive errors before recreating the streamer
@@ -54,6 +68,11 @@ const (
 	backoffMultiplier = 2
 	// Sleep time between position checks in BlockWait
 	blockWaitSleep = 100 * time.Millisecond
+	// Number of consecutive blockWaitSleep intervals where the buffered position
+	// hasn't advanced before BlockWait flushes binary logs to nudge the syncer.
+	// 3 * blockWaitSleep (~300ms) tolerates brief syncer lag (e.g. CI load) while
+	// remaining negligible relative to DefaultTimeout.
+	blockWaitStallThreshold = 3
 )
 
 var (
@@ -119,30 +138,50 @@ type Client struct {
 	logger     *slog.Logger
 	streamWG   sync.WaitGroup // tracks readStream goroutine for proper cleanup
 
+	// forceEnableBufferedMap, when true, lets new subscriptions use LWW
+	// buffered-map dedup during the copy phase even for non-memory-comparable
+	// PKs (queue-mode kicks in only post-copy). Default false — see
+	// ClientConfig.ForceEnableBufferedMap.
+	forceEnableBufferedMap bool
+
+	// subscriptionSoftLimitBytes is the per-subscription byte cap passed
+	// to bufferedMap.softLimitBytes on construction. Zero disables the
+	// cap. See DefaultSubscriptionSoftLimitBytes.
+	subscriptionSoftLimitBytes int64
+
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
 // NewClient creates a new Client instance.
-func NewClient(db *sql.DB, host string, username, password string, config *ClientConfig) *Client {
+// config.Applier is required!
+func NewClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) *Client {
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
+	softLimit := config.SubscriptionSoftLimitBytes
+	if softLimit == 0 {
+		softLimit = DefaultSubscriptionSoftLimitBytes
+	} else if softLimit < 0 {
+		softLimit = 0 // explicit opt-out
+	}
 	return &Client{
-		db:               db,
-		dbConfig:         config.DBConfig,
-		host:             host,
-		username:         username,
-		password:         password,
-		logger:           config.Logger,
-		targetBatchTime:  config.TargetBatchTime,
-		targetBatchSize:  DefaultBatchSize, // initial starting value.
-		concurrency:      config.Concurrency,
-		subscriptions:    make(map[string]Subscription),
-		callerCancelFunc: config.CancelFunc,
-		ddlFilterSchema:  config.DDLFilterSchema,
-		ddlFilterTables:  toSet(config.DDLFilterTables),
-		serverID:         config.ServerID,
-		applier:          config.Applier,
+		db:                         db,
+		dbConfig:                   config.DBConfig,
+		host:                       host,
+		username:                   username,
+		password:                   password,
+		logger:                     config.Logger,
+		targetBatchTime:            config.TargetBatchTime,
+		targetBatchSize:            DefaultBatchSize, // initial starting value.
+		concurrency:                config.Concurrency,
+		subscriptions:              make(map[string]Subscription),
+		callerCancelFunc:           config.CancelFunc,
+		ddlFilterSchema:            config.DDLFilterSchema,
+		ddlFilterTables:            toSet(config.DDLFilterTables),
+		serverID:                   config.ServerID,
+		applier:                    appl,
+		forceEnableBufferedMap:     config.ForceEnableBufferedMap,
+		subscriptionSoftLimitBytes: softLimit,
 	}
 }
 
@@ -151,7 +190,6 @@ type ClientConfig struct {
 	Concurrency     int
 	Logger          *slog.Logger
 	ServerID        uint32
-	Applier         applier.Applier
 	DBConfig        *dbconn.DBConfig // Database configuration including TLS settings
 
 	// CancelFunc is an optional callback from the caller (e.g. migration or move runner).
@@ -173,6 +211,20 @@ type ClientConfig struct {
 	// tables in the same schema should not trigger cancellation.
 	// If empty (and DDLFilterSchema is set), all tables in the schema trigger cancellation.
 	DDLFilterTables []string
+
+	// ForceEnableBufferedMap, when true, lets subscriptions for non-memory-comparable
+	// PKs use the LWW buffered-map dedup during the copy phase, falling back to
+	// the FIFO queue only post-copy. Default false: those subscriptions run the
+	// FIFO queue full-time so it is exercised by integration tests like
+	// TestCutoverAtomicityWithConcurrentWrites. Memory-comparable PKs always use
+	// the buffered map regardless of this flag.
+	ForceEnableBufferedMap bool
+
+	// SubscriptionSoftLimitBytes overrides DefaultSubscriptionSoftLimitBytes
+	// for new subscriptions. Set to a negative value to disable the cap
+	// entirely (HasChanged will never block on memory). Zero (the
+	// zero-value default) means use DefaultSubscriptionSoftLimitBytes.
+	SubscriptionSoftLimitBytes int64
 }
 
 // serverIDCounter is an atomic counter used to help ensure unique server IDs
@@ -223,38 +275,29 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	if _, exists := c.subscriptions[subKey]; exists {
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
-
-	// Decide which subscription type to use. We always prefer deltaMap
-	// But will fall back to deltaQueue if the PK is not memory comparable.
+	// If the PK is not memory comparable we still use the buffered map, but it
+	// needs to know that when the watermark optimizations are disabled
+	// (i.e. we've finished copying and we're about to start checksum),
+	// that it needs to act like a FIFO queue. This is a requirement because of edge
+	// cases caused by collations since A == a, but in our map they would
+	// not compare as equal.
+	var pkIsMemoryComparable = true
 	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
-		c.subscriptions[subKey] = &deltaQueue{
-			table:    currentTable,
-			newTable: newTable,
-			changes:  make([]queuedChange, 0),
-			c:        c,
-			chunker:  chunker,
-		}
-		return nil
+		pkIsMemoryComparable = false
 	}
-	if c.applier != nil {
-		c.subscriptions[subKey] = &bufferedMap{
-			table:    currentTable,
-			newTable: newTable,
-			changes:  make(map[string]bufferedChange),
-			c:        c,
-			chunker:  chunker,
-			applier:  c.applier,
-		}
-		return nil
+	sub := &bufferedMap{
+		table:                  currentTable,
+		newTable:               newTable,
+		changes:                make(map[string]bufferedChange),
+		c:                      c,
+		chunker:                chunker,
+		applier:                c.applier,
+		pkIsMemoryComparable:   pkIsMemoryComparable,
+		forceEnableBufferedMap: c.forceEnableBufferedMap,
+		softLimitBytes:         c.subscriptionSoftLimitBytes,
 	}
-	// Default case is delta map
-	c.subscriptions[subKey] = &deltaMap{
-		table:    currentTable,
-		newTable: newTable,
-		changes:  make(map[string]mapChange),
-		c:        c,
-		chunker:  chunker,
-	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	c.subscriptions[subKey] = sub
 	return nil
 }
 
@@ -611,7 +654,6 @@ func (c *Client) readStream(ctx context.Context) {
 				Name: currentLogName,
 				Pos:  uint32(event.Position),
 			})
-			c.logger.Debug("Binlog rotated to", "log_name", currentLogName, "position", event.Position)
 			continue
 		case *replication.RowsEvent:
 			// Rows event, check if there are any active subscriptions
@@ -639,8 +681,18 @@ func (c *Client) readStream(ctx context.Context) {
 			for _, ddlTable := range ddlTables {
 				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
+		case *replication.GTIDEvent,
+			*replication.TableMapEvent,
+			*replication.XIDEvent,
+			*replication.FormatDescriptionEvent,
+			*replication.PreviousGTIDsEvent:
+			// Known stream-housekeeping events. We don't act on them here; the
+			// position is still advanced via the LogPos update below. They are
+			// listed explicitly (rather than handled by the default case) so the
+			// default can keep logging genuinely unknown event types — a future
+			// row-event variant we don't recognize could otherwise cause silent
+			// data loss.
 		default:
-			// Log unknown event types for debugging
 			c.logger.Debug("Received unknown event type", "type", fmt.Sprintf("%T", ev.Event))
 		}
 		// Update the buffered position
@@ -681,18 +733,27 @@ func (c *Client) processDDLNotification(schema, table string) {
 		}
 	} else {
 		// Check if the schema.table matches any of our subscriptions.
-		// This is the default behavior.
-		matchFound := false
+		// This is the default behavior. Snapshot the subscription set
+		// under c.Lock and inspect it after release — Tables() is a
+		// pure accessor that does not need the client lock.
 		c.Lock()
+		subs := make([]Subscription, 0, len(c.subscriptions))
 		for _, sub := range c.subscriptions {
+			subs = append(subs, sub)
+		}
+		c.Unlock()
+		matchFound := false
+		for _, sub := range subs {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
 				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
 					break
 				}
 			}
+			if matchFound {
+				break
+			}
 		}
-		c.Unlock()
 		if !matchFound {
 			return
 		}
@@ -709,27 +770,25 @@ func (c *Client) processDDLNotification(schema, table string) {
 //   - If there is, it will call the subscription's keyHasChanged method
 //     with the PK that has been changed.
 //
-// We acquire a mutex when processing row events because we don't want a new subscription
-// to be added (uses mutex) and we miss processing for rows on it.
+// We hold c.Lock only for the subscription map lookup. Once we have the
+// subscription pointer, we release the client lock before dispatching to
+// HasChanged. This matters for backpressure: bufferedMap.HasChanged can
+// block on its own condition variable when the buffer is full, and we
+// must not be holding c.Lock while it parks — c.flush() and other
+// callers acquire c.Lock briefly and would otherwise be unable to
+// progress, which would prevent the very flush that would unblock us.
 func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
-	c.Lock()
-	defer c.Unlock()
-
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
+	c.Lock()
 	sub, ok := c.subscriptions[subName]
+	c.Unlock()
 	if !ok {
 		return nil // ignore event, it could be to a _new table.
 	}
 
 	// Runtime check for minimal RBR (binlog_row_image=MINIMAL).
-	// When a buffered applier is in use, it needs full row images to replay
-	// changes on the target. Minimal row images skip non-PK, non-changed columns
-	// which would cause data loss. We check c.applier rather than iterating
-	// all subscriptions for performance, since c.applier != nil implies a
-	// bufferedMap subscription is in use.
-	if c.applier != nil && isMinimalRowImage(e) {
-		return fmt.Errorf("received a minimal RBR event for table %s.%s, but a buffered applier is in use which requires full row images (binlog_row_image=FULL). "+
-			"Please set binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
+	if isMinimalRowImage(e) {
+		return fmt.Errorf("received a minimal RBR event for table %s.%s, but we require binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
 	}
 
 	eventType := parseEventType(ev.Header.EventType)
@@ -1028,6 +1087,7 @@ func (c *Client) BlockWait(ctx context.Context) error {
 
 	prevPos := c.getBufferedPos()
 	first := true
+	stallCount := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -1037,13 +1097,21 @@ func (c *Client) BlockWait(ctx context.Context) error {
 		default:
 			currPos := c.getBufferedPos()
 			if currPos.Compare(prevPos) <= 0 && !first {
-				// we skip flushing on the first iteration because c.getCurrentBinlogPosition already flushes the binary log
-
-				c.logger.Debug("buffered position has not advanced, flushing binary logs")
-				if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
-					return err // it could be context cancelled, return it
+				// Position hasn't advanced. Only flush after multiple consecutive
+				// stalls to avoid unnecessary flushes when the binlog syncer is
+				// just slightly behind (e.g., under CI load). getCurrentBinlogPosition
+				// already flushes once at the start, so a brief stall is expected.
+				stallCount++
+				if stallCount >= blockWaitStallThreshold {
+					c.logger.Debug("buffered position has not advanced, flushing binary logs")
+					if err := dbconn.Exec(ctx, c.db, "FLUSH BINARY LOGS"); err != nil {
+						return err // it could be context cancelled, return it
+					}
+					c.flushedBinlogs.Add(1)
+					stallCount = 0
 				}
-				c.flushedBinlogs.Add(1)
+			} else {
+				stallCount = 0
 			}
 			prevPos = currPos
 			first = false
@@ -1100,13 +1168,29 @@ func (c *Client) feedback(numberOfKeys int, d time.Duration) {
 }
 
 // SetWatermarkOptimization sets both high and low watermark optimizations
-// for all subscriptions. This should be disabled before checksum/cutover to ensure
-// all changes are flushed regardless of watermark position.
-func (c *Client) SetWatermarkOptimization(newVal bool) {
+// for all subscriptions. This should be disabled before checksum/cutover to
+// ensure all changes are flushed regardless of watermark position.
+//
+// Each subscription may drain its outgoing store on the toggle (see
+// bufferedMap.SetWatermarkOptimization), so this can fail with the drain
+// error. If one subscription fails, subsequent subscriptions are not
+// touched and the caller should treat the operation as not-yet-applied.
+//
+// We snapshot the subscription set under c.Lock and then release it before
+// toggling, so a long-running drain on one subscription doesn't block
+// processRowsEvent from finding subscriptions for unrelated tables.
+func (c *Client) SetWatermarkOptimization(ctx context.Context, newVal bool) error {
 	c.Lock()
-	defer c.Unlock()
-
+	subs := make([]Subscription, 0, len(c.subscriptions))
 	for _, sub := range c.subscriptions {
-		sub.SetWatermarkOptimization(newVal)
+		subs = append(subs, sub)
 	}
+	c.Unlock()
+
+	for _, sub := range subs {
+		if err := sub.SetWatermarkOptimization(ctx, newVal); err != nil {
+			return err
+		}
+	}
+	return nil
 }

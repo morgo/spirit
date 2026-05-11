@@ -13,13 +13,12 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestFixCorruptWithApplier(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS corruptt1")
@@ -37,16 +36,16 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	destDB.DBName = newDBName
 
 	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(src)
 	dest, err := dbconn.New(destDB.FormatDSN(), dbconn.NewDBConfig())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(dest)
 
 	t1 := table.NewTableInfo(src, "test", "corruptt1")
-	assert.NoError(t, t1.SetInfo(t.Context()))
+	require.NoError(t, t1.SetInfo(t.Context()))
 	t2 := table.NewTableInfo(dest, newDBName, "corruptt1")
-	assert.NoError(t, t2.SetInfo(t.Context()))
+	require.NoError(t, t2.SetInfo(t.Context()))
 	logger := slog.Default()
 	target := applier.Target{
 		DB:       dest,
@@ -57,29 +56,28 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	require.NoError(t, err)
 
 	// Start the applier so its workers can process async Apply calls
-	feed := repl.NewClient(src, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	feed := repl.NewClient(src, cfg.Addr, cfg.User, cfg.Passwd, applier, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
-		Applier:         applier,
 	})
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	assert.NoError(t, err)
-	assert.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	assert.NoError(t, feed.Run(t.Context()))
-	assert.NoError(t, chunker.Open())
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	config.Applier = applier
 
 	checker, err := NewChecker([]*sql.DB{src}, chunker, []*repl.Client{feed}, config)
-	assert.Equal(t, "0/3 0.00%", checker.GetProgress())
-	assert.NoError(t, err)
-	assert.NoError(t, checker.Run(t.Context())) // should be fixed!
-	assert.Equal(t, "3/3 100.00%", checker.GetProgress())
+	require.NoError(t, err)
+	require.Equal(t, "0/3 0.00%", checker.GetProgress())
+	require.NoError(t, checker.Run(t.Context())) // should be fixed!
+	require.Equal(t, "3/3 100.00%", checker.GetProgress())
 }
 
 func TestDistributedChecksum(t *testing.T) {
@@ -158,12 +156,11 @@ func TestDistributedChecksum(t *testing.T) {
 	// Create replication feed
 	// We're not going to do anything, but it's required by the distributed checker
 	logger := slog.Default()
-	feed := repl.NewClient(sourceDB, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	feed := repl.NewClient(sourceDB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
-		Applier:         shardedApplier,
 	})
 	defer feed.Close()
 
@@ -196,7 +193,7 @@ func TestDistributedChecksum(t *testing.T) {
 	err = sourceDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&sourceCount)
 	require.NoError(t, err)
 
-	assert.Equal(t, sourceCount, shard0Count+shard1Count, "Total rows in shards should equal source")
+	require.Equal(t, sourceCount, shard0Count+shard1Count, "Total rows in shards should equal source")
 }
 
 // TestDistributedChecksumNtoM tests the distributed checksum with 2 sources and 2 targets (N:M).
@@ -286,12 +283,11 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 
 	// Create a repl client per source. Both share the same applier.
 	logger := slog.Default()
-	feed0 := repl.NewClient(src0DB, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	feed0 := repl.NewClient(src0DB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
-		Applier:         shardedApplier,
 	})
 	defer feed0.Close()
 	chunker0, err := table.NewChunker(src0Table, table.ChunkerConfig{NewTable: src0Table})
@@ -299,12 +295,11 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 	require.NoError(t, feed0.AddSubscription(src0Table, src0Table, chunker0))
 	require.NoError(t, feed0.Run(t.Context()))
 
-	feed1 := repl.NewClient(src1DB, cfg.Addr, cfg.User, cfg.Passwd, &repl.ClientConfig{
+	feed1 := repl.NewClient(src1DB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, &repl.ClientConfig{
 		Logger:          logger,
 		Concurrency:     4,
 		TargetBatchTime: time.Second,
 		ServerID:        repl.NewServerID(),
-		Applier:         shardedApplier,
 	})
 	defer feed1.Close()
 	chunker1, err := table.NewChunker(src1Table, table.ChunkerConfig{Logger: logger})

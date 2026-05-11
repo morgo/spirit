@@ -10,15 +10,10 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTargetStateCheck(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
-
 	// Setup source and target databases
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS state_src`)
 	testutils.RunSQL(t, `CREATE DATABASE state_src`)
@@ -26,11 +21,11 @@ func TestTargetStateCheck(t *testing.T) {
 	testutils.RunSQL(t, `CREATE DATABASE state_tgt`)
 
 	sourceDB, err := sql.Open("mysql", testutils.DSNForDatabase("state_src"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
 	targetDB, err := sql.Open("mysql", testutils.DSNForDatabase("state_tgt"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(targetDB)
 
 	// Create a test table on source
@@ -59,7 +54,7 @@ func TestTargetStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := targetStateCheck(t.Context(), r, slog.Default())
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 
 	// Test 2: Target with matching empty table should pass
@@ -81,7 +76,7 @@ func TestTargetStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := targetStateCheck(t.Context(), r, slog.Default())
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 
 	// Test 3: Target with non-empty table should fail
@@ -107,8 +102,8 @@ func TestTargetStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := targetStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "is not empty")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "is not empty")
 	})
 
 	// Test 4: Target with mismatched schema should fail
@@ -132,7 +127,7 @@ func TestTargetStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := targetStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "schema does not match")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema does not match")
 	})
 }

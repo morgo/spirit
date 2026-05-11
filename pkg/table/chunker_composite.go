@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,15 +16,16 @@ import (
 type chunkerComposite struct {
 	sync.Mutex
 
-	Ti             *TableInfo
-	NewTi          *TableInfo // Destination table info
-	chunkSize      uint64
-	chunkPtrs      []Datum  // a list of Ptrs for each of the keys.
-	chunkKeys      []string // all the keys to chunk on (usually all the col names of the PK)
-	keyName        string   // the name of the key we are chunking on
-	where          string   // any additional WHERE conditions.
-	finalChunkSent bool
-	isOpen         bool
+	Ti                    *TableInfo
+	NewTi                 *TableInfo // Destination table info
+	chunkSize             uint64
+	chunkPtrs             []Datum  // a list of Ptrs for each of the keys.
+	chunkKeys             []string // all the keys to chunk on (usually all the col names of the PK)
+	keyName               string   // the name of the key we are chunking on
+	where                 string   // any additional WHERE conditions.
+	finalChunkSent        bool
+	isOpen                bool
+	disableDynamicChunker bool // only used by the test suite
 
 	columnMapping *ColumnMapping
 
@@ -85,23 +85,25 @@ func (t *chunkerComposite) Next() (*Chunk, error) {
 	// Start prefetching the next chunk
 	// First assume it's the first chunk, we can overwrite this
 	// just below.
+	quotedChunkKeys := QuoteColumns(t.chunkKeys)
+	quotedKeyName := QuoteColumns([]string{t.keyName})
 	query := fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) %s ORDER BY %s LIMIT 1 OFFSET %d",
-		strings.Join(t.chunkKeys, ","),
+		quotedChunkKeys,
 		t.Ti.QuotedTableName,
-		t.keyName,
+		quotedKeyName,
 		t.additionalConditionsSQL(false),
-		strings.Join(t.chunkKeys, ","),
+		quotedChunkKeys,
 		t.chunkSize,
 	)
 	if !t.isFirstChunk() {
 		// This is not the first chunk, since we have pointers set.
 		query = fmt.Sprintf("SELECT %s FROM %s FORCE INDEX (%s) WHERE %s %s ORDER BY %s LIMIT 1 OFFSET %d",
-			strings.Join(t.chunkKeys, ","),
+			quotedChunkKeys,
 			t.Ti.QuotedTableName,
-			t.keyName,
+			quotedKeyName,
 			expandRowConstructorComparison(t.chunkKeys, OpGreaterThan, t.chunkPtrs),
 			t.additionalConditionsSQL(true),
-			strings.Join(t.chunkKeys, ","), // order by
+			quotedChunkKeys, // order by
 			t.chunkSize,
 		)
 	}
@@ -218,6 +220,15 @@ func (t *chunkerComposite) Open() (err error) {
 	return t.open()
 }
 
+// SetDynamicChunking enables (true) or disables (false) the composite
+// chunker's dynamic chunk-size adaptation. Disabling is intended for tests
+// that need deterministic chunk sizes; production callers should leave it on.
+func (t *chunkerComposite) SetDynamicChunking(newValue bool) {
+	t.Lock()
+	defer t.Unlock()
+	t.disableDynamicChunker = !newValue
+}
+
 // OpenAtWatermark opens a table for the resume-from-checkpoint use case.
 // This will set the chunkPtr to a known safe value that is contained within
 // the checkpoint.
@@ -318,8 +329,8 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
-	// We should just skip it.
-	if chunk.ChunkSize != t.chunkSize {
+	// We should just skip it. We also skip if dynamic chunking is disabled.
+	if chunk.ChunkSize != t.chunkSize || t.disableDynamicChunker {
 		return
 	}
 
@@ -535,13 +546,21 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 
-	// If we haven't dispatched any chunks yet (chunkPtrs is empty),
-	// everything is "above" the high watermark (we haven't started copying yet)
-	// Return true to discard binlog events that are ahead of our progress.
-	// But if checkpointHighPtr is set (resume case), we must not discard
-	// events below it — those rows may already exist in the target.
+	// We haven't claimed any range yet (no chunks dispatched, no resume
+	// checkpoint). The previous behavior returned TRUE here ("everything is
+	// above the high watermark"), which silently dropped binlog events
+	// during the window between SetWatermarkOptimization(true) and the
+	// first chunker.Next() call. The intent was that the chunker's later
+	// SELECT would pick the row up from source, but that only works for
+	// rows committed before the SELECT's snapshot. Rows committed AFTER
+	// the SELECT but BEFORE chunkPtrs is set are invisible to both paths
+	// and lost — see issue #746.
+	//
+	// Per the contract above ("if there is any ambiguity, return FALSE"),
+	// return FALSE: buffer the change. Once chunks start being dispatched,
+	// the watermark logic at flush time routes it correctly.
 	if len(t.chunkPtrs) == 0 && t.checkpointHighPtr.IsNil() {
-		return true
+		return false
 	}
 
 	// If we've sent the final chunk, nothing is above
@@ -579,7 +598,13 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	// Check if key is greater than or equal to the current chunkPtr[0]
 	// Use GreaterThanOrEqual which supports all types (numeric, string, temporal)
 	if len(t.chunkPtrs) == 0 {
-		return true // no chunkPtrs yet, but above checkpointHighPtr
+		// chunkPtrs not dispatched yet, key is above checkpointHighPtr.
+		// Same reasoning as the IsNil branch above: returning TRUE here
+		// would silently drop events for keys that the chunker hasn't
+		// yet dispatched, on the assumption that the later SELECT will
+		// pick them up — which is unsafe for rows committed after the
+		// SELECT's snapshot. Return FALSE so the change is buffered.
+		return false
 	}
 	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
 }

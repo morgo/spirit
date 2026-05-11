@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,7 +121,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 	}
 	sourceRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		sourceChecksumCols,
-		strings.Join(chunk.Table.KeyColumns, ", "),
+		table.QuoteColumns(chunk.Table.KeyColumns),
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	))
@@ -146,7 +145,7 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 
 	targetRows, err := trx.QueryContext(ctx, fmt.Sprintf(queryTemplate,
 		targetChecksumCols,
-		strings.Join(chunk.NewTable.KeyColumns, ", "),
+		table.QuoteColumns(chunk.NewTable.KeyColumns),
 		chunk.NewTable.QuotedTableName,
 		chunk.String(),
 	))
@@ -360,6 +359,7 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	}()
 
 	// Try the checksum up to n times if differences are found and we can fix them
+	var lastErr error
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
 			c.logger.Error("checksum failed, retrying", "attempt", attempt, "maxRetries", c.maxRetries)
@@ -371,6 +371,15 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			c.differencesFound.Store(0)
 		}
 
+		// If the parent context is already cancelled, retrying is pointless —
+		// every subsequent attempt will fail the same way at the first
+		// ctx-aware call. Bail out with the cancellation cause directly so
+		// the caller sees the real reason rather than the generic
+		// "checksum failed after N attempts" wrapper below.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		// Run the checksum with yield support. A single checksum pass may be
 		// split across multiple runChecksum calls if the yield timeout fires.
 		// Between yields we release the REPEATABLE READ transactions to limit
@@ -378,6 +387,7 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 		// and fresh snapshot before resuming from the low watermark.
 		if err := c.runChecksumWithYield(ctx); err != nil {
 			c.logger.Error("checksum encountered an error", "error", err)
+			lastErr = err
 			continue
 		}
 
@@ -388,15 +398,27 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			c.logger.Info("checksum passed")
 			return nil
 		}
+		// Differences were found and (because we got here) recopied. Record
+		// this as the "last attempt outcome" so the exhausted-retries error
+		// below can distinguish it from a hard error path.
+		lastErr = nil
 	}
 
-	// Retries exhausted:
-	// This used to say "checksum failed, this should never happen" but that's not entirely true.
-	// If the user attempts a lossy schema change such as adding a UNIQUE INDEX to non-unique data,
-	// then the checksum will fail. This is entirely expected, and not considered a bug. We should
-	// do our best-case to differentiate that we believe this ALTER statement is lossy, and
-	// customize the returned error based on it.
-	return fmt.Errorf("checksum failed after %d attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit", c.maxRetries)
+	// Retries exhausted. There are two distinct shapes of failure here:
+	//
+	//   1. Every attempt returned an error (lastErr != nil) — e.g. a
+	//      transient context cancellation, a connection issue, or a bug
+	//      that surfaces as an error rather than a row diff. Surface the
+	//      underlying error verbatim so it's actually triagable.
+	//
+	//   2. Every attempt completed but kept finding row differences
+	//      (lastErr == nil) — this is the original "lossy ALTER or bug"
+	//      shape (e.g. adding a UNIQUE INDEX to non-unique data, or a real
+	//      bug in Spirit's copy phase). Keep the original guidance.
+	if lastErr != nil {
+		return fmt.Errorf("checksum errored on every attempt (%d/%d); last error: %w", c.maxRetries, c.maxRetries, lastErr)
+	}
+	return fmt.Errorf("checksum found differences on every attempt (%d/%d). This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit", c.maxRetries, c.maxRetries)
 }
 
 // runChecksumWithYield runs the checksum, automatically yielding and resuming

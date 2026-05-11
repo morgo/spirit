@@ -121,8 +121,11 @@ func (c *Config) IsEnabled(linterName string) bool {
 func RunLinters(existingSchema []*statement.CreateTable, changes []*statement.AbstractStatement, config Config) ([]Violation, error) {
 	var errs []error
 
-	lock.RLock()
-	defer lock.RUnlock()
+	// Acquired as a writer (not a reader) because Configure() mutates the
+	// globally-registered linter singletons. Concurrent RunLinters calls
+	// would otherwise race on those fields — see issue #747.
+	lock.Lock()
+	defer lock.Unlock()
 
 	var violations []Violation
 

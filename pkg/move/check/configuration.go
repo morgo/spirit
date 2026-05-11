@@ -20,20 +20,22 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		if src.DB == nil {
 			return fmt.Errorf("source %d: database connection is not initialized", i)
 		}
-		var binlogFormat, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema string
+		var binlogFormat, binlogRowImage, logBin, logSlaveUpdates, binlogRowValueOptions, performanceSchema, binlogOrderCommits string
 		err := src.DB.QueryRowContext(ctx,
 			`SELECT @@global.binlog_format,
 			@@global.binlog_row_image,
 			@@global.log_bin,
 			@@global.log_slave_updates,
 			@@global.binlog_row_value_options,
-			@@global.performance_schema`).Scan(
+			@@global.performance_schema,
+			@@global.binlog_order_commits`).Scan(
 			&binlogFormat,
 			&binlogRowImage,
 			&logBin,
 			&logSlaveUpdates,
 			&binlogRowValueOptions,
 			&performanceSchema,
+			&binlogOrderCommits,
 		)
 		if err != nil {
 			return fmt.Errorf("source %d: %w", i, err)
@@ -55,6 +57,12 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 		}
 		if performanceSchema != "1" {
 			return fmt.Errorf("source %d: performance_schema must be enabled for move operations", i)
+		}
+		if binlogOrderCommits != "1" {
+			// binlog_order_commits=ON is the MySQL default. Setting it OFF
+			// allows commit reordering that breaks Spirit's binlog→applier
+			// visibility assumption (see issue #818).
+			return fmt.Errorf("source %d: binlog_order_commits must be ON (this is the MySQL default; setting it OFF allows commit reordering that breaks Spirit's binlog→applier visibility assumption)", i)
 		}
 	}
 	return nil

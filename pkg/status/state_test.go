@@ -3,7 +3,7 @@ package status
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -12,13 +12,13 @@ func TestMain(m *testing.M) {
 }
 
 func TestStateString(t *testing.T) {
-	assert.Equal(t, "initial", Initial.String())
-	assert.Equal(t, "copyRows", CopyRows.String())
-	assert.Equal(t, "waitingOnSentinelTable", WaitingOnSentinelTable.String())
-	assert.Equal(t, "applyChangeset", ApplyChangeset.String())
-	assert.Equal(t, "checksum", Checksum.String())
-	assert.Equal(t, "cutOver", CutOver.String())
-	assert.Equal(t, "errCleanup", ErrCleanup.String())
-	assert.Equal(t, "analyzeTable", AnalyzeTable.String())
-	assert.Equal(t, "close", Close.String())
+	require.Equal(t, "initial", Initial.String())
+	require.Equal(t, "copyRows", CopyRows.String())
+	require.Equal(t, "waitingOnSentinelTable", WaitingOnSentinelTable.String())
+	require.Equal(t, "applyChangeset", ApplyChangeset.String())
+	require.Equal(t, "checksum", Checksum.String())
+	require.Equal(t, "cutOver", CutOver.String())
+	require.Equal(t, "errCleanup", ErrCleanup.String())
+	require.Equal(t, "analyzeTable", AnalyzeTable.String())
+	require.Equal(t, "close", Close.String())
 }

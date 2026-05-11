@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,13 +55,13 @@ func TestShardingProviderInterface(t *testing.T) {
 
 		column, hashFunc, err := provider.GetShardingMetadata("testdb", "users")
 		require.NoError(t, err)
-		assert.Equal(t, "user_id", column)
-		assert.NotNil(t, hashFunc)
+		require.Equal(t, "user_id", column)
+		require.NotNil(t, hashFunc)
 
 		// Test the hash function
 		hash, err := hashFunc(123)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(123), hash)
+		require.Equal(t, uint64(123), hash)
 	})
 
 	t.Run("returns empty for no vindex", func(t *testing.T) {
@@ -70,8 +69,8 @@ func TestShardingProviderInterface(t *testing.T) {
 
 		column, hashFunc, err := provider.GetShardingMetadata("testdb", "config")
 		require.NoError(t, err)
-		assert.Empty(t, column)
-		assert.Nil(t, hashFunc)
+		require.Empty(t, column)
+		require.Nil(t, hashFunc)
 	})
 
 	t.Run("returns error", func(t *testing.T) {
@@ -81,7 +80,7 @@ func TestShardingProviderInterface(t *testing.T) {
 
 		_, _, err := provider.GetShardingMetadata("testdb", "users")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "test error")
+		require.Contains(t, err.Error(), "test error")
 	})
 }
 
@@ -102,17 +101,17 @@ func TestHashFunc(t *testing.T) {
 		// Test with int
 		hash, err := hashFunc(42)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(84), hash)
+		require.Equal(t, uint64(84), hash)
 
 		// Test with string
 		hash, err = hashFunc("hello")
 		require.NoError(t, err)
-		assert.Equal(t, uint64(5), hash)
+		require.Equal(t, uint64(5), hash)
 
 		// Test with unsupported type
 		_, err = hashFunc(3.14)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unsupported type")
+		require.Contains(t, err.Error(), "unsupported type")
 	})
 }
 
@@ -167,29 +166,29 @@ func TestMultiTableShardingProvider(t *testing.T) {
 	t.Run("returns correct config for users table", func(t *testing.T) {
 		column, hashFunc, err := provider.GetShardingMetadata("testdb", "users")
 		require.NoError(t, err)
-		assert.Equal(t, "user_id", column)
-		assert.NotNil(t, hashFunc)
+		require.Equal(t, "user_id", column)
+		require.NotNil(t, hashFunc)
 
 		hash, err := hashFunc(123)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(1), hash)
+		require.Equal(t, uint64(1), hash)
 	})
 
 	t.Run("returns correct config for orders table", func(t *testing.T) {
 		column, hashFunc, err := provider.GetShardingMetadata("testdb", "orders")
 		require.NoError(t, err)
-		assert.Equal(t, "order_id", column)
-		assert.NotNil(t, hashFunc)
+		require.Equal(t, "order_id", column)
+		require.NotNil(t, hashFunc)
 
 		hash, err := hashFunc(456)
 		require.NoError(t, err)
-		assert.Equal(t, uint64(2), hash)
+		require.Equal(t, uint64(2), hash)
 	})
 
 	t.Run("returns empty for unconfigured table", func(t *testing.T) {
 		column, hashFunc, err := provider.GetShardingMetadata("testdb", "config")
 		require.NoError(t, err)
-		assert.Empty(t, column)
-		assert.Nil(t, hashFunc)
+		require.Empty(t, column)
+		require.Nil(t, hashFunc)
 	})
 }

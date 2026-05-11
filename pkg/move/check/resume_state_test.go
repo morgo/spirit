@@ -10,15 +10,10 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestResumeStateCheck(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner")
-	}
-
 	// Setup source and target databases
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS resume_src`)
 	testutils.RunSQL(t, `CREATE DATABASE resume_src`)
@@ -26,11 +21,11 @@ func TestResumeStateCheck(t *testing.T) {
 	testutils.RunSQL(t, `CREATE DATABASE resume_tgt`)
 
 	sourceDB, err := sql.Open("mysql", testutils.DSNForDatabase("resume_src"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(sourceDB)
 
 	targetDB, err := sql.Open("mysql", testutils.DSNForDatabase("resume_tgt"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer utils.CloseAndLog(targetDB)
 
 	// Create a test table on source
@@ -63,9 +58,9 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := resumeStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "checkpoint table")
-		assert.Contains(t, err.Error(), "does not exist")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "checkpoint table")
+		require.Contains(t, err.Error(), "does not exist")
 	})
 
 	// Create checkpoint table for remaining tests
@@ -94,9 +89,9 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := resumeStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "does not exist on target")
-		assert.Contains(t, err.Error(), "cannot resume")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "does not exist on target")
+		require.Contains(t, err.Error(), "cannot resume")
 	})
 
 	// Create matching target table
@@ -119,7 +114,7 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := resumeStateCheck(t.Context(), r, slog.Default())
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 
 	// Test 4: Schema mismatch should fail
@@ -143,9 +138,9 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err := resumeStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "schema mismatch")
-		assert.Contains(t, err.Error(), "cannot resume safely")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema mismatch")
+		require.Contains(t, err.Error(), "cannot resume safely")
 	})
 
 	// Test 5: No source tables should fail
@@ -161,8 +156,8 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{}, // Empty
 		}
 		err := resumeStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "no source tables")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no source tables")
 	})
 
 	// Test 6: Multiple targets with matching schema should pass
@@ -207,7 +202,7 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err = resumeStateCheck(t.Context(), r, slog.Default())
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	})
 
 	// Test 7: Multiple targets with one missing table should fail
@@ -239,8 +234,8 @@ func TestResumeStateCheck(t *testing.T) {
 			SourceTables: []*table.TableInfo{sourceTable},
 		}
 		err = resumeStateCheck(t.Context(), r, slog.Default())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "does not exist on target 1")
-		assert.Contains(t, err.Error(), "cannot resume")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "does not exist on target 1")
+		require.Contains(t, err.Error(), "cannot resume")
 	})
 }

@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,14 +35,15 @@ func TestEnumReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM value reorder")
-	assert.ErrorContains(t, err, "buffered mode")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
-	// Unbuffered + reorder ENUM: should pass (unbuffered is safe for ENUM)
+	// Unbuffered + reorder ENUM: should also fail — bufferedMap is now the
+	// binlog replay path for memory-comparable PKs regardless of the copy mode.
 	r.Buffered = false
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
 	// Buffered + append ENUM (safe): should pass
 	r = Resources{
@@ -52,7 +52,7 @@ func TestEnumReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Buffered + insert new ENUM value in middle: should fail
 	r = Resources{
@@ -61,8 +61,8 @@ func TestEnumReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM value reorder")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
 	// Buffered + CHANGE COLUMN with reorder: should fail
 	r = Resources{
@@ -71,8 +71,8 @@ func TestEnumReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM value reorder")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
 	// Buffered + remove ENUM value: should fail
 	r = Resources{
@@ -81,8 +81,8 @@ func TestEnumReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "unsafe ENUM value reorder")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
 	// Buffered + non-ENUM column modification: should pass
 	r = Resources{
@@ -91,7 +91,7 @@ func TestEnumReorderCheck(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestEnumReorderCheckVarcharToEnum(t *testing.T) {
@@ -115,12 +115,12 @@ func TestEnumReorderCheckVarcharToEnum(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Unbuffered + VARCHAR→ENUM conversion: should also pass
 	r.Buffered = false
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Buffered + CHANGE COLUMN VARCHAR→ENUM: should pass
 	r = Resources{
@@ -129,5 +129,5 @@ func TestEnumReorderCheckVarcharToEnum(t *testing.T) {
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

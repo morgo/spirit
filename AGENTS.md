@@ -26,6 +26,7 @@ cd cmd/spirit && go build
 ./spirit move --help
 ./spirit lint --help
 ./spirit diff --help
+./spirit fmt --help
 ```
 
 Spirit uses [Kong](https://github.com/alecthomas/kong) for CLI argument parsing with subcommands. The CLI structs are defined in `pkg/migration/`, `pkg/move/`, and `pkg/lint/` respectively.
@@ -62,7 +63,6 @@ The `pkg/testutils/` package provides helpers used across all test files:
 - `NewTestTable(t, name, createSQL)` — creates a test table with automatic cleanup (see below)
 - `CreateUniqueTestDatabase(t)` — creates a unique temporary database with automatic cleanup via `t.Cleanup()`
 - `RunSQL(t, stmt)` / `RunSQLInDatabase(t, dbName, stmt)` — execute SQL against the test MySQL
-- `IsMinimalRBRTestRunner(t)` — detects minimal `binlog_row_image` environments to skip incompatible tests
 
 #### `NewTestTable` — preferred way to create test tables
 
@@ -132,7 +132,7 @@ m.Alter = "ENGINE=InnoDB"
 require.NoError(t, m.Run())
 ```
 
-Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithStrict()`, `WithDBName(name)`, `WithRespectSentinel()`.
+Available options: `WithThreads(n)`, `WithTargetChunkTime(d)`, `WithBuffered(b)`, `WithTable(name)`, `WithAlter(stmt)`, `WithStatement(sql)`, `WithTestThrottler()`, `WithDeferCutOver()`, `WithSkipDropAfterCutover()`, `WithStrict()`, `WithDBName(name)`, `WithRespectSentinel()`, `WithLint()`, `WithLintOnly()`, `WithHost(host)`, `WithReplicaDSN(dsn)`, `WithReplicaMaxLag(d)`, `WithConfFile(t, content)`.
 
 **General test patterns:**
 - Integration tests connect to real MySQL — there are no mocked database tests for core logic
@@ -154,7 +154,7 @@ The project uses golangci-lint v2 with `gofmt` and `goimports` formatters enable
 
 ```
 cmd/
-  spirit/     → Single CLI entry point with subcommands: migrate, move, lint, diff
+  spirit/     → Single CLI entry point with subcommands: migrate, move, lint, diff, fmt
 
 pkg/
   migration/  → Orchestrator for single-table schema changes (main entry point)
@@ -166,10 +166,12 @@ pkg/
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
   statement/  → SQL parsing via TiDB parser (ALTER, CREATE, DROP, RENAME)
-  lint/       → Static analysis framework for schemas and DDL (12 built-in linters)
+  lint/       → Static analysis framework for schemas and DDL (15 built-in linters)
+  fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
   metrics/    → Metric types for observability
+  buildinfo/  → Build version and metadata
   utils/      → General utilities
   testutils/  → Test helpers (DSN, database creation, SQL execution)
 
@@ -201,15 +203,14 @@ Each package has its own `README.md` with detailed documentation. Key packages t
 The main orchestrator. `runner.go` contains the core migration loop. `Migration` struct is the Kong CLI binding. The `Run()` method drives the full lifecycle. See `cutover.go` for the atomic rename logic.
 
 ### `pkg/repl`
-Acts as a MySQL replica using [go-mysql](https://github.com/go-mysql-org/go-mysql). Three subscription types:
-- **DeltaMap** (preferred) — deduplicates changes in a map; requires memory-comparable PKs
-- **DeltaQueue** (fallback) — FIFO queue for non-memory-comparable PKs
-- **BufferedMap** (experimental) — stores full row data for cross-server moves
+Acts as a MySQL replica using [go-mysql](https://github.com/go-mysql-org/go-mysql). Two subscription types:
+- **BufferedMap** (default) — stores the full row image from the binlog and writes via the applier. Used for memory-comparable PKs (integers, binary strings, etc.). Sidesteps the binlog/visibility race that motivates `binlog_row_image=FULL` (see #746).
+- **DeltaQueue** (fallback) — FIFO queue using `REPLACE INTO ... SELECT` for non-memory-comparable PKs (e.g. `VARCHAR` collations). Slower; used only when `BufferedMap` cannot be.
 
 ### `pkg/copier`
 Two algorithms:
-- **Unbuffered** (default) — `INSERT IGNORE INTO ... SELECT` directly in MySQL
-- **Buffered** (experimental) — producer/consumer pattern for cross-server migrations
+- **Unbuffered** (default) — `INSERT IGNORE INTO ... SELECT` directly in MySQL.
+- **Buffered** (`--buffered`) — producer/consumer pattern; required for cross-server migrations (`pkg/move`) and opt-in for single-server schema changes. Selected via `CopierConfig.Buffered`; ignores the applier when `Buffered` is false even if one is supplied.
 
 ### `pkg/table`
 Three chunker implementations:
@@ -221,7 +222,7 @@ Three chunker implementations:
 Uses the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) for SQL parsing. If a DDL cannot be parsed by TiDB, Spirit cannot execute it. `parse_create_table.go` provides structured `CREATE TABLE` parsing.
 
 ### `pkg/lint`
-12 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
+15 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
 
 ### `pkg/dbconn`
 Handles connection management including:
@@ -272,8 +273,10 @@ Spirit is designed to fail safely. When in doubt:
 
 GitHub Actions workflows (`.github/workflows/`):
 - **linter.yml** — runs `golangci-lint` v2.11.4 on Go 1.26 (push to main + PRs)
-- **mysql8-docker.yml** — integration tests against MySQL 8.0.33 with replication/TLS
+- **mysql8-docker.yml** — integration tests against MySQL 8.0.45 with replication/TLS
 - **mysql8.0.28-docker.yml** — integration tests against MySQL 8.0.28
+- **mysql8.0.42-docker.yml** — integration tests against MySQL 8.0.42
 - **mysql84-docker.yml** — integration tests against MySQL 8.4
-- **mysql8_rbr_minimal-docker.yml** — tests with minimal `binlog_row_image`
+- **mysql97-docker.yml** — integration tests against MySQL 9.7
 - **buildandrun-docker.yml** — build and run smoke test
+- **release.yml** — release automation

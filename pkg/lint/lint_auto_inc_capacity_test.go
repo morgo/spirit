@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,14 +89,14 @@ func TestAutoIncCapacity_AboveThreshold_TinyInt(t *testing.T) {
 
 	// 220 is above 85% of 255 (216)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "auto_inc_capacity", violations[0].Linter.Name())
-	assert.Equal(t, SeverityError, violations[0].Severity)
-	assert.Equal(t, "users", violations[0].Location.Table)
-	assert.NotNil(t, violations[0].Location.Column)
-	assert.Equal(t, "id", *violations[0].Location.Column)
-	assert.NotNil(t, violations[0].Message)
-	assert.Contains(t, violations[0].Message, "AUTO_INCREMENT")
-	assert.NotNil(t, violations[0].Suggestion)
+	require.Equal(t, "auto_inc_capacity", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "id", *violations[0].Location.Column)
+	require.NotNil(t, violations[0].Message)
+	require.Contains(t, violations[0].Message, "AUTO_INCREMENT")
+	require.NotNil(t, violations[0].Suggestion)
 }
 
 func TestAutoIncCapacity_AboveThreshold_SmallInt(t *testing.T) {
@@ -114,8 +113,8 @@ func TestAutoIncCapacity_AboveThreshold_SmallInt(t *testing.T) {
 
 	// 60000 is above 85% of 65536 (55705.6)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.Equal(t, "id", *violations[0].Location.Column)
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.Equal(t, "id", *violations[0].Location.Column)
 }
 
 func TestAutoIncCapacity_AboveThreshold_MediumInt(t *testing.T) {
@@ -132,7 +131,7 @@ func TestAutoIncCapacity_AboveThreshold_MediumInt(t *testing.T) {
 
 	// 15000000 is above 85% of 16777216 (14260633.6)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "products", violations[0].Location.Table)
+	require.Equal(t, "products", violations[0].Location.Table)
 }
 
 func TestAutoIncCapacity_AboveThreshold_Int(t *testing.T) {
@@ -149,7 +148,7 @@ func TestAutoIncCapacity_AboveThreshold_Int(t *testing.T) {
 
 	// 3700000000 is above 85% of 4294967296 (3650722201.6)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "logs", violations[0].Location.Table)
+	require.Equal(t, "logs", violations[0].Location.Table)
 }
 
 // Test signed vs unsigned
@@ -184,7 +183,7 @@ func TestAutoIncCapacity_SignedTinyInt_AboveThreshold(t *testing.T) {
 
 	// 110 is above 85% of 128 (108.8) for signed TINYINT
 	require.Len(t, violations, 1)
-	assert.Contains(t, *violations[0].Suggestion, "UNSIGNED")
+	require.Contains(t, *violations[0].Suggestion, "UNSIGNED")
 }
 
 func TestAutoIncCapacity_SignedSmallInt_AboveThreshold(t *testing.T) {
@@ -201,7 +200,7 @@ func TestAutoIncCapacity_SignedSmallInt_AboveThreshold(t *testing.T) {
 
 	// 28000 is above 85% of 32768 (27852.8) for signed SMALLINT
 	require.Len(t, violations, 1)
-	assert.Contains(t, *violations[0].Suggestion, "UNSIGNED")
+	require.Contains(t, *violations[0].Suggestion, "UNSIGNED")
 }
 
 func TestAutoIncCapacity_SignedInt_AboveThreshold(t *testing.T) {
@@ -218,7 +217,7 @@ func TestAutoIncCapacity_SignedInt_AboveThreshold(t *testing.T) {
 
 	// 1850000000 is above 85% of 2147483648 (1825361100.8) for signed INT
 	require.Len(t, violations, 1)
-	assert.Contains(t, *violations[0].Suggestion, "UNSIGNED")
+	require.Contains(t, *violations[0].Suggestion, "UNSIGNED")
 }
 
 // Test different threshold values
@@ -279,7 +278,7 @@ func TestAutoIncCapacity_Configure_ValidThreshold(t *testing.T) {
 		"threshold": "90",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(90), linter.threshold)
+	require.Equal(t, uint64(90), linter.threshold)
 }
 
 func TestAutoIncCapacity_Configure_MinimumThreshold(t *testing.T) {
@@ -288,7 +287,7 @@ func TestAutoIncCapacity_Configure_MinimumThreshold(t *testing.T) {
 		"threshold": "1",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1), linter.threshold)
+	require.Equal(t, uint64(1), linter.threshold)
 }
 
 func TestAutoIncCapacity_Configure_MaximumThreshold(t *testing.T) {
@@ -297,7 +296,7 @@ func TestAutoIncCapacity_Configure_MaximumThreshold(t *testing.T) {
 		"threshold": "100",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, uint64(100), linter.threshold)
+	require.Equal(t, uint64(100), linter.threshold)
 }
 
 func TestAutoIncCapacity_Configure_InvalidThreshold_Zero(t *testing.T) {
@@ -306,7 +305,7 @@ func TestAutoIncCapacity_Configure_InvalidThreshold_Zero(t *testing.T) {
 		"threshold": "0",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be between 0 and 100")
+	require.Contains(t, err.Error(), "must be between 0 and 100")
 }
 
 func TestAutoIncCapacity_Configure_InvalidThreshold_Negative(t *testing.T) {
@@ -315,7 +314,7 @@ func TestAutoIncCapacity_Configure_InvalidThreshold_Negative(t *testing.T) {
 		"threshold": "-10",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be between 0 and 100")
+	require.Contains(t, err.Error(), "must be between 0 and 100")
 }
 
 func TestAutoIncCapacity_Configure_InvalidThreshold_TooHigh(t *testing.T) {
@@ -324,7 +323,7 @@ func TestAutoIncCapacity_Configure_InvalidThreshold_TooHigh(t *testing.T) {
 		"threshold": "101",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be between 0 and 100")
+	require.Contains(t, err.Error(), "must be between 0 and 100")
 }
 
 func TestAutoIncCapacity_Configure_InvalidThreshold_NotANumber(t *testing.T) {
@@ -333,7 +332,7 @@ func TestAutoIncCapacity_Configure_InvalidThreshold_NotANumber(t *testing.T) {
 		"threshold": "abc",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not be parsed")
+	require.Contains(t, err.Error(), "could not be parsed")
 }
 
 func TestAutoIncCapacity_Configure_InvalidThreshold_Float(t *testing.T) {
@@ -342,7 +341,7 @@ func TestAutoIncCapacity_Configure_InvalidThreshold_Float(t *testing.T) {
 		"threshold": "85.5",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not be parsed")
+	require.Contains(t, err.Error(), "could not be parsed")
 }
 
 func TestAutoIncCapacity_Configure_UnknownKey(t *testing.T) {
@@ -360,29 +359,29 @@ func TestAutoIncCapacity_DefaultConfig(t *testing.T) {
 	linter := &AutoIncCapacityLinter{}
 	config := linter.DefaultConfig()
 	require.Contains(t, config, "threshold")
-	assert.Equal(t, "85", config["threshold"])
+	require.Equal(t, "85", config["threshold"])
 }
 
 // Test linter metadata
 
 func TestAutoIncCapacity_Name(t *testing.T) {
 	linter := &AutoIncCapacityLinter{}
-	assert.Equal(t, "auto_inc_capacity", linter.Name())
+	require.Equal(t, "auto_inc_capacity", linter.Name())
 }
 
 func TestAutoIncCapacity_Description(t *testing.T) {
 	linter := &AutoIncCapacityLinter{}
 	desc := linter.Description()
-	assert.NotEmpty(t, desc)
-	assert.Contains(t, desc, "auto-inc")
-	assert.Contains(t, desc, "capacity")
+	require.NotEmpty(t, desc)
+	require.Contains(t, desc, "auto-inc")
+	require.Contains(t, desc, "capacity")
 }
 
 func TestAutoIncCapacity_String(t *testing.T) {
 	linter := &AutoIncCapacityLinter{}
 	str := linter.String()
-	assert.NotEmpty(t, str)
-	assert.Contains(t, str, "auto_inc_capacity")
+	require.NotEmpty(t, str)
+	require.Contains(t, str, "auto_inc_capacity")
 }
 
 // Test tables without AUTO_INCREMENT
@@ -463,7 +462,7 @@ func TestAutoIncCapacity_MultipleTables_SomeFail(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct1, ct2}, nil)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "orders", violations[0].Location.Table)
+	require.Equal(t, "orders", violations[0].Location.Table)
 }
 
 func TestAutoIncCapacity_MultipleTables_AllFail(t *testing.T) {
@@ -487,8 +486,8 @@ func TestAutoIncCapacity_MultipleTables_AllFail(t *testing.T) {
 
 	require.Len(t, violations, 2)
 	tableNames := []string{violations[0].Location.Table, violations[1].Location.Table}
-	assert.Contains(t, tableNames, "users")
-	assert.Contains(t, tableNames, "orders")
+	require.Contains(t, tableNames, "users")
+	require.Contains(t, tableNames, "orders")
 }
 
 // Test with existing tables and changes
@@ -536,7 +535,7 @@ func TestAutoIncCapacity_NewTable_FromChanges(t *testing.T) {
 	violations := linter.Lint(nil, stmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, "users", violations[0].Location.Table)
 }
 
 func TestAutoIncCapacity_MixedExistingAndNew(t *testing.T) {
@@ -560,7 +559,7 @@ func TestAutoIncCapacity_MixedExistingAndNew(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{existingTable}, newStmts)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "new_table", violations[0].Location.Table)
+	require.Equal(t, "new_table", violations[0].Location.Table)
 }
 
 // Test violation structure
@@ -580,16 +579,16 @@ func TestAutoIncCapacity_ViolationStructure(t *testing.T) {
 	require.Len(t, violations, 1)
 	v := violations[0]
 
-	assert.NotNil(t, v.Linter)
-	assert.Equal(t, "auto_inc_capacity", v.Linter.Name())
-	assert.Equal(t, SeverityError, v.Severity)
-	assert.NotEmpty(t, v.Message)
-	assert.Contains(t, v.Message, "AUTO_INCREMENT")
-	assert.NotNil(t, v.Location)
-	assert.Equal(t, "users", v.Location.Table)
-	assert.NotNil(t, v.Location.Column)
-	assert.Equal(t, "id", *v.Location.Column)
-	assert.NotNil(t, v.Suggestion)
+	require.NotNil(t, v.Linter)
+	require.Equal(t, "auto_inc_capacity", v.Linter.Name())
+	require.Equal(t, SeverityError, v.Severity)
+	require.NotEmpty(t, v.Message)
+	require.Contains(t, v.Message, "AUTO_INCREMENT")
+	require.NotNil(t, v.Location)
+	require.Equal(t, "users", v.Location.Table)
+	require.NotNil(t, v.Location.Column)
+	require.Equal(t, "id", *v.Location.Column)
+	require.NotNil(t, v.Suggestion)
 }
 
 func TestAutoIncCapacity_Suggestion_NonBigInt(t *testing.T) {
@@ -605,7 +604,7 @@ func TestAutoIncCapacity_Suggestion_NonBigInt(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	require.Len(t, violations, 1)
-	assert.Contains(t, *violations[0].Suggestion, "BIGINT")
+	require.Contains(t, *violations[0].Suggestion, "BIGINT")
 }
 
 func TestAutoIncCapacity_Suggestion_Signed(t *testing.T) {
@@ -621,8 +620,8 @@ func TestAutoIncCapacity_Suggestion_Signed(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	require.Len(t, violations, 1)
-	assert.Contains(t, *violations[0].Suggestion, "UNSIGNED")
-	assert.Contains(t, *violations[0].Suggestion, "BIGINT")
+	require.Contains(t, *violations[0].Suggestion, "UNSIGNED")
+	require.Contains(t, *violations[0].Suggestion, "BIGINT")
 }
 
 // Test edge cases
@@ -771,6 +770,6 @@ func TestAutoIncCapacity_ComplexTable_Fail(t *testing.T) {
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 	require.Len(t, violations, 1)
-	assert.Equal(t, "orders", violations[0].Location.Table)
-	assert.Equal(t, "order_id", *violations[0].Location.Column)
+	require.Equal(t, "orders", violations[0].Location.Table)
+	require.Equal(t, "order_id", *violations[0].Location.Column)
 }

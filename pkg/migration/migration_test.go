@@ -2,6 +2,7 @@ package migration
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -13,12 +14,16 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
+	// Tests run at Debug level so diagnostic logs in the binlog applier
+	// path (HasChanged add/drop, deltaMap.Flush stmt + affected_rows) and
+	// the copier (per-chunk affected_rows) are captured in CI output.
+	// See issue #746.
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
 	sentinelCheckInterval = 100 * time.Millisecond
@@ -99,6 +104,7 @@ func TestE2ENullAlterWithReplicas(t *testing.T) {
 	if replicaDSN == "" {
 		t.Skip("skipping replica tests because REPLICA_DSN not set")
 	}
+	testutils.WaitForReplicaHealthy(t, replicaDSN, 30*time.Second)
 	testutils.NewTestTable(t, "replicatest", `CREATE TABLE replicatest (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		name varchar(255) NOT NULL,
@@ -146,9 +152,6 @@ func TestGeneratedColumns(t *testing.T) {
 		testGeneratedColumns(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testGeneratedColumns(t, true)
 	})
 }
@@ -171,9 +174,6 @@ func TestStoredGeneratedColumns(t *testing.T) {
 		testStoredGeneratedColumns(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testStoredGeneratedColumns(t, true)
 	})
 }
@@ -216,9 +216,6 @@ func TestBinaryChecksum(t *testing.T) {
 		testBinaryChecksum(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testBinaryChecksum(t, true)
 	})
 }
@@ -258,9 +255,6 @@ func TestConvertCharset(t *testing.T) {
 		testConvertCharset(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testConvertCharset(t, true)
 	})
 }
@@ -398,9 +392,6 @@ func TestLargeNumberOfMultiChanges(t *testing.T) {
 }
 
 func TestBufferedMultiTableMigration(t *testing.T) {
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-	}
 	tt := testutils.NewTestTable(t, "bmt_t1", `CREATE TABLE bmt_t1 (
 		id int not null primary key auto_increment,
 		name varchar(100) not null,
@@ -439,12 +430,12 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, defaultUsername, migration.Username)
-	assert.Equal(t, defaultPassword, *migration.Password)
-	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
-	assert.Equal(t, defaultDatabase, migration.Database)
-	assert.Equal(t, defaultTLSMode, migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, defaultUsername, migration.Username)
+	require.Equal(t, defaultPassword, *migration.Password)
+	require.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
+	require.Equal(t, defaultDatabase, migration.Database)
+	require.Equal(t, defaultTLSMode, migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsCLIUsed(t *testing.T) {
@@ -461,14 +452,14 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 	}
 
 	_, err := migration.normalizeOptions()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "VERIFY_CA", migration.TLSMode)
-	assert.Equal(t, "/path/to/ca", migration.TLSCertificatePath)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "VERIFY_CA", migration.TLSMode)
+	require.Equal(t, "/path/to/ca", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
@@ -482,12 +473,12 @@ func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, defaultUsername, migration.Username)
-	assert.Empty(t, *migration.Password)
-	assert.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
-	assert.Equal(t, defaultDatabase, migration.Database)
-	assert.Equal(t, defaultTLSMode, migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, defaultUsername, migration.Username)
+	require.Empty(t, *migration.Password)
+	require.Equal(t, fmt.Sprintf("%s:%d", defaultHost, defaultPort), migration.Host)
+	require.Equal(t, defaultDatabase, migration.Database)
+	require.Equal(t, defaultTLSMode, migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
@@ -503,8 +494,8 @@ func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
 	}
 
 	_, err := migration.normalizeOptions()
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "no such file or directory")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no such file or directory")
 }
 
 func TestMigrationParamsIniFilePreferCommandLineOptions(t *testing.T) {
@@ -534,12 +525,12 @@ tls-ca = /path/from/file
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-host:1234", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "REQUIRED", migration.TLSMode)
-	assert.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-host:1234", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "REQUIRED", migration.TLSMode)
+	require.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileNoCommandLineOptions(t *testing.T) {
@@ -563,12 +554,12 @@ tls-ca = /path/to/cert
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "filepass", *migration.Password)
-	assert.Equal(t, "filehost:5678", migration.Host)
-	assert.Equal(t, "filedb", migration.Database)
-	assert.Equal(t, "REQUIRED", migration.TLSMode)
-	assert.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
+	require.Equal(t, "fileuser", migration.Username)
+	require.Equal(t, "filepass", *migration.Password)
+	require.Equal(t, "filehost:5678", migration.Host)
+	require.Equal(t, "filedb", migration.Database)
+	require.Equal(t, "REQUIRED", migration.TLSMode)
+	require.Equal(t, "/path/to/cert", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileUseDefaultPort(t *testing.T) {
@@ -591,12 +582,12 @@ tls-ca = /path/to/another/ca
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "filepass", *migration.Password)
-	assert.Equal(t, "filehost:3306", migration.Host)
-	assert.Equal(t, "filedb", migration.Database)
-	assert.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
-	assert.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
+	require.Equal(t, "fileuser", migration.Username)
+	require.Equal(t, "filepass", *migration.Password)
+	require.Equal(t, "filehost:3306", migration.Host)
+	require.Equal(t, "filedb", migration.Database)
+	require.Equal(t, "VERIFY_IDENTITY", migration.TLSMode)
+	require.Equal(t, "/path/to/another/ca", migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileOnlyUserSpecifiedInFile(t *testing.T) {
@@ -618,12 +609,12 @@ user = fileuser
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "fileuser", migration.Username)
-	assert.Equal(t, "cli-pass", *migration.Password)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "fileuser", migration.Username)
+	require.Equal(t, "cli-pass", *migration.Password)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileOnlyPasswordSpecifiedInFile(t *testing.T) {
@@ -644,12 +635,12 @@ password = filepass
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "filepass", *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "filepass", *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileEmptyPasswordPassedThrough(t *testing.T) {
@@ -671,12 +662,12 @@ password =
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Empty(t, *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Empty(t, *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileEmptyPasswordOverridenByCommandLine(t *testing.T) {
@@ -699,12 +690,12 @@ password =
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileOnlyPortUsedFromFile(t *testing.T) {
@@ -727,12 +718,12 @@ port=1234
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-host:1234", migration.Host)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-host:1234", migration.Host)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
@@ -755,12 +746,12 @@ func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 func TestMigrationParamsIniFileHasNoClientSection(t *testing.T) {
@@ -785,12 +776,12 @@ password = mysqlpass
 	_, err := migration.normalizeOptions()
 	require.NoError(t, err)
 
-	assert.Equal(t, "cli-host:3306", migration.Host)
-	assert.Equal(t, "cli-user", migration.Username)
-	assert.Equal(t, "cli-password", *migration.Password)
-	assert.Equal(t, "cli-db", migration.Database)
-	assert.Equal(t, "PREFERRED", migration.TLSMode)
-	assert.Empty(t, migration.TLSCertificatePath)
+	require.Equal(t, "cli-host:3306", migration.Host)
+	require.Equal(t, "cli-user", migration.Username)
+	require.Equal(t, "cli-password", *migration.Password)
+	require.Equal(t, "cli-db", migration.Database)
+	require.Equal(t, "PREFERRED", migration.TLSMode)
+	require.Empty(t, migration.TLSCertificatePath)
 }
 
 // --- Configuration and validation tests (extracted from runner_test.go) ---
@@ -948,6 +939,60 @@ func TestDSN(t *testing.T) {
 			require.Equal(t, tc.host, cfg.Addr)
 			require.Equal(t, tc.schema, cfg.DBName)
 			require.Equal(t, "tcp", cfg.Net)
+		})
+	}
+}
+
+func TestSplitReplicaDSNs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "empty",
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:     "single DSN",
+			input:    "root:pass@tcp(localhost:3307)/test",
+			expected: []string{"root:pass@tcp(localhost:3307)/test"},
+		},
+		{
+			name:  "two DSNs",
+			input: "root:pass@tcp(replica1:3306)/db,root:pass@tcp(replica2:3306)/db",
+			expected: []string{
+				"root:pass@tcp(replica1:3306)/db",
+				"root:pass@tcp(replica2:3306)/db",
+			},
+		},
+		{
+			name:  "three DSNs with spaces",
+			input: "root:pass@tcp(r1:3306)/db, root:pass@tcp(r2:3306)/db , root:pass@tcp(r3:3306)/db",
+			expected: []string{
+				"root:pass@tcp(r1:3306)/db",
+				"root:pass@tcp(r2:3306)/db",
+				"root:pass@tcp(r3:3306)/db",
+			},
+		},
+		{
+			name:     "trailing comma",
+			input:    "root:pass@tcp(localhost:3306)/db,",
+			expected: []string{"root:pass@tcp(localhost:3306)/db"},
+		},
+		{
+			name:     "only commas and spaces",
+			input:    " , , , ",
+			expected: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result := splitReplicaDSNs(tc.input)
+			require.Equal(t, tc.expected, result)
 		})
 	}
 }

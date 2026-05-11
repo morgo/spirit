@@ -57,7 +57,7 @@ var _ MappedChunker = &chunkerOptimistic{}
 // When this mode is enabled, the chunkSize is "reset" to 1000 rows, so we know that
 // t.chunkSize is reliable. It is also expanded again based on feedback.
 func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
-	key := t.Ti.KeyColumns[0]
+	key := QuoteColumns(t.Ti.KeyColumns[:1])
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
 		key, t.Ti.QuotedTableName, key, key, t.chunkSize,
 	)
@@ -207,7 +207,10 @@ func (t *chunkerOptimistic) Open() (err error) {
 	return t.open()
 }
 
-func (t *chunkerOptimistic) setDynamicChunking(newValue bool) {
+// SetDynamicChunking enables (true) or disables (false) the optimistic
+// chunker's dynamic chunk-size adaptation. Disabling is intended for tests
+// that need deterministic chunk sizes; production callers should leave it on.
+func (t *chunkerOptimistic) SetDynamicChunking(newValue bool) {
 	t.Lock()
 	defer t.Unlock()
 	t.disableDynamicChunker = !newValue
@@ -558,7 +561,26 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 	if t.chunkPtr.IsNil() && t.checkpointHighPtr.IsNil() {
-		return true // every key is above because we haven't started copying.
+		// We haven't claimed any range yet (no chunk advanced, no resume
+		// checkpoint). The previous behavior returned TRUE here ("every key is
+		// above"), which silently dropped binlog events during the window
+		// between SetWatermarkOptimization(true) and the first chunker.Next().
+		// The intent was to rely on the chunker's later SELECT picking the row
+		// up from the source — but that only works if the writer committed
+		// before the SELECT's snapshot. A writer that commits AFTER the
+		// SELECT and BEFORE chunkPtr is set produces a row that the SELECT
+		// misses AND the binlog drops; the row is lost. (Observed in #746
+		// as 4 consecutive missing PKs in chunk [1,1001) on
+		// TestCutoverAtomicityWithConcurrentWrites.)
+		//
+		// Per this method's contract above ("if there is any ambiguity, it's
+		// important to return FALSE"), return FALSE: keep the change in the
+		// delta/buffered map. Once the chunker advances, the watermark logic
+		// at flush time will route it correctly — either flushing it via
+		// REPLACE INTO ... SELECT FROM original (idempotent with anything the
+		// chunker's own SELECT picked up) or deferring it until the chunker
+		// passes its key.
+		return false
 	}
 	if t.finalChunkSent {
 		return false // we're done, so everything is below.

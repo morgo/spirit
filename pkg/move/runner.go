@@ -87,6 +87,11 @@ type Runner struct {
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
 	dbConfig   *dbconn.DBConfig
+
+	// watchTaskWait blocks until the WatchTask goroutines have exited.
+	// Set in startBackgroundRoutines and invoked from Close() so that
+	// late status/checkpoint goroutine activity cannot race with teardown.
+	watchTaskWait func()
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -100,6 +105,17 @@ func NewRunner(m *Move) (*Runner, error) {
 }
 
 func (r *Runner) Close() error {
+	// Cancel the runner context so background goroutines (status.WatchTask)
+	// observe ctx.Done() and exit. Idempotent.
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+	}
+	// Wait for the status/checkpoint dumper goroutines to exit before
+	// tearing down connections, so a late DumpCheckpoint cannot race with
+	// post-Close cleanup.
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
+	}
 	if r.copyChunker != nil {
 		if err := r.copyChunker.Close(); err != nil {
 			return err
@@ -298,6 +314,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
 		Applier:         r.applier, // Use the shared applier
+		Buffered:        true,      // move always uses the buffered copier
 	})
 	if err != nil {
 		return err
@@ -401,16 +418,16 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
 	for i := range r.sources {
 		src := &r.sources[i]
-		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, &repl.ClientConfig{
-			Logger:          r.logger,
-			Concurrency:     r.move.Threads,
-			TargetBatchTime: r.move.TargetChunkTime,
-			CancelFunc:      r.fatalError,
-			DDLFilterSchema: src.config.DBName,
-			DDLFilterTables: r.move.SourceTables,
-			ServerID:        repl.NewServerID(),
-			Applier:         r.applier,
-			DBConfig:        r.dbConfig,
+		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, &repl.ClientConfig{
+			Logger:                 r.logger,
+			Concurrency:            r.move.Threads,
+			TargetBatchTime:        r.move.TargetChunkTime,
+			CancelFunc:             r.fatalError,
+			DDLFilterSchema:        src.config.DBName,
+			DDLFilterTables:        r.move.SourceTables,
+			ServerID:               repl.NewServerID(),
+			DBConfig:               r.dbConfig,
+			ForceEnableBufferedMap: r.move.ForceEnableBufferedMap,
 		})
 	}
 
@@ -492,6 +509,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
 		Applier:         r.applier, // Use the shared applier
+		Buffered:        true,      // move always uses the buffered copier
 	})
 	if err != nil {
 		return err
@@ -655,7 +673,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	r.startBackgroundRoutines(ctx)
-	r.setWatermarkOptimizationAll(true)
+	if err := r.setWatermarkOptimizationAll(ctx, true); err != nil {
+		return err
+	}
 
 	r.status.Set(status.CopyRows)
 	if err := r.copier.Run(ctx); err != nil {
@@ -663,10 +683,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Disable both watermark optimizations so that all changes can be flushed.
-	// The watermark optimizations can prevent some keys from being flushed,
-	// which would cause flushedPos to not advance, leading to a mismatch
-	// with bufferedPos and causing AllChangesFlushed() to return false.
-	r.setWatermarkOptimizationAll(false)
+	// For non-memory-comparable PKs this also drains the buffered map and
+	// switches the subscription into FIFO queue mode (see
+	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	if err := r.setWatermarkOptimizationAll(ctx, false); err != nil {
+		return err
+	}
 	if err := r.flushAllReplClients(ctx); err != nil {
 		return err
 	}
@@ -725,8 +747,10 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		go r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 	}
 
-	// Start go routines for checkpointing and dumping status
-	status.WatchTask(ctx, r, r.logger)
+	// Start go routines for checkpointing and dumping status. The returned
+	// wait function is invoked from Close() so we can be sure no late
+	// checkpoint INSERT lands after teardown begins.
+	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
 }
 
 // fatalError is the callback provided to the replication client.
@@ -1243,11 +1267,16 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 	return nil
 }
 
-// setWatermarkOptimizationAll sets watermark optimization on all replication clients.
-func (r *Runner) setWatermarkOptimizationAll(enabled bool) {
+// setWatermarkOptimizationAll sets watermark optimization on all replication
+// clients. Each subscription may drain its outgoing store on the toggle (see
+// pkg/repl/subscription_buffered.go), so this can return the drain error.
+func (r *Runner) setWatermarkOptimizationAll(ctx context.Context, enabled bool) error {
 	for i := range r.sources {
-		r.sources[i].replClient.SetWatermarkOptimization(enabled)
+		if err := r.sources[i].replClient.SetWatermarkOptimization(ctx, enabled); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // getDeltaLenAll returns the total number of pending changes across all replication clients.

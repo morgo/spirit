@@ -15,7 +15,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,15 +58,17 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
 
-	// Close() before cancel() to free resources before context cancellation.
-	require.NoError(t, m.Close())
+	// Cancel first, wait for Run to return (so deferred MDL release runs and
+	// no in-flight goroutine can trip fatalError → dropCheckpoint), then Close
+	// to tear down the remaining resources.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO bigintpk (name,b) VALUES('t', 't')")
@@ -134,6 +135,7 @@ func TestCheckpoint(t *testing.T) {
 	require.Error(t, r.resumeFromCheckpoint(t.Context()))
 	// So we proceed with the initial steps.
 	require.NoError(t, r.newMigration(t.Context()))
+	disableDynamicChunking(t, r.copyChunker)
 
 	// Now we are ready to start copying rows.
 	// Instead of calling r.copyRows() we will step through it manually.
@@ -193,6 +195,7 @@ func TestCheckpoint(t *testing.T) {
 	// Start the binary log feed just before copy rows starts.
 	// replClient.Run() is already called in resumeFromCheckpoint.
 	require.NoError(t, r.resumeFromCheckpoint(t.Context()))
+	disableDynamicChunking(t, r.copyChunker)
 	// This opens the table at the checkpoint (table.OpenAtWatermark())
 	// which sets the chunkPtr at the LowerBound. It also has to position
 	// the watermark to this point so new watermarks "align" correctly.
@@ -392,7 +395,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := r.Run(ctx)
-		assert.Error(t, err) // context cancelled
+		require.Error(t, err) // context cancelled
 	}()
 	for r.status.Get() < status.WaitingOnSentinelTable {
 		// Wait for the sentinel table.
@@ -401,9 +404,11 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 
 	require.NoError(t, r.checksum(t.Context()))       // run the checksum, the original Run is blocked on sentinel.
 	require.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
-	require.NoError(t, r.Close())                     // close the run first to avoid race conditions.
-	cancel()                                          // unblock the original waiting on sentinel.
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
+	cancel() // unblocks the goroutine that was waiting on sentinel.
 	<-done
+	require.NoError(t, r.Close())
 
 	// drop the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, `DROP TABLE _spirit_sentinel`)
@@ -541,15 +546,16 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
 
-	// Close() before cancel() to avoid race conditions.
-	require.NoError(t, m.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO chkpresumetest (pad) SELECT RANDOM_BYTES(1024) FROM chkpresumetest LIMIT 1000")
@@ -599,15 +605,16 @@ FROM compositevarcharpk a WHERE version='1'`)
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
 
-	// Close() before cancel() to avoid race conditions.
-	require.NoError(t, m.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	m2 := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
@@ -638,15 +645,16 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := m.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, m)
 
-	// Cancel context first to signal goroutines to stop, then Close() to clean up resources.
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
+	<-done
 	require.NoError(t, m.Close())
-	<-done // Wait for the goroutine to finish
 
 	// Insert some more dummy data
 	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM resumestricttest LIMIT 1000")
@@ -788,7 +796,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	// this is normally done in m.setup() but we want to call it in isolation.
 	require.NoError(t, m.resumeFromCheckpoint(ctx))
 	// This is normally done in m.setup()
-	m.replClient.SetWatermarkOptimization(true)
+	require.NoError(t, m.replClient.SetWatermarkOptimization(ctx, true))
 	// doublecheck that the highPtr is 1002 in the _new table and not in the original table.
 	require.Equal(t, "10", m.changes[0].table.MaxValue().String())
 	require.Equal(t, "1002", m.changes[0].newTable.MaxValue().String())
@@ -850,6 +858,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 		WithDBName(dbName),
 		WithThreads(1),
 		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler(),
 		WithRespectSentinel())
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -857,7 +866,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := runner.Run(ctx)
-		assert.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
 	}()
 
 	waitForCheckpoint(t, runner)
@@ -868,10 +877,11 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, lock)
 
-	// Close() before cancel() to avoid race conditions.
-	require.NoError(t, runner.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, runner.Close())
 
 	// Manually create the sentinel table.
 	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE _spirit_sentinel (id int unsigned primary key)")
@@ -945,10 +955,11 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	err = db.QueryRowContext(t.Context(), "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_cleanup_test_new'").Scan(&tableName)
 	require.NoError(t, err, "_cleanup_test_new table should exist after checkpoint")
 
-	// Close() before cancel() to avoid race conditions (see other tests)
-	require.NoError(t, m.Close())
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Now corrupt the checkpoint by setting an invalid binlog position.
 	// This simulates binlog expiry between stop and start.
@@ -985,9 +996,9 @@ func TestResumeFromCheckpointStrictBinlogExpired(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Corrupt binlog name to simulate expiry
 	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999`)
@@ -1029,9 +1040,9 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
 	testutils.RunSQL(t, `UPDATE _chkpttooold_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
@@ -1068,9 +1079,9 @@ func TestResumeFromCheckpointStrictTooOld(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
 	testutils.RunSQL(t, `UPDATE _strictoldtest_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
@@ -1110,14 +1121,93 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	}()
 
 	waitForCheckpoint(t, m)
-	require.NoError(t, m.Close())
 	cancel()
 	<-done
+	require.NoError(t, m.Close())
 
 	// Do NOT backdate the checkpoint - it was just created, so it's fresh.
 	// The migration should resume from checkpoint successfully.
 	m2 := NewTestRunner(t, "chkptnotold", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
 	require.True(t, m2.usedResumeFromCheckpoint) // Should have resumed because checkpoint is fresh
+	require.NoError(t, m2.Close())
+}
+
+// TestResumeRejectsCheckpointFromDifferentTable verifies that the
+// original_table_name column is checked when resuming. If a checkpoint row
+// records a different table name than the one we're migrating, resume must
+// refuse to use it. This protects against the rare collision where two
+// distinct long table names truncate to the same checkpoint table name.
+func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "chkptmismatch", `CREATE TABLE chkptmismatch (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	tt.SeedRows(t, "INSERT INTO chkptmismatch (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
+
+	// First run: produce a real checkpoint via normal flow.
+	m := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.Run(ctx)
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
+
+	// Tamper: pretend the checkpoint belongs to a different table.
+	testutils.RunSQL(t, `UPDATE _chkptmismatch_chkpnt SET original_table_name = 'someothertable'`)
+
+	// Resume must refuse and fall back to a fresh migration.
+	m2 := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB", WithThreads(2))
+	require.NoError(t, m2.Run(t.Context()))
+	require.False(t, m2.usedResumeFromCheckpoint,
+		"resume should be skipped when checkpoint records a different original table name")
+	require.NoError(t, m2.Close())
+}
+
+// TestResumeFromCheckpointStrictCollision asserts that under --strict, a
+// truncation-collision (different original_table_name) surfaces as
+// ErrCheckpointCollision rather than silently starting a fresh migration.
+func TestResumeFromCheckpointStrictCollision(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "strictcollision", `CREATE TABLE strictcollision (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	tt.SeedRows(t, "INSERT INTO strictcollision (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
+
+	m := NewTestRunner(t, "strictcollision", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.Run(ctx)
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
+
+	testutils.RunSQL(t, `UPDATE _strictcollision_chkpnt SET original_table_name = 'someothertable'`)
+
+	m2 := NewTestRunner(t, "strictcollision", "ENGINE=InnoDB",
+		WithThreads(2),
+		WithStrict())
+	err := m2.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorIs(t, err, status.ErrCheckpointCollision)
 	require.NoError(t, m2.Close())
 }

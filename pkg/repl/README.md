@@ -2,91 +2,88 @@
 
 The replication client tracks changes to tables by acting as a MySQL replica. The [go-mysql library](https://github.com/go-mysql-org/go-mysql) does most of the heavy lifting by connecting to MySQL and parsing binary log events. Spirit's role is to manage subscriptions for each table being migrated, deduplicate changes, and coordinate with the copier to avoid redundant work.
 
-Each table tracked is represented by a `subscription`, with three main implementations:
+Each table tracked is represented by a `subscription`. There is a single
+subscription type — the **buffered map** — that stores the full row image
+from the binlog and applies it through the applier. For non-memory-comparable
+primary keys it falls back to a FIFO queue *internally* once the watermark
+optimization is disabled, but row images are still preserved and the applier
+path is still used.
 
-## Subscription Implementations
+## Subscription Implementation
 
-### Delta Map
+### Background
 
-The delta map is the preferred subscription type and is selected for tables with memory-comparable primary keys (integers, binary strings, etc.). It uses a map to track changes:
+Earlier versions of Spirit shipped two subscription types side-by-side: a `deltaMap` that stored only primary-key hashes (and re-read row state from the source via `REPLACE INTO ... SELECT` at flush time), and a `deltaQueue` that preserved binlog order for non-memory-comparable PKs. The split caused [issue #746](https://github.com/block/spirit/issues/746): MySQL's binlog-vs-visibility ordering meant that the deltaMap path could read a stale row image when its `SELECT` raced ahead of the row's commit visibility, applying the wrong final state.
+
+The fix was to unify everything around a single subscription type — the buffered map — that captures the **full row image** from the binlog directly, so the applied state is the binlog state and the source-side `SELECT` race is gone. The deltaMap and deltaQueue types were removed entirely; the FIFO behaviour previously provided by deltaQueue now lives inside bufferedMap as an internal mode for non-memory-comparable PKs (see below).
+
+### Buffered Map
+
+The buffered map stores the full row image directly from the binlog and
+applies it through the applier interface:
 
 **How it works:**
-- Maintains a map of `primaryKey -> (isDelete, originalKey)`
-- Multiple changes to the same row are automatically deduplicated (only the final state is stored)
-- Flushes changes in parallel across multiple threads
-- Uses `REPLACE INTO ... SELECT` to apply changes efficiently
+- Maintains a map of `primaryKeyHash -> (isDelete, fullRowImage)`.
+- Multiple changes to the same row are automatically deduplicated (only the
+  final state is stored).
+- Uses the applier's `UpsertRows` and `DeleteKeys` to write changes — there
+  is no `SELECT FROM original` round-trip.
+- Flushes changes through the applier's parallel write workers.
 
 **Advantages:**
-- **Excellent deduplication**: If a row is modified 100 times, only one REPLACE operation is performed
-- **Parallel flushing**: Independent keys can be written concurrently for maximum throughput
-- **Memory efficient**: Only stores the latest state for each key
-- **Watermark optimization (when supported by the chunker)**: Can skip ranges of keys using both `KeyAboveHighWatermark` and `KeyBelowLowWatermark`
+- **Excellent deduplication**: if a row is modified 100 times, only one upsert is performed.
+- **Parallel flushing**: independent keys can be written concurrently via the applier.
+- **No source-side reads at flush**: the row image is already in memory, so no contention with OLTP traffic on the source.
+- **Sidesteps the binlog/visibility race**: because the row image *is* the applied state, there is no opportunity for MySQL's binlog-vs-visibility ordering to surface a stale row (see [issue #746](https://github.com/block/spirit/issues/746)).
+- **Watermark optimization (when supported by the chunker)**: can skip ranges of keys using both `KeyAboveHighWatermark` and `KeyBelowLowWatermark`.
+- **Cross-server compatibility**: the applier can target a different MySQL server, which is what `pkg/move` relies on.
 
 **Limitations:**
-- Requires memory-comparable primary keys (no VARCHAR, FLOAT etc.)
+- Requires `binlog_row_image=FULL` and an empty `binlog_row_value_options` (the applier needs the complete row image).
+- Higher memory usage than a key-only map: stores full row data for each changed key.
 - Watermark optimizations (`KeyAboveHighWatermark` and `KeyBelowLowWatermark`) are available on `MappedChunker` implementations (both optimistic and composite chunkers). They work correctly for numeric, binary, and temporal primary key types. For `VARCHAR`/`TEXT` columns with collations, Go's byte-order comparison may differ from MySQL's collation order; any discrepancies are caught by the checksum phase (see [issue #479](https://github.com/block/spirit/issues/479)).
 
 **Example scenario:**
 ```
-Binlog events:  INSERT(id=1), UPDATE(id=1), UPDATE(id=1), DELETE(id=2)
-Delta map:      {1: REPLACE, 2: DELETE}
-Applied:        REPLACE INTO ... WHERE id=1; DELETE FROM ... WHERE id=2;
+Binlog events:  INSERT(id=1, ...), UPDATE(id=1, ...), UPDATE(id=1, ...), DELETE(id=2)
+Buffered map:   {1: {row: <latest image>}, 2: {isDelete}}
+Applied:        UpsertRows({id=1, ...}); DeleteKeys({id=2});
 ```
 
-### Delta Queue
+#### FIFO fallback for non-memory-comparable primary keys
 
-The delta queue is a fallback for tables with non-memory-comparable primary keys. It maintains a FIFO queue of changes:
+For tables with non-memory-comparable primary keys (e.g. `VARCHAR` with a
+case-insensitive collation), the subscription falls back to an internal
+FIFO queue. The queue still stores row images inline and applies them via
+the applier — there is no `REPLACE INTO ... SELECT`, so the #746 fix and
+cross-server move support ([issue #607](https://github.com/block/spirit/issues/607))
+are preserved. The queue exists only to preserve binlog order:
+collation-equivalent keys like `"A"` and `"a"` hash to different map slots
+but resolve to the same MySQL row, so a map's non-deterministic iteration
+would apply events out of order. FIFO replay through the applier preserves
+binlog order; the target's own collation-aware uniqueness then collapses
+the events onto the right row.
 
-**How it works:**
-- Maintains an ordered queue of `(primaryKeyHash, isDelete)` tuples
-- Changes are applied sequentially in the order they were received
-- Limited deduplication: only merges consecutive operations of the same type
-- Uses `REPLACE INTO ... SELECT` and `DELETE` statements
+Two routing policies are available, controlled by the
+`--force-enable-buffered-map` migration flag (and the equivalent
+`Move.ForceEnableBufferedMap` field):
 
-**Advantages:**
-- **Universal compatibility**: Works with any primary key type (VARCHAR, FLOAT, etc.)
-- **Preserves order**: Maintains the exact sequence of operations
+- **Default (`--force-enable-buffered-map=false`):** queue-mode runs
+  full-time for non-memory-comparable PKs, in both copy and post-copy
+  phases. This mirrors the previous `deltaQueue` performance
+  characteristics but keeps the queue path warm in CI (especially
+  `TestCutoverAtomicityWithConcurrentWrites`) so any bug in the queue
+  surfaces against real workloads before we trust it as a corner-case
+  path.
+- **Optimization (`--force-enable-buffered-map=true`):** during the copy
+  phase the subscription uses LWW buffered-map dedup (faster, works
+  because the chunker's own SELECT covers in-window case-collision
+  races). When the watermark optimization is disabled at the end of the
+  copy phase, `SetWatermarkOptimization` drains the map inline and the
+  subscription switches into queue mode for the cutover/checksum window.
 
-**Limitations:**
-- **Single-threaded flushing**: Must process changes sequentially, limiting throughput
-- **Poor deduplication**: Stores all intermediate states, only merging consecutive operations
-- **Higher memory usage**: Can accumulate many operations for the same key
-- **No support for optimizations**: Key above and key below watermark optimizations are not possible
-
-**Example scenario:**
-```
-Binlog events:  INSERT(k="abc"), UPDATE(k="def"), DELETE(k="def"), UPDATE(k="abc")
-Delta queue:    [("abc", REPLACE), ("def" REPLACE), ("def", DELETE), ("abc", REPLACE)]
-Applied:        REPLACE INTO ... WHERE k IN ("abc", "def"); DELETE FROM ... WHERE k="def"; REPLACE INTO ... WHERE k="abc";
-```
-
-**Performance note:** The delta queue is significantly worse performing than the other two implementations. It should only be used when the primary key type makes the delta map impossible. It is so bad in fact, that in the future it is worth considering disabling it and relying on the checksum to catch issues. See [issue #475](https://github.com/block/spirit/issues/475).
-
-### Buffered Map
-
-The buffered map is a subscription type required for move operations where source and target are on different MySQL servers. It stores full row data and uses the applier interface:
-
-**How it works:**
-- Maintains a map of `primaryKeyHash -> (isDelete, fullRowData)`
-- Stores complete row data in memory, not just primary keys
-- Uses the applier interface to write changes (supports sharding and remote targets)
-- Flushes changes in parallel using the applier's batching logic
-
-**Advantages:**
-- **Better concurrency**: Doesn't hold locks on the source table during flush (no `SELECT` needed)
-- **Supports sharding**: Can distribute changes across multiple target databases via the applier
-- **Flexible targets**: Can potentially target non-MySQL destinations in the future
-- **Watermark optimization**: Supports both `KeyAboveHighWatermark` and `KeyBelowLowWatermark` optimizations
-
-**Limitations:**
-- **Significantly higher memory usage**: Stores full row data for each changed key
-- **Higher CPU usage**: buffering changes in the spirit daemon adds CPU load to Spirit
-- **More complex**: Requires coordination with the applier layer
-- **Not the default**: Less battle-tested than delta map for single-server schema changes
-
-**When to use:** Primarily for move operations where `REPLACE INTO ... SELECT` cannot be used because the source and target are on different MySQL servers.
-
-**Enabling:** Provide a non-nil `Applier` in the client config. When an applier is configured, buffered map behavior is enabled automatically, and this is set up by default for move operations.
+Memory-comparable PKs always use the buffered map regardless of the
+flag, since map-key equality matches MySQL row identity.
 
 ## Features
 
@@ -161,6 +158,16 @@ if !client.AllChangesFlushed() {
 ```
 
 The `client.Flush()` will retry in a loop until the number of pending changes is considered trivial (currently <10K). It is important to handle errors correctly here, because `FlushUnderTableLock` may fail if it can't flush the pending changes fast enough. This is your cue to abandon the cutover operation for now, and try again when the server is under less load.
+
+### Memory backpressure
+
+Each subscription approximates the bytes it is holding in memory (row image + key bytes per buffered change) and parks `HasChanged` on a per-subscription condition variable when the total reaches `DefaultSubscriptionSoftLimitBytes` (256 MiB). This keeps wide rows — LONGTEXT, BLOB, large JSON — from OOMing the migrator when the source's write rate outpaces the applier.
+
+The cap is **soft**: the wait is checked *before* a change is added, against the buffer's current pre-add size. A row is therefore always admitted whenever `sizeBytes < softLimitBytes`, even if its own size pushes the total well past the limit; the cap only blocks *new* arrivals once the buffer is already at or over it. This is intentional — it preserves forward progress regardless of row width — but it does mean peak memory can exceed `DefaultSubscriptionSoftLimitBytes` by up to one oversized row's worth before the next caller parks.
+
+Override via `ClientConfig.SubscriptionSoftLimitBytes`; pass a negative value to disable the cap entirely. The `times_parked_on_soft_limit` and `size_bytes` fields appear in the watermark-toggled log line, and `keys_added` / `keys_dropped_above_high` / `keys_skipped_not_below_low` provide the surrounding context.
+
+**Limitation — binlog retention:** while parked, the binlog reader makes no progress. If the source rotates past the reader's current position (`binlog_expire_logs_seconds`) before the buffer drains, the reader will fail to resume and the migration will abort. Tune the soft limit and source retention together for sustained high-write workloads.
 
 ### Other Minor Features
 

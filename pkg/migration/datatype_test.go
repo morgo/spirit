@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -172,30 +171,21 @@ func TestTpConversion(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestEnumReorder tests that reordering ENUM values in an ALTER TABLE
-// produces correct data after migration.
+// TestEnumReorder verifies that ENUM reordering ALTERs are refused at preflight
+// in both unbuffered and buffered modes.
 //
-// This test only works correctly in unbuffered mode because of the way
-// ENUM values are represented in the binlog. We test *both* unbuffered and buffered modes
-// though and we accept a pre-flight failure as a "pass", since it's not corruption.
-// i.e. it's OK to refuse changes you can't handle.
-//
-// The unbuffered path uses REPLACE INTO ... SELECT (SQL-level string operations) which
-// handles ENUM reordering correctly. The buffered path uses UpsertRows with raw binlog
-// values, where ENUM values are represented as int64 ordinals. If the ENUM is reordered,
-// the ordinals map to different string values in the target table, causing data corruption.
-//
-// This test exercises both the copier path (initial data) and the binlog
-// replay path (concurrent DML during migration) to verify correctness.
+// The binlog replay path (bufferedMap) is now used for any memory-comparable PK
+// regardless of copy mode, and it represents ENUM values as int64 ordinals from
+// the binlog. Reordering the ENUM definition makes those ordinals point at
+// different strings in the target, which would corrupt rows. The preflight
+// check refuses these ALTERs unconditionally — it's better to fail fast than
+// to corrupt data.
 func TestEnumReorder(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) {
 		testEnumReorder(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testEnumReorder(t, true)
 	})
 }
@@ -214,7 +204,8 @@ func testEnumReorder(t *testing.T, enableBuffered bool) {
 	m := NewTestRunner(t, "enumreorder", "MODIFY COLUMN status ENUM('pending', 'active', 'inactive') NOT NULL",
 		WithThreads(1),
 		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	// Concurrent DML during copy phase to exercise binlog replay.
 	ctx, cancel := context.WithCancel(t.Context())
@@ -247,33 +238,8 @@ func testEnumReorder(t *testing.T, enableBuffered bool) {
 	<-dmlDone
 	require.NoError(t, m.Close())
 
-	if enableBuffered {
-		require.Error(t, migrationErr)
-		assert.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
-		return
-	}
-
-	// Unbuffered mode: migration should succeed and data should be correct.
-	require.NoError(t, migrationErr)
-
-	// Verify that every row has a valid ENUM string value.
-	var activeCount, inactiveCount, pendingCount int
-	err = tt.DB.QueryRowContext(t.Context(), `SELECT
-		SUM(status = 'active'),
-		SUM(status = 'inactive'),
-		SUM(status = 'pending')
-		FROM enumreorder`).Scan(&activeCount, &inactiveCount, &pendingCount)
-	require.NoError(t, err)
-
-	var totalCount int
-	err = tt.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM enumreorder`).Scan(&totalCount)
-	require.NoError(t, err)
-
-	require.Equal(t, totalCount, activeCount+inactiveCount+pendingCount,
-		"all rows should have a valid ENUM value (no empty strings from ordinal corruption)")
-	require.Greater(t, activeCount, 0, "should have 'active' rows")
-	require.Greater(t, inactiveCount, 0, "should have 'inactive' rows")
-	require.Greater(t, pendingCount, 0, "should have 'pending' rows")
+	require.Error(t, migrationErr)
+	require.ErrorContains(t, migrationErr, "unsafe ENUM value reorder")
 }
 
 // TestSetReorder mirrors TestEnumReorder but for SET columns.
@@ -285,9 +251,6 @@ func TestSetReorder(t *testing.T) {
 		testSetReorder(t, false)
 	})
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testSetReorder(t, true)
 	})
 }
@@ -302,7 +265,8 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	m := NewTestRunner(t, "setreorder", "MODIFY COLUMN perms SET('execute', 'read', 'write') NOT NULL",
 		WithThreads(1),
 		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	// Concurrent DML during copy phase.
 	ctx, cancel := context.WithCancel(t.Context())
@@ -336,16 +300,13 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	require.NoError(t, m.Close())
 
 	require.Error(t, migrationErr)
-	assert.ErrorContains(t, migrationErr, "unsafe SET value reorder")
+	require.ErrorContains(t, migrationErr, "unsafe SET value reorder")
 }
 
 // TestBufferedMigrationFailsGracefullyWithMinimalRBR verifies that a buffered
 // migration fails gracefully when it receives minimal RBR events from a rogue session.
 func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 	t.Parallel()
-	if testutils.IsMinimalRBRTestRunner(t) {
-		t.Skip("Skipping test for minimal RBR test runner (global setting already minimal)")
-	}
 
 	tt := testutils.NewTestTable(t, "minrbr_buffered", `CREATE TABLE minrbr_buffered (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -412,9 +373,6 @@ func TestAlterPKIntToBigInt(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigInt(t, false) })
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testAlterPKIntToBigInt(t, true)
 	})
 }
@@ -448,9 +406,6 @@ func TestAlterPKIntToBigIntUnsigned(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntUnsigned(t, false) })
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testAlterPKIntToBigIntUnsigned(t, true)
 	})
 }
@@ -479,9 +434,6 @@ func TestAlterPKTinyIntToInt(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKTinyIntToInt(t, false) })
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testAlterPKTinyIntToInt(t, true)
 	})
 }
@@ -510,9 +462,6 @@ func TestAlterPKIntToBigIntWithDML(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntWithDML(t, false) })
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testAlterPKIntToBigIntWithDML(t, true)
 	})
 }
@@ -525,7 +474,8 @@ func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
 	)`)
 	tt.SeedRows(t, "INSERT INTO altpk_dml (name, val) SELECT 'seed', 1", 4096)
 	m := NewTestRunner(t, "altpk_dml", "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -554,9 +504,6 @@ func TestAlterPKCompositeDatatypeChange(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKCompositeDatatypeChange(t, false) })
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testAlterPKCompositeDatatypeChange(t, true)
 	})
 }
@@ -593,9 +540,6 @@ func TestAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T) {
 	t.Parallel()
 	t.Run("unbuffered", func(t *testing.T) { testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t, false) })
 	t.Run("buffered", func(t *testing.T) {
-		if testutils.IsMinimalRBRTestRunner(t) {
-			t.Skip("Skipping buffered copy test because binlog_row_image is not FULL or binlog_row_value_options is not empty")
-		}
 		testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t, true)
 	})
 }
@@ -612,7 +556,8 @@ func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enable
 		"MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT, MODIFY COLUMN name VARCHAR(255) NOT NULL",
 		WithThreads(2),
 		WithTargetChunkTime(100*time.Millisecond),
-		WithBuffered(enableBuffered))
+		WithBuffered(enableBuffered),
+		WithTestThrottler())
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -634,4 +579,40 @@ func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enable
 		"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='altpk_multi' AND COLUMN_NAME='id'",
 	).Scan(&colType))
 	require.Equal(t, "bigint", colType)
+}
+
+// TestSpatialGeneratedColumnAndIndex verifies that the parser accepts a combined
+// ALTER TABLE that adds a GEOMETRY generated column with SRID and a SPATIAL INDEX
+// in one statement. Geometry data lives in a text column, so this exercises
+// parsing + DDL execution; binary geometry round-tripping is covered separately
+// in the copier and subscription tests.
+func TestSpatialGeneratedColumnAndIndex(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "t1spatial", `CREATE TABLE t1spatial (
+		id bigint NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		geometry_wkt varchar(500) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO t1spatial (name, geometry_wkt) VALUES
+		('Statue of Liberty', 'POINT(-74.0445 40.6892)'),
+		('Eiffel Tower', 'POINT(2.2945 48.8584)'),
+		('Big Ben', 'POINT(-0.1246 51.5007)'),
+		('Colosseum', 'POINT(12.4924 41.8902)'),
+		('Sydney Opera House', 'POINT(151.2153 -33.8568)'),
+		('Great Wall of China', 'POINT(116.5704 40.4319)'),
+		('Machu Picchu', 'POINT(-72.5450 -13.1631)'),
+		('Taj Mahal', 'POINT(78.0421 27.1751)'),
+		('Christ the Redeemer', 'POINT(-43.2105 -22.9519)'),
+		('Golden Gate Bridge', 'POINT(-122.4783 37.8199)')`)
+
+	m := NewTestRunnerFromStatement(t, `ALTER TABLE t1spatial
+ADD COLUMN points_of_interest GEOMETRY GENERATED ALWAYS AS (ST_GeomFromText(geometry_wkt, 4326, 'axis-order=long-lat')) STORED NOT NULL SRID 4326,
+ADD SPATIAL INDEX idx_points_of_interest (points_of_interest)`)
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM t1spatial`).Scan(&count))
+	require.Equal(t, 10, count)
 }

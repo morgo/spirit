@@ -4,17 +4,17 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRedundantIndexLinter_Name(t *testing.T) {
 	linter := &RedundantIndexLinter{}
-	assert.Equal(t, "redundant_indexes", linter.Name())
+	require.Equal(t, "redundant_indexes", linter.Name())
 }
 
 func TestRedundantIndexLinter_Description(t *testing.T) {
 	linter := &RedundantIndexLinter{}
-	assert.NotEmpty(t, linter.Description())
+	require.NotEmpty(t, linter.Description())
 }
 
 func TestRedundantIndexLinter_PrefixRedundancy(t *testing.T) {
@@ -81,24 +81,24 @@ func TestRedundantIndexLinter_PrefixRedundancy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			linter := &RedundantIndexLinter{}
 			ct, err := statement.ParseCreateTable(tt.createTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 			if tt.expectViolated {
-				assert.NotEmpty(t, violations, "Expected violations but got none")
+				require.NotEmpty(t, violations, "Expected violations but got none")
 				found := false
 				for _, v := range violations {
 					if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
 						found = true
-						assert.Contains(t, v.Message, tt.coveringIndex)
-						assert.Equal(t, SeverityWarning, v.Severity)
+						require.Contains(t, v.Message, tt.coveringIndex)
+						require.Equal(t, SeverityWarning, v.Severity)
 						break
 					}
 				}
-				assert.True(t, found, "Expected violation for index %s", tt.violatedIndex)
+				require.True(t, found, "Expected violation for index %s", tt.violatedIndex)
 			} else {
-				assert.Empty(t, violations, "Expected no violations but got: %v", violations)
+				require.Empty(t, violations, "Expected no violations but got: %v", violations)
 			}
 		})
 	}
@@ -125,12 +125,12 @@ func TestRedundantIndexLinter_RedundantToUniqueIndex(t *testing.T) {
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC;`
 	linter := &RedundantIndexLinter{}
 	ct, err := statement.ParseCreateTable(createTable)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
-	assert.Len(t, violations, 1, "Expected one violation")
-	assert.Contains(t, violations[0].Message, "Index 'idx_XYZ_id' on columns (XYZ_id) is redundant")
+	require.Len(t, violations, 1, "Expected one violation")
+	require.Contains(t, violations[0].Message, "Index 'idx_XYZ_id' on columns (XYZ_id) is redundant")
 }
 
 func TestRedundantIndexLinter_DuplicateIndexes(t *testing.T) {
@@ -181,24 +181,24 @@ func TestRedundantIndexLinter_DuplicateIndexes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			linter := &RedundantIndexLinter{}
 			ct, err := statement.ParseCreateTable(tt.createTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 			if tt.expectViolated {
-				assert.NotEmpty(t, violations, "Expected violations but got none")
+				require.NotEmpty(t, violations, "Expected violations but got none")
 				found := false
 				for _, v := range violations {
 					if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
 						found = true
-						assert.Contains(t, v.Message, "duplicate")
-						assert.Equal(t, SeverityWarning, v.Severity)
+						require.Contains(t, v.Message, "duplicate")
+						require.Equal(t, SeverityWarning, v.Severity)
 						break
 					}
 				}
-				assert.True(t, found, "Expected violation for index %s", tt.violatedIndex)
+				require.True(t, found, "Expected violation for index %s", tt.violatedIndex)
 			} else {
-				assert.Empty(t, violations, "Expected no violations but got: %v", violations)
+				require.Empty(t, violations, "Expected no violations but got: %v", violations)
 			}
 		})
 	}
@@ -274,27 +274,27 @@ func TestRedundantIndexLinter_RedundantToPrimaryKey(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			linter := &RedundantIndexLinter{}
 			ct, err := statement.ParseCreateTable(tt.createTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
 			if tt.expectViolated {
-				assert.NotEmpty(t, violations, "Expected violations but got none")
+				require.NotEmpty(t, violations, "Expected violations but got none")
 				found := false
 				for _, v := range violations {
 					if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
 						found = true
-						assert.Contains(t, v.Message, "PRIMARY KEY")
-						assert.Equal(t, SeverityWarning, v.Severity)
+						require.Contains(t, v.Message, "PRIMARY KEY")
+						require.Equal(t, SeverityWarning, v.Severity)
 						if tt.isDuplicate {
-							assert.Contains(t, v.Message, "duplicate")
+							require.Contains(t, v.Message, "duplicate")
 						}
 						break
 					}
 				}
-				assert.True(t, found, "Expected violation for index %s", tt.violatedIndex)
+				require.True(t, found, "Expected violation for index %s", tt.violatedIndex)
 			} else {
-				assert.Empty(t, violations, "Expected no violations but got: %v", violations)
+				require.Empty(t, violations, "Expected no violations but got: %v", violations)
 			}
 		})
 	}
@@ -400,7 +400,7 @@ func TestRedundantIndexLinter_PKSuffixRedundancy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			linter := &RedundantIndexLinter{}
 			ct, err := statement.ParseCreateTable(tt.createTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
@@ -411,20 +411,20 @@ func TestRedundantIndexLinter_PKSuffixRedundancy(t *testing.T) {
 						if v.Context != nil {
 							if colCount, ok := v.Context["redundant_col_count"]; ok && colCount == tt.redundantColCount {
 								found = true
-								assert.Contains(t, v.Message, "redundant PRIMARY KEY")
-								assert.Contains(t, v.Message, "suffix")
-								assert.Equal(t, SeverityWarning, v.Severity)
+								require.Contains(t, v.Message, "redundant PRIMARY KEY")
+								require.Contains(t, v.Message, "suffix")
+								require.Equal(t, SeverityWarning, v.Severity)
 								break
 							}
 						}
 					}
 				}
-				assert.True(t, found, "Expected PK suffix violation for index %s with %d redundant columns", tt.violatedIndex, tt.redundantColCount)
+				require.True(t, found, "Expected PK suffix violation for index %s with %d redundant columns", tt.violatedIndex, tt.redundantColCount)
 			} else {
 				// Check that there's no PK suffix violation for this index
 				for _, v := range violations {
 					if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
-						assert.NotContains(t, v.Message, "suffix", "Should not have suffix violation")
+						require.NotContains(t, v.Message, "suffix", "Should not have suffix violation")
 					}
 				}
 			}
@@ -501,7 +501,7 @@ func TestRedundantIndexLinter_TypeCompatibility(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			linter := &RedundantIndexLinter{}
 			ct, err := statement.ParseCreateTable(tt.createTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
@@ -513,11 +513,11 @@ func TestRedundantIndexLinter_TypeCompatibility(t *testing.T) {
 						break
 					}
 				}
-				assert.True(t, found, "Expected violation for index %s", tt.violatedIndex)
+				require.True(t, found, "Expected violation for index %s", tt.violatedIndex)
 			} else {
 				for _, v := range violations {
 					if v.Location != nil && v.Location.Index != nil {
-						assert.NotEqual(t, tt.violatedIndex, *v.Location.Index, "Should not have violation for %s", tt.violatedIndex)
+						require.NotEqual(t, tt.violatedIndex, *v.Location.Index, "Should not have violation for %s", tt.violatedIndex)
 					}
 				}
 			}
@@ -540,7 +540,7 @@ func TestRedundantIndexLinter_MultipleViolations(t *testing.T) {
 
 	linter := &RedundantIndexLinter{}
 	ct, err := statement.ParseCreateTable(createTable)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
@@ -549,7 +549,7 @@ func TestRedundantIndexLinter_MultipleViolations(t *testing.T) {
 	// 2. idx_ab redundant to idx_abc
 	// 3. idx_dup redundant to idx_abc (or idx_ab)
 	// 4. idx_suffix has redundant PK suffix
-	assert.GreaterOrEqual(t, len(violations), 4, "Expected at least 4 violations")
+	require.GreaterOrEqual(t, len(violations), 4, "Expected at least 4 violations")
 
 	violatedIndexes := make(map[string]bool)
 	for _, v := range violations {
@@ -558,10 +558,10 @@ func TestRedundantIndexLinter_MultipleViolations(t *testing.T) {
 		}
 	}
 
-	assert.True(t, violatedIndexes["idx_a"], "idx_a should be flagged")
-	assert.True(t, violatedIndexes["idx_ab"], "idx_ab should be flagged")
-	assert.True(t, violatedIndexes["idx_dup"], "idx_dup should be flagged")
-	assert.True(t, violatedIndexes["idx_suffix"], "idx_suffix should be flagged")
+	require.True(t, violatedIndexes["idx_a"], "idx_a should be flagged")
+	require.True(t, violatedIndexes["idx_ab"], "idx_ab should be flagged")
+	require.True(t, violatedIndexes["idx_dup"], "idx_dup should be flagged")
+	require.True(t, violatedIndexes["idx_suffix"], "idx_suffix should be flagged")
 }
 
 func TestRedundantIndexLinter_NoViolations(t *testing.T) {
@@ -611,10 +611,10 @@ func TestRedundantIndexLinter_NoViolations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			linter := &RedundantIndexLinter{}
 			ct, err := statement.ParseCreateTable(tt.createTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-			assert.Empty(t, violations, "Expected no violations but got: %v", violations)
+			require.Empty(t, violations, "Expected no violations but got: %v", violations)
 		})
 	}
 }
@@ -634,7 +634,7 @@ func TestRedundantIndexLinter_CompositePrimaryKey(t *testing.T) {
 
 	linter := &RedundantIndexLinter{}
 	ct, err := statement.ParseCreateTable(createTable)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
 
@@ -646,18 +646,18 @@ func TestRedundantIndexLinter_CompositePrimaryKey(t *testing.T) {
 	}
 
 	// idx_tenant should be redundant to PK (tenant_id, user_id)
-	assert.Contains(t, violatedIndexes, "idx_tenant", "idx_tenant should be redundant to PK")
+	require.Contains(t, violatedIndexes, "idx_tenant", "idx_tenant should be redundant to PK")
 
 	// idx_email_tenant_user should have redundant PK suffix
-	assert.Contains(t, violatedIndexes, "idx_email_tenant_user", "idx_email_tenant_user should have redundant suffix")
-	assert.Contains(t, violatedIndexes["idx_email_tenant_user"], "suffix")
+	require.Contains(t, violatedIndexes, "idx_email_tenant_user", "idx_email_tenant_user should have redundant suffix")
+	require.Contains(t, violatedIndexes["idx_email_tenant_user"], "suffix")
 
 	// idx_email should be redundant to idx_email_tenant_user (prefix match)
-	assert.Contains(t, violatedIndexes, "idx_email", "idx_email should be redundant to idx_email_tenant_user")
+	require.Contains(t, violatedIndexes, "idx_email", "idx_email should be redundant to idx_email_tenant_user")
 
 	// idx_created should have redundant PK suffix (tenant_id, user_id)
-	assert.Contains(t, violatedIndexes, "idx_created", "idx_created should have redundant suffix")
-	assert.Contains(t, violatedIndexes["idx_created"], "suffix")
+	require.Contains(t, violatedIndexes, "idx_created", "idx_created should have redundant suffix")
+	require.Contains(t, violatedIndexes["idx_created"], "suffix")
 }
 
 // TestRedundantIndexLinter_CreateTableInChanges tests that the linter
@@ -686,16 +686,16 @@ func TestRedundantIndexLinter_CreateTableInChanges(t *testing.T) {
 
 	// Parse as a change (AbstractStatement)
 	abstractStmt, err := statement.New(createTableSQL)
-	assert.NoError(t, err)
-	assert.Len(t, abstractStmt, 1)
+	require.NoError(t, err)
+	require.Len(t, abstractStmt, 1)
 
 	// Lint with the CREATE TABLE as a change (not an existing table)
 	violations := linter.Lint(nil, abstractStmt)
 
 	// Should detect idx_bank_account_id as redundant to the UNIQUE KEY
-	assert.Len(t, violations, 1, "Expected one violation for redundant index")
-	assert.Contains(t, violations[0].Message, "idx_bank_account_id")
-	assert.Contains(t, violations[0].Message, "redundant")
+	require.Len(t, violations, 1, "Expected one violation for redundant index")
+	require.Contains(t, violations[0].Message, "idx_bank_account_id")
+	require.Contains(t, violations[0].Message, "redundant")
 }
 
 // TestRedundantIndexLinter_AlterTableAddRedundantIndex tests that the linter
@@ -791,32 +791,32 @@ func TestRedundantIndexLinter_AlterTableAddRedundantIndex(t *testing.T) {
 
 			// Parse existing table
 			existingCT, err := statement.ParseCreateTable(tt.existingTable)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			// Parse ALTER TABLE statement
 			alterStmt, err := statement.New(tt.alterSQL)
-			assert.NoError(t, err)
-			assert.Len(t, alterStmt, 1)
+			require.NoError(t, err)
+			require.Len(t, alterStmt, 1)
 
 			// Run linter
 			violations := linter.Lint([]*statement.CreateTable{existingCT}, alterStmt)
 
 			if tt.expectViolated {
-				assert.NotEmpty(t, violations, "Expected violations but got none")
+				require.NotEmpty(t, violations, "Expected violations but got none")
 				found := false
 				for _, v := range violations {
 					if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
 						found = true
 						if tt.messageContains != "" {
-							assert.Contains(t, v.Message, tt.messageContains)
+							require.Contains(t, v.Message, tt.messageContains)
 						}
-						assert.Equal(t, SeverityWarning, v.Severity)
+						require.Equal(t, SeverityWarning, v.Severity)
 						break
 					}
 				}
-				assert.True(t, found, "Expected violation for index %s", tt.violatedIndex)
+				require.True(t, found, "Expected violation for index %s", tt.violatedIndex)
 			} else {
-				assert.Empty(t, violations, "Expected no violations but got: %v", violations)
+				require.Empty(t, violations, "Expected no violations but got: %v", violations)
 			}
 		})
 	}
@@ -841,11 +841,11 @@ func TestRedundantIndexLinter_AlterTableMultipleIndexes(t *testing.T) {
 	linter := &RedundantIndexLinter{}
 
 	existingCT, err := statement.ParseCreateTable(existingTable)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Parse ALTER TABLE - note this creates separate statements for each ADD INDEX
 	alterStmts, err := statement.New(alterSQL)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	violations := linter.Lint([]*statement.CreateTable{existingCT}, alterStmts)
 
@@ -857,8 +857,8 @@ func TestRedundantIndexLinter_AlterTableMultipleIndexes(t *testing.T) {
 		}
 	}
 
-	assert.True(t, violatedIndexes["idx_a"], "idx_a should be flagged as redundant")
-	assert.False(t, violatedIndexes["idx_d"], "idx_d should not be flagged")
+	require.True(t, violatedIndexes["idx_a"], "idx_a should be flagged as redundant")
+	require.False(t, violatedIndexes["idx_d"], "idx_d should not be flagged")
 }
 
 // TestRedundantIndexLinter_AlterTableOnNonExistentTable tests that the linter
@@ -868,13 +868,13 @@ func TestRedundantIndexLinter_AlterTableOnNonExistentTable(t *testing.T) {
 
 	alterSQL := "ALTER TABLE nonexistent ADD INDEX idx_a (a)"
 	alterStmt, err := statement.New(alterSQL)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Run linter with no existing tables
 	violations := linter.Lint(nil, alterStmt)
 
 	// Should not crash and should return no violations
-	assert.Empty(t, violations)
+	require.Empty(t, violations)
 }
 
 // TestRedundantIndexLinter_AlterTableComplex tests a complex scenario
@@ -898,20 +898,20 @@ func TestRedundantIndexLinter_AlterTableComplex(t *testing.T) {
 	linter := &RedundantIndexLinter{}
 
 	table1, err := statement.ParseCreateTable(table1SQL)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	table2, err := statement.ParseCreateTable(table2SQL)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// ALTER statements: one adds redundant index, one doesn't
 	alterSQL1 := "ALTER TABLE users ADD INDEX idx_email_dup (email)"
 	alterSQL2 := "ALTER TABLE orders ADD INDEX idx_product (product_id)"
 
 	alter1, err := statement.New(alterSQL1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	alter2, err := statement.New(alterSQL2)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	alter1 = append(alter1, alter2...)
 
@@ -925,6 +925,6 @@ func TestRedundantIndexLinter_AlterTableComplex(t *testing.T) {
 		}
 	}
 
-	assert.True(t, violatedIndexes["idx_email_dup"], "idx_email_dup should be flagged")
-	assert.False(t, violatedIndexes["idx_product"], "idx_product should not be flagged")
+	require.True(t, violatedIndexes["idx_email_dup"], "idx_email_dup should be flagged")
+	require.False(t, violatedIndexes["idx_product"], "idx_product should not be flagged")
 }

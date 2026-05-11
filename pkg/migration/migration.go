@@ -35,13 +35,13 @@ type Migration struct {
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
-	ReplicaDSN           string        `name:"replica-dsn" help:"A DSN for a replica which (if specified) will be used for lag checking." optional:""`
+	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
 	LockWaitTimeout      time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
 	SkipDropAfterCutover bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
 	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
 	SkipForceKill        bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
-	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected" optional:"" default:"false"`
+	Strict               bool          `name:"strict" help:"Exit on --alter mismatch when incomplete migration is detected. Not recommended for most users; the default idempotent restart behavior is safer." optional:"" default:"false"`
 	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
 	Lint                 bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
 	LintOnly             bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
@@ -55,8 +55,28 @@ type Migration struct {
 	// using INSERT IGNORE .. SELECT. This is also required for cross-server moves.
 	Buffered bool `name:"buffered" help:"Use the buffered copier based on the lock-free DBLog algorithm" optional:"" default:"false"`
 
+	// ForceEnableBufferedMap controls whether the LWW buffered-map mode of the
+	// replication subscription is used during the copy phase for tables with
+	// non-memory-comparable primary keys (e.g. VARCHAR with a CI collation).
+	//
+	// Default false: the FIFO queue runs full-time for those tables, mirroring
+	// the previous deltaQueue performance characteristics. We keep the queue
+	// hot in CI (notably TestCutoverAtomicityWithConcurrentWrites) so any bug
+	// in the queue path is caught before we flip the default.
+	//
+	// Set true to opt into the optimization: buffered-map dedup during copy,
+	// FIFO queue post-copy. Memory-comparable PKs always use the buffered map
+	// regardless of this flag.
+	ForceEnableBufferedMap bool `name:"force-enable-buffered-map" help:"Enable the buffered map during copy even for non-memory comparable PKs. This relies on the checksum to catch and fix mistakes, so it is still considered 'correct', but is experimental for now." optional:"" default:"false"`
+
 	CheckpointMaxAge     time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 	ChecksumYieldTimeout time.Duration `name:"checksum-yield-timeout" help:"Maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth)" optional:"" default:"24h"`
+
+	// MaxCommitLatency throttles when observed commit latency exceeds this
+	// threshold. Currently auto-enabled only on Aurora (auto-detected); the
+	// default 100ms is intentionally a high upper bound to only cut the most
+	// extreme tail latencies. See issue #468.
+	MaxCommitLatency time.Duration `name:"max-commit-latency" help:"Throttle when average commit latency exceeds this threshold (currently only auto-enabled on Aurora)" optional:"" default:"100ms"`
 
 	// Hidden options for now (supports more obscure cash/sq usecases)
 	InterpolateParams bool `name:"interpolate-params" help:"Enable interpolate params for DSN" optional:"" default:"false" hidden:""`

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/table"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,7 +21,7 @@ func assertChangesContain(t *testing.T, changes []*AbstractStatement, expected [
 				break
 			}
 		}
-		assert.True(t, found, "expected some statement to contain %q, got %v", exp, strs)
+		require.True(t, found, "expected some statement to contain %q, got %v", exp, strs)
 	}
 }
 
@@ -157,7 +156,7 @@ func TestDeclarativeToImperative(t *testing.T) {
 			changes, err := DeclarativeToImperative(tt.current, tt.desired, nil)
 			require.NoError(t, err)
 
-			assert.Len(t, changes, tt.expectedCount)
+			require.Len(t, changes, tt.expectedCount)
 			if tt.contains != nil {
 				assertChangesContain(t, changes, tt.contains)
 			}
@@ -176,14 +175,15 @@ func TestDeclarativeToImperativeWithOptions(t *testing.T) {
 
 	changes, err := DeclarativeToImperative(current, desired, NewDiffOptions())
 	require.NoError(t, err)
-	assert.Empty(t, changes, "AUTO_INCREMENT differences should be ignored with default options")
+	require.Empty(t, changes, "AUTO_INCREMENT differences should be ignored with default options")
 }
 
 func TestDeclarativeToImperative_OrderingCreateAlterBeforeDrop(t *testing.T) {
-	// Verify the correctness property: CREATE/ALTER statements always come
-	// before DROP statements. This ensures safe sequential execution (e.g.
-	// a table referenced by a FK won't be dropped before the referencing
-	// ALTER runs).
+	// Verify the correctness property: statements are ordered as
+	// CREATE → ALTER → DROP. This ensures safe sequential execution (e.g.
+	// an ALTER adding a FK to a newly-created table runs after the CREATE,
+	// and a table referenced by a FK won't be dropped before the
+	// referencing ALTER runs).
 	current := []table.TableSchema{
 		{Name: "a_table", Schema: "CREATE TABLE a_table (id INT PRIMARY KEY)"},
 		{Name: "b_table", Schema: "CREATE TABLE b_table (id INT PRIMARY KEY)"},
@@ -199,23 +199,39 @@ func TestDeclarativeToImperative_OrderingCreateAlterBeforeDrop(t *testing.T) {
 	changes, err := DeclarativeToImperative(current, desired, nil)
 	require.NoError(t, err)
 
-	// We expect: ALTER a_table, CREATE e_new, DROP c_drop_me, DROP d_drop_me
+	// We expect: CREATE e_new, ALTER a_table, DROP c_drop_me, DROP d_drop_me
 	require.Len(t, changes, 4)
 
-	// Find the boundary: all DROPs must come after all non-DROPs.
-	firstDropIdx := -1
+	// Classify each statement and verify strict CREATE → ALTER → DROP ordering.
+	const (
+		phaseCreate = iota
+		phaseAlter
+		phaseDrop
+	)
+	phase := phaseCreate
 	for i, ch := range changes {
-		if strings.Contains(ch.Statement, "DROP TABLE") {
-			if firstDropIdx == -1 {
-				firstDropIdx = i
-			}
-		} else {
-			// Any non-DROP after a DROP is a violation of the ordering invariant.
-			if firstDropIdx != -1 {
-				t.Fatalf("non-DROP statement at index %d after DROP at index %d: %s", i, firstDropIdx, ch.Statement)
-			}
+		var stmtPhase int
+		switch {
+		case strings.Contains(ch.Statement, "CREATE TABLE"):
+			stmtPhase = phaseCreate
+		case strings.Contains(ch.Statement, "ALTER TABLE"):
+			stmtPhase = phaseAlter
+		case strings.Contains(ch.Statement, "DROP TABLE"):
+			stmtPhase = phaseDrop
+		default:
+			t.Fatalf("unexpected statement at index %d: %s", i, ch.Statement)
 		}
+		if stmtPhase < phase {
+			t.Fatalf("ordering violation at index %d: got %s after phase %d", i, ch.Statement, phase)
+		}
+		phase = stmtPhase
 	}
+
+	// Additionally verify the exact order of statement types.
+	require.Contains(t, changes[0].Statement, "CREATE TABLE")
+	require.Contains(t, changes[1].Statement, "ALTER TABLE")
+	require.Contains(t, changes[2].Statement, "DROP TABLE")
+	require.Contains(t, changes[3].Statement, "DROP TABLE")
 }
 
 func TestToTableSchema(t *testing.T) {
@@ -224,9 +240,9 @@ func TestToTableSchema(t *testing.T) {
 
 	ts, err := ct.ToTableSchema()
 	require.NoError(t, err)
-	assert.Equal(t, "t1", ts.Name)
-	assert.Contains(t, ts.Schema, "CREATE TABLE")
-	assert.Contains(t, ts.Schema, "t1")
-	assert.Contains(t, ts.Schema, "id")
-	assert.Contains(t, ts.Schema, "name")
+	require.Equal(t, "t1", ts.Name)
+	require.Contains(t, ts.Schema, "CREATE TABLE")
+	require.Contains(t, ts.Schema, "t1")
+	require.Contains(t, ts.Schema, "id")
+	require.Contains(t, ts.Schema, "name")
 }

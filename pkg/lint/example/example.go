@@ -19,7 +19,7 @@ type TableNameLengthLinter struct {
 // NewTableNameLengthLinter creates a new table name length linter with default configuration.
 func NewTableNameLengthLinter() *TableNameLengthLinter {
 	return &TableNameLengthLinter{
-		maxLength: 58, // MySQL's limit is 64 but we use 58 to allow for prefixes/suffixes
+		maxLength: 58, // example default; MySQL's hard limit is 64
 	}
 }
 
