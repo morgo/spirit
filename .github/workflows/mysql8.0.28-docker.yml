@@ -11,6 +11,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Detect non-docs changes
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+
       - name: Test
+        if: steps.filter.outputs.code == 'true'
         run: docker compose -f compose.yml -f 8.0.28.yml up mysql test --abort-on-container-exit
         working-directory: compose
+
+      - name: Skip — documentation-only change
+        if: steps.filter.outputs.code != 'true'
+        run: echo "Documentation-only change detected; skipping tests."
