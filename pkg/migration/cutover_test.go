@@ -225,20 +225,14 @@ func TestInvalidOptions(t *testing.T) {
 // The optimistic chunker is selected automatically for single-column
 // auto_increment PKs; the composite chunker covers everything else (here we
 // force it via a composite (id, x_token) PK, where x_token is VARCHAR — that
-// makes the PK non-memory-comparable and routes the bufferedMap subscription
-// through its FIFO queue mode for the entire run, copy and post-copy).
+// makes the PK non-memory-comparable, so the bufferedMap subscription uses
+// LWW map dedup during the copy phase and the FIFO queue post-copy).
 //
 // All variants use the buffered replication subscription. The deltaMap path
 // was retired as part of #746 — it relied on `REPLACE INTO _new ... SELECT
 // FROM original ...` which is subject to the binlog/visibility race. The
 // composite-PK variants were dropped when deltaQueue went away (#821) and
 // are restored here against the unified bufferedMap implementation.
-//
-// We deliberately don't add a `--force-enable-buffered-map=true` variant
-// for the composite-PK case. With the default (false), the queue runs
-// full-time across copy and post-copy phases, which exercises the queue
-// path strictly more than the optimization (where the queue only runs
-// post-copy). The default is the higher-coverage variant.
 //
 // Note on FixDifferences: this test runs with the production default
 // (FixDifferences=true on the checksum). An earlier version of this test

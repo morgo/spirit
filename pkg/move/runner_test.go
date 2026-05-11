@@ -440,32 +440,15 @@ func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
 // primary key (VARCHAR with a CI collation) — the case from issue #607. The
 // move runs under concurrent writes to exercise the binlog replay path.
 //
-// The two subtests cover both routing modes for non-memory-comparable PKs:
-//
-//   - default (forceEnableBufferedMap=false): FIFO queue full-time. This is
-//     the safe default — the queue replays binlog events in their original
-//     order, which is required for collation-sensitive PKs because the map's
-//     hash equality ("A" ≠ "a") does not match MySQL's row identity ("A" =
-//     "a" under a CI collation).
-//   - force-enable-buffered-map=true: LWW map dedup during copy, FIFO queue
-//     post-copy. This is the experimental optimization, kept honest by the
-//     post-cutover checksum.
+// For non-memory-comparable PKs the bufferedMap subscription uses LWW map
+// dedup during the copy phase and FIFO queue post-copy. The queue replays
+// binlog events in their original order, which is required for collation-
+// sensitive PKs because the map's hash equality ("A" ≠ "a") does not match
+// MySQL's row identity ("A" = "a" under a CI collation). The post-cutover
+// checksum keeps the optimization honest by repairing any divergence.
 func TestMoveWithVarcharPK(t *testing.T) {
-	t.Run("queue-full-time", func(t *testing.T) {
-		testMoveWithVarcharPK(t, false)
-	})
-	t.Run("force-enable-buffered-map", func(t *testing.T) {
-		testMoveWithVarcharPK(t, true)
-	})
-}
-
-func testMoveWithVarcharPK(t *testing.T, forceEnableBufferedMap bool) {
-	dbSuffix := "queue"
-	if forceEnableBufferedMap {
-		dbSuffix = "bufmap"
-	}
-	srcDB := "source_varcharpk_" + dbSuffix
-	dstDB := "dest_varcharpk_" + dbSuffix
+	srcDB := "source_varcharpk"
+	dstDB := "dest_varcharpk"
 
 	sourceDSN := testutils.DSNForDatabase(srcDB)
 	targetDSN := testutils.DSNForDatabase(dstDB)
@@ -533,20 +516,19 @@ func testMoveWithVarcharPK(t *testing.T, forceEnableBufferedMap bool) {
 	time.Sleep(100 * time.Millisecond)
 
 	move := &Move{
-		SourceDSN:              sourceDSN,
-		TargetDSN:              targetDSN,
-		TargetChunkTime:        100 * time.Millisecond,
-		Threads:                2,
-		WriteThreads:           2,
-		CreateSentinel:         false,
-		ForceEnableBufferedMap: forceEnableBufferedMap,
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		WriteThreads:    2,
+		CreateSentinel:  false,
 	}
 	err = move.Run()
 	cancel()
 	wg.Wait()
 
-	t.Logf("forceEnableBufferedMap=%v: %d successful writes, %d errors during move",
-		forceEnableBufferedMap, writeCount.Load(), errorCount.Load())
+	t.Logf("%d successful writes, %d errors during move",
+		writeCount.Load(), errorCount.Load())
 	require.NoError(t, err, "move on VARCHAR PK table must succeed (issue #607)")
 
 	// Source/target row counts must match. The internal checksum step inside
