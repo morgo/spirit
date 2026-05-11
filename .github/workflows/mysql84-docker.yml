@@ -15,6 +15,7 @@ jobs:
         uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.2
         id: filter
         with:
+          predicate-quantifier: 'every'
           filters: |
             code:
               - '!**/*.md'
