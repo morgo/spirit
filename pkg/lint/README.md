@@ -260,11 +260,11 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ### auto_inc_capacity
 
-**Severity**: Warning  
+**Severity**: Error  
 **Configurable**: Yes  
 **Checks**: CREATE TABLE
 
-Ensures that AUTO_INCREMENT values are not within a dangerous percentage of the column type's maximum capacity.
+Ensures that AUTO_INCREMENT values are not within a dangerous percentage of the column type's maximum capacity. Approaching the capacity ceiling will eventually cause INSERTs to fail.
 
 **Configuration Options:**
 
@@ -361,7 +361,7 @@ ALTER TABLE products ADD COLUMN discount DOUBLE;
 
 ### invisible_index_before_drop
 
-**Severity**: Warning (default), Error (configurable)  
+**Severity**: Error (default), Warning (configurable)  
 **Configurable**: Yes  
 **Checks**: ALTER TABLE (DROP INDEX)
 
@@ -369,7 +369,7 @@ Requires indexes to be made invisible before dropping them as a safety measure. 
 
 **Configuration Options:**
 
-- `raiseError` (string): Set to `"true"` to make violations errors instead of warnings. Default: `"false"`.
+- `raiseError` (string): Set to `"false"` to demote violations to warnings instead of errors. Default: `"true"`.
 
 **Examples:**
 
@@ -399,11 +399,11 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ### multiple_alter_table
 
-**Severity**: Warning  
+**Severity**: Info  
 **Configurable**: No  
 **Checks**: ALTER TABLE
 
-Detects multiple ALTER TABLE statements on the same table that could be combined into one for better performance and fewer table rebuilds.
+Detects multiple ALTER TABLE statements on the same table that could be combined into one for better performance and fewer table rebuilds. This is an optimization suggestion, not a correctness issue.
 
 **Examples:**
 
@@ -449,11 +449,11 @@ ALTER TABLE users RENAME TO UserAccounts;
 
 ### primary_key
 
-**Severity**: Warning (missing/invalid types), Warning (signed integers)  
+**Severity**: Warning for existing tables, Error for new tables (CREATE TABLE in changes)  
 **Configurable**: Yes  
 **Checks**: CREATE TABLE
 
-Ensures primary keys are defined and use appropriate data types (BIGINT UNSIGNED, BINARY, or VARBINARY by default).
+Ensures primary keys are defined and use appropriate data types (BIGINT UNSIGNED, BINARY, or VARBINARY by default). Severity is scoped by source: existing tables produce Warning so legacy schemas don't block unrelated ALTERs, while new CREATE TABLE statements in the incoming changes produce Error.
 
 **Configuration Options:**
 
@@ -463,20 +463,15 @@ Ensures primary keys are defined and use appropriate data types (BIGINT UNSIGNED
 **Examples:**
 
 ```sql
--- ❌ Error (no primary key)
+-- ❌ Error in a new CREATE TABLE / ⚠️ Warning if the table already exists (no primary key)
 CREATE TABLE users (
   id INT,
   name VARCHAR(100)
 );
 
--- ❌ Error (INT not allowed by default)
+-- ❌ Error in a new CREATE TABLE / ⚠️ Warning if the table already exists (INT not allowed by default)
 CREATE TABLE users (
   id INT PRIMARY KEY
-);
-
--- ⚠️ Warning (signed BIGINT, should be UNSIGNED)
-CREATE TABLE users (
-  id BIGINT PRIMARY KEY
 );
 
 -- ✅ Correct
@@ -667,7 +662,7 @@ ALTER TABLE users ADD COLUMN legacy_date DATETIME DEFAULT '0000-00-00 00:00:00';
 
 ### has_timestamp
 
-**Severity**: Warning  
+**Severity**: Warning for existing tables, Error for new tables (CREATE TABLE in changes) and for ALTER TABLE statements that add/modify TIMESTAMP columns  
 **Configurable**: No  
 **Checks**: CREATE TABLE, ALTER TABLE (ADD/MODIFY/CHANGE COLUMN)
 
@@ -683,7 +678,7 @@ Detects redundant indexes where one index is a prefix of another (e.g., INDEX(a)
 
 ### rename_column
 
-**Severity**: Warning  
+**Severity**: Error  
 **Configurable**: No  
 **Checks**: ALTER TABLE
 
@@ -697,16 +692,16 @@ Detects column renames via RENAME COLUMN or CHANGE COLUMN. Column renames cannot
 |--------|--------------|--------------|-------------|----------|
 | `allow_charset` | ✅ | ✅ | ✅ | Warning |
 | `allow_engine` | ✅ | ✅ | ✅ | Warning |
-| `auto_inc_capacity` | ✅ | ✅ | ❌ | Warning |
+| `auto_inc_capacity` | ✅ | ✅ | ❌ | Error |
 | `has_fk` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
-| `has_timestamp` | ❌ | ✅ | ✅ | Warning |
-| `invisible_index_before_drop` | ✅ | ❌ | ✅ | Warning |
-| `multiple_alter_table` | ❌ | ❌ | ✅ | Warning |
+| `has_timestamp` | ❌ | ✅ | ✅ | Warning (existing) / Error (new) |
+| `invisible_index_before_drop` | ✅ | ❌ | ✅ | Error (default), Warning (configurable) |
+| `multiple_alter_table` | ❌ | ❌ | ✅ | Info |
 | `name_case` | ❌ | ✅ | ✅ | Warning |
-| `primary_key` | ✅ | ✅ | ❌ | Warning |
+| `primary_key` | ✅ | ✅ | ❌ | Warning (existing) / Error (new) |
 | `redundant_indexes` | ❌ | ✅ | ❌ | Warning |
-| `rename_column` | ❌ | ❌ | ✅ | Warning |
+| `rename_column` | ❌ | ❌ | ✅ | Error |
 | `reserved_words` | ❌ | ✅ | ✅ | Warning |
 | `type_pedantic` | ✅ | ✅ | ✅ | Warning / Error |
 | `unsafe` | ✅ | ❌ | ✅ | Warning |
