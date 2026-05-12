@@ -1177,20 +1177,18 @@ func TestHasFloatLinter_UltraComplexScenario(t *testing.T) {
 	linter := &HasFloatLinter{}
 	violations := linter.Lint([]*statement.CreateTable{existing1, existing2}, newTableStmts)
 
-	// Should detect:
-	// 1. existing1.value (FLOAT in existing table)
-	// 2. new_table.score (DOUBLE in new table)
-	// 3. existing2.pressure (FLOAT via ADD)
-	// 4. existing2.temperature (DOUBLE via MODIFY)
-	// 5. existing1.measurement (FLOAT via CHANGE)
-	require.Len(t, violations, 5)
+	// Post-state contains:
+	// 1. new_table.score        — DOUBLE in new CREATE TABLE
+	// 2. existing2.pressure     — FLOAT via ADD
+	// 3. existing2.temperature  — DOUBLE via MODIFY (was INT)
+	// 4. existing1.measurement  — FLOAT via CHANGE (was existing1.value, renamed)
+	//
+	// existing1.value is renamed away by CHANGE COLUMN, so it no longer
+	// appears in the post-state — only the renamed `measurement` does.
+	require.Len(t, violations, 4)
 
-	// Verify we have violations from all sources
-	var foundExisting1, foundNewTable, foundAdd, foundModify, foundChange bool
+	var foundNewTable, foundAdd, foundModify, foundChange bool
 	for _, v := range violations {
-		if v.Location.Table == "existing1" && *v.Location.Column == "value" {
-			foundExisting1 = true
-		}
 		if v.Location.Table == "new_table" && *v.Location.Column == "score" {
 			foundNewTable = true
 		}
@@ -1204,7 +1202,6 @@ func TestHasFloatLinter_UltraComplexScenario(t *testing.T) {
 			foundChange = true
 		}
 	}
-	require.True(t, foundExisting1, "Should find violation in existing1.value")
 	require.True(t, foundNewTable, "Should find violation in new_table.score")
 	require.True(t, foundAdd, "Should find violation in ADD COLUMN")
 	require.True(t, foundModify, "Should find violation in MODIFY COLUMN")

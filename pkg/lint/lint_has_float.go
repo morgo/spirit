@@ -2,9 +2,9 @@ package lint
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 )
 
@@ -26,58 +26,41 @@ func (l *HasFloatLinter) Description() string {
 	return "Detects usage of FLOAT or DOUBLE data types in table definitions"
 }
 
+// Lint operates on a post-state view of the schema, so a column being
+// converted away from FLOAT/DOUBLE in an ALTER doesn't generate a false
+// positive. The violation message distinguishes pre-existing columns from
+// columns added/modified by the changeset to preserve actionability.
 func (l *HasFloatLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	// Loop over all table definitions
-	for table := range CreateTableStatements(existingTables, changes) {
-		violations = append(violations, l.checkCreateTable(table)...)
-	}
+	addedOrModified := columnsAddedOrModifiedInChanges(changes)
+	createdInChanges := newTablesInChanges(changes)
 
-	// Loop over ALTER TABLE statements that add/modify FLOAT/DOUBLE columns
-	for _, change := range changes {
-		alter, ok := change.AsAlterTable()
-		if !ok {
-			continue
-		}
-		for _, spec := range alter.Specs {
-			var message string
-			switch spec.Tp { //nolint:exhaustive
-			case ast.AlterTableAddColumns:
-				message = "New column %q in table %q uses floating-point data type"
-			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-				message = "Column %q in table %q modified to use floating-point data type"
-			default:
+	for _, ct := range PostState(existingTables, changes) {
+		tKey := strings.ToLower(ct.TableName)
+		for _, col := range ct.Columns {
+			if col.Raw == nil || col.Raw.Tp == nil {
 				continue
 			}
-
-			// Check all columns in this spec for FLOAT/DOUBLE
-			for _, col := range spec.NewColumns {
-				if col.Tp.GetType() == mysql.TypeFloat || col.Tp.GetType() == mysql.TypeDouble {
-					violations = append(violations, Violation{
-						Linter: l,
-						Location: &Location{
-							Table:  change.Table,
-							Column: &col.Name.Name.O,
-						},
-						Message:  fmt.Sprintf(message, col.Name.Name.O, change.Table),
-						Severity: SeverityWarning,
-					})
-				}
+			tp := col.Raw.Tp.GetType()
+			if tp != mysql.TypeFloat && tp != mysql.TypeDouble {
+				continue
 			}
-		}
-	}
-	return violations
-}
-
-func (l *HasFloatLinter) checkCreateTable(table *statement.CreateTable) (violations []Violation) {
-	for _, col := range table.Columns {
-		if col.Raw.Tp.GetType() == mysql.TypeFloat || col.Raw.Tp.GetType() == mysql.TypeDouble {
+			colName := col.Name
+			colKey := strings.ToLower(colName)
+			modified := !createdInChanges[tKey] && addedOrModified[tKey][colKey]
+			var message string
+			switch {
+			case modified:
+				message = fmt.Sprintf("Column %q in table %q modified to use floating-point data type", colName, ct.TableName)
+			default:
+				message = fmt.Sprintf("Column %q in table %q uses %s data type", colName, ct.TableName, col.Raw.Tp.String())
+			}
 			violations = append(violations, Violation{
 				Linter: l,
 				Location: &Location{
-					Table:  table.TableName,
-					Column: &col.Name,
+					Table:  ct.TableName,
+					Column: &colName,
 				},
-				Message:  fmt.Sprintf("Column %q in table %q uses %s data type", col.Name, table.TableName, col.Type),
+				Message:  message,
 				Severity: SeverityWarning,
 			})
 		}
