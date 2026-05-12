@@ -1,0 +1,371 @@
+package lint
+
+import (
+	"sort"
+	"strings"
+
+	"github.com/block/spirit/pkg/statement"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+)
+
+// PostState returns a deterministic post-state view of the schema: the existing
+// tables augmented with CREATE TABLE statements from changes, and existing tables
+// patched with ADD/DROP/MODIFY/CHANGE COLUMN and ADD/DROP INDEX (and DROP PRIMARY
+// KEY) specs from ALTER TABLE statements. Other ALTER specs are ignored.
+//
+// The result is sorted by table name. The input tables are not mutated.
+//
+// Linters that need to evaluate the schema as it will exist *after* a set of
+// pending changes (rather than as it exists today) should iterate this slice
+// rather than existingTables directly — otherwise they will produce false
+// positives for ALTER statements that fix legacy issues.
+func PostState(existing []*statement.CreateTable, changes []*statement.AbstractStatement) []*statement.CreateTable {
+	byName := make(map[string]*statement.CreateTable, len(existing))
+	for _, t := range existing {
+		byName[strings.ToLower(t.TableName)] = t
+	}
+
+	for _, change := range changes {
+		if change == nil {
+			continue
+		}
+		if change.IsCreateTable() {
+			ct, err := change.ParseCreateTable()
+			if err == nil && ct != nil {
+				byName[strings.ToLower(ct.TableName)] = ct
+			}
+			continue
+		}
+		at, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		key := strings.ToLower(change.Table)
+		base, found := byName[key]
+		if !found {
+			// Synthesize a placeholder for ALTERs whose target isn't in
+			// existingTables. applyAlter still produces a best-effort
+			// post-state — column adds/modifies/changes show up; drops are
+			// harmless against an empty column list. This is the right
+			// behavior for linters that evaluate the affected columns
+			// individually (has_timestamp, has_float, zero_date) even
+			// without full schema context.
+			base = &statement.CreateTable{TableName: change.Table}
+		}
+		byName[key] = applyAlter(base, at)
+	}
+
+	out := make([]*statement.CreateTable, 0, len(byName))
+	for _, t := range byName {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TableName < out[j].TableName })
+	return out
+}
+
+// newTablesInChanges returns the set of (lowercased) table names that are
+// created by a CREATE TABLE statement in changes. Columns inside these tables
+// are considered "new", not legacy.
+func newTablesInChanges(changes []*statement.AbstractStatement) map[string]bool {
+	out := make(map[string]bool)
+	for _, change := range changes {
+		if change == nil || !change.IsCreateTable() {
+			continue
+		}
+		ct, err := change.ParseCreateTable()
+		if err != nil || ct == nil {
+			continue
+		}
+		out[strings.ToLower(ct.TableName)] = true
+	}
+	return out
+}
+
+// columnsAddedOrModifiedInChanges returns, for each table, the set of
+// (lowercased) column names that are added or modified by ALTER TABLE
+// statements in changes. CHANGE COLUMN records both the old name and the
+// new name as added/modified — neither is "pre-existing untouched". MODIFY
+// COLUMN records the column name. ADD COLUMN records the new column name.
+// DROP COLUMN is not recorded here (dropped columns don't appear in
+// post-state at all).
+func columnsAddedOrModifiedInChanges(changes []*statement.AbstractStatement) map[string]map[string]bool {
+	out := make(map[string]map[string]bool)
+	mark := func(table, col string) {
+		tKey := strings.ToLower(table)
+		if out[tKey] == nil {
+			out[tKey] = make(map[string]bool)
+		}
+		out[tKey][strings.ToLower(col)] = true
+	}
+	for _, change := range changes {
+		if change == nil {
+			continue
+		}
+		at, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		for _, spec := range at.Specs {
+			switch spec.Tp { //nolint:exhaustive
+			case ast.AlterTableAddColumns, ast.AlterTableModifyColumn:
+				for _, col := range spec.NewColumns {
+					if col.Name != nil {
+						mark(change.Table, col.Name.Name.O)
+					}
+				}
+			case ast.AlterTableChangeColumn:
+				if spec.OldColumnName != nil {
+					mark(change.Table, spec.OldColumnName.Name.O)
+				}
+				for _, col := range spec.NewColumns {
+					if col.Name != nil {
+						mark(change.Table, col.Name.Name.O)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// columnsModifiedInChanges returns, for each table, the (lowercased) column
+// names that are retyped via MODIFY COLUMN or CHANGE COLUMN — i.e. operations
+// that act on a column that should already exist. The map distinguishes
+// retypes from ADD COLUMN, which is useful when a linter wants different
+// messaging for "new column" vs "existing column being changed".
+func columnsModifiedInChanges(changes []*statement.AbstractStatement) map[string]map[string]bool {
+	out := make(map[string]map[string]bool)
+	mark := func(table, col string) {
+		tKey := strings.ToLower(table)
+		if out[tKey] == nil {
+			out[tKey] = make(map[string]bool)
+		}
+		out[tKey][strings.ToLower(col)] = true
+	}
+	for _, change := range changes {
+		if change == nil {
+			continue
+		}
+		at, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		for _, spec := range at.Specs {
+			switch spec.Tp { //nolint:exhaustive
+			case ast.AlterTableModifyColumn:
+				for _, col := range spec.NewColumns {
+					if col.Name != nil {
+						mark(change.Table, col.Name.Name.O)
+					}
+				}
+			case ast.AlterTableChangeColumn:
+				if spec.OldColumnName != nil {
+					mark(change.Table, spec.OldColumnName.Name.O)
+				}
+				for _, col := range spec.NewColumns {
+					if col.Name != nil {
+						mark(change.Table, col.Name.Name.O)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// PreStateColumns returns a lookup of (lowercased table name) → (lowercased
+// column name) → column from the existing tables. Linters use this to
+// distinguish columns that pre-existed (severity Warning) from columns added
+// or modified by changes (severity Error).
+func PreStateColumns(existing []*statement.CreateTable) map[string]map[string]*statement.Column {
+	out := make(map[string]map[string]*statement.Column, len(existing))
+	for _, t := range existing {
+		tKey := strings.ToLower(t.TableName)
+		cols := make(map[string]*statement.Column, len(t.Columns))
+		for i := range t.Columns {
+			c := &t.Columns[i]
+			cols[strings.ToLower(c.Name)] = c
+		}
+		out[tKey] = cols
+	}
+	return out
+}
+
+// applyAlter returns a shallow clone of t with the relevant subset of alter
+// specs applied. The original table is not mutated.
+//
+// Note: GetIndexes() synthesizes PRIMARY KEY / UNIQUE entries from inline
+// column-level flags (col.PrimaryKey, col.Unique), so the drop paths below
+// must clear those flags in addition to scrubbing cloned.Indexes — otherwise
+// the synthesis would resurrect the dropped index in the post-state.
+func applyAlter(t *statement.CreateTable, at *ast.AlterTableStmt) *statement.CreateTable {
+	cloned := *t
+	cloned.Columns = append(statement.Columns(nil), t.Columns...)
+	cloned.Indexes = append(statement.Indexes(nil), t.Indexes...)
+
+	for _, spec := range at.Specs {
+		switch spec.Tp { //nolint:exhaustive
+		case ast.AlterTableAddColumns:
+			for _, colDef := range spec.NewColumns {
+				cloned.Columns = append(cloned.Columns, columnFromAst(colDef))
+			}
+		case ast.AlterTableDropColumn:
+			if spec.OldColumnName != nil {
+				cloned.Columns = removeColumn(cloned.Columns, spec.OldColumnName.Name.O)
+			}
+		case ast.AlterTableModifyColumn:
+			if len(spec.NewColumns) > 0 {
+				colDef := spec.NewColumns[0]
+				cloned.Columns = replaceColumn(cloned.Columns, colDef.Name.Name.O, columnFromAst(colDef))
+			}
+		case ast.AlterTableChangeColumn:
+			if len(spec.NewColumns) > 0 && spec.OldColumnName != nil {
+				colDef := spec.NewColumns[0]
+				cloned.Columns = replaceColumn(cloned.Columns, spec.OldColumnName.Name.O, columnFromAst(colDef))
+			}
+		case ast.AlterTableAddConstraint:
+			if spec.Constraint == nil {
+				continue
+			}
+			if idx, ok := indexFromConstraint(spec.Constraint); ok {
+				cloned.Indexes = append(cloned.Indexes, idx)
+				// An inline-flag column whose constraint we just promoted to
+				// the table-level Indexes list could be double-counted. The
+				// duplication is harmless for the indexed-column set (a set,
+				// not a multiset), so we don't dedupe here.
+			}
+		case ast.AlterTableDropIndex:
+			before := len(cloned.Indexes)
+			cloned.Indexes = removeIndex(cloned.Indexes, spec.Name, "")
+			if len(cloned.Indexes) == before {
+				// Nothing removed at the table level — this may target an
+				// implicit index created by an inline column-level UNIQUE,
+				// whose server-assigned index name is the column's name.
+				cloned.Columns = clearInlineUniqueByName(cloned.Columns, spec.Name)
+			}
+		case ast.AlterTableDropPrimaryKey:
+			cloned.Indexes = removeIndex(cloned.Indexes, "", "PRIMARY KEY")
+			// Inline `col TYPE PRIMARY KEY` never appears in t.Indexes; it
+			// only surfaces via GetIndexes() synthesizing from this flag.
+			// Clearing it here makes the post-state honor DROP PRIMARY KEY.
+			cloned.Columns = clearAllInlinePrimaryKey(cloned.Columns)
+		}
+	}
+	return &cloned
+}
+
+// columnFromAst constructs a minimal statement.Column from an AST column def.
+// Only Raw (for type information), Name, and inline PrimaryKey/Unique flags
+// are populated — that's enough for the linters that need post-state.
+func columnFromAst(colDef *ast.ColumnDef) statement.Column {
+	col := statement.Column{
+		Raw:  colDef,
+		Name: colDef.Name.Name.O,
+	}
+	for _, opt := range colDef.Options {
+		switch opt.Tp { //nolint:exhaustive
+		case ast.ColumnOptionPrimaryKey:
+			col.PrimaryKey = true
+		case ast.ColumnOptionUniqKey:
+			col.Unique = true
+		}
+	}
+	return col
+}
+
+func removeColumn(cols statement.Columns, name string) statement.Columns {
+	out := cols[:0]
+	for _, c := range cols {
+		if !strings.EqualFold(c.Name, name) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// replaceColumn substitutes newCol in place of the column named oldName,
+// preserving any inline PRIMARY KEY / UNIQUE flags from the old definition.
+// MySQL semantics: MODIFY / CHANGE COLUMN re-types a column but does not drop
+// existing constraints on it; those are removed only via DROP PRIMARY KEY /
+// DROP INDEX. The new column def from the parser doesn't carry those over.
+func replaceColumn(cols statement.Columns, oldName string, newCol statement.Column) statement.Columns {
+	for i, c := range cols {
+		if strings.EqualFold(c.Name, oldName) {
+			if c.PrimaryKey && !newCol.PrimaryKey {
+				newCol.PrimaryKey = true
+			}
+			if c.Unique && !newCol.Unique {
+				newCol.Unique = true
+			}
+			cols[i] = newCol
+			return cols
+		}
+	}
+	return append(cols, newCol)
+}
+
+// clearAllInlinePrimaryKey clears the inline PrimaryKey flag from every
+// column. Used by DROP PRIMARY KEY since inline `col TYPE PRIMARY KEY` only
+// shows up via GetIndexes() synthesizing from this flag.
+func clearAllInlinePrimaryKey(cols statement.Columns) statement.Columns {
+	for i := range cols {
+		cols[i].PrimaryKey = false
+	}
+	return cols
+}
+
+// clearInlineUniqueByName clears col.Unique on the column whose name matches
+// the dropped index name. MySQL names the implicit index for an inline
+// `col TYPE UNIQUE` after the column itself, so DROP INDEX <colname> can
+// target it. We only run this when no table-level index of that name existed.
+func clearInlineUniqueByName(cols statement.Columns, indexName string) statement.Columns {
+	if indexName == "" {
+		return cols
+	}
+	for i := range cols {
+		if strings.EqualFold(cols[i].Name, indexName) && cols[i].Unique {
+			cols[i].Unique = false
+			break
+		}
+	}
+	return cols
+}
+
+func indexFromConstraint(c *ast.Constraint) (statement.Index, bool) {
+	var typeStr string
+	switch c.Tp { //nolint:exhaustive
+	case ast.ConstraintPrimaryKey:
+		typeStr = "PRIMARY KEY"
+	case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
+		typeStr = "UNIQUE"
+	case ast.ConstraintKey, ast.ConstraintIndex:
+		typeStr = "INDEX"
+	default:
+		return statement.Index{}, false
+	}
+	cols := make([]string, 0, len(c.Keys))
+	for _, k := range c.Keys {
+		if k.Column != nil {
+			cols = append(cols, k.Column.Name.O)
+		}
+	}
+	return statement.Index{
+		Name:    c.Name,
+		Type:    typeStr,
+		Columns: cols,
+	}, true
+}
+
+func removeIndex(indexes statement.Indexes, name, typeMatch string) statement.Indexes {
+	out := indexes[:0]
+	for _, idx := range indexes {
+		if name != "" && strings.EqualFold(idx.Name, name) {
+			continue
+		}
+		if typeMatch != "" && idx.Type == typeMatch {
+			continue
+		}
+		out = append(out, idx)
+	}
+	return out
+}

@@ -28,31 +28,17 @@ func (l *ZeroDateLinter) String() string {
 	return Stringer(l)
 }
 
+// Lint operates on a post-state view of the schema so that ALTERs which fix
+// zero-date columns don't produce false positives on the pre-state.
 func (l *ZeroDateLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	for ct := range CreateTableStatements(existingTables, changes) {
+	for _, ct := range PostState(existingTables, changes) {
 		for _, column := range ct.Columns {
+			if column.Raw == nil {
+				continue
+			}
 			v := l.checkColumnZeroDate(column.Raw, ct.TableName)
 			if v != nil {
 				violations = append(violations, *v)
-			}
-		}
-	}
-
-	// Check ALTER TABLE statements
-	for _, change := range changes {
-		at, ok := change.AsAlterTable()
-		if !ok {
-			continue
-		}
-		for _, spec := range at.Specs {
-			switch spec.Tp { //nolint:exhaustive
-			case ast.AlterTableAddColumns, ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-				for _, column := range spec.NewColumns {
-					v := l.checkColumnZeroDate(column, at.Table.Name.String())
-					if v != nil {
-						violations = append(violations, *v)
-					}
-				}
 			}
 		}
 	}

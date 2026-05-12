@@ -516,6 +516,33 @@ func TestHasTimestampLinter_AlterAddTimestampToTableWithExistingTimestamp(t *tes
 
 // --- ALTER TABLE that fixes TIMESTAMP (no false-positive warnings) ---
 
+// Regression test for the false positive reported in the wild: when a
+// declarative diff converts an existing TIMESTAMP column to DATETIME via
+// MODIFY COLUMN, the linter should not emit a Warning for the (no-longer-
+// existing) pre-state TIMESTAMP.
+func TestHasTimestampLinter_DeclarativeDiff_TimestampToDatetime_NoFalsePositive(t *testing.T) {
+	existingSQL := `CREATE TABLE executions (
+		id int PRIMARY KEY AUTO_INCREMENT,
+		task_id int NOT NULL,
+		logs longtext,
+		termination_message text,
+		created_at timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+		KEY task_id (task_id),
+		KEY created_at (created_at)
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	alterSQL := `ALTER TABLE executions MODIFY COLUMN created_at datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	linter := &HasTimestampLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	require.Empty(t, violations, "converting created_at TIMESTAMP → DATETIME should produce zero violations")
+}
+
 func TestHasTimestampLinter_AlterDropTimestampColumn(t *testing.T) {
 	// Existing table has two TIMESTAMP columns
 	existingSQL := `CREATE TABLE users (
@@ -534,40 +561,12 @@ func TestHasTimestampLinter_AlterDropTimestampColumn(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Filter to just ALTER-path warnings (exclude existing table warnings)
-	var alterWarnings []Violation
-	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			alterWarnings = append(alterWarnings, v)
-		}
-	}
-
-	// Should warn about created_at (still TIMESTAMP) but NOT about updated_at (being dropped)
-	// Existing table produces 2 warnings, ALTER path should only warn about created_at
-	// Total warnings: 2 from existing table + 1 from ALTER path = but updated_at is being fixed
-	// Let's check that we don't have warnings for updated_at from the ALTER path
-	// The existing table warnings are separate from ALTER warnings
-	// With the fix: existing table warns about both, ALTER only warns about created_at (not updated_at)
-	createdAtCount := 0
-	updatedAtCount := 0
-	for _, v := range alterWarnings {
-		if v.Location != nil && v.Location.Column != nil {
-			switch *v.Location.Column {
-			case "created_at":
-				createdAtCount++
-			case "updated_at":
-				updatedAtCount++
-			}
-		}
-	}
-
-	// created_at appears in both existing table warning and ALTER warning
-	require.GreaterOrEqual(t, createdAtCount, 1)
-	// updated_at: existing table still warns (it doesn't know about the ALTER),
-	// but the ALTER path should NOT warn about it since it's being dropped.
-	// We expect exactly 1 warning for updated_at (from existing table only),
-	// not 2 (which would mean the ALTER path also warned about it).
-	require.Equal(t, 1, updatedAtCount, "updated_at should only be warned about from existing table, not from ALTER path")
+	// Post-state contains only created_at (still TIMESTAMP) — updated_at is
+	// dropped, so it doesn't generate any warning. We expect exactly one
+	// Warning for created_at.
+	require.Len(t, violations, 1)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "created_at", *violations[0].Location.Column)
 }
 
 func TestHasTimestampLinter_AlterModifyTimestampToDatetime(t *testing.T) {
@@ -588,38 +587,12 @@ func TestHasTimestampLinter_AlterModifyTimestampToDatetime(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// The ALTER is fixing created_at, so the ALTER path should only warn about updated_at
-	var alterPathWarnings []Violation
-	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			alterPathWarnings = append(alterPathWarnings, v)
-		}
-	}
-
-	// Existing table warns about both (2 warnings)
-	// ALTER path warns about updated_at only (1 warning), created_at is being fixed
-	createdAtCount := 0
-	updatedAtCount := 0
-	for _, v := range alterPathWarnings {
-		if v.Location != nil && v.Location.Column != nil {
-			switch *v.Location.Column {
-			case "created_at":
-				createdAtCount++
-			case "updated_at":
-				updatedAtCount++
-			}
-		}
-	}
-
-	// created_at: 1 from existing table (the ALTER path excludes it since it's being fixed)
-	require.Equal(t, 1, createdAtCount)
-	// updated_at: 1 from existing table + 1 from ALTER path = 2
-	require.Equal(t, 2, updatedAtCount)
-
-	// No errors — nothing is introducing TIMESTAMP
-	for _, v := range violations {
-		require.NotEqual(t, SeverityError, v.Severity)
-	}
+	// Post-state: created_at is DATETIME (fixed, no violation); updated_at
+	// remains TIMESTAMP. We expect exactly one Warning for updated_at and
+	// no Errors.
+	require.Len(t, violations, 1)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, "updated_at", *violations[0].Location.Column)
 }
 
 func TestHasTimestampLinter_AlterChangeTimestampToDatetime(t *testing.T) {
@@ -639,21 +612,8 @@ func TestHasTimestampLinter_AlterChangeTimestampToDatetime(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Existing table warns about old_ts (1 warning)
-	// ALTER path should NOT warn about old_ts since it's being converted away
-	var errors []Violation
-	for _, v := range violations {
-		if v.Severity == SeverityError {
-			errors = append(errors, v)
-		}
-	}
-	require.Empty(t, errors, "converting TIMESTAMP to DATETIME should not produce errors")
-
-	// The ALTER path should not add a warning for old_ts since it's being fixed
-	// Only the existing table warning for old_ts should remain
-	require.Len(t, violations, 1)
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Equal(t, "old_ts", *violations[0].Location.Column)
+	// Post-state: old_ts is gone, new_dt is DATETIME — nothing to flag.
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_AlterDropAllTimestampColumns(t *testing.T) {
@@ -674,17 +634,8 @@ func TestHasTimestampLinter_AlterDropAllTimestampColumns(t *testing.T) {
 	linter := &HasTimestampLinter{}
 	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
 
-	// Existing table still warns (2 warnings) — it doesn't know about the ALTER
-	// ALTER path should NOT warn since both columns are being dropped
-	var alterPathViolations []Violation
-	for _, v := range violations {
-		// All violations should be Warning from existing table
-		require.Equal(t, SeverityWarning, v.Severity)
-		alterPathViolations = append(alterPathViolations, v)
-	}
-
-	// Only 2 warnings from existing table, none from ALTER path
-	require.Len(t, alterPathViolations, 2)
+	// Post-state: both columns are dropped — no TIMESTAMP columns remain.
+	require.Empty(t, violations)
 }
 
 func TestHasTimestampLinter_AlterModifyTimestampToDatetimeNoExisting(t *testing.T) {
