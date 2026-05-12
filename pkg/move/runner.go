@@ -55,9 +55,13 @@ func (s *sourceInfo) sourceKey() string {
 }
 
 // binlogPosition is used for JSON serialization of per-source binlog positions in checkpoints.
+// GTID is populated when the corresponding source has gtid_mode=ON; in that case
+// resume prefers it over Name/Pos so that a source failover can be tolerated.
+// The Name/Pos fields are still recorded as legacy fallback / human context.
 type binlogPosition struct {
 	Name string `json:"name"`
 	Pos  uint32 `json:"pos"`
+	GTID string `json:"gtid,omitempty"`
 }
 
 type Runner struct {
@@ -346,6 +350,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 			Name: pos.Name,
 			Pos:  pos.Pos,
 		})
+		if pos.GTID != "" {
+			if err := r.sources[i].replClient.SetFlushedGTID(pos.GTID); err != nil {
+				return fmt.Errorf("could not restore checkpoint GTID for source %s: %w", key, err)
+			}
+		}
 	}
 
 	// Delete rows above the watermark from all target tables before resuming.
@@ -1125,7 +1134,11 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	positions := make(map[string]binlogPosition)
 	for i := range r.sources {
 		pos := r.sources[i].replClient.GetBinlogApplyPosition()
-		positions[r.sources[i].sourceKey()] = binlogPosition{Name: pos.Name, Pos: pos.Pos}
+		positions[r.sources[i].sourceKey()] = binlogPosition{
+			Name: pos.Name,
+			Pos:  pos.Pos,
+			GTID: r.sources[i].replClient.GetBinlogApplyGTID(),
+		}
 	}
 	positionsJSON, err := json.Marshal(positions)
 	if err != nil {

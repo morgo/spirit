@@ -961,9 +961,14 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	<-done
 	require.NoError(t, m.Close())
 
-	// Now corrupt the checkpoint by setting an invalid binlog position.
-	// This simulates binlog expiry between stop and start.
-	testutils.RunSQL(t, `UPDATE _cleanup_test_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999`)
+	// Now corrupt the checkpoint by setting an invalid binlog position AND
+	// invalidating the GTID column. We invalidate both because resume prefers
+	// GTID when present and would otherwise ignore the corrupted file/pos.
+	// 99999999-... is a well-formed but never-issued UUID so the parse
+	// succeeds; the GTID_SUBSET(@@gtid_purged, saved) check then fails
+	// because the saved set lacks every GTID the server has actually
+	// produced.
+	testutils.RunSQL(t, `UPDATE _cleanup_test_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999, binlog_gtid = '99999999-9999-9999-9999-999999999999:1'`)
 
 	// Without strict mode: falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB", WithThreads(2))
@@ -1000,8 +1005,10 @@ func TestResumeFromCheckpointStrictBinlogExpired(t *testing.T) {
 	<-done
 	require.NoError(t, m.Close())
 
-	// Corrupt binlog name to simulate expiry
-	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999`)
+	// Corrupt binlog coordinates to simulate expiry. We corrupt both the
+	// file/pos and the GTID column because resume prefers GTID when present.
+	// See TestResumeFromCleanupOnFailure for the GTID-shape explanation.
+	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999, binlog_gtid = '99999999-9999-9999-9999-999999999999:1'`)
 
 	// With strict mode: should error with ErrBinlogNotFound instead of silently restarting
 	m2 := NewTestRunner(t, "strictbinlogtest", "ENGINE=InnoDB",

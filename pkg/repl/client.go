@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/google/uuid"
 )
 
 const (
@@ -118,6 +120,18 @@ type Client struct {
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
+
+	// GTID tracking. When the source server has gtid_mode=ON at the time Run()
+	// is called, we drive the syncer with GTID sets instead of file/pos so that
+	// resume can survive a source failover. The file/pos fields above are still
+	// updated from the binlog stream so that BlockWait and existing callers
+	// keep working; on resume we prefer GTID when available.
+	//
+	// If gtid_mode flips OFF mid-run, we keep using the GTID set we already have;
+	// the resume after restart in that case will fail loudly, which is by design.
+	gtidMode     bool          // captured at Run(); does not track mid-run flips
+	bufferedGTID mysql.GTIDSet // buffered GTID set (nil if !gtidMode)
+	flushedGTID  mysql.GTIDSet // safely-applied GTID set (nil if !gtidMode)
 
 	statisticsLock  sync.Mutex
 	targetBatchTime time.Duration
@@ -308,6 +322,45 @@ func (c *Client) SetFlushedPos(pos mysql.Position) {
 	c.flushedPos = pos
 }
 
+// SetFlushedGTID restores the safe-flushed GTID set from a checkpoint. The
+// parsed value is also used by Run() as the starting point for the syncer.
+// Passing an empty string is a no-op and leaves the client in file/pos mode.
+func (c *Client) SetFlushedGTID(s string) error {
+	if s == "" {
+		return nil
+	}
+	gset, err := mysql.ParseMysqlGTIDSet(s)
+	if err != nil {
+		return fmt.Errorf("could not parse checkpoint GTID set %q: %w", s, err)
+	}
+	c.Lock()
+	defer c.Unlock()
+	c.flushedGTID = gset
+	c.gtidMode = true
+	return nil
+}
+
+// GetBinlogApplyGTID returns the safely-applied GTID set as a string, or ""
+// if the source is not in GTID mode. Used by the migration/move runners to
+// persist the GTID set in checkpoints.
+func (c *Client) GetBinlogApplyGTID() string {
+	c.Lock()
+	defer c.Unlock()
+	if c.flushedGTID == nil {
+		return ""
+	}
+	return c.flushedGTID.String()
+}
+
+// GTIDModeEnabled returns whether the client was started against a server
+// with gtid_mode=ON. The value is decided at Run() and does not track mid-run
+// changes to the server variable.
+func (c *Client) GTIDModeEnabled() bool {
+	c.Lock()
+	defer c.Unlock()
+	return c.gtidMode
+}
+
 func (c *Client) AllChangesFlushed() bool {
 	c.Lock()
 	defer c.Unlock()
@@ -381,6 +434,56 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	}, nil
 }
 
+// detectGTIDMode returns true if the source has gtid_mode=ON.
+// ON_PERMISSIVE / OFF_PERMISSIVE / OFF all count as "not on", because in those
+// modes some transactions don't carry GTIDs and resume-by-GTID is unsafe.
+func (c *Client) detectGTIDMode(ctx context.Context) (bool, error) {
+	var mode string
+	if err := c.db.QueryRowContext(ctx, "SELECT @@global.gtid_mode").Scan(&mode); err != nil {
+		return false, err
+	}
+	return strings.EqualFold(mode, "ON"), nil
+}
+
+// getCurrentGTIDSet returns the current value of gtid_executed parsed as a
+// mysql.MysqlGTIDSet. Used as the starting point when no resume checkpoint
+// is supplying one.
+func (c *Client) getCurrentGTIDSet(ctx context.Context) (mysql.GTIDSet, error) {
+	var s string
+	if err := c.db.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&s); err != nil {
+		return nil, err
+	}
+	// gtid_executed may contain literal newlines for readability; strip them
+	// so ParseMysqlGTIDSet doesn't choke on whitespace inside intervals.
+	s = strings.ReplaceAll(s, "\n", "")
+	return mysql.ParseMysqlGTIDSet(s)
+}
+
+// gtidIsImpossible reports whether the saved flushedGTID set is too far
+// behind the source's gtid_purged for resume to be safe. The relevant check
+// is "has the server purged any GTID that the saved set does NOT already
+// contain?" — those are the events we would need but cannot receive.
+// (Purging GTIDs that the saved set DOES contain is harmless: those
+// transactions are already applied and we never have to replay them.)
+//
+// Returns (true, nil) when resume is unsafe, (false, nil) when it is safe,
+// and a non-nil error if the validating query itself fails.
+func (c *Client) gtidIsImpossible(ctx context.Context) (bool, error) {
+	if c.flushedGTID == nil {
+		return false, nil
+	}
+	// GTID_SUBSET(set1, set2) returns 1 iff every GTID in set1 is also in
+	// set2. We want the server's gtid_purged to be a subset of saved —
+	// otherwise the server has dropped events between saved and now.
+	var isSubset int
+	row := c.db.QueryRowContext(ctx,
+		"SELECT GTID_SUBSET(@@global.gtid_purged, ?)", c.flushedGTID.String())
+	if err := row.Scan(&isSubset); err != nil {
+		return true, err
+	}
+	return isSubset != 1, nil
+}
+
 // Run initializes the binlog syncer and starts the binlog reader.
 // It returns an error if the initialization fails.
 func (c *Client) Run(ctx context.Context) (err error) {
@@ -414,23 +517,81 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		}
 		c.cfg.TLSConfig = tlsConfig
 	}
-	// Determine where to start the sync from.
-	// We default from what the current position is right
-	// now, but for resume cases we just need to check that the
-	// position is resumable.
-	if c.flushedPos.Name == "" {
-		c.flushedPos, err = c.getCurrentBinlogPosition(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
-		}
-	} else if c.binlogPositionIsImpossible(ctx) {
-		return errors.New("binlog position is impossible, the source may have already purged it")
-	}
-	c.bufferedPos = c.flushedPos // set buffered to the initial flushed value
-	c.syncer = replication.NewBinlogSyncer(c.cfg)
-	c.streamer, err = c.syncer.StartSync(c.flushedPos)
+
+	// Decide once, at startup, whether the source advertises GTID mode. We
+	// don't re-check this later: if the operator flips gtid_mode mid-run we
+	// keep doing whatever we started with. The resume path is what enforces
+	// that gtid_mode hasn't been turned OFF between runs.
+	gtidEnabled, err := c.detectGTIDMode(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to start binlog streamer: %w", err)
+		return fmt.Errorf("failed to detect gtid_mode: %w", err)
+	}
+	// If a checkpoint restored a GTID set via SetFlushedGTID, the server must
+	// still be in GTID mode — otherwise file/pos coordinates don't map to the
+	// checkpoint and silent corruption is the alternative.
+	if c.flushedGTID != nil && !gtidEnabled {
+		return errors.New("checkpoint contains a GTID set but gtid_mode is OFF on the source; cannot resume")
+	}
+
+	// Which coordinate are we going to drive the syncer with?
+	//   - GTID: the caller supplied a GTID set (resume from a new-style
+	//     checkpoint), OR there's no checkpoint at all and the server has
+	//     gtid_mode=ON (fresh start on a GTID-enabled server).
+	//   - file/pos: the caller supplied only a file/pos (legacy resume), or
+	//     the server is not in GTID mode (fresh start on a non-GTID server).
+	// The legacy-resume branch is what lets us upgrade Spirit mid-flight
+	// without orphaning checkpoints that pre-date the GTID column.
+	useGTID := c.flushedGTID != nil || (c.flushedPos.Name == "" && gtidEnabled)
+	c.gtidMode = useGTID
+
+	if useGTID {
+		// On a fresh start we read the current gtid_executed; on resume we
+		// keep whatever SetFlushedGTID populated. We still call
+		// getCurrentBinlogPosition so that bufferedPos has something
+		// sensible for BlockWait()/logging, even though resume uses GTID.
+		if c.flushedGTID == nil {
+			gset, gerr := c.getCurrentGTIDSet(ctx)
+			if gerr != nil {
+				return fmt.Errorf("failed to read gtid_executed: %w", gerr)
+			}
+			c.flushedGTID = gset
+		} else if impossible, ierr := c.gtidIsImpossible(ctx); ierr != nil {
+			return fmt.Errorf("failed to validate checkpoint GTID against gtid_purged: %w", ierr)
+		} else if impossible {
+			return errors.New("checkpoint GTID set has been purged on the source, cannot resume")
+		}
+		c.bufferedGTID = c.flushedGTID.Clone()
+		// Also seed the file/pos for any non-resume consumers that still
+		// read it (BlockWait, logging). This is best-effort.
+		if pos, perr := c.getCurrentBinlogPosition(ctx); perr == nil {
+			if c.flushedPos.Name == "" {
+				c.flushedPos = pos
+			}
+			c.bufferedPos = c.flushedPos
+		}
+		c.syncer = replication.NewBinlogSyncer(c.cfg)
+		c.streamer, err = c.syncer.StartSyncGTID(c.flushedGTID)
+		if err != nil {
+			return fmt.Errorf("failed to start binlog GTID streamer: %w", err)
+		}
+	} else {
+		// File/pos path (unchanged behaviour for non-GTID servers, also
+		// used when resuming from a legacy file/pos-only checkpoint even
+		// if the server happens to be in GTID mode now).
+		if c.flushedPos.Name == "" {
+			c.flushedPos, err = c.getCurrentBinlogPosition(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
+			}
+		} else if c.binlogPositionIsImpossible(ctx) {
+			return errors.New("binlog position is impossible, the source may have already purged it")
+		}
+		c.bufferedPos = c.flushedPos
+		c.syncer = replication.NewBinlogSyncer(c.cfg)
+		c.streamer, err = c.syncer.StartSync(c.flushedPos)
+		if err != nil {
+			return fmt.Errorf("failed to start binlog streamer: %w", err)
+		}
 	}
 	// Start the binlog reader in a go routine, using a context with cancel.
 	// Write the cancel function to c.cancelFunc
@@ -463,27 +624,40 @@ func (c *Client) recreateStreamer() error {
 		c.syncer.Close()
 	}
 
-	// Still on the same binlog file we started with.
-	// Safe to replay from position 4 because the subscription data structures
-	// (deltaMap, bufferedMap, deltaQueue) are idempotent - reprocessing events
-	// will simply overwrite previous state with the same value.
-	newStartPos := mysql.Position{
-		Name: c.bufferedPos.Name,
-		Pos:  4, // Binlog files always start at position 4
-	}
-	c.logger.Info("Recreating streamer from file start",
-		"file", c.bufferedPos.Name,
-		"previous_position", c.bufferedPos.Pos,
-		"new_start_position", newStartPos,
-	)
-
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	var err error
-	c.streamer, err = c.syncer.StartSync(newStartPos)
+	if c.gtidMode {
+		// In GTID mode we can simply resume from the last safely-flushed GTID
+		// set. We replay events from there forward; the subscription data
+		// structures (deltaMap, bufferedMap, deltaQueue) are idempotent so
+		// reprocessing is harmless. We deliberately use flushedGTID rather
+		// than bufferedGTID because anything between flushed and buffered
+		// is data we don't yet consider durable.
+		resumeGTID := c.flushedGTID.Clone()
+		c.logger.Info("Recreating streamer from GTID set",
+			"gtid_set", resumeGTID.String(),
+		)
+		c.streamer, err = c.syncer.StartSyncGTID(resumeGTID)
+	} else {
+		// Still on the same binlog file we started with.
+		// Safe to replay from position 4 because the subscription data structures
+		// (deltaMap, bufferedMap, deltaQueue) are idempotent - reprocessing events
+		// will simply overwrite previous state with the same value.
+		newStartPos := mysql.Position{
+			Name: c.bufferedPos.Name,
+			Pos:  4, // Binlog files always start at position 4
+		}
+		c.logger.Info("Recreating streamer from file start",
+			"file", c.bufferedPos.Name,
+			"previous_position", c.bufferedPos.Pos,
+			"new_start_position", newStartPos,
+		)
+		c.streamer, err = c.syncer.StartSync(newStartPos)
+	}
 	if err != nil {
 		c.logger.Error("Failed to start binlog streamer in recreateStreamer",
 			"error", err,
-			"position", newStartPos,
+			"gtid_mode", c.gtidMode,
 			"config", fmt.Sprintf("host=%s:%d user=%s", c.cfg.Host, c.cfg.Port, c.cfg.User))
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
 	}
@@ -665,8 +839,23 @@ func (c *Client) readStream(ctx context.Context) {
 			for _, ddlTable := range ddlTables {
 				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
-		case *replication.GTIDEvent,
-			*replication.TableMapEvent,
+		case *replication.GTIDEvent:
+			// When the source is in GTID mode, record the GTID of the
+			// transaction that is about to be applied so that flush()
+			// can snapshot a safe-applied GTID set alongside file/pos.
+			// We mutate bufferedGTID under the client lock; the set is
+			// shared with flush() and must not be touched without it.
+			c.Lock()
+			if c.gtidMode && c.bufferedGTID != nil {
+				if sid, uerr := uuid.FromBytes(event.SID); uerr == nil {
+					gtidStr := sid.String() + ":" + strconv.FormatInt(event.GNO, 10)
+					if uerr := c.bufferedGTID.Update(gtidStr); uerr != nil {
+						c.logger.Warn("could not merge GTID into buffered set", "gtid", gtidStr, "error", uerr)
+					}
+				}
+			}
+			c.Unlock()
+		case *replication.TableMapEvent,
 			*replication.XIDEvent,
 			*replication.FormatDescriptionEvent,
 			*replication.PreviousGTIDsEvent:
@@ -949,6 +1138,12 @@ func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock
 func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
 	c.Lock()
 	newFlushedPos := c.bufferedPos
+	var newFlushedGTID mysql.GTIDSet
+	if c.bufferedGTID != nil {
+		// Clone so that subsequent readStream updates to bufferedGTID don't
+		// retroactively mutate the snapshot we're about to commit.
+		newFlushedGTID = c.bufferedGTID.Clone()
+	}
 	c.Unlock()
 	var allChangesFlushed = true
 	for _, subscription := range c.subscriptions {
@@ -974,7 +1169,12 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	// because the low watermark optimization helps a lot in these cases because
 	// it reduces contention between the copier and the repl applier.
 	if allChangesFlushed {
-		c.SetFlushedPos(newFlushedPos)
+		c.Lock()
+		c.flushedPos = newFlushedPos
+		if newFlushedGTID != nil {
+			c.flushedGTID = newFlushedGTID
+		}
+		c.Unlock()
 	}
 	return nil
 }

@@ -865,12 +865,17 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	// original_table_name records the full untruncated table name (single-table
 	// migrations only) so resume can detect the rare case where two long table
 	// names truncate to the same checkpoint table name. Empty for multi-table.
+	// binlog_gtid is non-null when the source is in gtid_mode=ON. When set,
+	// resume prefers it over binlog_name/binlog_pos so that recovery works
+	// after a source failover. binlog_name/binlog_pos are still written for
+	// non-GTID servers and as informational context in logs.
 	if err := dbconn.Exec(ctx, r.db, `CREATE TABLE %n.%n (
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
 	binlog_name VARCHAR(255),
 	binlog_pos INT,
+	binlog_gtid TEXT,
 	statement TEXT,
 	original_table_name VARCHAR(64) NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1000,16 +1005,19 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
-	// We intentionally SELECT * FROM the checkpoint table because if the structure
-	// changes, we want this operation to fail. This will indicate that the checkpoint
-	// was created by either an earlier or later version of spirit, in which case
-	// we do not support recovery.
-	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
+	// We pin the column list so a future schema addition does not need to be
+	// matched by the Scan() destinations. The structural-mismatch detection
+	// previously provided by SELECT * is still covered by the explicit column
+	// list — if a column disappears, the query fails.
+	query := fmt.Sprintf(
+		"SELECT id, copier_watermark, checksum_watermark, binlog_name, binlog_pos, binlog_gtid, statement, original_table_name, created_at "+
+			"FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.changes[0].stmt.Schema, r.checkpointTableName())
 	var copierWatermark, binlogName, statement, checksumWatermark, originalTableName string
+	var binlogGTID sql.NullString
 	var id, binlogPos int
 	var createdAtStr string
-	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &originalTableName, &createdAtStr)
+	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &binlogGTID, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
@@ -1030,10 +1038,22 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return fmt.Errorf("%w: stored=%q expected=%q", status.ErrCheckpointCollision, originalTableName, r.changes[0].table.TableName)
 	}
 
-	// Validate the checkpoint's binlog position is still available on the server
-	// before creating any resources (replClient, subscriptions, etc.).
+	// Validate the checkpoint's binlog coordinates are still available on the
+	// server before creating any resources (replClient, subscriptions, etc.).
 	// This avoids partial initialization that would need cleanup on failure.
-	if !r.binlogFileExists(ctx, binlogName) {
+	//
+	// When the checkpoint has a GTID set we validate that against gtid_purged
+	// — file/pos may legitimately point at a file that doesn't exist on the
+	// new primary after a failover, and GTIDs are the correct coordinate.
+	if binlogGTID.Valid && binlogGTID.String != "" {
+		ok, err := r.checkpointGTIDIsAvailable(ctx, binlogGTID.String)
+		if err != nil {
+			return fmt.Errorf("%w: could not validate GTID against gtid_purged: %v", status.ErrBinlogNotFound, err)
+		}
+		if !ok {
+			return fmt.Errorf("%w: GTID set %q has been purged, cannot resume", status.ErrBinlogNotFound, binlogGTID.String)
+		}
+	} else if !r.binlogFileExists(ctx, binlogName) {
 		return fmt.Errorf("%w: %s has been purged, cannot resume", status.ErrBinlogNotFound, binlogName)
 	}
 
@@ -1094,6 +1114,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		Name: binlogName,
 		Pos:  uint32(binlogPos),
 	})
+	if binlogGTID.Valid && binlogGTID.String != "" {
+		if err := r.replClient.SetFlushedGTID(binlogGTID.String); err != nil {
+			return fmt.Errorf("could not restore checkpoint GTID %q: %w", binlogGTID.String, err)
+		}
+	}
 
 	// Start the replClient now. This is because if the checkpoint is so old there
 	// are no longer binary log files, we want to abandon resume-from-checkpoint
@@ -1103,6 +1128,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		r.logger.Warn("resuming from checkpoint failed because resuming from the previous binlog position failed",
 			"log-file", binlogName,
 			"log-pos", binlogPos,
+			"log-gtid", binlogGTID.String,
 		)
 		return err
 	}
@@ -1111,9 +1137,27 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		"checksum-watermark", checksumWatermark,
 		"log-file", binlogName,
 		"log-pos", binlogPos,
+		"log-gtid", binlogGTID.String,
 	)
 	r.usedResumeFromCheckpoint = true
 	return nil
+}
+
+// checkpointGTIDIsAvailable returns true when resume from `saved` is safe:
+// the server has not purged any GTID that lies between the saved set and the
+// server's current gtid_executed. Said differently, gtid_purged must be a
+// subset of saved — otherwise events we would need to replay are gone.
+//
+// This is the failover-safe counterpart to binlogFileExists: it answers the
+// same "can we still resume from this coordinate?" question, but in a way
+// that survives a source failover because GTIDs are global.
+func (r *Runner) checkpointGTIDIsAvailable(ctx context.Context, saved string) (bool, error) {
+	var isSubset int
+	if err := r.db.QueryRowContext(ctx,
+		"SELECT GTID_SUBSET(@@global.gtid_purged, ?)", saved).Scan(&isSubset); err != nil {
+		return false, err
+	}
+	return isSubset == 1, nil
 }
 
 // binlogFileExists checks if the given binlog file is still available on the server.
@@ -1233,6 +1277,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	}
 	// Retrieve the binlog position first and under a mutex.
 	binlog := r.replClient.GetBinlogApplyPosition()
+	binlogGTID := r.replClient.GetBinlogApplyGTID()
 	copierWatermark, err := copyChunker.GetLowWatermark()
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
@@ -1255,18 +1300,20 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		"low-watermark", copierWatermark,
 		"log-file", binlog.Name,
 		"log-pos", binlog.Pos,
+		"log-gtid", binlogGTID,
 	)
 	originalTableName := ""
 	if len(r.changes) == 1 {
 		originalTableName = r.changes[0].table.TableName
 	}
-	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement, original_table_name) VALUES (%?, %?, %?, %?, %?, %?)",
+	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, binlog_gtid, statement, original_table_name) VALUES (%?, %?, %?, %?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		copierWatermark,
 		checksumWatermark,
 		binlog.Name,
 		binlog.Pos,
+		binlogGTID,
 		r.migration.Statement,
 		originalTableName,
 	)
