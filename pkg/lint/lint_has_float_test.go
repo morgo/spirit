@@ -522,6 +522,9 @@ func TestHasFloatLinter_AlterTableAddFloatColumn(t *testing.T) {
 	require.Equal(t, SeverityWarning, violations[0].Severity)
 	require.Contains(t, violations[0].Message, "temperature")
 	require.Contains(t, violations[0].Message, "measurements")
+	// ADD COLUMN should produce the "New column" message form, not "modified".
+	require.Contains(t, violations[0].Message, "New column")
+	require.NotContains(t, violations[0].Message, "modified")
 	require.Equal(t, "measurements", violations[0].Location.Table)
 	require.Equal(t, "temperature", *violations[0].Location.Column)
 }

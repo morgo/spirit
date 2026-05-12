@@ -28,11 +28,17 @@ func (l *HasFloatLinter) Description() string {
 
 // Lint operates on a post-state view of the schema, so a column being
 // converted away from FLOAT/DOUBLE in an ALTER doesn't generate a false
-// positive. The violation message distinguishes pre-existing columns from
-// columns added/modified by the changeset to preserve actionability.
+// positive. The violation message uses three forms to preserve
+// actionability:
+//
+//   - "New column …" when the column did not exist in the pre-state
+//     (ADD COLUMN, or a column in a CREATE TABLE).
+//   - "Column … modified to use …" when the column existed pre-state and
+//     is being retyped by MODIFY / CHANGE COLUMN.
+//   - "Column … uses …" for pre-existing untouched columns.
 func (l *HasFloatLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	addedOrModified := columnsAddedOrModifiedInChanges(changes)
-	createdInChanges := newTablesInChanges(changes)
+	pre := PreStateColumns(existingTables)
+	modified := columnsModifiedInChanges(changes)
 
 	for _, ct := range PostState(existingTables, changes) {
 		tKey := strings.ToLower(ct.TableName)
@@ -46,11 +52,16 @@ func (l *HasFloatLinter) Lint(existingTables []*statement.CreateTable, changes [
 			}
 			colName := col.Name
 			colKey := strings.ToLower(colName)
-			modified := !createdInChanges[tKey] && addedOrModified[tKey][colKey]
+			_, preExisted := pre[tKey][colKey]
 			var message string
 			switch {
-			case modified:
+			case modified[tKey][colKey]:
+				// MODIFY / CHANGE COLUMN — the column existed pre-state
+				// (or is asserted to) and is being retyped.
 				message = fmt.Sprintf("Column %q in table %q modified to use floating-point data type", colName, ct.TableName)
+			case !preExisted:
+				// ADD COLUMN, or a column inside a new CREATE TABLE.
+				message = fmt.Sprintf("New column %q in table %q uses floating-point data type", colName, ct.TableName)
 			default:
 				message = fmt.Sprintf("Column %q in table %q uses %s data type", colName, ct.TableName, col.Raw.Tp.String())
 			}

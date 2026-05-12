@@ -128,6 +128,51 @@ func columnsAddedOrModifiedInChanges(changes []*statement.AbstractStatement) map
 	return out
 }
 
+// columnsModifiedInChanges returns, for each table, the (lowercased) column
+// names that are retyped via MODIFY COLUMN or CHANGE COLUMN — i.e. operations
+// that act on a column that should already exist. The map distinguishes
+// retypes from ADD COLUMN, which is useful when a linter wants different
+// messaging for "new column" vs "existing column being changed".
+func columnsModifiedInChanges(changes []*statement.AbstractStatement) map[string]map[string]bool {
+	out := make(map[string]map[string]bool)
+	mark := func(table, col string) {
+		tKey := strings.ToLower(table)
+		if out[tKey] == nil {
+			out[tKey] = make(map[string]bool)
+		}
+		out[tKey][strings.ToLower(col)] = true
+	}
+	for _, change := range changes {
+		if change == nil {
+			continue
+		}
+		at, ok := change.AsAlterTable()
+		if !ok {
+			continue
+		}
+		for _, spec := range at.Specs {
+			switch spec.Tp { //nolint:exhaustive
+			case ast.AlterTableModifyColumn:
+				for _, col := range spec.NewColumns {
+					if col.Name != nil {
+						mark(change.Table, col.Name.Name.O)
+					}
+				}
+			case ast.AlterTableChangeColumn:
+				if spec.OldColumnName != nil {
+					mark(change.Table, spec.OldColumnName.Name.O)
+				}
+				for _, col := range spec.NewColumns {
+					if col.Name != nil {
+						mark(change.Table, col.Name.Name.O)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // PreStateColumns returns a lookup of (lowercased table name) → (lowercased
 // column name) → column from the existing tables. Linters use this to
 // distinguish columns that pre-existed (severity Warning) from columns added
