@@ -835,19 +835,40 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 }
 
 // pkChanged reports whether two PK images differ. The values come from
-// the binlog row image and may be int, string, []byte, etc., so we
-// compare via fmt.Sprintf rather than reflect.DeepEqual to handle the
-// int vs int64 / []byte vs string normalisation MySQL performs.
+// the binlog row image as `any` with concrete types that depend on the
+// source column (int8/16/32/64, uint*, string, []byte, ...), so the
+// helper normalises before comparing:
+//
+//   - numeric widths (int vs int64, signed vs unsigned of the same
+//     magnitude) are equalised by formatting through fmt.Sprintf("%v");
+//   - []byte is coerced to string so a column that surfaces as one in
+//     one image and the other in the next is still compared correctly
+//     (fmt.Sprintf("%v", []byte("a")) is "[97]" which would otherwise
+//     spuriously diverge from "a").
+//
+// In practice go-mysql is consistent about which Go type it emits for a
+// given column, so the []byte/string coercion is defensive — but cheap
+// enough to keep the helper robust to future decoder changes.
 func pkChanged(a, b []any) bool {
 	if len(a) != len(b) {
 		return true
 	}
 	for i := range a {
-		if fmt.Sprintf("%v", a[i]) != fmt.Sprintf("%v", b[i]) {
+		if !pkValueEqual(a[i], b[i]) {
 			return true
 		}
 	}
 	return false
+}
+
+func pkValueEqual(a, b any) bool {
+	if ab, ok := a.([]byte); ok {
+		a = string(ab)
+	}
+	if bb, ok := b.([]byte); ok {
+		b = string(bb)
+	}
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
 // isMinimalRowImage returns true if the RowsEvent contains a minimal row image,

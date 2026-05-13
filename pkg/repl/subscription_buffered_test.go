@@ -1849,11 +1849,23 @@ func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
 			// AFTER image — including the unchanged JSON column — and
 			// the applier writes the row back to _new through the JSON
 			// re-encode path that this test guards against.
+			const newUpdatedAt = "2026-05-13 11:00:00.000"
 			testutils.RunSQL(t, fmt.Sprintf(
-				"UPDATE %s SET updated_at = '2026-05-13 11:00:00.000' WHERE id = 1",
-				srcTable.QuotedTableName))
+				"UPDATE %s SET updated_at = '%s' WHERE id = 1",
+				srcTable.QuotedTableName, newUpdatedAt))
 			require.NoError(t, client.BlockWait(t.Context()))
 			require.NoError(t, client.Flush(t.Context()))
+
+			// Sanity check: the UPDATE event must have been applied to
+			// _new. Without this, a regression that silently dropped the
+			// event would let the JSON CRCs stay equal (they were equal
+			// from the seed) and the test would pass vacuously.
+			var dstUpdatedAt string
+			require.NoError(t, db.QueryRowContext(t.Context(),
+				fmt.Sprintf("SELECT updated_at FROM %s WHERE id = 1", dstTable.QuotedTableName),
+			).Scan(&dstUpdatedAt))
+			require.Equal(t, newUpdatedAt, dstUpdatedAt,
+				"binlog UPDATE event did not propagate to _new; JSON CRC equality below is vacuous")
 
 			// pkg/checksum compares JSON columns via the CRC32 of
 			// CAST(j AS json), so use exactly that comparison here.
@@ -1862,19 +1874,22 @@ func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
 			if srcCk != dstCk {
 				// Pull both rendered values for a useful failure message.
 				var srcJSON, dstJSON string
-				_ = db.QueryRowContext(t.Context(),
-					fmt.Sprintf("SELECT CAST(j AS char CHARACTER SET utf8mb4) FROM %s WHERE id = 1", srcTable.QuotedTableName)).Scan(&srcJSON)
-				_ = db.QueryRowContext(t.Context(),
-					fmt.Sprintf("SELECT CAST(j AS char CHARACTER SET utf8mb4) FROM %s WHERE id = 1", dstTable.QuotedTableName)).Scan(&dstJSON)
+				require.NoError(t, db.QueryRowContext(t.Context(),
+					fmt.Sprintf("SELECT CAST(j AS char CHARACTER SET utf8mb4) FROM %s WHERE id = 1", srcTable.QuotedTableName),
+				).Scan(&srcJSON))
+				require.NoError(t, db.QueryRowContext(t.Context(),
+					fmt.Sprintf("SELECT CAST(j AS char CHARACTER SET utf8mb4) FROM %s WHERE id = 1", dstTable.QuotedTableName),
+				).Scan(&dstJSON))
 				t.Fatalf("checksum mismatch after binlog UPDATE on a non-JSON column rewrote the JSON value:\n  src(id=1) = %s\n  dst(id=1) = %s", srcJSON, dstJSON)
 			}
 		})
 	}
 }
 
-// fetchJSONColumnCRC returns the per-row CRC32 of a JSON column using the
-// same expression pkg/checksum builds (CAST(col AS json), wrapped in the
-// same IFNULL/ISNULL guards). Used by TestBufferedMapJSONNumberRoundTrip.
+// fetchJSONColumnCRC returns the table-aggregate CRC32 of a JSON column
+// (BIT_XOR of CRC32(CAST(col AS json)) across all rows), using the same
+// IFNULL / ISNULL / CAST expression that pkg/checksum builds. Used by
+// TestBufferedMapJSONNumberRoundTrip.
 func fetchJSONColumnCRC(t *testing.T, col string, tbl *table.TableInfo) int64 {
 	t.Helper()
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())

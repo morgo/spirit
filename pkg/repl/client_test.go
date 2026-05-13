@@ -1037,6 +1037,18 @@ func TestPkChanged(t *testing.T) {
 		require.False(t, pkChanged([]any{int64(7)}, []any{uint64(7)}))
 	})
 
+	t.Run("byte slice and string with same content are unchanged", func(t *testing.T) {
+		// fmt.Sprintf alone renders []byte and string differently
+		// ("[97 98]" vs "ab"), so the helper coerces []byte to string
+		// before formatting. Defensive against decoder changes that
+		// might surface a column as []byte in one image and string in
+		// the next.
+		require.False(t, pkChanged([]any{[]byte("abc")}, []any{"abc"}))
+		require.False(t, pkChanged([]any{"abc"}, []any{[]byte("abc")}))
+		require.False(t, pkChanged([]any{[]byte("abc")}, []any{[]byte("abc")}))
+		require.True(t, pkChanged([]any{[]byte("abc")}, []any{"abd"}))
+	})
+
 	t.Run("typed nil is treated as a value", func(t *testing.T) {
 		// fmt.Sprintf("%v", nil) == "<nil>". Two nils render the same,
 		// so a column transitioning NULL -> NULL doesn't count as changed.
