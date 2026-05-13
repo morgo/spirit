@@ -78,6 +78,21 @@ The maximum age of a checkpoint before Spirit refuses to resume from it. When Sp
 
 This protects against resuming from very stale checkpoints where replaying the accumulated binary log changes would take longer than starting the migration from scratch.
 
+#### Resuming across Spirit binary versions
+
+> **⚠️ Resuming a migration with a different Spirit binary version than the one that wrote the checkpoint is not supported and may produce incorrect results.**
+
+When Spirit reads a checkpoint, it relies on the columns of the checkpoint table matching the columns the current binary expects:
+
+- **If the checkpoint table schema differs** between versions (columns added, removed, or reordered), the resume read will fail and Spirit logs a warning and starts a fresh migration. This is true in both strict and non-strict modes — [`--strict`](#strict) does not currently hard-fail on a checkpoint-table schema mismatch, so progress from the previous binary version is silently discarded.
+- **If the checkpoint table schema is unchanged but the *meaning* of stored values has changed** between versions (for example, a watermark format change, a routing-policy change, or a new applier behavior), Spirit cannot detect the mismatch. The resume will silently succeed and the new binary will reinterpret the old checkpoint, which can produce incorrect results.
+
+Operationally, this means:
+
+- Do not upgrade or downgrade the Spirit binary while a migration is in progress.
+- If you must change Spirit versions, let the in-flight migration finish first, or accept the lost progress and start fresh with the new version.
+- For long-running migrations that span planned binary upgrades, plan to drain the migration before the upgrade window.
+
 ### checksum-yield-timeout
 
 - Type: Duration
@@ -285,6 +300,8 @@ The scenarios where `--strict` causes Spirit to fail rather than restart are:
 - The checkpoint is too old to safely resume (replaying binlogs would be slower than restarting)
 
 In all of these cases, the default (non-strict) behavior is to log a warning and start fresh, which is usually the correct action.
+
+Note: a checkpoint-table schema mismatch (typically caused by resuming with a different Spirit binary version — see [Resuming across Spirit binary versions](#resuming-across-spirit-binary-versions)) is **not** one of the strict-mode hard-fail cases. In both strict and non-strict mode Spirit logs a warning and starts a fresh migration.
 
 ### table
 
