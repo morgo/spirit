@@ -971,3 +971,77 @@ func TestProcessDDLNotification(t *testing.T) {
 		})
 	})
 }
+
+// TestPkChanged exercises the helper that decides whether the before- and
+// after-image of a binlog UPDATE event represent a primary key update.
+// Values arrive in []any from the binlog row image with concrete types
+// like int8/int16/int32/int64 depending on the source column, so the
+// helper compares via fmt.Sprintf("%v", ...) rather than reflect.DeepEqual.
+func TestPkChanged(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both nil is unchanged", func(t *testing.T) {
+		require.False(t, pkChanged(nil, nil))
+	})
+
+	t.Run("nil and empty slice are unchanged", func(t *testing.T) {
+		// len(nil) == 0 == len([]any{}), so the helper treats them as equal.
+		require.False(t, pkChanged(nil, []any{}))
+		require.False(t, pkChanged([]any{}, nil))
+	})
+
+	t.Run("length mismatch is changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{1}, []any{1, 2}))
+		require.True(t, pkChanged([]any{1, 2}, []any{1}))
+	})
+
+	t.Run("single-column integer PK unchanged", func(t *testing.T) {
+		require.False(t, pkChanged([]any{int64(42)}, []any{int64(42)}))
+	})
+
+	t.Run("single-column integer PK changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{int64(42)}, []any{int64(43)}))
+	})
+
+	t.Run("single-column string PK unchanged", func(t *testing.T) {
+		require.False(t, pkChanged([]any{"abc"}, []any{"abc"}))
+	})
+
+	t.Run("single-column string PK changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{"abc"}, []any{"abd"}))
+	})
+
+	t.Run("composite PK all equal is unchanged", func(t *testing.T) {
+		require.False(t, pkChanged([]any{int64(1), "x"}, []any{int64(1), "x"}))
+	})
+
+	t.Run("composite PK first column changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{int64(1), "x"}, []any{int64(2), "x"}))
+	})
+
+	t.Run("composite PK last column changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{int64(1), "x"}, []any{int64(1), "y"}))
+	})
+
+	t.Run("numeric type equivalence: int vs int64 same value is unchanged", func(t *testing.T) {
+		// MySQL binlog may surface the same underlying value as different Go
+		// integer types depending on the source column width. fmt.Sprintf
+		// "%v" normalises these to identical text, so the helper must not
+		// see int(5) and int64(5) as a PK change.
+		require.False(t, pkChanged([]any{int(5)}, []any{int64(5)}))
+		require.False(t, pkChanged([]any{int32(5)}, []any{int64(5)}))
+		require.False(t, pkChanged([]any{uint32(5)}, []any{int64(5)}))
+	})
+
+	t.Run("numeric type equivalence: signed and unsigned same value", func(t *testing.T) {
+		require.False(t, pkChanged([]any{int64(7)}, []any{uint64(7)}))
+	})
+
+	t.Run("typed nil is treated as a value", func(t *testing.T) {
+		// fmt.Sprintf("%v", nil) == "<nil>". Two nils render the same,
+		// so a column transitioning NULL -> NULL doesn't count as changed.
+		// (PRIMARY KEY columns are NOT NULL in MySQL, but be conservative.)
+		require.False(t, pkChanged([]any{nil}, []any{nil}))
+		require.True(t, pkChanged([]any{nil}, []any{int64(0)}))
+	})
+}
