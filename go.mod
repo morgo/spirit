@@ -39,4 +39,4 @@ replace github.com/pingcap/tidb/pkg/parser => github.com/block/tidb/pkg/parser v
 // Pinned to a fork with the in-flight RenderJSONAsMySQLText flag for
 // type-preserving JSON binlog decoding. Revert to upstream go-mysql once
 // the new flag lands. See https://github.com/morgo/go-mysql/tree/mysql-text-json-rendering.
-replace github.com/go-mysql-org/go-mysql => github.com/morgo/go-mysql v0.0.0-20260513145205-90f8e9bd27a4
+replace github.com/go-mysql-org/go-mysql => github.com/morgo/go-mysql v0.0.0-20260513151644-11038310b494
