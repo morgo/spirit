@@ -60,6 +60,8 @@ Spirit periodically saves the progress of a schema change to an internal checkpo
 
 When you consider that many migrations are best measured in _days_, this feature can save you a lot of lost work and improves the predictability of large-table schema migrations.
 
+> **⚠️ Resume across Spirit binary versions is not supported.** A migration must be resumed by the same Spirit binary version that wrote the checkpoint. See [checkpoint-max-age](docs/migrate.md#checkpoint-max-age) for details on what Spirit does (and does not) detect when a different version is used to resume.
+
 **Note:** [This feature](https://github.com/github/gh-ost/blob/master/doc/resume.md) is now available in gh-ost.
 
 ## Atomic Multi-table changes
