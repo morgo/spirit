@@ -404,6 +404,16 @@ func (c *Client) Run(ctx context.Context) (err error) {
 		User:     c.username,
 		Password: c.password,
 		Logger:   c.logger,
+		// Render JSON columns directly from the JSONB byte stream in the
+		// same textual form MySQL produces from SELECT json_col. The
+		// default decoder goes through Go intermediate values + json.Marshal
+		// and loses type tags — whole-number JSONB_DOUBLEs collapse to
+		// JSON INTEGER, JSONB_OPAQUE/NEWDECIMAL collapses to JSON STRING —
+		// which corrupts the JSON binary when the row is replayed into
+		// the _new table and breaks the CRC32 checksum on every retry.
+		// See replication/json_mysql_text.go in the go-mysql fork for
+		// the renderer.
+		RenderJSONAsMySQLText: true,
 	}
 
 	// Apply TLS configuration using the same infrastructure as main database connections
@@ -747,12 +757,11 @@ func (c *Client) processDDLNotification(schema, table string) {
 	}
 }
 
-// processRowsEvent processes a RowsEvent. It will search all active
-// subscriptions to find one that matches the event's table:
+// processRowsEvent processes a RowsEvent. It looks up the subscription
+// for the event's table and dispatches per-row HasChanged calls.
 //
-//   - If there is no subscription, the event will be ignored.
-//   - If there is, it will call the subscription's keyHasChanged method
-//     with the PK that has been changed.
+//   - If there is no subscription, the event is ignored.
+//   - Otherwise we call HasChanged for each affected key.
 //
 // We hold c.Lock only for the subscription map lookup. Once we have the
 // subscription pointer, we release the client lock before dispatching to
@@ -761,6 +770,11 @@ func (c *Client) processDDLNotification(schema, table string) {
 // must not be holding c.Lock while it parks — c.flush() and other
 // callers acquire c.Lock briefly and would otherwise be unable to
 // progress, which would prevent the very flush that would unblock us.
+//
+// We require binlog_row_image=FULL on the source. With FULL each row
+// (before and after image alike) contains every column, so PK extraction
+// works the same way for all event types and no reconstruction is needed.
+// If a MINIMAL image slips through we error out.
 func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
 	c.Lock()
@@ -770,86 +784,70 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 		return nil // ignore event, it could be to a _new table.
 	}
 
-	// Runtime check for minimal RBR (binlog_row_image=MINIMAL).
 	if isMinimalRowImage(e) {
 		return fmt.Errorf("received a minimal RBR event for table %s.%s, but we require binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
 	}
 
+	tbl := sub.Tables()[0]
 	eventType := parseEventType(ev.Header.EventType)
 
 	if eventType == eventTypeUpdate {
-		// For update events there are always before and after images (i.e. e.Rows is always in pairs.)
-		// With MINIMAL row image, the PK is only included in the before image for non-PK updates.
-		// For PK updates, both before and after images will contain the PK columns since they changed.
+		// UPDATE events always carry before/after image pairs.
 		for i := 0; i < len(e.Rows); i += 2 {
 			beforeRow := e.Rows[i]
 			afterRow := e.Rows[i+1]
 
-			// Always process the before image (guaranteed to have PK in minimal mode)
-			beforeKey, err := sub.Tables()[0].PrimaryKeyValues(beforeRow)
+			beforeKey, err := tbl.PrimaryKeyValues(beforeRow)
 			if err != nil {
 				return err
 			}
-			if len(beforeKey) == 0 {
-				return fmt.Errorf("no primary key found for before row: %#v", beforeRow)
+			afterKey, err := tbl.PrimaryKeyValues(afterRow)
+			if err != nil {
+				return err
 			}
 
-			// With MINIMAL row image, we need to reconstruct the after key
-			// by combining the before key with any changed PK columns from the after image
-			afterKey := make([]any, len(beforeKey))
-			copy(afterKey, beforeKey) // Start with the before key
-
-			// Check if any PK columns were updated by examining the after row
-			isPKUpdate := false
-			afterRowSlice := afterRow
-
-			for pkIdx, pkCol := range sub.Tables()[0].KeyColumns {
-				// Find the position of this PK column in the table columns
-				for colIdx, col := range sub.Tables()[0].Columns {
-					if col == pkCol {
-						// If this column exists in the after image and is not nil, use it
-						if colIdx < len(afterRowSlice) && afterRowSlice[colIdx] != nil {
-							if fmt.Sprintf("%v", beforeKey[pkIdx]) != fmt.Sprintf("%v", afterRowSlice[colIdx]) {
-								afterKey[pkIdx] = afterRowSlice[colIdx]
-								isPKUpdate = true
-							}
-						}
-						break
-					}
-				}
-			}
-
-			if isPKUpdate {
-				// This is a primary key update - track both delete and insert
-				sub.HasChanged(beforeKey, nil, true)      // delete old key
-				sub.HasChanged(afterKey, afterRow, false) // insert new key
+			if pkChanged(beforeKey, afterKey) {
+				sub.HasChanged(beforeKey, nil, true)      // delete old PK
+				sub.HasChanged(afterKey, afterRow, false) // insert new PK
 			} else {
-				// Same PK, just a regular update
 				sub.HasChanged(beforeKey, afterRow, false)
 			}
 		}
-	} else {
-		// For INSERT and DELETE events, process each row normally
-		for _, row := range e.Rows {
-			key, err := sub.Tables()[0].PrimaryKeyValues(row)
-			if err != nil {
-				return err
-			}
-			if len(key) == 0 {
-				// In theory this is unreachable since we mandate a PK on tables
-				return fmt.Errorf("no primary key found for row: %#v", row)
-			}
-			switch eventType { //nolint:exhaustive
-			case eventTypeInsert:
-				sub.HasChanged(key, row, false)
-			case eventTypeDelete:
-				sub.HasChanged(key, nil, true)
-			default:
-				c.logger.Error("unknown event type", "type", ev.Header.EventType)
-			}
+		return nil
+	}
+
+	// INSERT and DELETE: one row per entry.
+	for _, row := range e.Rows {
+		key, err := tbl.PrimaryKeyValues(row)
+		if err != nil {
+			return err
+		}
+		switch eventType { //nolint:exhaustive
+		case eventTypeInsert:
+			sub.HasChanged(key, row, false)
+		case eventTypeDelete:
+			sub.HasChanged(key, nil, true)
+		default:
+			c.logger.Error("unknown event type", "type", ev.Header.EventType)
 		}
 	}
 	return nil
+}
+
+// pkChanged reports whether two PK images differ. The values come from
+// the binlog row image and may be int, string, []byte, etc., so we
+// compare via fmt.Sprintf rather than reflect.DeepEqual to handle the
+// int vs int64 / []byte vs string normalisation MySQL performs.
+func pkChanged(a, b []any) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if fmt.Sprintf("%v", a[i]) != fmt.Sprintf("%v", b[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // isMinimalRowImage returns true if the RowsEvent contains a minimal row image,
