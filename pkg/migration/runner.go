@@ -1446,9 +1446,31 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	}
 
 	iteration := 0
+	var lastDuration time.Duration // zero before the first iteration → full interval wait
 	for {
+		// Wait the minimum interval (less time already spent in the prior
+		// iteration). On the first iteration this is the full interval, so
+		// we don't kick off a checksum immediately after the initial pass.
+		// Sleep is ctx-cancellable so a sentinel drop interrupts immediately.
+		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
+			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
+			timer := time.NewTimer(remaining)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return nil
+		}
+		// Reset the chunker so this iteration scans the table from the start.
+		// (Skipped on the very first pass — the chunker is already freshly Open'd.)
+		if iteration > 0 {
+			if err := chunker.Reset(); err != nil {
+				return fmt.Errorf("failed to reset continuous-checksum chunker: %w", err)
+			}
 		}
 		iteration++
 		iterationStart := time.Now()
@@ -1461,28 +1483,11 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			}
 			return err
 		}
-		iterationDuration := time.Since(iterationStart)
+		lastDuration = time.Since(iterationStart)
 		r.logger.Info("continuous checksum iteration complete",
 			"iteration", iteration,
-			"duration", iterationDuration.Round(time.Second),
+			"duration", lastDuration.Round(time.Second),
 		)
-		// Enforce a minimum interval between iterations so small tables
-		// don't churn the table lock. Sleep is ctx-cancellable so the
-		// sentinel drop still interrupts us immediately.
-		if remaining := continuousChecksumMinInterval - iterationDuration; remaining > 0 {
-			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
-			timer := time.NewTimer(remaining)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
-		}
-		// Reset the chunker so the next iteration scans the table again.
-		if err := chunker.Reset(); err != nil {
-			return fmt.Errorf("failed to reset continuous-checksum chunker: %w", err)
-		}
 	}
 }
 
