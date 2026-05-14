@@ -160,7 +160,20 @@ You can resume a migration from checkpoint and Spirit will start waiting again f
 
 If you start a migration and realize that you forgot to set defer-cutover, worry not! You can manually create a sentinel table `_spirit_sentinel`, and Spirit will detect the table before the cutover is completed and block as though defer-cutover had been enabled from the beginning.
 
-Note that the checksum, if enabled, will be computed after the sentinel table is dropped. Because the checksum step takes an estimated 10-20% of the migration, the cutover will not occur immediately after the sentinel table is dropped.
+#### Two-checksum model
+
+When `defer-cutover` is in use Spirit runs two checksums:
+
+1. The **initial checksum** runs after copy-rows completes and before Spirit starts waiting on the sentinel. This is the correctness gate; the cutover will not proceed unless the initial checksum succeeds.
+2. The **continuous checksum** runs in a loop *while* Spirit is waiting on the sentinel to be dropped. It is a best-effort consistency re-check so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The continuous loop is interrupted immediately when the sentinel is dropped, and Spirit proceeds straight to cutover — there is no extra wait for an in-flight continuous pass to finish.
+
+Migration order (with `defer-cutover`):
+
+```
+copy rows → initial checksum → wait on sentinel (continuous checksum loop) → cutover
+```
+
+The continuous checksum runs single-threaded today (see [block/spirit#831](https://github.com/block/spirit/issues/831) for dynamic thread tuning) and shares the same yield, retry, and fixup behavior as the initial pass. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
 
 ### host
 

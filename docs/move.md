@@ -28,6 +28,21 @@ This will copy all tables from the source database to the target database, verif
 
 When set to `true`, a sentinel table (`_spirit_sentinel`) is created on the **source** database after the table copy completes. Move will block before cutover until the sentinel table is manually dropped, giving the operator a chance to verify the copy before proceeding.
 
+#### Two-checksum model
+
+When `create-sentinel` is in use Move runs two checksums:
+
+1. The **initial checksum** runs after copy-rows completes and before Move starts waiting on the sentinel. This is the correctness gate; the cutover will not proceed unless the initial checksum succeeds.
+2. The **continuous checksum** runs in a loop *while* Move is waiting on the sentinel to be dropped. It is a best-effort consistency re-check so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The continuous loop is interrupted immediately when the sentinel is dropped, and Move proceeds straight to cutover — there is no extra wait for an in-flight continuous pass to finish.
+
+Move order (with `create-sentinel`):
+
+```
+copy rows → initial checksum → wait on sentinel (continuous checksum loop) → cutover
+```
+
+The continuous checksum runs single-threaded today (see [block/spirit#831](https://github.com/block/spirit/issues/831) for dynamic thread tuning) and shares the same retry and fixup behavior as the initial pass. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
+
 ### defer-secondary-indexes
 
 - Type: Boolean

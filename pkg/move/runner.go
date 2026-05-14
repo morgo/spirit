@@ -694,16 +694,22 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logger.Info("All tables copied successfully.")
 
+	// Run the initial checksum (inside prepareForCutover) before the
+	// sentinel wait. While the sentinel blocks cutover, waitOnSentinelTable
+	// runs a continuous checksum loop in the background. See docs/move.md
+	// for the two-checksum model.
+	if err := r.prepareForCutover(ctx); err != nil {
+		return err
+	}
+	r.logger.Info("Initial checksum completed successfully")
+
 	r.sentinelWaitStartTime = time.Now()
 	r.status.Set(status.WaitingOnSentinelTable)
 	if err := r.waitOnSentinelTable(ctx); err != nil {
 		return err
 	}
 
-	if err := r.prepareForCutover(ctx); err != nil {
-		return err
-	}
-	r.logger.Info("Checksum completed successfully, starting cutover")
+	r.logger.Info("Sentinel released, starting cutover")
 	// Create a cutover.
 	r.status.Set(status.CutOver)
 	cutoverSources := make([]CutOverSource, len(r.sources))
@@ -1079,7 +1085,12 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 	return sentinelTableExists > 0, nil
 }
 
-// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped
+// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
+// While we wait, run a "continuous checksum" loop in the background as a
+// best-effort consistency re-check. The continuous checksum is purely
+// opportunistic — the initial checksum (already run in prepareForCutover) is
+// the correctness gate, and the continuous loop is interrupted immediately
+// when the sentinel drops so cutover proceeds without delay.
 func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	if sentinelExists, err := r.sentinelTableExists(ctx); err != nil {
 		return err
@@ -1091,6 +1102,25 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	r.logger.Warn("cutover deferred while sentinel table exists; will wait",
 		"sentinel-table", sentinelTableName,
 		"wait-limit", sentinelWaitLimit)
+
+	// Spawn the continuous checksum. It uses its own checker + chunker and is
+	// not wired into the checkpoint — so a crash during sentinel wait does
+	// not add mandatory checksum time on resume.
+	continuousCtx, cancelContinuous := context.WithCancel(ctx)
+	continuousDone := make(chan struct{})
+	go func() {
+		defer close(continuousDone)
+		if err := r.runContinuousChecksum(continuousCtx); err != nil {
+			// A hard failure here is treated like an initial-checksum
+			// failure: cancel the migration so cutover does not proceed.
+			r.logger.Error("continuous checksum failed; cancelling move", "error", err)
+			r.cancelFunc()
+		}
+	}()
+	defer func() {
+		cancelContinuous()
+		<-continuousDone
+	}()
 
 	timer := time.NewTimer(sentinelWaitLimit)
 	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
@@ -1113,6 +1143,91 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 			return errors.New("timed out waiting for sentinel table to be dropped")
 		}
 	}
+}
+
+// runContinuousChecksum loops calling a fresh distributed checker over the
+// source/target tables for as long as ctx is alive. It is the "continuous"
+// half of the two-checksum model (see docs/move.md) and is only called while
+// the move is blocked in WaitingOnSentinelTable.
+//
+// The checker used here is separate from r.checker and uses a fresh chunker
+// so checkpoint state is unaffected. Single-threaded by design — checksum
+// throttling is tracked separately in github.com/block/spirit/issues/831.
+func (r *Runner) runContinuousChecksum(ctx context.Context) error {
+	chunker, err := r.buildContinuousChunker()
+	if err != nil {
+		return fmt.Errorf("failed to build continuous-checksum chunker: %w", err)
+	}
+	if err := chunker.Open(); err != nil {
+		return fmt.Errorf("failed to open continuous-checksum chunker: %w", err)
+	}
+	defer utils.CloseAndLog(chunker)
+
+	sourceDBs := make([]*sql.DB, len(r.sources))
+	feeds := make([]*repl.Client, len(r.sources))
+	for i := range r.sources {
+		sourceDBs[i] = r.sources[i].db
+		feeds[i] = r.sources[i].replClient
+	}
+	checker, err := checksum.NewChecker(sourceDBs, chunker, feeds, &checksum.CheckerConfig{
+		// TODO(#831): once the throttler can size threads dynamically,
+		// replace the hard-coded 1 with the move's thread count.
+		Concurrency:     1,
+		TargetChunkTime: r.move.TargetChunkTime,
+		DBConfig:        r.dbConfig,
+		Logger:          r.logger,
+		Applier:         r.applier,
+		FixDifferences:  true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create continuous checker: %w", err)
+	}
+
+	iteration := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		iteration++
+		iterationStart := time.Now()
+		r.logger.Info("continuous checksum iteration starting", "iteration", iteration)
+		if err := checker.Run(ctx); err != nil {
+			// Treat context cancellation as expected (the sentinel was dropped
+			// while a pass was in flight). Anything else is a real failure.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
+			return err
+		}
+		r.logger.Info("continuous checksum iteration complete",
+			"iteration", iteration,
+			"duration", time.Since(iterationStart).Round(time.Second),
+		)
+		// Reset the chunker so the next iteration scans the table again.
+		if err := chunker.Reset(); err != nil {
+			return fmt.Errorf("failed to reset continuous-checksum chunker: %w", err)
+		}
+	}
+}
+
+// buildContinuousChunker builds a fresh chunker for the continuous-checksum
+// loop. It is deliberately not wired into r.checksumChunker / checkpoint.
+func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
+	chunkers := make([]table.Chunker, 0)
+	for i := range r.sources {
+		for _, tbl := range r.sources[i].tables {
+			chunkerCfg := table.ChunkerConfig{
+				TargetChunkTime: r.move.TargetChunkTime,
+				Logger:          r.logger,
+			}
+			c, err := table.NewChunker(tbl, chunkerCfg)
+			if err != nil {
+				return nil, err
+			}
+			chunkers = append(chunkers, c)
+		}
+	}
+	return table.NewMultiChunker(chunkers...), nil
 }
 
 // DumpCheckpoint is called approximately every minute.
