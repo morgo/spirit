@@ -269,11 +269,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Perform steps to prepare for final cutover.
-	// This includes computing the initial checksum, catching up on
-	// replClient apply, and running ANALYZE TABLE so that the statistics
-	// will be up-to-date on cutover.
-	if err := r.prepareForCutover(ctx); err != nil {
+	// Post-copy phase: catch up on replClient apply, run ANALYZE TABLE
+	// so cutover stats are fresh, and run the initial checksum.
+	if err := r.postCopyPhase(ctx); err != nil {
 		return err
 	}
 
@@ -367,11 +365,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// prepareForCutover performs steps to prepare for the final cutover.
-// most of these steps are technically optional, but skipping them
-// could for example cause a stall during the cutover if the replClient
-// has too many pending updates.
-func (r *Runner) prepareForCutover(ctx context.Context) error {
+// postCopyPhase runs the work that happens between copy-rows and the
+// sentinel wait: drain the binlog backlog, run ANALYZE TABLE, and
+// perform the initial checksum. When defer-cutover is not in use this
+// is also the last phase before cutover.
+func (r *Runner) postCopyPhase(ctx context.Context) error {
 	r.status.Set(status.ApplyChangeset)
 	// Disable the periodic flush and flush all pending events.
 	// We want it disabled for ANALYZE TABLE and acquiring a table lock
@@ -1344,7 +1342,7 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 // Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
 // While we wait, run a "continuous checksum" loop in the background as a
 // best-effort consistency re-check. The continuous checksum is purely
-// opportunistic — the initial checksum (already run in prepareForCutover) is
+// opportunistic — the initial checksum (already run in postCopyPhase) is
 // the correctness gate, and the continuous loop is interrupted immediately
 // when the sentinel drops so cutover proceeds without delay.
 func (r *Runner) waitOnSentinelTable(ctx context.Context) error {

@@ -694,11 +694,11 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logger.Info("All tables copied successfully.")
 
-	// Run the initial checksum (inside prepareForCutover) before the
-	// sentinel wait. While the sentinel blocks cutover, waitOnSentinelTable
-	// runs a continuous checksum loop in the background. See docs/move.md
-	// for the two-checksum model.
-	if err := r.prepareForCutover(ctx); err != nil {
+	// Post-copy phase: drain the binlog, restore secondary indexes,
+	// ANALYZE TABLE, run the initial checksum. While the sentinel blocks
+	// cutover, waitOnSentinelTable runs a continuous checksum loop in the
+	// background — see docs/move.md for the two-checksum model.
+	if err := r.postCopyPhase(ctx); err != nil {
 		return err
 	}
 	r.logger.Info("Initial checksum completed successfully")
@@ -967,7 +967,12 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 	return nil
 }
 
-func (r *Runner) prepareForCutover(ctx context.Context) error {
+// postCopyPhase runs the work that happens between copy-rows and the
+// sentinel wait: drain the binlog backlog, restore secondary indexes
+// (if deferred), run ANALYZE TABLE, and perform the initial checksum.
+// When create-sentinel is not in use this is also the last phase
+// before cutover.
+func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// Disable the periodic flush and flush all pending events.
 	// We want it disabled for ANALYZE TABLE and acquiring a table lock
 	// *but* it will be started again briefly inside of the checksum
@@ -1088,7 +1093,7 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 // Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
 // While we wait, run a "continuous checksum" loop in the background as a
 // best-effort consistency re-check. The continuous checksum is purely
-// opportunistic — the initial checksum (already run in prepareForCutover) is
+// opportunistic — the initial checksum (already run in postCopyPhase) is
 // the correctness gate, and the continuous loop is interrupted immediately
 // when the sentinel drops so cutover proceeds without delay.
 func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
