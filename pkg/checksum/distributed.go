@@ -240,15 +240,16 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// Step 3: Use the applier to write the rows to all targets
 	// The applier will handle distribution across shards if needed.
 	//
-	// TODO: passing fixCtx here does not actually make the apply non-
-	// cancellable, because the applier's worker goroutines were started
-	// with the parent context (see Applier.Start in pkg/applier) and use
-	// that for the actual DML. A parent cancellation between the DELETEs
-	// above and the worker writes can leave targets with rows DELETEd but
-	// not yet reapplied. The continuous-checksum loop's `DifferencesFound()`
-	// gate ensures cutover still aborts in that case (so the broken state
-	// stays internal to `_new` and is recopied on resume), but a proper
-	// fix would scope a worker context to the repair window.
+	// The applier's worker goroutines run under context.WithoutCancel(ctx)
+	// (see Run() below), so a parent cancellation between the DELETEs above
+	// and the worker writes does not by itself cancel the inserts. The
+	// remaining limitation is that workers stop when the deferred Stop() at
+	// the end of Run runs — if Run returns due to a continuous-checksum
+	// cancel while writes are queued, those inserts may be dropped. The
+	// continuous-checksum loop's DifferencesFound() gate keeps cutover
+	// aborting in that case so the broken state stays internal and is
+	// recopied on resume; a tighter fix would scope a worker context to
+	// the repair window only.
 	if len(rowData) > 0 {
 		done := make(chan error, 1)
 		applyErr := c.applier.Apply(fixCtx, chunk, rowData, func(affectedRows int64, err error) {

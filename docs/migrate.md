@@ -165,7 +165,7 @@ If you start a migration and realize that you forgot to set defer-cutover, worry
 When `defer-cutover` is in use Spirit runs two checksums:
 
 1. The **initial checksum** runs after copy-rows completes and before Spirit starts waiting on the sentinel. This is the correctness gate; the cutover will not proceed unless the initial checksum succeeds.
-2. The **continuous checksum** runs in a loop *while* Spirit is waiting on the sentinel to be dropped. It is a best-effort consistency re-check so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The continuous loop is interrupted immediately when the sentinel is dropped, and Spirit proceeds straight to cutover — there is no extra wait for an in-flight continuous pass to finish.
+2. The **continuous checksum** runs in a loop *while* Spirit is waiting on the sentinel to be dropped. It is a best-effort consistency re-check so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The continuous loop is interrupted as soon as the sentinel is dropped, and Spirit proceeds to cutover. One exception: if a pass had already detected a mismatch and is mid-recopy, the in-flight repair runs to completion (bounded by an internal per-chunk timeout) before cutover continues, since cancelling between the DELETE and re-insert would leave the chunk inconsistent. A real repair error surfaced this way aborts the run instead of proceeding to cutover.
 
 Migration order (with `defer-cutover`):
 

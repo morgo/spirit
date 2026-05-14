@@ -186,7 +186,7 @@ scripts/      → Build and run helper scripts
 3. **Start replication client** — subscribe to binlog events for the source table
 4. **Copy rows** — parallel chunked copying from source to shadow table
 5. **Post-copy phase** — drain binlog backlog, run `ANALYZE TABLE`, run the **initial checksum** (correctness gate for cutover)
-6. **Sentinel wait** (optional, `--defer-cutover`) — block before cutover until `_spirit_sentinel` is dropped; a **continuous checksum** loop runs in the background and re-verifies the data, interrupted on sentinel drop
+6. **Sentinel wait** (optional, `--defer-cutover`) — block before cutover until `_spirit_sentinel` is dropped; a **continuous checksum** loop runs in the background and re-verifies the data, interrupted on sentinel drop (an in-flight chunk recopy is allowed to finish, bounded by an internal per-chunk timeout, since the DELETE+re-insert pair must stay atomic)
 7. **Cutover** — atomic `RENAME TABLE` swap (source ↔ shadow)
 
 ### Key design decisions

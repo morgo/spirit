@@ -305,6 +305,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.waitOnSentinelTable(ctx); err != nil {
 			return err
 		}
+		// Re-run ANALYZE TABLE after the sentinel drops. The initial
+		// ANALYZE in postCopyPhase may be stale if the sentinel sat for
+		// hours/days while ongoing writes were applied to _new — fresh
+		// stats keep cutover plans honest.
+		r.status.Set(status.AnalyzeTable)
+		r.logger.Info("Re-running ANALYZE TABLE after sentinel drop")
+		for _, change := range r.changes {
+			if err := dbconn.Exec(ctx, r.db, "ANALYZE TABLE %n.%n", change.newTable.SchemaName, change.newTable.TableName); err != nil {
+				return err
+			}
+		}
 	}
 	// Run any checks that need to be done pre-cutover.
 	if err := r.runChecks(ctx, check.ScopeCutover); err != nil {
@@ -1357,8 +1368,11 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 // While we wait, run a "continuous checksum" loop in the background as a
 // best-effort consistency re-check. The continuous checksum is purely
 // opportunistic — the initial checksum (already run in postCopyPhase) is
-// the correctness gate, and the continuous loop is interrupted immediately
-// when the sentinel drops so cutover proceeds without delay.
+// the correctness gate. The continuous loop is cancelled when the sentinel
+// drops; any in-flight chunk recopy runs under context.WithoutCancel up to
+// fixChunkTimeout so the DELETE + re-insert pair stays atomic, then the
+// goroutine exits. A real "checksum found differences" surfaced from that
+// in-flight repair is promoted into retErr and aborts cutover.
 func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 	if sentinelExists, err := r.sentinelTableExists(ctx); err != nil {
 		return err
@@ -1403,10 +1417,6 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 			}
 		}
 	}()
-	defer func() {
-		cancelFlush()
-		<-flushDone
-	}()
 
 	// Spawn the continuous checksum. It uses its own checker + chunker and is
 	// not wired into the checkpoint — so a crash during sentinel wait does
@@ -1418,18 +1428,25 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 		defer close(continuousDone)
 		continuousErr = r.runContinuousChecksum(continuousCtx)
 	}()
-	// On exit, surface any continuous-checksum failure even if we are leaving
-	// because the sentinel dropped. The continuous loop's recopy path runs
-	// under context.WithoutCancel and finishes despite cancelContinuous(), so
-	// `continuousErr` may carry a real "checksum found differences" after the
-	// wait below returns. If the parent ctx is already cancelled, prefer that.
+
+	// Single defer that handles teardown for both goroutines. We cancel the
+	// flush goroutine first so that its in-flight Flush (which holds
+	// continuousFlushMu) can drop the mutex promptly, otherwise the
+	// continuous goroutine may block on Lock() while we wait for it to exit.
+	// Then we cancel the continuous goroutine and wait for both to finish.
+	// runContinuousChecksum already filters harmless sentinel cancellations
+	// to nil, so any non-nil continuousErr is one it intentionally chose to
+	// propagate — surface it as retErr whenever the parent ctx itself has
+	// not been cancelled (parent cancellation is its own error path).
 	defer func() {
+		cancelFlush()
 		cancelContinuous()
+		<-flushDone
 		<-continuousDone
 		if retErr != nil {
 			return
 		}
-		if continuousErr != nil && !errors.Is(continuousErr, context.Canceled) && ctx.Err() == nil {
+		if continuousErr != nil && ctx.Err() == nil {
 			retErr = fmt.Errorf("continuous checksum failed: %w", continuousErr)
 		}
 	}()
