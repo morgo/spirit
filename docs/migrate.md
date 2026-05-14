@@ -173,7 +173,7 @@ Migration order (with `defer-cutover`):
 copy rows → initial checksum → wait on sentinel (continuous checksum loop) → cutover
 ```
 
-The continuous checksum runs single-threaded today (see [block/spirit#831](https://github.com/block/spirit/issues/831) for dynamic thread tuning) and shares the same yield, retry, and fixup behavior as the initial pass. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
+The continuous checksum runs single-threaded today (see [block/spirit#831](https://github.com/block/spirit/issues/831) for dynamic thread tuning) and shares the same yield and fixup behavior as the initial pass. After each iteration completes, Spirit waits a minimum of one hour before starting the next pass so that small tables don't churn the table lock back-to-back; the wait is interrupted immediately when the sentinel is dropped. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
 
 ### host
 

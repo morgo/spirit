@@ -34,6 +34,11 @@ var (
 	sentinelWaitLimit       = 48 * time.Hour
 	sentinelTableName       = "_spirit_sentinel"   // this is now a const.
 	checkpointTableName     = "_spirit_checkpoint" // const for multi-migration checkpoints.
+	// continuousChecksumMinInterval is the minimum amount of time between
+	// continuous-checksum iterations during the sentinel wait. Without it,
+	// small tables would re-acquire the table lock back-to-back since each
+	// pass finishes in seconds.
+	continuousChecksumMinInterval = 1 * time.Hour
 )
 
 type Runner struct {
@@ -1456,10 +1461,24 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			}
 			return err
 		}
+		iterationDuration := time.Since(iterationStart)
 		r.logger.Info("continuous checksum iteration complete",
 			"iteration", iteration,
-			"duration", time.Since(iterationStart).Round(time.Second),
+			"duration", iterationDuration.Round(time.Second),
 		)
+		// Enforce a minimum interval between iterations so small tables
+		// don't churn the table lock. Sleep is ctx-cancellable so the
+		// sentinel drop still interrupts us immediately.
+		if remaining := continuousChecksumMinInterval - iterationDuration; remaining > 0 {
+			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
+			timer := time.NewTimer(remaining)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
 		// Reset the chunker so the next iteration scans the table again.
 		if err := chunker.Reset(); err != nil {
 			return fmt.Errorf("failed to reset continuous-checksum chunker: %w", err)
