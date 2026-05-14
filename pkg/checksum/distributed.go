@@ -173,6 +173,15 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	c.recopyLock.Lock()
 	defer c.recopyLock.Unlock()
 
+	// The fix is split into DELETE-from-targets and Apply-from-sources. If the
+	// parent ctx is cancelled between or during these steps, the target side
+	// would be left with rows DELETEd but not yet reapplied. The
+	// continuous-checksum loop's cancellation on sentinel drop hits this race,
+	// so we run the fix under a context that ignores the parent's
+	// cancellation. The bounded timeout still protects against a hung apply.
+	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
+	defer fixCancel()
+
 	// Step 1: Delete all rows in the chunk range from all targets
 	// This ensures we remove any extra rows that shouldn't be there.
 	// Use chunk.Table here to target the chunk's original table name consistently across targets.
@@ -181,7 +190,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
 		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String(), "table", chunk.Table.TableName)
-		_, err := dbconn.RetryableTransaction(ctx, target.DB, false, c.dbConfig, deleteStmt)
+		_, err := dbconn.RetryableTransaction(fixCtx, target.DB, false, c.dbConfig, deleteStmt)
 		if err != nil {
 			return fmt.Errorf("failed to delete chunk from target %d: %w", i, err)
 		}
@@ -202,7 +211,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	for i := range c.sourcePools {
 		c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "sourceID", i, "table", chunk.Table.TableName)
 
-		rows, err := c.sourcePools[i].db.QueryContext(ctx, query)
+		rows, err := c.sourcePools[i].db.QueryContext(fixCtx, query)
 		if err != nil {
 			return fmt.Errorf("failed to query chunk data from source %d: %w", i, err)
 		}
@@ -232,7 +241,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// The applier will handle distribution across shards if needed
 	if len(rowData) > 0 {
 		done := make(chan error, 1)
-		applyErr := c.applier.Apply(ctx, chunk, rowData, func(affectedRows int64, err error) {
+		applyErr := c.applier.Apply(fixCtx, chunk, rowData, func(affectedRows int64, err error) {
 			if err != nil {
 				c.logger.Error("failed to recopy chunk via applier", "error", err)
 				done <- err
@@ -251,8 +260,8 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 			if err != nil {
 				return fmt.Errorf("recopy via applier failed: %w", err)
 			}
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-fixCtx.Done():
+			return fixCtx.Err()
 		}
 	}
 	c.logger.Info("successfully recopied chunk", "chunk", chunk.String(), "rowCount", len(rowData))

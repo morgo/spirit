@@ -40,9 +40,9 @@ Checkpoints are stored on the source because reshard operations use a 1:N topolo
 
 ### Sentinel Table
 
-When `CreateSentinel` is enabled, the runner creates a `_spirit_sentinel` table on the source after the initial checksum completes and waits for it to be dropped by an external actor. This provides a coordination point for orchestration systems that need to perform additional steps between copy completion and cutover.
+When `CreateSentinel` is enabled, the runner creates a `_spirit_sentinel` table on the source during setup (before the copy starts) and then *blocks before cutover* until it is dropped by an external actor. The wait sits between the initial checksum and the cutover. This provides a coordination point for orchestration systems that need to perform additional steps between copy completion and cutover.
 
-While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. Each iteration waits a minimum of one hour after the previous pass completes so that small tables do not churn the table lock back-to-back; the wait is interrupted immediately when the sentinel is dropped. See [docs/move.md](../../docs/move.md) for the user-facing description.
+While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The first iteration starts one hour after the initial checksum, and subsequent iterations are capped at one per hour so that small tables do not churn the table lock back-to-back; the wait is interrupted immediately when the sentinel is dropped. See [docs/move.md](../../docs/move.md) for the user-facing description.
 
 ### Cutover Function
 

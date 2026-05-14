@@ -1363,19 +1363,41 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 		"wait-limit", sentinelWaitLimit,
 	)
 
+	// Keep periodic flushing alive throughout the sentinel wait. postCopyPhase
+	// stopped it; without restarting it here, binlog deltas accumulate until
+	// the next continuous-checksum iteration (up to an hour) and the cutover
+	// has to drain them all under the table lock.
+	flushCtx, cancelFlush := context.WithCancel(ctx)
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		ticker := time.NewTicker(repl.DefaultFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-flushCtx.Done():
+				return
+			case <-ticker.C:
+				if err := r.replClient.Flush(flushCtx); err != nil && !errors.Is(err, context.Canceled) {
+					r.logger.Warn("periodic flush failed during sentinel wait", "error", err)
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancelFlush()
+		<-flushDone
+	}()
+
 	// Spawn the continuous checksum. It uses its own checker + chunker and is
 	// not wired into the checkpoint — so a crash during sentinel wait does
 	// not add mandatory checksum time on resume.
 	continuousCtx, cancelContinuous := context.WithCancel(ctx)
 	continuousDone := make(chan struct{})
+	var continuousErr error
 	go func() {
 		defer close(continuousDone)
-		if err := r.runContinuousChecksum(continuousCtx); err != nil {
-			// A hard failure here is treated like an initial-checksum
-			// failure: cancel the migration so cutover does not proceed.
-			r.logger.Error("continuous checksum failed; cancelling migration", "error", err)
-			r.fatalError()
-		}
+		continuousErr = r.runContinuousChecksum(continuousCtx)
 	}()
 	defer func() {
 		cancelContinuous()
@@ -1403,6 +1425,23 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 			}
 		case <-timer.C:
 			return errors.New("timed out waiting for sentinel table to be dropped")
+		case <-continuousDone:
+			// Continuous goroutine exited before the sentinel was dropped.
+			// If our parent ctx is cancelled, the goroutine just propagated
+			// that cancellation — surface the parent's error directly.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// A non-nil error means continuous detected a real failure.
+			// Return it as a regular migration failure — do NOT call
+			// fatalError, which would invalidate the checkpoint and force
+			// the operator to start from scratch. The initial checksum is
+			// already durable on disk via FixDifferences, so a re-run
+			// resumes from the existing checkpoint.
+			if continuousErr != nil {
+				return fmt.Errorf("continuous checksum failed: %w", continuousErr)
+			}
+			return errors.New("continuous checksum exited unexpectedly")
 		}
 	}
 }
