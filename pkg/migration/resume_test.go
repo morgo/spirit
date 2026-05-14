@@ -903,10 +903,14 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	}()
 
 	// Wait until the migration is blocked on the sentinel table, confirming
-	// that the manually-created sentinel is respected on resume.
+	// that the manually-created sentinel is respected on resume. The timeout
+	// is generous because the new flow runs the post-copy phase (drain +
+	// ANALYZE + initial checksum) before transitioning to
+	// WaitingOnSentinelTable, and CI hosts under parallel load sometimes
+	// need 30+ seconds of wall time to get through it.
 	require.Eventually(t, func() bool {
 		return m.status.Get() == status.WaitingOnSentinelTable
-	}, 30*time.Second, 100*time.Millisecond, "migration did not reach WaitingOnSentinelTable")
+	}, 2*time.Minute, 100*time.Millisecond, "migration did not reach WaitingOnSentinelTable")
 
 	// Cancel instead of waiting for the full sentinelWaitLimit timeout.
 	m.Cancel()
