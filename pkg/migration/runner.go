@@ -582,7 +582,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		FixDifferences:  true,
-		MaxRetries:      1,
+		MaxRetries:      3,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
 	})
 
@@ -1437,8 +1437,11 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			DBConfig:        r.dbConfig,
 			Logger:          r.logger,
 			FixDifferences:  true,
-			MaxRetries:      3,
-			YieldTimeout:    r.migration.ChecksumYieldTimeout,
+			// One pass per outer-loop iteration; the continuous-checksum
+			// loop itself supplies the retry, so we don't nest a second
+			// retry loop inside each iteration.
+			MaxRetries:   1,
+			YieldTimeout: r.migration.ChecksumYieldTimeout,
 		},
 	)
 	if err != nil {

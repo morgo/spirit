@@ -1188,6 +1188,10 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		Logger:          r.logger,
 		Applier:         r.applier,
 		FixDifferences:  true,
+		// One pass per outer-loop iteration; the continuous-checksum
+		// loop itself supplies the retry, so we don't nest a second
+		// retry loop inside each iteration.
+		MaxRetries: 1,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create continuous checker: %w", err)
