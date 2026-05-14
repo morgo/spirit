@@ -272,10 +272,19 @@ func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) er
 		chunk.Table.QuotedTableName,
 		chunk.String(),
 	)
-	if _, err := dbconn.RetryableTransaction(ctx, c.db, false, c.dbConfig, deleteStmt); err != nil {
+	// The DELETE and REPLACE run as two separate transactions (to avoid the
+	// deadlock pattern documented above). If the parent ctx is cancelled
+	// between them, the target chunk would be left with rows DELETEd but not
+	// yet REPLACEd. The continuous-checksum loop's cancellation on sentinel
+	// drop hits this race, so we run both statements under a context that
+	// ignores the parent's cancellation. The bounded timeout still protects
+	// against a hung transaction.
+	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
+	defer fixCancel()
+	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, false, c.dbConfig, deleteStmt); err != nil {
 		return fmt.Errorf("failed to delete existing rows: %w", err)
 	}
-	if _, err := dbconn.RetryableTransaction(ctx, c.db, false, c.dbConfig, replaceStmt); err != nil {
+	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, false, c.dbConfig, replaceStmt); err != nil {
 		return fmt.Errorf("failed to replace chunk data: %w", err)
 	}
 	return nil
@@ -300,6 +309,14 @@ func (c *SingleChecker) ExecTime() time.Duration {
 	c.Lock()
 	defer c.Unlock()
 	return c.execTime
+}
+
+// DifferencesFound returns the number of chunks where a source/target
+// mismatch was detected in the most recent (or in-flight) pass. Used by
+// the continuous-checksum loop to decide whether a cancellation swallow
+// is safe.
+func (c *SingleChecker) DifferencesFound() uint64 {
+	return c.differencesFound.Load()
 }
 
 func (c *SingleChecker) setInvalid(newVal bool) {

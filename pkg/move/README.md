@@ -9,8 +9,8 @@ A move operation follows this sequence:
 1. **Pre-run checks** — validate configuration before opening database connections.
 2. **Setup** — discover source tables, create targets, run preflight/post-setup checks.
 3. **Copy rows** — bulk-copy all source tables to their targets using the copier.
-4. **Sentinel wait** — optionally pause after copy completes, allowing external orchestration to confirm readiness before cutover.
-5. **Checksum** — verify data consistency between source and targets.
+4. **Initial checksum** (post-copy phase) — flush the binlog backlog, restore any secondary indexes that were deferred during table creation (see `DeferSecondaryIndexes` below), run ANALYZE TABLE, and verify data consistency between source and targets. This is the correctness gate; cutover does not proceed unless this checksum succeeds.
+5. **Sentinel wait** — optionally pause before cutover, allowing external orchestration to confirm readiness. While the sentinel blocks cutover, a **continuous checksum** loop runs in the background to keep re-verifying the data; the loop is interrupted as soon as the sentinel is dropped.
 6. **Cutover** — acquire a table lock, flush remaining replication changes, execute the caller-provided cutover function, and rename original tables out of the way.
 
 ## Design Decisions
@@ -40,7 +40,9 @@ Checkpoints are stored on the source because reshard operations use a 1:N topolo
 
 ### Sentinel Table
 
-When `CreateSentinel` is enabled, the runner creates a `_spirit_sentinel` table on the source after copy completes and waits for it to be dropped by an external actor. This provides a coordination point for orchestration systems that need to perform additional steps between copy completion and cutover.
+When `CreateSentinel` is enabled, the runner creates a `_spirit_sentinel` table on the source during setup (before the copy starts) and then *blocks before cutover* until it is dropped by an external actor. The wait sits between the initial checksum and the cutover. This provides a coordination point for orchestration systems that need to perform additional steps between copy completion and cutover.
+
+While the sentinel blocks the cutover, the runner re-runs the checksum in a loop (the "continuous checksum") so that the data is re-verified close to the moment of cutover, even if the sentinel sits for hours. The first iteration starts one hour after the initial checksum, and subsequent iterations are capped at one per hour so that small tables do not churn the table lock back-to-back; the wait is interrupted when the sentinel is dropped. One exception: if a pass had already detected a mismatch and is mid-recopy, the in-flight repair runs to completion (bounded by an internal per-chunk timeout) before cutover continues, because the DELETE-from-targets + re-apply-from-sources pair must stay atomic. See [docs/move.md](../../docs/move.md) for the user-facing description.
 
 ### Cutover Function
 

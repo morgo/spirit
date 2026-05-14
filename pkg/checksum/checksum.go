@@ -26,6 +26,15 @@ var (
 	// DefaultYieldTimeout is the default maximum duration for a single checksum
 	// pass before yielding to release long-running REPEATABLE READ transactions.
 	DefaultYieldTimeout = 24 * time.Hour
+
+	// fixChunkTimeout bounds the DELETE + REPLACE (or DELETE + Apply) pair that
+	// recopies a mismatched chunk. The pair runs under a context derived from
+	// context.WithoutCancel so a sentinel-drop cancellation can't leave the
+	// target in a partial state between the two transactions. The bound still
+	// catches the case where one transaction is hung. This applies to every
+	// repair path (initial and continuous checksum), so it has to be generous
+	// enough for legitimate large/slow recopies on busy or distant replicas.
+	fixChunkTimeout = 10 * time.Minute
 )
 
 type Checker interface {
@@ -34,6 +43,13 @@ type Checker interface {
 	GetProgress() string
 	StartTime() time.Time
 	ExecTime() time.Duration
+	// DifferencesFound returns the number of chunks where a source/target
+	// mismatch was detected during the most recent (or in-flight) pass.
+	// Useful for callers that need to distinguish "clean cancellation" from
+	// "cancellation while a fix may have been mid-flight" — the continuous-
+	// checksum loop uses it to decide whether a sentinel-drop swallow is
+	// safe.
+	DifferencesFound() uint64
 }
 
 type CheckerConfig struct {

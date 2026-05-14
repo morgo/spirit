@@ -173,6 +173,15 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	c.recopyLock.Lock()
 	defer c.recopyLock.Unlock()
 
+	// The fix is split into DELETE-from-targets and Apply-from-sources. If the
+	// parent ctx is cancelled between or during these steps, the target side
+	// would be left with rows DELETEd but not yet reapplied. The
+	// continuous-checksum loop's cancellation on sentinel drop hits this race,
+	// so we run the fix under a context that ignores the parent's
+	// cancellation. The bounded timeout still protects against a hung apply.
+	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
+	defer fixCancel()
+
 	// Step 1: Delete all rows in the chunk range from all targets
 	// This ensures we remove any extra rows that shouldn't be there.
 	// Use chunk.Table here to target the chunk's original table name consistently across targets.
@@ -181,7 +190,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
 		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String(), "table", chunk.Table.TableName)
-		_, err := dbconn.RetryableTransaction(ctx, target.DB, false, c.dbConfig, deleteStmt)
+		_, err := dbconn.RetryableTransaction(fixCtx, target.DB, false, c.dbConfig, deleteStmt)
 		if err != nil {
 			return fmt.Errorf("failed to delete chunk from target %d: %w", i, err)
 		}
@@ -202,7 +211,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	for i := range c.sourcePools {
 		c.logger.Debug("reading chunk data for recopy", "chunk", chunk.String(), "sourceID", i, "table", chunk.Table.TableName)
 
-		rows, err := c.sourcePools[i].db.QueryContext(ctx, query)
+		rows, err := c.sourcePools[i].db.QueryContext(fixCtx, query)
 		if err != nil {
 			return fmt.Errorf("failed to query chunk data from source %d: %w", i, err)
 		}
@@ -229,10 +238,21 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	c.logger.Info("recopying chunk via applier", "chunk", chunk.String(), "rowCount", len(rowData), "sourceCount", len(c.sourcePools))
 
 	// Step 3: Use the applier to write the rows to all targets
-	// The applier will handle distribution across shards if needed
+	// The applier will handle distribution across shards if needed.
+	//
+	// The applier's worker goroutines run under context.WithoutCancel(ctx)
+	// (see Run() below), so a parent cancellation between the DELETEs above
+	// and the worker writes does not by itself cancel the inserts. The
+	// remaining limitation is that workers stop when the deferred Stop() at
+	// the end of Run runs — if Run returns due to a continuous-checksum
+	// cancel while writes are queued, those inserts may be dropped. The
+	// continuous-checksum loop's DifferencesFound() gate keeps cutover
+	// aborting in that case so the broken state stays internal and is
+	// recopied on resume; a tighter fix would scope a worker context to
+	// the repair window only.
 	if len(rowData) > 0 {
 		done := make(chan error, 1)
-		applyErr := c.applier.Apply(ctx, chunk, rowData, func(affectedRows int64, err error) {
+		applyErr := c.applier.Apply(fixCtx, chunk, rowData, func(affectedRows int64, err error) {
 			if err != nil {
 				c.logger.Error("failed to recopy chunk via applier", "error", err)
 				done <- err
@@ -251,8 +271,8 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 			if err != nil {
 				return fmt.Errorf("recopy via applier failed: %w", err)
 			}
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-fixCtx.Done():
+			return fixCtx.Err()
 		}
 	}
 	c.logger.Info("successfully recopied chunk", "chunk", chunk.String(), "rowCount", len(rowData))
@@ -278,6 +298,14 @@ func (c *DistributedChecker) ExecTime() time.Duration {
 	c.Lock()
 	defer c.Unlock()
 	return c.execTime
+}
+
+// DifferencesFound returns the number of chunks where a source/target
+// mismatch was detected in the most recent (or in-flight) pass. Used by
+// the continuous-checksum loop to decide whether a cancellation swallow
+// is safe.
+func (c *DistributedChecker) DifferencesFound() uint64 {
+	return c.differencesFound.Load()
 }
 
 func (c *DistributedChecker) setInvalid(newVal bool) {
@@ -426,8 +454,15 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	c.Unlock()
 
 	// This is only really used if there are checksum failures
-	// and chunks need to be recopied.
-	if err := c.applier.Start(ctx); err != nil {
+	// and chunks need to be recopied. We start the applier under a context
+	// that is decoupled from `ctx` so that a parent-ctx cancellation in the
+	// middle of a recopy (e.g. a sentinel drop during the continuous-checksum
+	// loop) does not abort the applier's worker writes between the DELETE
+	// step in replaceChunk and the actual reapply: replaceChunk builds its
+	// own fixCtx via context.WithoutCancel, but the workers would otherwise
+	// take their cancellation from the ctx that Start was given. The applier
+	// is still cleanly shut down via the deferred Stop() when Run returns.
+	if err := c.applier.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("failed to start applier: %w", err)
 	}
 

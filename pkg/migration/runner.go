@@ -34,6 +34,11 @@ var (
 	sentinelWaitLimit       = 48 * time.Hour
 	sentinelTableName       = "_spirit_sentinel"   // this is now a const.
 	checkpointTableName     = "_spirit_checkpoint" // const for multi-migration checkpoints.
+	// continuousChecksumMinInterval is the minimum amount of time between
+	// continuous-checksum iterations during the sentinel wait. Without it,
+	// small tables would re-acquire the table lock back-to-back since each
+	// pass finishes in seconds.
+	continuousChecksumMinInterval = 1 * time.Hour
 )
 
 type Runner struct {
@@ -59,6 +64,15 @@ type Runner struct {
 	checksumChunker table.Chunker // the chunker for checksum
 
 	chunkerMu sync.RWMutex // protects copyChunker and checksumChunker from concurrent access
+
+	// continuousFlushMu serializes the sentinel-wait flush goroutine with
+	// each continuous-checksum iteration. The flush holds the subscription
+	// mutex and runs DML against the new table; the checksum's initConnPool
+	// acquires a table lock and then a subscription mutex via
+	// FlushUnderTableLock. Running them concurrently can deadlock. We hold
+	// continuousFlushMu around both the periodic flush and the checker.Run
+	// call so they never overlap.
+	continuousFlushMu sync.Mutex
 
 	// Track some key statistics.
 	startTime             time.Time
@@ -269,25 +283,28 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// r.waitOnSentinel may return an error if there is
-	// some unexpected problem checking for the existence of
-	// the sentinel table OR if sentinelWaitLimit is exceeded.
-	// This function is invoked even if DeferCutOver is false
-	// because it's possible that the sentinel table was created
-	// manually after the migration started.
+	// Post-copy phase: catch up on replClient apply, run ANALYZE TABLE
+	// so cutover stats are fresh, and run the initial checksum.
+	if err := r.postCopyPhase(ctx); err != nil {
+		return err
+	}
+
+	// Block on the sentinel table (if defer-cutover is in use). While we
+	// wait, waitOnSentinelTable also runs a "continuous checksum" loop in
+	// the background — see docs/migrate.md for the two-checksum model.
+	// The initial checksum above is the correctness gate; the continuous
+	// checksum opportunistically re-verifies data so that on sentinel drop
+	// we have high confidence even if the wait lasted hours.
+	//
+	// This is invoked even if DeferCutOver is false because it's possible
+	// that the sentinel table was created manually after the migration
+	// started.
 	if r.migration.RespectSentinel {
 		r.sentinelWaitStartTime = time.Now()
 		r.status.Set(status.WaitingOnSentinelTable)
 		if err := r.waitOnSentinelTable(ctx); err != nil {
 			return err
 		}
-	}
-	// Perform steps to prepare for final cutover.
-	// This includes computing a checksum,
-	// catching up on replClient apply, running ANALYZE TABLE so
-	// that the statistics will be up-to-date on cutover.
-	if err := r.prepareForCutover(ctx); err != nil {
-		return err
 	}
 	// Run any checks that need to be done pre-cutover.
 	if err := r.runChecks(ctx, check.ScopeCutover); err != nil {
@@ -362,11 +379,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// prepareForCutover performs steps to prepare for the final cutover.
-// most of these steps are technically optional, but skipping them
-// could for example cause a stall during the cutover if the replClient
-// has too many pending updates.
-func (r *Runner) prepareForCutover(ctx context.Context) error {
+// postCopyPhase runs the work that happens between copy-rows and the
+// sentinel wait: drain the binlog backlog, run ANALYZE TABLE, and
+// perform the initial checksum. When defer-cutover is not in use this
+// is also the last phase before cutover.
+func (r *Runner) postCopyPhase(ctx context.Context) error {
 	r.status.Set(status.ApplyChangeset)
 	// Disable the periodic flush and flush all pending events.
 	// We want it disabled for ANALYZE TABLE and acquiring a table lock
@@ -1336,8 +1353,16 @@ func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
 	return sentinelTableExists > 0, nil
 }
 
-// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped
-func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
+// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
+// While we wait, run a "continuous checksum" loop in the background as a
+// best-effort consistency re-check. The continuous checksum is purely
+// opportunistic — the initial checksum (already run in postCopyPhase) is
+// the correctness gate. The continuous loop is cancelled when the sentinel
+// drops; any in-flight chunk recopy runs under context.WithoutCancel up to
+// fixChunkTimeout so the DELETE + re-insert pair stays atomic, then the
+// goroutine exits. A real "checksum found differences" surfaced from that
+// in-flight repair is promoted into retErr and aborts cutover.
+func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 	if sentinelExists, err := r.sentinelTableExists(ctx); err != nil {
 		return err
 	} else if !sentinelExists {
@@ -1349,6 +1374,71 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 		"sentinel-table", sentinelTableName,
 		"wait-limit", sentinelWaitLimit,
 	)
+
+	// Keep periodic flushing alive throughout the sentinel wait. postCopyPhase
+	// stopped it; without restarting it here, binlog deltas accumulate until
+	// the next continuous-checksum iteration (up to an hour) and the cutover
+	// has to drain them all under the table lock.
+	//
+	// We serialize this flush with the continuous-checksum iteration via
+	// continuousFlushMu. Holding the mutex during a flush ensures we are not
+	// flushing while the checksum's initConnPool is acquiring its table lock,
+	// which would deadlock: our flush holds the subscription mutex while its
+	// DML waits on the table lock, and FlushUnderTableLock then needs that
+	// same subscription mutex.
+	flushCtx, cancelFlush := context.WithCancel(ctx)
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		ticker := time.NewTicker(repl.DefaultFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-flushCtx.Done():
+				return
+			case <-ticker.C:
+				r.continuousFlushMu.Lock()
+				err := r.replClient.Flush(flushCtx)
+				r.continuousFlushMu.Unlock()
+				if err != nil && !errors.Is(err, context.Canceled) {
+					r.logger.Warn("periodic flush failed during sentinel wait", "error", err)
+				}
+			}
+		}
+	}()
+
+	// Spawn the continuous checksum. It uses its own checker + chunker and is
+	// not wired into the checkpoint — so a crash during sentinel wait does
+	// not add mandatory checksum time on resume.
+	continuousCtx, cancelContinuous := context.WithCancel(ctx)
+	continuousDone := make(chan struct{})
+	var continuousErr error
+	go func() {
+		defer close(continuousDone)
+		continuousErr = r.runContinuousChecksum(continuousCtx)
+	}()
+
+	// Single defer that handles teardown for both goroutines. We cancel the
+	// flush goroutine first so that its in-flight Flush (which holds
+	// continuousFlushMu) can drop the mutex promptly, otherwise the
+	// continuous goroutine may block on Lock() while we wait for it to exit.
+	// Then we cancel the continuous goroutine and wait for both to finish.
+	// runContinuousChecksum already filters harmless sentinel cancellations
+	// to nil, so any non-nil continuousErr is one it intentionally chose to
+	// propagate — surface it as retErr whenever the parent ctx itself has
+	// not been cancelled (parent cancellation is its own error path).
+	defer func() {
+		cancelFlush()
+		cancelContinuous()
+		<-flushDone
+		<-continuousDone
+		if retErr != nil {
+			return
+		}
+		if continuousErr != nil && ctx.Err() == nil {
+			retErr = fmt.Errorf("continuous checksum failed: %w", continuousErr)
+		}
+	}()
 
 	timer := time.NewTimer(sentinelWaitLimit)
 	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
@@ -1363,7 +1453,10 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 				return err
 			}
 			if !sentinelExists {
-				// Sentinel table has been dropped, we can proceed with cutover
+				// Sentinel table has been dropped, we can proceed with cutover.
+				// The defer above still observes continuousErr — if a continuous
+				// pass was mid-recopy and surfaces a real drift error, that
+				// overrides this nil return.
 				r.logger.Info("sentinel table dropped",
 					"time", t,
 				)
@@ -1371,8 +1464,144 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 			}
 		case <-timer.C:
 			return errors.New("timed out waiting for sentinel table to be dropped")
+		case <-continuousDone:
+			// Continuous goroutine exited before the sentinel was dropped.
+			// If our parent ctx is cancelled, the goroutine just propagated
+			// that cancellation — surface the parent's error directly.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// A non-nil error means continuous detected a real failure.
+			// Return it as a regular migration failure — do NOT call
+			// fatalError, which would invalidate the checkpoint and force
+			// the operator to start from scratch. The initial checksum is
+			// already durable on disk via FixDifferences, so a re-run
+			// resumes from the existing checkpoint.
+			if continuousErr != nil {
+				return fmt.Errorf("continuous checksum failed: %w", continuousErr)
+			}
+			return errors.New("continuous checksum exited unexpectedly")
 		}
 	}
+}
+
+// runContinuousChecksum loops calling a fresh checker over the source/new
+// tables for as long as ctx is alive. It is the "continuous" half of the
+// two-checksum model (see docs/migrate.md) and is only called while the
+// migration is blocked in WaitingOnSentinelTable.
+//
+// The checker used here is separate from r.checker and uses a fresh chunker
+// so checkpoint state is unaffected. Single-threaded by design — checksum
+// throttling is tracked separately in github.com/block/spirit/issues/831.
+func (r *Runner) runContinuousChecksum(ctx context.Context) error {
+	chunker, err := r.buildContinuousChunker()
+	if err != nil {
+		return fmt.Errorf("failed to build continuous-checksum chunker: %w", err)
+	}
+	if err := chunker.Open(); err != nil {
+		return fmt.Errorf("failed to open continuous-checksum chunker: %w", err)
+	}
+	defer utils.CloseAndLog(chunker)
+
+	checker, err := checksum.NewChecker(
+		[]*sql.DB{r.db},
+		chunker,
+		[]*repl.Client{r.replClient},
+		&checksum.CheckerConfig{
+			// TODO(#831): once the throttler can size threads dynamically,
+			// replace the hard-coded 1 with the migration's thread count.
+			Concurrency:     1,
+			TargetChunkTime: r.migration.TargetChunkTime,
+			DBConfig:        r.dbConfig,
+			Logger:          r.logger,
+			FixDifferences:  true,
+			// One pass per outer-loop iteration; the continuous-checksum
+			// loop itself supplies the retry, so we don't nest a second
+			// retry loop inside each iteration.
+			MaxRetries:   1,
+			YieldTimeout: r.migration.ChecksumYieldTimeout,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create continuous checker: %w", err)
+	}
+
+	iteration := 0
+	var lastDuration time.Duration // zero before the first iteration → full interval wait
+	for {
+		// Wait the minimum interval (less time already spent in the prior
+		// iteration). On the first iteration this is the full interval, so
+		// we don't kick off a checksum immediately after the initial pass.
+		// Sleep is ctx-cancellable so a sentinel drop interrupts immediately.
+		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
+			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
+			timer := time.NewTimer(remaining)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		// Reset the chunker so this iteration scans the table from the start.
+		// (Skipped on the very first pass — the chunker is already freshly Open'd.)
+		if iteration > 0 {
+			if err := chunker.Reset(); err != nil {
+				return fmt.Errorf("failed to reset continuous-checksum chunker: %w", err)
+			}
+		}
+		iteration++
+		iterationStart := time.Now()
+		r.logger.Info("continuous checksum iteration starting", "iteration", iteration)
+		// Serialize the iteration with the sentinel-wait flush goroutine so
+		// they don't race on the subscription mutex / table lock.
+		r.continuousFlushMu.Lock()
+		runErr := checker.Run(ctx)
+		r.continuousFlushMu.Unlock()
+		if runErr != nil {
+			// Only suppress a `context.Canceled` that came from OUR ctx
+			// being cancelled (the sentinel was dropped while a pass was
+			// in flight) AND no mismatch was detected during the pass.
+			// If `DifferencesFound() > 0`, the fix path may have run only
+			// partway through — especially the distributed Apply step,
+			// whose worker context tracks the parent — so propagate the
+			// failure to abort cutover. A nested `DeadlineExceeded` from
+			// fixChunkTimeout always propagates (stuck recopy).
+			if ctx.Err() != nil && errors.Is(runErr, context.Canceled) && checker.DifferencesFound() == 0 {
+				return nil
+			}
+			return runErr
+		}
+		lastDuration = time.Since(iterationStart)
+		r.logger.Info("continuous checksum iteration complete",
+			"iteration", iteration,
+			"duration", lastDuration.Round(time.Second),
+		)
+	}
+}
+
+// buildContinuousChunker builds a fresh chunker for the continuous-checksum
+// loop. It is deliberately not wired into r.checksumChunker / checkpoint.
+func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
+	chunkers := make([]table.Chunker, 0, len(r.changes))
+	for _, change := range r.changes {
+		columnRenames := change.stmt.ColumnRenameMap()
+		columnMapping := table.NewColumnMapping(change.table, change.newTable, columnRenames)
+		c, err := table.NewChunker(change.table, table.ChunkerConfig{
+			NewTable:        change.newTable,
+			TargetChunkTime: r.migration.TargetChunkTime,
+			Logger:          r.logger,
+			ColumnMapping:   columnMapping,
+		})
+		if err != nil {
+			return nil, err
+		}
+		chunkers = append(chunkers, c)
+	}
+	return table.NewMultiChunker(chunkers...), nil
 }
 
 func (r *Runner) Cancel() {

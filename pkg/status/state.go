@@ -20,12 +20,16 @@ var (
 const (
 	Initial State = iota
 	CopyRows
-	WaitingOnSentinelTable
 	ApplyChangeset // first mass apply
 	RestoreSecondaryIndexes
 	AnalyzeTable
 	Checksum
 	PostChecksum // second mass apply
+	// WaitingOnSentinelTable comes after the initial checksum so that
+	// `state >= Checksum` is true while the sentinel-wait blocks the cutover.
+	// During this state Spirit also runs the "continuous checksum" loop
+	// described in docs/migrate.md.
+	WaitingOnSentinelTable
 	CutOver
 	Close
 	ErrCleanup
