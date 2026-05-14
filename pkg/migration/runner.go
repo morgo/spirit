@@ -305,17 +305,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.waitOnSentinelTable(ctx); err != nil {
 			return err
 		}
-		// Re-run ANALYZE TABLE after the sentinel drops. The initial
-		// ANALYZE in postCopyPhase may be stale if the sentinel sat for
-		// hours/days while ongoing writes were applied to _new — fresh
-		// stats keep cutover plans honest.
-		r.status.Set(status.AnalyzeTable)
-		r.logger.Info("Re-running ANALYZE TABLE after sentinel drop")
-		for _, change := range r.changes {
-			if err := dbconn.Exec(ctx, r.db, "ANALYZE TABLE %n.%n", change.newTable.SchemaName, change.newTable.TableName); err != nil {
-				return err
-			}
-		}
 	}
 	// Run any checks that need to be done pre-cutover.
 	if err := r.runChecks(ctx, check.ScopeCutover); err != nil {
