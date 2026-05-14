@@ -289,6 +289,14 @@ func (c *DistributedChecker) ExecTime() time.Duration {
 	return c.execTime
 }
 
+// DifferencesFound returns the number of chunks where a source/target
+// mismatch was detected in the most recent (or in-flight) pass. Used by
+// the continuous-checksum loop to decide whether a cancellation swallow
+// is safe.
+func (c *DistributedChecker) DifferencesFound() uint64 {
+	return c.differencesFound.Load()
+}
+
 func (c *DistributedChecker) setInvalid(newVal bool) {
 	c.Lock()
 	defer c.Unlock()
@@ -435,8 +443,15 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	c.Unlock()
 
 	// This is only really used if there are checksum failures
-	// and chunks need to be recopied.
-	if err := c.applier.Start(ctx); err != nil {
+	// and chunks need to be recopied. We start the applier under a context
+	// that is decoupled from `ctx` so that a parent-ctx cancellation in the
+	// middle of a recopy (e.g. a sentinel drop during the continuous-checksum
+	// loop) does not abort the applier's worker writes between the DELETE
+	// step in replaceChunk and the actual reapply: replaceChunk builds its
+	// own fixCtx via context.WithoutCancel, but the workers would otherwise
+	// take their cancellation from the ctx that Start was given. The applier
+	// is still cleanly shut down via the deferred Stop() when Run returns.
+	if err := c.applier.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("failed to start applier: %w", err)
 	}
 

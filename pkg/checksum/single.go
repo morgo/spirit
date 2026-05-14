@@ -311,6 +311,14 @@ func (c *SingleChecker) ExecTime() time.Duration {
 	return c.execTime
 }
 
+// DifferencesFound returns the number of chunks where a source/target
+// mismatch was detected in the most recent (or in-flight) pass. Used by
+// the continuous-checksum loop to decide whether a cancellation swallow
+// is safe.
+func (c *SingleChecker) DifferencesFound() uint64 {
+	return c.differencesFound.Load()
+}
+
 func (c *SingleChecker) setInvalid(newVal bool) {
 	c.Lock()
 	defer c.Unlock()

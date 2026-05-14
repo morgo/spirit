@@ -26,7 +26,7 @@ This will copy all tables from the source database to the target database, verif
 - Type: Boolean
 - Default value: `false`
 
-When set to `true`, a sentinel table (`_spirit_sentinel`) is created on the **source** database after the table copy completes. Move will block before cutover until the sentinel table is manually dropped, giving the operator a chance to verify the copy before proceeding.
+When set to `true`, a sentinel table (`_spirit_sentinel`) is created on the **source** database during setup, before the row copy starts. Move continues through copy and the initial checksum, then blocks before cutover until the sentinel table is manually dropped, giving the operator a chance to verify the copy before proceeding.
 
 #### Two-checksum model
 
