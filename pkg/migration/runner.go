@@ -577,7 +577,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		FixDifferences:  true,
-		MaxRetries:      3,
+		MaxRetries:      1,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
 	})
 
