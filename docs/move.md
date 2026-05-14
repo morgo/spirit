@@ -41,7 +41,9 @@ Move order (with `create-sentinel`):
 copy rows → initial checksum → wait on sentinel (continuous checksum loop) → cutover
 ```
 
-The continuous checksum runs single-threaded today (see [block/spirit#831](https://github.com/block/spirit/issues/831) for dynamic thread tuning) and shares the same fixup behavior as the initial pass. After each iteration completes, Move waits a minimum of one hour before starting the next pass so that small tables don't churn the table lock back-to-back; the wait is interrupted immediately when the sentinel is dropped. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
+The continuous checksum runs single-threaded today (see [block/spirit#831](https://github.com/block/spirit/issues/831) for dynamic thread tuning). After each iteration completes, Move waits a minimum of one hour before starting the next pass so that small tables don't churn the table lock back-to-back; the wait is interrupted immediately when the sentinel is dropped. It is enabled automatically whenever the sentinel is in effect — there is no separate flag.
+
+Each continuous-checksum pass runs once with no internal retry (the loop itself is the retry mechanism). If a pass detects a difference, the affected chunk is recopied via `FixDifferences` and the move is aborted with a "checksum found differences" error. The fix is durable on disk, so the operator can re-run the move and it will resume from the checkpoint and succeed if the drift has been addressed. The intent is "fail loud, investigate" — since the initial checksum already passed, any difference detected during the sentinel wait is unexpected.
 
 ### defer-secondary-indexes
 
