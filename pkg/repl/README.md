@@ -125,7 +125,16 @@ The subscription recovers automatically:
    `TableMapEvent`s — MySQL does not re-send TableMaps mid-file, so
    restarting at any later offset would leave the parser unable to
    decode subsequent `RowsEvent`s.
-4. Re-read events flow into the now queue-mode subscription in
+4. `readStream` filters out events ≤ `flushedPos` on the way in
+   (`Client.eventAlreadyFlushed`). Those events were already applied
+   to the destination by a prior flush; replaying them against the
+   now-newer destination state would overwrite correct rows with
+   stale row images and can recreate the very 1062 collision the
+   rewind was meant to resolve (e.g. an old "activate" event for
+   row A while the destination's current state has row B activated
+   for the same unique-key bucket). Only events strictly past
+   `flushedPos` enter the subscription's queue.
+5. The remaining events flow into the now queue-mode subscription in
    binlog (FIFO) order. `flushQueueLocked` carries that order into
    the multi-row upsert, so the swap pair lands deactivate-first
    and no longer collides. The subscription stays in queue mode for

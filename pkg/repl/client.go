@@ -301,6 +301,34 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 	c.bufferedPos = pos
 }
 
+// eventAlreadyFlushed reports whether a binlog event at the given
+// position is at or before c.flushedPos and therefore corresponds to
+// changes already committed to the destination table by a prior flush.
+//
+// In normal forward-flowing operation this is always false — flushedPos
+// only advances *after* its corresponding events have been applied, so
+// every new event has a position strictly past it. It only matters
+// during the rewind path (block/spirit#847): recreateStreamer can
+// restart the binlog reader at position 4 of c.flushedPos.Name to pick
+// up the file's TableMap events, and the events between position 4 and
+// the old flushedPos.Pos are events we already applied. Replaying them
+// would overwrite *newer* destination state with stale row images and
+// can recreate the very 1062 collision the rewind was meant to resolve
+// (an old "activate" event for row A while the destination's current
+// state has row B activated for the same unique-key bucket). Skipping
+// them keeps the destination at its already-correct state for those
+// rows; only events strictly past flushedPos are buffered for replay.
+func (c *Client) eventAlreadyFlushed(currentLogName string, logPos uint32) bool {
+	if logPos == 0 {
+		// FormatDescription / synthetic rotate / etc.
+		return false
+	}
+	c.Lock()
+	defer c.Unlock()
+	eventPos := mysql.Position{Name: currentLogName, Pos: logPos}
+	return eventPos.Compare(c.flushedPos) <= 0
+}
+
 // getBufferedPos returns the buffered position under a mutex.
 func (c *Client) getBufferedPos() mysql.Position {
 	c.Lock()
@@ -728,6 +756,16 @@ func (c *Client) readStream(ctx context.Context) {
 			})
 			continue
 		case *replication.RowsEvent:
+			// Skip events already covered by a prior flush. Normally this is a
+			// no-op (events flow forward from flushedPos); it only fires during
+			// a rewind, where we restarted the binlog reader at position 4 of
+			// the flushedPos file to pick up TableMap events. Replaying the
+			// already-applied prefix would overwrite newer destination state
+			// with stale row images and can recreate the 1062 the rewind was
+			// meant to resolve. See #847 and Client.eventAlreadyFlushed.
+			if c.eventAlreadyFlushed(currentLogName, ev.Header.LogPos) {
+				break
+			}
 			// Rows event, check if there are any active subscriptions
 			// for it, and pass it to the subscription.
 			if err = c.processRowsEvent(ev, event); err != nil {
