@@ -291,6 +291,64 @@ func TestClassifyInvalid(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoStatements)
 }
 
+// TestClassifyReservedWordTable verifies that ALTER TABLE statements on
+// tables whose names are SQL reserved words (e.g. `groups`, `order`, `user`)
+// are classified correctly when the identifier is backtick-quoted. The
+// unquoted form is rejected by the parser — same as MySQL itself — and is
+// not Spirit's responsibility to accept.
+func TestClassifyReservedWordTable(t *testing.T) {
+	tests := []struct {
+		name      string
+		sql       string
+		wantTable string
+		wantErr   bool
+	}{
+		{
+			name:      "MODIFY + AUTO_INCREMENT compound on `groups`",
+			sql:       "ALTER TABLE `groups` MODIFY `gid` bigint NOT NULL AUTO_INCREMENT, AUTO_INCREMENT = 5000210000",
+			wantTable: "groups",
+		},
+		{
+			name:      "AUTO_INCREMENT alone on `groups`",
+			sql:       "ALTER TABLE `groups` AUTO_INCREMENT = 5000210000",
+			wantTable: "groups",
+		},
+		{
+			name:      "MODIFY alone on `groups`",
+			sql:       "ALTER TABLE `groups` MODIFY `gid` bigint NOT NULL AUTO_INCREMENT",
+			wantTable: "groups",
+		},
+		{
+			name:      "ADD COLUMN on `order`",
+			sql:       "ALTER TABLE `order` ADD COLUMN foo INT",
+			wantTable: "order",
+		},
+		{
+			name:      "schema-qualified `groups`",
+			sql:       "ALTER TABLE test.`groups` ADD COLUMN foo INT",
+			wantTable: "groups",
+		},
+		{
+			name:    "unquoted reserved word rejected by parser",
+			sql:     "ALTER TABLE groups ADD COLUMN foo INT",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results, err := Classify(tt.sql)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, results, 1)
+			require.Equal(t, StatementAlterTable, results[0].Type)
+			require.Equal(t, tt.wantTable, results[0].Table)
+		})
+	}
+}
+
 func TestStatementTypeString(t *testing.T) {
 	require.Equal(t, "ALTER TABLE", StatementAlterTable.String())
 	require.Equal(t, "CREATE TABLE", StatementCreateTable.String())

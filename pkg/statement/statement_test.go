@@ -10,6 +10,34 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+// TestExtractFromReservedWordTable verifies that New() correctly extracts the
+// alter clause (the part after `ALTER TABLE <name>`) when the table name is a
+// SQL reserved word. The trimLen arithmetic in New() must not be tripped up by
+// the parser's backtick-quoting of reserved identifiers.
+func TestExtractFromReservedWordTable(t *testing.T) {
+	stmts, err := New("ALTER TABLE `groups` MODIFY `gid` bigint NOT NULL AUTO_INCREMENT, AUTO_INCREMENT = 5000210000")
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "groups", stmts[0].Table)
+	require.Equal(t, "MODIFY COLUMN `gid` BIGINT NOT NULL AUTO_INCREMENT, AUTO_INCREMENT = 5000210000", stmts[0].Alter)
+
+	stmts, err = New("ALTER TABLE `groups` AUTO_INCREMENT = 5000210000")
+	require.NoError(t, err)
+	require.Equal(t, "groups", stmts[0].Table)
+	require.Equal(t, "AUTO_INCREMENT = 5000210000", stmts[0].Alter)
+
+	stmts, err = New("ALTER TABLE `order` ADD COLUMN foo INT")
+	require.NoError(t, err)
+	require.Equal(t, "order", stmts[0].Table)
+	require.Equal(t, "ADD COLUMN `foo` INT", stmts[0].Alter)
+
+	stmts, err = New("ALTER TABLE test.`groups` ADD COLUMN foo INT")
+	require.NoError(t, err)
+	require.Equal(t, "test", stmts[0].Schema)
+	require.Equal(t, "groups", stmts[0].Table)
+	require.Equal(t, "ADD COLUMN `foo` INT", stmts[0].Alter)
+}
+
 func TestExtractFromStatement(t *testing.T) {
 	abstractStmt, err := New("ALTER TABLE t1 ADD INDEX (something)")
 	require.NoError(t, err)
