@@ -10,6 +10,7 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+
 // TestExtractFromReservedWordTable verifies that New() correctly extracts the
 // alter clause (the part after `ALTER TABLE <name>`) when the table name is a
 // SQL reserved word. The trimLen arithmetic in New() must not be tripped up by
