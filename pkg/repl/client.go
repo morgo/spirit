@@ -144,6 +144,14 @@ type Client struct {
 	subscriptionSoftLimitBytes int64
 
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
+
+	// rewindRequested is set by requestRewind (called from a subscription
+	// that just recovered from a duplicate-key collision per #847). When
+	// set, the next recreateStreamer call restarts the binlog reader at
+	// position 4 of c.flushedPos.Name rather than c.bufferedPos.Name —
+	// re-reading every event since the last fully-flushed position so the
+	// (now queue-mode) subscription can apply them in binlog FIFO order.
+	rewindRequested atomic.Bool
 }
 
 // NewClient creates a new Client instance.
@@ -450,20 +458,51 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	return nil
 }
 
-// recreateStreamer recreates the binlog streamer from the current buffered position.
-// When we recreate the syncer, the parser's table map is lost. MySQL only sends
-// TableMapEvents once per connection, so when we resume from a mid-stream position,
-// we won't have the table metadata needed to decode RowsEvents.
+// requestRewind asks readStream to recreate the binlog streamer from
+// position 4 of the flushedPos file. Called by a subscription's
+// handleFlushError after it recovers from a swap-pair duplicate-key
+// collision (block/spirit#847) and needs to replay every event since
+// the last fully-flushed position in binlog (FIFO) order.
 //
-// To handle this safely, we check if the binlog has rotated since we started:
-// - Same file as initial: error
-// - Different file: Safely recreate and resume from position 4.
+// Closing the syncer here causes the in-flight GetEvent in readStream
+// to error out; readStream sees rewindRequested and shortcuts straight
+// to recreateStreamer, skipping the consecutive-error / backoff path
+// that exists for stream-level read failures.
+func (c *Client) requestRewind() {
+	c.Lock()
+	c.rewindRequested.Store(true)
+	syncer := c.syncer
+	c.Unlock()
+	// Close the syncer *outside* the lock. recreateStreamer (which
+	// readStream is about to call) acquires the same lock, and
+	// syncer.Close blocks briefly on its internal goroutines — keeping
+	// the lock during that wait would deadlock.
+	if syncer != nil {
+		syncer.Close()
+	}
+}
+
+// recreateStreamer recreates the binlog streamer. By default it restarts
+// at position 4 of the current bufferedPos file (the existing recovery
+// path for stream-level read errors). When rewindRequested is set, it
+// restarts at position 4 of the flushedPos file instead — re-reading
+// every event since the last fully-flushed position. That path is taken
+// after a subscription's handleFlushError recovers from a swap-pair
+// duplicate-key collision per #847.
+//
+// Position 4 is the start of a binlog file; restarting there guarantees
+// the syncer sees the FormatDescriptionEvent and any TableMapEvents
+// needed to decode subsequent RowsEvents — MySQL does not re-send
+// TableMaps from earlier in the file when serving a mid-position dump,
+// so restarting mid-file would leave the parser unable to decode rows.
 func (c *Client) recreateStreamer() error {
 	c.Lock()
 	defer c.Unlock()
 
 	c.logger.Info("recreateStreamer called",
 		"buffered_position", c.bufferedPos,
+		"flushed_position", c.flushedPos,
+		"rewind_requested", c.rewindRequested.Load(),
 		"syncer_exists", c.syncer != nil,
 		"streamer_exists", c.streamer != nil)
 
@@ -473,18 +512,29 @@ func (c *Client) recreateStreamer() error {
 		c.syncer.Close()
 	}
 
-	// Still on the same binlog file we started with.
-	// Safe to replay from position 4 because the subscription data structures
-	// (deltaMap, bufferedMap, deltaQueue) are idempotent - reprocessing events
-	// will simply overwrite previous state with the same value.
+	// Pick the source file. Default: same file we'd previously been
+	// reading. Rewind path: the file that contains flushedPos so we
+	// catch every event since the last full flush, including any in a
+	// rotated-away earlier binlog.
+	sourceFile := c.bufferedPos.Name
+	rewinding := c.rewindRequested.Load()
+	if rewinding {
+		sourceFile = c.flushedPos.Name
+		c.rewindRequested.Store(false)
+		// Snap bufferedPos back so the position update in readStream
+		// (which uses ev.Header.LogPos) records a sensible value rather
+		// than a stale future one.
+		c.bufferedPos = mysql.Position{Name: sourceFile, Pos: 4}
+	}
+
 	newStartPos := mysql.Position{
-		Name: c.bufferedPos.Name,
+		Name: sourceFile,
 		Pos:  4, // Binlog files always start at position 4
 	}
 	c.logger.Info("Recreating streamer from file start",
-		"file", c.bufferedPos.Name,
-		"previous_position", c.bufferedPos.Pos,
+		"file", sourceFile,
 		"new_start_position", newStartPos,
+		"rewinding_to_flushed_pos", rewinding,
 	)
 
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
@@ -544,6 +594,26 @@ func (c *Client) readStream(ctx context.Context) {
 			// We only stop processing for context cancelled errors.
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil || c.isClosed.Load() {
 				return // stop processing
+			}
+
+			// Explicit rewind requested by a subscription that just
+			// recovered from a duplicate-key collision (#847). Skip
+			// the consecutive-error threshold and backoff — we want
+			// the rewind to happen *now*, not in 5 seconds. The
+			// recreateStreamer call below honors rewindRequested and
+			// restarts at position 4 of the flushedPos file.
+			if c.rewindRequested.Load() {
+				if recreateErr := c.recreateStreamer(); recreateErr != nil {
+					c.logger.Error("Failed to recreate streamer on explicit rewind",
+						"error", recreateErr)
+					// Fall through to normal error handling; the
+					// retry loop will pick it up.
+				} else {
+					consecutiveErrors = 0
+					recreateAttempts = 0
+					backoffDuration = initialBackoffDuration
+					continue
+				}
 			}
 
 			consecutiveErrors++

@@ -2,6 +2,7 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
+	mysql2 "github.com/go-sql-driver/mysql"
 )
 
 // The bufferedMap avoids using REPLACE INTO .. SELECT.
@@ -118,6 +120,15 @@ type bufferedMap struct {
 	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
 
 	pkIsMemoryComparable bool
+
+	// forceQueueMode is set by handleFlushError after a recoverable
+	// duplicate-key collision (block/spirit#847). Once set, queueModeActive
+	// returns true regardless of pkIsMemoryComparable / watermarkOptimization,
+	// so subsequent events accumulate in s.queue (FIFO) and flushQueueLocked
+	// drives them through the applier in binlog order. We never flip it back —
+	// once a swap-pair has been observed, this subscription stays in queue mode
+	// for the rest of the migration.
+	forceQueueMode bool
 }
 
 // Per-entry overheads applied on top of estimateRowSize so the soft
@@ -196,7 +207,13 @@ func (s *bufferedMap) Tables() []*table.TableInfo {
 // Memory-comparable PKs are never queue-mode (map-key equality matches
 // MySQL row identity). Non-memory-comparable PKs run in map mode during
 // the copy phase (watermark on) and switch to queue mode post-copy.
+//
+// One escape hatch: if forceQueueMode is set (after a recoverable
+// duplicate-key collision per #847), queue mode wins regardless.
 func (s *bufferedMap) queueModeActive() bool {
+	if s.forceQueueMode {
+		return true
+	}
 	if s.pkIsMemoryComparable {
 		return false
 	}
@@ -344,6 +361,9 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		}
 		if (i % target) == 0 {
 			if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
+				if s.handleFlushError(err) {
+					return false, nil
+				}
 				return false, err
 			}
 			deleteKeys = nil
@@ -352,6 +372,9 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 	}
 
 	if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
+		if s.handleFlushError(err) {
+			return false, nil
+		}
 		return false, err
 	}
 
@@ -367,6 +390,52 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		s.cond.Broadcast()
 	}
 	return allChangesFlushed, nil
+}
+
+// handleFlushError implements the swap-pair recovery path for #847.
+//
+// When the multi-row INSERT ... ON DUPLICATE KEY UPDATE inside flushBatch
+// fails with Error 1062, the cause is almost always that the buffered
+// map's randomized iteration handed the applier a swap pair (deactivate
+// row A, activate row B from the same source-side transaction) in the
+// wrong order — B activates first while A still holds the unique value
+// in the shadow table.
+//
+// On 1062 we:
+//
+//  1. Discard all pending changes. Their *latest* row images are still
+//     in the source-side binlog (the binlog reader has not advanced
+//     flushedPos past them), so we can re-read them.
+//  2. Flip forceQueueMode on. Subsequent events will accumulate in the
+//     FIFO queue, and flushQueueLocked drives them through the applier
+//     in binlog order — no in-batch reordering, no spurious collision.
+//  3. Ask the client to rewind the binlog reader back to position 4 of
+//     the flushedPos file. recreateStreamer handles the actual rewind
+//     once readStream sees the closed syncer.
+//
+// Returns true if we recognized and handled the error; the caller
+// should then treat the flush as a no-op (return allChangesFlushed=false
+// without an error) so flushedPos is not advanced.
+//
+// Caller must hold s.Mutex.
+func (s *bufferedMap) handleFlushError(err error) bool {
+	var me *mysql2.MySQLError
+	if !errors.As(err, &me) || me.Number != 1062 {
+		return false
+	}
+	s.c.logger.Warn("buffered-map flush hit a duplicate-key collision; "+
+		"clearing pending changes, switching to queue mode (FIFO), "+
+		"and rewinding binlog to flushed position",
+		"table", s.table.SchemaName+"."+s.table.TableName,
+		"error", err.Error(),
+		"changes_cleared", len(s.changes),
+	)
+	s.changes = make(map[string]bufferedChange)
+	s.sizeBytes = 0
+	s.forceQueueMode = true
+	s.cond.Broadcast() // wake HasChanged callers parked on the soft cap
+	s.c.requestRewind()
+	return true
 }
 
 // flushBatch flushes a batch of deletes and upserts using the applier.
