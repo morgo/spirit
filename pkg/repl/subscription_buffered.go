@@ -454,8 +454,16 @@ func (s *bufferedMap) handleFlushError(err error) bool {
 		"table", s.table.SchemaName+"."+s.table.TableName,
 		"error", err.Error(),
 		"changes_cleared", len(s.changes),
+		"queue_cleared", len(s.queue),
 	)
+	// Discard both stores. Anything that was in either is about to be
+	// re-read from the binlog by readStream after the rewind. Clearing
+	// the queue here (not just the map) also keeps sizeBytes accounting
+	// consistent — leaving stale queue entries while resetting sizeBytes
+	// would let flushQueueLocked drive sizeBytes negative when it
+	// subtracts drainedBytes on the next flush.
 	s.changes = make(map[string]bufferedChange)
+	s.queue = nil
 	s.sizeBytes = 0
 	s.forceQueueMode = true
 	s.cond.Broadcast() // wake HasChanged callers parked on the soft cap

@@ -609,6 +609,14 @@ func (c *Client) readStream(ctx context.Context) {
 					// Fall through to normal error handling; the
 					// retry loop will pick it up.
 				} else {
+					// recreateStreamer snapped bufferedPos back to
+					// {flushedPos.Name, 4}; resync our local file-name
+					// tracker so position updates for events that arrive
+					// *before* the synthetic RotateEvent record the
+					// correct file. MySQL does send a RotateEvent at the
+					// start of every binlog dump, but we shouldn't rely
+					// on that arriving before any setBufferedPos call.
+					currentLogName = c.getBufferedPos().Name
 					consecutiveErrors = 0
 					recreateAttempts = 0
 					backoffDuration = initialBackoffDuration
@@ -1038,6 +1046,7 @@ func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock
 func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
 	c.Lock()
 	newFlushedPos := c.bufferedPos
+	currentFlushedPos := c.flushedPos
 	c.Unlock()
 	var allChangesFlushed = true
 	for _, subscription := range c.subscriptions {
@@ -1062,7 +1071,15 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	// for these high contention cases. But that's not a great solution either,
 	// because the low watermark optimization helps a lot in these cases because
 	// it reduces contention between the copier and the repl applier.
-	if allChangesFlushed {
+	//
+	// Guard against a backwards move: a rewind (see Client.requestRewind, #847)
+	// can snap c.bufferedPos back to position 4 of c.flushedPos.Name to mark
+	// the binlog reader's new read position. If a flush captured that snapped
+	// value before readStream advanced bufferedPos back past flushedPos, this
+	// branch would otherwise regress the checkpoint. Skip it instead — once
+	// readStream re-reads past the old flushedPos, a subsequent flush will
+	// advance the checkpoint normally.
+	if allChangesFlushed && newFlushedPos.Compare(currentFlushedPos) >= 0 {
 		c.SetFlushedPos(newFlushedPos)
 	}
 	return nil

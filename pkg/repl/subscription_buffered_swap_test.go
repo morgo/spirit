@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
@@ -166,6 +167,49 @@ func TestBufferedMapSwapPairRecoversViaQueueMode(t *testing.T) {
 	require.Empty(t, sub.changes, "new events must not land back in the map")
 	require.Len(t, sub.queue, 1, "new events must land in the FIFO queue")
 	sub.Unlock()
+}
+
+// TestFlushDoesNotRegressFlushedPosAfterRewind covers the defensive
+// guard in `Client.flush` against a backwards checkpoint move when
+// a rewind has snapped `bufferedPos` back. Without the guard, a flush
+// that happened to run between the rewind (which sets bufferedPos =
+// {flushedPos.Name, 4}) and readStream catching up past the old
+// flushedPos.Pos would publish the rewound bufferedPos as the new
+// flushedPos — silently rewinding checkpoints.
+//
+// We don't run a real binlog reader here. We exercise `flush` directly
+// on a client that has no subscriptions (so allChangesFlushed=true)
+// and assert that flushedPos does not move backwards when bufferedPos
+// is set behind it.
+func TestFlushDoesNotRegressFlushedPosAfterRewind(t *testing.T) {
+	client := &Client{
+		db:              nil, // unused: no subscriptions to flush
+		logger:          slog.Default(),
+		concurrency:     1,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+		subscriptions:   map[string]Subscription{},
+	}
+
+	// Pretend we'd flushed up to (file, 5000) and then a rewind dropped
+	// bufferedPos back to the start of the file.
+	advanced := mysql.Position{Name: "binlog.000042", Pos: 5000}
+	rewound := mysql.Position{Name: "binlog.000042", Pos: 4}
+	client.SetFlushedPos(advanced)
+	client.setBufferedPos(rewound)
+
+	require.NoError(t, client.flush(t.Context(), false, nil))
+
+	require.Equal(t, advanced, client.GetBinlogApplyPosition(),
+		"flushedPos must not regress when a flush captures a rewound bufferedPos")
+
+	// Sanity: once bufferedPos advances back past the old flushedPos, a
+	// subsequent flush *does* move the checkpoint forward.
+	forward := mysql.Position{Name: "binlog.000042", Pos: 6000}
+	client.setBufferedPos(forward)
+	require.NoError(t, client.flush(t.Context(), false, nil))
+	require.Equal(t, forward, client.GetBinlogApplyPosition(),
+		"flushedPos should advance once bufferedPos is ahead again")
 }
 
 // TestSwapPairFullRecoveryViaQueueMode drives the full end-to-end
