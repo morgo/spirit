@@ -26,30 +26,55 @@ import (
 // binlog_order_commits = ON. Storing the row image inline (rather than
 // re-reading source via REPLACE INTO ... SELECT) sidesteps that race.
 //
-// Behaviour switches based on (watermarkOptimizationEnabled,
-// pkIsMemoryComparable):
+// Behaviour switches based on (forceQueueMode,
+// watermarkOptimizationEnabled, pkIsMemoryComparable):
 //
-//   - pkIsMemoryComparable=true: always map mode. Map-key equality matches
+//   - forceQueueMode=true: always queue mode. Set permanently by
+//     handleFlushError after the subscription recovers from a duplicate-
+//     key collision (see "Optimistic batching" below and #847).
+//   - pkIsMemoryComparable=true: map mode. Map-key equality matches
 //     MySQL row identity, so LWW dedup is correct.
 //   - pkIsMemoryComparable=false: map mode during the copy phase
 //     (watermark on), queue mode post-copy. The chunker's later SELECT
 //     covers in-window case-collision races during the copy phase; the
 //     post-cutover checksum repairs any divergence that slips through.
 //
-// Why queue mode at all? With case-insensitive collations, "A" and "a"
-// hash to distinct keys but resolve to the same row in MySQL, so a map's
-// non-deterministic iteration would apply the events in the wrong order.
-// FIFO ordering applies them in binlog order, which the target's own
-// collation-aware uniqueness then collapses correctly. The queue still
-// stores row images and applies them via the applier — no
-// REPLACE INTO ... SELECT, so #746 stays fixed and cross-server moves
-// stay supported per #607.
+// Why queue mode at all? Two unrelated reasons:
 //
-// SetWatermarkOptimization owns the transition: when its toggle changes
-// which store is active, it drains the outgoing store inline. Past that
-// boundary the invariant holds — only the currently-active store may
-// have entries — so HasChanged never has to merge into a stale map and
-// Flush never has to drain both stores in the normal path.
+//  1. Collation-insensitive PKs: with case-insensitive collations "A"
+//     and "a" hash to distinct keys but resolve to the same row in
+//     MySQL, so a map's non-deterministic iteration would apply the
+//     events in the wrong order. FIFO ordering applies them in binlog
+//     order, which the target's own collation-aware uniqueness then
+//     collapses correctly.
+//  2. Optimistic batching for unique keys (#847): the map flush hands
+//     the applier a batched INSERT...ON DUPLICATE KEY UPDATE. MySQL
+//     processes its VALUES list in array order, so the row order in
+//     the batch matters when two rows in it can collide on a unique
+//     key. The map's randomized iteration is fine for the common case
+//     where each row's upsert depends only on its own PK, but it
+//     breaks for "swap" patterns — a workload that legally moves a
+//     unique value between two rows inside one transaction
+//     (UPDATE A SET col=NULL; UPDATE B SET col='val';). When the
+//     activating row happens to come first in the batch, MySQL fails
+//     it with Error 1062 because the deactivating row still holds the
+//     value in the shadow. handleFlushError catches the 1062, clears
+//     the map, flips forceQueueMode on, and asks the client to rewind
+//     the binlog reader so the lost events can be re-read FIFO and
+//     applied in binlog order.
+//
+// Either path keeps the row image inline and applies via the applier —
+// no REPLACE INTO ... SELECT, so #746 stays fixed and cross-server
+// moves stay supported per #607.
+//
+// SetWatermarkOptimization owns the watermark-driven transition: when
+// its toggle changes which store is active, it drains the outgoing
+// store inline. Past that boundary the invariant holds — only the
+// currently-active store may have entries — so HasChanged never has to
+// merge into a stale map and Flush never has to drain both stores in
+// the normal path. The forceQueueMode transition is *not* drained by
+// SetWatermarkOptimization; handleFlushError discards the map outright
+// because the rewind will re-read those events from the binlog.
 
 type bufferedChange struct {
 	logicalRow  applier.LogicalRow
