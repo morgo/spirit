@@ -169,6 +169,47 @@ func TestBufferedMapSwapPairRecoversViaQueueMode(t *testing.T) {
 	sub.Unlock()
 }
 
+// TestEventAlreadyFlushedSkipsBeforeFlushedPos exercises the position
+// filter that readStream uses to skip events ≤ flushedPos during a
+// rewind. Without it, the rewind path (which restarts the binlog
+// reader at position 4 of flushedPos.Name to pick up TableMap events)
+// re-buffers events that were already applied to the destination by
+// a prior flush. Replaying those old row images against the now
+// newer destination state can recreate the 1062 collision the rewind
+// was meant to resolve. See block/spirit#847 and the production
+// regression in `balance_changes` reported on 2026-05-15.
+func TestEventAlreadyFlushedSkipsBeforeFlushedPos(t *testing.T) {
+	client := &Client{
+		db:              nil,
+		logger:          slog.Default(),
+		concurrency:     1,
+		targetBatchSize: 1000,
+		dbConfig:        dbconn.NewDBConfig(),
+		subscriptions:   map[string]Subscription{},
+	}
+	client.SetFlushedPos(mysql.Position{Name: "binlog.000042", Pos: 5000})
+
+	// Position 0 (FormatDescriptionEvent, synthetic rotates) is never skipped.
+	require.False(t, client.eventAlreadyFlushed("binlog.000042", 0))
+
+	// Earlier file → already flushed.
+	require.True(t, client.eventAlreadyFlushed("binlog.000041", 1234567))
+
+	// Same file, before flushedPos → already flushed.
+	require.True(t, client.eventAlreadyFlushed("binlog.000042", 100))
+
+	// Same file, exactly at flushedPos → already flushed (LogPos is the
+	// end of the event, so equal means the event ends at the flushed
+	// boundary and was part of the last fully-flushed batch).
+	require.True(t, client.eventAlreadyFlushed("binlog.000042", 5000))
+
+	// Same file, past flushedPos → not flushed, must be processed.
+	require.False(t, client.eventAlreadyFlushed("binlog.000042", 5001))
+
+	// Later file → not flushed, must be processed.
+	require.False(t, client.eventAlreadyFlushed("binlog.000043", 4))
+}
+
 // TestFlushDoesNotRegressFlushedPosAfterRewind covers the defensive
 // guard in `Client.flush` against a backwards checkpoint move when
 // a rewind has snapped `bufferedPos` back. Without the guard, a flush
