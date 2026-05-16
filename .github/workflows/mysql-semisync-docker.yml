@@ -1,0 +1,37 @@
+name: MySQL 8.0.45 (semi-sync, no replica) /w docker-compose
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect non-docs changes
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+
+      # Brings up a MySQL source with semi-sync enabled and no replica
+      # attached. `rpl_semi_sync_source_timeout=100ms` widens the
+      # binlog→commit-visibility window from a rare CI flake (#746) to a
+      # guaranteed event on every committing transaction, so the buffered
+      # replication subscription's "read row images straight from the
+      # binlog" property is exercised deterministically.
+      - name: Test (semi-sync, no replica)
+        if: steps.filter.outputs.code == 'true'
+        run: docker compose -f semisync.yml up mysql test --abort-on-container-exit --exit-code-from test
+        working-directory: compose
+
+      - name: Skip — documentation-only change
+        if: steps.filter.outputs.code != 'true'
+        run: echo "Documentation-only change detected; skipping tests."

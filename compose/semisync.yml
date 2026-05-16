@@ -1,0 +1,65 @@
+# Semi-sync source with no replica attached — used by the
+# `mysql-semisync-docker.yml` workflow to deterministically reproduce the
+# binlog/visibility lag documented in issue #746 on every commit.
+#
+# The source has the semi-sync source plugin loaded and `rpl_semi_sync_source_timeout`
+# pinned at 100ms. With no replica connected, every committing transaction:
+#   1. writes its row events to the binlog (immediately visible to replication clients),
+#   2. waits up to 100ms for a semi-sync ACK that will never arrive,
+#   3. times out and proceeds to make the InnoDB commit visible to local SELECTs.
+#
+# That widens the binlog→commit-visibility race from a CI-load-dependent
+# rare flake to a guaranteed 100ms window for every transaction. Spirit's
+# buffered replication subscription (production default) reads row images
+# directly from the binlog and must not regress to the pre-#821 design
+# that issued `REPLACE INTO _new ... SELECT FROM original ...` against
+# rows that aren't visible yet.
+services:
+  mysql:
+    image: mysql:8.0.45
+    ports: [ '8034:3306' ]
+    # to suppress mbind: Operation not permitted in CI
+    # https://stackoverflow.com/a/55706057
+    cap_add:
+      - SYS_NICE
+    environment:
+      MYSQL_ROOT_PASSWORD: msandbox
+    healthcheck:
+      test: mysqladmin ping -h 127.0.0.1 -u root --password=$$MYSQL_ROOT_PASSWORD
+      start_period: 1s
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    volumes:
+      - mysql-semisync-data-dir:/var/lib/mysql
+      - ./bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
+    command: >-
+      --server-id=1
+      --log-bin=mysql-bin
+      --gtid-mode=on
+      --enforce-gtid-consistency=on
+      --plugin-load-add=rpl_semi_sync_source=semisync_source.so
+      --rpl-semi-sync-source-enabled=ON
+      --rpl-semi-sync-source-timeout=100
+      --rpl-semi-sync-source-wait-no-replica=ON
+      --rpl-semi-sync-source-wait-point=AFTER_SYNC
+
+  test:
+    build:
+      context: ../
+    # Build-tagged test only — `-tags semisync` includes
+    # cutover_semisync_test.go, and `-run` limits to that single test so
+    # we don't pay the 100ms-per-commit semi-sync tax on the rest of the
+    # migration suite.
+    command: >-
+      go test -race -tags semisync -timeout=15m -count=1 -v
+      -run TestCutoverAtomicitySemiSync
+      ./pkg/migration/...
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_DSN: tsandbox:msandbox@tcp(mysql)/test
+
+volumes:
+  mysql-semisync-data-dir:
