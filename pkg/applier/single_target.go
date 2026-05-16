@@ -471,9 +471,46 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	return affectedRows, nil
 }
 
-// UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
-// The rows are LogicalRow structs containing the row images.
-// If lock is non-nil, the upsert is executed under the table lock.
+// UpsertRows performs an upsert (REPLACE INTO ... VALUES) synchronously.
+// The rows are LogicalRow structs containing inline row images from the
+// binlog. If lock is non-nil, the upsert is executed under the table lock.
+//
+// REPLACE semantics, and why we use them:
+//
+// MySQL's `REPLACE INTO target (cols) VALUES (...)` treats each value
+// tuple as an INSERT, except that for any row in `target` that conflicts
+// with the new row on PRIMARY KEY *or any UNIQUE index*, the old row is
+// deleted before the new row is inserted. Per the docs, conflicts on
+// multiple unique indexes can lead to multiple deletions for a single
+// new row.
+//
+// Two implications matter for callers reading this code:
+//
+//  1. A single REPLACE may delete rows whose PKs are *not* in the
+//     `rows` argument. If row B's image collides on a unique key with
+//     some other row A currently in the destination (because A was the
+//     previous holder of that unique value), REPLACE deletes A while
+//     inserting B. A is then transiently missing from the destination
+//     until its own event arrives in a later flush (or a later batch in
+//     the same flush) and re-inserts it. This is what restores the
+//     order-independence the pre-#821 deltaMap had with `REPLACE INTO
+//     ... SELECT`. See block/spirit#847.
+//
+//  2. Eventual consistency. Between the moment REPLACE deletes A and
+//     the moment A's image is re-applied, the destination is not a
+//     valid snapshot of source — it has fewer rows. Spirit relies on
+//     the bufferedMap being an *up-to-date and disjoint* representation
+//     of pending changes (each PK appears at most once, holding the
+//     latest row image) so that every transiently-deleted row will be
+//     re-inserted as flushes progress. The destination converges back
+//     to source's current state once the last unflushed event for each
+//     affected PK has been applied. The post-cutover checksum (with
+//     `FixDifferences=true`) is the backstop that catches any
+//     divergence that survives.
+//
+// We supply inline row images rather than `REPLACE INTO ... SELECT FROM
+// source`, so the read-after-commit race that motivated #746 does not
+// apply.
 func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -513,22 +550,9 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 		return 0, nil
 	}
 
-	// Use REPLACE INTO rather than INSERT ... ON DUPLICATE KEY UPDATE so the
-	// applier is idempotent for any subset/order of binlog events that all
-	// land in the same multi-row batch. REPLACE's "delete any row that
-	// conflicts on PRIMARY KEY *or any UNIQUE index*, then insert" semantics
-	// resolve transient unique-key collisions that occur when a source-side
-	// transaction legally moves a unique value between two rows (e.g.
-	// UPDATE A SET col=NULL; UPDATE B SET col='value';). ON DUPLICATE KEY
-	// UPDATE detects only the first conflict and switches to UPDATE on
-	// that row, so a subsequent unique-key collision the UPDATE introduces
-	// becomes a hard Error 1062 (block/spirit#847). REPLACE absorbs that
-	// collision by deleting the prior holder.
-	//
-	// We supply the row image inline, so this does *not* re-introduce the
-	// `REPLACE INTO ... SELECT FROM source` round-trip that motivated #746.
-	// The semantics match the pre-#821 deltaMap behavior without the
-	// read-after-commit race.
+	// See the function-level doc for the REPLACE-vs-ODKU rationale and
+	// the eventual-consistency implications of REPLACE deleting rows on
+	// unique-key conflicts.
 	upsertStmt := fmt.Sprintf("REPLACE INTO %s (%s) VALUES %s",
 		mapping.TargetTable().QuotedTableName,
 		targetColumnList,

@@ -53,6 +53,20 @@ import (
 // without re-introducing the binlog/visibility race motivating #746 —
 // we supply the inline row image, not a SELECT against source.
 //
+// Eventual consistency: REPLACE may delete more rows than appear in
+// its VALUES list — specifically, any row in the destination that
+// holds a unique value the new row is now claiming. That row is
+// briefly missing from the destination until its own event arrives in
+// a later batch (or a later row in the same batch) and re-inserts it.
+// Spirit's correctness relies on the bufferedMap being an up-to-date
+// and *disjoint* representation of pending changes — every PK appears
+// at most once at flush time, holding the latest row image — so every
+// transiently-deleted row is guaranteed to have its own event in the
+// buffer (or arriving shortly). The destination converges to source's
+// current state once the last unflushed event for each affected PK
+// has been applied; the post-cutover checksum (with
+// FixDifferences=true) catches any divergence that slips through.
+//
 // SetWatermarkOptimization owns the watermark-driven transition: when
 // its toggle changes which store is active, it drains the outgoing
 // store inline. Past that boundary the invariant holds — only the

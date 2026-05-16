@@ -130,6 +130,49 @@ This is the same robustness the pre-#821 `deltaMap` had with
 read-after-commit race that motivated #746 — we supply the inline
 row image, not a `SELECT` against source.
 
+##### Eventual consistency between batches
+
+REPLACE's "delete any unique-key conflict before each insert"
+semantic means a single REPLACE statement can delete *more rows* than
+the ones in its VALUES list — specifically, any row currently in the
+destination that previously held a unique value the new row is now
+claiming. That row is briefly missing from the destination until its
+own event arrives in a later batch (or in the same batch but
+processed later) and re-inserts it.
+
+Concretely, for the swap pair above with batches of size 1:
+
+| Step | Batch | Destination state |
+|------|-------|-------------------|
+| 0    | —     | id=1: 'S', id=2: NULL |
+| 1    | `REPLACE (id=1, slot=NULL)` | id=1: NULL, id=2: NULL |
+| 2    | `REPLACE (id=2, slot='S')`  | id=1: NULL, id=2: 'S' |
+
+And for the same swap pair if the activate landed first across batches:
+
+| Step | Batch | Destination state |
+|------|-------|-------------------|
+| 0    | —     | id=1: 'S', id=2: NULL |
+| 1    | `REPLACE (id=2, slot='S')` | id=2: 'S' (id=1 **deleted** — unique-key conflict on 'S') |
+| 2    | `REPLACE (id=1, slot=NULL)` | id=1: NULL, id=2: 'S' (id=1 re-inserted) |
+
+Binlog ordering gives us the first table in practice — within a
+single source-side transaction, the deactivate event has a lower
+binlog position than the activate — but Spirit's correctness does
+not depend on which case occurs. The destination converges to
+source's current state once the last unflushed event for each
+affected PK has been applied.
+
+This eventual consistency is safe because the `bufferedMap` is an
+**up-to-date and disjoint** representation of pending changes: every
+PK appears at most once at flush time, holding the latest row image
+MySQL emitted for it. Any row transiently deleted by REPLACE's
+conflict resolution is therefore guaranteed to have its own event in
+the buffer (or arriving shortly) — its row image isn't lost,
+just temporarily not yet applied. The post-cutover checksum (with
+`FixDifferences=true`) is the backstop for anything that slips
+through.
+
 See `TestBufferedMapSwapPairFlushesViaReplace` (unit) and
 `TestSwapPairEndToEndViaReplace` (end-to-end) for the regression gates.
 
