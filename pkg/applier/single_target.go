@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -480,7 +479,7 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 		return 0, nil
 	}
 	_, targetColumnList := mapping.Columns()
-	sourceColumnNames, targetColumnNames := mapping.ColumnsSlice()
+	sourceColumnNames, _ := mapping.ColumnsSlice()
 	intersectedColumns := mapping.SourceColumnIndices()
 
 	// Build the VALUES clause from the row images
@@ -514,37 +513,29 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 		return 0, nil
 	}
 
-	// Build the ON DUPLICATE KEY UPDATE clause using target column names.
-	var updateClauses []string
-	for _, col := range targetColumnNames {
-		if !slices.Contains(mapping.TargetTable().KeyColumns, col) {
-			updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
-		}
-	}
+	// Use REPLACE INTO rather than INSERT ... ON DUPLICATE KEY UPDATE so the
+	// applier is idempotent for any subset/order of binlog events that all
+	// land in the same multi-row batch. REPLACE's "delete any row that
+	// conflicts on PRIMARY KEY *or any UNIQUE index*, then insert" semantics
+	// resolve transient unique-key collisions that occur when a source-side
+	// transaction legally moves a unique value between two rows (e.g.
+	// UPDATE A SET col=NULL; UPDATE B SET col='value';). ON DUPLICATE KEY
+	// UPDATE detects only the first conflict and switches to UPDATE on
+	// that row, so a subsequent unique-key collision the UPDATE introduces
+	// becomes a hard Error 1062 (block/spirit#847). REPLACE absorbs that
+	// collision by deleting the prior holder.
+	//
+	// We supply the row image inline, so this does *not* re-introduce the
+	// `REPLACE INTO ... SELECT FROM source` round-trip that motivated #746.
+	// The semantics match the pre-#821 deltaMap behavior without the
+	// read-after-commit race.
+	upsertStmt := fmt.Sprintf("REPLACE INTO %s (%s) VALUES %s",
+		mapping.TargetTable().QuotedTableName,
+		targetColumnList,
+		strings.Join(valuesClauses, ", "),
+	)
 
-	// If every column is part of the PK there's nothing to UPDATE on conflict
-	// (the row's content is the PK and a same-PK conflict means same content).
-	// `INSERT … ON DUPLICATE KEY UPDATE` with an empty clause is a SQL syntax
-	// error, so use `INSERT IGNORE` for that case instead — same semantics.
-	var upsertStmt, upsertPath string
-	if len(updateClauses) == 0 {
-		upsertPath = "insert-ignore"
-		upsertStmt = fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-			mapping.TargetTable().QuotedTableName,
-			targetColumnList,
-			strings.Join(valuesClauses, ", "),
-		)
-	} else {
-		upsertPath = "on-duplicate-key-update"
-		upsertStmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
-			mapping.TargetTable().QuotedTableName,
-			targetColumnList,
-			strings.Join(valuesClauses, ", "),
-			strings.Join(updateClauses, ", "),
-		)
-	}
-
-	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", mapping.TargetTable().TableName, "path", upsertPath)
+	a.logger.Debug("executing upsert", "rowCount", len(valuesClauses), "table", mapping.TargetTable().TableName, "path", "replace-into")
 
 	// Execute under lock if provided
 	if lock != nil {

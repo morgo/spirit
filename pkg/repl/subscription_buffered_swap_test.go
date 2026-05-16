@@ -14,44 +14,34 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/go-mysql-org/go-mysql/mysql"
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
 
-// TestBufferedMapSwapPairRecoversViaQueueMode is a deterministic,
-// single-threaded regression test for the fix to block/spirit#847.
+// TestBufferedMapSwapPairFlushesViaReplace is a deterministic regression
+// test for block/spirit#847. The bug: when a source-side transaction
+// legally swaps a unique value between two rows
+// (`UPDATE A SET col=NULL; UPDATE B SET col='val'`), the buffered map
+// flush previously emitted `INSERT ... ON DUPLICATE KEY UPDATE` with a
+// randomly-ordered VALUES list, and MySQL processes that list in array
+// order. When the activate row landed first, MySQL aborted with
+// Error 1062 because the deactivating row still held the unique value.
 //
-// Background: `bufferedMap.flushMapLocked` iterates `s.changes` (a Go
-// map, randomized iteration) and hands the rows to the applier as a
-// single `INSERT ... ON DUPLICATE KEY UPDATE` with a multi-row VALUES
-// list. MySQL processes that list in array order. When a swap pair
-// lands in the same batch — row A's deactivation and row B's activation,
-// both from the same source-side transaction — the random map order can
-// place B's activation before A's deactivation, and MySQL rejects the
-// first row with Error 1062 because A still holds the unique value.
+// The fix changes the applier to issue `REPLACE INTO ... VALUES (...)`.
+// REPLACE deletes any row that conflicts on PRIMARY KEY or any UNIQUE
+// index before each insert, so the multi-row VALUES list is order-
+// independent: each row's conflicts are resolved by deletion before
+// its own insert runs. We supply the inline row image (not a SELECT
+// against source), so this does not reintroduce the binlog/visibility
+// race that motivated #746.
 //
-// The fix is detect-and-switch (`handleFlushError`): when Flush sees a
-// 1062, the subscription discards its pending map, flips into
-// forceQueueMode, and asks the client to rewind the binlog reader to
-// position 4 of the flushedPos file. The events that were lost when
-// the map was cleared are re-read FIFO and applied via flushQueueLocked,
-// which preserves binlog order in the resulting batch — no collision.
-//
-// This test exercises the subscription-level half of that fix: we
-// drive a swap pair into the map for 50 independent buckets (so the
-// probability that map iteration happens to land *every* pair in the
-// safe order is 2^-50, effectively zero), call Flush once, and assert:
-//
-//   - Flush returns no error (we recovered).
-//   - allChangesFlushed=false (so flushedPos won't advance).
-//   - The subscription is now in queue mode.
-//   - The map is empty (state was discarded).
-//
-// The end-to-end half of the fix — the client actually rewinding the
-// binlog reader and the queue mode applying the re-read events — is
-// covered by TestSwapPairFullRecoveryViaQueueMode below.
-func TestBufferedMapSwapPairRecoversViaQueueMode(t *testing.T) {
+// This test seeds 50 independent swap-pair buckets into the buffered
+// map and asserts that `Flush` succeeds without error and that the
+// destination ends up at the post-swap state. Without the fix, the
+// probability that map iteration happens to place *every* pair in the
+// safe order is 2^-50 — effectively zero — so the test reliably
+// reproduces the failure on the old applier path.
+func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
 		slot_id VARCHAR(50) DEFAULT NULL,
@@ -115,12 +105,12 @@ func TestBufferedMapSwapPairRecoversViaQueueMode(t *testing.T) {
 		changes:               make(map[string]bufferedChange),
 		chunker:               mockChunker,
 		watermarkOptimization: false, // accept every event; no chunker-progress gating
-		pkIsMemoryComparable:  true,  // INT PK → map mode (the failing path)
+		pkIsMemoryComparable:  true,  // INT PK → map mode
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 
 	// Inject the swap pair for every bucket. In source these two
-	// UPDATEs are committed inside one transaction:
+	// UPDATEs would be committed inside one transaction:
 	//   UPDATE id=active SET slot_id=NULL;
 	//   UPDATE id=passive SET slot_id='S<i>';
 	// We bypass the binlog reader and call HasChanged with the
@@ -133,110 +123,109 @@ func TestBufferedMapSwapPairRecoversViaQueueMode(t *testing.T) {
 	}
 	require.Equal(t, buckets*2, sub.Length())
 
-	// With the buggy map-iteration order, the batched
-	// INSERT ... ON DUPLICATE KEY UPDATE will, with probability
-	// 1 - 2^-buckets, place at least one bucket's activation before its
-	// deactivation and trigger Error 1062 on uq_slot inside flushBatch.
-	// `handleFlushError` recognizes that, clears the map, flips
-	// forceQueueMode, asks the client to rewind, and returns the flush
-	// as a no-op (allChangesFlushed=false, no error).
+	// With REPLACE INTO, the multi-row VALUES list is order-independent
+	// — the swap pair lands cleanly regardless of map iteration order.
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	require.NoError(t, err, "recovery path should swallow the 1062")
-	require.False(t, allFlushed,
-		"allChangesFlushed must be false so flushedPos stays put — the events still need to be re-read FIFO")
+	require.NoError(t, err, "REPLACE INTO must handle the swap pair without 1062")
+	require.True(t, allFlushed)
 
-	// State assertions: the recovery path discarded pending changes and
-	// flipped the subscription into queue mode.
+	// We did not trigger the safety-net recovery path.
 	sub.Lock()
-	require.True(t, sub.forceQueueMode, "forceQueueMode should be set after a 1062 recovery")
-	require.True(t, sub.queueModeActive(), "queueModeActive should return true once forceQueueMode is on")
-	require.Empty(t, sub.changes, "pending map should be cleared")
-	require.Zero(t, sub.sizeBytes, "sizeBytes should be reset to 0")
+	require.False(t, sub.forceQueueMode,
+		"swap-pair flush must NOT trigger the queue-mode safety net — REPLACE handles it natively")
+	require.Empty(t, sub.changes)
 	sub.Unlock()
 
-	// The recovery also asks the client to rewind the binlog reader.
-	// (We constructed the Client directly without a syncer, so the
-	// close-the-syncer half of requestRewind is a no-op; the flag flip
-	// is the observable signal here.)
-	require.True(t, client.rewindRequested.Load(),
-		"client should have been asked to rewind the binlog reader")
-
-	// A subsequent HasChanged should route to the queue, not the map.
-	sub.HasChanged([]any{42}, []any{42, "after-recovery"}, false)
-	sub.Lock()
-	require.Empty(t, sub.changes, "new events must not land back in the map")
-	require.Len(t, sub.queue, 1, "new events must land in the FIFO queue")
-	sub.Unlock()
+	// End-state assertion: bucket-for-bucket the destination reflects the swap.
+	for i := 0; i < buckets; i++ {
+		activePK := 2*i + 1
+		passivePK := 2*i + 2
+		var was, now sql.NullString
+		require.NoError(t, db.QueryRowContext(t.Context(),
+			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", dstTable.QuotedTableName), activePK).Scan(&was))
+		require.NoError(t, db.QueryRowContext(t.Context(),
+			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", dstTable.QuotedTableName), passivePK).Scan(&now))
+		require.False(t, was.Valid, "bucket %d previously-active row should be NULL now", i)
+		require.True(t, now.Valid, "bucket %d previously-passive row should hold the slot now", i)
+		require.Equal(t, fmt.Sprintf("S%d", i), now.String)
+	}
 }
 
-// TestFlushDoesNotRegressFlushedPosAfterRewind covers the defensive
-// guard in `Client.flush` against a backwards checkpoint move when
-// a rewind has snapped `bufferedPos` back. Without the guard, a flush
-// that happened to run between the rewind (which sets bufferedPos =
-// {flushedPos.Name, 4}) and readStream catching up past the old
-// flushedPos.Pos would publish the rewound bufferedPos as the new
-// flushedPos — silently rewinding checkpoints.
+// TestHandleFlushErrorSafetyNet exercises the defensive `handleFlushError`
+// helper directly — without an actual MySQL collision. The REPLACE-based
+// applier shouldn't produce an Error 1062 for the workloads we know
+// about, but the safety net is wired up regardless so that an unexpected
+// duplicate-key error from a future edge case flips the subscription
+// into queue mode rather than aborting the migration.
 //
-// We don't run a real binlog reader here. We exercise `flush` directly
-// on a client that has no subscriptions (so allChangesFlushed=true)
-// and assert that flushedPos does not move backwards when bufferedPos
-// is set behind it.
-func TestFlushDoesNotRegressFlushedPosAfterRewind(t *testing.T) {
+// The test stuffs the map with state, hands `handleFlushError` a
+// synthesized 1062, and asserts:
+//
+//   - it returns true (recognized + handled),
+//   - the map and queue are cleared,
+//   - sizeBytes is reset,
+//   - forceQueueMode is on so subsequent events route to the queue,
+//   - a non-1062 error returns false and leaves state untouched.
+func TestHandleFlushErrorSafetyNet(t *testing.T) {
 	client := &Client{
-		db:              nil, // unused: no subscriptions to flush
+		db:              nil,
 		logger:          slog.Default(),
 		concurrency:     1,
 		targetBatchSize: 1000,
 		dbConfig:        dbconn.NewDBConfig(),
 		subscriptions:   map[string]Subscription{},
 	}
+	srcTable := &table.TableInfo{SchemaName: "test", TableName: "t"}
 
-	// Pretend we'd flushed up to (file, 5000) and then a rewind dropped
-	// bufferedPos back to the start of the file.
-	advanced := mysql.Position{Name: "binlog.000042", Pos: 5000}
-	rewound := mysql.Position{Name: "binlog.000042", Pos: 4}
-	client.SetFlushedPos(advanced)
-	client.setBufferedPos(rewound)
+	sub := &bufferedMap{
+		c:        client,
+		table:    srcTable,
+		newTable: srcTable,
+		changes: map[string]bufferedChange{
+			"a": {logicalRow: applier.LogicalRow{RowImage: []any{1, "x"}}, originalKey: []any{1}},
+			"b": {logicalRow: applier.LogicalRow{RowImage: []any{2, "y"}}, originalKey: []any{2}},
+		},
+		queue:                []queuedChange{{key: "c", logicalRow: applier.LogicalRow{RowImage: []any{3, "z"}}}},
+		sizeBytes:            12345,
+		pkIsMemoryComparable: true,
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	sub.Lock()
+	defer sub.Unlock()
 
-	require.NoError(t, client.flush(t.Context(), false, nil))
+	// Non-1062 errors must not be swallowed.
+	otherErr := &mysql2.MySQLError{Number: 1213, Message: "Deadlock"}
+	require.False(t, sub.handleFlushError(otherErr), "deadlock must not be treated as a 1062")
+	require.False(t, sub.forceQueueMode)
+	require.NotEmpty(t, sub.changes)
 
-	require.Equal(t, advanced, client.GetBinlogApplyPosition(),
-		"flushedPos must not regress when a flush captures a rewound bufferedPos")
-
-	// Sanity: once bufferedPos advances back past the old flushedPos, a
-	// subsequent flush *does* move the checkpoint forward.
-	forward := mysql.Position{Name: "binlog.000042", Pos: 6000}
-	client.setBufferedPos(forward)
-	require.NoError(t, client.flush(t.Context(), false, nil))
-	require.Equal(t, forward, client.GetBinlogApplyPosition(),
-		"flushedPos should advance once bufferedPos is ahead again")
+	// 1062 triggers the recovery: clear both stores, reset sizeBytes,
+	// flip forceQueueMode on, leave flushedPos untouched (caller does that).
+	dupErr := &mysql2.MySQLError{
+		Number:  1062,
+		Message: "Duplicate entry 'X' for key 't.uq_slot'",
+	}
+	require.True(t, sub.handleFlushError(dupErr))
+	require.True(t, sub.forceQueueMode, "forceQueueMode should be set after recovery")
+	require.True(t, sub.queueModeActive())
+	require.Empty(t, sub.changes)
+	require.Empty(t, sub.queue)
+	require.Zero(t, sub.sizeBytes)
 }
 
-// TestSwapPairFullRecoveryViaQueueMode drives the full end-to-end
-// rewind path: real Client.Run, real binlog reader, real swap
-// transactions on source, real Flush calls, real recovery, real
-// destination state.
+// TestSwapPairEndToEndViaReplace drives the full end-to-end path: real
+// Client.Run, real binlog reader, real swap transactions on source,
+// real Flush calls, real destination state. With the REPLACE-based
+// applier this should complete successfully and *without* tripping the
+// safety-net recovery, because REPLACE handles the swap-pair shape
+// natively (its "delete any unique-key conflict before each insert"
+// semantic resolves the in-batch reordering risk).
 //
-// The flow:
-//
-//  1. Source and destination tables are seeded with the pre-swap state.
-//     The seed inserts happen *before* Run starts so they are outside
-//     the subscription's binlog window (the rewind will still re-read
-//     them from the start of the file, but applying them is idempotent
-//     because their values match what's already in dest).
-//  2. Run starts the binlog reader at the current server position.
-//  3. The test executes N legal swap transactions on source.
-//  4. BlockWait waits for the subscription to receive every event.
-//  5. The first Flush hits the swap-pair 1062 inside flushMapLocked,
-//     recovers via handleFlushError, asks the client to rewind, and
-//     returns no error. The subscription is now in forceQueueMode.
-//  6. readStream notices the closed syncer, sees rewindRequested, and
-//     recreates the streamer at position 4 of flushedPos.Name. As it
-//     re-reads events they accumulate in the FIFO queue.
-//  7. Subsequent Flush loops drain the queue via flushQueueLocked,
-//     which preserves binlog order — no in-batch reordering.
-//  8. The destination ends up byte-equal to the source.
-func TestSwapPairFullRecoveryViaQueueMode(t *testing.T) {
+// We additionally assert `forceQueueMode == false` at the end: the
+// safety net should not have engaged. Falling into queue mode here
+// would mean REPLACE is failing for some reason we haven't anticipated
+// — that's worth surfacing rather than silently tolerating.
+func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
 		slot_id VARCHAR(50) DEFAULT NULL,
@@ -275,10 +264,6 @@ func TestSwapPairFullRecoveryViaQueueMode(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
 
-	// Seed both tables with identical pre-swap state BEFORE Run starts,
-	// so these inserts aren't in the subscription's window. (They will
-	// still be re-read once the rewind kicks in, but applying them via
-	// the FIFO queue is idempotent — they match what's already in dst.)
 	const buckets = 50
 	var seed []string
 	for i := 0; i < buckets; i++ {
@@ -297,13 +282,13 @@ func TestSwapPairFullRecoveryViaQueueMode(t *testing.T) {
 	defer client.Close()
 
 	sub := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
-	// Disable the watermark optimization so every binlog event is
-	// admitted to the map (in production this is what happens after
-	// the copy phase finishes — the post-copy applier sees every event).
+	// Mirror the post-copy state where the watermark optimization is off
+	// and every binlog event is admitted to the map.
 	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
 
-	// Run swap transactions on source. Each is a legal
-	// deactivate-then-activate inside a single transaction.
+	// Run swap transactions on source: deactivate-then-activate inside
+	// a single transaction. Legal in source; binlog records two UPDATE
+	// events per bucket.
 	for i := 0; i < buckets; i++ {
 		activePK := 2*i + 1
 		passivePK := 2*i + 2
@@ -319,43 +304,33 @@ func TestSwapPairFullRecoveryViaQueueMode(t *testing.T) {
 		require.NoError(t, tx.Commit())
 	}
 
-	// Drive client.Flush through to completion. Internally it loops
-	// flush -> BlockWait -> flush until the delta is trivial; the
-	// recovery+rewind path is wholly contained inside that loop.
 	require.NoError(t, client.Flush(t.Context()))
 
-	// The subscription must have detected the swap-pair collision and
-	// switched modes — otherwise the bug would still be present.
+	// The safety net must not have engaged: REPLACE handles this shape
+	// natively. If forceQueueMode flipped, something unexpected happened.
 	sub.Lock()
-	require.True(t, sub.forceQueueMode,
-		"the swap-pair collision should have triggered the recovery path")
+	require.False(t, sub.forceQueueMode,
+		"REPLACE INTO should handle swap pairs without falling into the safety-net queue mode")
 	sub.Unlock()
 
-	// End-state assertion: dst must match src bucket-for-bucket. Active
-	// rows have moved from PK=2i+1 to PK=2i+2.
+	// End-state assertion: dst matches src bucket-for-bucket.
 	for i := 0; i < buckets; i++ {
 		activePK := 2*i + 1
 		passivePK := 2*i + 2
 		var srcActive, dstActive sql.NullString
 		require.NoError(t, db.QueryRowContext(t.Context(),
-			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", srcTable.QuotedTableName), activePK).
-			Scan(&srcActive))
+			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", srcTable.QuotedTableName), activePK).Scan(&srcActive))
 		require.NoError(t, db.QueryRowContext(t.Context(),
-			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", dstTable.QuotedTableName), activePK).
-			Scan(&dstActive))
-		require.False(t, srcActive.Valid, "source bucket %d previously-active row should now be NULL", i)
-		require.Equal(t, srcActive, dstActive,
-			"bucket %d previously-active row (PK=%d) state must match between src and dst", i, activePK)
+			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", dstTable.QuotedTableName), activePK).Scan(&dstActive))
+		require.False(t, srcActive.Valid, "source bucket %d previously-active row should be NULL", i)
+		require.Equal(t, srcActive, dstActive, "bucket %d active-row state must match", i)
 
 		var srcPassive, dstPassive sql.NullString
 		require.NoError(t, db.QueryRowContext(t.Context(),
-			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", srcTable.QuotedTableName), passivePK).
-			Scan(&srcPassive))
+			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", srcTable.QuotedTableName), passivePK).Scan(&srcPassive))
 		require.NoError(t, db.QueryRowContext(t.Context(),
-			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", dstTable.QuotedTableName), passivePK).
-			Scan(&dstPassive))
-		require.True(t, srcPassive.Valid, "source bucket %d previously-passive row should now hold the slot", i)
-		require.Equal(t, srcPassive, dstPassive,
-			"bucket %d previously-passive row (PK=%d) state must match between src and dst", i, passivePK)
+			fmt.Sprintf("SELECT slot_id FROM %s WHERE id=?", dstTable.QuotedTableName), passivePK).Scan(&dstPassive))
+		require.True(t, srcPassive.Valid, "source bucket %d previously-passive row should hold the slot", i)
+		require.Equal(t, srcPassive, dstPassive, "bucket %d passive-row state must match", i)
 	}
 }

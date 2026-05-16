@@ -765,21 +765,20 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 				valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 			}
 
-			// Build the ON DUPLICATE KEY UPDATE clause (all non-PK columns)
-			var updateClauses []string
-			for _, col := range sourceTable.NonGeneratedColumns {
-				if !slices.Contains(sourceTable.KeyColumns, col) {
-					updateClauses = append(updateClauses, fmt.Sprintf("`%s` = new.`%s`", col, col))
-				}
-			}
-
-			// Use just the table name, not the fully qualified name, because
-			// the database connection (shard.writeDB) already determines which database to write to
-			upsertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new ON DUPLICATE KEY UPDATE %s",
+			// Use REPLACE INTO for the same reason the single-target applier
+			// does — it makes the applier idempotent across any subset/order
+			// of binlog events in the same batch, by deleting any row that
+			// conflicts on PRIMARY KEY *or any UNIQUE index* before each
+			// insert. See SingleTargetApplier.UpsertRows for the full
+			// rationale and #847 for the bug that motivated the switch.
+			//
+			// Just the table name, not the fully qualified name — the
+			// database connection (shard.writeDB) already determines which
+			// database to write to.
+			upsertStmt := fmt.Sprintf("REPLACE INTO %s (%s) VALUES %s",
 				sourceTable.QuotedTableName,
 				columnList,
 				strings.Join(valuesClauses, ", "),
-				strings.Join(updateClauses, ", "),
 			)
 			a.logger.Debug("executing upsert on shard",
 				"shardID", sid,
