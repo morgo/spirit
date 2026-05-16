@@ -33,16 +33,23 @@ services:
     volumes:
       - mysql-semisync-data-dir:/var/lib/mysql
       - ./bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
+    # The `loose-` prefix is load-bearing on the rpl-semi-sync-source-*
+    # flags: --initialize-insecure ignores --plugin-load-add (the plugin
+    # binary isn't loaded during data-dir init) and would then abort
+    # fatally on the unknown variable. `loose-` tells mysqld to silently
+    # skip the variable when it doesn't exist (during init) and apply it
+    # normally when it does (every subsequent start, where
+    # --plugin-load-add has loaded the plugin).
     command: >-
       --server-id=1
       --log-bin=mysql-bin
       --gtid-mode=on
       --enforce-gtid-consistency=on
       --plugin-load-add=rpl_semi_sync_source=semisync_source.so
-      --rpl-semi-sync-source-enabled=ON
-      --rpl-semi-sync-source-timeout=100
-      --rpl-semi-sync-source-wait-no-replica=ON
-      --rpl-semi-sync-source-wait-point=AFTER_SYNC
+      --loose-rpl-semi-sync-source-enabled=ON
+      --loose-rpl-semi-sync-source-timeout=100
+      --loose-rpl-semi-sync-source-wait-no-replica=ON
+      --loose-rpl-semi-sync-source-wait-point=AFTER_SYNC
 
   test:
     build:
