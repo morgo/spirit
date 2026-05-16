@@ -94,12 +94,15 @@ services:
       mysql:
         condition: service_healthy
 
-  # Joins mysql_replica's network namespace and installs a 100ms outbound
-  # delay via netem. The qdisc lives in the network namespace, which is
-  # owned by mysql_replica — the rule persists after this sidecar exits.
-  # `service_completed_successfully` on the test container blocks until
-  # tc has applied, so the test never starts in a window where the
-  # replica is still ACKing fast.
+  # Joins mysql_replica's network namespace and installs a 100ms
+  # outbound delay via netem. The qdisc lives in the network namespace
+  # and would persist past this sidecar's exit — but `docker compose
+  # up --abort-on-container-exit` (which `--exit-code-from test`
+  # implies) aborts the whole stack the moment *any* container exits,
+  # so an earlier draft that exited 0 here triggered the abort before
+  # `test` could start. The sidecar must stay alive for the duration
+  # of the run; we sleep infinitely after applying tc and use a
+  # healthcheck to signal "qdisc in place" to the test service.
   netem:
     image: alpine:3.19
     network_mode: "service:mysql_replica"
@@ -113,8 +116,15 @@ services:
       apk add --no-cache iproute2 &&
       tc qdisc add dev eth0 root netem delay 100ms &&
       tc qdisc show dev eth0 &&
-      echo 'netem applied: 100ms outbound delay on mysql_replica'
+      echo 'netem applied: 100ms outbound delay on mysql_replica' &&
+      sleep infinity
       "
+    healthcheck:
+      test: ["CMD-SHELL", "tc qdisc show dev eth0 | grep -q netem"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
 
   test:
     build:
@@ -133,7 +143,7 @@ services:
       mysql_replica:
         condition: service_healthy
       netem:
-        condition: service_completed_successfully
+        condition: service_healthy
     environment:
       MYSQL_DSN: tsandbox:msandbox@tcp(mysql)/test
 
