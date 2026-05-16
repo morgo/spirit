@@ -1,4 +1,4 @@
-name: MySQL 8.0.45 (semi-sync, no replica) /w docker-compose
+name: MySQL 8.0.45 (semi-sync, delayed replica) /w docker-compose
 on:
   push:
     branches: [ main ]
@@ -21,15 +21,18 @@ jobs:
               - '!**/*.md'
               - '!docs/**'
 
-      # Brings up a MySQL source with semi-sync enabled and no replica
-      # attached. `rpl_semi_sync_source_timeout=100ms` widens the
-      # binlog→commit-visibility window from a rare CI flake (#746) to a
-      # guaranteed event on every committing transaction, so the buffered
-      # replication subscription's "read row images straight from the
-      # binlog" property is exercised deterministically.
-      - name: Test (semi-sync, no replica)
+      # Brings up a MySQL source with semi-sync enabled, a connected
+      # mysql_replica, and a netem sidecar that pins 100ms of outbound
+      # delay on the replica's network namespace. The semi-sync ACK
+      # round-trip therefore pays ~100ms per commit on the source,
+      # which widens the binlog→commit-visibility window from a rare CI
+      # flake (#746) to a guaranteed event on every committing
+      # transaction. That exercises the buffered replication
+      # subscription's "read row images straight from the binlog"
+      # property deterministically.
+      - name: Test (semi-sync, delayed replica)
         if: steps.filter.outputs.code == 'true'
-        run: docker compose -f semisync.yml up mysql test --abort-on-container-exit --exit-code-from test
+        run: docker compose -f semisync.yml up mysql mysql_replica netem test --abort-on-container-exit --exit-code-from test
         working-directory: compose
 
       - name: Skip — documentation-only change

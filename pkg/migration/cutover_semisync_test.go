@@ -17,12 +17,19 @@ import (
 // `semisync` build tag and intended to be run only by the dedicated
 // `mysql-semisync-docker.yml` workflow.
 //
-// The workflow brings up a MySQL source configured with semi-sync enabled
-// but no replica attached, and a very short `rpl_semi_sync_source_timeout`
-// (~100 ms). With those settings every committing transaction blocks for
-// the timeout window between binlog write and InnoDB commit-visibility —
-// deterministically widening the binlog/visibility race documented in
-// issue #746 from a rare CI flake to a near-certain event on every commit.
+// The workflow brings up a MySQL source with semi-sync enabled, a
+// connected `mysql_replica`, and a netem sidecar that adds 100ms of
+// outbound delay on the replica's network namespace. The semi-sync ACK
+// round-trip therefore pays ~100ms per commit on the source, between
+// binlog write and InnoDB commit-visibility — deterministically widening
+// the binlog/visibility race documented in issue #746 from a rare CI
+// flake to a near-certain event on every commit.
+//
+// (An earlier draft used a zero-replica configuration, which sounds
+// equivalent but isn't: with no replica ever connected, MySQL's
+// semi-sync plugin falls back to async after a handful of timed-out
+// commits and `Rpl_semi_sync_source_status` flips OFF — see
+// `compose/semisync.yml` for the why.)
 //
 // Spirit's production code path now reads row images directly from the
 // binlog via the buffered replication subscription (#821, #823), so it no
