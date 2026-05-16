@@ -1,19 +1,25 @@
-# Semi-sync source with no replica attached — used by the
+# Semi-sync source with one connected replica whose outbound traffic is
+# delayed 100ms via `tc netem`. Used by the
 # `mysql-semisync-docker.yml` workflow to deterministically reproduce the
 # binlog/visibility lag documented in issue #746 on every commit.
 #
-# The source has the semi-sync source plugin loaded and `rpl_semi_sync_source_timeout`
-# pinned at 100ms. With no replica connected, every committing transaction:
-#   1. writes its row events to the binlog (immediately visible to replication clients),
-#   2. waits up to 100ms for a semi-sync ACK that will never arrive,
-#   3. times out and proceeds to make the InnoDB commit visible to local SELECTs.
+# Why a connected replica is required: MySQL's semi-sync source plugin
+# falls back to asynchronous after a few timed-out commits when zero
+# replicas have ever connected, regardless of
+# `rpl_semi_sync_source_wait_no_replica=ON`. Empirically: status flips OFF
+# and commit latency drops to ~1ms — no race window is widened.
 #
-# That widens the binlog→commit-visibility race from a CI-load-dependent
-# rare flake to a guaranteed 100ms window for every transaction. Spirit's
-# buffered replication subscription (production default) reads row images
-# directly from the binlog and must not regress to the pre-#821 design
-# that issued `REPLACE INTO _new ... SELECT FROM original ...` against
-# rows that aren't visible yet.
+# With a connected replica plus an outbound 100ms delay on it, every
+# commit on the source pays:
+#   1. binlog flush + sync (events become visible to dump on disk)
+#   2. send events to replica (delayed 100ms by netem)
+#   3. wait for replica ACK (also delayed 100ms by netem)
+#   4. InnoDB commit (visibility for local SELECTs)
+#
+# Net effect: ~100ms window between "binlog event observable" and
+# "row visible to local SELECT" on every committing transaction.
+# Spirit's buffered replication subscription (production default) must
+# remain correct under that window — see cutover_semisync_test.go.
 services:
   mysql:
     image: mysql:8.0.45
@@ -51,6 +57,65 @@ services:
       --loose-rpl-semi-sync-source-wait-no-replica=ON
       --loose-rpl-semi-sync-source-wait-point=AFTER_SYNC
 
+  mysql_replica:
+    image: mysql:8.0.45
+    cap_add:
+      - SYS_NICE
+      # Required so the netem sidecar (which shares this container's
+      # network namespace via network_mode) can apply the tc qdisc.
+      - NET_ADMIN
+    environment:
+      MYSQL_ROOT_PASSWORD: msandbox
+    healthcheck:
+      test: ["CMD", "./replication_health_check.sh"]
+      start_period: 1s
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    volumes:
+      - mysql-replica-semisync-data-dir:/var/lib/mysql
+      - ./replication-tls/init-ci-replica.sql:/docker-entrypoint-initdb.d/init-ci-replica.sql
+      - ./replication-tls/replication_health_check.sh:/replication_health_check.sh
+    # The replica must load `rpl_semi_sync_replica` and enable it,
+    # otherwise the source sees the replica connection as a plain
+    # (non-semi-sync) client — `Rpl_semi_sync_source_clients` stays 0,
+    # the source falls back to async, and no per-commit latency is
+    # injected. Same `loose-` rationale as the source: --plugin-load-add
+    # is ignored during --initialize-insecure and the variable would
+    # then be unknown.
+    command: >-
+      --server-id=2
+      --relay-log=mysql-relay-bin
+      --gtid-mode=on
+      --enforce-gtid-consistency=on
+      --plugin-load-add=rpl_semi_sync_replica=semisync_replica.so
+      --loose-rpl-semi-sync-replica-enabled=ON
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # Joins mysql_replica's network namespace and installs a 100ms outbound
+  # delay via netem. The qdisc lives in the network namespace, which is
+  # owned by mysql_replica — the rule persists after this sidecar exits.
+  # `service_completed_successfully` on the test container blocks until
+  # tc has applied, so the test never starts in a window where the
+  # replica is still ACKing fast.
+  netem:
+    image: alpine:3.19
+    network_mode: "service:mysql_replica"
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      mysql_replica:
+        condition: service_healthy
+    command: >-
+      sh -c "
+      apk add --no-cache iproute2 &&
+      tc qdisc add dev eth0 root netem delay 100ms &&
+      tc qdisc show dev eth0 &&
+      echo 'netem applied: 100ms outbound delay on mysql_replica'
+      "
+
   test:
     build:
       context: ../
@@ -65,8 +130,13 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      mysql_replica:
+        condition: service_healthy
+      netem:
+        condition: service_completed_successfully
     environment:
       MYSQL_DSN: tsandbox:msandbox@tcp(mysql)/test
 
 volumes:
   mysql-semisync-data-dir:
+  mysql-replica-semisync-data-dir:
