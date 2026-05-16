@@ -285,11 +285,25 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	return nil
 }
 
-// setBufferedPos updates the in-memory position that all changes have been read
-// but not necessarily flushed.
+// setBufferedPos updates the in-memory position that all changes have
+// been read but not necessarily flushed. The update is monotonic:
+// a position that compares less-than-or-equal to the current
+// bufferedPos is silently dropped.
+//
+// The monotonicity matters because recreateStreamer restarts the
+// binlog dump at position 4 of the current bufferedPos.Name, and
+// MySQL prefaces every binlog dump with a synthetic RotateEvent whose
+// `event.Position` is 4. Without the guard, that synthetic rotate
+// would drag bufferedPos back to {file, 4}, and a flush that ran
+// before subsequent events caught the position back up would publish
+// the rewound value via SetFlushedPos — silently regressing the
+// checkpoint and forcing a large re-read on the next resume.
 func (c *Client) setBufferedPos(pos mysql.Position) {
 	c.Lock()
 	defer c.Unlock()
+	if pos.Compare(c.bufferedPos) <= 0 {
+		return
+	}
 	c.bufferedPos = pos
 }
 
@@ -463,7 +477,9 @@ func (c *Client) Run(ctx context.Context) (err error) {
 // idempotent: it uses REPLACE INTO so re-applying any already-applied
 // event simply re-inserts the same row image, and re-applying an
 // out-of-order event transiently sets the destination to that row's
-// older state, which a later event in the queue will correct.
+// older state, which a subsequent binlog event (in this or a later
+// flush) will correct. The eventual-consistency property holds in both
+// map mode and queue mode — see UpsertRows in pkg/applier/single_target.go.
 func (c *Client) recreateStreamer() error {
 	c.Lock()
 	defer c.Unlock()
@@ -692,20 +708,15 @@ func (c *Client) readStream(ctx context.Context) {
 		default:
 			c.logger.Debug("Received unknown event type", "type", fmt.Sprintf("%T", ev.Event))
 		}
-		// Update the buffered position
-		// under a mutex.
-		// Only update if LogPos > 0 (some events like FormatDescriptionEvent have LogPos=0)
-		// and only if the position is moving forward (to avoid going backwards after rotation)
+		// Update the buffered position under a mutex. Some events
+		// (FormatDescriptionEvent and similar housekeeping events) have
+		// LogPos=0 and don't represent a real position. setBufferedPos
+		// itself enforces monotonicity, so we don't filter further here.
 		if ev.Header.LogPos > 0 {
-			newPos := mysql.Position{
+			c.setBufferedPos(mysql.Position{
 				Name: currentLogName,
 				Pos:  ev.Header.LogPos,
-			}
-			currentPos := c.getBufferedPos()
-			// Only update if the new position is ahead of the current position
-			if newPos.Compare(currentPos) > 0 {
-				c.setBufferedPos(newPos)
-			}
+			})
 		}
 	}
 }
