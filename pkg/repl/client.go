@@ -971,7 +971,6 @@ func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock
 func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
 	c.Lock()
 	newFlushedPos := c.bufferedPos
-	currentFlushedPos := c.flushedPos
 	c.Unlock()
 	var allChangesFlushed = true
 	for _, subscription := range c.subscriptions {
@@ -996,12 +995,7 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	// for these high contention cases. But that's not a great solution either,
 	// because the low watermark optimization helps a lot in these cases because
 	// it reduces contention between the copier and the repl applier.
-	//
-	// Defensive: refuse to move flushedPos backwards. setBufferedPos has
-	// its own "only-forward" guard, so under normal operation bufferedPos
-	// is always >= flushedPos when this branch runs. The guard here
-	// catches any future code path that captures a stale bufferedPos.
-	if allChangesFlushed && newFlushedPos.Compare(currentFlushedPos) >= 0 {
+	if allChangesFlushed {
 		c.SetFlushedPos(newFlushedPos)
 	}
 	return nil

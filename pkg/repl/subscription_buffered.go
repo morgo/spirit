@@ -2,7 +2,6 @@ package repl
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
-	mysql2 "github.com/go-sql-driver/mysql"
 )
 
 // The bufferedMap avoids using REPLACE INTO .. SELECT.
@@ -26,14 +24,10 @@ import (
 // binlog_order_commits = ON. Storing the row image inline (rather than
 // re-reading source via REPLACE INTO ... SELECT) sidesteps that race.
 //
-// Behaviour switches based on (forceQueueMode,
-// watermarkOptimizationEnabled, pkIsMemoryComparable):
+// Behaviour switches based on (watermarkOptimizationEnabled,
+// pkIsMemoryComparable):
 //
-//   - forceQueueMode=true: always queue mode. Set by handleFlushError as
-//     a defensive last-line response to an unexpected duplicate-key
-//     collision from the applier (#847). Not expected to fire now that
-//     the applier uses REPLACE INTO.
-//   - pkIsMemoryComparable=true: map mode. Map-key equality matches
+//   - pkIsMemoryComparable=true: always map mode. Map-key equality matches
 //     MySQL row identity, so LWW dedup is correct.
 //   - pkIsMemoryComparable=false: map mode during the copy phase
 //     (watermark on), queue mode post-copy. The chunker's later SELECT
@@ -135,15 +129,6 @@ type bufferedMap struct {
 	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
 
 	pkIsMemoryComparable bool
-
-	// forceQueueMode is set by handleFlushError after a recoverable
-	// duplicate-key collision (block/spirit#847). Once set, queueModeActive
-	// returns true regardless of pkIsMemoryComparable / watermarkOptimization,
-	// so subsequent events accumulate in s.queue (FIFO) and flushQueueLocked
-	// drives them through the applier in binlog order. We never flip it back —
-	// once a swap-pair has been observed, this subscription stays in queue mode
-	// for the rest of the migration.
-	forceQueueMode bool
 }
 
 // Per-entry overheads applied on top of estimateRowSize so the soft
@@ -222,13 +207,7 @@ func (s *bufferedMap) Tables() []*table.TableInfo {
 // Memory-comparable PKs are never queue-mode (map-key equality matches
 // MySQL row identity). Non-memory-comparable PKs run in map mode during
 // the copy phase (watermark on) and switch to queue mode post-copy.
-//
-// One escape hatch: if forceQueueMode is set (after a recoverable
-// duplicate-key collision per #847), queue mode wins regardless.
 func (s *bufferedMap) queueModeActive() bool {
-	if s.forceQueueMode {
-		return true
-	}
 	if s.pkIsMemoryComparable {
 		return false
 	}
@@ -376,9 +355,6 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		}
 		if (i % target) == 0 {
 			if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
-				if s.handleFlushError(err) {
-					return false, nil
-				}
 				return false, err
 			}
 			deleteKeys = nil
@@ -387,9 +363,6 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 	}
 
 	if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
-		if s.handleFlushError(err) {
-			return false, nil
-		}
 		return false, err
 	}
 
@@ -405,58 +378,6 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		s.cond.Broadcast()
 	}
 	return allChangesFlushed, nil
-}
-
-// handleFlushError is a defensive last line for flushMapLocked against
-// a duplicate-key collision from the applier (block/spirit#847). With
-// the applier now using REPLACE INTO (which deletes any row that
-// conflicts on PRIMARY KEY or any UNIQUE index before each insert),
-// this path is not expected to fire in practice — REPLACE absorbs the
-// swap-pair shape that triggered the original bug. We keep the
-// recovery wired up as a safety net: if some future edge case causes
-// the applier to return Error 1062 anyway, we'd rather flip the
-// subscription into queue mode and let the next flush retry FIFO than
-// abort the migration.
-//
-// On 1062 we:
-//
-//  1. Log a warning. This is not a path we expect to hit, and an
-//     operator seeing it should treat it as a signal that something
-//     unexpected is happening at the applier or schema level.
-//  2. Clear the pending map and queue. Returning allChangesFlushed=false
-//     keeps flushedPos pinned to the last fully-flushed position; the
-//     events we just discarded will need to come back via re-reading
-//     the binlog, but we don't trigger that here.
-//  3. Flip forceQueueMode on so subsequent events accumulate in the
-//     FIFO queue. Whether or not that helps depends on the underlying
-//     cause; for swap-pair collisions it does, for other shapes the
-//     post-cutover checksum is what catches divergence.
-//
-// Returns true if we recognized and handled the error; the caller
-// should then treat the flush as a no-op (return allChangesFlushed=false
-// without an error) so flushedPos is not advanced.
-//
-// Caller must hold s.Mutex.
-func (s *bufferedMap) handleFlushError(err error) bool {
-	var me *mysql2.MySQLError
-	if !errors.As(err, &me) || me.Number != 1062 {
-		return false
-	}
-	s.c.logger.Warn("buffered-map flush hit a duplicate-key collision; "+
-		"clearing pending changes and switching to queue mode (FIFO). "+
-		"With the REPLACE-INTO applier this path is not expected to fire — "+
-		"investigate the underlying cause",
-		"table", s.table.SchemaName+"."+s.table.TableName,
-		"error", err.Error(),
-		"changes_cleared", len(s.changes),
-		"queue_cleared", len(s.queue),
-	)
-	s.changes = make(map[string]bufferedChange)
-	s.queue = nil
-	s.sizeBytes = 0
-	s.forceQueueMode = true
-	s.cond.Broadcast() // wake HasChanged callers parked on the soft cap
-	return true
 }
 
 // flushBatch flushes a batch of deletes and upserts using the applier.

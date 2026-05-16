@@ -128,11 +128,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err, "REPLACE INTO must handle the swap pair without 1062")
 	require.True(t, allFlushed)
-
-	// We did not trigger the safety-net recovery path.
 	sub.Lock()
-	require.False(t, sub.forceQueueMode,
-		"swap-pair flush must NOT trigger the queue-mode safety net — REPLACE handles it natively")
 	require.Empty(t, sub.changes)
 	sub.Unlock()
 
@@ -151,80 +147,12 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	}
 }
 
-// TestHandleFlushErrorSafetyNet exercises the defensive `handleFlushError`
-// helper directly — without an actual MySQL collision. The REPLACE-based
-// applier shouldn't produce an Error 1062 for the workloads we know
-// about, but the safety net is wired up regardless so that an unexpected
-// duplicate-key error from a future edge case flips the subscription
-// into queue mode rather than aborting the migration.
-//
-// The test stuffs the map with state, hands `handleFlushError` a
-// synthesized 1062, and asserts:
-//
-//   - it returns true (recognized + handled),
-//   - the map and queue are cleared,
-//   - sizeBytes is reset,
-//   - forceQueueMode is on so subsequent events route to the queue,
-//   - a non-1062 error returns false and leaves state untouched.
-func TestHandleFlushErrorSafetyNet(t *testing.T) {
-	client := &Client{
-		db:              nil,
-		logger:          slog.Default(),
-		concurrency:     1,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
-		subscriptions:   map[string]Subscription{},
-	}
-	srcTable := &table.TableInfo{SchemaName: "test", TableName: "t"}
-
-	sub := &bufferedMap{
-		c:        client,
-		table:    srcTable,
-		newTable: srcTable,
-		changes: map[string]bufferedChange{
-			"a": {logicalRow: applier.LogicalRow{RowImage: []any{1, "x"}}, originalKey: []any{1}},
-			"b": {logicalRow: applier.LogicalRow{RowImage: []any{2, "y"}}, originalKey: []any{2}},
-		},
-		queue:                []queuedChange{{key: "c", logicalRow: applier.LogicalRow{RowImage: []any{3, "z"}}}},
-		sizeBytes:            12345,
-		pkIsMemoryComparable: true,
-	}
-	sub.cond = sync.NewCond(&sub.Mutex)
-	sub.Lock()
-	defer sub.Unlock()
-
-	// Non-1062 errors must not be swallowed.
-	otherErr := &mysql2.MySQLError{Number: 1213, Message: "Deadlock"}
-	require.False(t, sub.handleFlushError(otherErr), "deadlock must not be treated as a 1062")
-	require.False(t, sub.forceQueueMode)
-	require.NotEmpty(t, sub.changes)
-
-	// 1062 triggers the recovery: clear both stores, reset sizeBytes,
-	// flip forceQueueMode on, leave flushedPos untouched (caller does that).
-	dupErr := &mysql2.MySQLError{
-		Number:  1062,
-		Message: "Duplicate entry 'X' for key 't.uq_slot'",
-	}
-	require.True(t, sub.handleFlushError(dupErr))
-	require.True(t, sub.forceQueueMode, "forceQueueMode should be set after recovery")
-	require.True(t, sub.queueModeActive())
-	require.Empty(t, sub.changes)
-	require.Empty(t, sub.queue)
-	require.Zero(t, sub.sizeBytes)
-}
-
 // TestSwapPairEndToEndViaReplace drives the full end-to-end path: real
 // Client.Run, real binlog reader, real swap transactions on source,
 // real Flush calls, real destination state. With the REPLACE-based
-// applier this should complete successfully and *without* tripping the
-// safety-net recovery, because REPLACE handles the swap-pair shape
-// natively (its "delete any unique-key conflict before each insert"
-// semantic resolves the in-batch reordering risk).
-//
-// We additionally assert `forceQueueMode == false` at the end: the
-// safety net should not have engaged. Falling into queue mode here
-// would mean REPLACE is failing for some reason we haven't anticipated
-// — that's worth surfacing rather than silently tolerating.
+// applier this should complete successfully because REPLACE handles the
+// swap-pair shape natively — its "delete any unique-key conflict before
+// each insert" semantic resolves the in-batch reordering risk.
 func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
@@ -305,13 +233,6 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	}
 
 	require.NoError(t, client.Flush(t.Context()))
-
-	// The safety net must not have engaged: REPLACE handles this shape
-	// natively. If forceQueueMode flipped, something unexpected happened.
-	sub.Lock()
-	require.False(t, sub.forceQueueMode,
-		"REPLACE INTO should handle swap pairs without falling into the safety-net queue mode")
-	sub.Unlock()
 
 	// End-state assertion: dst matches src bucket-for-bucket.
 	for i := 0; i < buckets; i++ {

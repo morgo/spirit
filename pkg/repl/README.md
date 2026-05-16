@@ -43,14 +43,11 @@ applies it through the applier interface:
 - Higher memory usage than a key-only map: stores full row data for each changed key.
 - Watermark optimizations (`KeyAboveHighWatermark` and `KeyBelowLowWatermark`) are available on `MappedChunker` implementations (both optimistic and composite chunkers). They work correctly for numeric, binary, and temporal primary key types. For `VARCHAR`/`TEXT` columns with collations, Go's byte-order comparison may differ from MySQL's collation order; any discrepancies are caught by the checksum phase (see [issue #479](https://github.com/block/spirit/issues/479)).
 
-**The map is optimistic.** It bets that the randomized iteration order of
-`s.changes` is harmless for each row's upsert. That bet would break for
-workloads that move a unique value between rows inside a single
-transaction (a "swap" pattern) if the applier used `INSERT ... ON
-DUPLICATE KEY UPDATE`, since that statement resolves only the first
-conflict and leaves any other unique-key collision as a hard 1062. We
-side-step that by issuing **`REPLACE INTO target VALUES (...)`** in the
-applier instead — see "Applier idempotence via REPLACE INTO" below.
+**Map iteration order is irrelevant** because the applier issues
+`REPLACE INTO target VALUES (...)`, which deletes any row that conflicts
+on PRIMARY KEY or any UNIQUE index before each insert. That makes the
+multi-row VALUES list order-independent — see "Applier idempotence via
+REPLACE INTO" below.
 
 **Example scenario:**
 ```
@@ -133,19 +130,8 @@ This is the same robustness the pre-#821 `deltaMap` had with
 read-after-commit race that motivated #746 — we supply the inline
 row image, not a `SELECT` against source.
 
-##### Safety net: `forceQueueMode`
-
-`bufferedMap.handleFlushError` is still wired up: if the applier
-ever returns `Error 1062` for some shape we haven't anticipated, the
-subscription clears its pending state and flips `forceQueueMode` on
-so subsequent events route through the FIFO queue. Operators seeing
-the warning log line should treat it as a signal that something
-unexpected is happening at the applier or schema level — REPLACE
-should not be producing 1062s in practice.
-
-See `TestBufferedMapSwapPairFlushesViaReplace` (unit), `TestHandleFlushErrorSafetyNet`
-(unit, exercises the safety net directly), and `TestSwapPairEndToEndViaReplace`
-(end-to-end) for the regression gates.
+See `TestBufferedMapSwapPairFlushesViaReplace` (unit) and
+`TestSwapPairEndToEndViaReplace` (end-to-end) for the regression gates.
 
 ## Features
 
