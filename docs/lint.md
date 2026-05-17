@@ -63,6 +63,7 @@ These linters detect issues that could cause problems during online schema chang
 | `has_foreign_key` | Foreign keys can block online schema changes and cause replication issues |
 | `invisible_index_before_drop` | Dropping indexes without first making them invisible is risky |
 | `multiple_alter_table` | Multiple ALTERs on the same table should be combined for efficiency |
+| `rename_column` | Column renames break ORMs and can't be deployed atomically with application changes |
 | `unsafe` | Detects unsafe operations in schema changes |
 
 ### Data Type Safety
@@ -73,6 +74,7 @@ These linters catch data types that can cause precision or capacity issues:
 |--------|-------------|
 | `auto_inc_capacity` | Warns when auto-increment columns approach their maximum value |
 | `has_float` | FLOAT/DOUBLE types have precision issues; DECIMAL is preferred |
+| `has_timestamp` | TIMESTAMP overflows on 2038-01-19; DATETIME is preferred |
 | `primary_key` | Primary keys should use BIGINT UNSIGNED or BINARY types for longevity |
 | `zero_date` | Zero-date defaults cause issues with strict SQL mode |
 
@@ -88,6 +90,7 @@ These linters enforce organizational standards and best practices:
 | `name_case` | Ensures table names are lowercase |
 | `redundant_indexes` | Detects duplicate or unnecessary indexes |
 | `reserved_words` | Warns about MySQL reserved words in identifiers |
+| `type_pedantic` | Enforces cross-table type consistency for same-name columns and inferred `{table}_id` foreign keys |
 
 ## Violation Severity
 
