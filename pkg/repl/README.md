@@ -34,7 +34,7 @@ applies it through the applier interface:
 - **Excellent deduplication**: if a row is modified 100 times, only one upsert is performed.
 - **Parallel flushing**: independent keys can be written concurrently via the applier.
 - **No source-side reads at flush**: the row image is already in memory, so no contention with OLTP traffic on the source.
-- **Sidesteps the binlog/visibility race**: because the row image *is* the applied state, there is no opportunity for MySQL's binlog-vs-visibility ordering to surface a stale row (see [issue #746](https://github.com/block/spirit/issues/746)).
+- **Sidesteps the binlog/visibility race**: because the row image *is* the applied state, there is no opportunity for MySQL's binlog-vs-visibility ordering to surface a stale row (see [issue #746](https://github.com/block/spirit/issues/746)). This also makes spirit safe to run against sources configured with **semi-synchronous replication**, which can widen that window by tens or hundreds of milliseconds depending on replica ACK latency. The `mysql-semisync-docker.yml` CI lane exercises this configuration end-to-end.
 - **Watermark optimization (when supported by the chunker)**: can skip ranges of keys using both `KeyAboveHighWatermark` and `KeyBelowLowWatermark`.
 - **Cross-server compatibility**: the applier can target a different MySQL server, which is what `pkg/move` relies on.
 
