@@ -265,13 +265,12 @@ func TestNameCaseLinter_AlterTableRenameUppercase(t *testing.T) {
 	linter := &NameCaseLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	// Renaming to uppercase should be detected
+	// Renaming to uppercase should be detected against the post-state name.
 	require.Len(t, violations, 1)
 	require.Equal(t, "name_case", violations[0].Linter.Name())
-	require.Contains(t, violations[0].Message, "users")
 	require.Contains(t, violations[0].Message, "CUSTOMERS")
 	require.Contains(t, violations[0].Message, "not lowercase")
-	require.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, "CUSTOMERS", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_AlterTableRenameMixedCase(t *testing.T) {
@@ -282,11 +281,10 @@ func TestNameCaseLinter_AlterTableRenameMixedCase(t *testing.T) {
 	linter := &NameCaseLinter{}
 	violations := linter.Lint(nil, stmts)
 
-	// Renaming to mixed case should be detected
+	// Renaming to mixed case should be detected against the post-state name.
 	require.Len(t, violations, 1)
-	require.Contains(t, violations[0].Message, "users")
 	require.Contains(t, violations[0].Message, "UserAccounts")
-	require.Equal(t, "users", violations[0].Location.Table)
+	require.Equal(t, "UserAccounts", violations[0].Location.Table)
 }
 
 func TestNameCaseLinter_AlterTableRenameCamelCase(t *testing.T) {
@@ -494,11 +492,11 @@ func TestNameCaseLinter_MultipleRenames(t *testing.T) {
 
 	var foundUsers, foundOrders bool
 	for _, v := range violations {
-		if v.Location.Table == "users" {
+		switch v.Location.Table {
+		case "USERS_NEW":
 			foundUsers = true
 			require.Contains(t, v.Message, "USERS_NEW")
-		}
-		if v.Location.Table == "orders" {
+		case "Orders_Archive":
 			foundOrders = true
 			require.Contains(t, v.Message, "Orders_Archive")
 		}
@@ -616,15 +614,14 @@ func TestNameCaseLinter_RenameViolationStructure(t *testing.T) {
 	require.Len(t, violations, 1)
 	v := violations[0]
 
-	// Verify violation structure for rename
+	// The violation is reported against the post-state table name —
+	// the unified "table name %q is not lowercase" message keys off the
+	// final name, since that is what would land in the schema.
 	require.NotNil(t, v.Linter)
 	require.Equal(t, "name_case", v.Linter.Name())
-	require.NotEmpty(t, v.Message)
-	require.Contains(t, v.Message, "users")
 	require.Contains(t, v.Message, "USERS_NEW")
-	require.Contains(t, v.Message, "renamed")
 	require.NotNil(t, v.Location)
-	require.Equal(t, "users", v.Location.Table)
+	require.Equal(t, "USERS_NEW", v.Location.Table)
 }
 
 // Tests for complex scenarios
@@ -672,13 +669,12 @@ func TestNameCaseLinter_ComplexScenario(t *testing.T) {
 
 	var foundUsers, foundProducts, foundInventory bool
 	for _, v := range violations {
-		if v.Location.Table == "USERS" {
+		switch v.Location.Table {
+		case "USERS":
 			foundUsers = true
-		}
-		if v.Location.Table == "Products" {
+		case "Products":
 			foundProducts = true
-		}
-		if v.Location.Table == "inventory" {
+		case "INVENTORY_NEW":
 			foundInventory = true
 			require.Contains(t, v.Message, "INVENTORY_NEW")
 		}

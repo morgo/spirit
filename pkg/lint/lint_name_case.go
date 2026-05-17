@@ -25,8 +25,11 @@ func (l *NameCaseLinter) Description() string {
 	return "ensure that table names are all lowercase"
 }
 
+// Lint walks the post-state of the schema so an ALTER RENAME that fixes a
+// non-lowercase name does not produce a false positive, and a rename that
+// introduces a non-lowercase name surfaces against the final table name.
 func (l *NameCaseLinter) Lint(createTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	for ct := range CreateTableStatements(createTables, changes) {
+	for _, ct := range PostState(createTables, changes) {
 		if ct.TableName != strings.ToLower(ct.TableName) {
 			violations = append(violations, Violation{
 				Linter: l,
@@ -36,26 +39,6 @@ func (l *NameCaseLinter) Lint(createTables []*statement.CreateTable, changes []*
 				Message:  fmt.Sprintf("table name %q is not lowercase", ct.TableName),
 				Severity: SeverityWarning,
 			})
-		}
-	}
-	for _, change := range changes {
-		if at, ok := change.AsAlterTable(); ok {
-			for _, spec := range at.Specs {
-				if spec.NewTable != nil {
-					newName := spec.NewTable.Name.O
-					oldName := at.Table.Name.O
-					if newName != oldName && newName != strings.ToLower(newName) {
-						violations = append(violations, Violation{
-							Linter: l,
-							Location: &Location{
-								Table: oldName,
-							},
-							Message:  fmt.Sprintf("table %q being renamed to %q, which is not lowercase", oldName, newName),
-							Severity: SeverityWarning,
-						})
-					}
-				}
-			}
 		}
 	}
 	return violations

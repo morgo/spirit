@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
@@ -96,10 +95,13 @@ func (l *ReservedWordsLinter) String() string {
 	return Stringer(l)
 }
 
+// Lint walks the post-state of the schema so warnings reflect the final
+// table and column names. ALTERs that DROP, RENAME, or MODIFY away a
+// reserved-word identifier no longer produce false positives, and ALTERs
+// that introduce a reserved-word identifier (ADD COLUMN, RENAME TABLE, etc.)
+// are reported against the final shape.
 func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	// Check CREATE TABLE statements
-	for ct := range CreateTableStatements(existingTables, changes) {
-		// Check table name
+	for _, ct := range PostState(existingTables, changes) {
 		if l.isReservedWord(ct.TableName) {
 			violations = append(violations, Violation{
 				Linter:   l,
@@ -112,67 +114,19 @@ func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, chan
 			})
 		}
 
-		// Check column names
 		for _, column := range ct.Columns {
 			if l.isReservedWord(column.Name) {
+				colName := column.Name
 				violations = append(violations, Violation{
 					Linter:   l,
 					Severity: SeverityWarning,
 					Location: &Location{
 						Table:  ct.TableName,
-						Column: &column.Name,
+						Column: &colName,
 					},
 					Message:    fmt.Sprintf("Column name %q is a MySQL reserved word", column.Name),
 					Suggestion: strPtr(fmt.Sprintf("Use backticks when referencing this column: `%s` or choose a different name", column.Name)),
 				})
-			}
-		}
-	}
-
-	// Check ALTER TABLE statements
-	for _, change := range changes {
-		at, ok := change.AsAlterTable()
-		if !ok {
-			continue
-		}
-
-		tableName := at.Table.Name.String()
-
-		for _, spec := range at.Specs {
-			switch spec.Tp { //nolint:exhaustive
-			case ast.AlterTableAddColumns, ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-				// Check new column names
-				for _, column := range spec.NewColumns {
-					columnName := column.Name.Name.O
-					if l.isReservedWord(columnName) {
-						violations = append(violations, Violation{
-							Linter:   l,
-							Severity: SeverityWarning,
-							Location: &Location{
-								Table:  tableName,
-								Column: &columnName,
-							},
-							Message:    fmt.Sprintf("Column name %q is a MySQL reserved word", columnName),
-							Suggestion: strPtr(fmt.Sprintf("Use backticks when referencing this column: `%s` or choose a different name", columnName)),
-						})
-					}
-				}
-			case ast.AlterTableRenameTable:
-				// Check new table name
-				if spec.NewTable != nil {
-					newTableName := spec.NewTable.Name.O
-					if l.isReservedWord(newTableName) {
-						violations = append(violations, Violation{
-							Linter:   l,
-							Severity: SeverityWarning,
-							Location: &Location{
-								Table: tableName,
-							},
-							Message:    fmt.Sprintf("New table name %q is a MySQL reserved word", newTableName),
-							Suggestion: strPtr(fmt.Sprintf("Use backticks when referencing this table: `%s` or choose a different name", newTableName)),
-						})
-					}
-				}
 			}
 		}
 	}

@@ -52,7 +52,13 @@ func PostState(existing []*statement.CreateTable, changes []*statement.AbstractS
 			// without full schema context.
 			base = &statement.CreateTable{TableName: change.Table}
 		}
-		byName[key] = applyAlter(base, at)
+		result := applyAlter(base, at)
+		// RENAME TABLE changes the key the post-state map should index by.
+		newKey := strings.ToLower(result.TableName)
+		if newKey != key {
+			delete(byName, key)
+		}
+		byName[newKey] = result
 	}
 
 	out := make([]*statement.CreateTable, 0, len(byName))
@@ -202,6 +208,11 @@ func applyAlter(t *statement.CreateTable, at *ast.AlterTableStmt) *statement.Cre
 	cloned := *t
 	cloned.Columns = append(statement.Columns(nil), t.Columns...)
 	cloned.Indexes = append(statement.Indexes(nil), t.Indexes...)
+	cloned.Constraints = append(statement.Constraints(nil), t.Constraints...)
+	if t.TableOptions != nil {
+		opts := *t.TableOptions
+		cloned.TableOptions = &opts
+	}
 
 	for _, spec := range at.Specs {
 		switch spec.Tp { //nolint:exhaustive
@@ -234,6 +245,9 @@ func applyAlter(t *statement.CreateTable, at *ast.AlterTableStmt) *statement.Cre
 				// duplication is harmless for the indexed-column set (a set,
 				// not a multiset), so we don't dedupe here.
 			}
+			if c, ok := nonIndexConstraint(spec.Constraint); ok {
+				cloned.Constraints = append(cloned.Constraints, c)
+			}
 		case ast.AlterTableDropIndex:
 			before := len(cloned.Indexes)
 			cloned.Indexes = removeIndex(cloned.Indexes, spec.Name, "")
@@ -249,9 +263,88 @@ func applyAlter(t *statement.CreateTable, at *ast.AlterTableStmt) *statement.Cre
 			// only surfaces via GetIndexes() synthesizing from this flag.
 			// Clearing it here makes the post-state honor DROP PRIMARY KEY.
 			cloned.Columns = clearAllInlinePrimaryKey(cloned.Columns)
+		case ast.AlterTableDropForeignKey:
+			cloned.Constraints = removeConstraint(cloned.Constraints, spec.Name, "FOREIGN KEY")
+		case ast.AlterTableDropCheck:
+			cloned.Constraints = removeConstraint(cloned.Constraints, spec.Name, "CHECK")
+		case ast.AlterTableRenameTable:
+			if spec.NewTable != nil {
+				cloned.TableName = spec.NewTable.Name.O
+			}
+		case ast.AlterTableOption:
+			cloned.TableOptions = applyTableOptions(cloned.TableOptions, spec.Options)
 		}
 	}
 	return &cloned
+}
+
+// applyTableOptions returns a TableOptions with the changes from opts merged in.
+// Options not set in opts are preserved from the input; setting an empty string
+// or zero value leaves the existing option untouched (matches MySQL semantics —
+// table options without a clause are not reset to defaults).
+func applyTableOptions(existing *statement.TableOptions, opts []*ast.TableOption) *statement.TableOptions {
+	if len(opts) == 0 {
+		return existing
+	}
+	var out statement.TableOptions
+	if existing != nil {
+		out = *existing
+	}
+	for _, opt := range opts {
+		switch opt.Tp { //nolint:exhaustive
+		case ast.TableOptionEngine:
+			if opt.StrValue != "" {
+				v := opt.StrValue
+				out.Engine = &v
+			}
+		case ast.TableOptionCharset:
+			if opt.StrValue != "" {
+				v := opt.StrValue
+				out.Charset = &v
+			}
+		case ast.TableOptionCollate:
+			if opt.StrValue != "" {
+				v := opt.StrValue
+				out.Collation = &v
+			}
+		case ast.TableOptionAutoIncrement:
+			if opt.UintValue > 0 {
+				v := opt.UintValue
+				out.AutoIncrement = &v
+			}
+		case ast.TableOptionComment:
+			if opt.StrValue != "" {
+				v := opt.StrValue
+				out.Comment = &v
+			}
+		}
+	}
+	return &out
+}
+
+// nonIndexConstraint converts an ast.Constraint that is *not* an index-like
+// constraint (FK, CHECK) into a statement.Constraint suitable for the post-
+// state Constraints slice. Returns (_, false) for index/PK/UNIQUE constraints,
+// which are already handled by indexFromConstraint.
+func nonIndexConstraint(c *ast.Constraint) (statement.Constraint, bool) {
+	switch c.Tp { //nolint:exhaustive
+	case ast.ConstraintForeignKey:
+		return statement.Constraint{Raw: c, Name: c.Name, Type: "FOREIGN KEY"}, true
+	case ast.ConstraintCheck:
+		return statement.Constraint{Raw: c, Name: c.Name, Type: "CHECK"}, true
+	}
+	return statement.Constraint{}, false
+}
+
+func removeConstraint(cs statement.Constraints, name, typeMatch string) statement.Constraints {
+	out := cs[:0]
+	for _, c := range cs {
+		if name != "" && strings.EqualFold(c.Name, name) && c.Type == typeMatch {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // columnFromAst constructs a minimal statement.Column from an AST column def.

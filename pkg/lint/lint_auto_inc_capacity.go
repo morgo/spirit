@@ -47,8 +47,11 @@ func (l *AutoIncCapacityLinter) String() string {
 	return Stringer(l)
 }
 
+// Lint walks the post-state of the schema so an ALTER that raises
+// AUTO_INCREMENT or widens the column type is linted against the table's
+// final shape rather than the pre-ALTER snapshot.
 func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	for ct := range CreateTableStatements(existingTables, changes) {
+	for _, ct := range PostState(existingTables, changes) {
 		if ct.TableOptions == nil || ct.TableOptions.AutoIncrement == nil {
 			// If the table definition doesn't include an AUTO_INCREMENT clause we can't check anything
 			continue

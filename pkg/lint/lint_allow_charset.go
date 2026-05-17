@@ -49,10 +49,22 @@ func (l *AllowCharset) DefaultConfig() map[string]string {
 	}
 }
 
+// Lint walks the post-state of the schema. The message form preserves the
+// pre/post-state distinction that the old ALTER pass made explicit:
+//
+//   - "New column …" when the column did not exist in the pre-state.
+//   - "Column … modified to use …" when MODIFY/CHANGE COLUMN retypes an
+//     existing column.
+//   - "Column … has unsupported character set" for pre-existing untouched
+//     columns and columns inside a new CREATE TABLE.
 func (l *AllowCharset) Lint(createTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	// TODO: do we care about supporting character sets that are valid for MySQL but not valid for the TiDB parser? For example big5
 	suggestion := "Use a supported character set: " + strings.Join(l.charsets, ", ")
-	for ct := range CreateTableStatements(createTables, changes) {
+	pre := PreStateColumns(createTables)
+	newTables := newTablesInChanges(changes)
+	modified := columnsModifiedInChanges(changes)
+
+	for _, ct := range PostState(createTables, changes) {
 		if ct.TableOptions != nil && ct.TableOptions.Charset != nil && !slices.Contains(l.charsets, *ct.TableOptions.Charset) {
 			violations = append(violations, Violation{
 				Linter:     l,
@@ -62,41 +74,27 @@ func (l *AllowCharset) Lint(createTables []*statement.CreateTable, changes []*st
 				Suggestion: &suggestion,
 			})
 		}
+		tKey := strings.ToLower(ct.TableName)
 		for _, column := range ct.Columns {
-			v := l.checkColumnCharset(column.Raw, fmt.Sprintf("Column %q has unsupported character set", column.Name))
-			if v != nil {
-				if v.Location != nil {
-					v.Location.Table = ct.TableName
-				}
-				violations = append(violations, *v)
-			}
-		}
-	}
-
-	for _, change := range changes {
-		at, ok := change.AsAlterTable()
-		if !ok {
-			continue
-		}
-		for _, spec := range at.Specs {
-			var message string
-			switch spec.Tp { //nolint:exhaustive
-			case ast.AlterTableAddColumns:
-				message = "New column %q in table %q uses a disallowed character set"
-			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-				message = "Column %q in table %q modified to use a disallowed character set"
-			default:
+			if column.Raw == nil {
 				continue
 			}
-
-			for _, column := range spec.NewColumns {
-				v := l.checkColumnCharset(column, message)
-				if v != nil {
-					if v.Location != nil && at.Table != nil {
-						v.Location.Table = at.Table.Name.String()
-					}
-					violations = append(violations, *v)
-				}
+			colKey := strings.ToLower(column.Name)
+			_, preExisted := pre[tKey][colKey]
+			var message string
+			switch {
+			case modified[tKey][colKey]:
+				message = fmt.Sprintf("Column %q in table %q modified to use a disallowed character set", column.Name, ct.TableName)
+			case !preExisted && !newTables[tKey]:
+				// ADD COLUMN against a pre-existing table.
+				message = fmt.Sprintf("New column %q in table %q uses a disallowed character set", column.Name, ct.TableName)
+			default:
+				message = fmt.Sprintf("Column %q has unsupported character set", column.Name)
+			}
+			v := l.checkColumnCharset(column.Raw, message)
+			if v != nil {
+				v.Location.Table = ct.TableName
+				violations = append(violations, *v)
 			}
 		}
 	}
