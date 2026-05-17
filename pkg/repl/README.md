@@ -43,11 +43,11 @@ applies it through the applier interface:
 - Higher memory usage than a key-only map: stores full row data for each changed key.
 - Watermark optimizations (`KeyAboveHighWatermark` and `KeyBelowLowWatermark`) are available on `MappedChunker` implementations (both optimistic and composite chunkers). They work correctly for numeric, binary, and temporal primary key types. For `VARCHAR`/`TEXT` columns with collations, Go's byte-order comparison may differ from MySQL's collation order; any discrepancies are caught by the checksum phase (see [issue #479](https://github.com/block/spirit/issues/479)).
 
-**The map is optimistic.** It bets that the randomized iteration order of
-`s.changes` is harmless because each row's upsert depends only on its own
-PK. That bet holds for the overwhelmingly common case, but it breaks for
-workloads that move a unique value between rows inside a single
-transaction — see "Optimistic batching and the FIFO fallback" below.
+**Map iteration order is irrelevant** because the applier issues
+`REPLACE INTO target VALUES (...)`, which deletes any row that conflicts
+on PRIMARY KEY or any UNIQUE index before each insert. That makes the
+multi-row VALUES list order-independent — see "Applier idempotence via
+REPLACE INTO" below.
 
 **Example scenario:**
 ```
@@ -82,14 +82,18 @@ divergence.
 Memory-comparable PKs always use the buffered map, since map-key
 equality matches MySQL row identity.
 
-#### Optimistic batching and the FIFO fallback (#847)
+#### Applier idempotence via REPLACE INTO (#847)
 
-The buffered map flush builds one multi-row
-`INSERT ... ON DUPLICATE KEY UPDATE` per batch. MySQL processes the
-`VALUES` list in array order, so the order of rows inside the batch
-matters whenever two rows in the same batch can collide on a unique
-key. The map's iteration is randomized, which is fine for the common
-case but is **unsafe for "swap" patterns**:
+The applier writes a multi-row statement per batch. We use:
+
+```sql
+REPLACE INTO target (cols) VALUES (...), (...), ...;
+```
+
+rather than `INSERT ... ON DUPLICATE KEY UPDATE`. The choice matters
+whenever two rows in the same batch can collide on a unique key —
+typically because a source-side transaction legally moves a unique
+value between rows:
 
 ```sql
 -- Legal in source: deactivate one row, then activate another,
@@ -101,47 +105,76 @@ UPDATE t SET slot_id = 'S'   WHERE id = 2;  -- was NULL
 COMMIT;
 ```
 
-The two `UPDATE` binlog events can land in the same flush batch. If
-the map's random iteration places id=2 (activate) before id=1
-(deactivate), MySQL processes id=2's upsert first while id=1 still
-holds `'S'` in the shadow table and aborts with
-`Error 1062 (23000): Duplicate entry ...`.
+With `INSERT ... ON DUPLICATE KEY UPDATE`, MySQL processes the
+multi-row VALUES list in array order and resolves only the *first*
+conflict on each row (via the UPDATE clause). If the resulting update
+introduces a *second* unique-key collision the statement fails with
+`Error 1062`. The map's randomized iteration meant a swap pair could
+land "activate-first" in the batch, hitting that exact failure.
 
-The subscription recovers automatically:
+`REPLACE INTO` is order-independent for this case. Per the docs:
 
-1. `handleFlushError` recognises the 1062, clears the pending map,
-   flips an internal `forceQueueMode` flag, and asks the client to
-   rewind. The flush is reported as a no-op so `flushedPos` is not
-   advanced.
-2. `Client.requestRewind` sets a flag and closes the current binlog
-   syncer. `readStream` sees the closed syncer plus the rewind flag
-   and shortcuts straight into `recreateStreamer`, skipping the
-   consecutive-error backoff that exists for stream-level read
-   failures.
-3. `recreateStreamer` restarts the binlog reader at position 4 of
-   the `flushedPos` file (the start of the binlog file containing
-   the last fully-flushed position). Position 4 is required so the
-   syncer picks up the file's `FormatDescriptionEvent` and
-   `TableMapEvent`s — MySQL does not re-send TableMaps mid-file, so
-   restarting at any later offset would leave the parser unable to
-   decode subsequent `RowsEvent`s.
-4. Re-read events flow into the now queue-mode subscription in
-   binlog (FIFO) order. `flushQueueLocked` carries that order into
-   the multi-row upsert, so the swap pair lands deactivate-first
-   and no longer collides. The subscription stays in queue mode for
-   the rest of the migration; we don't flip back, since one
-   observed swap means the workload is likely to produce more.
+> REPLACE works exactly like INSERT, except that if an old row in
+> the table has the same value as a new row for a PRIMARY KEY or a
+> UNIQUE index, the old row is deleted before the new row is
+> inserted.
 
-Tables whose workloads never produce a swap never trip the recovery
-path and keep the full dedup benefit of map mode. The cost of the
-recovery is one wasted flush and a re-read of every event since the
-last full flush; the destination ends up byte-identical to source
-because the re-applied events are idempotent for already-applied
-rows and correct for the unapplied tail.
+So each row's conflicts — on PK or any unique index — are deleted
+before that row's insert runs, irrespective of where the conflicting
+row sits in the batch. The swap pair collapses to "delete the
+previous holder, insert the new holder" and the order of the two
+events inside the batch doesn't matter.
 
-See `TestBufferedMapSwapPairRecoversViaQueueMode` (unit) and
-`TestSwapPairFullRecoveryViaQueueMode` (end-to-end) for the
-regression gates.
+This is the same robustness the pre-#821 `deltaMap` had with
+`REPLACE INTO target SELECT FROM source`, but **without** the
+read-after-commit race that motivated #746 — we supply the inline
+row image, not a `SELECT` against source.
+
+##### Eventual consistency between batches
+
+REPLACE's "delete any unique-key conflict before each insert"
+semantic means a single REPLACE statement can delete *more rows* than
+the ones in its VALUES list — specifically, any row currently in the
+destination that previously held a unique value the new row is now
+claiming. That row is briefly missing from the destination until its
+own event arrives in a later batch (or in the same batch but
+processed later) and re-inserts it.
+
+Concretely, for the swap pair above with batches of size 1:
+
+| Step | Batch | Destination state |
+|------|-------|-------------------|
+| 0    | —     | id=1: 'S', id=2: NULL |
+| 1    | `REPLACE (id=1, slot=NULL)` | id=1: NULL, id=2: NULL |
+| 2    | `REPLACE (id=2, slot='S')`  | id=1: NULL, id=2: 'S' |
+
+And for the same swap pair if the activate landed first across batches:
+
+| Step | Batch | Destination state |
+|------|-------|-------------------|
+| 0    | —     | id=1: 'S', id=2: NULL |
+| 1    | `REPLACE (id=2, slot='S')` | id=2: 'S' (id=1 **deleted** — unique-key conflict on 'S') |
+| 2    | `REPLACE (id=1, slot=NULL)` | id=1: NULL, id=2: 'S' (id=1 re-inserted) |
+
+Binlog ordering gives us the first table in practice — within a
+single source-side transaction, the deactivate event has a lower
+binlog position than the activate — but Spirit's correctness does
+not depend on which case occurs. The destination converges to
+source's current state once the last unflushed event for each
+affected PK has been applied.
+
+This eventual consistency is safe because the `bufferedMap` is an
+**up-to-date and disjoint** representation of pending changes: every
+PK appears at most once at flush time, holding the latest row image
+MySQL emitted for it. Any row transiently deleted by REPLACE's
+conflict resolution is therefore guaranteed to have its own event in
+the buffer (or arriving shortly) — its row image isn't lost,
+just temporarily not yet applied. The post-cutover checksum (with
+`FixDifferences=true`) is the backstop for anything that slips
+through.
+
+See `TestBufferedMapSwapPairFlushesViaReplace` (unit) and
+`TestSwapPairEndToEndViaReplace` (end-to-end) for the regression gates.
 
 ## Features
 

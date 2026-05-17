@@ -2,7 +2,6 @@ package repl
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
-	mysql2 "github.com/go-sql-driver/mysql"
 )
 
 // The bufferedMap avoids using REPLACE INTO .. SELECT.
@@ -26,55 +24,55 @@ import (
 // binlog_order_commits = ON. Storing the row image inline (rather than
 // re-reading source via REPLACE INTO ... SELECT) sidesteps that race.
 //
-// Behaviour switches based on (forceQueueMode,
-// watermarkOptimizationEnabled, pkIsMemoryComparable):
+// Behaviour switches based on (watermarkOptimizationEnabled,
+// pkIsMemoryComparable):
 //
-//   - forceQueueMode=true: always queue mode. Set permanently by
-//     handleFlushError after the subscription recovers from a duplicate-
-//     key collision (see "Optimistic batching" below and #847).
-//   - pkIsMemoryComparable=true: map mode. Map-key equality matches
+//   - pkIsMemoryComparable=true: always map mode. Map-key equality matches
 //     MySQL row identity, so LWW dedup is correct.
 //   - pkIsMemoryComparable=false: map mode during the copy phase
 //     (watermark on), queue mode post-copy. The chunker's later SELECT
 //     covers in-window case-collision races during the copy phase; the
 //     post-cutover checksum repairs any divergence that slips through.
 //
-// Why queue mode at all? Two unrelated reasons:
+// Why queue mode at all? With case-insensitive collations "A" and "a"
+// hash to distinct keys but resolve to the same row in MySQL, so a
+// map's non-deterministic iteration would apply the events in the
+// wrong order. FIFO ordering applies them in binlog order, which the
+// target's own collation-aware uniqueness then collapses correctly.
+// The queue keeps the row image inline and applies it via the applier
+// — no REPLACE INTO ... SELECT round-trip, so #746 stays fixed and
+// cross-server moves stay supported per #607.
 //
-//  1. Collation-insensitive PKs: with case-insensitive collations "A"
-//     and "a" hash to distinct keys but resolve to the same row in
-//     MySQL, so a map's non-deterministic iteration would apply the
-//     events in the wrong order. FIFO ordering applies them in binlog
-//     order, which the target's own collation-aware uniqueness then
-//     collapses correctly.
-//  2. Optimistic batching for unique keys (#847): the map flush hands
-//     the applier a batched INSERT...ON DUPLICATE KEY UPDATE. MySQL
-//     processes its VALUES list in array order, so the row order in
-//     the batch matters when two rows in it can collide on a unique
-//     key. The map's randomized iteration is fine for the common case
-//     where each row's upsert depends only on its own PK, but it
-//     breaks for "swap" patterns — a workload that legally moves a
-//     unique value between two rows inside one transaction
-//     (UPDATE A SET col=NULL; UPDATE B SET col='val';). When the
-//     activating row happens to come first in the batch, MySQL fails
-//     it with Error 1062 because the deactivating row still holds the
-//     value in the shadow. handleFlushError catches the 1062, clears
-//     the map, flips forceQueueMode on, and asks the client to rewind
-//     the binlog reader so the lost events can be re-read FIFO and
-//     applied in binlog order.
+// Applier idempotence: the applier issues `REPLACE INTO target VALUES ...`
+// rather than `INSERT ... ON DUPLICATE KEY UPDATE`. REPLACE deletes any
+// row that conflicts on PRIMARY KEY or any UNIQUE index before each
+// insert, which makes the applier idempotent for any subset/order of
+// events that land together in a multi-row batch. That's what restores
+// the pre-#821 robustness for "swap" workloads (a source-side
+// transaction that legally moves a unique value between two rows)
+// without re-introducing the binlog/visibility race motivating #746 —
+// we supply the inline row image, not a SELECT against source.
 //
-// Either path keeps the row image inline and applies via the applier —
-// no REPLACE INTO ... SELECT, so #746 stays fixed and cross-server
-// moves stay supported per #607.
+// Eventual consistency: REPLACE may delete more rows than appear in
+// its VALUES list — specifically, any row in the destination that
+// holds a unique value the new row is now claiming. That row is
+// briefly missing from the destination until its own event arrives in
+// a later batch (or a later row in the same batch) and re-inserts it.
+// Spirit's correctness relies on the bufferedMap being an up-to-date
+// and *disjoint* representation of pending changes — every PK appears
+// at most once at flush time, holding the latest row image — so every
+// transiently-deleted row is guaranteed to have its own event in the
+// buffer (or arriving shortly). The destination converges to source's
+// current state once the last unflushed event for each affected PK
+// has been applied; the post-cutover checksum (with
+// FixDifferences=true) catches any divergence that slips through.
 //
 // SetWatermarkOptimization owns the watermark-driven transition: when
 // its toggle changes which store is active, it drains the outgoing
 // store inline. Past that boundary the invariant holds — only the
 // currently-active store may have entries — so HasChanged never has to
 // merge into a stale map and Flush never has to drain both stores in
-// the normal path. The forceQueueMode transition is *not* drained by
-// SetWatermarkOptimization; handleFlushError discards the map outright
-// because the rewind will re-read those events from the binlog.
+// the normal path.
 
 type bufferedChange struct {
 	logicalRow  applier.LogicalRow
@@ -145,15 +143,6 @@ type bufferedMap struct {
 	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
 
 	pkIsMemoryComparable bool
-
-	// forceQueueMode is set by handleFlushError after a recoverable
-	// duplicate-key collision (block/spirit#847). Once set, queueModeActive
-	// returns true regardless of pkIsMemoryComparable / watermarkOptimization,
-	// so subsequent events accumulate in s.queue (FIFO) and flushQueueLocked
-	// drives them through the applier in binlog order. We never flip it back —
-	// once a swap-pair has been observed, this subscription stays in queue mode
-	// for the rest of the migration.
-	forceQueueMode bool
 }
 
 // Per-entry overheads applied on top of estimateRowSize so the soft
@@ -232,13 +221,7 @@ func (s *bufferedMap) Tables() []*table.TableInfo {
 // Memory-comparable PKs are never queue-mode (map-key equality matches
 // MySQL row identity). Non-memory-comparable PKs run in map mode during
 // the copy phase (watermark on) and switch to queue mode post-copy.
-//
-// One escape hatch: if forceQueueMode is set (after a recoverable
-// duplicate-key collision per #847), queue mode wins regardless.
 func (s *bufferedMap) queueModeActive() bool {
-	if s.forceQueueMode {
-		return true
-	}
 	if s.pkIsMemoryComparable {
 		return false
 	}
@@ -386,9 +369,6 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		}
 		if (i % target) == 0 {
 			if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
-				if s.handleFlushError(err) {
-					return false, nil
-				}
 				return false, err
 			}
 			deleteKeys = nil
@@ -397,9 +377,6 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 	}
 
 	if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
-		if s.handleFlushError(err) {
-			return false, nil
-		}
 		return false, err
 	}
 
@@ -415,60 +392,6 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		s.cond.Broadcast()
 	}
 	return allChangesFlushed, nil
-}
-
-// handleFlushError implements the swap-pair recovery path for #847.
-//
-// When the multi-row INSERT ... ON DUPLICATE KEY UPDATE inside flushBatch
-// fails with Error 1062, the cause is almost always that the buffered
-// map's randomized iteration handed the applier a swap pair (deactivate
-// row A, activate row B from the same source-side transaction) in the
-// wrong order — B activates first while A still holds the unique value
-// in the shadow table.
-//
-// On 1062 we:
-//
-//  1. Discard all pending changes. Their *latest* row images are still
-//     in the source-side binlog (the binlog reader has not advanced
-//     flushedPos past them), so we can re-read them.
-//  2. Flip forceQueueMode on. Subsequent events will accumulate in the
-//     FIFO queue, and flushQueueLocked drives them through the applier
-//     in binlog order — no in-batch reordering, no spurious collision.
-//  3. Ask the client to rewind the binlog reader back to position 4 of
-//     the flushedPos file. recreateStreamer handles the actual rewind
-//     once readStream sees the closed syncer.
-//
-// Returns true if we recognized and handled the error; the caller
-// should then treat the flush as a no-op (return allChangesFlushed=false
-// without an error) so flushedPos is not advanced.
-//
-// Caller must hold s.Mutex.
-func (s *bufferedMap) handleFlushError(err error) bool {
-	var me *mysql2.MySQLError
-	if !errors.As(err, &me) || me.Number != 1062 {
-		return false
-	}
-	s.c.logger.Warn("buffered-map flush hit a duplicate-key collision; "+
-		"clearing pending changes, switching to queue mode (FIFO), "+
-		"and rewinding binlog to flushed position",
-		"table", s.table.SchemaName+"."+s.table.TableName,
-		"error", err.Error(),
-		"changes_cleared", len(s.changes),
-		"queue_cleared", len(s.queue),
-	)
-	// Discard both stores. Anything that was in either is about to be
-	// re-read from the binlog by readStream after the rewind. Clearing
-	// the queue here (not just the map) also keeps sizeBytes accounting
-	// consistent — leaving stale queue entries while resetting sizeBytes
-	// would let flushQueueLocked drive sizeBytes negative when it
-	// subtracts drainedBytes on the next flush.
-	s.changes = make(map[string]bufferedChange)
-	s.queue = nil
-	s.sizeBytes = 0
-	s.forceQueueMode = true
-	s.cond.Broadcast() // wake HasChanged callers parked on the soft cap
-	s.c.requestRewind()
-	return true
 }
 
 // flushBatch flushes a batch of deletes and upserts using the applier.
