@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
@@ -58,6 +57,10 @@ func (l *AllowEngine) String() string {
 	return Stringer(l)
 }
 
+// Lint walks the post-state of the schema so an ALTER TABLE ENGINE=... that
+// migrates *to* an allowed engine no longer false-positives against the
+// legacy engine, and one that changes the engine to a disallowed value is
+// reported against the table's final shape.
 func (l *AllowEngine) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	if l.allowedEngines == nil {
 		err := l.Configure(l.DefaultConfig())
@@ -65,45 +68,21 @@ func (l *AllowEngine) Lint(existingTables []*statement.CreateTable, changes []*s
 			panic(err)
 		}
 	}
-	for ct := range CreateTableStatements(existingTables, changes) {
-		// Skip tables without explicit engine specification
+	for _, ct := range PostState(existingTables, changes) {
 		if ct.TableOptions == nil || ct.TableOptions.Engine == nil {
 			continue
 		}
-
 		engineName := *ct.TableOptions.Engine
-		if _, ok := l.allowedEngines[strings.ToLower(engineName)]; !ok {
-			violations = append(violations, Violation{
-				Linter:     l,
-				Location:   &Location{Table: ct.TableName},
-				Message:    fmt.Sprintf("Table %q uses an unsupported engine %q", ct.TableName, engineName),
-				Severity:   SeverityWarning,
-				Suggestion: strPtr("Use a supported storage engine: " + strings.Join(slices.Sorted(maps.Keys(l.allowedEngines)), ", ")),
-			})
-		}
-	}
-	for _, change := range changes {
-		alter, ok := change.AsAlterTable()
-		if !ok {
+		if _, ok := l.allowedEngines[strings.ToLower(engineName)]; ok {
 			continue
 		}
-		for _, spec := range alter.Specs {
-			for _, option := range spec.Options {
-				if option.Tp != ast.TableOptionEngine {
-					continue
-				}
-				engineName := option.StrValue
-				if _, ok := l.allowedEngines[strings.ToLower(engineName)]; !ok {
-					violations = append(violations, Violation{
-						Linter:     l,
-						Location:   &Location{Table: alter.Table.Name.String()},
-						Message:    fmt.Sprintf("Table %q uses an unsupported engine %q", alter.Table.Name, engineName),
-						Severity:   SeverityWarning,
-						Suggestion: strPtr("Use a supported storage engine: " + strings.Join(slices.Sorted(maps.Keys(l.allowedEngines)), ", ")),
-					})
-				}
-			}
-		}
+		violations = append(violations, Violation{
+			Linter:     l,
+			Location:   &Location{Table: ct.TableName},
+			Message:    fmt.Sprintf("Table %q uses an unsupported engine %q", ct.TableName, engineName),
+			Severity:   SeverityWarning,
+			Suggestion: strPtr("Use a supported storage engine: " + strings.Join(slices.Sorted(maps.Keys(l.allowedEngines)), ", ")),
+		})
 	}
 	return violations
 }

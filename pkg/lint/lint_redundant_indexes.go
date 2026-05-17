@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func init() {
@@ -14,13 +13,22 @@ func init() {
 
 // RedundantIndexLinter checks for redundant indexes in tables.
 // An index is considered redundant if:
-// 1. Its columns are a prefix of the PRIMARY KEY columns
-// 2. Another index's column list starts with this index's columns (prefix match)
-// 3. Another index has exactly the same columns in the same order (duplicate)
-// 4. The index ends with PRIMARY KEY columns (suffix redundancy)
+//  1. Its columns are a prefix of the PRIMARY KEY columns
+//  2. Another index's column list starts with this index's columns (prefix match)
+//  3. Another index has exactly the same columns in the same order (duplicate)
+//  4. The index ends with PRIMARY KEY columns (suffix redundancy) — InnoDB
+//     auto-appends PK columns to secondary indexes, so spelling them out is
+//     wasteful.
+//  5. The index starts with the full PRIMARY KEY (prefix redundancy) — point
+//     and equality lookups by PK are already served by the clustered index,
+//     so the leading PK columns add no capability that a non-PK-leading
+//     variant of the index wouldn't already provide.
 //
-// In InnoDB, secondary indexes automatically include PRIMARY KEY columns as a suffix,
-// making certain index patterns redundant and wasteful.
+// The linter evaluates the *post-state* of the schema (existing tables with
+// CREATE TABLE / ALTER TABLE changes applied) so warnings fire when a
+// redundant index is being introduced, and stay silent when it is being
+// removed — matching the post-state convention established for other linters
+// in #840.
 type RedundantIndexLinter struct{}
 
 func (l *RedundantIndexLinter) Name() string {
@@ -28,20 +36,14 @@ func (l *RedundantIndexLinter) Name() string {
 }
 
 func (l *RedundantIndexLinter) Description() string {
-	return "Detects redundant indexes including duplicates, prefix matches, and unnecessary PRIMARY KEY suffixes"
+	return "Detects redundant indexes including duplicates, prefix matches, and unnecessary PRIMARY KEY suffixes or prefixes"
 }
 
 func (l *RedundantIndexLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
 	var violations []Violation
-
-	// Check both existing tables and CREATE TABLE statements in changes
-	for table := range CreateTableStatements(existingTables, changes) {
+	for _, table := range PostState(existingTables, changes) {
 		violations = append(violations, l.checkTableIndexes(table)...)
 	}
-
-	// Check ALTER TABLE statements that add indexes
-	violations = append(violations, l.checkAlterTableStatements(existingTables, changes)...)
-
 	return violations
 }
 
@@ -64,9 +66,14 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 			continue
 		}
 
-		// Check 1: Redundant PK suffix (can coexist with other issues)
-		// This checks if the index explicitly includes PK columns at the end
-		if primaryKey != nil {
+		// PRIMARY KEY itself never participates in suffix/prefix-of-PK checks
+		// against itself, and the checks below are only meaningful for
+		// secondary indexes.
+		if primaryKey != nil && index.Type != "PRIMARY KEY" {
+			// Check: Redundant PK suffix
+			// The index explicitly includes PK columns at its end. InnoDB
+			// already appends PK columns to secondary indexes, so spelling
+			// them out wastes space.
 			if hasRedundant, colCount := hasRedundantPKSuffix(index, *primaryKey); hasRedundant {
 				violations = append(violations, createPKSuffixViolation(
 					table.GetTableName(),
@@ -76,9 +83,22 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 				))
 				// Continue checking - index might also be fully redundant
 			}
+
+			// Check: Redundant PK prefix
+			// The index leads with the full PK. Point and equality lookups by
+			// PK are already served by the clustered index, and a non-PK-leading
+			// variant of this index would auto-append PK anyway.
+			if hasRedundant, colCount := hasRedundantPKPrefix(index, *primaryKey); hasRedundant {
+				violations = append(violations, createPKPrefixViolation(
+					table.GetTableName(),
+					index,
+					*primaryKey,
+					colCount,
+				))
+			}
 		}
 
-		// Check 2: Redundant to another index
+		// Check: Redundant to another index
 		for _, otherIndex := range indexes {
 			if index.Name == otherIndex.Name {
 				continue
@@ -103,16 +123,41 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 }
 
 // isRedundantToIndex checks if indexA is redundant to indexB.
-// Returns true if indexA is a prefix of indexB OR if they're duplicates.
+// Returns true if indexA is a prefix of indexB OR if they're duplicates,
+// AND any constraint indexA enforces is also enforced by indexB.
 func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
-	// Type compatibility check
-	if !canMakeRedundant(indexB, indexA) {
+	// FULLTEXT and SPATIAL indexes serve specialized purposes and are not
+	// interchangeable with B-tree indexes (or each other).
+	if indexA.Type == "FULLTEXT" || indexA.Type == "SPATIAL" ||
+		indexB.Type == "FULLTEXT" || indexB.Type == "SPATIAL" {
+		return false
+	}
+
+	// PRIMARY KEY is a table-level constraint (clustered key, uniqueness,
+	// implicit NOT NULL) that cannot be dropped in favor of another index —
+	// not even a column-for-column duplicate. Reporting it as redundant
+	// would suggest an unsafe rewrite, so never flag it.
+	if indexA.Type == "PRIMARY KEY" {
 		return false
 	}
 
 	// indexA cannot be redundant if it has MORE columns than indexB
 	if len(indexA.Columns) > len(indexB.Columns) {
 		return false
+	}
+
+	// A UNIQUE index enforces uniqueness over its exact column set. A wider
+	// covering index (UNIQUE or PK on more columns) enforces a *different*
+	// uniqueness scope and so does not subsume the constraint. UNIQUE is
+	// therefore only redundant when an exact-column-set duplicate also
+	// enforces uniqueness over those columns.
+	if indexA.Type == "UNIQUE" {
+		if len(indexA.Columns) != len(indexB.Columns) {
+			return false
+		}
+		if indexB.Type != "UNIQUE" && indexB.Type != "PRIMARY KEY" {
+			return false
+		}
 	}
 
 	// Check if all columns of indexA match the prefix of indexB in exact order
@@ -129,28 +174,33 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 	return true
 }
 
-// canMakeRedundant checks if the covering index can make the redundant index redundant
-// based on their types. Different index types serve different purposes.
-func canMakeRedundant(covering statement.Index, redundant statement.Index) bool {
-	// FULLTEXT and SPATIAL indexes serve special purposes
-	// Regular indexes cannot make them redundant, and they can't make others redundant
-	if redundant.Type == "FULLTEXT" || redundant.Type == "SPATIAL" ||
-		covering.Type == "FULLTEXT" || covering.Type == "SPATIAL" {
-		return false
+// hasRedundantPKPrefix checks if a secondary index leads with the full
+// PRIMARY KEY. Returns true and the count of leading PK columns if so.
+//
+// Rationale: InnoDB's PRIMARY KEY is the clustered index, so point and
+// equality lookups by PK are best served by PK directly. A secondary index
+// of the form INDEX (pk, x, y) covers no lookup that either PK alone or
+// INDEX (x, y) (with PK auto-appended) cannot already serve. The leading
+// PK columns are therefore redundant.
+//
+// Unlike the suffix check, this only matches the *full* PK at the start —
+// a partial PK prefix at the start is a defensible covering index pattern.
+// The index must have additional columns beyond the PK (an index that *is*
+// the PK is caught by the duplicate / prefix-of-PK rules instead).
+func hasRedundantPKPrefix(index statement.Index, primaryKey statement.Index) (bool, int) {
+	pkLen := len(primaryKey.Columns)
+	if pkLen == 0 {
+		return false, 0
 	}
-
-	// PRIMARY KEY can make most indexes redundant (it acts like a UNIQUE index)
-	if covering.Type == "PRIMARY KEY" {
-		return true
+	if len(index.Columns) <= pkLen {
+		return false, 0
 	}
-
-	// UNIQUE indexes provide additional constraints beyond lookup
-	// A non-unique index cannot make a UNIQUE index redundant
-	if redundant.Type == "UNIQUE" && covering.Type != "UNIQUE" {
-		return false
+	for i := range pkLen {
+		if index.Columns[i] != primaryKey.Columns[i] {
+			return false, 0
+		}
 	}
-
-	return true
+	return true, pkLen
 }
 
 // hasRedundantPKSuffix checks if an index has a redundant PRIMARY KEY suffix.
@@ -340,156 +390,41 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 	}
 }
 
-// checkAlterTableStatements checks ALTER TABLE statements that add indexes
-// for potential redundancy with existing indexes or other indexes being added.
-func (l *RedundantIndexLinter) checkAlterTableStatements(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) []Violation {
-	var violations []Violation
+// createPKPrefixViolation creates a violation for a secondary index that
+// leads with the full PRIMARY KEY.
+func createPKPrefixViolation(tableName string, index statement.Index, primaryKey statement.Index, redundantColCount int) Violation {
+	redundantPrefix := index.Columns[:redundantColCount]
+	usefulSuffix := index.Columns[redundantColCount:]
 
-	// Build a map of existing tables for quick lookup
-	existingTableMap := make(map[string]*statement.CreateTable)
-	for _, table := range existingTables {
-		existingTableMap[table.GetTableName()] = table
-	}
+	message := fmt.Sprintf(
+		"Index '%s' on columns (%s) leads with PRIMARY KEY columns (%s). "+
+			"Point and equality lookups by PRIMARY KEY are served by the clustered index directly, "+
+			"and InnoDB appends PK columns to secondary indexes — the leading PK columns add no capability.",
+		index.Name,
+		strings.Join(index.Columns, ", "),
+		strings.Join(redundantPrefix, ", "),
+	)
+	suggestion := fmt.Sprintf(
+		"Redefine index '%s' as INDEX (%s) — InnoDB will append PRIMARY KEY (%s) internally — "+
+			"or drop it entirely if the PRIMARY KEY alone covers the queries that use it.",
+		index.Name,
+		strings.Join(usefulSuffix, ", "),
+		strings.Join(primaryKey.Columns, ", "),
+	)
 
-	// Process each ALTER TABLE statement
-	for _, change := range changes {
-		alterStmt, ok := change.AsAlterTable()
-		if !ok {
-			continue
-		}
-
-		tableName := change.Table
-
-		// Get the existing table definition (if it exists)
-		existingTable := existingTableMap[tableName]
-		if existingTable == nil {
-			// Table doesn't exist yet - might be created in this batch of changes
-			// For now, we'll skip checking ALTER on non-existent tables
-			continue
-		}
-
-		// Extract indexes being added in this ALTER TABLE
-		newIndexes := l.extractIndexesFromAlter(alterStmt)
-		if len(newIndexes) == 0 {
-			continue
-		}
-
-		// Get existing indexes from the table
-		existingIndexes := existingTable.GetIndexes()
-		primaryKey := existingIndexes.ByName("PRIMARY")
-
-		// Check each new index for redundancy
-		for i, newIndex := range newIndexes {
-			// Check against existing indexes
-			if v := l.checkIndexRedundancy(tableName, newIndex, existingIndexes, primaryKey); v != nil {
-				violations = append(violations, *v)
-			}
-
-			// Check against other new indexes being added in the same ALTER
-			// (only check against indexes that come before this one to avoid duplicates)
-			for j := range i {
-				otherNewIndex := newIndexes[j]
-
-				// Check if newIndex is redundant to otherNewIndex
-				if isRedundantToIndex(newIndex, otherNewIndex) {
-					isDuplicate := len(newIndex.Columns) == len(otherNewIndex.Columns)
-					violations = append(violations, createRedundancyViolation(
-						tableName,
-						newIndex,
-						otherNewIndex,
-						isDuplicate,
-						false, // not redundant to PK
-					))
-					break // Only report first redundancy
-				}
-			}
-		}
-	}
-
-	return violations
-}
-
-// checkIndexRedundancy checks if a single index is redundant to any index in the provided list.
-// Returns a violation if redundancy is found, nil otherwise.
-func (l *RedundantIndexLinter) checkIndexRedundancy(tableName string, index statement.Index, existingIndexes statement.Indexes, primaryKey *statement.Index) *Violation {
-	// Check for redundant PK suffix first
-	if primaryKey != nil {
-		if hasRedundant, colCount := hasRedundantPKSuffix(index, *primaryKey); hasRedundant {
-			v := createPKSuffixViolation(tableName, index, *primaryKey, colCount)
-			return &v
-		}
-	}
-
-	// Check if redundant to any existing index
-	for _, existingIndex := range existingIndexes {
-		if isRedundantToIndex(index, existingIndex) {
-			isDuplicate := len(index.Columns) == len(existingIndex.Columns)
-			v := createRedundancyViolation(
-				tableName,
-				index,
-				existingIndex,
-				isDuplicate,
-				existingIndex.Type == "PRIMARY KEY",
-			)
-			return &v
-		}
-	}
-
-	return nil
-}
-
-// extractIndexesFromAlter extracts index definitions from an ALTER TABLE statement
-func (l *RedundantIndexLinter) extractIndexesFromAlter(alterStmt *ast.AlterTableStmt) []statement.Index {
-	var indexes []statement.Index
-
-	for _, spec := range alterStmt.Specs {
-		if spec.Tp == ast.AlterTableAddConstraint && spec.Constraint != nil {
-			index := l.constraintToIndex(spec.Constraint)
-			if index != nil {
-				indexes = append(indexes, *index)
-			}
-		}
-	}
-
-	return indexes
-}
-
-// constraintToIndex converts an ast.Constraint to a statement.Index
-func (l *RedundantIndexLinter) constraintToIndex(constraint *ast.Constraint) *statement.Index {
-	// Extract column names from the constraint
-	var columns []string
-	for _, key := range constraint.Keys {
-		if key.Column != nil {
-			columns = append(columns, key.Column.Name.O)
-		}
-	}
-
-	if len(columns) == 0 {
-		return nil
-	}
-
-	// Determine the index type
-	var indexType string
-	switch constraint.Tp { //nolint:exhaustive
-	case ast.ConstraintPrimaryKey:
-		indexType = "PRIMARY KEY"
-	case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
-		indexType = "UNIQUE"
-	case ast.ConstraintKey, ast.ConstraintIndex:
-		indexType = "INDEX"
-	case ast.ConstraintFulltext:
-		indexType = "FULLTEXT"
-	case ast.ConstraintSpatial:
-		indexType = "SPATIAL"
-	default:
-		// Not an index constraint (e.g., foreign key, check)
-		return nil
-	}
-
-	return &statement.Index{
-		Name:    constraint.Name,
-		Type:    indexType,
-		Columns: columns,
-		Raw:     constraint,
+	return Violation{
+		Linter:     &RedundantIndexLinter{},
+		Severity:   SeverityWarning,
+		Message:    message,
+		Location:   &Location{Table: tableName, Index: &index.Name},
+		Suggestion: &suggestion,
+		Context: map[string]any{
+			"index_name":          index.Name,
+			"full_columns":        index.Columns,
+			"redundant_prefix":    redundantPrefix,
+			"useful_columns":      usefulSuffix,
+			"primary_key_columns": primaryKey.Columns,
+			"redundant_col_count": redundantColCount,
+		},
 	}
 }

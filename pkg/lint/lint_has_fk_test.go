@@ -587,7 +587,7 @@ func TestHasFKLinter_AlterTableAddForeignKey(t *testing.T) {
 	require.Len(t, violations, 1)
 	require.Equal(t, "has_foreign_key", violations[0].Linter.Name())
 	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "Adding foreign key constraint")
+	require.Contains(t, violations[0].Message, "FOREIGN KEY constraint")
 	require.Contains(t, violations[0].Message, "fk_user_id")
 	require.Contains(t, violations[0].Message, "orders")
 	require.Equal(t, "orders", violations[0].Location.Table)
@@ -613,7 +613,7 @@ func TestHasFKLinter_AlterTableAddMultipleForeignKeys(t *testing.T) {
 		require.Equal(t, SeverityWarning, v.Severity)
 		require.Equal(t, "order_items", v.Location.Table)
 		require.NotNil(t, v.Location.Constraint)
-		require.Contains(t, v.Message, "Adding foreign key constraint")
+		require.Contains(t, v.Message, "FOREIGN KEY constraint")
 	}
 
 	// Verify both constraint names are present
@@ -861,7 +861,7 @@ func TestHasFKLinter_MixedCreateAndAlterStatements(t *testing.T) {
 		case "orders":
 			require.Contains(t, v.Message, "has FOREIGN KEY constraint")
 		case "order_items":
-			require.Contains(t, v.Message, "Adding foreign key constraint")
+			require.Contains(t, v.Message, "FOREIGN KEY constraint")
 		}
 	}
 }
@@ -948,7 +948,7 @@ func TestHasFKLinter_AlterTableViolationStructure(t *testing.T) {
 	require.Equal(t, "has_foreign_key", v.Linter.Name())
 	require.Equal(t, SeverityWarning, v.Severity)
 	require.NotEmpty(t, v.Message)
-	require.Contains(t, v.Message, "Adding foreign key constraint")
+	require.Contains(t, v.Message, "FOREIGN KEY constraint")
 	require.NotNil(t, v.Location)
 	require.Equal(t, "orders", v.Location.Table)
 	require.NotNil(t, v.Location.Constraint)

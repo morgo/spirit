@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -463,7 +464,10 @@ func TestRedundantIndexLinter_TypeCompatibility(t *testing.T) {
 			expectViolated: false,
 		},
 		{
-			name: "UNIQUE (a) redundant to UNIQUE (a, b)",
+			// UNIQUE (a) and UNIQUE (a, b) enforce different uniqueness scopes:
+			// the former forbids duplicate values of `a`, the latter only forbids
+			// duplicate (a, b) pairs. Dropping UNIQUE (a) would weaken the schema.
+			name: "UNIQUE (a) NOT redundant to UNIQUE (a, b)",
 			createTable: `CREATE TABLE t1 (
 				id INT PRIMARY KEY,
 				a INT,
@@ -471,18 +475,20 @@ func TestRedundantIndexLinter_TypeCompatibility(t *testing.T) {
 				UNIQUE idx_a (a),
 				UNIQUE idx_ab (a, b)
 			)`,
-			expectViolated: true,
+			expectViolated: false,
 			violatedIndex:  "idx_a",
 		},
 		{
-			name: "UNIQUE (a) redundant to PK (a, b)",
+			// PRIMARY KEY (a, b) only forbids duplicate (a, b) pairs; it does
+			// not subsume the stricter UNIQUE (a) constraint.
+			name: "UNIQUE (a) NOT redundant to PK (a, b)",
 			createTable: `CREATE TABLE t1 (
 				a INT,
 				b INT,
 				PRIMARY KEY (a, b),
 				UNIQUE idx_a (a)
 			)`,
-			expectViolated: true,
+			expectViolated: false,
 			violatedIndex:  "idx_a",
 		},
 		{
@@ -735,17 +741,30 @@ func TestRedundantIndexLinter_AlterTableAddRedundantIndex(t *testing.T) {
 			messageContains: "PRIMARY KEY",
 		},
 		{
-			name: "ADD UNIQUE redundant to existing UNIQUE",
+			// Adding UNIQUE (a) alongside UNIQUE (a, b) is *not* redundant —
+			// the two enforce different uniqueness scopes.
+			name: "ADD UNIQUE NOT redundant to wider existing UNIQUE",
 			existingTable: `CREATE TABLE t1 (
 				id INT PRIMARY KEY,
 				a INT,
 				b INT,
 				UNIQUE KEY idx_ab (a, b)
 			)`,
-			alterSQL:        "ALTER TABLE t1 ADD UNIQUE KEY idx_a (a)",
+			alterSQL:       "ALTER TABLE t1 ADD UNIQUE KEY idx_a (a)",
+			expectViolated: false,
+		},
+		{
+			name: "ADD UNIQUE duplicate of existing UNIQUE",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				UNIQUE KEY idx_ab (a, b)
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD UNIQUE KEY idx_ab_dup (a, b)",
 			expectViolated:  true,
-			violatedIndex:   "idx_a",
-			messageContains: "redundant",
+			violatedIndex:   "idx_ab_dup",
+			messageContains: "duplicate",
 		},
 		{
 			name: "ADD INDEX with PK suffix redundancy",
@@ -875,6 +894,218 @@ func TestRedundantIndexLinter_AlterTableOnNonExistentTable(t *testing.T) {
 
 	// Should not crash and should return no violations
 	require.Empty(t, violations)
+}
+
+// TestRedundantIndexLinter_PKNotFlaggedAsRedundant is a regression test for
+// two issues reported together:
+//
+//  1. A secondary index whose leading columns match the PRIMARY KEY caused
+//     the PRIMARY KEY itself to be reported as redundant. The PRIMARY KEY is
+//     a constraint (clustered key + uniqueness + NOT NULL) and cannot be
+//     dropped in favor of another index, so it must never be flagged.
+//  2. The leading-PK secondary index itself should be flagged as redundant —
+//     in InnoDB the PK is the clustered key and secondary indexes auto-append
+//     PK columns, so a leading PK column contributes no lookup capability
+//     that the PK or a non-PK-leading variant of the index wouldn't already
+//     provide.
+//
+// Scenario: a table is left with both PRIMARY KEY (id) and a secondary index
+// (id, parent_id, created_at). The linter should fire on the secondary index
+// (not on the PRIMARY KEY), and only when the redundant index is present in
+// the post-state.
+func TestRedundantIndexLinter_PKNotFlaggedAsRedundant(t *testing.T) {
+	createTable := `CREATE TABLE t1 (
+		id INT NOT NULL AUTO_INCREMENT,
+		parent_id INT NOT NULL,
+		payload LONGTEXT,
+		note TEXT,
+		created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+		PRIMARY KEY (id),
+		KEY id_parent_created (id, parent_id, created_at),
+		KEY parent_id (parent_id),
+		KEY created_at (created_at)
+	)`
+
+	linter := &RedundantIndexLinter{}
+	ct, err := statement.ParseCreateTable(createTable)
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	flagged := make(map[string]string)
+	for _, v := range violations {
+		if v.Location == nil || v.Location.Index == nil {
+			continue
+		}
+		require.NotEqual(t, "PRIMARY", *v.Location.Index,
+			"PRIMARY KEY must never be flagged as redundant; got: %s", v.Message)
+		flagged[*v.Location.Index] = v.Message
+	}
+
+	require.Contains(t, flagged, "id_parent_created",
+		"leading-PK secondary index should be flagged as redundant")
+	require.Contains(t, flagged["id_parent_created"], "leads with PRIMARY KEY")
+}
+
+// TestRedundantIndexLinter_PKPrefixRedundancy covers the leading-PK rule.
+func TestRedundantIndexLinter_PKPrefixRedundancy(t *testing.T) {
+	tests := []struct {
+		name           string
+		createTable    string
+		expectViolated bool
+		violatedIndex  string
+	}{
+		{
+			name: "INDEX (id, a, b) leading single-column PK is redundant",
+			createTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx (id, a, b)
+			)`,
+			expectViolated: true,
+			violatedIndex:  "idx",
+		},
+		{
+			name: "INDEX (a, b, c) leading composite PK is redundant",
+			createTable: `CREATE TABLE t1 (
+				a INT,
+				b INT,
+				c INT,
+				PRIMARY KEY (a, b),
+				INDEX idx (a, b, c)
+			)`,
+			expectViolated: true,
+			violatedIndex:  "idx",
+		},
+		{
+			name: "INDEX (a, c) with PK (a, b) — only partial PK at start, not flagged",
+			createTable: `CREATE TABLE t1 (
+				a INT,
+				b INT,
+				c INT,
+				PRIMARY KEY (a, b),
+				INDEX idx (a, c)
+			)`,
+			expectViolated: false,
+		},
+		{
+			name: "INDEX (a, b) with PK (a, b) is a duplicate, not a PK-prefix violation",
+			createTable: `CREATE TABLE t1 (
+				a INT,
+				b INT,
+				PRIMARY KEY (a, b),
+				INDEX idx (a, b)
+			)`,
+			expectViolated: false, // duplicate-of-PK rule fires instead
+		},
+		{
+			name: "INDEX (b, a, c) with PK (a, b) — different order, not flagged",
+			createTable: `CREATE TABLE t1 (
+				a INT,
+				b INT,
+				c INT,
+				PRIMARY KEY (a, b),
+				INDEX idx (b, a, c)
+			)`,
+			expectViolated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linter := &RedundantIndexLinter{}
+			ct, err := statement.ParseCreateTable(tt.createTable)
+			require.NoError(t, err)
+
+			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+			found := false
+			for _, v := range violations {
+				if v.Location != nil && v.Location.Index != nil && *v.Location.Index == tt.violatedIndex {
+					if strings.Contains(v.Message, "leads with PRIMARY KEY") {
+						found = true
+						break
+					}
+				}
+			}
+			if tt.expectViolated {
+				require.True(t, found, "Expected PK-prefix violation for index %s", tt.violatedIndex)
+			} else {
+				require.False(t, found, "Did not expect PK-prefix violation, got violations: %v", violations)
+			}
+		})
+	}
+}
+
+// TestRedundantIndexLinter_PostStateEvaluation verifies that the linter
+// evaluates the post-state of the schema (existing tables with pending
+// changes applied), matching the convention from #840. ADD INDEX should
+// surface redundancies as they are introduced, and DROP INDEX should
+// silence redundancies that are being removed.
+func TestRedundantIndexLinter_PostStateEvaluation(t *testing.T) {
+	existing := `CREATE TABLE t1 (
+		id INT NOT NULL AUTO_INCREMENT,
+		parent_id INT NOT NULL,
+		created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+		PRIMARY KEY (id),
+		KEY id_parent_created (id, parent_id, created_at),
+		KEY parent_id (parent_id),
+		KEY created_at (created_at)
+	)`
+
+	existingCT, err := statement.ParseCreateTable(existing)
+	require.NoError(t, err)
+	linter := &RedundantIndexLinter{}
+
+	// With no pending changes, the redundant index in the table should be
+	// flagged.
+	violations := linter.Lint([]*statement.CreateTable{existingCT}, nil)
+	flagged := false
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Index != nil && *v.Location.Index == "id_parent_created" {
+			flagged = true
+		}
+	}
+	require.True(t, flagged, "should flag the redundant index in pre-state when no DROP is pending")
+
+	// Pending ALTER DROP INDEX should remove the redundant index from the
+	// post-state, silencing the warning.
+	dropStmts, err := statement.New("ALTER TABLE t1 DROP INDEX id_parent_created")
+	require.NoError(t, err)
+
+	violations = linter.Lint([]*statement.CreateTable{existingCT}, dropStmts)
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Index != nil {
+			require.NotEqual(t, "id_parent_created", *v.Location.Index,
+				"DROP INDEX should silence the warning, got: %s", v.Message)
+		}
+	}
+
+	// Inverse: starting from a clean table, ALTER ADD INDEX that introduces a
+	// leading-PK index should surface the warning at ADD time.
+	cleanExisting := `CREATE TABLE t1 (
+		id INT NOT NULL AUTO_INCREMENT,
+		parent_id INT NOT NULL,
+		created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+		PRIMARY KEY (id),
+		KEY parent_id (parent_id),
+		KEY created_at (created_at)
+	)`
+	cleanCT, err := statement.ParseCreateTable(cleanExisting)
+	require.NoError(t, err)
+
+	addStmts, err := statement.New("ALTER TABLE t1 ADD INDEX id_parent_created (id, parent_id, created_at)")
+	require.NoError(t, err)
+
+	violations = linter.Lint([]*statement.CreateTable{cleanCT}, addStmts)
+	flaggedAtAdd := false
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Index != nil && *v.Location.Index == "id_parent_created" {
+			flaggedAtAdd = true
+		}
+	}
+	require.True(t, flaggedAtAdd, "ADD INDEX should surface the leading-PK warning at the time the index is introduced")
 }
 
 // TestRedundantIndexLinter_AlterTableComplex tests a complex scenario
