@@ -207,6 +207,63 @@ func TestInvalidOptions(t *testing.T) {
 	require.Error(t, err)
 }
 
+// cutoverAtomicityOptimisticSchema and cutoverAtomicityCompositeSchema are
+// the schemas used by TestCutoverAtomicityWithConcurrentWrites (and the
+// build-tagged TestCutoverAtomicitySemiSync variant). They live at package
+// scope so both tests stay in sync — drift between them would obscure
+// whether a failure is environment-specific or schema-specific.
+const cutoverAtomicityOptimisticSchema = `CREATE TABLE %s (
+	id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+	x_token VARCHAR(36) NOT NULL,
+	cents INT NOT NULL,
+	currency VARCHAR(3) NOT NULL,
+	s_token VARCHAR(36) NOT NULL,
+	r_token VARCHAR(36) NOT NULL,
+	version INT NOT NULL DEFAULT 1,
+	c1 VARCHAR(20),
+	c2 VARCHAR(200),
+	c3 VARCHAR(10),
+	t1 DATETIME,
+	t2 DATETIME,
+	t3 DATETIME,
+	b1 TINYINT,
+	b2 TINYINT,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	UNIQUE KEY idx_x_token (x_token),
+	KEY idx_s_token (s_token),
+	KEY idx_r_token (r_token)
+)`
+
+// Composite-PK schema. Putting x_token in the PK forces NewChunker to pick
+// the composite chunker instead of the optimistic one (which only handles a
+// single-column auto_increment PK), and the VARCHAR component makes the PK
+// non-memory-comparable so the bufferedMap subscription routes through its
+// FIFO queue mode. The UNIQUE KEY on x_token is dropped since the PK now
+// enforces uniqueness on (id, x_token).
+const cutoverAtomicityCompositeSchema = `CREATE TABLE %s (
+	id INT NOT NULL AUTO_INCREMENT,
+	x_token VARCHAR(36) NOT NULL,
+	cents INT NOT NULL,
+	currency VARCHAR(3) NOT NULL,
+	s_token VARCHAR(36) NOT NULL,
+	r_token VARCHAR(36) NOT NULL,
+	version INT NOT NULL DEFAULT 1,
+	c1 VARCHAR(20),
+	c2 VARCHAR(200),
+	c3 VARCHAR(10),
+	t1 DATETIME,
+	t2 DATETIME,
+	t3 DATETIME,
+	b1 TINYINT,
+	b2 TINYINT,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	PRIMARY KEY (id, x_token),
+	KEY idx_s_token (s_token),
+	KEY idx_r_token (r_token)
+)`
+
 // TestCutoverAtomicityWithConcurrentWrites tests that if we modify the cutover
 // so that it never renames the new table into the place of the existing table,
 // we have consistency between the _old and _new tables.
@@ -254,68 +311,16 @@ func TestInvalidOptions(t *testing.T) {
 func TestCutoverAtomicityWithConcurrentWrites(t *testing.T) {
 	t.Parallel()
 
-	const optimisticSchema = `CREATE TABLE %s (
-		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-		x_token VARCHAR(36) NOT NULL,
-		cents INT NOT NULL,
-		currency VARCHAR(3) NOT NULL,
-		s_token VARCHAR(36) NOT NULL,
-		r_token VARCHAR(36) NOT NULL,
-		version INT NOT NULL DEFAULT 1,
-		c1 VARCHAR(20),
-		c2 VARCHAR(200),
-		c3 VARCHAR(10),
-		t1 DATETIME,
-		t2 DATETIME,
-		t3 DATETIME,
-		b1 TINYINT,
-		b2 TINYINT,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL,
-		UNIQUE KEY idx_x_token (x_token),
-		KEY idx_s_token (s_token),
-		KEY idx_r_token (r_token)
-	)`
-
-	// Composite-PK schema. Putting x_token in the PK forces NewChunker to
-	// pick the composite chunker instead of the optimistic one (which only
-	// handles a single-column auto_increment PK), and the VARCHAR component
-	// makes the PK non-memory-comparable so the bufferedMap subscription
-	// routes through its FIFO queue mode. Drop the redundant UNIQUE KEY on
-	// x_token since the PK now enforces uniqueness on (id, x_token).
-	const compositeSchema = `CREATE TABLE %s (
-		id INT NOT NULL AUTO_INCREMENT,
-		x_token VARCHAR(36) NOT NULL,
-		cents INT NOT NULL,
-		currency VARCHAR(3) NOT NULL,
-		s_token VARCHAR(36) NOT NULL,
-		r_token VARCHAR(36) NOT NULL,
-		version INT NOT NULL DEFAULT 1,
-		c1 VARCHAR(20),
-		c2 VARCHAR(200),
-		c3 VARCHAR(10),
-		t1 DATETIME,
-		t2 DATETIME,
-		t3 DATETIME,
-		b1 TINYINT,
-		b2 TINYINT,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL,
-		PRIMARY KEY (id, x_token),
-		KEY idx_s_token (s_token),
-		KEY idx_r_token (r_token)
-	)`
-
 	cases := []struct {
 		name      string
 		tableName string
 		schema    string
 		buffered  bool
 	}{
-		{"optimistic_unbuffered", "t1concurrent_oub", optimisticSchema, false},
-		{"optimistic_buffered", "t1concurrent_obu", optimisticSchema, true},
-		{"composite_unbuffered", "t1concurrent_cub", compositeSchema, false},
-		{"composite_buffered", "t1concurrent_cbu", compositeSchema, true},
+		{"optimistic_unbuffered", "t1concurrent_oub", cutoverAtomicityOptimisticSchema, false},
+		{"optimistic_buffered", "t1concurrent_obu", cutoverAtomicityOptimisticSchema, true},
+		{"composite_unbuffered", "t1concurrent_cub", cutoverAtomicityCompositeSchema, false},
+		{"composite_buffered", "t1concurrent_cbu", cutoverAtomicityCompositeSchema, true},
 	}
 
 	for _, tc := range cases {

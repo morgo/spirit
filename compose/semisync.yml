@@ -1,0 +1,152 @@
+# Semi-sync source with one connected replica whose outbound traffic is
+# delayed 100ms via `tc netem`. Used by the
+# `mysql-semisync-docker.yml` workflow to deterministically reproduce the
+# binlog/visibility lag documented in issue #746 on every commit.
+#
+# Why a connected replica is required: MySQL's semi-sync source plugin
+# falls back to asynchronous after a few timed-out commits when zero
+# replicas have ever connected, regardless of
+# `rpl_semi_sync_source_wait_no_replica=ON`. Empirically: status flips OFF
+# and commit latency drops to ~1ms — no race window is widened.
+#
+# With a connected replica plus an outbound 100ms delay on it, every
+# commit on the source pays:
+#   1. binlog flush + sync (events become visible to dump on disk)
+#   2. send events to replica (delayed 100ms by netem)
+#   3. wait for replica ACK (also delayed 100ms by netem)
+#   4. InnoDB commit (visibility for local SELECTs)
+#
+# Net effect: ~100ms window between "binlog event observable" and
+# "row visible to local SELECT" on every committing transaction.
+# Spirit's buffered replication subscription (production default) must
+# remain correct under that window — see cutover_semisync_test.go.
+services:
+  mysql:
+    image: mysql:8.0.45
+    ports: [ '8034:3306' ]
+    # to suppress mbind: Operation not permitted in CI
+    # https://stackoverflow.com/a/55706057
+    cap_add:
+      - SYS_NICE
+    environment:
+      MYSQL_ROOT_PASSWORD: msandbox
+    healthcheck:
+      test: mysqladmin ping -h 127.0.0.1 -u root --password=$$MYSQL_ROOT_PASSWORD
+      start_period: 1s
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    volumes:
+      - mysql-semisync-data-dir:/var/lib/mysql
+      - ./bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
+    # The `loose-` prefix is load-bearing on the rpl-semi-sync-source-*
+    # flags: --initialize-insecure ignores --plugin-load-add (the plugin
+    # binary isn't loaded during data-dir init) and would then abort
+    # fatally on the unknown variable. `loose-` tells mysqld to silently
+    # skip the variable when it doesn't exist (during init) and apply it
+    # normally when it does (every subsequent start, where
+    # --plugin-load-add has loaded the plugin).
+    command: >-
+      --server-id=1
+      --log-bin=mysql-bin
+      --gtid-mode=on
+      --enforce-gtid-consistency=on
+      --plugin-load-add=rpl_semi_sync_source=semisync_source.so
+      --loose-rpl-semi-sync-source-enabled=ON
+      --loose-rpl-semi-sync-source-timeout=100
+      --loose-rpl-semi-sync-source-wait-no-replica=ON
+      --loose-rpl-semi-sync-source-wait-point=AFTER_SYNC
+
+  mysql_replica:
+    image: mysql:8.0.45
+    cap_add:
+      - SYS_NICE
+      # Required so the netem sidecar (which shares this container's
+      # network namespace via network_mode) can apply the tc qdisc.
+      - NET_ADMIN
+    environment:
+      MYSQL_ROOT_PASSWORD: msandbox
+    healthcheck:
+      test: ["CMD", "./replication_health_check.sh"]
+      start_period: 1s
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    volumes:
+      - mysql-replica-semisync-data-dir:/var/lib/mysql
+      - ./replication-tls/init-ci-replica.sql:/docker-entrypoint-initdb.d/init-ci-replica.sql
+      - ./replication-tls/replication_health_check.sh:/replication_health_check.sh
+    # The replica must load `rpl_semi_sync_replica` and enable it,
+    # otherwise the source sees the replica connection as a plain
+    # (non-semi-sync) client — `Rpl_semi_sync_source_clients` stays 0,
+    # the source falls back to async, and no per-commit latency is
+    # injected. Same `loose-` rationale as the source: --plugin-load-add
+    # is ignored during --initialize-insecure and the variable would
+    # then be unknown.
+    command: >-
+      --server-id=2
+      --relay-log=mysql-relay-bin
+      --gtid-mode=on
+      --enforce-gtid-consistency=on
+      --plugin-load-add=rpl_semi_sync_replica=semisync_replica.so
+      --loose-rpl-semi-sync-replica-enabled=ON
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # Joins mysql_replica's network namespace and installs a 100ms
+  # outbound delay via netem. The qdisc lives in the network namespace
+  # and would persist past this sidecar's exit — but `docker compose
+  # up --abort-on-container-exit` (which `--exit-code-from test`
+  # implies) aborts the whole stack the moment *any* container exits,
+  # so an earlier draft that exited 0 here triggered the abort before
+  # `test` could start. The sidecar must stay alive for the duration
+  # of the run; we sleep infinitely after applying tc and use a
+  # healthcheck to signal "qdisc in place" to the test service.
+  netem:
+    image: alpine:3.19
+    network_mode: "service:mysql_replica"
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      mysql_replica:
+        condition: service_healthy
+    command: >-
+      sh -c "
+      apk add --no-cache iproute2 &&
+      tc qdisc add dev eth0 root netem delay 100ms &&
+      tc qdisc show dev eth0 &&
+      echo 'netem applied: 100ms outbound delay on mysql_replica' &&
+      sleep infinity
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "tc qdisc show dev eth0 | grep -q netem"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  test:
+    build:
+      context: ../
+    # Build-tagged test only — `-tags semisync` includes
+    # cutover_semisync_test.go, and `-run` limits to that single test so
+    # we don't pay the 100ms-per-commit semi-sync tax on the rest of the
+    # migration suite.
+    command: >-
+      go test -race -tags semisync -timeout=15m -count=1 -v
+      -run TestCutoverAtomicitySemiSync
+      ./pkg/migration/...
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql_replica:
+        condition: service_healthy
+      netem:
+        condition: service_healthy
+    environment:
+      MYSQL_DSN: tsandbox:msandbox@tcp(mysql)/test
+
+volumes:
+  mysql-semisync-data-dir:
+  mysql-replica-semisync-data-dir:
