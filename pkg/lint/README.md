@@ -30,7 +30,7 @@ if lint.HasErrors(violations) {
 }
 
 // Filter violations by linter
-flagViolations := lint.FilterByLinter(violations, "has_fk")
+flagViolations := lint.FilterByLinter(violations, "has_foreign_key")
 ```
 
 ### Creating a Custom Linter
@@ -168,7 +168,7 @@ type Location struct {
 
 ## Built-in Linters
 
-The `lint` package includes 16 built-in linters covering schema design, data types, and safety best practices.
+The `lint` package includes 17 built-in linters covering schema design, data types, and safety best practices.
 
 ### allow_charset
 
@@ -298,7 +298,44 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 ---
 
-### has_fk
+### datetime_index_position
+
+**Severity**: Warning  
+**Configurable**: No  
+**Checks**: CREATE TABLE, ALTER TABLE (ADD INDEX, ADD CONSTRAINT)
+
+Detects composite indexes where a `DATETIME`, `TIMESTAMP`, or `DATE` column appears in any non-last position. Date/time columns are overwhelmingly queried with range predicates (`>`, `>=`, `<`, `<=`, `BETWEEN`), and once the optimizer hits a range predicate on a column inside a composite index, the columns that follow can no longer be used for sorted access.
+
+This is a heuristic with no visibility into the actual query workload, so it always emits Warnings. Suppress or ignore the warning when the column is known to be queried with equality predicates only, or when the trailing columns exist to make this a covering index.
+
+**Examples:**
+
+```sql
+-- ❌ Violation: range scans on updated_at make `attempt` unusable for sorted access
+CREATE TABLE jobs (
+  id INT PRIMARY KEY,
+  updated_at DATETIME NOT NULL,
+  attempt INT NOT NULL,
+  KEY updated_at_attempt (updated_at, attempt)
+);
+
+-- ✅ Correct: equality column first, range column last
+CREATE TABLE jobs (
+  id INT PRIMARY KEY,
+  updated_at DATETIME NOT NULL,
+  attempt INT NOT NULL,
+  KEY attempt_updated (attempt, updated_at)
+);
+
+-- ❌ Violation in ALTER TABLE
+ALTER TABLE jobs ADD INDEX bad_idx (updated_at, attempt);
+```
+
+`FULLTEXT` and `SPATIAL` indexes are excluded (they don't behave like B-tree indexes for ranges). Single-column indexes are not flagged.
+
+---
+
+### has_foreign_key
 
 **Severity**: Warning  
 **Configurable**: No  
@@ -693,7 +730,8 @@ Detects column renames via RENAME COLUMN or CHANGE COLUMN. Column renames cannot
 | `allow_charset` | ✅ | ✅ | ✅ | Warning |
 | `allow_engine` | ✅ | ✅ | ✅ | Warning |
 | `auto_inc_capacity` | ✅ | ✅ | ❌ | Error |
-| `has_fk` | ❌ | ✅ | ✅ | Warning |
+| `datetime_index_position` | ❌ | ✅ | ✅ | Warning |
+| `has_foreign_key` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
 | `has_timestamp` | ❌ | ✅ | ✅ | Warning (existing) / Error (new) |
 | `invisible_index_before_drop` | ✅ | ❌ | ✅ | Error (default), Warning (configurable) |

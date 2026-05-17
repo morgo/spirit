@@ -12,14 +12,7 @@ Spirit's linters focus on **migration safety and policy enforcement**, not seman
 
 Spirit linters do **not** perform semantic validation of SQL correctness. They assume input schemas are syntactically valid. For example, linters will not detect if an index references a non-existent column—MySQL itself will reject such statements. If you need semantic validation, test your schemas against MySQL before linting.
 
-**Best practice:** When using `lint` or `diff`, it is recommended to use the `CREATE TABLE` statements returned from MySQL's `SHOW CREATE TABLE` output. MySQL normalizes SQL in ways the linter may not fully replicate. For example:
-- `SERIAL` becomes `BIGINT UNSIGNED NOT NULL AUTO_INCREMENT`
-- `BOOL` and `BOOLEAN` become `TINYINT(1)`
-- Inline `PRIMARY KEY` on a column becomes a table-level `PRIMARY KEY (col)` clause
-- `INTEGER` becomes `INT`
-- Default character sets and collations are made explicit
-
-Using `SHOW CREATE TABLE` output ensures the linter sees the same SQL that MySQL uses internally.
+**Best practice:** When linting `.sql` files, run [`spirit fmt`](fmt.md) first. MySQL normalizes SQL in ways the linter may not fully replicate (e.g. `SERIAL` → `BIGINT UNSIGNED NOT NULL AUTO_INCREMENT`, `BOOLEAN` → `TINYINT(1)`, inline `PRIMARY KEY` → table-level clause). `spirit fmt` canonicalizes files through a real MySQL server so the linter sees exactly what MySQL would store.
 
 Basic usage:
 
@@ -70,6 +63,7 @@ These linters detect issues that could cause problems during online schema chang
 | `has_foreign_key` | Foreign keys can block online schema changes and cause replication issues |
 | `invisible_index_before_drop` | Dropping indexes without first making them invisible is risky |
 | `multiple_alter_table` | Multiple ALTERs on the same table should be combined for efficiency |
+| `rename_column` | Column renames break ORMs and can't be deployed atomically with application changes |
 | `unsafe` | Detects unsafe operations in schema changes |
 
 ### Data Type Safety
@@ -80,6 +74,7 @@ These linters catch data types that can cause precision or capacity issues:
 |--------|-------------|
 | `auto_inc_capacity` | Warns when auto-increment columns approach their maximum value |
 | `has_float` | FLOAT/DOUBLE types have precision issues; DECIMAL is preferred |
+| `has_timestamp` | TIMESTAMP overflows on 2038-01-19; DATETIME is preferred |
 | `primary_key` | Primary keys should use BIGINT UNSIGNED or BINARY types for longevity |
 | `zero_date` | Zero-date defaults cause issues with strict SQL mode |
 
@@ -91,9 +86,11 @@ These linters enforce organizational standards and best practices:
 |--------|-------------|
 | `allow_charset` | Restricts which character sets are allowed |
 | `allow_engine` | Restricts which storage engines are allowed |
+| `datetime_index_position` | Warns when `DATETIME`/`TIMESTAMP`/`DATE` columns are not last in a composite index |
 | `name_case` | Ensures table names are lowercase |
 | `redundant_indexes` | Detects duplicate or unnecessary indexes |
 | `reserved_words` | Warns about MySQL reserved words in identifiers |
+| `type_pedantic` | Enforces cross-table type consistency for same-name columns and inferred `{table}_id` foreign keys |
 
 ## Violation Severity
 
