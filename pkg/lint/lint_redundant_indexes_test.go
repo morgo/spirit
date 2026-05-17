@@ -463,7 +463,10 @@ func TestRedundantIndexLinter_TypeCompatibility(t *testing.T) {
 			expectViolated: false,
 		},
 		{
-			name: "UNIQUE (a) redundant to UNIQUE (a, b)",
+			// UNIQUE (a) and UNIQUE (a, b) enforce different uniqueness scopes:
+			// the former forbids duplicate values of `a`, the latter only forbids
+			// duplicate (a, b) pairs. Dropping UNIQUE (a) would weaken the schema.
+			name: "UNIQUE (a) NOT redundant to UNIQUE (a, b)",
 			createTable: `CREATE TABLE t1 (
 				id INT PRIMARY KEY,
 				a INT,
@@ -471,18 +474,20 @@ func TestRedundantIndexLinter_TypeCompatibility(t *testing.T) {
 				UNIQUE idx_a (a),
 				UNIQUE idx_ab (a, b)
 			)`,
-			expectViolated: true,
+			expectViolated: false,
 			violatedIndex:  "idx_a",
 		},
 		{
-			name: "UNIQUE (a) redundant to PK (a, b)",
+			// PRIMARY KEY (a, b) only forbids duplicate (a, b) pairs; it does
+			// not subsume the stricter UNIQUE (a) constraint.
+			name: "UNIQUE (a) NOT redundant to PK (a, b)",
 			createTable: `CREATE TABLE t1 (
 				a INT,
 				b INT,
 				PRIMARY KEY (a, b),
 				UNIQUE idx_a (a)
 			)`,
-			expectViolated: true,
+			expectViolated: false,
 			violatedIndex:  "idx_a",
 		},
 		{
@@ -735,17 +740,30 @@ func TestRedundantIndexLinter_AlterTableAddRedundantIndex(t *testing.T) {
 			messageContains: "PRIMARY KEY",
 		},
 		{
-			name: "ADD UNIQUE redundant to existing UNIQUE",
+			// Adding UNIQUE (a) alongside UNIQUE (a, b) is *not* redundant —
+			// the two enforce different uniqueness scopes.
+			name: "ADD UNIQUE NOT redundant to wider existing UNIQUE",
 			existingTable: `CREATE TABLE t1 (
 				id INT PRIMARY KEY,
 				a INT,
 				b INT,
 				UNIQUE KEY idx_ab (a, b)
 			)`,
-			alterSQL:        "ALTER TABLE t1 ADD UNIQUE KEY idx_a (a)",
+			alterSQL:       "ALTER TABLE t1 ADD UNIQUE KEY idx_a (a)",
+			expectViolated: false,
+		},
+		{
+			name: "ADD UNIQUE duplicate of existing UNIQUE",
+			existingTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				UNIQUE KEY idx_ab (a, b)
+			)`,
+			alterSQL:        "ALTER TABLE t1 ADD UNIQUE KEY idx_ab_dup (a, b)",
 			expectViolated:  true,
-			violatedIndex:   "idx_a",
-			messageContains: "redundant",
+			violatedIndex:   "idx_ab_dup",
+			messageContains: "duplicate",
 		},
 		{
 			name: "ADD INDEX with PK suffix redundancy",
@@ -875,6 +893,44 @@ func TestRedundantIndexLinter_AlterTableOnNonExistentTable(t *testing.T) {
 
 	// Should not crash and should return no violations
 	require.Empty(t, violations)
+}
+
+// TestRedundantIndexLinter_PKNotFlaggedAsRedundant is a regression test for the
+// case where a secondary index whose leading columns match the PRIMARY KEY
+// caused the PRIMARY KEY itself to be reported as redundant. The PRIMARY KEY
+// is a constraint (clustered key + uniqueness + NOT NULL) that cannot be
+// dropped in favor of another index, so it must never be flagged as redundant.
+//
+// Scenario: a table is left with both PRIMARY KEY (id) and a secondary index
+// (id, parent_id, created_at). When the secondary index is about to be dropped,
+// the existing-table view of the schema still contains both, and the old
+// behavior emitted a misleading "drop PRIMARY KEY in favor of 'id'" warning.
+func TestRedundantIndexLinter_PKNotFlaggedAsRedundant(t *testing.T) {
+	createTable := `CREATE TABLE t1 (
+		id INT NOT NULL AUTO_INCREMENT,
+		parent_id INT NOT NULL,
+		payload LONGTEXT,
+		note TEXT,
+		created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+		PRIMARY KEY (id),
+		KEY id_parent_created (id, parent_id, created_at),
+		KEY parent_id (parent_id),
+		KEY created_at (created_at)
+	)`
+
+	linter := &RedundantIndexLinter{}
+	ct, err := statement.ParseCreateTable(createTable)
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+	for _, v := range violations {
+		if v.Location == nil || v.Location.Index == nil {
+			continue
+		}
+		require.NotEqual(t, "PRIMARY", *v.Location.Index,
+			"PRIMARY KEY must never be flagged as redundant; got: %s", v.Message)
+	}
 }
 
 // TestRedundantIndexLinter_AlterTableComplex tests a complex scenario

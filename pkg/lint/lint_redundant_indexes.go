@@ -103,16 +103,41 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 }
 
 // isRedundantToIndex checks if indexA is redundant to indexB.
-// Returns true if indexA is a prefix of indexB OR if they're duplicates.
+// Returns true if indexA is a prefix of indexB OR if they're duplicates,
+// AND any constraint indexA enforces is also enforced by indexB.
 func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
-	// Type compatibility check
-	if !canMakeRedundant(indexB, indexA) {
+	// FULLTEXT and SPATIAL indexes serve specialized purposes and are not
+	// interchangeable with B-tree indexes (or each other).
+	if indexA.Type == "FULLTEXT" || indexA.Type == "SPATIAL" ||
+		indexB.Type == "FULLTEXT" || indexB.Type == "SPATIAL" {
+		return false
+	}
+
+	// PRIMARY KEY is a table-level constraint (clustered key, uniqueness,
+	// implicit NOT NULL) that cannot be dropped in favor of another index —
+	// not even a column-for-column duplicate. Reporting it as redundant
+	// would suggest an unsafe rewrite, so never flag it.
+	if indexA.Type == "PRIMARY KEY" {
 		return false
 	}
 
 	// indexA cannot be redundant if it has MORE columns than indexB
 	if len(indexA.Columns) > len(indexB.Columns) {
 		return false
+	}
+
+	// A UNIQUE index enforces uniqueness over its exact column set. A wider
+	// covering index (UNIQUE or PK on more columns) enforces a *different*
+	// uniqueness scope and so does not subsume the constraint. UNIQUE is
+	// therefore only redundant when an exact-column-set duplicate also
+	// enforces uniqueness over those columns.
+	if indexA.Type == "UNIQUE" {
+		if len(indexA.Columns) != len(indexB.Columns) {
+			return false
+		}
+		if indexB.Type != "UNIQUE" && indexB.Type != "PRIMARY KEY" {
+			return false
+		}
 	}
 
 	// Check if all columns of indexA match the prefix of indexB in exact order
@@ -126,30 +151,6 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 	// - A prefix of indexB (len(indexA) < len(indexB)), OR
 	// - A duplicate of indexB (len(indexA) == len(indexB))
 	// Both cases are redundant!
-	return true
-}
-
-// canMakeRedundant checks if the covering index can make the redundant index redundant
-// based on their types. Different index types serve different purposes.
-func canMakeRedundant(covering statement.Index, redundant statement.Index) bool {
-	// FULLTEXT and SPATIAL indexes serve special purposes
-	// Regular indexes cannot make them redundant, and they can't make others redundant
-	if redundant.Type == "FULLTEXT" || redundant.Type == "SPATIAL" ||
-		covering.Type == "FULLTEXT" || covering.Type == "SPATIAL" {
-		return false
-	}
-
-	// PRIMARY KEY can make most indexes redundant (it acts like a UNIQUE index)
-	if covering.Type == "PRIMARY KEY" {
-		return true
-	}
-
-	// UNIQUE indexes provide additional constraints beyond lookup
-	// A non-unique index cannot make a UNIQUE index redundant
-	if redundant.Type == "UNIQUE" && covering.Type != "UNIQUE" {
-		return false
-	}
-
 	return true
 }
 
