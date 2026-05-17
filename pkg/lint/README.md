@@ -306,7 +306,7 @@ violations, err := lint.RunLinters(tables, stmts, lint.Config{
 
 Detects composite indexes where a `DATETIME`, `TIMESTAMP`, or `DATE` column appears in any non-last position. Date/time columns are overwhelmingly queried with range predicates (`>`, `>=`, `<`, `<=`, `BETWEEN`), and once the optimizer hits a range predicate on a column inside a composite index, the columns that follow can no longer be used for sorted access.
 
-This is a heuristic with no visibility into the actual query workload, so it always emits Warnings. Suppress or ignore the warning when the column is known to be queried with equality predicates only.
+This is a heuristic with no visibility into the actual query workload, so it always emits Warnings. Suppress or ignore the warning when the column is known to be queried with equality predicates only, or when the trailing columns exist to make this a covering index.
 
 **Examples:**
 

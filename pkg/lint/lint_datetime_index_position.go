@@ -98,8 +98,8 @@ func (l *DatetimeIndexPositionLinter) violation(tableName string, idx statement.
 	colCopy := colName
 	suggestion := fmt.Sprintf(
 		"Consider moving %q to the last position in index %q. This is a heuristic — "+
-			"if your workload only queries %q with equality predicates, the current "+
-			"order may be fine.",
+			"the current order may be intentional if %q is only queried with equality "+
+			"predicates, or if the trailing columns exist to make this a covering index.",
 		colName, indexName, colName,
 	)
 	return Violation{
