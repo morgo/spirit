@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -8,10 +9,12 @@ import (
 )
 
 // findTable returns the post-state table with the given name (case-insensitive)
-// or nil if none matches.
+// or nil if none matches. PostState keys its internal map by lower-cased name
+// but preserves the original casing on TableName, so callers shouldn't have to
+// guess the case the post-state produced.
 func findTable(tables []*statement.CreateTable, name string) *statement.CreateTable {
 	for _, t := range tables {
-		if t.TableName == name {
+		if strings.EqualFold(t.TableName, name) {
 			return t
 		}
 	}
