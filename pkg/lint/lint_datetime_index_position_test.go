@@ -235,6 +235,35 @@ func TestDatetimeIndexPositionLinter_AlterAddBadIndex(t *testing.T) {
 	require.Equal(t, "updated_at_attempt", *violations[0].Location.Index)
 }
 
+func TestDatetimeIndexPositionLinter_AlterAddUnnamedBadIndex(t *testing.T) {
+	// ALTER TABLE ... ADD INDEX without a name leaves idx.Name empty in the
+	// post-state. The violation should still produce a useful label (derived
+	// from the column list) and should not set Location.Index to an empty
+	// string.
+	existingSQL := `CREATE TABLE jobs (
+		id INT PRIMARY KEY,
+		updated_at DATETIME NOT NULL,
+		attempt INT NOT NULL
+	)`
+	ct, err := statement.ParseCreateTable(existingSQL)
+	require.NoError(t, err)
+
+	alterSQL := `ALTER TABLE jobs ADD INDEX (updated_at, attempt)`
+	stmts, err := statement.New(alterSQL)
+	require.NoError(t, err)
+
+	violations := (&DatetimeIndexPositionLinter{}).Lint([]*statement.CreateTable{ct}, stmts)
+
+	require.Len(t, violations, 1)
+	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "Unnamed index on (updated_at, attempt)")
+	require.NotContains(t, violations[0].Message, `Index ""`)
+	require.Nil(t, violations[0].Location.Index, "Location.Index should be nil when the index has no name")
+	require.Equal(t, "updated_at", *violations[0].Location.Column)
+	require.NotNil(t, violations[0].Suggestion)
+	require.Contains(t, *violations[0].Suggestion, "unnamed index on (updated_at, attempt)")
+}
+
 func TestDatetimeIndexPositionLinter_AlterAddGoodIndex(t *testing.T) {
 	existingSQL := `CREATE TABLE jobs (
 		id INT PRIMARY KEY,

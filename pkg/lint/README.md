@@ -30,7 +30,7 @@ if lint.HasErrors(violations) {
 }
 
 // Filter violations by linter
-flagViolations := lint.FilterByLinter(violations, "has_fk")
+flagViolations := lint.FilterByLinter(violations, "has_foreign_key")
 ```
 
 ### Creating a Custom Linter
@@ -335,7 +335,7 @@ ALTER TABLE jobs ADD INDEX bad_idx (updated_at, attempt);
 
 ---
 
-### has_fk
+### has_foreign_key
 
 **Severity**: Warning  
 **Configurable**: No  
@@ -731,7 +731,7 @@ Detects column renames via RENAME COLUMN or CHANGE COLUMN. Column renames cannot
 | `allow_engine` | ✅ | ✅ | ✅ | Warning |
 | `auto_inc_capacity` | ✅ | ✅ | ❌ | Error |
 | `datetime_index_position` | ❌ | ✅ | ✅ | Warning |
-| `has_fk` | ❌ | ✅ | ✅ | Warning |
+| `has_foreign_key` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
 | `has_timestamp` | ❌ | ✅ | ✅ | Warning (existing) / Error (new) |
 | `invisible_index_before_drop` | ✅ | ❌ | ✅ | Error (default), Warning (configurable) |

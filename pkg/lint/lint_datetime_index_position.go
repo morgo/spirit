@@ -94,32 +94,37 @@ func indexUsesBTreeSemantics(idx statement.Index) bool {
 }
 
 func (l *DatetimeIndexPositionLinter) violation(tableName string, idx statement.Index, colName, typeStr string, pos int) Violation {
-	indexName := idx.Name
+	// idx.Name may be empty for unnamed indexes added via
+	// ALTER TABLE ... ADD INDEX (...). Use a columns-based label so the
+	// message reads naturally, and omit Location.Index when the real name
+	// is unknown rather than surfacing an empty string.
+	label := indexLabel(idx)
 	colCopy := colName
 	suggestion := fmt.Sprintf(
-		"Consider moving %q to the last position in index %q. This is a heuristic — "+
+		"Consider moving %q to the last position in %s. This is a heuristic — "+
 			"the current order may be intentional if %q is only queried with equality "+
 			"predicates, or if the trailing columns exist to make this a covering index.",
-		colName, indexName, colName,
+		colName, label, colName,
 	)
+	loc := &Location{Table: tableName, Column: &colCopy}
+	if idx.Name != "" {
+		name := idx.Name
+		loc.Index = &name
+	}
 	return Violation{
 		Linter:   l,
 		Severity: SeverityWarning,
 		Message: fmt.Sprintf(
-			"Index %q has %s column %q in position %d of %d. %s columns are typically "+
+			"%s has %s column %q in position %d of %d. %s columns are typically "+
 				"queried with range predicates (>, >=, <, <=, BETWEEN), and a range on a "+
 				"non-last index column prevents the optimizer from using subsequent columns "+
 				"for sorted access.",
-			indexName, typeStr, colName, pos+1, len(idx.Columns), typeStr,
+			capitalize(label), typeStr, colName, pos+1, len(idx.Columns), typeStr,
 		),
-		Location: &Location{
-			Table:  tableName,
-			Column: &colCopy,
-			Index:  &indexName,
-		},
+		Location:   loc,
 		Suggestion: &suggestion,
 		Context: map[string]any{
-			"index_name":    indexName,
+			"index_name":    idx.Name,
 			"column_name":   colName,
 			"column_type":   typeStr,
 			"position":      pos + 1,
@@ -127,4 +132,22 @@ func (l *DatetimeIndexPositionLinter) violation(tableName string, idx statement.
 			"index_columns": idx.Columns,
 		},
 	}
+}
+
+// indexLabel returns a human-readable label for an index. If the index has a
+// name, the label is `Index "name"`; otherwise it's an `(unnamed index on
+// (col1, col2))` description derived from the column list, which is the only
+// stable identifier available for ALTER TABLE ADD INDEX without a name.
+func indexLabel(idx statement.Index) string {
+	if idx.Name != "" {
+		return fmt.Sprintf("index %q", idx.Name)
+	}
+	return fmt.Sprintf("unnamed index on (%s)", strings.Join(idx.Columns, ", "))
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
