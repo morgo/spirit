@@ -12,10 +12,11 @@ import (
 )
 
 // quoteIdent wraps a MySQL identifier in backticks, doubling any embedded
-// backtick to escape it (e.g. a column named `foo`bar` renders as
-// `` `foo``bar` ``). The previous fmt.Sprintf("`%s`", x) form generated
-// broken SQL when an identifier contained a backtick — caught only at
-// re-parse time as a confusing parse error rather than at emission.
+// backtick to escape it per MySQL's identifier-quoting rules. The
+// previous open-coded form (a Go format string with %s inside backticks)
+// produced broken SQL when an identifier contained a backtick — caught
+// only at re-parse time as a confusing parse error rather than at
+// emission. See TestQuoteIdent for the doubled-backtick edge cases.
 func quoteIdent(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }
