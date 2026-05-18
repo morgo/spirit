@@ -72,6 +72,18 @@ type Runner struct {
 	// FlushUnderTableLock. Running them concurrently can deadlock. We hold
 	// continuousFlushMu around both the periodic flush and the checker.Run
 	// call so they never overlap.
+	//
+	// Operational note: the lock is held for the *entire* checker.Run,
+	// not just its table-lock acquisition phase, because the Checker API
+	// doesn't expose the lock-acquisition boundary. On large tables this
+	// can pause the periodic flush for the duration of a continuous
+	// checksum pass (minutes to hours), during which binlog deltas
+	// accumulate in the subscription's buffered map. The cutover flush
+	// will drain the backlog under the table lock — which is correct but
+	// extends the cutover's lock-hold time. See checker.Run for the
+	// table-lock phase that motivates the serialization; reducing the
+	// pause requires plumbing a lock-acquired callback through the
+	// Checker interface.
 	continuousFlushMu sync.Mutex
 
 	// Track some key statistics.
@@ -1627,10 +1639,21 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		iterationStart := time.Now()
 		r.logger.Info("continuous checksum iteration starting", "iteration", iteration)
 		// Serialize the iteration with the sentinel-wait flush goroutine so
-		// they don't race on the subscription mutex / table lock.
+		// they don't race on the subscription mutex / table lock. The
+		// periodic flush is blocked for the duration of this iteration —
+		// log the held duration so the cost is observable when operators
+		// are deciding cutover timing on long-running migrations.
+		lockAcquired := time.Now()
 		r.continuousFlushMu.Lock()
 		runErr := checker.Run(ctx)
+		flushPaused := time.Since(lockAcquired)
 		r.continuousFlushMu.Unlock()
+		if flushPaused > repl.DefaultFlushInterval {
+			r.logger.Info("periodic flush paused for continuous-checksum iteration",
+				"duration", flushPaused,
+				"iteration", iteration,
+			)
+		}
 		if runErr != nil {
 			// Only suppress a `context.Canceled` that came from OUR ctx
 			// being cancelled (the sentinel was dropped while a pass was
