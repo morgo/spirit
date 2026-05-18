@@ -1129,4 +1129,3 @@ func TestNewDiffOptions(t *testing.T) {
 	require.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
 	require.True(t, opts.IgnoreRowFormat, "IgnoreRowFormat should default to true")
 }
-
