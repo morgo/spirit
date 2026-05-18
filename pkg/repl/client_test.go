@@ -275,6 +275,104 @@ func TestReplClientOpts(t *testing.T) {
 	require.NotEqual(t, startingPos, client.GetBinlogApplyPosition())
 }
 
+// TestPeriodicFlushLifecycle exercises the StartPeriodicFlush /
+// StopPeriodicFlush contract that the continuous-cutover refactor relies on.
+// The refactor deleted the dedicated sentinel-wait flush goroutine and the
+// `continuousFlushMu` mutex, instead trusting the primitive's own lifecycle.
+// Properties asserted here:
+//
+//   - Stop is safe when no flush is running (no-op, idempotent).
+//   - Stop blocks until the spawned goroutine has fully exited. Without this,
+//     a subsequent Start could race with the previous goroutine, double-flushing.
+//   - Calling Start while another flush is already running is a no-op for the
+//     second caller. This is what lets runContinuousChecksum safely call
+//     `go c.StartPeriodicFlush(...)` during its inter-iteration wait without
+//     coordinating with the checker, which spawns its own periodic flush.
+//   - Many Start/Stop cycles do not leak goroutines (goleak.VerifyTestMain in
+//     TestMain will fail the binary if any are left behind).
+func TestPeriodicFlushLifecycle(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replflushlifet1, replflushlifet2")
+	testutils.RunSQL(t, "CREATE TABLE replflushlifet1 (a INT NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "CREATE TABLE replflushlifet2 (a INT NOT NULL PRIMARY KEY)")
+
+	t1 := table.NewTableInfo(db, "test", "replflushlifet1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "replflushlifet2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd,
+		applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Run(t.Context()))
+	defer client.Close()
+
+	// callWithin runs fn in a goroutine and returns true if it completes
+	// within d. Used to assert Start/Stop never block past expected windows.
+	callWithin := func(d time.Duration, fn func()) bool {
+		done := make(chan struct{})
+		go func() {
+			fn()
+			close(done)
+		}()
+		select {
+		case <-done:
+			return true
+		case <-time.After(d):
+			return false
+		}
+	}
+
+	// 1. Stop is safe when no flush is running, and is idempotent.
+	require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
+		"Stop with no Start should be an immediate no-op")
+	require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
+		"second consecutive Stop should also no-op")
+
+	// 2. Stop blocks until the goroutine exits. Use a long interval so the
+	//    ticker never fires — the only exit path is Stop's cancel. If the
+	//    new lifecycle is correct, Stop returns once the goroutine has
+	//    closed `done`, so it must complete well under our 500ms budget.
+	go client.StartPeriodicFlush(t.Context(), time.Hour)
+	// Yield so the goroutine reaches its select before we Stop.
+	time.Sleep(50 * time.Millisecond)
+	require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
+		"Stop should return promptly once the goroutine reaches its select")
+
+	// 3. Concurrent Start while a flush is already running is a no-op for
+	//    the second caller — it returns immediately rather than spawning a
+	//    second flush. If this regressed, the second call would block until
+	//    Stop and the test would time out below.
+	go client.StartPeriodicFlush(t.Context(), time.Hour)
+	time.Sleep(50 * time.Millisecond) // let the first call acquire ownership
+	require.True(t,
+		callWithin(500*time.Millisecond, func() {
+			client.StartPeriodicFlush(t.Context(), time.Hour)
+		}),
+		"second Start while a flush is running must return immediately as a no-op")
+	require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
+		"Stop should clean up the first flush goroutine")
+
+	// 4. Many Start/Stop cycles are clean — no hangs, no leaked goroutines.
+	//    A regression where Stop didn't actually wait for goroutine exit
+	//    would show up here either as a hang (if the next Start hit the
+	//    "already running" no-op path against a stale cancel) or as a
+	//    goleak failure at end of run.
+	for i := range 10 {
+		go client.StartPeriodicFlush(t.Context(), time.Hour)
+		time.Sleep(10 * time.Millisecond)
+		require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
+			"cycle %d: Stop should return promptly", i)
+	}
+}
+
 // TestReplClientQueue tests the "queue" based approach to buffering changes
 // We've removed the queue based approach, but we keep this test anyway to ensure
 // the buffered map behaves correct for this.
