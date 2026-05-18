@@ -1,8 +1,11 @@
 package repl
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 
+	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -166,4 +169,44 @@ func isMinimalRowImage(e *replication.RowsEvent) bool {
 		}
 	}
 	return false
+}
+
+// binlogPositionIsImpossible reports whether expectedLogName is no
+// longer present on the server (i.e. the binlog file the caller wants
+// to resume from has been purged).
+//
+// Returns:
+//   - (true, nil)   — the file is definitely absent: resume from this
+//     position cannot succeed.
+//   - (false, nil)  — the file is present: the position is resumable.
+//   - (_, err)      — could not determine (query / scan / iteration
+//     failed). Callers should surface this as a real
+//     error rather than treating it as "purged" — a
+//     network blip or auth hiccup is recoverable,
+//     while reporting "purged" abandons the checkpoint
+//     and forces a full re-copy.
+//
+// pkg/migration.Runner has a near-identical helper (binlogFileExists)
+// over the same SHOW BINARY LOGS query. Consolidating into a single
+// shared helper would mean exposing it from pkg/repl or pulling both
+// into a lower-level package; left as a follow-up.
+func binlogPositionIsImpossible(ctx context.Context, db *sql.DB, expectedLogName string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW BINARY LOGS")
+	if err != nil {
+		return false, fmt.Errorf("query SHOW BINARY LOGS: %w", err)
+	}
+	defer utils.CloseAndLog(rows)
+	var logname, size, encrypted string
+	for rows.Next() {
+		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
+			return false, fmt.Errorf("scan SHOW BINARY LOGS row: %w", err)
+		}
+		if logname == expectedLogName {
+			return false, nil // file present, position is resumable
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterating SHOW BINARY LOGS: %w", err)
+	}
+	return true, nil // file definitely not in the result set
 }

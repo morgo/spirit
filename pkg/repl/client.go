@@ -15,7 +15,6 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
-	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 )
@@ -367,7 +366,7 @@ func (c *Client) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
 		}
 	} else {
-		impossible, err := c.binlogPositionIsImpossible(ctx)
+		impossible, err := binlogPositionIsImpossible(ctx, c.db, c.flushedPos.Name)
 		if err != nil {
 			return fmt.Errorf("could not verify binlog position: %w", err)
 		}
@@ -763,40 +762,6 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 		}
 	}
 	return nil
-}
-
-// binlogPositionIsImpossible reports whether the configured flushedPos
-// names a binlog file that is no longer present on the server.
-//
-// Returns:
-//   - (true, nil)   — the file was definitely purged: resume from this
-//     position cannot succeed.
-//   - (false, nil)  — the file is present: the position is resumable.
-//   - (_, err)      — could not determine (query failed, scan failed,
-//     row iteration failed). Callers should surface
-//     this as a real error rather than treating it as
-//     "purged" — a network blip or auth hiccup is
-//     recoverable, while reporting "purged" abandons
-//     the checkpoint and forces a full re-copy.
-func (c *Client) binlogPositionIsImpossible(ctx context.Context) (bool, error) {
-	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
-	if err != nil {
-		return false, fmt.Errorf("query SHOW BINARY LOGS: %w", err)
-	}
-	defer utils.CloseAndLog(rows)
-	var logname, size, encrypted string
-	for rows.Next() {
-		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
-			return false, fmt.Errorf("scan SHOW BINARY LOGS row: %w", err)
-		}
-		if logname == c.flushedPos.Name {
-			return false, nil // file present, position is resumable
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterating SHOW BINARY LOGS: %w", err)
-	}
-	return true, nil // file definitely not in the result set
 }
 
 // fatalError is called from within the readStream goroutine when a truly fatal
