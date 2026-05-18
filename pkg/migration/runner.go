@@ -1064,6 +1064,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var createdAtStr string
 	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
+		// Distinguish "checkpoint table exists but has no rows" — a normal
+		// "nothing to resume from" state — from a real read failure
+		// (permission denied, server gone, etc.) so an operator inspecting
+		// the log doesn't mistake an empty checkpoint for a permission
+		// issue.
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("checkpoint table '%s' is empty, nothing to resume from", r.checkpointTableName())
+		}
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
 
@@ -1086,7 +1094,11 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Validate the checkpoint's binlog position is still available on the server
 	// before creating any resources (replClient, subscriptions, etc.).
 	// This avoids partial initialization that would need cleanup on failure.
-	if !r.binlogFileExists(ctx, binlogName) {
+	exists, err := r.binlogFileExists(ctx, binlogName)
+	if err != nil {
+		return fmt.Errorf("could not verify checkpoint binlog availability: %w", err)
+	}
+	if !exists {
 		return fmt.Errorf("%w: %s has been purged, cannot resume", status.ErrBinlogNotFound, binlogName)
 	}
 
@@ -1169,24 +1181,37 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	return nil
 }
 
-// binlogFileExists checks if the given binlog file is still available on the server.
-// Used to validate checkpoint binlog positions before creating resources.
-func (r *Runner) binlogFileExists(ctx context.Context, binlogName string) bool {
+// binlogFileExists reports whether the named binlog file is still
+// available on the server. Used to validate checkpoint binlog positions
+// before creating resources.
+//
+// Returns:
+//   - (true, nil)   — file present on the server, checkpoint is resumable.
+//   - (false, nil)  — file definitively not present, checkpoint must be
+//     discarded.
+//   - (_, err)      — could not determine (query / scan / iteration
+//     failed). Callers should surface this as a real
+//     error: a network blip should not be treated as
+//     "binlog purged", which would force a full re-copy.
+func (r *Runner) binlogFileExists(ctx context.Context, binlogName string) (bool, error) {
 	rows, err := r.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
-		return false
+		return false, fmt.Errorf("query SHOW BINARY LOGS: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var logname, size, encrypted string
 	for rows.Next() {
 		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
-			return false
+			return false, fmt.Errorf("scan SHOW BINARY LOGS row: %w", err)
 		}
 		if logname == binlogName {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterating SHOW BINARY LOGS: %w", err)
+	}
+	return false, nil
 }
 
 // initChunkers sets up the chunker(s) for the migration.
