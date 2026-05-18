@@ -54,3 +54,68 @@ func formatPartitionValue(v any) string {
 	}
 	return fmt.Sprintf("%v", v)
 }
+
+// ptrEqual reports whether two value pointers are nil-or-equal. Both nil
+// is equal; one nil and the other not is unequal; otherwise it
+// dereferences and compares. Replaces the per-type stringPtrEqual /
+// intPtrEqual / boolPtrEqual that this file used to carry.
+func ptrEqual[T comparable](a, b *T) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// getPreviousColumn returns the name of the column directly before
+// `name` in the given slice, or "" if `name` is the first column or
+// not found. Used by diffColumns to decide whether an ADD COLUMN needs
+// an AFTER clause.
+func getPreviousColumn(columns []Column, name string) string {
+	for i, col := range columns {
+		if col.Name == name {
+			if i == 0 {
+				return ""
+			}
+			return columns[i-1].Name
+		}
+	}
+	return ""
+}
+
+// needsQuotes decides whether a column DEFAULT value needs to be wrapped
+// in single quotes when emitted. SQL functions / boolean / NULL
+// literals and parseable numerics are emitted bare; everything else is
+// quoted as a string literal.
+//
+// Caveat: this is heuristic — there's no AST-level "literal kind" tag
+// available at this point, so a bit literal like b'01' or a hex literal
+// like 0x1A is misquoted as a string. The right fix is to thread a
+// DefaultIsLiteral / kind tag through Column from the parser.
+func needsQuotes(value string) bool {
+	// Common SQL functions/expressions that don't need quotes
+	upper := strings.ToUpper(value)
+	if upper == "NULL" ||
+		upper == "TRUE" ||
+		upper == "FALSE" ||
+		upper == "CURRENT_TIMESTAMP" ||
+		upper == "NOW()" ||
+		strings.HasPrefix(upper, "CURRENT_TIMESTAMP(") {
+		return false
+	}
+
+	// If it parses as an integer, don't quote it
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return false
+	}
+
+	// If it parses as a float, don't quote it
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return false
+	}
+
+	// Default to quoting (for strings)
+	return true
+}

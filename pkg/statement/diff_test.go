@@ -1132,40 +1132,40 @@ func TestNewDiffOptions(t *testing.T) {
 
 // TestHelperFunctions tests the helper functions used in diff.go
 func TestHelperFunctions(t *testing.T) {
-	t.Run("stringPtrEqual", func(t *testing.T) {
+	t.Run("ptrEqual_string", func(t *testing.T) {
 		str1 := "test"
 		str2 := "test"
 		str3 := "different"
 
-		require.True(t, stringPtrEqual(nil, nil))
-		require.True(t, stringPtrEqual(&str1, &str2))
-		require.False(t, stringPtrEqual(&str1, nil))
-		require.False(t, stringPtrEqual(nil, &str1))
-		require.False(t, stringPtrEqual(&str1, &str3))
+		require.True(t, ptrEqual[string](nil, nil))
+		require.True(t, ptrEqual(&str1, &str2))
+		require.False(t, ptrEqual(&str1, nil))
+		require.False(t, ptrEqual(nil, &str1))
+		require.False(t, ptrEqual(&str1, &str3))
 	})
 
-	t.Run("intPtrEqual", func(t *testing.T) {
+	t.Run("ptrEqual_int", func(t *testing.T) {
 		int1 := 10
 		int2 := 10
 		int3 := 20
 
-		require.True(t, intPtrEqual(nil, nil))
-		require.True(t, intPtrEqual(&int1, &int2))
-		require.False(t, intPtrEqual(&int1, nil))
-		require.False(t, intPtrEqual(nil, &int1))
-		require.False(t, intPtrEqual(&int1, &int3))
+		require.True(t, ptrEqual[int](nil, nil))
+		require.True(t, ptrEqual(&int1, &int2))
+		require.False(t, ptrEqual(&int1, nil))
+		require.False(t, ptrEqual(nil, &int1))
+		require.False(t, ptrEqual(&int1, &int3))
 	})
 
-	t.Run("boolPtrEqual", func(t *testing.T) {
+	t.Run("ptrEqual_bool", func(t *testing.T) {
 		bool1 := true
 		bool2 := true
 		bool3 := false
 
-		require.True(t, boolPtrEqual(nil, nil))
-		require.True(t, boolPtrEqual(&bool1, &bool2))
-		require.False(t, boolPtrEqual(&bool1, nil))
-		require.False(t, boolPtrEqual(nil, &bool1))
-		require.False(t, boolPtrEqual(&bool1, &bool3))
+		require.True(t, ptrEqual[bool](nil, nil))
+		require.True(t, ptrEqual(&bool1, &bool2))
+		require.False(t, ptrEqual(&bool1, nil))
+		require.False(t, ptrEqual(nil, &bool1))
+		require.False(t, ptrEqual(&bool1, &bool3))
 	})
 
 	t.Run("needsQuotes", func(t *testing.T) {

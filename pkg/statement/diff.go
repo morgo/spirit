@@ -602,7 +602,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 
 	// Compare ENGINE
 	if !opts.IgnoreEngine {
-		if !stringPtrEqual(ct.TableOptions.getEngine(), target.TableOptions.getEngine()) {
+		if !ptrEqual(ct.TableOptions.getEngine(), target.TableOptions.getEngine()) {
 			if engine := target.TableOptions.getEngine(); engine != nil {
 				clauses = append(clauses, fmt.Sprintf("ENGINE=%s", *engine))
 			}
@@ -611,13 +611,13 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 
 	// Compare CHARSET and COLLATION
 	if !opts.IgnoreCharsetCollation {
-		if !stringPtrEqual(ct.TableOptions.getCharset(), target.TableOptions.getCharset()) {
+		if !ptrEqual(ct.TableOptions.getCharset(), target.TableOptions.getCharset()) {
 			if charset := target.TableOptions.getCharset(); charset != nil {
 				clauses = append(clauses, fmt.Sprintf("DEFAULT CHARSET=%s", *charset))
 			}
 		}
 
-		if !stringPtrEqual(ct.TableOptions.getCollation(), target.TableOptions.getCollation()) {
+		if !ptrEqual(ct.TableOptions.getCollation(), target.TableOptions.getCollation()) {
 			if collation := target.TableOptions.getCollation(); collation != nil {
 				clauses = append(clauses, fmt.Sprintf("COLLATE=%s", *collation))
 			}
@@ -625,7 +625,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 	}
 
 	// Compare COMMENT (always compared — not controlled by an ignore option)
-	if !stringPtrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
+	if !ptrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
 		if comment := target.TableOptions.getComment(); comment != nil {
 			clauses = append(clauses, fmt.Sprintf("COMMENT='%s'", sqlescape.EscapeString(*comment)))
 		}
@@ -633,7 +633,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 
 	// Compare ROW_FORMAT
 	if !opts.IgnoreRowFormat {
-		if !stringPtrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
+		if !ptrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
 			if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
 				clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
 			}
@@ -643,7 +643,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 	// Compare AUTO_INCREMENT
 	// Note: AUTO_INCREMENT is ignored by default (like vitess schemadiff)
 	if !opts.IgnoreAutoIncrement {
-		if !stringPtrEqual(ct.TableOptions.getAutoIncrement(), target.TableOptions.getAutoIncrement()) {
+		if !ptrEqual(ct.TableOptions.getAutoIncrement(), target.TableOptions.getAutoIncrement()) {
 			if autoInc := target.TableOptions.getAutoIncrement(); autoInc != nil {
 				clauses = append(clauses, fmt.Sprintf("AUTO_INCREMENT=%s", *autoInc))
 			}
@@ -707,16 +707,16 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.Type != b.Type {
 		return false
 	}
-	if !intPtrEqual(a.Length, b.Length) {
+	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
-	if !intPtrEqual(a.Precision, b.Precision) {
+	if !ptrEqual(a.Precision, b.Precision) {
 		return false
 	}
-	if !intPtrEqual(a.Scale, b.Scale) {
+	if !ptrEqual(a.Scale, b.Scale) {
 		return false
 	}
-	if !boolPtrEqual(a.Unsigned, b.Unsigned) {
+	if !ptrEqual(a.Unsigned, b.Unsigned) {
 		return false
 	}
 	if a.Nullable != b.Nullable {
@@ -736,7 +736,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 			targetDefault = nil
 		}
 	}
-	if !stringPtrEqual(sourceDefault, targetDefault) {
+	if !ptrEqual(sourceDefault, targetDefault) {
 		return false
 	}
 	if a.DefaultIsExpr != b.DefaultIsExpr {
@@ -751,7 +751,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.Unique != b.Unique {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 
@@ -769,7 +769,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		targetCharset = nil
 	}
 
-	if !stringPtrEqual(sourceCharset, targetCharset) {
+	if !ptrEqual(sourceCharset, targetCharset) {
 		return false
 	}
 
@@ -785,7 +785,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		targetCollation = nil
 	}
 
-	if !stringPtrEqual(sourceCollation, targetCollation) {
+	if !ptrEqual(sourceCollation, targetCollation) {
 		return false
 	}
 
@@ -806,16 +806,16 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.Type != b.Type {
 		return false
 	}
-	if !intPtrEqual(a.Length, b.Length) {
+	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
-	if !intPtrEqual(a.Precision, b.Precision) {
+	if !ptrEqual(a.Precision, b.Precision) {
 		return false
 	}
-	if !intPtrEqual(a.Scale, b.Scale) {
+	if !ptrEqual(a.Scale, b.Scale) {
 		return false
 	}
-	if !boolPtrEqual(a.Unsigned, b.Unsigned) {
+	if !ptrEqual(a.Unsigned, b.Unsigned) {
 		return false
 	}
 	if a.Nullable != b.Nullable {
@@ -835,7 +835,7 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 			targetDefault = nil
 		}
 	}
-	if !stringPtrEqual(sourceDefault, targetDefault) {
+	if !ptrEqual(sourceDefault, targetDefault) {
 		return false
 	}
 	if a.DefaultIsExpr != b.DefaultIsExpr {
@@ -848,13 +848,13 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.Unique != b.Unique {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
-	if !stringPtrEqual(a.Charset, b.Charset) {
+	if !ptrEqual(a.Charset, b.Charset) {
 		return false
 	}
-	if !stringPtrEqual(a.Collation, b.Collation) {
+	if !ptrEqual(a.Collation, b.Collation) {
 		return false
 	}
 	if !slices.Equal(a.EnumValues, b.EnumValues) {
@@ -882,13 +882,13 @@ func indexesEqual(a, b *Index) bool {
 	} else if !slices.Equal(a.Columns, b.Columns) {
 		return false
 	}
-	if !boolPtrEqual(a.Invisible, b.Invisible) {
+	if !ptrEqual(a.Invisible, b.Invisible) {
 		return false
 	}
-	if !stringPtrEqual(a.Using, b.Using) {
+	if !ptrEqual(a.Using, b.Using) {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 	return true
@@ -911,10 +911,10 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 		return false
 	}
 	// Skip Invisible comparison
-	if !stringPtrEqual(a.Using, b.Using) {
+	if !ptrEqual(a.Using, b.Using) {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 	return true
@@ -938,10 +938,10 @@ func indexColumnsEqual(a, b *IndexColumn) bool {
 	if a.Name != b.Name {
 		return false
 	}
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
-	if !intPtrEqual(a.Length, b.Length) {
+	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
 	return true
@@ -966,7 +966,7 @@ func constraintsEqualIgnoreName(a, b *Constraint) bool {
 	if !slices.Equal(a.Columns, b.Columns) {
 		return false
 	}
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
 	// Compare foreign key references
@@ -981,10 +981,10 @@ func constraintsEqualIgnoreName(a, b *Constraint) bool {
 			return false
 		}
 		// Compare ON DELETE and ON UPDATE actions
-		if !stringPtrEqual(a.References.OnDelete, b.References.OnDelete) {
+		if !ptrEqual(a.References.OnDelete, b.References.OnDelete) {
 			return false
 		}
-		if !stringPtrEqual(a.References.OnUpdate, b.References.OnUpdate) {
+		if !ptrEqual(a.References.OnUpdate, b.References.OnUpdate) {
 			return false
 		}
 	}
@@ -1197,50 +1197,6 @@ func formatAddConstraint(constr *Constraint) string {
 	return strings.Join(parts, " ")
 }
 
-// Helper functions for comparison
-func stringPtrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-func intPtrEqual(a, b *int) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-func boolPtrEqual(a, b *bool) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-// getPreviousColumn returns the name of the column before the given column name
-func getPreviousColumn(columns []Column, name string) string {
-	for i, col := range columns {
-		if col.Name == name {
-			if i == 0 {
-				return ""
-			}
-			return columns[i-1].Name
-		}
-	}
-	return ""
-}
-
 // getPrimaryKeyIndex returns the PRIMARY KEY index if it exists (table-level PK), nil otherwise
 func (ct *CreateTable) getPrimaryKeyIndex() *Index {
 	for i := range ct.Indexes {
@@ -1249,33 +1205,6 @@ func (ct *CreateTable) getPrimaryKeyIndex() *Index {
 		}
 	}
 	return nil
-}
-
-// needsQuotes determines if a default value needs to be quoted
-func needsQuotes(value string) bool {
-	// Common SQL functions/expressions that don't need quotes
-	upper := strings.ToUpper(value)
-	if upper == "NULL" ||
-		upper == "TRUE" ||
-		upper == "FALSE" ||
-		upper == "CURRENT_TIMESTAMP" ||
-		upper == "NOW()" ||
-		strings.HasPrefix(upper, "CURRENT_TIMESTAMP(") {
-		return false
-	}
-
-	// If it parses as an integer, don't quote it
-	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
-		return false
-	}
-
-	// If it parses as a float, don't quote it
-	if _, err := strconv.ParseFloat(value, 64); err == nil {
-		return false
-	}
-
-	// Default to quoting (for strings)
-	return true
 }
 
 // diffPartitionOptions compares partition options and returns ALTER clauses for differences.
@@ -1338,7 +1267,7 @@ func isPartitionCountOnlyChange(source, target *PartitionOptions) (bool, int) {
 	}
 
 	// Must have same expression/columns
-	if !stringPtrEqual(source.Expression, target.Expression) {
+	if !ptrEqual(source.Expression, target.Expression) {
 		return false, 0
 	}
 	if !slices.Equal(source.Columns, target.Columns) {
@@ -1378,7 +1307,7 @@ func partitionOptionsEqual(a, b *PartitionOptions) bool {
 	}
 
 	// Compare expression (for HASH and RANGE)
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
 
@@ -1428,12 +1357,12 @@ func partitionDefinitionEqual(a, b *PartitionDefinition) bool {
 	}
 
 	// Compare comment
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 
 	// Compare engine
-	if !stringPtrEqual(a.Engine, b.Engine) {
+	if !ptrEqual(a.Engine, b.Engine) {
 		return false
 	}
 
@@ -1483,7 +1412,7 @@ func subPartitionOptionsEqual(a, b *SubPartitionOptions) bool {
 		return false
 	}
 
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
 
