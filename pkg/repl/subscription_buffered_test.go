@@ -1623,7 +1623,19 @@ func TestBufferedMapCloseUnblocksParkedHasChanged(t *testing.T) {
 	sub.sizeBytes = 2048 // force the next caller to park
 	sub.Unlock()
 
+	// Register cleanup *before* launching the parker. If any require/
+	// Eventually below fails, t.Cleanup runs in LIFO order: Close wakes
+	// the parker so it can return, then we wait for `done` to ensure
+	// the goroutine has actually exited (goleak otherwise reports it).
 	done := make(chan struct{})
+	t.Cleanup(func() {
+		sub.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("parked goroutine did not exit after t.Cleanup Close")
+		}
+	})
 	go func() {
 		sub.HasChanged([]any{int32(1)}, []any{int32(1), "x"}, false)
 		close(done)
@@ -1670,6 +1682,17 @@ func TestClientCloseUnblocksParkedHasChanged(t *testing.T) {
 	defer utils.CloseAndLog(db)
 
 	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
+
+	// The body of this test deliberately starts a Close in a goroutine
+	// and asserts it returns within a bound. If an earlier require fails,
+	// register a cleanup that wakes any parked HasChanged and tears down
+	// the client so the readStream goroutine doesn't leak past the test.
+	// markClosed is the lower-level wake; the second client.Close (no-op
+	// after the in-test one) keeps the cleanup idempotent.
+	t.Cleanup(func() {
+		sub.Close()
+		client.Close()
+	})
 
 	// Seed one row so sizeBytes > 0, then crank the soft limit down.
 	// Any further binlog-driven HasChanged will park.

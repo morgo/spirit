@@ -761,13 +761,11 @@ func (c *Client) processDDLNotification(schema, table string) {
 //   - If there is no subscription, the event is ignored.
 //   - Otherwise we call HasChanged for each affected key.
 //
-// We hold c.Lock only for the subscription map lookup. Once we have the
-// subscription pointer, we release the client lock before dispatching to
-// HasChanged. This matters for backpressure: bufferedMap.HasChanged can
-// block on its own condition variable when the buffer is full, and we
-// must not be holding c.Lock while it parks — c.flush() and other
-// callers acquire c.Lock briefly and would otherwise be unable to
-// progress, which would prevent the very flush that would unblock us.
+// The subscription lookup goes through c.subs (its own RWMutex); c.Lock
+// is not held here. That's load-bearing for backpressure: bufferedMap.
+// HasChanged can park on its own condition variable when the buffer is
+// full, and a c.Lock held across the park would block c.flush() — the
+// very flush that drains the buffer and would wake the parker.
 //
 // We require binlog_row_image=FULL on the source. With FULL each row
 // (before and after image alike) contains every column, so PK extraction
