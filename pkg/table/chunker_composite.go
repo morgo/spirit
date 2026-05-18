@@ -15,33 +15,23 @@ import (
 
 type chunkerComposite struct {
 	sync.Mutex
+	// dynamicChunkSizer owns chunkSize / chunkTimingInfo / ChunkerTarget /
+	// disableDynamicChunker. watermarkTracker owns watermark /
+	// lowerBoundWatermarkMap / checkpointHighPtr. Embedded so existing
+	// call sites can keep reading these as t.chunkSize, t.watermark, etc.
+	dynamicChunkSizer
+	watermarkTracker
 
-	Ti                    *TableInfo
-	NewTi                 *TableInfo // Destination table info
-	chunkSize             uint64
-	chunkPtrs             []Datum  // a list of Ptrs for each of the keys.
-	chunkKeys             []string // all the keys to chunk on (usually all the col names of the PK)
-	keyName               string   // the name of the key we are chunking on
-	where                 string   // any additional WHERE conditions.
-	finalChunkSent        bool
-	isOpen                bool
-	disableDynamicChunker bool // only used by the test suite
+	Ti             *TableInfo
+	NewTi          *TableInfo // Destination table info
+	chunkPtrs      []Datum    // a list of Ptrs for each of the keys.
+	chunkKeys      []string   // all the keys to chunk on (usually all the col names of the PK)
+	keyName        string     // the name of the key we are chunking on
+	where          string     // any additional WHERE conditions.
+	finalChunkSent bool
+	isOpen         bool
 
 	columnMapping *ColumnMapping
-
-	checkpointHighPtr Datum // the high watermark detected on restore from checkpoint
-
-	// Dynamic Chunking is time based instead of row based.
-	// It uses *time* to determine the target chunk size.
-	chunkTimingInfo []time.Duration
-	ChunkerTarget   time.Duration // i.e. 500ms for target
-
-	// This is used for restore.
-	watermark *Chunk
-	// Map from lowerbound value of a chunk -> chunk,
-	// Used to update the watermark by applying stored chunks,
-	// by comparing their lowerBound with current watermark upperBound.
-	lowerBoundWatermarkMap map[string]*Chunk
 
 	// Progress tracking is up to the chunker implementation
 	// For the composite chunker, we use the actual copied
@@ -325,7 +315,7 @@ func (t *chunkerComposite) Reset() error {
 func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows uint64) {
 	t.Lock()
 	defer t.Unlock()
-	t.bumpWatermark(chunk)
+	t.bumpWatermark(chunk, t.logger)
 
 	// Update progress tracking - add the actual rows processed
 	atomic.AddUint64(&t.rowsCopied, actualRows)
@@ -358,7 +348,8 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 
 	// If we have enough feedback, re-evaluate the chunk size.
 	if len(t.chunkTimingInfo) > 10 {
-		t.updateChunkerTarget(t.calculateNewTargetChunkSize())
+		newTarget, _ := t.calculateNewTargetChunkSize()
+		t.updateChunkerTarget(newTarget)
 	}
 }
 
@@ -387,78 +378,6 @@ func (t *chunkerComposite) GetLowWatermark() (string, error) {
 		return "", fmt.Errorf("could not serialize composite watermark: %w", err)
 	}
 	return string(jsonBytes), nil
-}
-
-// isSpecialRestoredChunk is used to test for the first chunk after restore-from-checkpoint.
-// The restored chunk is a really special beast because the lowerbound
-// will be repeated by the first chunk that is applied post restore.
-// This is called under a mutex.
-func (t *chunkerComposite) isSpecialRestoredChunk(chunk *Chunk) bool {
-	if chunk.LowerBound == nil || chunk.UpperBound == nil || t.watermark == nil || t.watermark.LowerBound == nil || t.watermark.UpperBound == nil {
-		return false // restored checkpoints always have both.
-	}
-	return chunk.LowerBound.comparesTo(t.watermark.LowerBound)
-}
-
-// bumpWatermark updates the minimum value that is known to be safely copied,
-// and is called under a mutex.
-// Because of parallelism, it is possible that a chunk is copied out of order,
-// so this func needs to account for that.
-// Basically:
-//   - If the chunk does not "align" to the current low watermark, it's stored in a map keyed by its lowerBound valuesString() value.
-//   - If it does align, the watermark is bumped to the chunk's max value. Then
-//     stored chunk map is checked to see if an existing chunk lowerBound aligns with the new watermark.
-//   - If any stored chunk aligns, it is deleted off the map and the watermark is bumped.
-//   - This process repeats until there is no more alignment from the stored map *or* the map is empty.
-func (t *chunkerComposite) bumpWatermark(chunk *Chunk) {
-	if chunk.UpperBound == nil {
-		return
-	}
-	// Check if this is the first chunk or it's the special restored chunk.
-	// If so, set the watermark and then go on to applying any stored chunks.
-	if (t.watermark == nil && chunk.LowerBound == nil) || t.isSpecialRestoredChunk(chunk) {
-		t.watermark = chunk
-		goto applyStoredChunks
-	}
-
-	// Validate that chunk has lower bound before moving on
-	if chunk.LowerBound == nil {
-		errMsg := fmt.Sprintf("coreChunker.bumpWatermark: nil lowerBound value encountered more than once: %v", chunk)
-		t.logger.Error(errMsg)
-		panic(errMsg) // Fatal equivalent - log and panic
-	}
-
-	// We haven't set the first chunk yet, or it's not aligned with the
-	// previous watermark. Store it in the map keyed by its lowerBound, and move on.
-
-	// We only need to store by lowerBound because, when updating watermark
-	// we always compare the upperBound of current watermark to lowerBound of stored chunks.
-	// Key can never be nil, because first chunk will not hit this code path and all remaining chunks will have lowerBound.
-	if t.watermark == nil || !t.watermark.UpperBound.comparesTo(chunk.LowerBound) {
-		t.lowerBoundWatermarkMap[chunk.LowerBound.valuesString()] = chunk
-		return
-	}
-
-	// The remaining case is:
-	// t.watermark.UpperBound.Value == chunk.LowerBound.Value
-	// Replace the current watermark with the chunk.
-	t.watermark = chunk
-
-applyStoredChunks:
-
-	// Check the waterMarkMap for any chunks that align with the new watermark.
-	// If there are any, bump the watermark and delete from the map.
-	// If there are none, we're done.
-	for t.waterMarkMapNotEmpty() && t.watermark.UpperBound != nil && t.lowerBoundWatermarkMap[t.watermark.UpperBound.valuesString()] != nil {
-		key := t.watermark.UpperBound.valuesString()
-		nextWatermark := t.lowerBoundWatermarkMap[key]
-		t.watermark = nextWatermark
-		delete(t.lowerBoundWatermarkMap, key)
-	}
-}
-
-func (t *chunkerComposite) waterMarkMapNotEmpty() bool {
-	return len(t.lowerBoundWatermarkMap) != 0
 }
 
 func (t *chunkerComposite) open() (err error) {
@@ -493,40 +412,6 @@ func (t *chunkerComposite) IsRead() bool {
 	t.Lock()
 	defer t.Unlock()
 	return t.finalChunkSent
-}
-
-func (t *chunkerComposite) updateChunkerTarget(newTarget uint64) {
-	// Already called under a mutex.
-	newTarget = t.boundaryCheckTargetChunkSize(newTarget)
-	t.chunkSize = newTarget
-	t.chunkTimingInfo = []time.Duration{}
-}
-
-func (t *chunkerComposite) boundaryCheckTargetChunkSize(newTarget uint64) uint64 {
-	newTargetRows := float64(newTarget)
-
-	// we only scale up 50% at a time in case the data from previous chunks had "gaps" leading to quicker than expected time.
-	// this is for safety. If the chunks are really taking less time than our target, it will gradually increase chunk size
-	if newTargetRows > float64(t.chunkSize)*MaxDynamicStepFactor {
-		newTargetRows = float64(t.chunkSize) * MaxDynamicStepFactor
-	}
-
-	if newTargetRows > MaxDynamicRowSize {
-		newTargetRows = MaxDynamicRowSize
-	}
-
-	if newTargetRows < MinDynamicRowSize {
-		newTargetRows = MinDynamicRowSize
-	}
-	return uint64(newTargetRows)
-}
-
-func (t *chunkerComposite) calculateNewTargetChunkSize() uint64 {
-	// We do all our math as float64 of time in ns
-	p90 := float64(LazyFindP90(t.chunkTimingInfo))
-	targetTime := float64(t.ChunkerTarget)
-	newTargetRows := float64(t.chunkSize) * (targetTime / p90)
-	return uint64(newTargetRows)
 }
 
 // Progress returns the current progress of the chunker
