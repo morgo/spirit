@@ -366,8 +366,14 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
 		}
-	} else if c.binlogPositionIsImpossible(ctx) {
-		return errors.New("binlog position is impossible, the source may have already purged it")
+	} else {
+		impossible, err := c.binlogPositionIsImpossible(ctx)
+		if err != nil {
+			return fmt.Errorf("could not verify binlog position: %w", err)
+		}
+		if impossible {
+			return errors.New("binlog position is impossible, the source may have already purged it")
+		}
 	}
 	c.bufferedPos = c.flushedPos // set buffered to the initial flushed value
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
@@ -759,25 +765,38 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	return nil
 }
 
-func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
+// binlogPositionIsImpossible reports whether the configured flushedPos
+// names a binlog file that is no longer present on the server.
+//
+// Returns:
+//   - (true, nil)   — the file was definitely purged: resume from this
+//     position cannot succeed.
+//   - (false, nil)  — the file is present: the position is resumable.
+//   - (_, err)      — could not determine (query failed, scan failed,
+//     row iteration failed). Callers should surface
+//     this as a real error rather than treating it as
+//     "purged" — a network blip or auth hiccup is
+//     recoverable, while reporting "purged" abandons
+//     the checkpoint and forces a full re-copy.
+func (c *Client) binlogPositionIsImpossible(ctx context.Context) (bool, error) {
 	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
-		return true // if we can't get the logs, its already impossible
+		return false, fmt.Errorf("query SHOW BINARY LOGS: %w", err)
 	}
 	defer utils.CloseAndLog(rows)
 	var logname, size, encrypted string
 	for rows.Next() {
 		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
-			return true
+			return false, fmt.Errorf("scan SHOW BINARY LOGS row: %w", err)
 		}
 		if logname == c.flushedPos.Name {
-			return false // We just need presence of the log file for success
+			return false, nil // file present, position is resumable
 		}
 	}
-	if rows.Err() != nil {
-		return true // can't determine.
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterating SHOW BINARY LOGS: %w", err)
 	}
-	return true
+	return true, nil // file definitely not in the result set
 }
 
 // fatalError is called from within the readStream goroutine when a truly fatal
