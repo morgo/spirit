@@ -24,19 +24,33 @@ func TestDatum(t *testing.T) {
 	require.Equal(t, "0", unsigned.MinValue().String())
 	require.Equal(t, "18446744073709551615", unsigned.MaxValue().String())
 
-	newsigned := signed.Add(10)
-	newunsigned := unsigned.Add(10)
+	newsigned, err := signed.Add(10)
+	require.NoError(t, err)
+	newunsigned, err := unsigned.Add(10)
+	require.NoError(t, err)
 	require.Equal(t, "11", newsigned.String())
 	require.Equal(t, "11", newunsigned.String())
 
-	require.True(t, newsigned.GreaterThanOrEqual(signed))
-	require.True(t, newunsigned.GreaterThanOrEqual(unsigned))
-	require.True(t, newsigned.GreaterThan(signed))
-	require.True(t, newunsigned.GreaterThan(unsigned))
-	require.True(t, signed.LessThan(newsigned))
-	require.True(t, unsigned.LessThan(newunsigned))
-	require.True(t, signed.LessThanOrEqual(newsigned))
-	require.True(t, unsigned.LessThanOrEqual(newunsigned))
+	// Helpers that splat the (bool, error) tuple from a comparison into a
+	// single assertion, so call sites read like the original boolean form.
+	requireTrue := func(got bool, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		require.True(t, got)
+	}
+	requireFalse := func(got bool, err error) {
+		t.Helper()
+		require.NoError(t, err)
+		require.False(t, got)
+	}
+	requireTrue(newsigned.GreaterThanOrEqual(signed))
+	requireTrue(newunsigned.GreaterThanOrEqual(unsigned))
+	requireTrue(newsigned.GreaterThan(signed))
+	requireTrue(newunsigned.GreaterThan(unsigned))
+	requireTrue(signed.LessThan(newsigned))
+	requireTrue(unsigned.LessThan(newunsigned))
+	requireTrue(signed.LessThanOrEqual(newsigned))
+	requireTrue(unsigned.LessThanOrEqual(newunsigned))
 
 	// Test that add operations do not overflow. i.e.
 	// We initialize the values to max-10 of the range, but then add 100 to each.
@@ -45,8 +59,12 @@ func TestDatum(t *testing.T) {
 	require.NoError(t, err)
 	overflowUnsigned, err := NewDatum(uint64(math.MaxUint64)-10, unsignedType)
 	require.NoError(t, err)
-	require.Equal(t, strconv.Itoa(math.MaxInt64), overflowSigned.Add(100).String())
-	require.Equal(t, "18446744073709551615", overflowUnsigned.Add(100).String())
+	overflowSignedResult, err := overflowSigned.Add(100)
+	require.NoError(t, err)
+	require.Equal(t, strconv.Itoa(math.MaxInt64), overflowSignedResult.String())
+	overflowUnsignedResult, err := overflowUnsigned.Add(100)
+	require.NoError(t, err)
+	require.Equal(t, "18446744073709551615", overflowUnsignedResult.String())
 
 	// Test unsigned with signed input
 	unsigned, err = NewDatum(int(1), unsignedType)
@@ -63,32 +81,31 @@ func TestDatum(t *testing.T) {
 	require.NoError(t, err)
 	str2, err := NewDatumFromValue("banana", "VARCHAR(255)")
 	require.NoError(t, err)
-	require.True(t, str2.GreaterThan(str1))        // "banana" > "apple"
-	require.True(t, str2.GreaterThanOrEqual(str1)) // "banana" >= "apple"
-	require.True(t, str1.LessThan(str2))           // "apple" < "banana"
-	require.True(t, str1.LessThanOrEqual(str2))    // "apple" <= "banana"
+	requireTrue(str2.GreaterThan(str1))        // "banana" > "apple"
+	requireTrue(str2.GreaterThanOrEqual(str1)) // "banana" >= "apple"
+	requireTrue(str1.LessThan(str2))           // "apple" < "banana"
+	requireTrue(str1.LessThanOrEqual(str2))    // "apple" <= "banana"
 	str3, err := NewDatumFromValue("apple", "VARCHAR(255)")
 	require.NoError(t, err)
-	require.True(t, str1.GreaterThanOrEqual(str3)) // equal values
-	require.True(t, str1.LessThanOrEqual(str3))    // equal values
-	require.False(t, str1.GreaterThan(str3))       // equal values
-	require.False(t, str1.LessThan(str3))          // equal values
+	requireTrue(str1.GreaterThanOrEqual(str3)) // equal values
+	requireTrue(str1.LessThanOrEqual(str3))    // equal values
+	requireFalse(str1.GreaterThan(str3))       // equal values
+	requireFalse(str1.LessThan(str3))          // equal values
 
 	// Test temporal comparisons (DATETIME)
 	datetime1, err := NewDatumFromValue("2024-01-01 10:00:00", "DATETIME")
 	require.NoError(t, err)
 	datetime2, err := NewDatumFromValue("2024-01-02 10:00:00", "DATETIME")
 	require.NoError(t, err)
-	require.True(t, datetime2.GreaterThan(datetime1))
-	require.True(t, datetime1.LessThan(datetime2))
+	requireTrue(datetime2.GreaterThan(datetime1))
+	requireTrue(datetime1.LessThan(datetime2))
 
-	// Test that comparing different types panics
-	require.Panics(t, func() {
-		signed.GreaterThan(unsigned)
-	})
-	require.Panics(t, func() {
-		signed.LessThan(str1)
-	})
+	// Comparing different types returns an error rather than panicking,
+	// so a single malformed event during a long migration is recoverable.
+	_, err = signed.GreaterThan(unsigned)
+	require.Error(t, err)
+	_, err = signed.LessThan(str1)
+	require.Error(t, err)
 }
 
 func TestDatumInt32ToUnsigned(t *testing.T) {

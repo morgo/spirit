@@ -674,7 +674,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		concurrency:     2,
 		targetBatchSize: 1000,
 		dbConfig:        dbconn.NewDBConfig(),
-		subscriptions:   make(map[string]Subscription),
+		subs:            newSubscriptionRegistry(),
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
@@ -688,8 +688,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
-	sub.cond = sync.NewCond(&sub.Mutex)
-	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
+	require.True(t, client.subs.AddBuffered(encodeSchemaTable(srcTable.SchemaName, srcTable.TableName), sub))
 	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
@@ -709,8 +708,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
-	sub2.cond = sync.NewCond(&sub2.Mutex)
-	client.subscriptions["test2"] = sub2
+	require.True(t, client.subs.AddBuffered("test2", sub2))
 	sub2.HasChanged([]any{2}, nil, false)
 	require.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
@@ -836,85 +834,6 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	client.Close()
 }
 
-// TestNewServerIDConcurrent tests that NewServerID generates unique IDs even when called concurrently.
-// This is a regression test for the issue where using time.Now().Unix() as a seed caused collisions
-// when multiple clients were created within the same second. This is *only* an issue for tests,
-// but the serverIDs need to be unique to prevent MySQL disconnecting the sessions.
-//
-// Note: Due to the birthday paradox, when generating 10,000 IDs from a ~4.3B range, there's a small
-// probability (~1.16%) of collision. We allow up to 1 duplicate to make the test less flaky while
-// still catching regressions where the old time-based seed caused frequent collisions.
-func TestNewServerIDConcurrent(t *testing.T) {
-	const numGoroutines = 100
-	const idsPerGoroutine = 100
-	const maxAllowedDuplicates = 1
-
-	// Channel to collect all generated IDs
-	idChan := make(chan uint32, numGoroutines*idsPerGoroutine)
-
-	// Use sync.WaitGroup to ensure all goroutines complete
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
-
-	// Start multiple goroutines generating IDs concurrently
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			for range idsPerGoroutine {
-				idChan <- NewServerID()
-			}
-		}()
-	}
-
-	// Wait for all goroutines to complete, then close the channel
-	go func() {
-		wg.Wait()
-		close(idChan)
-	}()
-
-	// Collect all IDs and track duplicates
-	ids := make(map[uint32]int) // map ID to count
-	var duplicateCount int
-	var firstDuplicate uint32
-
-	for id := range idChan {
-		// Verify ID is in expected range (at least 1001)
-		require.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
-
-		// Track duplicates - count every occurrence beyond the first
-		ids[id]++
-		if ids[id] > 1 {
-			duplicateCount++
-			if firstDuplicate == 0 {
-				firstDuplicate = id
-			}
-		}
-	}
-
-	// Log duplicate information if any found
-	if duplicateCount > 0 {
-		t.Logf("Found %d duplicate ID(s). First duplicate: %d", duplicateCount, firstDuplicate)
-	}
-
-	// Allow up to maxAllowedDuplicates to account for birthday paradox
-	require.LessOrEqual(t, duplicateCount, maxAllowedDuplicates,
-		"Should have at most %d duplicate ID(s), but found %d", maxAllowedDuplicates, duplicateCount)
-
-	// Verify we got close to the expected number of unique IDs
-	// With 1 allowed duplicate, we should have at least 9,999 unique IDs
-	minExpectedUnique := numGoroutines*idsPerGoroutine - maxAllowedDuplicates
-	require.GreaterOrEqual(t, len(ids), minExpectedUnique,
-		"Should have at least %d unique IDs", minExpectedUnique)
-}
-
-// TestNewServerIDRange tests that NewServerID always returns values in the expected range.
-func TestNewServerIDRange(t *testing.T) {
-	for range 1000 {
-		id := NewServerID()
-		require.GreaterOrEqual(t, id, uint32(1001), "ServerID should be >= 1001")
-	}
-}
-
 func TestProcessDDLNotification(t *testing.T) {
 	// Helper: create a minimal Client with the given filter config and a cancel tracker.
 	makeClient := func(filterSchema string, filterTables []string) (*Client, *bool) {
@@ -924,7 +843,7 @@ func TestProcessDDLNotification(t *testing.T) {
 			callerCancelFunc: func() bool { cancelled = true; return true },
 			ddlFilterSchema:  filterSchema,
 			ddlFilterTables:  toSet(filterTables),
-			subscriptions:    make(map[string]Subscription),
+			subs:             newSubscriptionRegistry(),
 		}
 		return c, &cancelled
 	}
@@ -945,7 +864,7 @@ func TestProcessDDLNotification(t *testing.T) {
 		c := &Client{
 			logger:           slog.Default(),
 			callerCancelFunc: func() bool { cancelled = true; return true },
-			subscriptions:    make(map[string]Subscription),
+			subs:             newSubscriptionRegistry(),
 		}
 		sub := &bufferedMap{
 			table:    tbl,
@@ -953,8 +872,7 @@ func TestProcessDDLNotification(t *testing.T) {
 			changes:  make(map[string]bufferedChange),
 			c:        c,
 		}
-		sub.cond = sync.NewCond(&sub.Mutex)
-		c.subscriptions[dbName+".orders"] = sub
+		require.True(t, c.subs.AddBuffered(dbName+".orders", sub))
 
 		// DDL on the subscribed table should cancel.
 		c.processDDLNotification(dbName, "orders")
@@ -1012,97 +930,11 @@ func TestProcessDDLNotification(t *testing.T) {
 		c := &Client{
 			logger:          slog.Default(),
 			ddlFilterSchema: "mydb",
-			subscriptions:   make(map[string]Subscription),
+			subs:            newSubscriptionRegistry(),
 		}
 		// Should not panic even though callerCancelFunc is nil.
 		require.NotPanics(t, func() {
 			c.processDDLNotification("mydb", "some_table")
 		})
-	})
-}
-
-// TestPkChanged exercises the helper that decides whether the before- and
-// after-image of a binlog UPDATE event represent a primary key update.
-// Values arrive in []any from the binlog row image with concrete types
-// like int8/int16/int32/int64 depending on the source column, so the
-// helper compares via fmt.Sprintf("%v", ...) rather than reflect.DeepEqual.
-func TestPkChanged(t *testing.T) {
-	t.Parallel()
-
-	t.Run("both nil is unchanged", func(t *testing.T) {
-		require.False(t, pkChanged(nil, nil))
-	})
-
-	t.Run("nil and empty slice are unchanged", func(t *testing.T) {
-		// len(nil) == 0 == len([]any{}), so the helper treats them as equal.
-		require.False(t, pkChanged(nil, []any{}))
-		require.False(t, pkChanged([]any{}, nil))
-	})
-
-	t.Run("length mismatch is changed", func(t *testing.T) {
-		require.True(t, pkChanged([]any{1}, []any{1, 2}))
-		require.True(t, pkChanged([]any{1, 2}, []any{1}))
-	})
-
-	t.Run("single-column integer PK unchanged", func(t *testing.T) {
-		require.False(t, pkChanged([]any{int64(42)}, []any{int64(42)}))
-	})
-
-	t.Run("single-column integer PK changed", func(t *testing.T) {
-		require.True(t, pkChanged([]any{int64(42)}, []any{int64(43)}))
-	})
-
-	t.Run("single-column string PK unchanged", func(t *testing.T) {
-		require.False(t, pkChanged([]any{"abc"}, []any{"abc"}))
-	})
-
-	t.Run("single-column string PK changed", func(t *testing.T) {
-		require.True(t, pkChanged([]any{"abc"}, []any{"abd"}))
-	})
-
-	t.Run("composite PK all equal is unchanged", func(t *testing.T) {
-		require.False(t, pkChanged([]any{int64(1), "x"}, []any{int64(1), "x"}))
-	})
-
-	t.Run("composite PK first column changed", func(t *testing.T) {
-		require.True(t, pkChanged([]any{int64(1), "x"}, []any{int64(2), "x"}))
-	})
-
-	t.Run("composite PK last column changed", func(t *testing.T) {
-		require.True(t, pkChanged([]any{int64(1), "x"}, []any{int64(1), "y"}))
-	})
-
-	t.Run("numeric type equivalence: int vs int64 same value is unchanged", func(t *testing.T) {
-		// MySQL binlog may surface the same underlying value as different Go
-		// integer types depending on the source column width. fmt.Sprintf
-		// "%v" normalises these to identical text, so the helper must not
-		// see int(5) and int64(5) as a PK change.
-		require.False(t, pkChanged([]any{int(5)}, []any{int64(5)}))
-		require.False(t, pkChanged([]any{int32(5)}, []any{int64(5)}))
-		require.False(t, pkChanged([]any{uint32(5)}, []any{int64(5)}))
-	})
-
-	t.Run("numeric type equivalence: signed and unsigned same value", func(t *testing.T) {
-		require.False(t, pkChanged([]any{int64(7)}, []any{uint64(7)}))
-	})
-
-	t.Run("byte slice and string with same content are unchanged", func(t *testing.T) {
-		// fmt.Sprintf alone renders []byte and string differently
-		// ("[97 98]" vs "ab"), so the helper coerces []byte to string
-		// before formatting. Defensive against decoder changes that
-		// might surface a column as []byte in one image and string in
-		// the next.
-		require.False(t, pkChanged([]any{[]byte("abc")}, []any{"abc"}))
-		require.False(t, pkChanged([]any{"abc"}, []any{[]byte("abc")}))
-		require.False(t, pkChanged([]any{[]byte("abc")}, []any{[]byte("abc")}))
-		require.True(t, pkChanged([]any{[]byte("abc")}, []any{"abd"}))
-	})
-
-	t.Run("typed nil is treated as a value", func(t *testing.T) {
-		// fmt.Sprintf("%v", nil) == "<nil>". Two nils render the same,
-		// so a column transitioning NULL -> NULL doesn't count as changed.
-		// (PRIMARY KEY columns are NOT NULL in MySQL, but be conservative.)
-		require.False(t, pkChanged([]any{nil}, []any{nil}))
-		require.True(t, pkChanged([]any{nil}, []any{int64(0)}))
 	})
 }

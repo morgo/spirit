@@ -192,7 +192,11 @@ func (t *chunkerComposite) nextQueryToDatums(query string) ([]Datum, error) {
 	var datums []Datum
 	for i, name := range columnNames {
 		newVal := reflect.ValueOf(columns[i]).Interface().(sql.RawBytes)
-		datum, err := NewDatum(string(newVal), t.Ti.datumTp(name))
+		tp, err := t.Ti.datumTp(name)
+		if err != nil {
+			return nil, fmt.Errorf("looking up type for column %s: %w", name, err)
+		}
+		datum, err := NewDatum(string(newVal), tp)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create datum for column %s: %w", name, err)
 		}
@@ -476,8 +480,15 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	// is above it. If it's not above it, we return FALSE before we check
 	// the chunkPtr. This prevents a phantom row issue on resume where
 	// rows above the watermark may already exist in the new table.
-	if !t.checkpointHighPtr.IsNil() && t.checkpointHighPtr.GreaterThanOrEqual(keyDatum) {
-		return false
+	if !t.checkpointHighPtr.IsNil() {
+		atOrAbove, err := t.checkpointHighPtr.GreaterThanOrEqual(keyDatum)
+		if err != nil {
+			t.logger.Error("comparing checkpointHighPtr in KeyAboveHighWatermark", "error", err)
+			return false
+		}
+		if atOrAbove {
+			return false
+		}
 	}
 
 	// Check if key is greater than or equal to the current chunkPtr[0]
@@ -491,7 +502,12 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 		// SELECT's snapshot. Return FALSE so the change is buffered.
 		return false
 	}
-	return keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
+	above, err := keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
+	if err != nil {
+		t.logger.Error("comparing chunkPtrs[0] in KeyAboveHighWatermark", "error", err)
+		return false
+	}
+	return above
 }
 
 // KeyBelowLowWatermark checks if a key is below the low watermark.
@@ -527,7 +543,12 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	// Key is below watermark if watermark.UpperBound[0] > key
 	// Use GreaterThan which supports all types (numeric, string, temporal)
 	// t.watermark.UpperBound represents the maximum value that has been safely copied in that chunk
-	return t.watermark.UpperBound.Value[0].GreaterThan(keyDatum)
+	below, err := t.watermark.UpperBound.Value[0].GreaterThan(keyDatum)
+	if err != nil {
+		t.logger.Error("comparing watermark in KeyBelowLowWatermark", "error", err)
+		return false
+	}
+	return below
 }
 
 // SetKey allows you to chunk on a secondary index, and not the primary key.

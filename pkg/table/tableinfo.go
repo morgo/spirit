@@ -407,12 +407,12 @@ func (t *TableInfo) wrapCastTypeAs(sqlCol, typeCol string) (string, error) {
 	return fmt.Sprintf("CAST(`%s` AS %s)", sqlCol, castableTp(tp)), nil
 }
 
-func (t *TableInfo) datumTp(col string) datumTp {
+func (t *TableInfo) datumTp(col string) (datumTp, error) {
 	tp, ok := t.columnsMySQLTps[col] // the tp keeps the width in this context.
 	if !ok {
-		panic("column not found, can not determine datumTp")
+		return unknownType, fmt.Errorf("column %q not found in table %s", col, t.TableName)
 	}
-	return mySQLTypeToDatumTp(tp)
+	return mySQLTypeToDatumTp(tp), nil
 }
 
 // GetColumnMySQLType returns the MySQL type for a given column name

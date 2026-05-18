@@ -75,8 +75,10 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 		t.chunkPtr = maxVal
 
 		// If the difference between min and max is less than
-		// MaxDynamicRowSize we can turn off prefetching.
-		if maxVal.Range(minVal) < MaxDynamicRowSize {
+		// MaxDynamicRowSize we can turn off prefetching. Range may error
+		// on non-numeric Datums (binary PK); in that case the prefetching
+		// optimization simply doesn't apply — fall through.
+		if rng, err := maxVal.Range(minVal); err == nil && rng < MaxDynamicRowSize {
 			t.logger.Warn("disabling chunk prefetching",
 				"min-val", minVal,
 				"max-val", maxVal,
@@ -146,17 +148,26 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 	// need updating, in which case we synchronously refresh them.
 	// This helps reduce the risk of a very large unbounded
 	// chunk from a table that is actively growing.
-	if t.chunkPtr.GreaterThanOrEqual(t.Ti.maxValue) && t.Ti.statisticsNeedUpdating() {
+	atOrPastMax, err := t.chunkPtr.GreaterThanOrEqual(t.Ti.maxValue)
+	if err != nil {
+		return nil, fmt.Errorf("comparing chunkPtr to maxValue: %w", err)
+	}
+	if atOrPastMax && t.Ti.statisticsNeedUpdating() {
 		t.logger.Info("approaching the end of the table, synchronously updating statistics")
 		if err := t.Ti.updateTableStatistics(context.TODO()); err != nil {
 			return nil, err
+		}
+		// statistics may have raised maxValue; re-check.
+		atOrPastMax, err = t.chunkPtr.GreaterThanOrEqual(t.Ti.maxValue)
+		if err != nil {
+			return nil, fmt.Errorf("comparing chunkPtr to maxValue: %w", err)
 		}
 	}
 
 	// Only now if there is a maximum value and the chunkPtr exceeds it, we apply
 	// the maximum value optimization which is to return an open bounded
 	// chunk.
-	if t.chunkPtr.GreaterThanOrEqual(t.Ti.maxValue) {
+	if atOrPastMax {
 		t.finalChunkSent = true
 		return &Chunk{
 			ChunkSize:  t.chunkSize,
@@ -174,7 +185,10 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 	// but not exceeding math.MaxInt64.
 
 	minVal := t.chunkPtr
-	maxVal := t.chunkPtr.Add(t.chunkSize)
+	maxVal, err := t.chunkPtr.Add(t.chunkSize)
+	if err != nil {
+		return nil, fmt.Errorf("advancing chunkPtr: %w", err)
+	}
 	t.chunkPtr = maxVal
 	return &Chunk{
 		ChunkSize:  t.chunkSize,
@@ -482,11 +496,23 @@ func (t *chunkerOptimistic) KeyAboveHighWatermark(key0 any) bool {
 	// the key is above it. If it's not above it, we return FALSE
 	// before we check the chunkPtr. This helps prevent a phantom
 	// row issue.
-	if !t.checkpointHighPtr.IsNil() && t.checkpointHighPtr.GreaterThanOrEqual(keyDatum) {
-		return false
+	if !t.checkpointHighPtr.IsNil() {
+		atOrAbove, err := t.checkpointHighPtr.GreaterThanOrEqual(keyDatum)
+		if err != nil {
+			t.logger.Error("comparing checkpointHighPtr in KeyAboveHighWatermark", "error", err)
+			return false
+		}
+		if atOrAbove {
+			return false
+		}
 	}
 	// Finally we check the chunkPtr.
-	return keyDatum.GreaterThanOrEqual(t.chunkPtr)
+	above, err := keyDatum.GreaterThanOrEqual(t.chunkPtr)
+	if err != nil {
+		t.logger.Error("comparing chunkPtr in KeyAboveHighWatermark", "error", err)
+		return false
+	}
+	return above
 }
 
 // KeyBelowLowWatermark checks if the key is below the low watermark.
@@ -519,7 +545,12 @@ func (t *chunkerOptimistic) KeyBelowLowWatermark(key0 any) bool {
 		t.logger.Error("failed to create watermarkDatum in KeyBelowLowWatermark", "error", err)
 		return false
 	}
-	return watermarkDatum.GreaterThan(keyDatum)
+	below, err := watermarkDatum.GreaterThan(keyDatum)
+	if err != nil {
+		t.logger.Error("comparing watermark in KeyBelowLowWatermark", "error", err)
+		return false
+	}
+	return below
 }
 
 func (t *chunkerOptimistic) Tables() []*TableInfo {
