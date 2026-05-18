@@ -3,13 +3,11 @@ package dbconn
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
-	mathrand "math/rand"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -18,13 +16,6 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
 )
-
-// SpiritProgramNamePrefix is the prefix used for the per-invocation
-// program_name connection attribute. Every connection Spirit opens through
-// dbconn.New carries this attribute (suffixed with DBConfig.SessionID), and
-// the kill queries exclude sessions matching it so we never kill our own
-// pool members when ForceKill fires during cutover.
-const SpiritProgramNamePrefix = "spirit-"
 
 const (
 	errLockWaitTimeout  = 1205
@@ -45,14 +36,6 @@ type DBConfig struct {
 	RangeOptimizerMaxMemSize int64
 	InterpolateParams        bool
 	ForceKill                bool // If true, kill locking transactions to acquire metadata locks (default: true)
-	// SessionID is a per-invocation random tag used to identify connections
-	// opened by THIS Spirit instance. It is emitted as the program_name
-	// connection attribute on every connection from dbconn.New and used by
-	// the kill queries to exclude Spirit's own pool members from the kill
-	// set. Two Spirit instances against the same MySQL server each get
-	// their own SessionID, so they coexist without killing each other's
-	// connections. Auto-populated by NewDBConfig.
-	SessionID string
 	// TLS Configuration
 	TLSMode            string // TLS connection mode (DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY)
 	TLSCertificatePath string // Path to custom TLS certificate file
@@ -67,33 +50,10 @@ func NewDBConfig() *DBConfig {
 		RangeOptimizerMaxMemSize: 0,     // default is 8M, we set to unlimited. Not user configurable (may reconsider in the future).
 		InterpolateParams:        false, // default is false
 		ForceKill:                true,  // default is true
-		SessionID:                newSessionID(),
 		// TLS defaults
 		TLSMode:            "PREFERRED", // default to PREFERRED mode like MySQL
 		TLSCertificatePath: "",          // no custom certificate by default
 	}
-}
-
-// newSessionID returns a random 16-character hex string used to tag every
-// connection opened by this Spirit invocation. crypto/rand keeps two
-// concurrent Spirit instances from colliding even when they share a
-// MySQL server and start in the same second.
-func newSessionID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand should not fail on supported platforms; fall back to
-		// math/rand so we always have *some* tag rather than the empty
-		// string (which would disable the self-exclusion filter).
-		return fmt.Sprintf("fallback-%016x", mathrand.Uint64())
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// SpiritProgramName returns the program_name connection attribute value
-// that the kill queries use to recognise Spirit's own connections. Exported
-// so tests can construct the same value.
-func SpiritProgramName(sessionID string) string {
-	return SpiritProgramNamePrefix + sessionID
 }
 
 // canRetryError looks at the MySQL error and decides if it is considered
@@ -226,7 +186,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 
 // backoff sleeps a few milliseconds before retrying.
 func backoff(i int) {
-	randFactor := i * mathrand.Intn(10) * int(time.Millisecond)
+	randFactor := i * rand.Intn(10) * int(time.Millisecond)
 	time.Sleep(time.Duration(randFactor))
 }
 

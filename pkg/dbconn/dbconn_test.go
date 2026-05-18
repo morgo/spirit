@@ -121,19 +121,6 @@ func TestForceExec(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	// Open the simulated external blocker on a separate DB with its own
-	// DBConfig (and therefore its own SessionID / program_name). The
-	// kill-query self-exclusion filter is keyed on SessionID, so a blocker
-	// sharing the runner's config would now be (correctly) skipped — that
-	// is the whole point of fix N1. Using a sibling config models the
-	// production scenario where the blocker is a foreign application
-	// transaction, not a Spirit pool member.
-	blockerConfig := NewDBConfig()
-	require.NotEqual(t, config.SessionID, blockerConfig.SessionID)
-	blockerDB, err := New(testutils.DSN(), blockerConfig)
-	require.NoError(t, err)
-	defer utils.CloseAndLog(blockerDB)
-
 	err = Exec(t.Context(), db, "DROP TABLE IF EXISTS requires_mdl")
 	require.NoError(t, err)
 
@@ -144,7 +131,7 @@ func TestForceExec(t *testing.T) {
 	err = ti.SetInfo(t.Context())
 	require.NoError(t, err)
 
-	trx, err := blockerDB.BeginTx(t.Context(), nil)
+	trx, err := db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
 	defer trx.Rollback()                                                //nolint: errcheck
 	_, err = trx.ExecContext(t.Context(), "SELECT * FROM requires_mdl") // just a select, nothing else.

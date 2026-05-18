@@ -81,7 +81,7 @@ func TestKillLongRunningTransactions(t *testing.T) {
 	// Sleep to ensure the transactions are long-running
 	time.Sleep(time.Second)
 
-	tableLocks, err := GetTableLocks(t.Context(), db, tables, nil, logger, nil)
+	tableLocks, err := GetTableLocks(t.Context(), db, tables, logger, nil)
 	require.NoError(t, err)
 	require.Len(t, tableLocks, 1)
 	require.True(t, tableLocks[0].ObjectName.Valid)
@@ -121,78 +121,4 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		err = tx.Rollback()
 		require.Error(t, err, "expected rollback to fail because transaction was killed")
 	}
-}
-
-// TestSpiritSessionExcludedFromKill verifies the program_name based
-// self-exclusion that protects Spirit's own pool members from being
-// targeted by ForceKill at cutover.
-//
-// Setup: two DBs against the same MySQL server, each with its own
-// DBConfig and therefore its own SessionID — they look like two
-// independent Spirit invocations. dbA opens a long-running transaction
-// holding an MDL on a target table.
-//
-// Properties asserted:
-//
-//  1. dbA querying GetLockingTransactions with its own config does NOT
-//     see dbA's transaction (its program_name matches the filter).
-//  2. dbB querying with its own config DOES see dbA's transaction
-//     (different SessionID, different program_name).
-//  3. Querying with a nil config (legacy callers / privileges check) DOES
-//     see dbA's transaction (no filter applied → legacy behavior).
-func TestSpiritSessionExcludedFromKill(t *testing.T) {
-	logger := slog.Default()
-
-	dbConfigA := NewDBConfig()
-	dbConfigA.InterpolateParams = true
-	dbA, err := New(testutils.DSN(), dbConfigA)
-	require.NoError(t, err)
-	defer utils.CloseAndLog(dbA)
-
-	dbConfigB := NewDBConfig()
-	dbConfigB.InterpolateParams = true
-	require.NotEqual(t, dbConfigA.SessionID, dbConfigB.SessionID, "each NewDBConfig must generate a fresh SessionID")
-	dbB, err := New(testutils.DSN(), dbConfigB)
-	require.NoError(t, err)
-	defer utils.CloseAndLog(dbB)
-
-	var schema string
-	require.NoError(t, dbA.QueryRowContext(t.Context(), "SELECT DATABASE()").Scan(&schema))
-
-	tbl := table.NewTableInfo(dbA, schema, "TestSpiritSessionExcluded")
-	require.NoError(t, Exec(t.Context(), dbA, "DROP TABLE IF EXISTS "+tbl.QuotedTableName))
-	require.NoError(t, Exec(t.Context(), dbA, "CREATE TABLE "+tbl.QuotedTableName+" (id INT NOT NULL auto_increment PRIMARY KEY, i int)"))
-	defer func() { _ = Exec(t.Context(), dbA, "DROP TABLE IF EXISTS "+tbl.QuotedTableName) }()
-
-	// Open a long-running transaction on dbA holding an MDL on tbl.
-	tx, err := dbA.BeginTx(t.Context(), nil)
-	require.NoError(t, err)
-	defer func() { _ = tx.Rollback() }()
-	_, err = tx.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (i) VALUES (1)", tbl.QuotedTableName))
-	require.NoError(t, err)
-
-	// Allow the MDL to register in performance_schema.
-	time.Sleep(500 * time.Millisecond)
-
-	prev := TransactionWeightThreshold
-	TransactionWeightThreshold = 1_000_000_000 // high so the trx isn't filtered out by weight
-	defer func() { TransactionWeightThreshold = prev }()
-
-	tables := []*table.TableInfo{tbl}
-
-	// 1. dbA's own config filters out dbA's transaction.
-	idsFromA, err := GetLockingTransactions(t.Context(), dbA, tables, dbConfigA, logger, nil)
-	require.NoError(t, err)
-	require.Empty(t, idsFromA, "Spirit must not see its own pool members through its own SessionID filter")
-
-	// 2. dbB's config (different SessionID) does see dbA's transaction.
-	idsFromB, err := GetLockingTransactions(t.Context(), dbB, tables, dbConfigB, logger, nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, idsFromB, "a sibling Spirit invocation must still observe foreign locking transactions")
-
-	// 3. Legacy nil-config path (privileges check) preserves the
-	//    pre-filter behaviour and sees the transaction too.
-	idsFromNil, err := GetLockingTransactions(t.Context(), dbA, tables, nil, logger, nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, idsFromNil, "nil config must fall back to legacy unfiltered behaviour")
 }
