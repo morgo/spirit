@@ -239,9 +239,13 @@ func (d Datum) MinValue() Datum {
 	}
 }
 
-func (d Datum) Add(addVal uint64) Datum {
+// Add returns d + addVal. Returns an error if d is not numeric — callers
+// that previously crashed on a binary-PK migration via the optimistic
+// chunker's prefetch path now get a recoverable error and can checkpoint
+// and exit cleanly.
+func (d Datum) Add(addVal uint64) (Datum, error) {
 	if !d.IsNumeric() {
-		panic("not supported on binary type")
+		return Datum{}, fmt.Errorf("Datum.Add: not supported on non-numeric type %v", d.Tp)
 	}
 	ret := d
 	if d.Tp == signedType {
@@ -250,48 +254,64 @@ func (d Datum) Add(addVal uint64) Datum {
 			returnVal = int64(math.MaxInt64) // overflow
 		}
 		ret.Val = returnVal
-		return ret
+		return ret, nil
 	}
 	returnVal := d.Val.(uint64) + addVal
 	if returnVal < d.Val.(uint64) {
 		returnVal = uint64(math.MaxUint64) // overflow
 	}
 	ret.Val = returnVal
-	return ret
+	return ret, nil
 }
 
-// Range returns the diff between 2 datums as an uint64.
-func (d Datum) Range(d2 Datum) uint64 {
+// Range returns the diff between two datums as a uint64. Returns an
+// error on non-numeric types for the same reason Add does.
+func (d Datum) Range(d2 Datum) (uint64, error) {
 	if !d.IsNumeric() {
-		panic("not supported on binary type")
+		return 0, fmt.Errorf("Datum.Range: not supported on non-numeric type %v", d.Tp)
 	}
 	if d.Tp == signedType {
-		return uint64(d.Val.(int64) - d2.Val.(int64))
+		return uint64(d.Val.(int64) - d2.Val.(int64)), nil
 	}
-	return d.Val.(uint64) - d2.Val.(uint64)
+	return d.Val.(uint64) - d2.Val.(uint64), nil
 }
 
-// String returns the datum as a SQL escaped string
-func (d Datum) String() string {
+// SQLString returns the datum as a SQL-escaped literal. Returns an
+// error if a non-numeric datum's Val is not a string — callers in the
+// applier's SQL-emission path now surface that as a normal error
+// instead of crashing the migration.
+func (d Datum) SQLString() (string, error) {
 	if d.IsNil() {
-		return "NULL"
+		return "NULL", nil
 	}
 	if d.IsNumeric() {
-		return fmt.Sprintf("%v", d.Val)
+		return fmt.Sprintf("%v", d.Val), nil
 	}
 	s, ok := d.Val.(string)
 	if !ok {
-		panic("can not convert datum to string")
+		return "", fmt.Errorf("Datum.SQLString: cannot convert non-string Val (%T) for type %v", d.Val, d.Tp)
 	}
 	// Check if it should be hex encoded
 	if d.IsBinaryString() {
 		// MySQL binary string needs at least one character
 		if len(s) == 0 {
-			return "0x00"
+			return "0x00", nil
 		}
-		return fmt.Sprintf("%#x", s)
+		return fmt.Sprintf("%#x", s), nil
 	}
-	return "\"" + sqlescape.EscapeString(s) + "\""
+	return "\"" + sqlescape.EscapeString(s) + "\"", nil
+}
+
+// String implements fmt.Stringer for log / debug output. It calls
+// SQLString and silently falls back to a placeholder on error so that
+// printing a Datum in a log line never crashes. Use SQLString directly
+// for any value that ends up in real SQL.
+func (d Datum) String() string {
+	s, err := d.SQLString()
+	if err != nil {
+		return fmt.Sprintf("<invalid datum: %v>", err)
+	}
+	return s
 }
 
 // IsNumeric checks if it's signed or unsigned
@@ -315,92 +335,72 @@ func (d Datum) IsNil() bool {
 	return d.Val == nil
 }
 
-func (d Datum) GreaterThanOrEqual(d2 Datum) bool {
+// compare reduces the four ordering operators to a single (-1, 0, +1)
+// result so the type-dispatch logic isn't duplicated four times. Returns
+// an error on type mismatch or an unrecognized Datum type — the four
+// public wrappers below convert that into a (bool, error) result that
+// callers can either propagate or, in the chunker watermark paths,
+// swallow with a safe-default false.
+func (d Datum) compare(d2 Datum) (int, error) {
 	if d.Tp != d2.Tp {
-		panic("cannot compare different datum types")
+		return 0, fmt.Errorf("cannot compare datums of different types: %v vs %v", d.Tp, d2.Tp)
 	}
-
 	switch d.Tp {
 	case signedType:
-		return d.Val.(int64) >= d2.Val.(int64)
+		a, b := d.Val.(int64), d2.Val.(int64)
+		switch {
+		case a < b:
+			return -1, nil
+		case a > b:
+			return 1, nil
+		default:
+			return 0, nil
+		}
 	case unsignedType:
-		return d.Val.(uint64) >= d2.Val.(uint64)
+		a, b := d.Val.(uint64), d2.Val.(uint64)
+		switch {
+		case a < b:
+			return -1, nil
+		case a > b:
+			return 1, nil
+		default:
+			return 0, nil
+		}
 	case binaryType, unknownType:
-		// For binary, string, and temporal types, use native Go string comparison
-		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
-		// It may differ from MySQL collation but is safe for watermark optimizations since they
-		// are disabled before the checksum phase.
-		return fmt.Sprint(d.Val) >= fmt.Sprint(d2.Val)
+		// Native Go string comparison: lexicographic byte-by-byte,
+		// deterministic and consistent. May differ from MySQL collation
+		// but safe for watermark optimizations since they are disabled
+		// before the checksum phase.
+		a, b := fmt.Sprint(d.Val), fmt.Sprint(d2.Val)
+		switch {
+		case a < b:
+			return -1, nil
+		case a > b:
+			return 1, nil
+		default:
+			return 0, nil
+		}
 	default:
-		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
+		return 0, fmt.Errorf("unsupported datum type for comparison: %v", d.Tp)
 	}
 }
 
-func (d Datum) GreaterThan(d2 Datum) bool {
-	if d.Tp != d2.Tp {
-		panic("cannot compare different datum types")
-	}
-
-	switch d.Tp {
-	case signedType:
-		return d.Val.(int64) > d2.Val.(int64)
-	case unsignedType:
-		return d.Val.(uint64) > d2.Val.(uint64)
-	case binaryType, unknownType:
-		// For binary, string, and temporal types, use native Go string comparison
-		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
-		// It may differ from MySQL collation but is safe for watermark optimizations since they
-		// are disabled before the checksum phase.
-		return fmt.Sprint(d.Val) > fmt.Sprint(d2.Val)
-	default:
-		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
-	}
+func (d Datum) GreaterThanOrEqual(d2 Datum) (bool, error) {
+	c, err := d.compare(d2)
+	return c >= 0, err
 }
 
-// LessThanOrEqual performs a comparison between two Datum values.
-// Works with all comparable types including numeric, strings, binary, and temporal.
-// Provided for completeness.
-func (d Datum) LessThanOrEqual(d2 Datum) bool {
-	if d.Tp != d2.Tp {
-		panic("cannot compare different datum types")
-	}
-
-	switch d.Tp {
-	case signedType:
-		return d.Val.(int64) <= d2.Val.(int64)
-	case unsignedType:
-		return d.Val.(uint64) <= d2.Val.(uint64)
-	case binaryType, unknownType:
-		// For binary, string, and temporal types, use native Go string comparison
-		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
-		// It may differ from MySQL collation but is safe for watermark optimizations since they
-		// are disabled before the checksum phase.
-		return fmt.Sprint(d.Val) <= fmt.Sprint(d2.Val)
-	default:
-		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
-	}
+func (d Datum) GreaterThan(d2 Datum) (bool, error) {
+	c, err := d.compare(d2)
+	return c > 0, err
 }
 
-// LessThan performs a comparison between two Datum values.
-// Works with all comparable types including numeric, strings, binary, and temporal.
-// Provided for completeness.
-func (d Datum) LessThan(d2 Datum) bool {
-	if d.Tp != d2.Tp {
-		panic("cannot compare different datum types")
-	}
+func (d Datum) LessThanOrEqual(d2 Datum) (bool, error) {
+	c, err := d.compare(d2)
+	return c <= 0, err
+}
 
-	switch d.Tp {
-	case signedType:
-		return d.Val.(int64) < d2.Val.(int64)
-	case unsignedType:
-		return d.Val.(uint64) < d2.Val.(uint64)
-	case binaryType, unknownType:
-		// For binary, string, and temporal types, use native Go string comparison
-		// This uses lexicographic byte-by-byte comparison which is deterministic and consistent.
-		// It may differ from MySQL collation but is safe for watermark optimizations since they
-		// are disabled before the checksum phase.
-		return fmt.Sprint(d.Val) < fmt.Sprint(d2.Val)
-	default:
-		panic(fmt.Sprintf("unsupported datum type for comparison: %v", d.Tp))
-	}
+func (d Datum) LessThan(d2 Datum) (bool, error) {
+	c, err := d.compare(d2)
+	return c < 0, err
 }

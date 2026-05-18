@@ -331,7 +331,11 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 			if err != nil {
 				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
 			}
-			values = append(values, datum.String())
+			sql, err := datum.SQLString()
+			if err != nil {
+				return 0, fmt.Errorf("failed to format datum for column %s: %w", columnNames[i], err)
+			}
+			values = append(values, sql)
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -541,7 +545,11 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 			if err != nil {
 				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
-			values = append(values, datum.String())
+			sql, err := datum.SQLString()
+			if err != nil {
+				return 0, fmt.Errorf("failed to format datum for column %s: %w", sourceColumnNames[i], err)
+			}
+			values = append(values, sql)
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
