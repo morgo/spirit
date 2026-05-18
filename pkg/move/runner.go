@@ -751,7 +751,7 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		for _, tbl := range r.sources[i].tables {
 			go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 		}
-		go r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+		r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 	}
 
 	// Start go routines for checkpointing and dumping status. The returned
@@ -1251,7 +1251,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
 			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
 			for i := range r.sources {
-				go r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+				r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 			}
 			timer := time.NewTimer(remaining)
 			select {

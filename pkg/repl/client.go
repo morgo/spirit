@@ -861,11 +861,14 @@ func (c *Client) StopPeriodicFlush() {
 	<-done
 }
 
-// StartPeriodicFlush runs a loop that periodically flushes the binlog
-// changeset, used by the migrator to advance the binlog position. It
-// blocks until ctx is cancelled or StopPeriodicFlush is called; callers
-// should invoke it via `go`. Calling Start while a flush is already
-// running is a no-op (the caller's goroutine returns immediately).
+// StartPeriodicFlush starts a goroutine that periodically flushes the
+// binlog changeset, used by the migrator to advance the binlog position.
+// Registration of the cancel/done pair happens synchronously in the
+// caller's goroutine before the loop is spawned, so a follow-up
+// StopPeriodicFlush is guaranteed to observe the registration. Callers
+// MUST NOT prefix with `go` — the loop is spawned internally.
+//
+// Calling Start while a flush is already running is a no-op.
 func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
 	c.periodicFlushLock.Lock()
 	if c.periodicFlushCancel != nil {
@@ -878,12 +881,16 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 	c.periodicFlushDone = done
 	c.periodicFlushLock.Unlock()
 
+	go c.runPeriodicFlush(flushCtx, interval, done)
+}
+
+func (c *Client) runPeriodicFlush(ctx context.Context, interval time.Duration, done chan struct{}) {
 	defer close(done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-flushCtx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			startLoop := time.Now()
@@ -891,7 +898,7 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 			// The periodic flush does not respect the throttler since we want to advance the binlog position
 			// we allow this to run, and then expect that if it is under load the throttler
 			// will kick in and slow down the copy-rows.
-			if err := c.flush(flushCtx, false, nil); err != nil {
+			if err := c.flush(ctx, false, nil); err != nil {
 				c.logger.Error("error flushing binary log", "error", err)
 			}
 			c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop))

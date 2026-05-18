@@ -264,7 +264,7 @@ func TestReplClientOpts(t *testing.T) {
 	require.Equal(t, 49961, client.GetDeltaLen())
 	// Flush. We could use client.Flush() but for testing purposes lets use
 	// PeriodicFlush()
-	go client.StartPeriodicFlush(t.Context(), 1*time.Second)
+	client.StartPeriodicFlush(t.Context(), 1*time.Second)
 	time.Sleep(2 * time.Second)
 	client.StopPeriodicFlush()
 	require.Equal(t, 0, db.Stats().InUse) // all connections are returned
@@ -286,8 +286,11 @@ func TestReplClientOpts(t *testing.T) {
 //     a subsequent Start could race with the previous goroutine, double-flushing.
 //   - Calling Start while another flush is already running is a no-op for the
 //     second caller. This is what lets runContinuousChecksum safely call
-//     `go c.StartPeriodicFlush(...)` during its inter-iteration wait without
+//     `c.StartPeriodicFlush(...)` during its inter-iteration wait without
 //     coordinating with the checker, which spawns its own periodic flush.
+//   - Start registers its cancel/done pair synchronously before spawning the
+//     loop goroutine, so a Stop that immediately follows a Start is
+//     guaranteed to observe the registration and wait for the goroutine.
 //   - Many Start/Stop cycles do not leak goroutines (goleak.VerifyTestMain in
 //     TestMain will fail the binary if any are left behind).
 func TestPeriodicFlushLifecycle(t *testing.T) {
@@ -340,9 +343,9 @@ func TestPeriodicFlushLifecycle(t *testing.T) {
 	//    ticker never fires — the only exit path is Stop's cancel. If the
 	//    new lifecycle is correct, Stop returns once the goroutine has
 	//    closed `done`, so it must complete well under our 500ms budget.
-	go client.StartPeriodicFlush(t.Context(), time.Hour)
-	// Yield so the goroutine reaches its select before we Stop.
-	time.Sleep(50 * time.Millisecond)
+	//    Start registers synchronously, so an immediately-following Stop
+	//    is guaranteed to see the cancel/done pair.
+	client.StartPeriodicFlush(t.Context(), time.Hour)
 	require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
 		"Stop should return promptly once the goroutine reaches its select")
 
@@ -350,8 +353,7 @@ func TestPeriodicFlushLifecycle(t *testing.T) {
 	//    the second caller — it returns immediately rather than spawning a
 	//    second flush. If this regressed, the second call would block until
 	//    Stop and the test would time out below.
-	go client.StartPeriodicFlush(t.Context(), time.Hour)
-	time.Sleep(50 * time.Millisecond) // let the first call acquire ownership
+	client.StartPeriodicFlush(t.Context(), time.Hour)
 	require.True(t,
 		callWithin(500*time.Millisecond, func() {
 			client.StartPeriodicFlush(t.Context(), time.Hour)
@@ -366,8 +368,7 @@ func TestPeriodicFlushLifecycle(t *testing.T) {
 	//    "already running" no-op path against a stale cancel) or as a
 	//    goleak failure at end of run.
 	for i := range 10 {
-		go client.StartPeriodicFlush(t.Context(), time.Hour)
-		time.Sleep(10 * time.Millisecond)
+		client.StartPeriodicFlush(t.Context(), time.Hour)
 		require.True(t, callWithin(500*time.Millisecond, client.StopPeriodicFlush),
 			"cycle %d: Stop should return promptly", i)
 	}

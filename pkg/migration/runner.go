@@ -790,7 +790,7 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 	for _, change := range r.changes {
 		go change.table.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
-	go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+	r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 	// Start go routines for checkpointing and dumping status. The returned
 	// wait function is invoked from Close() so we can be sure no late
 	// checkpoint INSERT lands after teardown begins.
@@ -1561,7 +1561,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		// and have to be drained under the cutover's table lock.
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
 			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
-			go r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+			r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
 			timer := time.NewTimer(remaining)
 			select {
 			case <-ctx.Done():

@@ -328,7 +328,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 	allChangesFlushed = true
 
 	if len(s.changes) > 0 {
-		mapAllFlushed, err := s.flushMapLocked(ctx, underLock, lock)
+		mapAllFlushed, err := s.flushMapLocked(ctx, underLock, lock, false)
 		if err != nil {
 			return false, err
 		}
@@ -347,7 +347,15 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 }
 
 // flushMapLocked drains s.changes through the applier. Caller must hold s.Lock.
-func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock) (bool, error) {
+//
+// bypassWatermark forces every entry to flush regardless of the low-watermark
+// filter and irrespective of the current value of s.watermarkOptimization.
+// SetWatermarkOptimization uses this to drain the outgoing store before
+// flipping the flag — the flag is still `true` at that point, so the normal
+// filter would skip keys above the low watermark and leave them behind in the
+// store we are about to abandon. underLock (cutover) implies bypass for the
+// same reason.
+func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock, bypassWatermark bool) (bool, error) {
 	var deleteKeys []string
 	var upsertRows []applier.LogicalRow
 	var keysFlushed []string
@@ -358,14 +366,14 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 	if underLock {
 		lockToUse = lock
 	}
+	applyWatermarkFilter := !underLock && !bypassWatermark && s.watermarkOptimizationEnabled()
 
 	for key, change := range s.changes {
-		// Check low watermark only if the optimization is enabled AND we're not under lock.
-		// When underLock=true (during cutover), we must flush all changes regardless of watermark.
-		// Use originalKey to preserve typed values for watermark comparison.
-		// In bufferedMap, we use the low-watermark check to defer flushing keys that are
-		// still being copied (KeyBelowLowWatermark returns false), so this condition skips them.
-		if !underLock && s.watermarkOptimizationEnabled() && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+		// In bufferedMap, the low-watermark check defers flushing keys that
+		// are still being copied (KeyBelowLowWatermark returns false). It is
+		// only safe to skip when we are not under cutover lock and the caller
+		// has not asked us to drain everything (bypassWatermark).
+		if applyWatermarkFilter && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
 			s.keysSkippedBelow.Add(1)
 			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
@@ -527,7 +535,7 @@ func (s *bufferedMap) Close() {
 }
 
 // SetWatermarkOptimization toggles the watermark filter and, if the toggle
-// changes which store is active, drains the *outgoing* store before
+// changes which store is active, fully drains the *outgoing* store before
 // returning. After a successful call the invariant holds: only the active
 // store may have entries.
 //
@@ -537,6 +545,15 @@ func (s *bufferedMap) Close() {
 // continue to land in the old store until the caller successfully retries
 // the toggle. The call is still idempotent — retrying with the same
 // `enabled` value recomputes the same target mode and re-runs the drain.
+//
+// The drain MUST bypass the watermark filter. When leaving map mode,
+// s.watermarkOptimization is still `true` and the normal filter would skip
+// any key not below the low watermark and leave it stranded in s.changes
+// while subsequent events land in s.queue. That stranded map entry would
+// then be applied out of order with respect to the queue (queue mode exists
+// precisely to preserve order for non-memory-comparable PKs). The bypass
+// flag on flushMapLocked closes that gap, and we assert s.changes is empty
+// after the drain to catch any future regression.
 func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool) error {
 	s.Lock()
 	defer s.Unlock()
@@ -559,10 +576,20 @@ func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool
 				}
 			}
 		} else {
-			// Leaving map mode; map is the outgoing store.
+			// Leaving map mode; map is the outgoing store. We must bypass
+			// the watermark filter here: s.watermarkOptimization is still
+			// `true` at this point (we have not flipped it yet), so without
+			// the bypass flushMapLocked would skip any key not below the
+			// low watermark and leave it in the store we are about to
+			// abandon — violating the post-toggle invariant that only the
+			// active store has entries, and risking out-of-order apply
+			// against the queue we are switching into.
 			if len(s.changes) > 0 {
-				if _, err := s.flushMapLocked(ctx, false, nil); err != nil {
+				if _, err := s.flushMapLocked(ctx, false, nil, true); err != nil {
 					return fmt.Errorf("draining map on watermark toggle: %w", err)
+				}
+				if len(s.changes) > 0 {
+					return fmt.Errorf("draining map on watermark toggle: %d entries remained after bypass drain", len(s.changes))
 				}
 			}
 		}
