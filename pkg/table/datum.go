@@ -302,10 +302,14 @@ func (d Datum) SQLString() (string, error) {
 	return "\"" + sqlescape.EscapeString(s) + "\"", nil
 }
 
-// String implements fmt.Stringer for log / debug output. It calls
-// SQLString and silently falls back to a placeholder on error so that
-// printing a Datum in a log line never crashes. Use SQLString directly
-// for any value that ends up in real SQL.
+// String implements fmt.Stringer by wrapping SQLString and falling back
+// to a "<invalid datum: ...>" placeholder on error so that printing a
+// Datum in a log line never crashes. Most call sites end up inlining
+// the result into SQL (Chunk.String → expandRowConstructorComparison
+// → vals[i].String()), which is fine for valid datums and degrades to
+// a deliberately-broken SQL fragment (caught at parse time by MySQL)
+// for invalid ones. Prefer SQLString directly in new code where
+// explicit error handling is available — e.g. the applier paths.
 func (d Datum) String() string {
 	s, err := d.SQLString()
 	if err != nil {
