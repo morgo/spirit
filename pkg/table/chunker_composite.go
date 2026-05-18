@@ -376,10 +376,6 @@ func (t *chunkerComposite) GetLowWatermark() (string, error) {
 	return string(jsonBytes), nil
 }
 
-// isSpecialRestoredChunk is used to test for the first chunk after restore-from-checkpoint.
-// The restored chunk is a really special beast because the lowerbound
-// will be repeated by the first chunk that is applied post restore.
-// This is called under a mutex.
 func (t *chunkerComposite) open() (err error) {
 	if t.isOpen {
 		// This prevents an error where open is re-called

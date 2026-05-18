@@ -388,10 +388,6 @@ func (t *chunkerOptimistic) GetLowWatermark() (string, error) {
 	return t.watermark.JSON(), nil
 }
 
-// isSpecialRestoredChunk is used to test for the first chunk after restore-from-checkpoint.
-// The restored chunk is a really special beast because the lowerbound
-// will be repeated by the first chunk that is applied post restore.
-// This is called under a mutex.
 func (t *chunkerOptimistic) open() (err error) {
 	if len(t.Ti.KeyColumns) > 1 {
 		return errors.New("the optimistic chunker no longer supports key columns > 1")
