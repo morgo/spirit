@@ -278,12 +278,12 @@ func (d Datum) Range(d2 Datum) (uint64, error) {
 
 // String returns the datum as a SQL-escaped literal. It is also
 // fmt.Stringer for log / debug formatting. The previous form panicked
-// when a non-numeric datum's Val was not a string; this form returns
-// a "<invalid datum: ...>" placeholder instead. Most call sites
-// (Chunk.String → expandRowConstructorComparison) inline the result
-// into a SQL fragment — a valid datum produces valid SQL, an invalid
-// one produces a deliberately-broken fragment that surfaces as a
-// MySQL parse error rather than a panic.
+// when a non-numeric datum's Val was not a string; this form coerces
+// via %v so a misconstructed datum still produces a valid SQL fragment
+// (correctly escaped/quoted below) rather than crashing the migration.
+// NewDatum always normalizes Val to string for binaryType/unknownType,
+// so this coercion only fires for datums built by hand with an
+// unexpected Val type.
 func (d Datum) String() string {
 	if d.IsNil() {
 		return "NULL"
@@ -293,7 +293,7 @@ func (d Datum) String() string {
 	}
 	s, ok := d.Val.(string)
 	if !ok {
-		return fmt.Sprintf("<invalid datum: non-string Val (%T) for type %v>", d.Val, d.Tp)
+		s = fmt.Sprintf("%v", d.Val)
 	}
 	if d.IsBinaryString() {
 		// MySQL binary string needs at least one character
