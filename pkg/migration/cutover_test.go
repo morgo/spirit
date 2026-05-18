@@ -138,6 +138,17 @@ func TestMDLLockFails(t *testing.T) {
 	// Cutover retries in a loop and fails after ~15s (3s timeout * 5 retries).
 	err = cutover.Run(t.Context())
 	require.Error(t, err)
+
+	// With error joining, every failed attempt is preserved in the returned
+	// error chain — operators debugging a flapping cutover see the full
+	// history rather than just the last try. MaxRetries=2 above, so we
+	// expect both attempts to be annotated and present.
+	joined, ok := err.(interface{ Unwrap() []error })
+	require.True(t, ok, "cutover error should be a joined error (%T)", err)
+	require.Len(t, joined.Unwrap(), 2, "expected one wrapped error per attempt")
+	require.Contains(t, err.Error(), "attempt 1:")
+	require.Contains(t, err.Error(), "attempt 2:")
+
 	require.NoError(t, trx.Rollback())
 }
 
