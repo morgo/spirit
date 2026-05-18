@@ -50,7 +50,9 @@ func (w *watermarkTracker) waterMarkMapNotEmpty() bool {
 //     chunks whose lowerBound now aligns with the new watermark.
 //
 // Caller must hold the chunker's mutex. The logger is passed in because
-// the helper doesn't own one — see chunker_helpers.go's package doc.
+// watermarkTracker does not own one — keeping it field-less avoids an
+// ambiguous-field-promotion clash with dynamicChunkSizer when both are
+// embedded into the same chunker struct.
 func (w *watermarkTracker) bumpWatermark(chunk *Chunk, logger *slog.Logger) {
 	if chunk.UpperBound == nil {
 		return
