@@ -132,7 +132,10 @@ type JSONBoundary struct {
 func jsonStrings2Datums(ti *TableInfo, keys []string, vals []string) ([]Datum, error) {
 	datums := make([]Datum, len(keys))
 	for i, str := range vals {
-		tp := ti.datumTp(keys[i])
+		tp, err := ti.datumTp(keys[i])
+		if err != nil {
+			return nil, fmt.Errorf("looking up type for key %s: %w", keys[i], err)
+		}
 		// datumValFromString handles hex decoding for binary types:
 		// if tp is binaryType and the string starts with "0x",
 		// it decodes the hex back to raw binary bytes. This is needed because
