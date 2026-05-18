@@ -131,3 +131,16 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client, *table.TableInfo, *table
 	require.NoError(t, client.Run(t.Context()))
 	return db, client, srcTable, dstTable
 }
+
+// getBufferedMap fetches the bufferedMap subscription for the given
+// schema.table key, failing the test if the key is missing or if the
+// stored Subscription is not a *bufferedMap. Used by tests that inspect
+// subscription internals directly.
+func getBufferedMap(t *testing.T, c *Client, key string) *bufferedMap {
+	t.Helper()
+	sub, ok := c.subs.Get(key)
+	require.True(t, ok, "no subscription registered for %q", key)
+	bm, ok := sub.(*bufferedMap)
+	require.True(t, ok, "subscription %q is not a *bufferedMap", key)
+	return bm
+}
