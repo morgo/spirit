@@ -1,11 +1,8 @@
-// Package repl contains binary log subscription functionality.
 package repl
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -178,78 +175,6 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 	}
 }
 
-type ClientConfig struct {
-	TargetBatchTime time.Duration
-	Concurrency     int
-	Logger          *slog.Logger
-	ServerID        uint32
-	DBConfig        *dbconn.DBConfig // Database configuration including TLS settings
-
-	// CancelFunc is an optional callback from the caller (e.g. migration or move runner).
-	// It is called when a DDL change is detected on a subscribed table, or when a fatal
-	// stream error occurs (such as minimal RBR detection or exhausted streamer recreation
-	// attempts). The caller is expected to handle cancellation and cleanup.
-	// It returns true if the error was acted upon (caller actually cancelled),
-	// or false if it was ignored (e.g. because the caller is already past cutover).
-	CancelFunc func() bool
-
-	// DDLFilterSchema, when set, broadens DDL detection to cancel on any DDL change
-	// in the specified schema, rather than only on exact table matches against subscriptions.
-	// This is used by the move runner to detect DDL on any table in the source database.
-	DDLFilterSchema string
-
-	// DDLFilterTables, when set alongside DDLFilterSchema, narrows the schema-level
-	// DDL detection to only the specified table names. This is used for partial moves
-	// where only specific tables from a schema are being moved — DDL on unrelated
-	// tables in the same schema should not trigger cancellation.
-	// If empty (and DDLFilterSchema is set), all tables in the schema trigger cancellation.
-	DDLFilterTables []string
-
-	// SubscriptionSoftLimitBytes overrides DefaultSubscriptionSoftLimitBytes
-	// for new subscriptions. Set to a negative value to disable the cap
-	// entirely (HasChanged will never block on memory). Zero (the
-	// zero-value default) means use DefaultSubscriptionSoftLimitBytes.
-	SubscriptionSoftLimitBytes int64
-}
-
-// serverIDCounter is an atomic counter used to help ensure unique server IDs
-var serverIDCounter atomic.Uint32
-
-// NewServerID generates a unique server ID to avoid conflicts with other binlog readers.
-// Uses crypto/rand combined with an atomic counter to ensure uniqueness even when called
-// concurrently. Returns a value in the range 1001-4294967295 to avoid conflicts with
-// typical MySQL server IDs (0-1000).
-func NewServerID() uint32 {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// Fallback to nanosecond-based generation if crypto/rand fails (should never happen)
-		rangeSize := int64(^uint32(0) - 1000)
-		return uint32(time.Now().UnixNano()%rangeSize) + 1001
-	}
-	// Convert bytes to uint32, mix with counter, and map to valid range
-	randomPart := binary.BigEndian.Uint32(b[:])
-	counterPart := serverIDCounter.Add(1)
-
-	// XOR the random and counter parts for better distribution
-	result := randomPart ^ counterPart
-
-	// Map result into the range [1001, max uint32]
-	// Use modulo to constrain to the valid range, then add 1001
-	result = (result % (^uint32(0) - 1000)) + 1001
-
-	return result
-}
-
-// NewClientDefaultConfig returns a default config for the copier.
-func NewClientDefaultConfig() *ClientConfig {
-	return &ClientConfig{
-		Concurrency:     4,
-		TargetBatchTime: DefaultTargetBatchTime,
-		Logger:          slog.Default(),
-		ServerID:        NewServerID(),
-	}
-}
-
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
 func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
@@ -260,7 +185,6 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 	// that it needs to act like a FIFO queue. This is a requirement because of edge
 	// cases caused by collations since A == a, but in our map they would
 	// not compare as equal.
-	pkIsMemoryComparable := currentTable.PrimaryKeyIsMemoryComparable() == nil
 	if !c.subs.AddBuffered(subKey, &bufferedMap{
 		table:                currentTable,
 		newTable:             newTable,
@@ -268,7 +192,7 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 		c:                    c,
 		chunker:              chunker,
 		applier:              c.applier,
-		pkIsMemoryComparable: pkIsMemoryComparable,
+		pkIsMemoryComparable: currentTable.PrimaryKeyIsMemoryComparable() == nil,
 		softLimitBytes:       c.subscriptionSoftLimitBytes,
 	}) {
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
