@@ -77,9 +77,24 @@ type Migration struct {
 }
 
 // Validate is called by Kong after parsing to check for invalid flag combinations.
+// Zero values mean "use the default" (normalizeOptions fills them in), so they
+// are not rejected here; only explicitly-negative or otherwise invalid values
+// are caught.
 func (m *Migration) Validate() error {
 	if m.Lint && m.LintOnly {
 		return errors.New("--lint and --lint-only cannot be used together")
+	}
+	if m.Threads < 0 {
+		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
+	}
+	if m.TargetChunkTime < 0 {
+		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)
+	}
+	if m.ReplicaMaxLag < 0 {
+		return fmt.Errorf("--replica-max-lag must be non-negative, got %s", m.ReplicaMaxLag)
+	}
+	if m.CheckpointMaxAge < 0 {
+		return fmt.Errorf("--checkpoint-max-age must be non-negative, got %s", m.CheckpointMaxAge)
 	}
 	return nil
 }
