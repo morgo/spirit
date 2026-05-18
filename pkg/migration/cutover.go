@@ -23,6 +23,12 @@ const (
 	// the source of contention time to clear.
 	cutoverInitialBackoff = 100 * time.Millisecond
 	cutoverMaxBackoff     = 10 * time.Second
+	// cutoverUnlockTimeout caps the duration of the deferred UNLOCK TABLES
+	// in executeRenameUnderLock. The unlock runs under a ctx derived via
+	// context.WithoutCancel so it still fires when the parent ctx is
+	// cancelled mid-cutover; without an explicit timeout the call could
+	// block indefinitely on an unhealthy connection.
+	cutoverUnlockTimeout = 30 * time.Second
 )
 
 type CutOver struct {
@@ -81,7 +87,7 @@ func (c *CutOver) Run(ctx context.Context) error {
 	// than just whatever happened on the last try.
 	var attemptErrs []error
 	backoff := cutoverInitialBackoff
-	for i := range c.dbConfig.MaxRetries {
+	for i := range max(1, c.dbConfig.MaxRetries) {
 		if ctx.Err() != nil {
 			return errors.Join(append(attemptErrs, ctx.Err())...)
 		}
@@ -165,8 +171,12 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	// so a ctx cancel mid-cutover still releases the lock. ExecContext on
 	// a cancelled ctx returns immediately without sending the statement;
 	// the server would eventually release the lock when the connection
-	// dies, but giving UNLOCK TABLES a fair chance is cleaner.
-	defer utils.CloseAndLogWithContext(context.WithoutCancel(ctx), tableLock)
+	// dies, but giving UNLOCK TABLES a fair chance is cleaner. Bound the
+	// detached ctx with cutoverUnlockTimeout so an unhealthy connection
+	// can't block the deferred close indefinitely.
+	unlockCtx, cancelUnlock := context.WithTimeout(context.WithoutCancel(ctx), cutoverUnlockTimeout)
+	defer cancelUnlock()
+	defer utils.CloseAndLogWithContext(unlockCtx, tableLock)
 	// FlushUnderTableLock itself does flush → BlockWait → flush, so the
 	// flush's own binlog events (REPLACE INTO _new / DELETE FROM _new) are
 	// already read back inside the BlockWait of the same call. The earlier
