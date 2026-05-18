@@ -77,6 +77,9 @@ func (c *CutOver) Run(ctx context.Context) error {
 		// - The RENAME TABLE connection
 		// - The Flush() threads
 		// Because we want to safely flush quickly, we set the limit to 5.
+		// Pool size grows monotonically and is not restored — the
+		// migration ends after cutover, so there is nothing to shrink
+		// back for. See the MaxOpenConnections doc in (*Runner).Run.
 		c.db.SetMaxOpenConns(5)
 	}
 	// Collect every attempt's error and join them on exit, so an operator
