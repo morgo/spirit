@@ -3,6 +3,7 @@ package repl
 import (
 	"testing"
 
+	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/stretchr/testify/require"
 )
 
@@ -337,4 +338,122 @@ func TestExtractTablesFromDDLStmtsComplex(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestPkChanged exercises the helper that decides whether the before- and
+// after-image of a binlog UPDATE event represent a primary key update.
+// Values arrive in []any from the binlog row image with concrete types
+// like int8/int16/int32/int64 depending on the source column, so the
+// helper compares via fmt.Sprintf("%v", ...) rather than reflect.DeepEqual.
+func TestPkChanged(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both nil is unchanged", func(t *testing.T) {
+		require.False(t, pkChanged(nil, nil))
+	})
+
+	t.Run("nil and empty slice are unchanged", func(t *testing.T) {
+		// len(nil) == 0 == len([]any{}), so the helper treats them as equal.
+		require.False(t, pkChanged(nil, []any{}))
+		require.False(t, pkChanged([]any{}, nil))
+	})
+
+	t.Run("length mismatch is changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{1}, []any{1, 2}))
+		require.True(t, pkChanged([]any{1, 2}, []any{1}))
+	})
+
+	t.Run("single-column integer PK unchanged", func(t *testing.T) {
+		require.False(t, pkChanged([]any{int64(42)}, []any{int64(42)}))
+	})
+
+	t.Run("single-column integer PK changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{int64(42)}, []any{int64(43)}))
+	})
+
+	t.Run("single-column string PK unchanged", func(t *testing.T) {
+		require.False(t, pkChanged([]any{"abc"}, []any{"abc"}))
+	})
+
+	t.Run("single-column string PK changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{"abc"}, []any{"abd"}))
+	})
+
+	t.Run("composite PK all equal is unchanged", func(t *testing.T) {
+		require.False(t, pkChanged([]any{int64(1), "x"}, []any{int64(1), "x"}))
+	})
+
+	t.Run("composite PK first column changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{int64(1), "x"}, []any{int64(2), "x"}))
+	})
+
+	t.Run("composite PK last column changed", func(t *testing.T) {
+		require.True(t, pkChanged([]any{int64(1), "x"}, []any{int64(1), "y"}))
+	})
+
+	t.Run("numeric type equivalence: int vs int64 same value is unchanged", func(t *testing.T) {
+		// MySQL binlog may surface the same underlying value as different Go
+		// integer types depending on the source column width. fmt.Sprintf
+		// "%v" normalises these to identical text, so the helper must not
+		// see int(5) and int64(5) as a PK change.
+		require.False(t, pkChanged([]any{int(5)}, []any{int64(5)}))
+		require.False(t, pkChanged([]any{int32(5)}, []any{int64(5)}))
+		require.False(t, pkChanged([]any{uint32(5)}, []any{int64(5)}))
+	})
+
+	t.Run("numeric type equivalence: signed and unsigned same value", func(t *testing.T) {
+		require.False(t, pkChanged([]any{int64(7)}, []any{uint64(7)}))
+	})
+
+	t.Run("byte slice and string with same content are unchanged", func(t *testing.T) {
+		// fmt.Sprintf alone renders []byte and string differently
+		// ("[97 98]" vs "ab"), so the helper coerces []byte to string
+		// before formatting. Defensive against decoder changes that
+		// might surface a column as []byte in one image and string in
+		// the next.
+		require.False(t, pkChanged([]any{[]byte("abc")}, []any{"abc"}))
+		require.False(t, pkChanged([]any{"abc"}, []any{[]byte("abc")}))
+		require.False(t, pkChanged([]any{[]byte("abc")}, []any{[]byte("abc")}))
+		require.True(t, pkChanged([]any{[]byte("abc")}, []any{"abd"}))
+	})
+
+	t.Run("typed nil is treated as a value", func(t *testing.T) {
+		// fmt.Sprintf("%v", nil) == "<nil>". Two nils render the same,
+		// so a column transitioning NULL -> NULL doesn't count as changed.
+		// (PRIMARY KEY columns are NOT NULL in MySQL, but be conservative.)
+		require.False(t, pkChanged([]any{nil}, []any{nil}))
+		require.True(t, pkChanged([]any{nil}, []any{int64(0)}))
+	})
+}
+
+// TestIsMinimalRowImage verifies the per-event detection used by the
+// binlog client to refuse running against a source configured with
+// binlog_row_image other than FULL. SkippedColumns is a [][]int per
+// row from go-mysql; a row with len > 0 inside indicates that some
+// columns were omitted, which is the MINIMAL/NOBLOB image form.
+func TestIsMinimalRowImage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil SkippedColumns is full image", func(t *testing.T) {
+		e := &replication.RowsEvent{SkippedColumns: nil}
+		require.False(t, isMinimalRowImage(e))
+	})
+
+	t.Run("empty per-row slices is full image", func(t *testing.T) {
+		// go-mysql preallocates one slice per row, all empty when the
+		// source has binlog_row_image=FULL.
+		e := &replication.RowsEvent{SkippedColumns: [][]int{{}, {}, {}}}
+		require.False(t, isMinimalRowImage(e))
+	})
+
+	t.Run("any non-empty per-row slice flags minimal", func(t *testing.T) {
+		// A single row with at least one skipped column ordinal is enough.
+		e := &replication.RowsEvent{SkippedColumns: [][]int{{}, {2}, {}}}
+		require.True(t, isMinimalRowImage(e))
+	})
+
+	t.Run("multiple skipped columns also flags minimal", func(t *testing.T) {
+		e := &replication.RowsEvent{SkippedColumns: [][]int{{1, 2, 3}}}
+		require.True(t, isMinimalRowImage(e))
+	})
 }

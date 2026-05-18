@@ -136,6 +136,12 @@ type bufferedMap struct {
 	watermarkOptimization bool
 	chunker               table.MappedChunker
 
+	// closed is set by Close() to release any HasChanged caller parked on
+	// the soft memory limit. Without it, Client.Close() deadlocks on
+	// streamWG.Wait(): readStream → processRowsEvent → HasChanged would
+	// remain blocked on the cond with no flush in flight to wake it.
+	closed bool
+
 	// Counters for the bookend log emitted on watermark-optimization transitions.
 	keysAdded        atomic.Int64
 	keysDroppedAbove atomic.Int64
@@ -250,7 +256,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// — the exit duration is the operator's main signal for binlog-
 	// retention risk, and without these lines a stalled migrator looks
 	// indistinguishable from one that's just slow.
-	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes {
+	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes && !s.closed {
 		s.timesParked.Add(1)
 		s.c.logger.Warn("subscription parked on soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
@@ -258,15 +264,21 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 			"soft_limit_bytes", s.softLimitBytes,
 		)
 		parkStart := time.Now()
-		for s.sizeBytes >= s.softLimitBytes {
+		for s.sizeBytes >= s.softLimitBytes && !s.closed {
 			s.cond.Wait()
 		}
 		s.c.logger.Info("subscription unparked from soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"parked_duration", time.Since(parkStart),
 			"size_bytes", s.sizeBytes,
+			"closed", s.closed,
 		)
 	}
+	// On close we fall through and admit the row even if it exceeds the
+	// soft limit. The buffer will be discarded by the caller; admitting
+	// keeps subscription.Length() consistent with the buffered position
+	// that readStream advances after processRowsEvent returns, so a
+	// concurrent flush cannot publish a flushedPos that skips this event.
 
 	hashedKey := utils.HashKey(key)
 
@@ -503,6 +515,19 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 // is enabled. This is already called under a mutex.
 func (s *bufferedMap) watermarkOptimizationEnabled() bool {
 	return s.watermarkOptimization && s.chunker != nil
+}
+
+// Close releases any HasChanged caller parked on the soft memory limit so
+// the binlog reader goroutine can exit on Client.Close(). Pending changes
+// are not flushed; they are discarded along with the subscription. Safe
+// to call more than once.
+func (s *bufferedMap) Close() {
+	s.Lock()
+	s.closed = true
+	if s.cond != nil {
+		s.cond.Broadcast()
+	}
+	s.Unlock()
 }
 
 // SetWatermarkOptimization toggles the watermark filter and, if the toggle
