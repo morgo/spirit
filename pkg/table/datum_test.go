@@ -176,13 +176,15 @@ func TestKeyBelowLowWatermarkWithNegativeInt32(t *testing.T) {
 
 	// Create the optimistic chunker directly
 	chk := &chunkerOptimistic{
-		Ti:            ti,
-		ChunkerTarget: 100 * time.Millisecond,
-		logger:        slog.Default(),
-		watermark: &Chunk{
-			UpperBound: &Boundary{Value: []Datum{{Val: uint64(100), Tp: unsignedType}}},
-			LowerBound: &Boundary{Value: []Datum{{Val: uint64(0), Tp: unsignedType}}},
+		Ti:                ti,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+		watermarkTracker: watermarkTracker{
+			watermark: &Chunk{
+				UpperBound: &Boundary{Value: []Datum{{Val: uint64(100), Tp: unsignedType}}},
+				LowerBound: &Boundary{Value: []Datum{{Val: uint64(0), Tp: unsignedType}}},
+			},
 		},
+		logger: slog.Default(),
 		// We need chunkPtr to have a type for NewDatum call
 		chunkPtr: Datum{Val: uint64(0), Tp: unsignedType},
 	}

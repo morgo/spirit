@@ -27,9 +27,9 @@ func TestOptimisticChunkerBasic(t *testing.T) {
 	}
 	t1.statisticsLastUpdated = time.Now()
 	chunker := &chunkerOptimistic{
-		Ti:            t1,
-		ChunkerTarget: ChunkerDefaultTarget,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		logger:            slog.Default(),
 	}
 	chunker.SetDynamicChunking(false)
 
@@ -91,10 +91,10 @@ func TestLowWatermark(t *testing.T) {
 
 	require.NoError(t, t1.PrimaryKeyIsMemoryComparable())
 	chunker := &chunkerOptimistic{
-		Ti:                     t1,
-		ChunkerTarget:          ChunkerDefaultTarget,
-		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
 	}
 	chunker.SetDynamicChunking(false)
 
@@ -320,9 +320,9 @@ func TestOptimisticPrefetchChunking(t *testing.T) {
 	t1.db = db
 	require.NoError(t, t1.SetInfo(t.Context()))
 	chunker := &chunkerOptimistic{
-		Ti:            t1,
-		ChunkerTarget: time.Second,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: time.Second},
+		logger:            slog.Default(),
 	}
 	chunker.SetDynamicChunking(true)
 	require.NoError(t, chunker.Open())
@@ -355,10 +355,10 @@ func TestOptimisticChunkerReset(t *testing.T) {
 
 	// Create chunker
 	chunker := &chunkerOptimistic{
-		Ti:                     t1,
-		ChunkerTarget:          ChunkerDefaultTarget,
-		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
 	}
 	chunker.SetDynamicChunking(false)
 

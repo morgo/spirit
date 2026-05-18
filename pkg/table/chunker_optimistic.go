@@ -13,29 +13,19 @@ import (
 
 type chunkerOptimistic struct {
 	sync.Mutex
+	// dynamicChunkSizer owns chunkSize / chunkTimingInfo / ChunkerTarget /
+	// disableDynamicChunker. watermarkTracker owns watermark /
+	// lowerBoundWatermarkMap / checkpointHighPtr. Embedded so existing
+	// call sites can keep reading these as t.chunkSize, t.watermark, etc.
+	dynamicChunkSizer
+	watermarkTracker
 
-	Ti                *TableInfo
-	NewTi             *TableInfo // Destination table info
-	chunkSize         uint64
-	chunkPtr          Datum
-	checkpointHighPtr Datum // the high watermark detected on restore
-	finalChunkSent    bool
-	isOpen            bool
-	columnMapping     *ColumnMapping
-
-	// Dynamic Chunking is time based instead of row based.
-	// It uses *time* to determine the target chunk size.
-	chunkTimingInfo []time.Duration
-	ChunkerTarget   time.Duration // i.e. 500ms for target
-
-	disableDynamicChunker bool // only used by the test suite
-
-	// This is used for restore.
-	watermark *Chunk
-	// Map from lowerbound value of a chunk -> chunk,
-	// Used to update the watermark by applying stored chunks,
-	// by comparing their lowerBound with current watermark upperBound.
-	lowerBoundWatermarkMap map[string]*Chunk
+	Ti             *TableInfo
+	NewTi          *TableInfo // Destination table info
+	chunkPtr       Datum
+	finalChunkSent bool
+	isOpen         bool
+	columnMapping  *ColumnMapping
 
 	// The chunk prefetching algorithm is used when the chunker detects
 	// that there are very large gaps in the sequence.
@@ -324,7 +314,7 @@ func (t *chunkerOptimistic) Reset() error {
 func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 	t.Lock()
 	defer t.Unlock()
-	t.bumpWatermark(chunk)
+	t.bumpWatermark(chunk, t.logger)
 
 	// It is up to the chunker implementation to decide how to track "rows copied"
 	// In the optimistic chunker, since it is really designed around auto_increment
@@ -362,7 +352,24 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 
 	// We have enough feedback to re-evaluate the chunk size.
 	if len(t.chunkTimingInfo) > 10 {
-		t.updateChunkerTarget(t.calculateNewTargetChunkSize())
+		newTarget, p90 := t.calculateNewTargetChunkSize()
+		// Optimistic-specific: switch to prefetch chunking if we're already at
+		// the max chunk size, the next target wants to go higher still, and
+		// the p90 is only a fraction of our target time. The composite
+		// chunker has no analogous mode so this lives at the chunker rather
+		// than in dynamicChunkSizer.
+		if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90*5 < t.ChunkerTarget {
+			t.logger.Warn("dynamic chunking is not working as expected",
+				"target-time", t.ChunkerTarget,
+				"p90-time", p90,
+				"new-target-rows", newTarget,
+				"max-dynamic-row-size", MaxDynamicRowSize,
+			)
+			t.logger.Warn("switching to prefetch algorithm")
+			t.chunkSize = StartingChunkSize // reset
+			t.chunkPrefetchingEnabled = true
+		}
+		t.updateChunkerTarget(newTarget)
 	}
 }
 
@@ -385,74 +392,6 @@ func (t *chunkerOptimistic) GetLowWatermark() (string, error) {
 // The restored chunk is a really special beast because the lowerbound
 // will be repeated by the first chunk that is applied post restore.
 // This is called under a mutex.
-func (t *chunkerOptimistic) isSpecialRestoredChunk(chunk *Chunk) bool {
-	if chunk.LowerBound == nil || chunk.UpperBound == nil || t.watermark == nil || t.watermark.LowerBound == nil || t.watermark.UpperBound == nil {
-		return false // restored checkpoints always have both.
-	}
-	return chunk.LowerBound.comparesTo(t.watermark.LowerBound)
-}
-
-// bumpWatermark updates the minimum value that is known to be safely copied,
-// and is called under a mutex.
-// Because of parallelism, it is possible that a chunk is copied out of order,
-// so this func needs to account for that.
-// Basically:
-//   - If the chunk does not "align" to the current low watermark, it's stored in a map keyed by its lowerBound valuesString() value.
-//   - If it does align, the watermark is bumped to the chunk's max value. Then
-//     stored chunk map is checked to see if an existing chunk lowerBound aligns with the new watermark.
-//   - If any stored chunk aligns, it is deleted off the map and the watermark is bumped.
-//   - This process repeats until there is no more alignment from the stored map *or* the map is empty.
-func (t *chunkerOptimistic) bumpWatermark(chunk *Chunk) {
-	if chunk.UpperBound == nil {
-		return
-	}
-	// Check if this is the first chunk or it's the special restored chunk.
-	// If so, set the watermark and then go on to applying any stored chunks.
-	if (t.watermark == nil && chunk.LowerBound == nil) || t.isSpecialRestoredChunk(chunk) {
-		t.watermark = chunk
-		goto applyStoredChunks
-	}
-
-	// Validate that chunk has lower bound before moving on
-	if chunk.LowerBound == nil {
-		errMsg := fmt.Sprintf("coreChunker.bumpWatermark: nil lowerBound value encountered more than once: %v", chunk)
-		t.logger.Error(errMsg)
-		panic(errMsg) // Fatal equivalent - log and panic
-	}
-
-	// We haven't set the first chunk yet, or it's not aligned with the
-	// previous watermark. Store it in the map keyed by its lowerBound, and move on.
-
-	// We only need to store by lowerBound because, when updating watermark
-	// we always compare the upperBound of current watermark to lowerBound of stored chunks.
-	// Key can never be nil, because first chunk will not hit this code path and all remaining chunks will have lowerBound.
-	if t.watermark == nil || !t.watermark.UpperBound.comparesTo(chunk.LowerBound) {
-		t.lowerBoundWatermarkMap[chunk.LowerBound.valuesString()] = chunk
-		return
-	}
-
-	// The remaining case is:
-	// t.watermark.UpperBound.Value == chunk.LowerBound.Value
-	// Replace the current watermark with the chunk.
-	t.watermark = chunk
-
-applyStoredChunks:
-
-	// Check the waterMarkMap for any chunks that align with the new watermark.
-	// If there are any, bump the watermark and delete from the map.
-	// If there are none, we're done.
-	for t.waterMarkMapNotEmpty() && t.watermark.UpperBound != nil && t.lowerBoundWatermarkMap[t.watermark.UpperBound.valuesString()] != nil {
-		key := t.watermark.UpperBound.valuesString()
-		nextWatermark := t.lowerBoundWatermarkMap[key]
-		t.watermark = nextWatermark
-		delete(t.lowerBoundWatermarkMap, key)
-	}
-}
-
-func (t *chunkerOptimistic) waterMarkMapNotEmpty() bool {
-	return len(t.lowerBoundWatermarkMap) != 0
-}
-
 func (t *chunkerOptimistic) open() (err error) {
 	if len(t.Ti.KeyColumns) > 1 {
 		return errors.New("the optimistic chunker no longer supports key columns > 1")
@@ -489,55 +428,6 @@ func (t *chunkerOptimistic) IsRead() bool {
 	t.Lock()
 	defer t.Unlock()
 	return t.finalChunkSent
-}
-
-func (t *chunkerOptimistic) updateChunkerTarget(newTarget uint64) {
-	// Already called under a mutex.
-	newTarget = t.boundaryCheckTargetChunkSize(newTarget)
-	t.chunkSize = newTarget
-	t.chunkTimingInfo = []time.Duration{}
-}
-
-func (t *chunkerOptimistic) boundaryCheckTargetChunkSize(newTarget uint64) uint64 {
-	newTargetRows := float64(newTarget)
-
-	// we only scale up 50% at a time in case the data from previous chunks had "gaps" leading to quicker than expected time.
-	// this is for safety. If the chunks are really taking less time than our target, it will gradually increase chunk size
-	if newTargetRows > float64(t.chunkSize)*MaxDynamicStepFactor {
-		newTargetRows = float64(t.chunkSize) * MaxDynamicStepFactor
-	}
-
-	if newTargetRows > MaxDynamicRowSize {
-		newTargetRows = MaxDynamicRowSize
-	}
-
-	if newTargetRows < MinDynamicRowSize {
-		newTargetRows = MinDynamicRowSize
-	}
-	return uint64(newTargetRows)
-}
-
-func (t *chunkerOptimistic) calculateNewTargetChunkSize() uint64 {
-	// We do all our math as float64 of time in ns
-	p90 := float64(LazyFindP90(t.chunkTimingInfo))
-	targetTime := float64(t.ChunkerTarget)
-	newTargetRows := float64(t.chunkSize) * (targetTime / p90)
-	// switch to prefetch chunking if:
-	// - We are already at the max chunk size
-	// - This new target wants to go higher
-	// - our current p90 is only a fraction of our target time
-	if t.chunkSize == MaxDynamicRowSize && newTargetRows > MaxDynamicRowSize && (p90*5 < targetTime) {
-		t.logger.Warn("dynamic chunking is not working as expected",
-			"target-time", time.Duration(targetTime),
-			"p90-time", time.Duration(p90),
-			"new-target-rows", uint64(newTargetRows),
-			"max-dynamic-row-size", MaxDynamicRowSize,
-		)
-		t.logger.Warn("switching to prefetch algorithm")
-		t.chunkSize = StartingChunkSize // reset
-		t.chunkPrefetchingEnabled = true
-	}
-	return uint64(newTargetRows)
 }
 
 // Progress returns the current progress of the chunker as (rowsCopied, totalRows)
