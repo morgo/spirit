@@ -1056,6 +1056,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var createdAtStr string
 	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
+		// Distinguish "checkpoint table exists but has no rows" — a normal
+		// "nothing to resume from" state — from a real read failure
+		// (permission denied, server gone, etc.) so an operator inspecting
+		// the log doesn't mistake an empty checkpoint for a permission
+		// issue.
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("checkpoint table '%s' is empty, nothing to resume from", r.checkpointTableName())
+		}
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
 
