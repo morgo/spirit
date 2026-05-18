@@ -144,6 +144,15 @@ func pkValueEqual(a, b any) bool {
 	if bb, ok := b.([]byte); ok {
 		b = string(bb)
 	}
+	// Booleans would otherwise collide with strings "true" / "false" under
+	// fmt.Sprintf("%v", ...). PK columns are rarely boolean (BIT or
+	// TINYINT(1) some drivers surface as bool), but if one is, exact
+	// type-and-value match is required.
+	aBool, aIsBool := a.(bool)
+	bBool, bIsBool := b.(bool)
+	if aIsBool || bIsBool {
+		return aIsBool && bIsBool && aBool == bBool
+	}
 	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
