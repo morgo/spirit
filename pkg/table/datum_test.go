@@ -87,10 +87,10 @@ func TestDatum(t *testing.T) {
 	requireTrue(str1.LessThanOrEqual(str2))    // "apple" <= "banana"
 	str3, err := NewDatumFromValue("apple", "VARCHAR(255)")
 	require.NoError(t, err)
-	requireTrue(str1.GreaterThanOrEqual(str3))  // equal values
-	requireTrue(str1.LessThanOrEqual(str3))     // equal values
-	requireFalse(str1.GreaterThan(str3))        // equal values
-	requireFalse(str1.LessThan(str3))           // equal values
+	requireTrue(str1.GreaterThanOrEqual(str3)) // equal values
+	requireTrue(str1.LessThanOrEqual(str3))    // equal values
+	requireFalse(str1.GreaterThan(str3))       // equal values
+	requireFalse(str1.LessThan(str3))          // equal values
 
 	// Test temporal comparisons (DATETIME)
 	datetime1, err := NewDatumFromValue("2024-01-01 10:00:00", "DATETIME")
