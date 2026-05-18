@@ -575,14 +575,11 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 
 	// Set the binlog position.
 	// Create a binlog subscriber
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, &repl.ClientConfig{
-		Logger:          r.logger,
-		Concurrency:     r.migration.Threads,
-		TargetBatchTime: r.migration.TargetChunkTime,
-		CancelFunc:      r.fatalError,
-		ServerID:        repl.NewServerID(),
-		DBConfig:        r.dbConfig, // Pass database configuration to replication client
-	})
+	replConfig := repl.NewClientDefaultConfig()
+	replConfig.Logger = r.logger
+	replConfig.CancelFunc = r.fatalError
+	replConfig.DBConfig = r.dbConfig
+	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig)
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
 	for _, change := range r.changes {

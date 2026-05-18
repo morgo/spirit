@@ -433,16 +433,13 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
 	for i := range r.sources {
 		src := &r.sources[i]
-		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, &repl.ClientConfig{
-			Logger:          r.logger,
-			Concurrency:     r.move.Threads,
-			TargetBatchTime: r.move.TargetChunkTime,
-			CancelFunc:      r.fatalError,
-			DDLFilterSchema: src.config.DBName,
-			DDLFilterTables: r.move.SourceTables,
-			ServerID:        repl.NewServerID(),
-			DBConfig:        r.dbConfig,
-		})
+		replConfig := repl.NewClientDefaultConfig()
+		replConfig.Logger = r.logger
+		replConfig.CancelFunc = r.fatalError
+		replConfig.DDLFilterSchema = src.config.DBName
+		replConfig.DDLFilterTables = r.move.SourceTables
+		replConfig.DBConfig = r.dbConfig
+		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
 	}
 
 	// Run post-setup checks

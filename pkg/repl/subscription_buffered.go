@@ -351,9 +351,8 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 	var deleteKeys []string
 	var upsertRows []applier.LogicalRow
 	var keysFlushed []string
-	var i int64
+	var i int
 	allChangesFlushed := true
-	target := atomic.LoadInt64(&s.c.targetBatchSize)
 
 	var lockToUse *dbconn.TableLock
 	if underLock {
@@ -379,7 +378,7 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		} else {
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
-		if (i % target) == 0 {
+		if (i % DefaultBatchSize) == 0 {
 			if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
 				return false, err
 			}
@@ -422,7 +421,6 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 			return fmt.Errorf("failed to delete keys: %w", err)
 		}
 		deleteAffected = affectedRows
-		s.c.feedback(int(affectedRows), time.Since(startTime))
 	}
 
 	// Execute upserts
@@ -432,7 +430,6 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 			return fmt.Errorf("failed to upsert rows: %w", err)
 		}
 		upsertAffected = affectedRows
-		s.c.feedback(int(affectedRows), time.Since(startTime))
 	}
 
 	s.c.logger.Debug("flushBatch executed",
@@ -468,7 +465,6 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 	if underLock {
 		lockToUse = lock
 	}
-	target := int(atomic.LoadInt64(&s.c.targetBatchSize))
 
 	var deleteKeys []string
 	var upsertRows []applier.LogicalRow
@@ -485,7 +481,7 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 	var drainedBytes int64
 	for _, change := range s.queue {
 		typeFlip := change.logicalRow.IsDeleted != prevIsDelete
-		batchFull := len(deleteKeys)+len(upsertRows) >= target
+		batchFull := len(deleteKeys)+len(upsertRows) >= DefaultBatchSize
 		if typeFlip || batchFull {
 			if err := flushSegment(); err != nil {
 				return err

@@ -44,15 +44,9 @@ func TestReplClient(t *testing.T) {
 	t2 := table.NewTableInfo(db, "test", "replt2")
 	require.NoError(t, t2.SetInfo(t.Context()))
 
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
@@ -187,15 +181,9 @@ func TestReplClientResumeFromImpossible(t *testing.T) {
 	t2 := table.NewTableInfo(db, "test", "replresumet2")
 	require.NoError(t, t2.SetInfo(t.Context()))
 
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
@@ -221,15 +209,9 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 	t2 := table.NewTableInfo(db, "test", "replresumepointt2")
 	require.NoError(t, t2.SetInfo(t.Context()))
 
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
@@ -261,15 +243,9 @@ func TestReplClientOpts(t *testing.T) {
 	t2 := table.NewTableInfo(db, "test", "replclientoptst2")
 	require.NoError(t, t2.SetInfo(t.Context()))
 
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
@@ -373,59 +349,6 @@ func TestReplClientQueue(t *testing.T) {
 	require.Equal(t, 0, client.GetDeltaLen())
 }
 
-func TestFeedback(t *testing.T) {
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS feedbackt1, feedbackt2, _feedbackt1_chkpnt")
-	testutils.RunSQL(t, "CREATE TABLE feedbackt1 (a VARCHAR(255) NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE feedbackt2 (a VARCHAR(255) NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE _feedbackt1_chkpnt (a int)") // just used to advance binlog
-
-	t1 := table.NewTableInfo(db, "test", "replqueuet1")
-	require.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "replqueuet2")
-	require.NoError(t, t2.SetInfo(t.Context()))
-
-	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
-	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
-	require.NoError(t, err)
-	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
-	defer client.Close()
-
-	// initial values expected:
-	require.Equal(t, time.Millisecond*500, client.targetBatchTime)
-	require.Equal(t, int64(1000), client.targetBatchSize)
-
-	// Make it complete 5 times faster than expected
-	// Run 9 times initially.
-	for range 9 {
-		client.feedback(1000, time.Millisecond*100)
-	}
-	require.Equal(t, int64(1000), client.targetBatchSize) // no change yet
-	client.feedback(0, time.Millisecond*100)              // no keys, should not cause change.
-	require.Equal(t, int64(1000), client.targetBatchSize) // no change yet
-	client.feedback(1000, time.Millisecond*100)           // 10th time.
-	require.Equal(t, int64(5000), client.targetBatchSize) // 5x more keys.
-
-	// test with slower chunk
-	for range 10 {
-		client.feedback(1000, time.Second)
-	}
-	require.Equal(t, int64(500), client.targetBatchSize) // less keys.
-
-	// Test with a way slower chunk.
-	for range 10 {
-		client.feedback(500, time.Second*100)
-	}
-	require.Equal(t, int64(5), client.targetBatchSize) // equals the minimum.
-}
-
 // TestBlockWait tests that the BlockWait function will:
 // - check the server's binary log position
 // - block waiting until the repl client is at that position.
@@ -447,15 +370,9 @@ func TestBlockWait(t *testing.T) {
 	t3 := table.NewTableInfo(db, "test", "blockwaitt3")
 	require.NoError(t, t3.SetInfo(t.Context()))
 
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
@@ -515,22 +432,17 @@ func TestDDLNotification(t *testing.T) {
 	t2 := table.NewTableInfo(db, "test", "ddl_t2")
 	require.NoError(t, t2.SetInfo(t.Context()))
 
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
 	// Use a channel to track cancel calls from the CancelFunc callback.
 	cancelled := make(chan struct{}, 1)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		CancelFunc: func() bool {
-			cancelled <- struct{}{}
-			return true
-		},
-		ServerID: NewServerID(),
-	})
+	clientConfig := NewClientDefaultConfig()
+	clientConfig.CancelFunc = func() bool {
+		cancelled <- struct{}{}
+		return true
+	}
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
@@ -592,15 +504,9 @@ func TestCompositePKUpdate(t *testing.T) {
 	require.NoError(t, t2.SetInfo(t.Context()))
 
 	// Create replication client
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
 
 	// Add subscription - note that keyAboveWatermark is disabled for composite PKs
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
@@ -669,12 +575,10 @@ func TestAllChangesFlushed(t *testing.T) {
 	)`
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 	client := &Client{
-		db:              nil,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
-		subs:            newSubscriptionRegistry(),
+		db:       nil,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
+		subs:     newSubscriptionRegistry(),
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
@@ -797,13 +701,9 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &ClientConfig{
-		Logger:          slog.Default(),
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-		CancelFunc:      func() bool { cancel(); return true },
-	})
+	clientConfig := NewClientDefaultConfig()
+	clientConfig.CancelFunc = func() bool { cancel(); return true }
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))

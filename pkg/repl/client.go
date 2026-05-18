@@ -15,74 +15,19 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
-	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 )
 
-const (
-	binlogTrivialThreshold = 10000
-	// DefaultBatchSize is the number of rows in each batched REPLACE/DELETE statement.
-	// Larger is better, but we need to keep the run-time of the statement well below
-	// dbconn.maximumLockTime so that it doesn't prevent copy-row tasks from failing.
-	// Since on some of our Aurora tables with out-of-cache workloads only copy ~300 rows per second,
-	// we probably shouldn't set this any larger than about 1K. It will also use
-	// multiple-flush-threads, which should help it group commit and still be fast.
-	// This is only used as an initial starting value. It will auto-scale based on the DefaultTargetBatchTime.
-	DefaultBatchSize = 1000
-	// minBatchSize is the minimum batch size that we will allow the targetBatchSize to be.
-	minBatchSize = 5
-	// DefaultTargetBatchTime is the target time for flushing REPLACE/DELETE statements.
-	DefaultTargetBatchTime = time.Millisecond * 500
-
-	// DefaultFlushInterval is the time that the client will flush all binlog changes to disk.
-	// Longer values require more memory, but permit more merging.
-	// I expect we will change this to 1hr-24hr in the future.
-	DefaultFlushInterval = 30 * time.Second
-	// DefaultSubscriptionSoftLimitBytes caps the approximate memory held
-	// per subscription before HasChanged starts blocking on the buffered
-	// map's condition variable. The cap is "soft": a single oversized
-	// row admitted when the buffer is empty will exceed the limit, and
-	// the next caller will park until that row drains. This keeps wide
-	// rows (LONGTEXT / BLOB / large JSON) from OOMing the migrator
-	// while still guaranteeing forward progress regardless of row width.
-	// See pkg/repl/subscription_buffered.go for the accounting model.
-	//
-	// Operators should be aware that pausing the binlog reader for an
-	// extended period risks falling past the source's binlog retention
-	// (binlog_expire_logs_seconds). Tune this value, or the source's
-	// retention, accordingly.
-	DefaultSubscriptionSoftLimitBytes = 256 << 20
-	// DefaultTimeout is how long BlockWait is supposed to wait before returning errors.
-	DefaultTimeout = 30 * time.Second
-	// Maximum number of consecutive errors before recreating the streamer
-	maxConsecutiveErrors = 5
-	// Initial backoff duration for streamer recreation
-	initialBackoffDuration = time.Second
-	// Maximum backoff duration
-	maxBackoffDuration = time.Minute
-	// Backoff multiplier
-	backoffMultiplier = 2
-	// Sleep time between position checks in BlockWait
-	blockWaitSleep = 100 * time.Millisecond
-	// Number of consecutive blockWaitSleep intervals where the buffered position
-	// hasn't advanced before BlockWait flushes binary logs to nudge the syncer.
-	// 3 * blockWaitSleep (~300ms) tolerates brief syncer lag (e.g. CI load) while
-	// remaining negligible relative to DefaultTimeout.
-	blockWaitStallThreshold = 3
-)
-
-var (
-	// maxRecreateAttempts is the maximum number of streamer recreation attempts before giving up.
-	// This is really a const, but set to var for testing.
-	maxRecreateAttempts = 10
-
-	// ErrChangesNotFlushed indicates that not all changes have been flushed from the replication feed.
-	ErrChangesNotFlushed = errors.New("not all changes flushed")
-)
-
 type Client struct {
-	sync.Mutex
+	// mu protects position fields (bufferedPos / flushedPos), the
+	// streamer / syncer / cancelFunc tuple, and the cached
+	// binlogStatusStmt. Subscriptions live in c.subs with its own
+	// RWMutex. Named (not embedded) so the lock surface stays
+	// package-internal: sync.Mutex is not re-entrant, and exposing
+	// public Lock/Unlock on an external API invites accidental
+	// self-deadlocks from a caller that doesn't know what's already held.
+	mu sync.Mutex
 
 	host     string
 	username string
@@ -93,9 +38,10 @@ type Client struct {
 	streamer *replication.BinlogStreamer
 
 	// The DB connection is used for queries like SHOW MASTER STATUS
-	db       *sql.DB
-	applier  applier.Applier
-	dbConfig *dbconn.DBConfig
+	db               *sql.DB
+	applier          applier.Applier
+	dbConfig         *dbconn.DBConfig
+	binlogStatusStmt string // cached: "SHOW MASTER STATUS" or "SHOW BINARY LOG STATUS"
 
 	// subs owns the table-keyed subscription set and its own lock. See
 	// subscriptionRegistry. The Client mutex above does NOT cover map
@@ -115,14 +61,6 @@ type Client struct {
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
-
-	statisticsLock  sync.Mutex
-	targetBatchTime time.Duration
-	targetBatchSize int64 // will auto-adjust over time, use atomic to read/set
-	timingHistory   []time.Duration
-	concurrency     int
-
-	binlogStatusStmt string // cached: "SHOW MASTER STATUS" or "SHOW BINARY LOG STATUS"
 
 	// The periodic flush lock is just used for ensuring only one periodic flush runs at a time,
 	// and when we disable it, no more periodic flushes will run. The actual flushing is protected
@@ -162,9 +100,6 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 		username:                   username,
 		password:                   password,
 		logger:                     config.Logger,
-		targetBatchTime:            config.TargetBatchTime,
-		targetBatchSize:            DefaultBatchSize, // initial starting value.
-		concurrency:                config.Concurrency,
 		subs:                       newSubscriptionRegistry(),
 		callerCancelFunc:           config.CancelFunc,
 		ddlFilterSchema:            config.DDLFilterSchema,
@@ -214,8 +149,8 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 // the rewound value via SetFlushedPos — silently regressing the
 // checkpoint and forcing a large re-read on the next resume.
 func (c *Client) setBufferedPos(pos mysql.Position) {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if pos.Compare(c.bufferedPos) <= 0 {
 		return
 	}
@@ -224,22 +159,22 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 
 // getBufferedPos returns the buffered position under a mutex.
 func (c *Client) getBufferedPos() mysql.Position {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.bufferedPos
 }
 
 // SetFlushedPos updates the known safe position that all changes have been flushed.
 // It is used for resuming from a checkpoint.
 func (c *Client) SetFlushedPos(pos mysql.Position) {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.flushedPos = pos
 }
 
 func (c *Client) AllChangesFlushed() bool {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.bufferedPos.Compare(c.flushedPos) > 0 {
 		c.logger.Warn("Binlog reader info flushed-pos buffered-pos. Discrepancies could be due to modifications on other tables.", "flushed-pos", c.flushedPos, "buffered-pos", c.bufferedPos)
 	}
@@ -255,8 +190,8 @@ func (c *Client) AllChangesFlushed() bool {
 }
 
 func (c *Client) GetBinlogApplyPosition() mysql.Position {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.flushedPos
 }
 
@@ -310,8 +245,8 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 // Run initializes the binlog syncer and starts the binlog reader.
 // It returns an error if the initialization fails.
 func (c *Client) Run(ctx context.Context) error {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	host, portStr, err := net.SplitHostPort(c.host)
 	if err != nil {
@@ -359,8 +294,14 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to get binlog position, check binary is enabled: %w", err)
 		}
-	} else if c.binlogPositionIsImpossible(ctx) {
-		return errors.New("binlog position is impossible, the source may have already purged it")
+	} else {
+		impossible, err := binlogPositionIsImpossible(ctx, c.db, c.flushedPos.Name)
+		if err != nil {
+			return fmt.Errorf("could not verify binlog position: %w", err)
+		}
+		if impossible {
+			return errors.New("binlog position is impossible, the source may have already purged it")
+		}
 	}
 	c.bufferedPos = c.flushedPos // set buffered to the initial flushed value
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
@@ -397,8 +338,8 @@ func (c *Client) Run(ctx context.Context) error {
 // flush) will correct. The eventual-consistency property holds in both
 // map mode and queue mode — see UpsertRows in pkg/applier/single_target.go.
 func (c *Client) recreateStreamer() error {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	c.logger.Info("recreateStreamer called",
 		"buffered_position", c.bufferedPos,
@@ -441,10 +382,10 @@ func (c *Client) recreateStreamer() error {
 func (c *Client) readStream(ctx context.Context) {
 	defer c.streamWG.Done() // Signal completion when goroutine exits
 
-	c.Lock()
+	c.mu.Lock()
 	currentLogName := c.flushedPos.Name
 	startPos := c.flushedPos // Copy while holding lock
-	c.Unlock()
+	c.mu.Unlock()
 
 	consecutiveErrors := 0
 	recreateAttempts := 0
@@ -752,27 +693,6 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	return nil
 }
 
-func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
-	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
-	if err != nil {
-		return true // if we can't get the logs, its already impossible
-	}
-	defer utils.CloseAndLog(rows)
-	var logname, size, encrypted string
-	for rows.Next() {
-		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
-			return true
-		}
-		if logname == c.flushedPos.Name {
-			return false // We just need presence of the log file for success
-		}
-	}
-	if rows.Err() != nil {
-		return true // can't determine.
-	}
-	return true
-}
-
 // fatalError is called from within the readStream goroutine when a truly fatal
 // stream error occurs (e.g. unrecoverable stream error, minimal RBR detection,
 // or a fatal rows event error). It returns true if the caller acknowledged the
@@ -795,9 +715,9 @@ func (c *Client) Close() {
 	// itself acquires c.Lock from inside its loop (setBufferedPos,
 	// recreateStreamer), and holding the lock during Wait would deadlock
 	// an in-flight lock acquisition there.
-	c.Lock()
+	c.mu.Lock()
 	cancel := c.cancelFunc
-	c.Unlock()
+	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -854,9 +774,9 @@ func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock
 // the end of the flush. That's OK, we only set the flushed position to the known
 // safe buffered position taken at the start.
 func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
-	c.Lock()
+	c.mu.Lock()
 	newFlushedPos := c.bufferedPos
-	c.Unlock()
+	c.mu.Unlock()
 	var allChangesFlushed = true
 	for _, subscription := range c.subs.Snapshot() {
 		flushed, err := subscription.Flush(ctx, underLock, lock)
@@ -956,7 +876,7 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 				c.logger.Error("error flushing binary log", "error", err)
 			}
 			c.periodicFlushLock.Unlock()
-			c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop), "batch-size", atomic.LoadInt64(&c.targetBatchSize))
+			c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop))
 		}
 	}
 }
@@ -1014,47 +934,6 @@ func (c *Client) BlockWait(ctx context.Context) error {
 			// We are not caught up yet, so we need to wait.
 			time.Sleep(blockWaitSleep)
 		}
-	}
-}
-
-// feedback provides feedback on the apply time of changesets.
-// We use this to refine the targetBatchSize. This is a little bit
-// different for feedback for the copier, because:
-//
-//  1. frequently the batches will not be full.
-//  2. feedback is (at least currently) global to all subscriptions,
-//     and does not take into account that inserting into a 2 col table
-//     with 0 indexes is much faster than inserting into a 10 col table with 5 indexes.
-//
-// We still need to use a p90-like mechanism though,
-// because the rows being changed are by definition more likely to be hotspots.
-// Hotspots == Lock Contention. This is one of the exact reasons why we are
-// chunking in the first place. The probability that the applier can cause
-// impact on OLTP workloads is much higher than the copier.
-func (c *Client) feedback(numberOfKeys int, d time.Duration) {
-	c.statisticsLock.Lock()
-	defer c.statisticsLock.Unlock()
-	if numberOfKeys == 0 {
-		return // can't calculate anything, just return
-	}
-	// For the p90-like mechanism rather than storing all the previous
-	// durations, because the numberOfKeys is variable we instead store
-	// the timePerKey. We then adjust the targetBatchSize based on this.
-	// This creates some skew because small batches will have a higher
-	// timePerKey, which can create a back log. Which results in a smaller
-	// timePerKey. So at least the skew *should* be self-correcting. This
-	// has not yet been proven though.
-	timePerKey := d / time.Duration(numberOfKeys)
-	c.timingHistory = append(c.timingHistory, timePerKey)
-
-	// If we have enough feedback re-evaluate the target batch size
-	// based on the p90 timePerKey.
-	if len(c.timingHistory) >= 10 {
-		timePerKey := table.LazyFindP90(c.timingHistory)
-		newBatchSize := int64(float64(c.targetBatchTime) / float64(timePerKey))
-		newBatchSize = max(newBatchSize, minBatchSize)
-		atomic.StoreInt64(&c.targetBatchSize, newBatchSize)
-		c.timingHistory = nil // reset
 	}
 }
 

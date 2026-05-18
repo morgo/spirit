@@ -5,10 +5,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -109,7 +107,6 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client, *table.TableInfo, *table
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	target := applier.Target{
@@ -119,12 +116,7 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client, *table.TableInfo, *table
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig())
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
