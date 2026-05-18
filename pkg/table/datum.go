@@ -276,46 +276,33 @@ func (d Datum) Range(d2 Datum) (uint64, error) {
 	return d.Val.(uint64) - d2.Val.(uint64), nil
 }
 
-// SQLString returns the datum as a SQL-escaped literal. Returns an
-// error if a non-numeric datum's Val is not a string — callers in the
-// applier's SQL-emission path now surface that as a normal error
-// instead of crashing the migration.
-func (d Datum) SQLString() (string, error) {
+// String returns the datum as a SQL-escaped literal. It is also
+// fmt.Stringer for log / debug formatting. The previous form panicked
+// when a non-numeric datum's Val was not a string; this form returns
+// a "<invalid datum: ...>" placeholder instead. Most call sites
+// (Chunk.String → expandRowConstructorComparison) inline the result
+// into a SQL fragment — a valid datum produces valid SQL, an invalid
+// one produces a deliberately-broken fragment that surfaces as a
+// MySQL parse error rather than a panic.
+func (d Datum) String() string {
 	if d.IsNil() {
-		return "NULL", nil
+		return "NULL"
 	}
 	if d.IsNumeric() {
-		return fmt.Sprintf("%v", d.Val), nil
+		return fmt.Sprintf("%v", d.Val)
 	}
 	s, ok := d.Val.(string)
 	if !ok {
-		return "", fmt.Errorf("Datum.SQLString: cannot convert non-string Val (%T) for type %v", d.Val, d.Tp)
+		return fmt.Sprintf("<invalid datum: non-string Val (%T) for type %v>", d.Val, d.Tp)
 	}
-	// Check if it should be hex encoded
 	if d.IsBinaryString() {
 		// MySQL binary string needs at least one character
 		if len(s) == 0 {
-			return "0x00", nil
+			return "0x00"
 		}
-		return fmt.Sprintf("%#x", s), nil
+		return fmt.Sprintf("%#x", s)
 	}
-	return "\"" + sqlescape.EscapeString(s) + "\"", nil
-}
-
-// String implements fmt.Stringer by wrapping SQLString and falling back
-// to a "<invalid datum: ...>" placeholder on error so that printing a
-// Datum in a log line never crashes. Most call sites end up inlining
-// the result into SQL (Chunk.String → expandRowConstructorComparison
-// → vals[i].String()), which is fine for valid datums and degrades to
-// a deliberately-broken SQL fragment (caught at parse time by MySQL)
-// for invalid ones. Prefer SQLString directly in new code where
-// explicit error handling is available — e.g. the applier paths.
-func (d Datum) String() string {
-	s, err := d.SQLString()
-	if err != nil {
-		return fmt.Sprintf("<invalid datum: %v>", err)
-	}
-	return s
+	return "\"" + sqlescape.EscapeString(s) + "\""
 }
 
 // IsNumeric checks if it's signed or unsigned

@@ -445,11 +445,7 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 			if err != nil {
 				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
 			}
-			sql, err := datum.SQLString()
-			if err != nil {
-				return 0, fmt.Errorf("failed to format datum for column %s: %w", columnNames[i], err)
-			}
-			values = append(values, sql)
+			values = append(values, datum.String())
 		}
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
@@ -771,12 +767,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 						results <- result{err: fmt.Errorf("failed to convert value to datum for column %s: %w", col, err)}
 						return
 					}
-					sql, err := datum.SQLString()
-					if err != nil {
-						results <- result{err: fmt.Errorf("failed to format datum for column %s: %w", col, err)}
-						return
-					}
-					values = append(values, sql)
+					values = append(values, datum.String())
 				}
 				valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 			}
