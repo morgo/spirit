@@ -29,8 +29,7 @@ func TestBufferedMap(t *testing.T) {
 	require.Equal(t, 1, client.GetDeltaLen())
 
 	// Inspect the subscription directly.
-	sub, ok := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
-	require.True(t, ok)
+	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
 	require.Equal(t, 1, sub.Length())
 
 	// Check the logical row structure
@@ -1444,8 +1443,7 @@ func TestBufferedMapRealFlushWakesParked(t *testing.T) {
 	defer client.Close()
 	defer utils.CloseAndLog(db)
 
-	sub, ok := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
-	require.True(t, ok)
+	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
 
 	// Seed one buffered change so sizeBytes > 0, then crank the soft
 	// limit down to 1 byte. The next HasChanged caller is guaranteed
@@ -1574,8 +1572,7 @@ func TestProcessRowsEventDoesNotDeadlockOnPark(t *testing.T) {
 	defer client.Close()
 	defer utils.CloseAndLog(db)
 
-	sub, ok := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
-	require.True(t, ok)
+	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
 
 	// Seed a row so sizeBytes > 0, then drop the soft limit. Any
 	// further HasChanged from the binlog reader will park.
@@ -1612,6 +1609,119 @@ func TestProcessRowsEventDoesNotDeadlockOnPark(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(t.Context(),
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
 	require.Equal(t, 2, count)
+}
+
+// TestBufferedMapCloseUnblocksParkedHasChanged pins the invariant that
+// bufferedMap.Close() wakes any caller parked on the soft memory limit.
+// Without it, Client.Close() would deadlock on streamWG.Wait(): the
+// readStream goroutine, parked inside HasChanged via processRowsEvent,
+// never observes the ctx cancel because cond.Wait is not ctx-aware.
+func TestBufferedMapCloseUnblocksParkedHasChanged(t *testing.T) {
+	sub := newBareBufferedMap(1024)
+
+	sub.Lock()
+	sub.sizeBytes = 2048 // force the next caller to park
+	sub.Unlock()
+
+	// Register cleanup *before* launching the parker. If any require/
+	// Eventually below fails, t.Cleanup runs in LIFO order: Close wakes
+	// the parker so it can return, then we wait for `done` to ensure
+	// the goroutine has actually exited (goleak otherwise reports it).
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		sub.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("parked goroutine did not exit after t.Cleanup Close")
+		}
+	})
+	go func() {
+		sub.HasChanged([]any{int32(1)}, []any{int32(1), "x"}, false)
+		close(done)
+	}()
+
+	// Confirm the goroutine actually parked.
+	require.Eventually(t, func() bool {
+		return sub.timesParked.Load() >= 1
+	}, 2*time.Second, 5*time.Millisecond, "HasChanged should have parked on soft limit")
+	select {
+	case <-done:
+		t.Fatal("HasChanged returned without honoring the soft limit")
+	default:
+	}
+
+	// Close wakes the parker. It is NOT a flush — sizeBytes stays over
+	// the soft limit, but the parker falls through and admits the row so
+	// subscription state stays consistent with the readStream's buffered
+	// position bookkeeping.
+	sub.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HasChanged did not unblock after Close()")
+	}
+
+	sub.Lock()
+	require.True(t, sub.closed, "Close must set the closed flag")
+	require.Len(t, sub.changes, 1, "post-close row must still be admitted")
+	sub.Unlock()
+
+	// Close is idempotent.
+	sub.Close()
+}
+
+// TestClientCloseUnblocksParkedHasChanged is the end-to-end companion to
+// the bare-helper test above: it forces the binlog reader to park inside
+// HasChanged via processRowsEvent, then asserts that client.Close()
+// returns within a bounded time. Without bufferedMap.Close() waking the
+// parker, streamWG.Wait() would block forever.
+func TestClientCloseUnblocksParkedHasChanged(t *testing.T) {
+	db, client, srcTable, _ := setupBufferedTest(t)
+	defer utils.CloseAndLog(db)
+
+	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
+
+	// The body of this test deliberately starts a Close in a goroutine
+	// and asserts it returns within a bound. If an earlier require fails,
+	// register a cleanup that wakes any parked HasChanged and tears down
+	// the client so the readStream goroutine doesn't leak past the test.
+	// markClosed is the lower-level wake; the second client.Close (no-op
+	// after the in-test one) keeps the cleanup idempotent.
+	t.Cleanup(func() {
+		sub.Close()
+		client.Close()
+	})
+
+	// Seed one row so sizeBytes > 0, then crank the soft limit down.
+	// Any further binlog-driven HasChanged will park.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	sub.Lock()
+	sub.softLimitBytes = 1
+	sub.Unlock()
+
+	// Trigger a second INSERT; the binlog reader will pick it up and
+	// park inside processRowsEvent → HasChanged.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'parked')", srcTable.QuotedTableName))
+	require.Eventually(t, func() bool {
+		return sub.timesParked.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond, "binlog-driven HasChanged should park on soft limit")
+
+	// Close must return within a bounded time. Without the wake, it
+	// would block on streamWG.Wait() forever because readStream is
+	// parked inside HasChanged and cannot observe the ctx cancel.
+	closeDone := make(chan struct{})
+	go func() {
+		client.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("client.Close() blocked while HasChanged was parked — bufferedMap.Close did not wake the parker")
+	}
 }
 
 // TestBufferedMapGeometry tests that GEOMETRY column data (binary spatial values)
@@ -1674,8 +1784,7 @@ func TestBufferedMapGeometry(t *testing.T) {
 	require.Equal(t, 3, client.GetDeltaLen())
 
 	// Inspect the buffered subscription directly to verify row images contain geometry data.
-	sub, ok := client.subscriptions["test.subscription_test"].(*bufferedMap)
-	require.True(t, ok)
+	sub := getBufferedMap(t, client, "test.subscription_test")
 	require.False(t, sub.changes["1"].logicalRow.IsDeleted)
 	// The row image should have 3 columns: id, name, location (as binary geometry).
 	require.Len(t, sub.changes["1"].logicalRow.RowImage, 3)

@@ -1,11 +1,8 @@
-// Package repl contains binary log subscription functionality.
 package repl
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -100,10 +97,10 @@ type Client struct {
 	applier  applier.Applier
 	dbConfig *dbconn.DBConfig
 
-	// subscriptions is a map of tables that are actively
-	// watching for changes on. The key is schemaName.tableName.
-	// each subscription has its own set of changes.
-	subscriptions map[string]Subscription
+	// subs owns the table-keyed subscription set and its own lock. See
+	// subscriptionRegistry. The Client mutex above does NOT cover map
+	// access; reach the subscriptions only through these methods.
+	subs *subscriptionRegistry
 
 	// callerCancelFunc is an optional callback that is called when a DDL
 	// change is detected on a subscribed table, or when a fatal stream
@@ -168,7 +165,7 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 		targetBatchTime:            config.TargetBatchTime,
 		targetBatchSize:            DefaultBatchSize, // initial starting value.
 		concurrency:                config.Concurrency,
-		subscriptions:              make(map[string]Subscription),
+		subs:                       newSubscriptionRegistry(),
 		callerCancelFunc:           config.CancelFunc,
 		ddlFilterSchema:            config.DDLFilterSchema,
 		ddlFilterTables:            toSet(config.DDLFilterTables),
@@ -178,110 +175,28 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 	}
 }
 
-type ClientConfig struct {
-	TargetBatchTime time.Duration
-	Concurrency     int
-	Logger          *slog.Logger
-	ServerID        uint32
-	DBConfig        *dbconn.DBConfig // Database configuration including TLS settings
-
-	// CancelFunc is an optional callback from the caller (e.g. migration or move runner).
-	// It is called when a DDL change is detected on a subscribed table, or when a fatal
-	// stream error occurs (such as minimal RBR detection or exhausted streamer recreation
-	// attempts). The caller is expected to handle cancellation and cleanup.
-	// It returns true if the error was acted upon (caller actually cancelled),
-	// or false if it was ignored (e.g. because the caller is already past cutover).
-	CancelFunc func() bool
-
-	// DDLFilterSchema, when set, broadens DDL detection to cancel on any DDL change
-	// in the specified schema, rather than only on exact table matches against subscriptions.
-	// This is used by the move runner to detect DDL on any table in the source database.
-	DDLFilterSchema string
-
-	// DDLFilterTables, when set alongside DDLFilterSchema, narrows the schema-level
-	// DDL detection to only the specified table names. This is used for partial moves
-	// where only specific tables from a schema are being moved — DDL on unrelated
-	// tables in the same schema should not trigger cancellation.
-	// If empty (and DDLFilterSchema is set), all tables in the schema trigger cancellation.
-	DDLFilterTables []string
-
-	// SubscriptionSoftLimitBytes overrides DefaultSubscriptionSoftLimitBytes
-	// for new subscriptions. Set to a negative value to disable the cap
-	// entirely (HasChanged will never block on memory). Zero (the
-	// zero-value default) means use DefaultSubscriptionSoftLimitBytes.
-	SubscriptionSoftLimitBytes int64
-}
-
-// serverIDCounter is an atomic counter used to help ensure unique server IDs
-var serverIDCounter atomic.Uint32
-
-// NewServerID generates a unique server ID to avoid conflicts with other binlog readers.
-// Uses crypto/rand combined with an atomic counter to ensure uniqueness even when called
-// concurrently. Returns a value in the range 1001-4294967295 to avoid conflicts with
-// typical MySQL server IDs (0-1000).
-func NewServerID() uint32 {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// Fallback to nanosecond-based generation if crypto/rand fails (should never happen)
-		rangeSize := int64(^uint32(0) - 1000)
-		return uint32(time.Now().UnixNano()%rangeSize) + 1001
-	}
-	// Convert bytes to uint32, mix with counter, and map to valid range
-	randomPart := binary.BigEndian.Uint32(b[:])
-	counterPart := serverIDCounter.Add(1)
-
-	// XOR the random and counter parts for better distribution
-	result := randomPart ^ counterPart
-
-	// Map result into the range [1001, max uint32]
-	// Use modulo to constrain to the valid range, then add 1001
-	result = (result % (^uint32(0) - 1000)) + 1001
-
-	return result
-}
-
-// NewClientDefaultConfig returns a default config for the copier.
-func NewClientDefaultConfig() *ClientConfig {
-	return &ClientConfig{
-		Concurrency:     4,
-		TargetBatchTime: DefaultTargetBatchTime,
-		Logger:          slog.Default(),
-		ServerID:        NewServerID(),
-	}
-}
-
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
 func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
-	c.Lock()
-	defer c.Unlock()
-
 	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
-	if _, exists := c.subscriptions[subKey]; exists {
-		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
-	}
 	// If the PK is not memory comparable we still use the buffered map, but it
 	// needs to know that when the watermark optimizations are disabled
 	// (i.e. we've finished copying and we're about to start checksum),
 	// that it needs to act like a FIFO queue. This is a requirement because of edge
 	// cases caused by collations since A == a, but in our map they would
 	// not compare as equal.
-	var pkIsMemoryComparable = true
-	if err := currentTable.PrimaryKeyIsMemoryComparable(); err != nil {
-		pkIsMemoryComparable = false
-	}
-	sub := &bufferedMap{
+	if !c.subs.AddBuffered(subKey, &bufferedMap{
 		table:                currentTable,
 		newTable:             newTable,
 		changes:              make(map[string]bufferedChange),
 		c:                    c,
 		chunker:              chunker,
 		applier:              c.applier,
-		pkIsMemoryComparable: pkIsMemoryComparable,
+		pkIsMemoryComparable: currentTable.PrimaryKeyIsMemoryComparable() == nil,
 		softLimitBytes:       c.subscriptionSoftLimitBytes,
+	}) {
+		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
-	sub.cond = sync.NewCond(&sub.Mutex)
-	c.subscriptions[subKey] = sub
 	return nil
 }
 
@@ -325,13 +240,13 @@ func (c *Client) SetFlushedPos(pos mysql.Position) {
 func (c *Client) AllChangesFlushed() bool {
 	c.Lock()
 	defer c.Unlock()
-	// We check if the buffered position is ahead of the flushed position.
-	// We have a mutex, so we can read safely.
 	if c.bufferedPos.Compare(c.flushedPos) > 0 {
 		c.logger.Warn("Binlog reader info flushed-pos buffered-pos. Discrepancies could be due to modifications on other tables.", "flushed-pos", c.flushedPos, "buffered-pos", c.bufferedPos)
 	}
-	// We check if all subscriptions have flushed their changes.
-	for _, subscription := range c.subscriptions {
+	// Safe to call c.subs.Snapshot() and subscription.Length() while
+	// holding c.Lock — each uses a different mutex and neither calls back
+	// into the Client.
+	for _, subscription := range c.subs.Snapshot() {
 		if subscription.Length() > 0 {
 			return false
 		}
@@ -347,12 +262,9 @@ func (c *Client) GetBinlogApplyPosition() mysql.Position {
 
 // GetDeltaLen returns the total number of changes
 // that are pending across all subscriptions.
-// Acquires the client lock for thread safety.
 func (c *Client) GetDeltaLen() int {
-	c.Lock()
-	defer c.Unlock()
 	deltaLen := 0
-	for _, subscription := range c.subscriptions {
+	for _, subscription := range c.subs.Snapshot() {
 		deltaLen += subscription.Length()
 	}
 	return deltaLen
@@ -397,7 +309,7 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 
 // Run initializes the binlog syncer and starts the binlog reader.
 // It returns an error if the initialization fails.
-func (c *Client) Run(ctx context.Context) (err error) {
+func (c *Client) Run(ctx context.Context) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -454,6 +366,10 @@ func (c *Client) Run(ctx context.Context) (err error) {
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
+		// Close the syncer we just created so its internal goroutines exit
+		// even if the caller discards the Client without calling Close.
+		c.syncer.Close()
+		c.syncer = nil
 		return fmt.Errorf("failed to start binlog streamer: %w", err)
 	}
 	// Start the binlog reader in a go routine, using a context with cancel.
@@ -741,17 +657,9 @@ func (c *Client) processDDLNotification(schema, table string) {
 		}
 	} else {
 		// Check if the schema.table matches any of our subscriptions.
-		// This is the default behavior. Snapshot the subscription set
-		// under c.Lock and inspect it after release — Tables() is a
-		// pure accessor that does not need the client lock.
-		c.Lock()
-		subs := make([]Subscription, 0, len(c.subscriptions))
-		for _, sub := range c.subscriptions {
-			subs = append(subs, sub)
-		}
-		c.Unlock()
+		// Tables() is a pure accessor and needs no further locking.
 		matchFound := false
-		for _, sub := range subs {
+		for _, sub := range c.subs.Snapshot() {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
 				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
@@ -777,13 +685,11 @@ func (c *Client) processDDLNotification(schema, table string) {
 //   - If there is no subscription, the event is ignored.
 //   - Otherwise we call HasChanged for each affected key.
 //
-// We hold c.Lock only for the subscription map lookup. Once we have the
-// subscription pointer, we release the client lock before dispatching to
-// HasChanged. This matters for backpressure: bufferedMap.HasChanged can
-// block on its own condition variable when the buffer is full, and we
-// must not be holding c.Lock while it parks — c.flush() and other
-// callers acquire c.Lock briefly and would otherwise be unable to
-// progress, which would prevent the very flush that would unblock us.
+// The subscription lookup goes through c.subs (its own RWMutex); c.Lock
+// is not held here. That's load-bearing for backpressure: bufferedMap.
+// HasChanged can park on its own condition variable when the buffer is
+// full, and a c.Lock held across the park would block c.flush() — the
+// very flush that drains the buffer and would wake the parker.
 //
 // We require binlog_row_image=FULL on the source. With FULL each row
 // (before and after image alike) contains every column, so PK extraction
@@ -791,9 +697,7 @@ func (c *Client) processDDLNotification(schema, table string) {
 // If a MINIMAL image slips through we error out.
 func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
-	c.Lock()
-	sub, ok := c.subscriptions[subName]
-	c.Unlock()
+	sub, ok := c.subs.Get(subName)
 	if !ok {
 		return nil // ignore event, it could be to a _new table.
 	}
@@ -848,55 +752,6 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	return nil
 }
 
-// pkChanged reports whether two PK images differ. The values come from
-// the binlog row image as `any` with concrete types that depend on the
-// source column (int8/16/32/64, uint*, string, []byte, ...), so the
-// helper normalises before comparing:
-//
-//   - numeric widths (int vs int64, signed vs unsigned of the same
-//     magnitude) are equalised by formatting through fmt.Sprintf("%v");
-//   - []byte is coerced to string so a column that surfaces as one in
-//     one image and the other in the next is still compared correctly
-//     (fmt.Sprintf("%v", []byte("a")) is "[97]" which would otherwise
-//     spuriously diverge from "a").
-//
-// In practice go-mysql is consistent about which Go type it emits for a
-// given column, so the []byte/string coercion is defensive — but cheap
-// enough to keep the helper robust to future decoder changes.
-func pkChanged(a, b []any) bool {
-	if len(a) != len(b) {
-		return true
-	}
-	for i := range a {
-		if !pkValueEqual(a[i], b[i]) {
-			return true
-		}
-	}
-	return false
-}
-
-func pkValueEqual(a, b any) bool {
-	if ab, ok := a.([]byte); ok {
-		a = string(ab)
-	}
-	if bb, ok := b.([]byte); ok {
-		b = string(bb)
-	}
-	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
-}
-
-// isMinimalRowImage returns true if the RowsEvent contains a minimal row image,
-// i.e. some columns were skipped. This happens when binlog_row_image=MINIMAL or NOBLOB.
-// With full row images, SkippedColumns entries are empty slices.
-func isMinimalRowImage(e *replication.RowsEvent) bool {
-	for _, skipped := range e.SkippedColumns {
-		if len(skipped) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Client) binlogPositionIsImpossible(ctx context.Context) bool {
 	rows, err := c.db.QueryContext(ctx, "SHOW BINARY LOGS")
 	if err != nil {
@@ -935,19 +790,38 @@ func (c *Client) fatalError() bool {
 func (c *Client) Close() {
 	c.isClosed.Store(true)
 
-	// Cancel the context first to signal readStream goroutine to exit
-	if c.cancelFunc != nil {
-		c.cancelFunc()
+	// Read cancelFunc under c.Lock — Run() writes it under the same lock.
+	// We must not hold c.Lock across streamWG.Wait() below: readStream
+	// itself acquires c.Lock from inside its loop (setBufferedPos,
+	// recreateStreamer), and holding the lock during Wait would deadlock
+	// an in-flight lock acquisition there.
+	c.Lock()
+	cancel := c.cancelFunc
+	c.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 
-	// Wait for the readStream goroutine to exit cleanly
-	// This prevents goroutine leaks detected by goleak in tests
-	// It will eventually catch the ctx cancel from calling
-	// c.cancelFunc()
+	// Wake any subscription parked on backpressure. Without this, readStream
+	// can be stuck inside processRowsEvent → HasChanged on the soft-limit
+	// cond and never observe the ctx cancel — streamWG.Wait() would block
+	// forever.
+	for _, sub := range c.subs.Snapshot() {
+		sub.Close()
+	}
+
+	// Wait for the readStream goroutine to exit cleanly. This prevents
+	// goroutine leaks detected by goleak in tests.
 	c.streamWG.Wait()
 
+	// streamWG.Wait has returned, so readStream has exited and c.syncer
+	// is no longer raced by it. Close is not expected to run concurrently
+	// with Run() — the caller's sequenced-before edge (Run returned →
+	// Close called) makes Run's write of c.syncer visible here without
+	// further synchronization.
 	if c.syncer != nil {
 		c.syncer.Close()
+		c.syncer = nil
 	}
 }
 
@@ -984,7 +858,7 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	newFlushedPos := c.bufferedPos
 	c.Unlock()
 	var allChangesFlushed = true
-	for _, subscription := range c.subscriptions {
+	for _, subscription := range c.subs.Snapshot() {
 		flushed, err := subscription.Flush(ctx, underLock, lock)
 		if err != nil {
 			return err
@@ -1193,18 +1067,11 @@ func (c *Client) feedback(numberOfKeys int, d time.Duration) {
 // error. If one subscription fails, subsequent subscriptions are not
 // touched and the caller should treat the operation as not-yet-applied.
 //
-// We snapshot the subscription set under c.Lock and then release it before
-// toggling, so a long-running drain on one subscription doesn't block
-// processRowsEvent from finding subscriptions for unrelated tables.
+// Subscriptions are toggled against a snapshot so a long-running drain on
+// one subscription doesn't block processRowsEvent from finding
+// subscriptions for unrelated tables.
 func (c *Client) SetWatermarkOptimization(ctx context.Context, newVal bool) error {
-	c.Lock()
-	subs := make([]Subscription, 0, len(c.subscriptions))
-	for _, sub := range c.subscriptions {
-		subs = append(subs, sub)
-	}
-	c.Unlock()
-
-	for _, sub := range subs {
+	for _, sub := range c.subs.Snapshot() {
 		if err := sub.SetWatermarkOptimization(ctx, newVal); err != nil {
 			return err
 		}
