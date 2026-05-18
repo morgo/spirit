@@ -82,6 +82,21 @@ WHERE t.processlist_id IS NOT NULL
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s) "
 	rdsKillStatement = "CALL mysql.rds_kill(%d)" // not needed in MySQL 8.0 with the CONNECTION_ADMIN privilege
 	killStatement    = "KILL %d"
+
+	// spiritSessionExcludeClause filters out connections that THIS Spirit
+	// invocation owns. Every connection from dbconn.New carries a
+	// program_name attribute of the form "spirit-<sessionID>"; sessions
+	// matching the supplied value are excluded from the kill set.
+	//
+	// Two Spirit instances against the same MySQL server each get their
+	// own SessionID and so do not match each other's filter — each only
+	// protects its own pool. Applied to both LongRunningEventQuery (joining
+	// via t.processlist_id) and TableLockQuery (where the alias is also t).
+	spiritSessionExcludeClause = ` AND t.processlist_id NOT IN (
+		SELECT sca.processlist_id
+		FROM performance_schema.session_connect_attrs sca
+		WHERE sca.attr_name = 'program_name' AND sca.attr_value = ?
+	) `
 )
 
 type LockDetail struct {
@@ -102,7 +117,7 @@ type LockDetail struct {
 
 func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) error {
 	// First, check if there are explicit table locks that would prevent us from acquiring the metadata lock.
-	locks, err := GetTableLocks(ctx, db, tables, logger, ignorePIDs)
+	locks, err := GetTableLocks(ctx, db, tables, config, logger, ignorePIDs)
 	if err != nil {
 		return fmt.Errorf("failed to get table locks: %w", err)
 	}
@@ -145,6 +160,12 @@ func KillLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Ta
 // If no tables are specified, it will return all long-running transactions.
 // If a transaction's weight exceeds the TransactionWeightThreshold, it will be skipped.
 // If no long-running transactions are found, it returns nil.
+//
+// When config is non-nil and config.SessionID is set, connections opened
+// by THIS Spirit invocation (identified by their program_name attribute)
+// are excluded from the result. Production callers always supply a
+// populated config; the privileges-check path passes nil and falls back
+// to the legacy filter set.
 func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]int, error) {
 	// This function should query the performance schema to find long-running transactions
 	// that are holding locks on the specified tables.
@@ -165,6 +186,10 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 		inList, inParams := tablesToInList(tables, logger)
 		query += fmt.Sprintf(queryTableClause, inList)
 		params = append(params, inParams...)
+	}
+	if config != nil && config.SessionID != "" {
+		query += spiritSessionExcludeClause
+		params = append(params, SpiritProgramName(config.SessionID))
 	}
 
 	rows, err := db.QueryContext(ctx, query, params...)
@@ -232,7 +257,12 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 	return uniquePids, nil
 }
 
-func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, logger *slog.Logger, ignorePIDs []int) ([]*LockDetail, error) {
+// GetTableLocks reports any explicit LOCK TABLES holds (SHARED_NO_READ_WRITE
+// or SHARED_READ_ONLY) on the named tables. As with GetLockingTransactions,
+// passing a config with a populated SessionID excludes connections opened
+// by this Spirit invocation — so a Spirit-owned cutover holding LOCK TABLES
+// against a sibling cutover does not register as an external blocker.
+func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, ignorePIDs []int) ([]*LockDetail, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -255,6 +285,10 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 			query += fmt.Sprintf(queryTableClause, inList)
 			params = append(params, inParams...)
 		}
+	}
+	if config != nil && config.SessionID != "" {
+		query += spiritSessionExcludeClause
+		params = append(params, SpiritProgramName(config.SessionID))
 	}
 
 	rows, err := tx.QueryContext(ctx, query, params...)

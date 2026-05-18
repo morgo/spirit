@@ -286,6 +286,20 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	cfg.AllowCleartextPasswords = cfg.TLSConfig != ""
 	cfg.AllowNativePasswords = true
 
+	// Tag every Spirit-owned connection with a per-invocation program_name
+	// attribute. The kill queries in pkg/dbconn/kill.go exclude sessions
+	// carrying this attribute, so ForceKill at cutover does not target our
+	// own pool members (copier workers, applier, periodic flush, etc.).
+	// Preserve any caller-supplied connectionAttributes by appending.
+	if config.SessionID != "" {
+		spiritAttr := "program_name:" + SpiritProgramName(config.SessionID)
+		if cfg.ConnectionAttributes == "" {
+			cfg.ConnectionAttributes = spiritAttr
+		} else {
+			cfg.ConnectionAttributes = cfg.ConnectionAttributes + "," + spiritAttr
+		}
+	}
+
 	return cfg.FormatDSN(), nil
 }
 

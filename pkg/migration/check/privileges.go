@@ -97,7 +97,7 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 	if r.ForceKill {
 		var errs []error
 		// Parsing performance_schema grants seems really hard, so we just try to execute the queries and see if they succeed.
-		if _, err := dbconn.GetTableLocks(ctx, r.DB, []*table.TableInfo{r.Table}, logger, nil); err != nil {
+		if _, err := dbconn.GetTableLocks(ctx, r.DB, []*table.TableInfo{r.Table}, nil, logger, nil); err != nil {
 			errs = append(errs, err)
 		}
 		if _, err := dbconn.GetLockingTransactions(ctx, r.DB, []*table.TableInfo{r.Table}, nil, logger, nil); err != nil {

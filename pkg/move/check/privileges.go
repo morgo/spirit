@@ -127,7 +127,7 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 
 	// Verify SELECT access on performance_schema.*, which is required for the
 	// queries used by force-kill during cutover.
-	if _, err := dbconn.GetTableLocks(ctx, src.DB, r.SourceTables, logger, nil); err != nil {
+	if _, err := dbconn.GetTableLocks(ctx, src.DB, r.SourceTables, nil, logger, nil); err != nil {
 		errs = append(errs, err)
 	}
 	if _, err := dbconn.GetLockingTransactions(ctx, src.DB, r.SourceTables, nil, logger, nil); err != nil {
