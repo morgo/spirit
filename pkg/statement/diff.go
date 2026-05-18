@@ -2,6 +2,7 @@ package statement
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -118,7 +119,7 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 // buildAlterStatement constructs and parses an ALTER TABLE statement from clauses.
 func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement, error) {
 	alter := strings.Join(clauses, ", ")
-	alterStmt := fmt.Sprintf("ALTER TABLE `%s` %s", ct.TableName, alter)
+	alterStmt := fmt.Sprintf("ALTER TABLE %s %s", quoteIdent(ct.TableName), alter)
 
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(alterStmt, "", "")
@@ -163,7 +164,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	var dropClauses []string
 	for _, sourceCol := range ct.Columns {
 		if _, exists := targetColumns[sourceCol.Name]; !exists {
-			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN `%s`", sourceCol.Name))
+			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", quoteIdent(sourceCol.Name)))
 		}
 	}
 	slices.Sort(dropClauses)
@@ -188,7 +189,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			if prevColumn == "" {
 				clause += " FIRST"
 			} else if !isLastColumn {
-				clause += fmt.Sprintf(" AFTER `%s`", prevColumn)
+				clause += fmt.Sprintf(" AFTER %s", quoteIdent(prevColumn))
 			}
 			// If it's the last column, omit AFTER clause (implicit)
 			clauses = append(clauses, clause)
@@ -217,7 +218,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 					if prevColumn == "" {
 						clause += " FIRST"
 					} else {
-						clause += fmt.Sprintf(" AFTER `%s`", prevColumn)
+						clause += fmt.Sprintf(" AFTER %s", quoteIdent(prevColumn))
 					}
 				}
 				clauses = append(clauses, clause)
@@ -341,7 +342,7 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 			// 2. Source has table-level PK and target has inline PK (table-level -> inline transition)
 			if sourcePKIndex == nil || (sourcePKIndex != nil && targetPKIndex == nil) {
 				pkColumn = targetCol.Name
-				addClause = fmt.Sprintf("ADD PRIMARY KEY (`%s`)", pkColumn)
+				addClause = fmt.Sprintf("ADD PRIMARY KEY (%s)", quoteIdent(pkColumn))
 				break
 			}
 		}
@@ -445,7 +446,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 					pkDropAdded = true
 				}
 			} else {
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX `%s`", sourceIdx.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
 			}
 		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 			// Index exists but changed (and not just visibility) - need to drop and re-add
@@ -456,7 +457,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 					pkDropAdded = true
 				}
 			} else {
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX `%s`", sourceIdx.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
 			}
 		}
 	}
@@ -497,9 +498,9 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 			// Only visibility changed
 			targetVisible := targetIdx.Invisible == nil || !*targetIdx.Invisible
 			if targetVisible {
-				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX `%s` VISIBLE", targetIdx.Name))
+				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s VISIBLE", quoteIdent(targetIdx.Name)))
 			} else {
-				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX `%s` INVISIBLE", targetIdx.Name))
+				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s INVISIBLE", quoteIdent(targetIdx.Name)))
 			}
 		}
 	}
@@ -567,9 +568,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		if !exists || !constraintsEqual(sourceConstr, targetConstr) {
 			switch sourceConstr.Type {
 			case "FOREIGN KEY":
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY `%s`", sourceConstr.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", quoteIdent(sourceConstr.Name)))
 			case "CHECK":
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK `%s`", sourceConstr.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK %s", quoteIdent(sourceConstr.Name)))
 			}
 		}
 	}
@@ -601,7 +602,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 
 	// Compare ENGINE
 	if !opts.IgnoreEngine {
-		if !stringPtrEqual(ct.TableOptions.getEngine(), target.TableOptions.getEngine()) {
+		if !ptrEqual(ct.TableOptions.getEngine(), target.TableOptions.getEngine()) {
 			if engine := target.TableOptions.getEngine(); engine != nil {
 				clauses = append(clauses, fmt.Sprintf("ENGINE=%s", *engine))
 			}
@@ -610,13 +611,13 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 
 	// Compare CHARSET and COLLATION
 	if !opts.IgnoreCharsetCollation {
-		if !stringPtrEqual(ct.TableOptions.getCharset(), target.TableOptions.getCharset()) {
+		if !ptrEqual(ct.TableOptions.getCharset(), target.TableOptions.getCharset()) {
 			if charset := target.TableOptions.getCharset(); charset != nil {
 				clauses = append(clauses, fmt.Sprintf("DEFAULT CHARSET=%s", *charset))
 			}
 		}
 
-		if !stringPtrEqual(ct.TableOptions.getCollation(), target.TableOptions.getCollation()) {
+		if !ptrEqual(ct.TableOptions.getCollation(), target.TableOptions.getCollation()) {
 			if collation := target.TableOptions.getCollation(); collation != nil {
 				clauses = append(clauses, fmt.Sprintf("COLLATE=%s", *collation))
 			}
@@ -624,7 +625,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 	}
 
 	// Compare COMMENT (always compared — not controlled by an ignore option)
-	if !stringPtrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
+	if !ptrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
 		if comment := target.TableOptions.getComment(); comment != nil {
 			clauses = append(clauses, fmt.Sprintf("COMMENT='%s'", sqlescape.EscapeString(*comment)))
 		}
@@ -632,7 +633,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 
 	// Compare ROW_FORMAT
 	if !opts.IgnoreRowFormat {
-		if !stringPtrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
+		if !ptrEqual(ct.TableOptions.getRowFormat(), target.TableOptions.getRowFormat()) {
 			if rowFormat := target.TableOptions.getRowFormat(); rowFormat != nil {
 				clauses = append(clauses, fmt.Sprintf("ROW_FORMAT=%s", *rowFormat))
 			}
@@ -642,7 +643,7 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 	// Compare AUTO_INCREMENT
 	// Note: AUTO_INCREMENT is ignored by default (like vitess schemadiff)
 	if !opts.IgnoreAutoIncrement {
-		if !stringPtrEqual(ct.TableOptions.getAutoIncrement(), target.TableOptions.getAutoIncrement()) {
+		if !ptrEqual(ct.TableOptions.getAutoIncrement(), target.TableOptions.getAutoIncrement()) {
 			if autoInc := target.TableOptions.getAutoIncrement(); autoInc != nil {
 				clauses = append(clauses, fmt.Sprintf("AUTO_INCREMENT=%s", *autoInc))
 			}
@@ -706,16 +707,16 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.Type != b.Type {
 		return false
 	}
-	if !intPtrEqual(a.Length, b.Length) {
+	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
-	if !intPtrEqual(a.Precision, b.Precision) {
+	if !ptrEqual(a.Precision, b.Precision) {
 		return false
 	}
-	if !intPtrEqual(a.Scale, b.Scale) {
+	if !ptrEqual(a.Scale, b.Scale) {
 		return false
 	}
-	if !boolPtrEqual(a.Unsigned, b.Unsigned) {
+	if !ptrEqual(a.Unsigned, b.Unsigned) {
 		return false
 	}
 	if a.Nullable != b.Nullable {
@@ -735,7 +736,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 			targetDefault = nil
 		}
 	}
-	if !stringPtrEqual(sourceDefault, targetDefault) {
+	if !ptrEqual(sourceDefault, targetDefault) {
 		return false
 	}
 	if a.DefaultIsExpr != b.DefaultIsExpr {
@@ -750,7 +751,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.Unique != b.Unique {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 
@@ -768,7 +769,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		targetCharset = nil
 	}
 
-	if !stringPtrEqual(sourceCharset, targetCharset) {
+	if !ptrEqual(sourceCharset, targetCharset) {
 		return false
 	}
 
@@ -784,7 +785,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		targetCollation = nil
 	}
 
-	if !stringPtrEqual(sourceCollation, targetCollation) {
+	if !ptrEqual(sourceCollation, targetCollation) {
 		return false
 	}
 
@@ -805,16 +806,16 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.Type != b.Type {
 		return false
 	}
-	if !intPtrEqual(a.Length, b.Length) {
+	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
-	if !intPtrEqual(a.Precision, b.Precision) {
+	if !ptrEqual(a.Precision, b.Precision) {
 		return false
 	}
-	if !intPtrEqual(a.Scale, b.Scale) {
+	if !ptrEqual(a.Scale, b.Scale) {
 		return false
 	}
-	if !boolPtrEqual(a.Unsigned, b.Unsigned) {
+	if !ptrEqual(a.Unsigned, b.Unsigned) {
 		return false
 	}
 	if a.Nullable != b.Nullable {
@@ -834,7 +835,7 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 			targetDefault = nil
 		}
 	}
-	if !stringPtrEqual(sourceDefault, targetDefault) {
+	if !ptrEqual(sourceDefault, targetDefault) {
 		return false
 	}
 	if a.DefaultIsExpr != b.DefaultIsExpr {
@@ -847,13 +848,13 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.Unique != b.Unique {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
-	if !stringPtrEqual(a.Charset, b.Charset) {
+	if !ptrEqual(a.Charset, b.Charset) {
 		return false
 	}
-	if !stringPtrEqual(a.Collation, b.Collation) {
+	if !ptrEqual(a.Collation, b.Collation) {
 		return false
 	}
 	if !slices.Equal(a.EnumValues, b.EnumValues) {
@@ -881,13 +882,13 @@ func indexesEqual(a, b *Index) bool {
 	} else if !slices.Equal(a.Columns, b.Columns) {
 		return false
 	}
-	if !boolPtrEqual(a.Invisible, b.Invisible) {
+	if !ptrEqual(a.Invisible, b.Invisible) {
 		return false
 	}
-	if !stringPtrEqual(a.Using, b.Using) {
+	if !ptrEqual(a.Using, b.Using) {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 	return true
@@ -910,10 +911,10 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 		return false
 	}
 	// Skip Invisible comparison
-	if !stringPtrEqual(a.Using, b.Using) {
+	if !ptrEqual(a.Using, b.Using) {
 		return false
 	}
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 	return true
@@ -937,10 +938,10 @@ func indexColumnsEqual(a, b *IndexColumn) bool {
 	if a.Name != b.Name {
 		return false
 	}
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
-	if !intPtrEqual(a.Length, b.Length) {
+	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
 	return true
@@ -965,7 +966,7 @@ func constraintsEqualIgnoreName(a, b *Constraint) bool {
 	if !slices.Equal(a.Columns, b.Columns) {
 		return false
 	}
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
 	// Compare foreign key references
@@ -980,10 +981,10 @@ func constraintsEqualIgnoreName(a, b *Constraint) bool {
 			return false
 		}
 		// Compare ON DELETE and ON UPDATE actions
-		if !stringPtrEqual(a.References.OnDelete, b.References.OnDelete) {
+		if !ptrEqual(a.References.OnDelete, b.References.OnDelete) {
 			return false
 		}
-		if !stringPtrEqual(a.References.OnUpdate, b.References.OnUpdate) {
+		if !ptrEqual(a.References.OnUpdate, b.References.OnUpdate) {
 			return false
 		}
 	}
@@ -1027,7 +1028,7 @@ func formatColumnDefinition(col *Column) string {
 		typeDef += " unsigned"
 	}
 
-	parts = append(parts, fmt.Sprintf("`%s` %s", col.Name, typeDef))
+	parts = append(parts, fmt.Sprintf("%s %s", quoteIdent(col.Name), typeDef))
 
 	// Charset and collation (skip for binary types and JSON)
 	isBinaryType := col.Type == "varbinary" || col.Type == "binary" ||
@@ -1099,7 +1100,7 @@ func formatAddIndex(idx *Index) string {
 		keyword = "ADD INDEX"
 	}
 	if idx.Type != "PRIMARY KEY" && idx.Name != "" {
-		keyword += fmt.Sprintf(" `%s`", idx.Name)
+		keyword += " " + quoteIdent(idx.Name)
 	}
 	parts = append(parts, keyword)
 
@@ -1112,7 +1113,7 @@ func formatAddIndex(idx *Index) string {
 				columns = append(columns, fmt.Sprintf("(%s)", *col.Expression))
 			} else {
 				// Regular column reference
-				colStr := fmt.Sprintf("`%s`", col.Name)
+				colStr := quoteIdent(col.Name)
 				if col.Length != nil {
 					colStr += fmt.Sprintf("(%d)", *col.Length)
 				}
@@ -1122,7 +1123,7 @@ func formatAddIndex(idx *Index) string {
 	} else {
 		// Fall back to simple column names
 		for _, col := range idx.Columns {
-			columns = append(columns, fmt.Sprintf("`%s`", col))
+			columns = append(columns, quoteIdent(col))
 		}
 	}
 	parts = append(parts, fmt.Sprintf("(%s)", strings.Join(columns, ", ")))
@@ -1152,31 +1153,31 @@ func formatAddConstraint(constr *Constraint) string {
 	switch constr.Type {
 	case "CHECK":
 		if constr.Name != "" {
-			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT `%s` CHECK (%s)", constr.Name, *constr.Expression))
+			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT %s CHECK (%s)", quoteIdent(constr.Name), *constr.Expression))
 		} else {
 			parts = append(parts, fmt.Sprintf("ADD CHECK (%s)", *constr.Expression))
 		}
 	case "FOREIGN KEY":
 		var columns []string
 		for _, col := range constr.Columns {
-			columns = append(columns, fmt.Sprintf("`%s`", col))
+			columns = append(columns, quoteIdent(col))
 		}
 		var refColumns []string
 		for _, col := range constr.References.Columns {
-			refColumns = append(refColumns, fmt.Sprintf("`%s`", col))
+			refColumns = append(refColumns, quoteIdent(col))
 		}
 
 		var fkClause string
 		if constr.Name != "" {
-			fkClause = fmt.Sprintf("ADD CONSTRAINT `%s` FOREIGN KEY (%s) REFERENCES `%s` (%s)",
-				constr.Name,
+			fkClause = fmt.Sprintf("ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+				quoteIdent(constr.Name),
 				strings.Join(columns, ", "),
-				constr.References.Table,
+				quoteIdent(constr.References.Table),
 				strings.Join(refColumns, ", "))
 		} else {
-			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES `%s` (%s)",
+			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
 				strings.Join(columns, ", "),
-				constr.References.Table,
+				quoteIdent(constr.References.Table),
 				strings.Join(refColumns, ", "))
 		}
 
@@ -1196,50 +1197,6 @@ func formatAddConstraint(constr *Constraint) string {
 	return strings.Join(parts, " ")
 }
 
-// Helper functions for comparison
-func stringPtrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-func intPtrEqual(a, b *int) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-func boolPtrEqual(a, b *bool) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-// getPreviousColumn returns the name of the column before the given column name
-func getPreviousColumn(columns []Column, name string) string {
-	for i, col := range columns {
-		if col.Name == name {
-			if i == 0 {
-				return ""
-			}
-			return columns[i-1].Name
-		}
-	}
-	return ""
-}
-
 // getPrimaryKeyIndex returns the PRIMARY KEY index if it exists (table-level PK), nil otherwise
 func (ct *CreateTable) getPrimaryKeyIndex() *Index {
 	for i := range ct.Indexes {
@@ -1248,33 +1205,6 @@ func (ct *CreateTable) getPrimaryKeyIndex() *Index {
 		}
 	}
 	return nil
-}
-
-// needsQuotes determines if a default value needs to be quoted
-func needsQuotes(value string) bool {
-	// Common SQL functions/expressions that don't need quotes
-	upper := strings.ToUpper(value)
-	if upper == "NULL" ||
-		upper == "TRUE" ||
-		upper == "FALSE" ||
-		upper == "CURRENT_TIMESTAMP" ||
-		upper == "NOW()" ||
-		strings.HasPrefix(upper, "CURRENT_TIMESTAMP(") {
-		return false
-	}
-
-	// If it parses as an integer, don't quote it
-	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
-		return false
-	}
-
-	// If it parses as a float, don't quote it
-	if _, err := strconv.ParseFloat(value, 64); err == nil {
-		return false
-	}
-
-	// Default to quoting (for strings)
-	return true
 }
 
 // diffPartitionOptions compares partition options and returns ALTER clauses for differences.
@@ -1337,7 +1267,7 @@ func isPartitionCountOnlyChange(source, target *PartitionOptions) (bool, int) {
 	}
 
 	// Must have same expression/columns
-	if !stringPtrEqual(source.Expression, target.Expression) {
+	if !ptrEqual(source.Expression, target.Expression) {
 		return false, 0
 	}
 	if !slices.Equal(source.Columns, target.Columns) {
@@ -1377,7 +1307,7 @@ func partitionOptionsEqual(a, b *PartitionOptions) bool {
 	}
 
 	// Compare expression (for HASH and RANGE)
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
 
@@ -1427,12 +1357,12 @@ func partitionDefinitionEqual(a, b *PartitionDefinition) bool {
 	}
 
 	// Compare comment
-	if !stringPtrEqual(a.Comment, b.Comment) {
+	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
 
 	// Compare engine
-	if !stringPtrEqual(a.Engine, b.Engine) {
+	if !ptrEqual(a.Engine, b.Engine) {
 		return false
 	}
 
@@ -1456,10 +1386,15 @@ func partitionValuesEqual(a, b *PartitionValues) bool {
 		return false
 	}
 
-	// Compare values - this is a simple comparison that may need refinement
-	// for complex value types
+	// Today both sides come from the same parsePartitionClause path and
+	// are always Go strings, so reflect.DeepEqual and the old
+	// fmt.Sprintf("%v") string compare are equivalent. The change is
+	// forward-compatibility: if parsePartitionClause ever preserves the
+	// AST literal kind (so e.g. an int literal stays an int rather than
+	// being Restored to its string form), DeepEqual will distinguish
+	// "5" from 5 where %v would collapse them. No behaviour change today.
 	for i := range a.Values {
-		if fmt.Sprintf("%v", a.Values[i]) != fmt.Sprintf("%v", b.Values[i]) {
+		if !reflect.DeepEqual(a.Values[i], b.Values[i]) {
 			return false
 		}
 	}
@@ -1480,7 +1415,7 @@ func subPartitionOptionsEqual(a, b *SubPartitionOptions) bool {
 		return false
 	}
 
-	if !stringPtrEqual(a.Expression, b.Expression) {
+	if !ptrEqual(a.Expression, b.Expression) {
 		return false
 	}
 
@@ -1521,11 +1456,11 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", *partOpts.Expression))
 		} else if len(partOpts.Columns) > 0 {
 			// HASH can also use column names directly
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		}
 	case "KEY":
 		if len(partOpts.Columns) > 0 {
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		} else {
 			// KEY() with empty columns uses primary key
 			parts = append(parts, "()")
@@ -1536,13 +1471,13 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 		} else if len(partOpts.Columns) > 0 {
 			// RANGE COLUMNS
 			parts[len(parts)-1] = "RANGE COLUMNS"
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		}
 	case "LIST":
 		if len(partOpts.Columns) > 0 {
 			// LIST COLUMNS
 			parts[len(parts)-1] = "LIST COLUMNS"
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		}
 	}
 
@@ -1568,26 +1503,21 @@ func formatPartitionDefinition(def *PartitionDefinition) string {
 	var parts []string
 
 	// Partition name
-	parts = append(parts, fmt.Sprintf("PARTITION `%s`", def.Name))
+	parts = append(parts, "PARTITION "+quoteIdent(def.Name))
 
 	// Values clause
 	if def.Values != nil {
 		switch def.Values.Type {
 		case "LESS_THAN":
-			var values []string
-			for _, v := range def.Values.Values {
-				values = append(values, fmt.Sprintf("%v", v))
+			values := make([]string, len(def.Values.Values))
+			for i, v := range def.Values.Values {
+				values[i] = formatPartitionValue(v)
 			}
 			parts = append(parts, fmt.Sprintf("VALUES LESS THAN (%s)", strings.Join(values, ", ")))
 		case "IN":
-			var values []string
-			for _, v := range def.Values.Values {
-				// Handle string values that need quoting
-				if str, ok := v.(string); ok {
-					values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(str)))
-				} else {
-					values = append(values, fmt.Sprintf("%v", v))
-				}
+			values := make([]string, len(def.Values.Values))
+			for i, v := range def.Values.Values {
+				values[i] = formatPartitionValue(v)
 			}
 			parts = append(parts, fmt.Sprintf("VALUES IN (%s)", strings.Join(values, ", ")))
 		case "MAXVALUE":
