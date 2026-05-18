@@ -316,11 +316,11 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 // come up with a more sophisticated approach to allow concurrent
 // collection of changes while we flush.
 //
-// SetWatermarkOptimization drains the outgoing store inline whenever the
-// toggle changes mode, so under normal operation only one of map/queue
-// has entries when Flush runs. Both branches are still iterated as a
-// defensive measure — if the inactive store has anything (e.g. after a
-// failed prior toggle) we drain it before the active one.
+// SetWatermarkOptimization drains the outgoing store inline before
+// flipping the mode flag, so under normal operation only one of
+// map/queue has entries when Flush runs. Both branches are still
+// iterated defensively in case anything ever leaves the inactive store
+// non-empty.
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) (allChangesFlushed bool, err error) {
 	s.Lock()
 	defer s.Unlock()
@@ -531,33 +531,45 @@ func (s *bufferedMap) Close() {
 // returning. After a successful call the invariant holds: only the active
 // store may have entries.
 //
-// The decision is driven by store contents rather than the flag delta so
-// the call is idempotent: if a previous attempt failed mid-drain, retrying
-// with the same `enabled` value re-runs the drain.
+// Ordering: the outgoing store is drained *before* the flag is flipped, so
+// a drain failure leaves the subscription in its prior mode rather than a
+// half-toggled state (flag flipped, old store still dirty). New events
+// continue to land in the old store until the caller successfully retries
+// the toggle. The call is still idempotent — retrying with the same
+// `enabled` value recomputes the same target mode and re-runs the drain.
 func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool) error {
 	s.Lock()
 	defer s.Unlock()
 
-	s.watermarkOptimization = enabled
+	// Compute the target mode from `enabled` without flipping the flag,
+	// so a failed drain leaves watermarkOptimization unchanged.
+	// queueModeActive() = !pkIsMemoryComparable && !watermarkOptimization,
+	// so the target mode under `enabled` mirrors that formula.
+	targetQueueMode := !s.pkIsMemoryComparable && !enabled
+	currentQueueMode := s.queueModeActive()
 
-	// After the flip, exactly one store is the "active" store for new
-	// HasChanged calls (see queueModeActive). Drain the other one if it
-	// has leftover entries from the prior mode.
-	if s.queueModeActive() {
-		// Map is the inactive store now.
-		if len(s.changes) > 0 {
-			if _, err := s.flushMapLocked(ctx, false, nil); err != nil {
-				return fmt.Errorf("draining map on watermark toggle: %w", err)
+	if currentQueueMode != targetQueueMode {
+		// Mode transition: drain the store we're leaving so the invariant
+		// "only the active store may have entries" holds after the flip.
+		if currentQueueMode {
+			// Leaving queue mode; queue is the outgoing store.
+			if len(s.queue) > 0 {
+				if err := s.flushQueueLocked(ctx, false, nil); err != nil {
+					return fmt.Errorf("draining queue on watermark toggle: %w", err)
+				}
 			}
-		}
-	} else {
-		// Queue is the inactive store now.
-		if len(s.queue) > 0 {
-			if err := s.flushQueueLocked(ctx, false, nil); err != nil {
-				return fmt.Errorf("draining queue on watermark toggle: %w", err)
+		} else {
+			// Leaving map mode; map is the outgoing store.
+			if len(s.changes) > 0 {
+				if _, err := s.flushMapLocked(ctx, false, nil); err != nil {
+					return fmt.Errorf("draining map on watermark toggle: %w", err)
+				}
 			}
 		}
 	}
+
+	// Drain succeeded (or no drain needed) — safe to flip the flag now.
+	s.watermarkOptimization = enabled
 
 	s.c.logger.Info("watermark optimization toggled",
 		"table", s.table.TableName,
