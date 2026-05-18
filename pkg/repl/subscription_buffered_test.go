@@ -85,7 +85,6 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	target := applier.Target{
@@ -95,12 +94,7 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig())
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
@@ -141,7 +135,6 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	srcTable, dstTable := setupTestTables(t, t1, t2)
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
-	logger := slog.Default()
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	target := applier.Target{
@@ -151,12 +144,7 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, &ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig())
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
@@ -230,11 +218,9 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &Client{
-		db:              db,
-		logger:          logger,
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   logger,
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Create mock chunker with current position at 5
@@ -363,11 +349,9 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &Client{
-		db:              db,
-		logger:          logger,
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   logger,
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Create mock chunker with current position at 5
@@ -462,10 +446,8 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -534,11 +516,9 @@ func TestBufferedMapQueueModeFlush(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -617,11 +597,9 @@ func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -685,11 +663,9 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 	mockChunker.MarkAsComplete()
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -762,10 +738,8 @@ func TestBufferedMapTogglePassthrough(t *testing.T) {
 	mockChunker.SimulateProgress(0.001)
 
 	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -809,10 +783,8 @@ func TestBufferedMapConcurrentHasChanged(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -863,10 +835,8 @@ func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -909,10 +879,8 @@ func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -958,10 +926,8 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
 	client := &Client{
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1027,11 +993,9 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1049,71 +1013,6 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 	require.Equal(t, 0, sub.Length())
-}
-
-// TestBufferedMapQueueFlushBatchSizeLimit drives the queue flush with a
-// targetBatchSize smaller than the queue length, so flushQueueLocked must
-// split a same-type segment across multiple applier calls. The end state in
-// the target must still be all rows applied.
-func TestBufferedMapQueueFlushBatchSizeLimit(t *testing.T) {
-	t1 := `CREATE TABLE subscription_test (
-		id VARCHAR(64) NOT NULL,
-		name VARCHAR(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	t2 := `CREATE TABLE _subscription_test_new (
-		id VARCHAR(64) NOT NULL,
-		name VARCHAR(255) NOT NULL,
-		PRIMARY KEY (id)
-	)`
-	srcTable, dstTable := setupTestTables(t, t1, t2)
-
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-
-	cfg, err := mysql2.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
-	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
-	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	require.NoError(t, err)
-
-	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
-	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
-
-	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 2, // forces the same-type segment to split mid-flush
-		dbConfig:        dbconn.NewDBConfig(),
-	}
-
-	sub := &bufferedMap{
-		c:                    client,
-		applier:              applierInstance,
-		table:                srcTable,
-		newTable:             dstTable,
-		changes:              make(map[string]bufferedChange),
-		chunker:              mockChunker,
-		pkIsMemoryComparable: false,
-	}
-	sub.cond = sync.NewCond(&sub.Mutex)
-
-	for i := 1; i <= 5; i++ {
-		k := fmt.Sprintf("k%d", i)
-		sub.HasChanged([]any{k}, []any{k, "v"}, false)
-	}
-	require.Equal(t, 5, sub.Length())
-
-	allFlushed, err := sub.Flush(t.Context(), false, nil)
-	require.NoError(t, err)
-	require.True(t, allFlushed)
-
-	var count int
-	require.NoError(t, db.QueryRowContext(t.Context(),
-		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&count))
-	require.Equal(t, 5, count, "split across batches must still apply every row")
 }
 
 // TestBufferedMapQueueFlushUnderLock verifies that queue-mode flush works
@@ -1148,11 +1047,9 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1228,11 +1125,9 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
@@ -1762,12 +1657,7 @@ func TestBufferedMapGeometry(t *testing.T) {
 	}
 	appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, &ClientConfig{
-		Logger:          slog.Default(),
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig())
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
@@ -1941,12 +1831,7 @@ func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
 			}
 			appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 			require.NoError(t, err)
-			client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, &ClientConfig{
-				Logger:          slog.Default(),
-				Concurrency:     4,
-				TargetBatchTime: time.Second,
-				ServerID:        NewServerID(),
-			})
+			client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig())
 			chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 			require.NoError(t, err)
 			require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))

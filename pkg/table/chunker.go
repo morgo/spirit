@@ -105,22 +105,22 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 	// column key, unless a specific key/where is requested.
 	if len(t.KeyColumns) == 1 && t.KeyIsAutoInc && config.Key == "" && config.Where == "" {
 		return &chunkerOptimistic{
-			Ti:                     t,
-			NewTi:                  newTable,
-			ChunkerTarget:          config.TargetChunkTime,
-			columnMapping:          config.ColumnMapping,
-			lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-			logger:                 config.Logger,
+			Ti:                t,
+			NewTi:             newTable,
+			columnMapping:     config.ColumnMapping,
+			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+			watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+			logger:            config.Logger,
 		}, nil
 	}
 	return &chunkerComposite{
-		Ti:                     t,
-		NewTi:                  newTable,
-		ChunkerTarget:          config.TargetChunkTime,
-		columnMapping:          config.ColumnMapping,
-		keyName:                config.Key,
-		where:                  config.Where,
-		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 config.Logger,
+		Ti:                t,
+		NewTi:             newTable,
+		columnMapping:     config.ColumnMapping,
+		keyName:           config.Key,
+		where:             config.Where,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            config.Logger,
 	}, nil
 }

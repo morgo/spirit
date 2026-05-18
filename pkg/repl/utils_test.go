@@ -424,6 +424,19 @@ func TestPkChanged(t *testing.T) {
 		require.False(t, pkChanged([]any{nil}, []any{nil}))
 		require.True(t, pkChanged([]any{nil}, []any{int64(0)}))
 	})
+
+	t.Run("boolean and string-of-bool do not collide", func(t *testing.T) {
+		// fmt.Sprintf("%v", true) == "true" and fmt.Sprintf("%v", "true")
+		// == "true". Without the bool special-case, a TINYINT(1) PK
+		// column surfaced as bool would compare equal to a VARCHAR PK
+		// holding the literal string "true". Vanishingly rare in
+		// practice but worth a defensive test.
+		require.True(t, pkChanged([]any{true}, []any{"true"}))
+		require.True(t, pkChanged([]any{false}, []any{"false"}))
+		require.False(t, pkChanged([]any{true}, []any{true}))
+		require.False(t, pkChanged([]any{false}, []any{false}))
+		require.True(t, pkChanged([]any{true}, []any{false}))
+	})
 }
 
 // TestIsMinimalRowImage verifies the per-event detection used by the

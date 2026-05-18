@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -71,11 +70,9 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &Client{
-		db:              db,
-		logger:          slog.Default(),
-		concurrency:     2,
-		targetBatchSize: 1000,
-		dbConfig:        dbconn.NewDBConfig(),
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	// Seed the pre-swap state in the destination table directly. The
@@ -182,12 +179,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applierInstance, &ClientConfig{
-		Logger:          slog.Default(),
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        NewServerID(),
-	})
+	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applierInstance, NewClientDefaultConfig())
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
