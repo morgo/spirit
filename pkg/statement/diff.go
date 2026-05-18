@@ -2,6 +2,7 @@ package statement
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -9,6 +10,52 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/pingcap/tidb/pkg/parser"
 )
+
+// quoteIdent wraps a MySQL identifier in backticks, doubling any embedded
+// backtick to escape it (e.g. a column named `foo`bar` renders as
+// `` `foo``bar` ``). The previous fmt.Sprintf("`%s`", x) form generated
+// broken SQL when an identifier contained a backtick — caught only at
+// re-parse time as a confusing parse error rather than at emission.
+func quoteIdent(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
+// quoteIdentList applies quoteIdent to each element and joins them with
+// the given separator. Helps the common "column list" rendering pattern.
+func quoteIdentList(idents []string, sep string) string {
+	quoted := make([]string, len(idents))
+	for i, s := range idents {
+		quoted[i] = quoteIdent(s)
+	}
+	return strings.Join(quoted, sep)
+}
+
+// formatPartitionValue renders a single partition value (e.g. the inner
+// value of a VALUES LESS THAN (...) or VALUES IN (...) clause). The
+// previous fmt.Sprintf("%v", v) form generated broken SQL when a string
+// partition value contained a single quote.
+//
+// Caveat: parsePartitionClause currently restores every value to a Go
+// string regardless of whether the source SQL had it as a numeric or
+// string literal — so we can't simply quote on (v is string). We
+// instead try to parse the string as a number; if it parses, render
+// unquoted (matching RANGE/LIST partitions on integer expressions like
+// YEAR(...) or hash columns). If it doesn't parse, treat as a string
+// literal and quote+escape. A real type-aware fix requires preserving
+// the AST literal kind through parsePartitionClause; this is a
+// targeted patch on the SQL-emission side only.
+func formatPartitionValue(v any) string {
+	if s, ok := v.(string); ok {
+		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return s
+		}
+		if _, err := strconv.ParseFloat(s, 64); err == nil {
+			return s
+		}
+		return "'" + sqlescape.EscapeString(s) + "'"
+	}
+	return fmt.Sprintf("%v", v)
+}
 
 // DiffOptions controls the behavior of the Diff operation.
 type DiffOptions struct {
@@ -118,7 +165,7 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 // buildAlterStatement constructs and parses an ALTER TABLE statement from clauses.
 func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement, error) {
 	alter := strings.Join(clauses, ", ")
-	alterStmt := fmt.Sprintf("ALTER TABLE `%s` %s", ct.TableName, alter)
+	alterStmt := fmt.Sprintf("ALTER TABLE %s %s", quoteIdent(ct.TableName), alter)
 
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(alterStmt, "", "")
@@ -163,7 +210,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	var dropClauses []string
 	for _, sourceCol := range ct.Columns {
 		if _, exists := targetColumns[sourceCol.Name]; !exists {
-			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN `%s`", sourceCol.Name))
+			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", quoteIdent(sourceCol.Name)))
 		}
 	}
 	slices.Sort(dropClauses)
@@ -188,7 +235,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			if prevColumn == "" {
 				clause += " FIRST"
 			} else if !isLastColumn {
-				clause += fmt.Sprintf(" AFTER `%s`", prevColumn)
+				clause += fmt.Sprintf(" AFTER %s", quoteIdent(prevColumn))
 			}
 			// If it's the last column, omit AFTER clause (implicit)
 			clauses = append(clauses, clause)
@@ -217,7 +264,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 					if prevColumn == "" {
 						clause += " FIRST"
 					} else {
-						clause += fmt.Sprintf(" AFTER `%s`", prevColumn)
+						clause += fmt.Sprintf(" AFTER %s", quoteIdent(prevColumn))
 					}
 				}
 				clauses = append(clauses, clause)
@@ -341,7 +388,7 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 			// 2. Source has table-level PK and target has inline PK (table-level -> inline transition)
 			if sourcePKIndex == nil || (sourcePKIndex != nil && targetPKIndex == nil) {
 				pkColumn = targetCol.Name
-				addClause = fmt.Sprintf("ADD PRIMARY KEY (`%s`)", pkColumn)
+				addClause = fmt.Sprintf("ADD PRIMARY KEY (%s)", quoteIdent(pkColumn))
 				break
 			}
 		}
@@ -445,7 +492,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 					pkDropAdded = true
 				}
 			} else {
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX `%s`", sourceIdx.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
 			}
 		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 			// Index exists but changed (and not just visibility) - need to drop and re-add
@@ -456,7 +503,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 					pkDropAdded = true
 				}
 			} else {
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX `%s`", sourceIdx.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
 			}
 		}
 	}
@@ -497,9 +544,9 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 			// Only visibility changed
 			targetVisible := targetIdx.Invisible == nil || !*targetIdx.Invisible
 			if targetVisible {
-				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX `%s` VISIBLE", targetIdx.Name))
+				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s VISIBLE", quoteIdent(targetIdx.Name)))
 			} else {
-				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX `%s` INVISIBLE", targetIdx.Name))
+				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s INVISIBLE", quoteIdent(targetIdx.Name)))
 			}
 		}
 	}
@@ -567,9 +614,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		if !exists || !constraintsEqual(sourceConstr, targetConstr) {
 			switch sourceConstr.Type {
 			case "FOREIGN KEY":
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY `%s`", sourceConstr.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", quoteIdent(sourceConstr.Name)))
 			case "CHECK":
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK `%s`", sourceConstr.Name))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK %s", quoteIdent(sourceConstr.Name)))
 			}
 		}
 	}
@@ -1027,7 +1074,7 @@ func formatColumnDefinition(col *Column) string {
 		typeDef += " unsigned"
 	}
 
-	parts = append(parts, fmt.Sprintf("`%s` %s", col.Name, typeDef))
+	parts = append(parts, fmt.Sprintf("%s %s", quoteIdent(col.Name), typeDef))
 
 	// Charset and collation (skip for binary types and JSON)
 	isBinaryType := col.Type == "varbinary" || col.Type == "binary" ||
@@ -1099,7 +1146,7 @@ func formatAddIndex(idx *Index) string {
 		keyword = "ADD INDEX"
 	}
 	if idx.Type != "PRIMARY KEY" && idx.Name != "" {
-		keyword += fmt.Sprintf(" `%s`", idx.Name)
+		keyword += " " + quoteIdent(idx.Name)
 	}
 	parts = append(parts, keyword)
 
@@ -1112,7 +1159,7 @@ func formatAddIndex(idx *Index) string {
 				columns = append(columns, fmt.Sprintf("(%s)", *col.Expression))
 			} else {
 				// Regular column reference
-				colStr := fmt.Sprintf("`%s`", col.Name)
+				colStr := quoteIdent(col.Name)
 				if col.Length != nil {
 					colStr += fmt.Sprintf("(%d)", *col.Length)
 				}
@@ -1122,7 +1169,7 @@ func formatAddIndex(idx *Index) string {
 	} else {
 		// Fall back to simple column names
 		for _, col := range idx.Columns {
-			columns = append(columns, fmt.Sprintf("`%s`", col))
+			columns = append(columns, quoteIdent(col))
 		}
 	}
 	parts = append(parts, fmt.Sprintf("(%s)", strings.Join(columns, ", ")))
@@ -1152,31 +1199,31 @@ func formatAddConstraint(constr *Constraint) string {
 	switch constr.Type {
 	case "CHECK":
 		if constr.Name != "" {
-			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT `%s` CHECK (%s)", constr.Name, *constr.Expression))
+			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT %s CHECK (%s)", quoteIdent(constr.Name), *constr.Expression))
 		} else {
 			parts = append(parts, fmt.Sprintf("ADD CHECK (%s)", *constr.Expression))
 		}
 	case "FOREIGN KEY":
 		var columns []string
 		for _, col := range constr.Columns {
-			columns = append(columns, fmt.Sprintf("`%s`", col))
+			columns = append(columns, quoteIdent(col))
 		}
 		var refColumns []string
 		for _, col := range constr.References.Columns {
-			refColumns = append(refColumns, fmt.Sprintf("`%s`", col))
+			refColumns = append(refColumns, quoteIdent(col))
 		}
 
 		var fkClause string
 		if constr.Name != "" {
-			fkClause = fmt.Sprintf("ADD CONSTRAINT `%s` FOREIGN KEY (%s) REFERENCES `%s` (%s)",
-				constr.Name,
+			fkClause = fmt.Sprintf("ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+				quoteIdent(constr.Name),
 				strings.Join(columns, ", "),
-				constr.References.Table,
+				quoteIdent(constr.References.Table),
 				strings.Join(refColumns, ", "))
 		} else {
-			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES `%s` (%s)",
+			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
 				strings.Join(columns, ", "),
-				constr.References.Table,
+				quoteIdent(constr.References.Table),
 				strings.Join(refColumns, ", "))
 		}
 
@@ -1456,10 +1503,12 @@ func partitionValuesEqual(a, b *PartitionValues) bool {
 		return false
 	}
 
-	// Compare values - this is a simple comparison that may need refinement
-	// for complex value types
+	// Compare values by type *and* content. The previous fmt.Sprintf("%v")
+	// form collapsed types — e.g. the string "5" compared equal to the
+	// integer 5 — so a partition definition switch between the two looked
+	// like a no-op and the diff missed the change.
 	for i := range a.Values {
-		if fmt.Sprintf("%v", a.Values[i]) != fmt.Sprintf("%v", b.Values[i]) {
+		if !reflect.DeepEqual(a.Values[i], b.Values[i]) {
 			return false
 		}
 	}
@@ -1521,11 +1570,11 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 			parts = append(parts, fmt.Sprintf("(%s)", *partOpts.Expression))
 		} else if len(partOpts.Columns) > 0 {
 			// HASH can also use column names directly
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		}
 	case "KEY":
 		if len(partOpts.Columns) > 0 {
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		} else {
 			// KEY() with empty columns uses primary key
 			parts = append(parts, "()")
@@ -1536,13 +1585,13 @@ func formatPartitionOptions(partOpts *PartitionOptions) string {
 		} else if len(partOpts.Columns) > 0 {
 			// RANGE COLUMNS
 			parts[len(parts)-1] = "RANGE COLUMNS"
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		}
 	case "LIST":
 		if len(partOpts.Columns) > 0 {
 			// LIST COLUMNS
 			parts[len(parts)-1] = "LIST COLUMNS"
-			parts = append(parts, fmt.Sprintf("(`%s`)", strings.Join(partOpts.Columns, "`, `")))
+			parts = append(parts, fmt.Sprintf("(%s)", quoteIdentList(partOpts.Columns, ", ")))
 		}
 	}
 
@@ -1568,26 +1617,21 @@ func formatPartitionDefinition(def *PartitionDefinition) string {
 	var parts []string
 
 	// Partition name
-	parts = append(parts, fmt.Sprintf("PARTITION `%s`", def.Name))
+	parts = append(parts, "PARTITION "+quoteIdent(def.Name))
 
 	// Values clause
 	if def.Values != nil {
 		switch def.Values.Type {
 		case "LESS_THAN":
-			var values []string
-			for _, v := range def.Values.Values {
-				values = append(values, fmt.Sprintf("%v", v))
+			values := make([]string, len(def.Values.Values))
+			for i, v := range def.Values.Values {
+				values[i] = formatPartitionValue(v)
 			}
 			parts = append(parts, fmt.Sprintf("VALUES LESS THAN (%s)", strings.Join(values, ", ")))
 		case "IN":
-			var values []string
-			for _, v := range def.Values.Values {
-				// Handle string values that need quoting
-				if str, ok := v.(string); ok {
-					values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(str)))
-				} else {
-					values = append(values, fmt.Sprintf("%v", v))
-				}
+			values := make([]string, len(def.Values.Values))
+			for i, v := range def.Values.Values {
+				values[i] = formatPartitionValue(v)
 			}
 			parts = append(parts, fmt.Sprintf("VALUES IN (%s)", strings.Join(values, ", ")))
 		case "MAXVALUE":
