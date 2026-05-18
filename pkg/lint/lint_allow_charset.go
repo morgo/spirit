@@ -11,7 +11,7 @@ import (
 
 func init() {
 	Register(&AllowCharset{
-		charsets: []string{"utf8mb4"},
+		charsets: []string{"utf8mb4", "binary"},
 	})
 }
 
@@ -45,7 +45,7 @@ func (l *AllowCharset) Configure(config map[string]string) error {
 
 func (l *AllowCharset) DefaultConfig() map[string]string {
 	return map[string]string{
-		"charsets": "utf8mb4",
+		"charsets": "utf8mb4,binary",
 	}
 }
 

@@ -180,7 +180,7 @@ Restricts which character sets are allowed for tables and columns. Helps enforce
 
 **Configuration Options:**
 
-- `charsets` (string): Comma-separated list of allowed character sets. Default: `"utf8mb4"`.
+- `charsets` (string): Comma-separated list of allowed character sets. Default: `"utf8mb4,binary"`. The `binary` charset covers JSON, BLOB, and spatial columns, which MySQL reports as having the `binary` character set.
 
 **Examples:**
 
