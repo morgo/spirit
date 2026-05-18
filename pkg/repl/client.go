@@ -82,7 +82,14 @@ var (
 )
 
 type Client struct {
-	sync.Mutex
+	// mu protects position fields (bufferedPos / flushedPos), the
+	// streamer / syncer / cancelFunc tuple, and the cached
+	// binlogStatusStmt. Subscriptions live in c.subs with its own
+	// RWMutex. Named (not embedded) so the lock surface stays
+	// package-internal: sync.Mutex is not re-entrant, and exposing
+	// public Lock/Unlock on an external API invites accidental
+	// self-deadlocks from a caller that doesn't know what's already held.
+	mu sync.Mutex
 
 	host     string
 	username string
@@ -214,8 +221,8 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 // the rewound value via SetFlushedPos — silently regressing the
 // checkpoint and forcing a large re-read on the next resume.
 func (c *Client) setBufferedPos(pos mysql.Position) {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if pos.Compare(c.bufferedPos) <= 0 {
 		return
 	}
@@ -224,22 +231,22 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 
 // getBufferedPos returns the buffered position under a mutex.
 func (c *Client) getBufferedPos() mysql.Position {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.bufferedPos
 }
 
 // SetFlushedPos updates the known safe position that all changes have been flushed.
 // It is used for resuming from a checkpoint.
 func (c *Client) SetFlushedPos(pos mysql.Position) {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.flushedPos = pos
 }
 
 func (c *Client) AllChangesFlushed() bool {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.bufferedPos.Compare(c.flushedPos) > 0 {
 		c.logger.Warn("Binlog reader info flushed-pos buffered-pos. Discrepancies could be due to modifications on other tables.", "flushed-pos", c.flushedPos, "buffered-pos", c.bufferedPos)
 	}
@@ -255,8 +262,8 @@ func (c *Client) AllChangesFlushed() bool {
 }
 
 func (c *Client) GetBinlogApplyPosition() mysql.Position {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.flushedPos
 }
 
@@ -310,8 +317,8 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 // Run initializes the binlog syncer and starts the binlog reader.
 // It returns an error if the initialization fails.
 func (c *Client) Run(ctx context.Context) error {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	host, portStr, err := net.SplitHostPort(c.host)
 	if err != nil {
@@ -397,8 +404,8 @@ func (c *Client) Run(ctx context.Context) error {
 // flush) will correct. The eventual-consistency property holds in both
 // map mode and queue mode — see UpsertRows in pkg/applier/single_target.go.
 func (c *Client) recreateStreamer() error {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	c.logger.Info("recreateStreamer called",
 		"buffered_position", c.bufferedPos,
@@ -441,10 +448,10 @@ func (c *Client) recreateStreamer() error {
 func (c *Client) readStream(ctx context.Context) {
 	defer c.streamWG.Done() // Signal completion when goroutine exits
 
-	c.Lock()
+	c.mu.Lock()
 	currentLogName := c.flushedPos.Name
 	startPos := c.flushedPos // Copy while holding lock
-	c.Unlock()
+	c.mu.Unlock()
 
 	consecutiveErrors := 0
 	recreateAttempts := 0
@@ -795,9 +802,9 @@ func (c *Client) Close() {
 	// itself acquires c.Lock from inside its loop (setBufferedPos,
 	// recreateStreamer), and holding the lock during Wait would deadlock
 	// an in-flight lock acquisition there.
-	c.Lock()
+	c.mu.Lock()
 	cancel := c.cancelFunc
-	c.Unlock()
+	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -854,9 +861,9 @@ func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock
 // the end of the flush. That's OK, we only set the flushed position to the known
 // safe buffered position taken at the start.
 func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
-	c.Lock()
+	c.mu.Lock()
 	newFlushedPos := c.bufferedPos
-	c.Unlock()
+	c.mu.Unlock()
 	var allChangesFlushed = true
 	for _, subscription := range c.subs.Snapshot() {
 		flushed, err := subscription.Flush(ctx, underLock, lock)
