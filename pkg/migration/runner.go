@@ -656,15 +656,18 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	return nil
 }
 
-// closeReplicas closes all open replica database connections.
+// closeReplicas closes all open replica database connections, aggregating
+// errors with errors.Join so a failure on one replica doesn't leak the
+// handles of the rest. Matches the cleanup discipline in Close().
 func (r *Runner) closeReplicas() error {
+	var errs []error
 	for _, replica := range r.replicas {
 		if err := replica.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	r.replicas = nil
-	return nil
+	return errors.Join(errs...)
 }
 
 // setupThrottler sets up the throttlers used to pace the copier:
