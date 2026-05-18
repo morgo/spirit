@@ -289,10 +289,10 @@ func TestCompositeLowWatermark(t *testing.T) {
 	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker := &chunkerComposite{
-		Ti:                     t1,
-		ChunkerTarget:          ChunkerDefaultTarget,
-		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
 	}
 	_, err = chunker.Next()
 	require.Error(t, err) // not open yet
@@ -465,9 +465,9 @@ func TestSetKey(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "setkey_t1")
 	require.NoError(t, t1.SetInfo(t.Context()))
 	chunkerPK := &chunkerComposite{
-		Ti:            t1,
-		ChunkerTarget: 100 * time.Millisecond,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+		logger:            slog.Default(),
 	}
 	err = chunkerPK.SetKey("PRIMARY", "id < 1008")
 	require.NoError(t, err)
@@ -478,9 +478,9 @@ func TestSetKey(t *testing.T) {
 	require.NoError(t, chunkerPK.Close())
 
 	chunker := &chunkerComposite{
-		Ti:            t1,
-		ChunkerTarget: 100 * time.Millisecond,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+		logger:            slog.Default(),
 	}
 	err = chunker.SetKey("s", "status = 'ARCHIVED' AND updated_at < NOW() - INTERVAL 1 DAY")
 	require.NoError(t, err)
@@ -495,9 +495,9 @@ func TestSetKey(t *testing.T) {
 
 	// If I reset again with a different condition it should range as chunks.
 	chunker = &chunkerComposite{
-		Ti:            t1,
-		ChunkerTarget: 100 * time.Millisecond,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+		logger:            slog.Default(),
 	}
 	err = chunker.SetKey("s", "status = 'PENDING' AND updated_at > NOW() - INTERVAL 1 DAY")
 	require.NoError(t, err)
@@ -528,9 +528,9 @@ func TestSetKey(t *testing.T) {
 	// Test other index types.
 	for _, index := range []string{"u", "su", "ui"} {
 		chunker = &chunkerComposite{
-			Ti:            t1,
-			ChunkerTarget: 100 * time.Millisecond,
-			logger:        slog.Default(),
+			Ti:                t1,
+			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+			logger:            slog.Default(),
 		}
 		err = chunker.SetKey(index, "updated_at < NOW() - INTERVAL 1 DAY")
 		require.NoError(t, err)
@@ -600,9 +600,9 @@ func TestSetKeyCompositeKeyMerge(t *testing.T) {
 	t1 := NewTableInfo(db, "test", "setkeycomposite_t1")
 	require.NoError(t, t1.SetInfo(t.Context()))
 	chunker := &chunkerComposite{
-		Ti:            t1,
-		ChunkerTarget: 100 * time.Millisecond,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+		logger:            slog.Default(),
 	}
 	err = chunker.SetKey("dnc", "")
 	require.NoError(t, err)
@@ -637,10 +637,10 @@ func TestCompositeChunkerReset(t *testing.T) {
 	require.NoError(t, t1.SetInfo(t.Context()))
 
 	chunker := &chunkerComposite{
-		Ti:                     t1,
-		ChunkerTarget:          ChunkerDefaultTarget,
-		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
 	}
 
 	// Test that Reset() fails when chunker is not open
@@ -745,10 +745,10 @@ func TestCompositeChunkerReset(t *testing.T) {
 
 	// Test with custom key and where condition
 	chunker2 := &chunkerComposite{
-		Ti:                     t1,
-		ChunkerTarget:          ChunkerDefaultTarget,
-		lowerBoundWatermarkMap: make(map[string]*Chunk, 0),
-		logger:                 slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
 	}
 
 	// Set a custom key and where condition
@@ -1487,9 +1487,9 @@ func TestCompositeChunkerReservedWordPK(t *testing.T) {
 	// the secondary index named `key`. Before the fix, FORCE INDEX (key)
 	// failed because the index name was not quoted.
 	chunker2 := &chunkerComposite{
-		Ti:            t1,
-		ChunkerTarget: 100 * time.Millisecond,
-		logger:        slog.Default(),
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: 100 * time.Millisecond},
+		logger:            slog.Default(),
 	}
 	require.NoError(t, chunker2.SetKey("key", ""))
 	require.NoError(t, chunker2.Open())
