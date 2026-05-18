@@ -431,7 +431,7 @@ func TestDefaultConfig(t *testing.T) {
 	linter := AllowCharset{}
 	config := linter.DefaultConfig()
 	require.Contains(t, config, "charsets")
-	require.Equal(t, "utf8mb4", config["charsets"])
+	require.Equal(t, "utf8mb4,binary", config["charsets"])
 }
 
 // Tests for existing tables parameter
