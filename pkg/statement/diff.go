@@ -1386,10 +1386,13 @@ func partitionValuesEqual(a, b *PartitionValues) bool {
 		return false
 	}
 
-	// Compare values by type *and* content. The previous fmt.Sprintf("%v")
-	// form collapsed types — e.g. the string "5" compared equal to the
-	// integer 5 — so a partition definition switch between the two looked
-	// like a no-op and the diff missed the change.
+	// Today both sides come from the same parsePartitionClause path and
+	// are always Go strings, so reflect.DeepEqual and the old
+	// fmt.Sprintf("%v") string compare are equivalent. The change is
+	// forward-compatibility: if parsePartitionClause ever preserves the
+	// AST literal kind (so e.g. an int literal stays an int rather than
+	// being Restored to its string form), DeepEqual will distinguish
+	// "5" from 5 where %v would collapse them. No behaviour change today.
 	for i := range a.Values {
 		if !reflect.DeepEqual(a.Values[i], b.Values[i]) {
 			return false

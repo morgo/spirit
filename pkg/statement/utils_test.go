@@ -27,19 +27,43 @@ func TestQuoteIdent(t *testing.T) {
 
 // TestFormatPartitionValue verifies that string partition values are
 // quoted and escaped, while integer/float literals (which the parser
-// flattens into Go strings during Restore) are rendered unquoted.
+// flattens into Go strings during Restore) are rendered unquoted. The
+// numeric heuristic deliberately rejects ParseFloat-accepting curios
+// (NaN, Inf, exponent form) and zero-prefix integers so that an
+// SQL string literal that happens to look numeric is preserved as a
+// string rather than silently changing semantics or emitting invalid
+// SQL.
 func TestFormatPartitionValue(t *testing.T) {
 	cases := []struct {
 		name string
 		in   any
 		want string
 	}{
+		// Unquoted numeric paths
 		{"int_literal_string", "2020", "2020"},
 		{"negative_int", "-1", "-1"},
+		{"zero", "0", "0"},
 		{"float_literal_string", "3.14", "3.14"},
+		{"negative_float", "-2.5", "-2.5"},
+		{"raw_int", 42, "42"},
+
+		// Quoted string paths
 		{"string_literal", "asia", "'asia'"},
 		{"string_with_single_quote", "o'brien", "'o\\'brien'"},
-		{"raw_int", 42, "42"},
+
+		// Edge cases that look numeric but should stay quoted —
+		// otherwise a LIST partition with these literal strings would
+		// either change semantics or emit invalid SQL.
+		{"zero_prefix_one", "01", "'01'"},
+		{"zero_prefix_zero", "00", "'00'"},
+		{"NaN", "NaN", "'NaN'"},
+		{"Inf", "Inf", "'Inf'"},
+		{"plus_Inf", "+Inf", "'+Inf'"},
+		{"Infinity", "Infinity", "'Infinity'"},
+		{"exponent", "1e10", "'1e10'"},
+		{"trailing_dot", "1.", "'1.'"},
+		{"leading_dot", ".5", "'.5'"},
+		{"plus_sign_int", "+1", "'+1'"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

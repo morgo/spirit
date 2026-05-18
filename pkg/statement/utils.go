@@ -2,6 +2,7 @@ package statement
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,15 @@ func quoteIdentList(idents []string, sep string) string {
 	return strings.Join(quoted, sep)
 }
 
+// numericPartitionValueRe matches the subset of string values that can
+// be safely rendered unquoted as a partition value: plain optionally-
+// signed integer literals (e.g. "2020", "-1") and simple decimal floats
+// (e.g. "3.14", "-2.5"). Excludes things strconv.ParseFloat would
+// otherwise accept (NaN, Inf, "1e10") and zero-prefix forms ("01") that
+// would change semantics or generate invalid SQL if the source value
+// was a string literal that just happened to look numeric.
+var numericPartitionValueRe = regexp.MustCompile(`^-?(0|[1-9]\d*)(\.\d+)?$`)
+
 // formatPartitionValue renders a single partition value (e.g. the inner
 // value of a VALUES LESS THAN (...) or VALUES IN (...) clause). The
 // previous fmt.Sprintf("%v", v) form generated broken SQL when a string
@@ -35,19 +45,19 @@ func quoteIdentList(idents []string, sep string) string {
 //
 // Caveat: parsePartitionClause currently restores every value to a Go
 // string regardless of whether the source SQL had it as a numeric or
-// string literal — so we can't simply quote on (v is string). We
-// instead try to parse the string as a number; if it parses, render
-// unquoted (matching RANGE/LIST partitions on integer expressions like
-// YEAR(...) or hash columns). If it doesn't parse, treat as a string
-// literal and quote+escape. A real type-aware fix requires preserving
-// the AST literal kind through parsePartitionClause; this is a
-// targeted patch on the SQL-emission side only.
+// string literal — so we can't simply quote on (v is string). We use
+// the numericPartitionValueRe heuristic instead: strings that match
+// render unquoted (matching RANGE/LIST partitions on integer
+// expressions like YEAR(...) or hash columns); anything else is
+// treated as a string literal and quote+escaped. The heuristic
+// deliberately excludes ParseFloat-accepting curiosities (NaN, Inf,
+// "1e10") and zero-prefix forms ("01") that would silently change
+// semantics. A real type-aware fix requires preserving the AST literal
+// kind through parsePartitionClause; this is a targeted patch on the
+// SQL-emission side only.
 func formatPartitionValue(v any) string {
 	if s, ok := v.(string); ok {
-		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
-			return s
-		}
-		if _, err := strconv.ParseFloat(s, 64); err == nil {
+		if numericPartitionValueRe.MatchString(s) {
 			return s
 		}
 		return "'" + sqlescape.EscapeString(s) + "'"
