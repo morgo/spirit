@@ -88,6 +88,15 @@ type Runner struct {
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
 
+	// fatalOnce makes fatalError idempotent. Without it a concurrent burst
+	// of fatal events from the binlog goroutine and the migration loop
+	// could double-drop the checkpoint and double-cancel the context. The
+	// individual operations underneath are idempotent, but routing
+	// everything through Once keeps the side-effect set small enough to
+	// reason about and avoids racing with Close() teardown of r.db and
+	// r.checkpointTable.
+	fatalOnce sync.Once
+
 	// watchTaskWait blocks until the WatchTask goroutines (status/checkpoint
 	// dumpers) have exited. Set in startBackgroundRoutines and invoked from
 	// Close() before tearing down the database connection so that no late
@@ -647,15 +656,18 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	return nil
 }
 
-// closeReplicas closes all open replica database connections.
+// closeReplicas closes all open replica database connections, aggregating
+// errors with errors.Join so a failure on one replica doesn't leak the
+// handles of the rest. Matches the cleanup discipline in Close().
 func (r *Runner) closeReplicas() error {
+	var errs []error
 	for _, replica := range r.replicas {
 		if err := replica.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	r.replicas = nil
-	return nil
+	return errors.Join(errs...)
 }
 
 // setupThrottler sets up the throttlers used to pace the copier:
@@ -851,21 +863,36 @@ func (r *Runner) setup(ctx context.Context) error {
 // It returns true if the error was acted upon (migration cancelled),
 // or false if it was ignored (e.g. because the migration is already
 // past cutover, where Spirit's own RENAME TABLE DDL is expected).
+//
+// fatalError is safe to call concurrently. fatalOnce makes the
+// invalidate-and-cancel side effects idempotent and prevents racing
+// with Close() teardown of r.db / r.checkpointTable / r.cancelFunc.
 func (r *Runner) fatalError() bool {
 	if r.status.Get() >= status.CutOver {
 		return false
 	}
-	r.status.Set(status.ErrCleanup)
-	// Invalidate the checkpoint, so we don't try to resume.
-	// If we don't do this, the migration will permanently be blocked from proceeding.
-	// Letting it start again is the better choice.
-	// Use a background context since the migration context may already be cancelled.
-	if err := r.dropCheckpoint(context.Background()); err != nil {
-		r.logger.Error("could not remove checkpoint",
-			"error", err,
-		)
-	}
-	r.cancelFunc() // cancel the migration context
+	r.fatalOnce.Do(func() {
+		r.status.Set(status.ErrCleanup)
+		// Invalidate the checkpoint, so we don't try to resume.
+		// If we don't do this, the migration will permanently be blocked
+		// from proceeding. Letting it start again is the better choice.
+		// Use a background context since the migration context may
+		// already be cancelled. checkpointTable can still be nil if
+		// fatalError fires during early setup, before
+		// createCheckpointTable runs — skip the drop in that case.
+		if r.checkpointTable != nil && r.db != nil {
+			if err := r.dropCheckpoint(context.Background()); err != nil {
+				r.logger.Error("could not remove checkpoint",
+					"error", err,
+				)
+			}
+		}
+		// cancelFunc can also be nil during early setup or in test paths
+		// that bypass Run; nil-check before calling.
+		if r.cancelFunc != nil {
+			r.cancelFunc()
+		}
+	})
 	return true
 }
 
@@ -981,31 +1008,35 @@ func (r *Runner) Close() error {
 	if r.watchTaskWait != nil {
 		r.watchTaskWait()
 	}
+	// Run every cleanup step unconditionally and collect errors with
+	// errors.Join. Previously the first failing step short-circuited the
+	// rest, leaking the repl client's binlog reader goroutine, the
+	// throttler, replica DB handles, and finally the primary DB pool. The
+	// individual close calls are independent enough that running them all
+	// out of order does no harm.
+	var errs []error
 	for _, change := range r.changes {
-		err := change.Close()
-		if err != nil {
-			return err
+		if err := change.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if r.replClient != nil {
 		r.replClient.Close()
 	}
 	if r.throttler != nil {
-		err := r.throttler.Close()
-		if err != nil {
-			return err
+		if err := r.throttler.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if err := r.closeReplicas(); err != nil {
-		return err
+		errs = append(errs, err)
 	}
 	if r.db != nil {
-		err := r.db.Close()
-		if err != nil {
-			return err
+		if err := r.db.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
