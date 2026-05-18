@@ -674,7 +674,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		concurrency:     2,
 		targetBatchSize: 1000,
 		dbConfig:        dbconn.NewDBConfig(),
-		subscriptions:   make(map[string]Subscription),
+		subs:            newSubscriptionRegistry(),
 	}
 
 	// Test 1: Initial state - should be flushed when no changes
@@ -688,8 +688,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
-	sub.cond = sync.NewCond(&sub.Mutex)
-	client.subscriptions[encodeSchemaTable(srcTable.SchemaName, srcTable.TableName)] = sub
+	require.True(t, client.subs.AddBuffered(encodeSchemaTable(srcTable.SchemaName, srcTable.TableName), sub))
 	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
@@ -709,8 +708,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
-	sub2.cond = sync.NewCond(&sub2.Mutex)
-	client.subscriptions["test2"] = sub2
+	require.True(t, client.subs.AddBuffered("test2", sub2))
 	sub2.HasChanged([]any{2}, nil, false)
 	require.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
@@ -924,7 +922,7 @@ func TestProcessDDLNotification(t *testing.T) {
 			callerCancelFunc: func() bool { cancelled = true; return true },
 			ddlFilterSchema:  filterSchema,
 			ddlFilterTables:  toSet(filterTables),
-			subscriptions:    make(map[string]Subscription),
+			subs:             newSubscriptionRegistry(),
 		}
 		return c, &cancelled
 	}
@@ -945,7 +943,7 @@ func TestProcessDDLNotification(t *testing.T) {
 		c := &Client{
 			logger:           slog.Default(),
 			callerCancelFunc: func() bool { cancelled = true; return true },
-			subscriptions:    make(map[string]Subscription),
+			subs:             newSubscriptionRegistry(),
 		}
 		sub := &bufferedMap{
 			table:    tbl,
@@ -953,8 +951,7 @@ func TestProcessDDLNotification(t *testing.T) {
 			changes:  make(map[string]bufferedChange),
 			c:        c,
 		}
-		sub.cond = sync.NewCond(&sub.Mutex)
-		c.subscriptions[dbName+".orders"] = sub
+		require.True(t, c.subs.AddBuffered(dbName+".orders", sub))
 
 		// DDL on the subscribed table should cancel.
 		c.processDDLNotification(dbName, "orders")
@@ -1012,7 +1009,7 @@ func TestProcessDDLNotification(t *testing.T) {
 		c := &Client{
 			logger:          slog.Default(),
 			ddlFilterSchema: "mydb",
-			subscriptions:   make(map[string]Subscription),
+			subs:            newSubscriptionRegistry(),
 		}
 		// Should not panic even though callerCancelFunc is nil.
 		require.NotPanics(t, func() {

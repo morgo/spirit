@@ -36,4 +36,11 @@ type Subscription interface {
 	// it drains the outgoing store via the applier so only one store has
 	// pending entries at a time. Returns the drain error if any.
 	SetWatermarkOptimization(ctx context.Context, enabled bool) error
+
+	// Close signals that no further events will be delivered. Any HasChanged
+	// caller currently parked on backpressure (e.g. the bufferedMap soft
+	// memory limit) is unblocked so the binlog reader goroutine can exit.
+	// Close does NOT flush; pending changes are discarded along with the
+	// subscription. It is safe to call more than once.
+	Close()
 }

@@ -209,7 +209,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	require.NoError(t, client.Run(t.Context()))
 	defer client.Close()
 
-	sub := client.subscriptions[srcTable.SchemaName+"."+srcTable.TableName].(*bufferedMap)
+	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)
 	// Mirror the post-copy state where the watermark optimization is off
 	// and every binlog event is admitted to the map.
 	require.NoError(t, sub.SetWatermarkOptimization(t.Context(), false))
