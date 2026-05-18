@@ -209,11 +209,9 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 			tlsConfig.TLSCertificatePath = tc.tlsCert
 
 			// Create replication client config with database config
-			clientConfig := &repl.ClientConfig{
-				Logger:   slog.Default(),
-				ServerID: repl.NewServerID(),
-				DBConfig: tlsConfig,
-			} // Create a mock database connection for testing
+			clientConfig := repl.NewClientDefaultConfig()
+			clientConfig.DBConfig = tlsConfig
+			// Create a mock database connection for testing
 			db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 			require.NoError(t, err)
 			defer utils.CloseAndLog(db)

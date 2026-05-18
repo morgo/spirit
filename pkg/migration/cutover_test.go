@@ -53,12 +53,7 @@ func TestCutOver(t *testing.T) {
 	t1new := table.NewTableInfo(db, cfg.DBName, "_cutovert1_new")
 	t1old := "_cutovert1_old"
 	logger := slog.Default()
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        repl.NewServerID(),
-	})
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
@@ -117,12 +112,7 @@ func TestMDLLockFails(t *testing.T) {
 	t1new := table.NewTableInfo(db, cfg.DBName, "_mdllocks_new")
 	t1old := "test_old"
 	logger := slog.Default()
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        repl.NewServerID(),
-	})
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
@@ -180,12 +170,7 @@ func TestInvalidOptions(t *testing.T) {
 	require.NoError(t, t1.SetInfo(t.Context()))
 	t1new := table.NewTableInfo(db, cfg.DBName, "_invalid_t1_new")
 	t1old := "test_old"
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), &repl.ClientConfig{
-		Logger:          logger,
-		Concurrency:     4,
-		TargetBatchTime: time.Second,
-		ServerID:        repl.NewServerID(),
-	})
+	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))

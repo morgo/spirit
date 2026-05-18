@@ -15,9 +15,6 @@ func TestNewClientDefaultConfig(t *testing.T) {
 	cfg := NewClientDefaultConfig()
 	require.NotNil(t, cfg)
 
-	require.Equal(t, 4, cfg.Concurrency, "default Concurrency is 4")
-	require.Equal(t, DefaultTargetBatchTime, cfg.TargetBatchTime,
-		"default TargetBatchTime matches DefaultTargetBatchTime")
 	require.NotNil(t, cfg.Logger, "Logger defaults to slog.Default(), not nil")
 	require.GreaterOrEqual(t, cfg.ServerID, uint32(1001),
 		"ServerID generated via NewServerID() must be in the safe range")

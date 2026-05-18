@@ -2,17 +2,14 @@ package repl
 
 import (
 	"log/slog"
-	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
 )
 
 type ClientConfig struct {
-	TargetBatchTime time.Duration
-	Concurrency     int
-	Logger          *slog.Logger
-	ServerID        uint32
-	DBConfig        *dbconn.DBConfig // Database configuration including TLS settings
+	Logger   *slog.Logger
+	ServerID uint32
+	DBConfig *dbconn.DBConfig // Database configuration including TLS settings
 
 	// CancelFunc is an optional callback from the caller (e.g. migration or move runner).
 	// It is called when a DDL change is detected on a subscribed table, or when a fatal
@@ -44,9 +41,7 @@ type ClientConfig struct {
 // NewClientDefaultConfig returns a default config for the copier.
 func NewClientDefaultConfig() *ClientConfig {
 	return &ClientConfig{
-		Concurrency:     4,
-		TargetBatchTime: DefaultTargetBatchTime,
-		Logger:          slog.Default(),
-		ServerID:        NewServerID(),
+		Logger:   slog.Default(),
+		ServerID: NewServerID(),
 	}
 }
