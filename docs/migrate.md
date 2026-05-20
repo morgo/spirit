@@ -258,9 +258,23 @@ It is recommended that you use Spirit in combination with either parallel replic
 
 The replication throttler only affects the copy-rows operation, and does not apply to changes which arrive via the replication client. This is intentional, as if replication changes can not be applied fast enough the migration will never be able to complete. On a busy system (with single-threaded or insufficiently configured parallel replication) it is possible that the changes from the replication applier may be sufficiently high that they cause the copier process to perpetually be throttled. In this case, you may have to do something more drastic for the migration to complete. In approximate order of preference, you may consider:
 
-- Adjusting the configuration of your replicas to increase the parallel replication threads
+- Adjusting the configuration of your replicas to increase the parallel replication threads (see [Tuning parallel replication for Spirit workloads](#tuning-parallel-replication-for-spirit-workloads) below)
 - Temporarily disabling durability on the replica (i.e. `SET GLOBAL sync_binlog=0` and `SET GLOBAL innodb_flush_log_at_trx_commit=0`)
 - Increasing the `replica-max-lag` or disabling replica lag checking temporarily
+
+#### Tuning parallel replication for Spirit workloads
+
+Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each sized to a `--target-chunk-time` of 500ms), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are _disjoint_ the chunks have no row-level write conflicts with each other.
+
+This workload is exactly the right shape to execute in parallel on replicas, but under MySQL 8.0 defaults (`COMMIT_ORDER` scheduling) there is minimum parallelism, and it requires the following configuration changes:
+
+
+- **`binlog_transaction_dependency_tracking = WRITESET`** on the **source** — typically 3–10× replica apply boost. The replica coordinator can schedule non-conflicting transactions in parallel regardless of source commit order. This is the single largest unlock for Spirit workloads on busy systems.
+  - **MySQL 8.0.x (8.0.26 – 8.0.x):** set explicitly; the default is `COMMIT_ORDER`.
+  - **MySQL 8.4+ (including 9.x):** **do not set this variable** — it was deprecated in 8.0.35 / 8.2.0 and **removed in 8.4.0**. Attempting to set it raises an `Unknown system variable` error. The server now always uses writeset-based dependency tracking internally (equivalent to the old `WRITESET` setting), so no action is needed on the source.
+- **`replica_preserve_commit_order = OFF`** on the **replica** — an additional 1.3–2× on top of writeset dependency tracking. **Only safe if no downstream consumer of this replica's binlog depends on source commit order** (CDC pipelines, chained replicas, Datawarehouse consumers that tail this replica rather than the source). Verify tolerance before flipping when `log_replica_updates = ON`. Available on both 8.0 and 8.4+.
+
+On managed engines such as AWS Aurora, many of these parameters are static (`pending-reboot`) at the parameter-group level — `SET GLOBAL` works at runtime, but parameter-group changes require an instance reboot to persist.
 
 ### skip-drop-after-cutover
 
