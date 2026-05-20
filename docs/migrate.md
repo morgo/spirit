@@ -264,7 +264,10 @@ The replication throttler only affects the copy-rows operation, and does not app
 
 #### Tuning parallel replication for Spirit workloads
 
-Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each sized to a `--target-chunk-time` of 500ms), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are disjoint the chunks have no row-level write conflicts with each other. That is exactly the workload writeset-based dependency tracking is designed to parallelize on the replica — under the default `COMMIT_ORDER` scheduling, however, the replica's parallel workers must serialize on source commit order, so a busy table with many indexes can drive replica lag into the multi-hour range even when the source has spare CPU. Two MySQL 8.0+ replication settings make a large difference for this workload:
+Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each sized to a `--target-chunk-time` of 500ms), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are _disjoint_ the chunks have no row-level write conflicts with each other.
+
+This workload is exactly the right shape to execute in parallel on replicas, but under MySQL 8.0 defaults (`COMMIT_ORDER` scheduling) there is minimum parallelism, and it requires the following configuration changes:
+
 
 - **`binlog_transaction_dependency_tracking = WRITESET`** on the **source** — typically 3–10× replica apply boost. The replica coordinator can schedule non-conflicting transactions in parallel regardless of source commit order. This is the single largest unlock for Spirit workloads on busy systems.
   - **MySQL 8.0.x (8.0.26 – 8.0.x):** set explicitly; the default is `COMMIT_ORDER`.
