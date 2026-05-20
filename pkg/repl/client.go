@@ -655,6 +655,19 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 	tbl := sub.Tables()[0]
 	eventType := parseEventType(ev.Header.EventType)
 
+	// Decode ENUM ordinals / SET bitmasks back to their string form before
+	// we hand the row image to the subscription. The binlog reader yields
+	// them as int64s; if the target column has been migrated to a non-ENUM
+	// type (e.g. VARCHAR) the applier would otherwise insert those integers
+	// as literal values. See TableInfo.DecodeBinlogRow.
+	if tbl.HasEnumOrSetColumns() {
+		for _, row := range e.Rows {
+			if err := tbl.DecodeBinlogRow(row); err != nil {
+				return fmt.Errorf("decoding binlog row for %s.%s: %w", tbl.SchemaName, tbl.TableName, err)
+			}
+		}
+	}
+
 	if eventType == eventTypeUpdate {
 		// UPDATE events always carry before/after image pairs.
 		for i := 0; i < len(e.Rows); i += 2 {
