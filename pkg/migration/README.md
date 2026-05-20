@@ -17,8 +17,9 @@ There is one replication client for all changes, and a subscription is added for
 │  │   2. Start replication client                                                    │   │
 │  │   3. Run copier                                                                  │   │
 │  │   4. Disable watermark optimization                                              │   │
-│  │   5. Run checksum                                                                │   │
-│  │   6. Perform cutover (RENAME TABLE)                                              │   │
+│  │   5. Run initial checksum                                                        │   │
+│  │   6. Wait on defer-cutover sentinel (continuous checksum)                        │   │
+│  │   7. Perform cutover (RENAME TABLE)                                              │   │
 │  └──────────────────────────────────────────────────────────────────────────────────┘   │
 │         │                              │                              │                 │
 │         │ owns                         │ owns                         │ owns            │
@@ -45,15 +46,9 @@ To answer this question, we need to understand that there are two types of locks
 
 So when we describe Spirit as a "non-blocking schema change tool" that is a bit of a white lie. What it means is that we don't require a metadata lock for the entire 10h schema change, as built-in MySQL DDL often does. It does not mean that we do not require locks.
 
-The following are common **data lock** issues:
+The common **data lock** concern is the source table. The default (unbuffered) copier issues `INSERT IGNORE INTO _new ... SELECT FROM original`, and the `SELECT` side of `INSERT ... SELECT` takes shared row locks rather than using MVCC. Production workloads touching the same rows can contend with those locks. The main knob to mitigate this is `target-chunk-time`: smaller chunks mean each copy statement holds locks for less time.
 
-* Data locks are required *on the specific rows* when copying chunks from the existing table to the new table. This is because we use the `INSERT .. SELECT` syntax which does not use MVCC (i.e. non-locking reads) when reading from the SELECT side. We mitigate this effect by offering you a configurable `target-chunk-time`. Lower values will mean that these locks are held for less time because the copies are shorter.
-
-* Data locks are required *on the specific rows* when applying changes from the replication client. This is similar to the copier, except we use a combination of `DELETE` and `REPLACE .. SELECT`.
-
-* The copier and replication client conflict with each other and deadlock. This is less likely to occur now than in earlier versions of Spirit, see [issue #479](https://github.com/block/spirit/issues/479).
-
-You may want to use `--buffered` for cases where there are hot rows, or high probability of contention with data locks. Because of its different design, it only requires data locks on the `_new` table, which effectively prevents all of the data lock contention.
+If hot rows on the source table make even short-chunk contention unacceptable, use `--buffered`. The buffered copier reads rows into Spirit and writes them through the applier instead of running `INSERT ... SELECT`, so it takes no locks on the source. The replication client is already always buffered — it applies binlog row images via `REPLACE INTO _new VALUES (...)` and never touches the source — so `--buffered` plus the always-buffered subscription eliminates source-side data lock contention end-to-end. See [pkg/repl/README.md](../repl/README.md) for the subscription design.
 
 The following are cases where **metadata locks** are required:
 
