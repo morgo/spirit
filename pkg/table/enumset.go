@@ -122,17 +122,22 @@ func decodeEnumOrdinal(ordinal int64, elements []string) (string, error) {
 // decodeSetBitmask converts a SET bitmask into a comma-joined string of
 // the elements whose bits are set. Bit i (0-indexed) corresponds to
 // elements[i]. Bits set above len(elements) are an error.
+//
+// The bitmask arrives from the go-mysql binlog reader as int64 because
+// that is what its decodeValue() path returns, but MySQL SET supports
+// up to 64 members — a value with bit 63 set (or all 64 bits set,
+// which surfaces as -1) is valid. We reinterpret the int64 as uint64
+// to walk the bits; out-of-range bits are caught by the
+// i >= len(elements) guard rather than by a sign check.
 func decodeSetBitmask(bitmask int64, elements []string) (string, error) {
 	if bitmask == 0 {
 		return "", nil
 	}
-	if bitmask < 0 {
-		return "", fmt.Errorf("SET bitmask %d is negative", bitmask)
-	}
+	bits := uint64(bitmask)
 	maxBits := len(elements)
 	var parts []string
 	for i := 0; i < 64; i++ {
-		if bitmask&(int64(1)<<i) == 0 {
+		if bits&(uint64(1)<<i) == 0 {
 			continue
 		}
 		if i >= maxBits {

@@ -91,7 +91,8 @@ func enumSetRemovalCheck(ctx context.Context, r Resources, logger *slog.Logger) 
 			return fmt.Errorf("unsafe %s to %s type conversion on column %q is not supported. "+
 				"%s values would be coerced from their string form to %s, "+
 				"which loses the original value (typically becomes 0). "+
-				"Keep %s as a string-typed column (VARCHAR, CHAR, TEXT, BLOB, etc.) if it must be converted",
+				"Use a string-typed target (VARCHAR, CHAR, TEXT, BLOB, etc.) instead, "+
+				"or keep the column as %s",
 				typeName, col.ColDef.Tp.String(), col.LookupName, typeName, col.ColDef.Tp.String(), typeName)
 		}
 	}

@@ -82,7 +82,7 @@ func TestEnumSetRemovalCheckEnumToInt(t *testing.T) {
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ENUM")
-	require.ErrorContains(t, err, "string-typed column")
+	require.ErrorContains(t, err, "string-typed target")
 }
 
 func TestEnumSetRemovalCheckSetToVarchar(t *testing.T) {
