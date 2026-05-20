@@ -584,6 +584,77 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 	require.Equal(t, 3, i)
 }
 
+// TestSingleTargetApplierUpsertRowsWithGeneratedColumns is a regression test
+// for the bug where UpsertRows indexed RowImage via NonGeneratedColumns
+// positions, causing values from the wrong source columns to be inserted when
+// the source table has STORED generated columns earlier in column order.
+//
+// The reproduction places a STORED generated column between two non-generated
+// columns, with a TIMESTAMP(3) further along. Pre-fix, the varchar that
+// follows the generated column shifted into the TIMESTAMP slot, producing a
+// "Data truncated for column" warning that bubbled up as a fatal upsert
+// error.
+func TestSingleTargetApplierUpsertRowsWithGeneratedColumns(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_upsert_genco_test")
+	testutils.RunSQL(t, "CREATE DATABASE single_upsert_genco_test")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	target := base.Clone()
+	target.DBName = "single_upsert_genco_test"
+	targetDB, err := sql.Open("mysql", target.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	// Schema with a STORED generated column sitting between two regular
+	// columns, then a TIMESTAMP(3) further along. If the applier indexes
+	// the row image via NonGeneratedColumns positions, the varchar after
+	// the generated column shifts into the TIMESTAMP slot and MySQL
+	// reports "Data truncated for column 'updated_at'".
+	createTableSQL := `CREATE TABLE test_table (
+		id INT PRIMARY KEY,
+		amount BIGINT,
+		is_set TINYINT(1) GENERATED ALWAYS AS (IF(amount IS NOT NULL, 1, NULL)) STORED,
+		balance_change_id VARCHAR(255),
+		updated_at TIMESTAMP(3) NULL DEFAULT NULL
+	)`
+	_, err = targetDB.ExecContext(t.Context(), createTableSQL)
+	require.NoError(t, err)
+
+	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
+	err = targetTable.SetInfo(t.Context())
+	require.NoError(t, err)
+
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	// RowImage has all columns including the generated one (position 2),
+	// mirroring what the binlog reader produces.
+	upsertRows := []LogicalRow{
+		{
+			RowImage:  []any{int64(1), int64(100), int64(1), "abc-123", "2026-05-20 17:16:12.123"},
+			IsDeleted: false,
+		},
+	}
+
+	_, err = applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), upsertRows, nil)
+	require.NoError(t, err)
+
+	var amount int64
+	var balanceChangeID, updatedAt string
+	err = targetDB.QueryRowContext(t.Context(), "SELECT amount, balance_change_id, updated_at FROM test_table WHERE id = 1").Scan(&amount, &balanceChangeID, &updatedAt)
+	require.NoError(t, err)
+	require.Equal(t, int64(100), amount)
+	require.Equal(t, "abc-123", balanceChangeID)
+	require.Equal(t, "2026-05-20 17:16:12.123", updatedAt)
+}
+
 // TestSingleTargetApplierUpsertRowsSkipDeleted tests that deleted rows are skipped
 func TestSingleTargetApplierUpsertRowsSkipDeleted(t *testing.T) {
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_upsert_deleted_test")

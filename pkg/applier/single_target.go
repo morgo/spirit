@@ -521,7 +521,11 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 	}
 	_, targetColumnList := mapping.Columns()
 	sourceColumnNames, _ := mapping.ColumnsSlice()
-	intersectedColumns := mapping.SourceColumnIndices()
+	// RowImage from the binlog contains ALL columns, including STORED
+	// generated columns, so we must index it via ordinal positions in
+	// the full column list — not via positions in NonGeneratedColumns.
+	// The sharded applier does the same; see sharded.go.
+	intersectedColumns := mapping.SourceOrdinalIndices()
 
 	// Build the VALUES clause from the row images
 	var valuesClauses []string
