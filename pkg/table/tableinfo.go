@@ -39,6 +39,7 @@ type TableInfo struct {
 	NonGeneratedColumns         []string          // all the non-generated column names
 	Indexes                     []string          // all the index names
 	columnsMySQLTps             map[string]string // map from column name to MySQL type
+	enumSetElements             map[int][]string  // parsed ENUM/SET element list, keyed by column ordinal; only present for ENUM/SET columns
 	KeyColumns                  []string          // the column names of the primaryKey
 	keyColumnsMySQLTp           []string          // the MySQL types of the primaryKey
 	KeyIsAutoInc                bool              // if pk[0] is an auto_increment column
@@ -192,6 +193,7 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 	t.Columns = []string{}
 	t.NonGeneratedColumns = []string{}
 	t.columnsMySQLTps = make(map[string]string)
+	t.enumSetElements = nil
 	for rows.Next() {
 		var col, tp, expression string
 		if err := rows.Scan(&col, &tp, &expression); err != nil {
@@ -201,6 +203,16 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 		t.columnsMySQLTps[col] = tp
 		if expression == "" {
 			t.NonGeneratedColumns = append(t.NonGeneratedColumns, col)
+		}
+		if isEnumColumnType(tp) || isSetColumnType(tp) {
+			elements, perr := parseEnumSetElements(tp)
+			if perr != nil {
+				return fmt.Errorf("parsing ENUM/SET elements for %s.%s.%s: %w", t.SchemaName, t.TableName, col, perr)
+			}
+			if t.enumSetElements == nil {
+				t.enumSetElements = make(map[int][]string)
+			}
+			t.enumSetElements[len(t.Columns)-1] = elements
 		}
 	}
 	if rows.Err() != nil {
@@ -419,6 +431,64 @@ func (t *TableInfo) datumTp(col string) (datumTp, error) {
 func (t *TableInfo) GetColumnMySQLType(col string) (string, bool) {
 	tp, ok := t.columnsMySQLTps[col]
 	return tp, ok
+}
+
+// HasEnumOrSetColumns reports whether any column on this table is an
+// ENUM or SET. Used to skip the per-row decoding hot path when there's
+// nothing to decode.
+func (t *TableInfo) HasEnumOrSetColumns() bool {
+	return len(t.enumSetElements) > 0
+}
+
+// DecodeBinlogRow converts ENUM and SET values in a binlog row image
+// from their integer wire format (ENUM ordinal / SET bitmask) back to
+// the string form. Mutates the slice in place.
+//
+// Why: the go-mysql binlog reader yields ENUM as int64 ordinals and SET
+// as int64 bitmasks. Spirit's buffered replay path takes the row image
+// verbatim and feeds it to the applier as a REPLACE INTO ... VALUES.
+// If the target column has been migrated to a non-ENUM type
+// (e.g. VARCHAR), MySQL inserts those integers as literal values
+// instead of the original strings, corrupting data. Decoding here
+// restores the string form before the applier sees it.
+//
+// nil values (NULL columns) and rows with no ENUM/SET columns are a
+// no-op. If the table has no ENUM/SET columns at all, callers should
+// gate with HasEnumOrSetColumns and skip the call entirely.
+func (t *TableInfo) DecodeBinlogRow(row []any) error {
+	if len(t.enumSetElements) == 0 {
+		return nil
+	}
+	for ord, elements := range t.enumSetElements {
+		if ord >= len(row) {
+			continue
+		}
+		raw := row[ord]
+		if raw == nil {
+			continue
+		}
+		intVal, ok := raw.(int64)
+		if !ok {
+			continue
+		}
+		colName := ""
+		if ord < len(t.Columns) {
+			colName = t.Columns[ord]
+		}
+		mysqlType := t.columnsMySQLTps[colName]
+		var decoded string
+		var derr error
+		if isSetColumnType(mysqlType) {
+			decoded, derr = decodeSetBitmask(intVal, elements)
+		} else {
+			decoded, derr = decodeEnumOrdinal(intVal, elements)
+		}
+		if derr != nil {
+			return fmt.Errorf("decoding %s.%s column %q: %w", t.SchemaName, t.TableName, colName, derr)
+		}
+		row[ord] = decoded
+	}
+	return nil
 }
 
 // GetColumnOrdinal returns the ordinal position (0-indexed) of a column by name.
