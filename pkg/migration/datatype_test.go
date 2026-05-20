@@ -303,6 +303,212 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	require.ErrorContains(t, migrationErr, "unsafe SET value reorder")
 }
 
+// TestEnumToVarchar verifies that ENUM → VARCHAR migrations correctly
+// decode binlog ordinals into element strings so that buffered replay
+// writes the original values (e.g. "active") to the new VARCHAR column
+// rather than the raw int64 ordinal that the go-mysql binlog reader
+// emits. Regression test for the gap reported in
+// ppe-schema-change-development on Slack (2026-05-19).
+func TestEnumToVarchar(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "enumtovarchar", `CREATE TABLE enumtovarchar (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending') NOT NULL
+	)`)
+	// Seed with every ENUM value so we can assert on the full mapping.
+	tt.SeedRows(t, "INSERT INTO enumtovarchar (status) SELECT 'active'", 3000)
+	tt.SeedRows(t, "INSERT INTO enumtovarchar (status) SELECT 'inactive'", 3000)
+	tt.SeedRows(t, "INSERT INTO enumtovarchar (status) SELECT 'pending'", 3000)
+
+	m := NewTestRunner(t, "enumtovarchar", "MODIFY COLUMN status VARCHAR(32) NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(true),
+		WithTestThrottler())
+
+	// Concurrent DML during the copy phase exercises the binlog replay
+	// path — the bug we're regression-testing only surfaces for rows that
+	// reach the target via the bufferedMap, not via the chunker's SELECT.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		for i := 1; i <= 100; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO enumtovarchar (status) VALUES ('active')`)
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO enumtovarchar (status) VALUES ('inactive')`)
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO enumtovarchar (status) VALUES ('pending')`)
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumtovarchar SET status = 'pending' WHERE id = %d`, i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumtovarchar SET status = 'inactive' WHERE id = %d`, 3000+i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumtovarchar SET status = 'active' WHERE id = %d`, 6000+i))
+		}
+	}()
+
+	require.NoError(t, m.Run(ctx))
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+
+	// The column must now be VARCHAR and the values must be the original
+	// element strings — not their integer ordinals.
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT column_type FROM information_schema.columns
+		 WHERE table_schema='test' AND table_name='enumtovarchar' AND column_name='status'`).Scan(&colType))
+	require.Contains(t, colType, "varchar")
+
+	// No row should have a numeric-looking status — that would mean the
+	// ordinal leaked through. Cast to numeric and look for any non-zero
+	// match; ENUM ordinals would all be 1/2/3.
+	var leaked int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM enumtovarchar WHERE status IN ('1','2','3')`).Scan(&leaked))
+	require.Zero(t, leaked, "binlog ENUM ordinals leaked into VARCHAR column")
+
+	// Every value should be one of the original element strings.
+	var nonString int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM enumtovarchar WHERE status NOT IN ('active','inactive','pending')`).Scan(&nonString))
+	require.Zero(t, nonString)
+}
+
+// TestSetToVarchar verifies that SET → VARCHAR migrations decode the
+// bitmask wire format into a comma-joined element string. Companion to
+// TestEnumToVarchar.
+func TestSetToVarchar(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "settovarchar", `CREATE TABLE settovarchar (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		perms SET('read', 'write', 'execute') NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO settovarchar (perms) SELECT 'read,write'", 5000)
+	_, err := tt.DB.ExecContext(t.Context(), `INSERT INTO settovarchar (perms) VALUES ('read'),('write'),('execute'),('read,write,execute')`)
+	require.NoError(t, err)
+
+	m := NewTestRunner(t, "settovarchar", "MODIFY COLUMN perms VARCHAR(64) NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(true),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		for i := 1; i <= 50; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO settovarchar (perms) VALUES ('execute')`)
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO settovarchar (perms) VALUES ('read,execute')`)
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE settovarchar SET perms = 'read,write,execute' WHERE id = %d`, i))
+		}
+	}()
+
+	require.NoError(t, m.Run(ctx))
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT column_type FROM information_schema.columns
+		 WHERE table_schema='test' AND table_name='settovarchar' AND column_name='perms'`).Scan(&colType))
+	require.Contains(t, colType, "varchar")
+
+	// No row should contain a numeric-looking bitmask value. Any bitmask
+	// leaking through would render as a decimal string like "1", "3", "7".
+	var leaked int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM settovarchar WHERE perms REGEXP '^[0-9]+$'`).Scan(&leaked))
+	require.Zero(t, leaked, "binlog SET bitmask leaked into VARCHAR column")
+}
+
+// TestEnumToSet verifies that ENUM → SET migrations work end-to-end.
+// Each ENUM ordinal decodes to a single-element string which the
+// destination SET column accepts unchanged. Companion to
+// TestEnumToVarchar; covers the same binlog replay path with a SET
+// target instead of VARCHAR.
+func TestEnumToSet(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "enumtoset_mig", `CREATE TABLE enumtoset_mig (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending') NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO enumtoset_mig (status) SELECT 'active'", 3000)
+	tt.SeedRows(t, "INSERT INTO enumtoset_mig (status) SELECT 'inactive'", 3000)
+	tt.SeedRows(t, "INSERT INTO enumtoset_mig (status) SELECT 'pending'", 3000)
+
+	m := NewTestRunner(t, "enumtoset_mig",
+		"MODIFY COLUMN status SET('active', 'inactive', 'pending') NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(true),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		for i := 1; i <= 100; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO enumtoset_mig (status) VALUES ('active')`)
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO enumtoset_mig (status) VALUES ('inactive')`)
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO enumtoset_mig (status) VALUES ('pending')`)
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumtoset_mig SET status = 'pending' WHERE id = %d`, i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE enumtoset_mig SET status = 'inactive' WHERE id = %d`, 3000+i))
+		}
+	}()
+
+	require.NoError(t, m.Run(ctx))
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT column_type FROM information_schema.columns
+		 WHERE table_schema='test' AND table_name='enumtoset_mig' AND column_name='status'`).Scan(&colType))
+	require.Contains(t, colType, "set(")
+
+	// Every row must hold one of the three known element strings. A
+	// failed decode would render as an integer-looking value, or the
+	// empty SET if an ordinal pointed at a missing element.
+	var bad int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM enumtoset_mig
+		 WHERE status NOT IN ('active','inactive','pending')`).Scan(&bad))
+	require.Zero(t, bad)
+}
+
 // TestBufferedMigrationFailsGracefullyWithMinimalRBR verifies that a buffered
 // migration fails gracefully when it receives minimal RBR events from a rogue session.
 func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {

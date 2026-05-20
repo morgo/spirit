@@ -15,10 +15,38 @@ func init() {
 }
 
 // renameCheck validates rename operations in ALTER TABLE statements.
-// Table renames are always blocked. Column renames are allowed for non-PK columns
-// in non-buffered mode, but blocked for PK columns and in buffered mode.
-// Additionally, it blocks dangerous patterns where a rename's old or new name
-// overlaps with an added column name, which could cause data corruption.
+// Table renames are always blocked. Column renames are allowed for
+// non-PK columns in the unbuffered copier path; PK renames and any
+// rename under the buffered copier are blocked. Additionally, it
+// blocks dangerous patterns where a rename's old or new name overlaps
+// with an added column name, which could cause data corruption.
+//
+// Why r.Buffered (the buffered *copier*, not the binlog subscription)
+// still gates column renames:
+//
+// Column renames go through ColumnMapping in every code path, so the
+// straight-line case works. The unsolved edges are in the buffered
+// copier's row-handling around generated/virtual columns:
+//
+//   - The buffered copier reads source rows by the intersected source
+//     column list and writes them to the target by the intersected
+//     target column list (renames applied). For tables with
+//     generated/virtual columns the row image and column lists drift
+//     from a plain CRUD layout in ways the unbuffered INSERT IGNORE
+//     ... SELECT doesn't have to deal with — the source SELECT and the
+//     destination INSERT are no longer "the same shape," and some
+//     rename + generated-column combinations have edge cases we
+//     haven't audited.
+//   - The unbuffered copier sidesteps this because SELECT and INSERT
+//     are wired with the same ColumnMapping at the SQL layer; MySQL
+//     does the column resolution.
+//   - The binlog replay path (always buffered) also uses ColumnMapping
+//     and is independent of this concern — that's why we don't gate on
+//     the subscription mode here.
+//
+// Plan: revisit once buffered-copier row handling has explicit
+// coverage for rename + generated/virtual columns. Tracking issue
+// TODO.
 func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	alterStmt, ok := (*r.Statement.StmtNode).(*ast.AlterTableStmt)
 	if !ok {
@@ -48,8 +76,11 @@ func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 		}
 
 		if spec.Tp == ast.AlterTableRenameColumn {
+			// See function-level comment: gate is about the buffered
+			// *copier*'s row handling for generated/virtual columns,
+			// not about the always-buffered binlog subscription.
 			if r.Buffered {
-				return errors.New("column renames are not supported in buffered mode")
+				return errors.New("column renames are not supported with the buffered copier (--buffered); unaudited edge cases around generated/virtual columns in the buffered row-image path. Rerun without --buffered")
 			}
 			if spec.OldColumnName != nil {
 				if _, isPK := pkColumns[spec.OldColumnName.Name.O]; isPK {
@@ -68,8 +99,10 @@ func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 				oldName := spec.OldColumnName.Name.O
 				newName := spec.NewColumns[0].Name.Name.O
 				if oldName != newName {
+					// See function-level comment: buffered-copier gate
+					// only; the subscription path is fine.
 					if r.Buffered {
-						return errors.New("column renames are not supported in buffered mode")
+						return errors.New("column renames are not supported with the buffered copier (--buffered); unaudited edge cases around generated/virtual columns in the buffered row-image path. Rerun without --buffered")
 					}
 					if _, isPK := pkColumns[oldName]; isPK {
 						return fmt.Errorf("renaming primary key column %q is not supported", oldName)

@@ -28,22 +28,13 @@ func TestEnumSetRemovalCheckEnumToVarchar(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumremoval")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + ENUM→VARCHAR: should fail
+	// ENUM→VARCHAR is supported: processRowsEvent decodes the binlog
+	// ordinal into the element string before the applier sees it.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumremoval MODIFY COLUMN status VARCHAR(255) NOT NULL")[0],
-		Buffered:  true,
 	}
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
-
-	// Unbuffered + ENUM→VARCHAR: should also fail — bufferedMap is now the
-	// binlog replay path for memory-comparable PKs regardless of the copy mode.
-	r.Buffered = false
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
 }
 
 func TestEnumSetRemovalCheckEnumToText(t *testing.T) {
@@ -60,15 +51,12 @@ func TestEnumSetRemovalCheckEnumToText(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumremoval2")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + ENUM→TEXT: should fail
+	// ENUM→TEXT is supported for the same reason as ENUM→VARCHAR.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumremoval2 MODIFY COLUMN status TEXT NOT NULL")[0],
-		Buffered:  true,
 	}
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
 }
 
 func TestEnumSetRemovalCheckEnumToInt(t *testing.T) {
@@ -85,15 +73,16 @@ func TestEnumSetRemovalCheckEnumToInt(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumremoval3")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + ENUM→INT: should fail
+	// ENUM→INT is still rejected: the decoded string would be coerced
+	// to 0, silently losing data.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumremoval3 MODIFY COLUMN status INT NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.ErrorContains(t, err, "ENUM")
+	require.ErrorContains(t, err, "string-typed column")
 }
 
 func TestEnumSetRemovalCheckSetToVarchar(t *testing.T) {
@@ -110,22 +99,13 @@ func TestEnumSetRemovalCheckSetToVarchar(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "setremoval")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + SET→VARCHAR: should fail
+	// SET→VARCHAR is supported: bitmask is decoded to a comma-joined
+	// string of element names before the applier sees it.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE setremoval MODIFY COLUMN flags VARCHAR(255) NOT NULL")[0],
-		Buffered:  true,
 	}
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe SET to non-SET")
-
-	// Unbuffered + SET→VARCHAR: should also fail — bufferedMap is now the
-	// binlog replay path for memory-comparable PKs regardless of the copy mode.
-	r.Buffered = false
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe SET to non-SET")
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
 }
 
 func TestEnumSetRemovalCheckChangeColumn(t *testing.T) {
@@ -142,15 +122,12 @@ func TestEnumSetRemovalCheckChangeColumn(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumremoval_change")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + CHANGE COLUMN ENUM→VARCHAR: should fail
+	// CHANGE COLUMN ENUM→VARCHAR is supported.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumremoval_change CHANGE COLUMN status status VARCHAR(255) NOT NULL")[0],
-		Buffered:  true,
 	}
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to non-ENUM")
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
 }
 
 func TestEnumSetRemovalCheckEnumToEnum(t *testing.T) {
@@ -167,11 +144,10 @@ func TestEnumSetRemovalCheckEnumToEnum(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumremoval_safe")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + ENUM→ENUM (append): should pass (handled by enumReorderCheck, not this check)
+	// ENUM→ENUM (append): handled by enumReorderCheck, not this check.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumremoval_safe MODIFY COLUMN status ENUM('active', 'inactive', 'pending') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
@@ -191,11 +167,10 @@ func TestEnumSetRemovalCheckNonEnumColumn(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumremoval_nochange")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + VARCHAR→TEXT: should pass (not an ENUM/SET removal)
+	// VARCHAR→TEXT: not an ENUM/SET removal.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumremoval_nochange MODIFY COLUMN name TEXT NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
@@ -215,22 +190,45 @@ func TestEnumSetRemovalCheckEnumToSet(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumtoset")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + ENUM→SET: should fail (ordinal vs bitmask mismatch)
+	// ENUM→SET with the same elements is supported: each decoded ENUM
+	// string is a single-element value the SET accepts unchanged.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumtoset MODIFY COLUMN status SET('active', 'inactive') NOT NULL")[0],
-		Buffered:  true,
 	}
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to SET")
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
 
-	// Unbuffered + ENUM→SET: should also fail — bufferedMap is now the
-	// binlog replay path for memory-comparable PKs regardless of the copy mode.
-	r.Buffered = false
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM to SET")
+	// Element reordering or extra new elements is also fine — the
+	// destination SET parses the decoded string against its own element
+	// list, so any superset of the ENUM elements works.
+	r.Statement = statement.MustNew("ALTER TABLE enumtoset MODIFY COLUMN status SET('inactive', 'active', 'pending') NOT NULL")[0]
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
+}
+
+func TestEnumSetRemovalCheckEnumToSetMissingElement(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS enumtoset_missing`)
+	testutils.RunSQL(t, `CREATE TABLE enumtoset_missing (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending') NOT NULL
+	)`)
+
+	tbl := table.NewTableInfo(db, "test", "enumtoset_missing")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	// The new SET drops 'pending'. We allow the check to pass — if
+	// 'pending' rows actually exist they land as the empty set and the
+	// post-cutover checksum will reject; if no row used 'pending', the
+	// migration succeeds. Rejecting at preflight would block legitimate
+	// schema cleanups that drop defined-but-unused ENUM values.
+	r := Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumtoset_missing MODIFY COLUMN status SET('active', 'inactive') NOT NULL")[0],
+	}
+	require.NoError(t, enumSetRemovalCheck(t.Context(), r, slog.Default()))
 }
 
 func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
@@ -247,19 +245,12 @@ func TestEnumSetRemovalCheckSetToEnum(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "settoenum")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + SET→ENUM: should fail (bitmask vs ordinal mismatch)
+	// SET→ENUM is rejected: SET cells can hold multiple elements that
+	// ENUM cannot represent.
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE settoenum MODIFY COLUMN flags ENUM('read', 'write') NOT NULL")[0],
-		Buffered:  true,
 	}
-	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe SET to ENUM")
-
-	// Unbuffered + SET→ENUM: should also fail — bufferedMap is now the
-	// binlog replay path for memory-comparable PKs regardless of the copy mode.
-	r.Buffered = false
 	err = enumSetRemovalCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe SET to ENUM")
