@@ -258,9 +258,18 @@ It is recommended that you use Spirit in combination with either parallel replic
 
 The replication throttler only affects the copy-rows operation, and does not apply to changes which arrive via the replication client. This is intentional, as if replication changes can not be applied fast enough the migration will never be able to complete. On a busy system (with single-threaded or insufficiently configured parallel replication) it is possible that the changes from the replication applier may be sufficiently high that they cause the copier process to perpetually be throttled. In this case, you may have to do something more drastic for the migration to complete. In approximate order of preference, you may consider:
 
-- Adjusting the configuration of your replicas to increase the parallel replication threads
+- Adjusting the configuration of your replicas to increase the parallel replication threads (see [Tuning parallel replication for Spirit workloads](#tuning-parallel-replication-for-spirit-workloads) below)
 - Temporarily disabling durability on the replica (i.e. `SET GLOBAL sync_binlog=0` and `SET GLOBAL innodb_flush_log_at_trx_commit=0`)
 - Increasing the `replica-max-lag` or disabling replica lag checking temporarily
+
+#### Tuning parallel replication for Spirit workloads
+
+Spirit's row-copier copies each chunk inside a single `INSERT IGNORE INTO _<table>_new (...) SELECT ... FROM <table> WHERE <pk range>` transaction (default up to 4 in flight, each sized to a `--target-chunk-time` of 500ms). Each one lands in the binlog as a single multi-row transaction — that is what creates the head-of-line-blocking opportunity under `COMMIT_ORDER`: the replica's parallel workers serialize behind that transaction, so a busy table with many indexes can drive the replica lag into the multi-hour range even when the source has spare CPU. Two MySQL 8.0+ replication settings make a large difference for this workload:
+
+- **`binlog_transaction_dependency_tracking = WRITESET`** on the **source** — typically 3–10× replica apply boost. The replica coordinator can schedule non-conflicting transactions in parallel regardless of source commit order. This is the single largest unlock for Spirit workloads on busy systems.
+- **`replica_preserve_commit_order = OFF`** on the **replica** — an additional 1.3–2× on top of `WRITESET`. **Only safe if no downstream consumer of this replica's binlog depends on source commit order** (CDC pipelines, chained replicas, Datawarehouse consumers that tail this replica rather than the source). Verify tolerance before flipping when `log_replica_updates = ON`.
+
+On managed engines such as AWS Aurora, many of these parameters are static (`pending-reboot`) at the parameter-group level — `SET GLOBAL` works at runtime, but parameter-group changes require an instance reboot to persist.
 
 ### skip-drop-after-cutover
 
