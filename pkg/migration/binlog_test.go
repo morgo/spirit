@@ -12,6 +12,7 @@ import (
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -126,7 +127,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	m := NewTestRunner(t, "e2et1", "ENGINE=InnoDB", WithBuffered(false))
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
-	require.Equal(t, status.Progress{CurrentState: status.Initial, Summary: "", Tables: nil}, m.Progress())
+	require.Equal(t, status.Progress{CurrentState: status.Initial, Summary: "", Tables: nil, Throttler: &throttler.Noop{}}, m.Progress())
 
 	// Usually we would call m.Run() but we want to step through
 	// the migration process manually.
@@ -163,7 +164,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	require.NotNil(t, chunk)
 	require.Equal(t, "((`id1` < 1001)\n OR (`id1` = 1001 AND `id2` < 1))", chunk.String())
 	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	require.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1000/1200 83.33% copyRows ETA TBD", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1000, RowsTotal: 1200, IsComplete: false}}}, m.Progress())
+	require.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1000/1200 83.33% copyRows ETA TBD", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1000, RowsTotal: 1200, IsComplete: false}}, Throttler: &throttler.Noop{}}, m.Progress())
 
 	// Now insert some data.
 	testutils.RunSQL(t, `insert into e2et1 (id1, id2) values (1002, 2)`)
@@ -178,7 +179,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "((`id1` > 1001)\n OR (`id1` = 1001 AND `id2` >= 1))", chunk.String())
 	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk))
-	require.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1201/1200 100.08% copyRows ETA DUE", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1201, RowsTotal: 1200, IsComplete: true}}}, m.Progress())
+	require.Equal(t, status.Progress{CurrentState: status.CopyRows, Summary: "1201/1200 100.08% copyRows ETA DUE", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1201, RowsTotal: 1200, IsComplete: true}}, Throttler: &throttler.Noop{}}, m.Progress())
 
 	// Now insert some data.
 	// This should be picked up by the binlog subscription
@@ -208,7 +209,7 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	m.dbConfig = dbconn.NewDBConfig()
 	require.NoError(t, m.checksum(t.Context()))
 	require.Equal(t, "postChecksum", m.status.Get().String())
-	require.Equal(t, status.Progress{CurrentState: status.PostChecksum, Summary: "Applying Changeset Deltas=0", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1201, RowsTotal: 1200, IsComplete: true}}}, m.Progress())
+	require.Equal(t, status.Progress{CurrentState: status.PostChecksum, Summary: "Applying Changeset Deltas=0", Tables: []status.TableProgress{{TableName: "e2et1", RowsCopied: 1201, RowsTotal: 1200, IsComplete: true}}, Throttler: &throttler.Noop{}}, m.Progress())
 
 	// All done!
 	require.Equal(t, 0, m.db.Stats().InUse) // all connections are returned.
