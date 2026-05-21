@@ -30,3 +30,7 @@ func (t *Noop) BlockWait(ctx context.Context) {
 func (t *Noop) UpdateLag(ctx context.Context) error {
 	return nil
 }
+
+func (t *Noop) String() string {
+	return ""
+}

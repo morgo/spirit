@@ -14,6 +14,13 @@ type Throttler interface {
 	IsThrottled() bool
 	BlockWait(ctx context.Context)
 	UpdateLag(ctx context.Context) error
+
+	// String returns a human-readable description of why the throttler is
+	// currently throttling. It MUST return "" when the throttler is not
+	// currently throttled, so callers can use a non-empty result as a sign
+	// that throttling is active. The returned text is suitable for surfacing
+	// to a UI or log without further formatting.
+	String() string
 }
 
 // NewReplicationThrottler returns a Throttler for MySQL 8.0+ replicas.

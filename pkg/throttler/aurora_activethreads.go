@@ -192,6 +192,14 @@ func (a *ActiveThreads) IsThrottled() bool {
 	return a.isThrottled.Load()
 }
 
+func (a *ActiveThreads) String() string {
+	if !a.isThrottled.Load() {
+		return ""
+	}
+	return fmt.Sprintf("Aurora active threads %d exceed vCPUs %d",
+		a.lastActiveThreads.Load(), a.vCPUs)
+}
+
 // BlockWait blocks until active CPU threads fall to or below vCPUs, or up to
 // 60s. Matches the commit-latency throttler's loop shape so the multi-
 // throttler waits uniformly across signals.

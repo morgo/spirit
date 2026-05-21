@@ -3,6 +3,7 @@ package throttler
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 )
 
@@ -77,6 +78,18 @@ func (m *multiThrottler) BlockWait(ctx context.Context) {
 		}
 	}
 	wg.Wait()
+}
+
+// String joins non-empty child descriptions with "; ". Returns "" when no
+// child throttler is currently throttling.
+func (m *multiThrottler) String() string {
+	var parts []string
+	for _, t := range m.throttlers {
+		if s := t.String(); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // UpdateLag updates lag on all child throttlers.

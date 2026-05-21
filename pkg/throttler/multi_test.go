@@ -67,6 +67,13 @@ func (t *testThrottler) UpdateLag(_ context.Context) error {
 	return t.updateLagErr
 }
 
+func (t *testThrottler) String() string {
+	if t.throttled.Load() {
+		return "test throttler"
+	}
+	return ""
+}
+
 func TestMultiThrottler_Open(t *testing.T) {
 	t1 := &testThrottler{}
 	t2 := &testThrottler{}

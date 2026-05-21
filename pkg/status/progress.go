@@ -1,5 +1,7 @@
 package status
 
+import "github.com/block/spirit/pkg/throttler"
+
 // Progress is returned as a struct because we may add more to it later.
 // It is designed for wrappers (like a GUI) to be able to summarize the
 // current status without parsing log output.
@@ -10,6 +12,15 @@ type Progress struct {
 	// Tables contains per-table progress for multi-table migrations.
 	// For single-table migrations, this will have one entry.
 	Tables []TableProgress
+
+	// Throttler is the active throttler. Always non-nil — when no throttler
+	// has been configured a Noop is supplied so callers can dispatch on it
+	// without nil checks. Use Throttler.IsThrottled() for the boolean state
+	// and Throttler.String() for a human-readable reason (empty when not
+	// throttled). Surfacing the throttler itself (rather than fields cherry-
+	// picked from it) lets callers reach future throttler-specific data
+	// without needing additions to this struct.
+	Throttler throttler.Throttler
 }
 
 // TableProgress tracks progress for a single table in the migration.

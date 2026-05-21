@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -107,6 +108,14 @@ func (l *Replica) BlockWait(ctx context.Context) {
 		}
 	}
 	l.logger.Warn("lag monitor timed out", "lag_ms", atomic.LoadInt64(&l.currentLagInMs), "tolerance", l.lagTolerance)
+}
+
+func (l *Replica) String() string {
+	if !l.IsThrottled() {
+		return ""
+	}
+	return fmt.Sprintf("replica lag %dms exceeds tolerance %s",
+		atomic.LoadInt64(&l.currentLagInMs), l.lagTolerance)
 }
 
 // UpdateLag is a MySQL 8.0+ implementation of lag that is a better approximation than "seconds_behind_source".

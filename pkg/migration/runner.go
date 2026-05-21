@@ -76,9 +76,19 @@ type Runner struct {
 
 	// Used by the test-suite and some post-migration output.
 	// Indicates if certain optimizations applied.
-	usedInstantDDL           bool
-	usedInplaceDDL           bool
+	usedInstantDDL bool
+	usedInplaceDDL bool
+
+	// resumeMu protects usedResumeFromCheckpoint and resumeErr, which are
+	// written from setup() (running on the Run() goroutine) and may be read
+	// concurrently via the exported UsedResumeFromCheckpoint/ResumeError
+	// getters before Run() returns.
+	resumeMu                 sync.RWMutex
 	usedResumeFromCheckpoint bool
+	// resumeErr captures the error from a failed resumeFromCheckpoint attempt.
+	// It is set only when resume was attempted and failed (causing fallback to a
+	// fresh migration); it remains nil when resume succeeded or was not attempted.
+	resumeErr error
 
 	// Attached logger
 	logger     *slog.Logger
@@ -121,6 +131,7 @@ func NewRunner(m *Migration) (*Runner, error) {
 		logger:      slog.Default(),
 		metricsSink: &metrics.NoopSink{},
 		changes:     changes,
+		throttler:   &throttler.Noop{},
 	}
 	for _, change := range changes {
 		change.runner = runner // link back.
@@ -134,6 +145,37 @@ func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 
 func (r *Runner) SetLogger(logger *slog.Logger) {
 	r.logger = logger
+}
+
+// UsedResumeFromCheckpoint reports whether this migration resumed from an
+// existing checkpoint rather than starting fresh.
+func (r *Runner) UsedResumeFromCheckpoint() bool {
+	r.resumeMu.RLock()
+	defer r.resumeMu.RUnlock()
+	return r.usedResumeFromCheckpoint
+}
+
+// ResumeError returns the error from a failed resume-from-checkpoint attempt
+// that fell back to a fresh migration. Returns nil if resume succeeded or was
+// not attempted. The typed errors in the status package (ErrMismatchedAlter,
+// ErrBinlogNotFound, ErrCheckpointTooOld, ErrCheckpointCollision) are
+// preserved and can be matched with errors.Is.
+func (r *Runner) ResumeError() error {
+	r.resumeMu.RLock()
+	defer r.resumeMu.RUnlock()
+	return r.resumeErr
+}
+
+func (r *Runner) markResumed() {
+	r.resumeMu.Lock()
+	r.usedResumeFromCheckpoint = true
+	r.resumeMu.Unlock()
+}
+
+func (r *Runner) setResumeErr(err error) {
+	r.resumeMu.Lock()
+	r.resumeErr = err
+	r.resumeMu.Unlock()
 }
 
 // attemptMySQLDDL tries to perform the DDL using MySQL's built-in
@@ -817,6 +859,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		// checkpoint, or truncation collision all mean the checkpoint can't be
 		// used. Spirit logs the reason and falls back to a fresh migration so
 		// it always makes forward progress.
+		r.setResumeErr(err)
 		r.logger.Info("could not resume from checkpoint",
 			"reason", err,
 		) // explain why it failed.
@@ -963,6 +1006,7 @@ func (r *Runner) Progress() status.Progress {
 		CurrentState: r.status.Get(),
 		Summary:      summary,
 		Tables:       tables,
+		Throttler:    r.throttler,
 	}
 }
 
@@ -1153,7 +1197,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		"checksum-watermark", checksumWatermark,
 		"position", binlogPosition,
 	)
-	r.usedResumeFromCheckpoint = true
+	r.markResumed()
 	return nil
 }
 

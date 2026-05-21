@@ -82,7 +82,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	// Start a new migration with the same parameters. Let it complete.
 	m2 := NewTestRunner(t, "bigintpk", alterSQL, WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint)
+	require.True(t, m2.UsedResumeFromCheckpoint())
 	require.NoError(t, m2.Close())
 }
 
@@ -310,7 +310,7 @@ func TestCheckpointRestore(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, r2.Run(t.Context()))
-	require.True(t, r2.usedResumeFromCheckpoint)
+	require.True(t, r2.UsedResumeFromCheckpoint())
 	require.NoError(t, r2.Close())
 }
 
@@ -346,7 +346,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	// Resume with a fresh runner and confirm it picked up from the checkpoint.
 	m2 := NewTestRunner(t, "binarypk", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint) // managed to resume.
+	require.True(t, m2.UsedResumeFromCheckpoint()) // managed to resume.
 	require.NoError(t, m2.Close())
 }
 
@@ -410,7 +410,7 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 		WithTargetChunkTime(100*time.Millisecond))
 	require.NoError(t, r2.Run(t.Context()))
 	defer utils.CloseAndLog(r2)
-	require.True(t, r2.usedResumeFromCheckpoint)
+	require.True(t, r2.UsedResumeFromCheckpoint())
 }
 
 func TestCheckpointDifferentRestoreOptions(t *testing.T) {
@@ -508,7 +508,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// Start a new migration with the same parameters. Let it complete.
 	m2 := NewTestRunner(t, "chkpresumetest", alterSQL, WithThreads(4))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint)
+	require.True(t, m2.UsedResumeFromCheckpoint())
 	require.NoError(t, m2.Close())
 }
 
@@ -563,7 +563,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 
 	m2 := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint)
+	require.True(t, m2.UsedResumeFromCheckpoint())
 	require.NoError(t, m2.Close())
 }
 
@@ -815,7 +815,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	m.Cancel()
 	err = <-c
 	require.Error(t, err)
-	require.True(t, m.usedResumeFromCheckpoint)
+	require.True(t, m.UsedResumeFromCheckpoint())
 	require.NoError(t, m.Close())
 }
 
@@ -871,7 +871,7 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	// Resume falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.False(t, m2.usedResumeFromCheckpoint) // Should NOT have resumed because binlog was invalid
+	require.False(t, m2.UsedResumeFromCheckpoint()) // Should NOT have resumed because binlog was invalid
 	require.NoError(t, m2.Close())
 }
 
@@ -911,7 +911,7 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	// Resume falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "chkpttooold", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.False(t, m2.usedResumeFromCheckpoint) // Should NOT have resumed because checkpoint was too old
+	require.False(t, m2.UsedResumeFromCheckpoint()) // Should NOT have resumed because checkpoint was too old
 	require.NoError(t, m2.Close())
 }
 
@@ -947,7 +947,7 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	// The migration should resume from checkpoint successfully.
 	m2 := NewTestRunner(t, "chkptnotold", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.True(t, m2.usedResumeFromCheckpoint) // Should have resumed because checkpoint is fresh
+	require.True(t, m2.UsedResumeFromCheckpoint()) // Should have resumed because checkpoint is fresh
 	require.NoError(t, m2.Close())
 }
 
@@ -987,7 +987,7 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 	// Resume must refuse and fall back to a fresh migration.
 	m2 := NewTestRunner(t, "chkptmismatch", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
-	require.False(t, m2.usedResumeFromCheckpoint,
+	require.False(t, m2.UsedResumeFromCheckpoint(),
 		"resume should be skipped when checkpoint records a different original table name")
 	require.NoError(t, m2.Close())
 }

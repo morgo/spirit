@@ -28,12 +28,12 @@ When a new Runner starts (`Runner.Run()` → `setup()`), it always attempts `res
 
 1. **Check `_<table>_new` exists** — if the shadow table is gone, there's nothing to resume.
 2. **Read checkpoint table** — fetch the saved watermarks, position, statement, and `original_table_name`.
-3. **Validate DDL statement matches** — the checkpoint must be for the same alter. On a mismatch, Spirit discards the checkpoint and starts fresh.
+3. **Validate DDL statement matches** — the checkpoint must be for the same alter. On a mismatch, Spirit discards the checkpoint and starts fresh. The error reason is surfaced via `Runner.ResumeError()`.
 4. **Validate `original_table_name` matches** (single-table mode) — guards against the rare collision where two long table names truncate to the same checkpoint table name. A mismatch causes Spirit to discard the checkpoint and start fresh.
 5. **Set up copier, checker, and change source** — create the change source and add subscriptions for each table.
 6. **Resume streaming from the saved position** — `replClient.StartFromPosition(ctx, position)` primes the source's internal position and begins streaming. The source validates the position is still resumable; if it isn't (e.g. the MySQL binlog file has been purged), `change.ErrPositionNotFound` is returned and surfaces as `status.ErrBinlogNotFound`, causing Spirit to fall back to `newMigration()`.
 
-If any step fails, Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch. This means resume is best-effort — Spirit will always make forward progress even if the checkpoint is unusable.
+If any step fails, Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch. This means resume is best-effort — Spirit will always make forward progress even if the checkpoint is unusable. The error returned by the failed `resumeFromCheckpoint()` is preserved on the runner and accessible via `Runner.ResumeError()`.
 
 ## Background: how MySQL binary logs work
 
@@ -47,11 +47,12 @@ MySQL automatically deletes old binlog files based on `binlog_expire_logs_second
 
 One reason resume can fail is **binlog expiry**. If the checkpoint references a binlog file that has been purged, Spirit cannot resume because changes in the gap would be lost.
 
-The change source is responsible for detecting this when resume begins. The binlog implementation validates the position inside `StartFromPosition` (against `SHOW BINARY LOGS`) and returns `change.ErrPositionNotFound` if the file is gone; the migration runner translates that to `status.ErrBinlogNotFound`. Spirit logs the reason and falls back to `newMigration()`, restarting the copy from scratch. All checkpoint progress is lost.
+The change source is responsible for detecting this when resume begins. The binlog implementation validates the position inside `StartFromPosition` (against `SHOW BINARY LOGS`) and returns `change.ErrPositionNotFound` if the file is gone; the migration runner translates that to `status.ErrBinlogNotFound`. Spirit logs the reason and falls back to `newMigration()`, restarting the copy from scratch. All checkpoint progress is lost. The error is preserved on `Runner.ResumeError()` so callers can detect what happened.
 
 The tradeoff of falling back to `newMigration()` is that all copy progress is lost. For a large table this could mean hours of wasted work. To avoid this:
 
 - **Keep binlog retention longer than your longest expected migration pause.** If you expect to pause migrations for up to a week, make sure `binlog_expire_logs_seconds` is set to at least 7 days. The MySQL 8.0 default is 30 days (`2592000`), which is usually sufficient.
+- **Inspect `Runner.ResumeError()` after `Run()`** if you want to alert on lost progress. The typed errors (`status.ErrMismatchedAlter`, `status.ErrBinlogNotFound`, `status.ErrCheckpointTooOld`, `status.ErrCheckpointCollision`) work with `errors.Is()` for programmatic handling.
 - **Be aware of your binlog retention window.** If Spirit is paused longer than the retention period, the checkpoint's binlog file will be purged and resume will fail. Some managed MySQL services disable retention by default.
 
 ## Cross-version compatibility
@@ -62,7 +63,7 @@ Practical implications:
 
 - **Upgrading Spirit mid-migration** (older binary → newer binary). The newer binary's `Scan` expects a different number of columns than the on-disk checkpoint provides, so the read fails.
 - **Rolling back Spirit mid-migration** (newer binary → older binary). Same failure mode in reverse.
-- **Effect:** the read returns a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error. Spirit logs the error and falls through to `newMigration()`. The copy restarts from scratch and all checkpoint progress is lost.
+- **Effect:** the read returns a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error. Spirit logs the error and falls through to `newMigration()`. The copy restarts from scratch and all checkpoint progress is lost; the error is preserved on `Runner.ResumeError()`.
 
 Operational guidance:
 

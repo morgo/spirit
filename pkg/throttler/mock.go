@@ -38,3 +38,7 @@ func (t *Mock) BlockWait(ctx context.Context) {
 func (t *Mock) UpdateLag(ctx context.Context) error {
 	return nil
 }
+
+func (t *Mock) String() string {
+	return "mock throttler (always throttled)"
+}

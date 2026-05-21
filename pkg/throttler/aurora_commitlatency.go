@@ -166,6 +166,14 @@ func (c *CommitLatency) BlockWait(ctx context.Context) {
 		"threshold", c.threshold)
 }
 
+func (c *CommitLatency) String() string {
+	if !c.isThrottled.Load() {
+		return ""
+	}
+	return fmt.Sprintf("Aurora commit latency %s exceeds threshold %s",
+		time.Duration(c.avgLatencyUs.Load())*time.Microsecond, c.threshold)
+}
+
 // UpdateLag samples the Aurora commit counters and updates the throttled
 // state. Exported (and named to match the Throttler interface) so multi-
 // throttler can drive an immediate refresh. Errors here are unexpected

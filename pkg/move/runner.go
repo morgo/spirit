@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -75,10 +76,27 @@ type Runner struct {
 	checker           checksum.Checker
 	checksumWatermark string
 
+	// throttler is currently always a Noop in the move path (cross-server
+	// copy doesn't have a replica or commit-latency throttler wired in yet),
+	// but is surfaced on the runner so status.Progress can expose it
+	// uniformly with the migration runner.
+	throttler throttler.Throttler
+
 	// Track some key statistics.
-	startTime                time.Time
-	sentinelWaitStartTime    time.Time
+	startTime             time.Time
+	sentinelWaitStartTime time.Time
+
+	// resumeMu protects usedResumeFromCheckpoint and resumeErr, which are
+	// written from setup() (running on the Run() goroutine) and may be read
+	// concurrently via the exported UsedResumeFromCheckpoint/ResumeError
+	// getters before Run() returns.
+	resumeMu                 sync.RWMutex
 	usedResumeFromCheckpoint bool
+	// resumeErr captures the error from a failed resumeFromCheckpoint attempt.
+	// In the move path a failed resume is fatal (returned up from setup), so
+	// this is only observable in tests or via late inspection before the
+	// runner is closed.
+	resumeErr error
 
 	cutoverFunc func(ctx context.Context) error
 
@@ -96,10 +114,40 @@ var _ status.Task = (*Runner)(nil)
 
 func NewRunner(m *Move) (*Runner, error) {
 	r := &Runner{
-		move:   m,
-		logger: slog.Default(),
+		move:      m,
+		logger:    slog.Default(),
+		throttler: &throttler.Noop{},
 	}
 	return r, nil
+}
+
+// UsedResumeFromCheckpoint reports whether this move resumed from an existing
+// checkpoint rather than starting fresh.
+func (r *Runner) UsedResumeFromCheckpoint() bool {
+	r.resumeMu.RLock()
+	defer r.resumeMu.RUnlock()
+	return r.usedResumeFromCheckpoint
+}
+
+// ResumeError returns the error from a failed resume-from-checkpoint attempt.
+// Move treats resume failure as fatal (returned up from setup), so a non-nil
+// result here implies setup itself returned an error.
+func (r *Runner) ResumeError() error {
+	r.resumeMu.RLock()
+	defer r.resumeMu.RUnlock()
+	return r.resumeErr
+}
+
+func (r *Runner) markResumed() {
+	r.resumeMu.Lock()
+	r.usedResumeFromCheckpoint = true
+	r.resumeMu.Unlock()
+}
+
+func (r *Runner) setResumeErr(err error) {
+	r.resumeMu.Lock()
+	r.resumeErr = err
+	r.resumeMu.Unlock()
 }
 
 func (r *Runner) Close() error {
@@ -367,7 +415,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	r.checkpointTable = table.NewTableInfo(src0.db, src0.config.DBName, checkpointTableName)
-	r.usedResumeFromCheckpoint = true
+	r.markResumed()
 	return nil
 }
 
@@ -460,8 +508,9 @@ func (r *Runner) setup(ctx context.Context) error {
 			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%w, resume_error=%w", err, resumeErr)
 		}
 		// We pass the pre-check for resume, so attempt it
-		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", err)
+		if resumeErr := r.resumeFromCheckpoint(ctx); resumeErr != nil {
+			r.setResumeErr(resumeErr)
+			return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", resumeErr)
 		}
 		r.logger.Info("Successfully resumed move from existing checkpoint")
 		return nil
@@ -1104,6 +1153,7 @@ func (r *Runner) Progress() status.Progress {
 	return status.Progress{
 		CurrentState: r.status.Get(),
 		Summary:      summary,
+		Throttler:    r.throttler,
 	}
 }
 
