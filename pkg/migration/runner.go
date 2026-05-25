@@ -702,14 +702,19 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	}
 
 	// Aurora throttlers — assembled by the shared throttler.AuroraSetup
-	// helper so the move runner can use the same wiring. Build returns a
-	// zero result on non-Aurora sources (and when MaxCommitLatency is 0),
-	// which lets us treat the helper as unconditional here.
+	// helper so the move runner can use the same wiring. The two Aurora
+	// throttlers (commit-latency, active-threads) have independent gates:
+	// setting MaxCommitLatency=0 disables only commit-latency, leaving
+	// active-threads enabled when Aurora is detected and the user has
+	// SELECT on performance_schema.threads + events_waits_current. Build
+	// returns a zero result on non-Aurora sources so this call is safe
+	// to make unconditionally.
 	//
 	// OpenMonitor is invoked lazily by the helper only after IsAurora
-	// returns true, so non-Aurora users never pay the connect cost.
-	// MaxOpenConnections=2 lets both Aurora throttlers poll concurrently
-	// without serializing on a single conn, with a touch of headroom.
+	// returns true AND at least one throttler will be built, so non-
+	// Aurora users never pay the connect cost. MaxOpenConnections=2 lets
+	// both Aurora throttlers poll concurrently without serializing on a
+	// single conn, with a touch of headroom.
 	auroraRes, err := throttler.AuroraSetup{
 		Source: r.db,
 		OpenMonitor: func() (*sql.DB, error) {
