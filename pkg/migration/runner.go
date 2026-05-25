@@ -42,10 +42,17 @@ var (
 )
 
 type Runner struct {
-	migration       *Migration
-	db              *sql.DB
-	dbConfig        *dbconn.DBConfig
-	replicas        []*sql.DB
+	migration *Migration
+	db        *sql.DB
+	dbConfig  *dbconn.DBConfig
+	replicas  []*sql.DB
+	// monitorDB is a small dedicated connection pool used by the Aurora
+	// throttlers to poll perf-schema / global-status. Sharing the main
+	// r.db pool let throttler polls queue behind chunk writes, which
+	// delayed the very signal we wanted to react to (and counted the
+	// throttler's own SELECT as an active query thread). nil unless Aurora
+	// throttling is enabled.
+	monitorDB       *sql.DB
 	checkpointTable *table.TableInfo
 
 	// Changes enccapsulates all changes
@@ -670,6 +677,9 @@ func (r *Runner) closeReplicas() error {
 //   - one replication throttler per --replica-dsn (slowest wins)
 //   - a commit-latency throttler if the source is detected as Aurora and
 //     --max-commit-latency is positive (issue #468)
+//   - an active-threads throttler if the source is detected as Aurora and
+//     the migration user can read the relevant perf-schema tables (issue
+//     #831)
 //
 // Multiple replica DSNs can be specified as a comma-separated list.
 // This is common logic shared between resume and new migration paths.
@@ -691,26 +701,33 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 		throttlers = append(throttlers, replicaThrottlers...)
 	}
 
-	if r.migration.MaxCommitLatency > 0 {
-		isAurora, err := throttler.IsAurora(ctx, r.db)
-		if err != nil {
-			// Probe failure (e.g., performance_schema disabled, no privileges)
-			// is non-fatal — Aurora-only feature on a non-Aurora server, or
-			// a perf-schema-locked Aurora user. Log at Debug so operators can
-			// diagnose if they expected throttling, without alerting users
-			// who don't care.
-			r.logger.Debug("Aurora probe failed, skipping commit-latency throttler", "error", err)
-		} else if isAurora {
-			cl, err := throttler.NewCommitLatencyThrottler(r.db, r.migration.MaxCommitLatency, r.logger)
-			if err != nil {
-				_ = r.closeReplicas()
-				return fmt.Errorf("could not create commit-latency throttler: %w", err)
-			}
-			r.logger.Info("Aurora detected, enabling commit-latency throttler",
-				"threshold", r.migration.MaxCommitLatency)
-			throttlers = append(throttlers, cl)
-		}
+	// Aurora throttlers — assembled by the shared throttler.AuroraSetup
+	// helper so the move runner can use the same wiring. Build returns a
+	// zero result on non-Aurora sources (and when MaxCommitLatency is 0),
+	// which lets us treat the helper as unconditional here.
+	//
+	// OpenMonitor is invoked lazily by the helper only after IsAurora
+	// returns true, so non-Aurora users never pay the connect cost.
+	// MaxOpenConnections=2 lets both Aurora throttlers poll concurrently
+	// without serializing on a single conn, with a touch of headroom.
+	auroraRes, err := throttler.AuroraSetup{
+		Source: r.db,
+		OpenMonitor: func() (*sql.DB, error) {
+			monitorCfg := *r.dbConfig // shallow copy — MaxOpenConnections is value-typed
+			monitorCfg.MaxOpenConnections = 2
+			return dbconn.NewWithConnectionType(r.dsn(), &monitorCfg, "monitor database")
+		},
+		CommitLatencyThreshold: r.migration.MaxCommitLatency,
+		Logger:                 r.logger,
+	}.Build(ctx)
+	if err != nil {
+		_ = r.closeReplicas()
+		return err
 	}
+	if auroraRes.MonitorDB != nil {
+		r.monitorDB = auroraRes.MonitorDB
+	}
+	throttlers = append(throttlers, auroraRes.Throttlers...)
 
 	if len(throttlers) == 0 {
 		return nil // use default Noop throttler
@@ -721,8 +738,13 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	if err := r.throttler.Open(ctx); err != nil {
 		// multiThrottler already closes child throttlers on partial Open
 		// failure, but the *sql.DB connections backing replica throttlers
-		// are owned by r.replicas — clean those up too rather than leaving
-		// them dangling until Runner.Close() runs.
+		// are owned by r.replicas (and the Aurora monitor pool is owned
+		// by r.monitorDB) — clean those up too rather than leaving them
+		// dangling until Runner.Close() runs.
+		if r.monitorDB != nil {
+			_ = r.monitorDB.Close()
+			r.monitorDB = nil
+		}
 		_ = r.closeReplicas()
 		return fmt.Errorf("opening throttlers: %w", err)
 	}
@@ -1023,6 +1045,15 @@ func (r *Runner) Close() error {
 		if err := r.throttler.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	// Close the Aurora monitor pool after the throttler so its background
+	// pollers observe Close() / ctx cancellation before we yank the pool
+	// out from under them. No-op when not Aurora.
+	if r.monitorDB != nil {
+		if err := r.monitorDB.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		r.monitorDB = nil
 	}
 	if err := r.closeReplicas(); err != nil {
 		errs = append(errs, err)
