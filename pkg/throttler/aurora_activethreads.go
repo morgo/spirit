@@ -46,12 +46,12 @@ const (
 	WHERE pps.PROCESSLIST_ID IS NOT NULL
 	  AND pps.PROCESSLIST_COMMAND = 'Query'`
 
-	// auroravCPUsQuery reads the vCPU count from @@innodb_purge_threads.
+	// auroraVCPUsQuery reads the vCPU count from @@innodb_purge_threads.
 	// Aurora pins this to the instance vCPU count (see issue #831). On RDS
 	// MySQL the var also exists but its value tracks Aurora-style sizing
 	// only on Aurora — we gate the throttler on IsAurora, so this query is
 	// only ever issued there.
-	auroravCPUsQuery = `SELECT @@innodb_purge_threads`
+	auroraVCPUsQuery = `SELECT @@innodb_purge_threads`
 )
 
 // activeThreadsPollInterval mirrors commitLatencyPollInterval — we want fast
@@ -60,18 +60,18 @@ const (
 var activeThreadsPollInterval = 5 * time.Second
 
 // CanReadActiveThreads probes whether the current user can run the active-
-// threads query. Returns (true, nil) when the query runs cleanly, (false,
-// err) when it fails (typically: SELECT on performance_schema.threads or
+// threads query. Returns nil when the query runs cleanly, a wrapped error
+// when it fails (typically: SELECT on performance_schema.threads or
 // events_waits_current denied). Called from runner setup so we can skip the
 // throttler quietly on accounts without perf-schema read access — IsAurora
 // already proved global_status is readable, but perf-schema table grants are
 // independent.
-func CanReadActiveThreads(ctx context.Context, db *sql.DB) (bool, error) {
+func CanReadActiveThreads(ctx context.Context, db *sql.DB) error {
 	var n int64
 	if err := db.QueryRowContext(ctx, activeThreadsQuery).Scan(&n); err != nil {
-		return false, fmt.Errorf("probing active-threads query (requires SELECT on performance_schema.threads, events_waits_current): %w", err)
+		return fmt.Errorf("probing active-threads query (requires SELECT on performance_schema.threads, events_waits_current): %w", err)
 	}
-	return true, nil
+	return nil
 }
 
 // ActiveThreads throttles when the count of query-running threads (excluding
@@ -109,7 +109,7 @@ func NewActiveThreadsThrottler(db *sql.DB, logger *slog.Logger) (*ActiveThreads,
 }
 
 func (a *ActiveThreads) Open(ctx context.Context) error {
-	if err := a.db.QueryRowContext(ctx, auroravCPUsQuery).Scan(&a.vCPUs); err != nil {
+	if err := a.db.QueryRowContext(ctx, auroraVCPUsQuery).Scan(&a.vCPUs); err != nil {
 		return fmt.Errorf("reading @@innodb_purge_threads for vCPU count: %w", err)
 	}
 	if a.vCPUs <= 0 {

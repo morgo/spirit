@@ -104,9 +104,7 @@ func TestCanReadActiveThreads_LocalMySQL(t *testing.T) {
 
 	// On a stock MySQL with perf_schema enabled the query should run cleanly
 	// even though there's no Aurora-specific data — it's a vanilla perf-
-	// schema join. If this ever returns false on a healthy MySQL we want to
-	// know, since runner.setupThrottler depends on it as the gate.
-	ok, err := CanReadActiveThreads(t.Context(), db)
-	require.NoError(t, err)
-	require.True(t, ok)
+	// schema join. If this ever errors on a healthy MySQL we want to know,
+	// since runner.setupThrottler depends on it as the gate.
+	require.NoError(t, CanReadActiveThreads(t.Context(), db))
 }

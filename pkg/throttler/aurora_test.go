@@ -69,6 +69,25 @@ func TestAuroraSetup_NonAuroraSkipsMonitorEvenWithZeroThreshold(t *testing.T) {
 	require.False(t, openCalled, "OpenMonitor must not be called on a non-Aurora source even with threshold=0")
 }
 
+func TestAuroraSetup_RejectsNilRequiredFields(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	openMon := func() (*sql.DB, error) { return nil, nil }
+	logger := discardLogger()
+
+	// Each required field, exercised in isolation. Without these guards
+	// Build would NPE deep in the probe / OpenMonitor / log calls.
+	_, err = AuroraSetup{Source: nil, OpenMonitor: openMon, Logger: logger}.Build(t.Context())
+	require.ErrorContains(t, err, "Source is required")
+
+	_, err = AuroraSetup{Source: db, OpenMonitor: nil, Logger: logger}.Build(t.Context())
+	require.ErrorContains(t, err, "OpenMonitor is required")
+
+	_, err = AuroraSetup{Source: db, OpenMonitor: openMon, Logger: nil}.Build(t.Context())
+	require.ErrorContains(t, err, "Logger is required")
+}
+
 func TestAuroraSetup_IsAuroraProbeFailureIsNonFatal(t *testing.T) {
 	// Closed DB → IsAurora returns an error (driver/sql.ErrConnDone-style).
 	// The helper logs at Debug and returns a zero result rather than
