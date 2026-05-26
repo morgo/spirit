@@ -1049,8 +1049,13 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 		// while a checksum is in flight, so a permanent failure after the
 		// configured retries would otherwise leave a watermark that lets the
 		// next run skip the broken chunks and cut over on top of corrupt
-		// data. Invalidate the checkpoint here too.
-		r.fatalError()
+		// data. Invalidate the checkpoint here too. As in the migration
+		// runner, we skip the invalidation when the parent context is
+		// cancelled — that case is operator-initiated stop / deadline, and
+		// the partial checksum_watermark is legitimate resume progress.
+		if ctx.Err() == nil {
+			r.fatalError()
+		}
 		return err
 	}
 	return nil
