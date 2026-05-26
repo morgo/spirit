@@ -261,10 +261,21 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	// If you look at standard packages like wordpress, drupal etc.
 	// they all change the SQL mode. If you look at mysqldump, etc.
 	// they all unset the SQL mode just like this.
+	//
+	// NO_AUTO_VALUE_ON_ZERO is the one mode we *do* want enabled. Without it,
+	// MySQL rewrites a literal 0 in an AUTO_INCREMENT column to the next
+	// sequence value on INSERT/REPLACE. That silently corrupts a MODIFY ...
+	// AUTO_INCREMENT migration of a column whose source data already contains
+	// 0: the row at pk=0 ends up at a different pk in the new table, and
+	// neither the copier's INSERT IGNORE SELECT nor the checksum recopy can
+	// undo it (each retry re-allocates a fresh auto-inc value). Setting
+	// NO_AUTO_VALUE_ON_ZERO is a no-op for tables without AUTO_INCREMENT and
+	// for inserts that supply non-zero values, so it is safe to enable for
+	// all connections (copier, checksum recopy, binlog applier).
 	if cfg.Params == nil {
 		cfg.Params = make(map[string]string)
 	}
-	cfg.Params["sql_mode"] = `""`
+	cfg.Params["sql_mode"] = `"NO_AUTO_VALUE_ON_ZERO"`
 	cfg.Params["time_zone"] = `"+00:00"`
 	cfg.Params["innodb_lock_wait_timeout"] = strconv.Itoa(config.InnodbLockWaitTimeout)
 	cfg.Params["lock_wait_timeout"] = strconv.Itoa(config.LockWaitTimeout)
