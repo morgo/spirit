@@ -1267,6 +1267,29 @@ func (r *Runner) checksum(ctx context.Context) error {
 
 	// Run the checksum with internal retry logic
 	if err := r.checker.Run(ctx); err != nil {
+		// On a genuine checksum failure (not parent-context cancellation),
+		// invalidate the checkpoint before returning. The periodic checkpoint
+		// dumper persists the checksum chunker's low-watermark while the
+		// checksum is running, so by the time max retries is exhausted the
+		// stored watermark is past every chunk that has been recopied —
+		// including chunks that "passed" only because the recopy reproduced
+		// the same defect (e.g. an AUTO_INCREMENT rewrite of a literal 0).
+		// If we left the checkpoint in place, the next run would resume
+		// checksumming from that watermark, skip the broken chunk entirely,
+		// pass, and cut over to a corrupt table. fatalError drops the
+		// checkpoint and cancels the run context (idempotent via fatalOnce)
+		// so the supervisor has to start from scratch.
+		//
+		// We do NOT invalidate on parent-context cancellation (operator
+		// Ctrl-C, deadline exceeded, supervisor-initiated stop). In that
+		// case the persisted checksum_watermark is the legitimate progress
+		// of a partial pass and the next run should be free to resume
+		// from it. Distinguishing "checker returned cancellation" from
+		// "real failure" by inspecting ctx.Err() is sufficient — the
+		// checker treats a cancelled parent context as an immediate exit.
+		if ctx.Err() == nil {
+			r.fatalError()
+		}
 		if r.addsUniqueIndex() {
 			// Overwrite the error if we think it's because of a unique index addition
 			return errors.New("checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")

@@ -254,17 +254,30 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	} // end if cfg.TLSConfig == ""
 
 	// Set session variables via Params map.
-	// Setting sql_mode looks ill-advised, but unfortunately it's required.
-	// A user might have set their SQL mode to empty even if the
-	// server has it enabled. After they've inserted data,
-	// we need to be able to produce the same when copying.
-	// If you look at standard packages like wordpress, drupal etc.
-	// they all change the SQL mode. If you look at mysqldump, etc.
-	// they all unset the SQL mode just like this.
+	//
+	// Spirit overrides sql_mode on every connection. This looks ill-advised
+	// at first glance — but the user may have inserted data with a more
+	// permissive mode than the server's current default, and we need to be
+	// able to reproduce that data exactly when copying. Standard tools take
+	// the same approach: WordPress / Drupal change sql_mode, mysqldump
+	// overrides it, etc. Historically Spirit set it to the empty string for
+	// the most permissive copy possible.
+	//
+	// We now set it to exactly one mode: NO_AUTO_VALUE_ON_ZERO. Without
+	// this mode, MySQL rewrites a literal 0 in an AUTO_INCREMENT column to
+	// the next sequence value on INSERT/REPLACE. That silently corrupts a
+	// MODIFY ... AUTO_INCREMENT migration of a column whose source data
+	// already contains 0: the row at pk=0 ends up at a different pk in the
+	// new table, and neither the copier's INSERT IGNORE SELECT nor the
+	// checksum recopy can undo it (each retry re-allocates a fresh
+	// auto-inc value). NO_AUTO_VALUE_ON_ZERO is otherwise a no-op (it
+	// only affects literal-0 inserts into AUTO_INCREMENT columns), so it
+	// is safe to enable on every connection — copier, checksum recopy,
+	// binlog applier.
 	if cfg.Params == nil {
 		cfg.Params = make(map[string]string)
 	}
-	cfg.Params["sql_mode"] = `""`
+	cfg.Params["sql_mode"] = `"NO_AUTO_VALUE_ON_ZERO"`
 	cfg.Params["time_zone"] = `"+00:00"`
 	cfg.Params["innodb_lock_wait_timeout"] = strconv.Itoa(config.InnodbLockWaitTimeout)
 	cfg.Params["lock_wait_timeout"] = strconv.Itoa(config.LockWaitTimeout)

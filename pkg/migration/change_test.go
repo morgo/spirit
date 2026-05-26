@@ -231,6 +231,51 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	require.GreaterOrEqual(t, autoIncValue.Int64, int64(2979719), "Final AUTO_INCREMENT should be >= 2979719")
 }
 
+// TestModifyAddAutoIncrementPreservesZeroPK regresses a silent-data-loss bug
+// where MODIFY-ing a column to add AUTO_INCREMENT caused the row with pk=0
+// to be lost during the copy. MySQL substitutes the next auto-increment value
+// for a literal 0 unless NO_AUTO_VALUE_ON_ZERO is set in sql_mode. Spirit
+// sets sql_mode on the connection to opt in to NO_AUTO_VALUE_ON_ZERO so the
+// copier, checksum recopy, and binlog applier all preserve a literal 0.
+func TestModifyAddAutoIncrementPreservesZeroPK(t *testing.T) {
+	t.Parallel()
+
+	tableName := "test_modify_autoinc_zero"
+	testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_new, _%s_old`, tableName, tableName, tableName))
+	t.Cleanup(func() {
+		testutils.RunSQL(t, fmt.Sprintf(`DROP TABLE IF EXISTS %s, _%s_new, _%s_old`, tableName, tableName, tableName))
+	})
+
+	// Source schema mirrors the production case: gid is BIGINT NOT NULL but
+	// not yet AUTO_INCREMENT, and the table contains a row at gid=0.
+	testutils.RunSQL(t, fmt.Sprintf(`
+		CREATE TABLE %s (
+			gid BIGINT NOT NULL,
+			groupname VARCHAR(255) NOT NULL,
+			PRIMARY KEY (gid)
+		) ENGINE=InnoDB`, tableName))
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (gid, groupname) VALUES (0, 'zero'), (1, 'one'), (2, 'two')`, tableName))
+
+	r := NewTestRunner(t, tableName, "MODIFY gid BIGINT NOT NULL AUTO_INCREMENT")
+	defer utils.CloseAndLog(r)
+	require.NoError(t, r.Run(t.Context()))
+
+	testDB, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(testDB)
+
+	var ids []int64
+	rows, err := testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT gid FROM %s ORDER BY gid", tableName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.Equal(t, []int64{0, 1, 2}, ids, "row with gid=0 must survive the MODIFY ... AUTO_INCREMENT migration")
+}
+
 func TestOldTableNameTruncation(t *testing.T) {
 	t.Parallel()
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
