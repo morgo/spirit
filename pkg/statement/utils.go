@@ -82,10 +82,11 @@ func ptrEqual[T comparable](a, b *T) bool {
 // getPreviousColumn returns the name of the column directly before
 // `name` in the given slice, or "" if `name` is the first column or
 // not found. Used by diffColumns to decide whether an ADD COLUMN needs
-// an AFTER clause.
+// an AFTER clause. Matches `name` case-insensitively, since MySQL
+// column identifiers are case-insensitive.
 func getPreviousColumn(columns []Column, name string) string {
 	for i, col := range columns {
-		if col.Name == name {
+		if strings.EqualFold(col.Name, name) {
 			if i == 0 {
 				return ""
 			}
@@ -93,6 +94,22 @@ func getPreviousColumn(columns []Column, name string) string {
 		}
 	}
 	return ""
+}
+
+// equalFoldStrings reports whether two string slices are equal under
+// case-insensitive comparison, element-by-element. Used for comparing
+// lists of identifiers (column names, index column references) where
+// MySQL treats case differences as semantically identical.
+func equalFoldStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // needsQuotes decides whether a column DEFAULT value needs to be wrapped
