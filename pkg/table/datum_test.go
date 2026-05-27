@@ -340,6 +340,49 @@ func TestNewDatumFromValue(t *testing.T) {
 	d, err = NewDatumFromValue("test", "CUSTOM_TYPE")
 	require.NoError(t, err)
 	require.Equal(t, "\"test\"", d.String())
+
+	// BIT(N) values: emitted as bare numeric literals so MySQL coerces them
+	// to bit patterns, not as quoted strings (which MySQL would interpret
+	// byte-by-byte as bits). The Go MySQL driver returns BIT as a raw
+	// big-endian byte slice; the binlog reader returns int64. Both must
+	// land on the same numeric literal.
+	//
+	// Driver path: []byte → uint64 (big-endian).
+	d, err = NewDatumFromValue([]byte{0x01}, "BIT(1)")
+	require.NoError(t, err)
+	require.Equal(t, "1", d.String())
+	d, err = NewDatumFromValue([]byte{0x35}, "BIT(8)")
+	require.NoError(t, err)
+	require.Equal(t, "53", d.String())
+	d, err = NewDatumFromValue([]byte{0x01, 0x02}, "BIT(16)")
+	require.NoError(t, err)
+	require.Equal(t, "258", d.String())
+	// BIT(64) with top bit set: bytes round-trip through uint64 without
+	// the sign-extension that an int64 path would introduce.
+	d, err = NewDatumFromValue(
+		[]byte{0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, "BIT(64)")
+	require.NoError(t, err)
+	require.Equal(t, "9223372036854775808", d.String())
+
+	// Binlog path: int64 from go-mysql's decodeBit. Positive values are
+	// trivial; negative int64 (BIT(64) high bit set) must reinterpret bits
+	// as uint64 to round-trip correctly.
+	d, err = NewDatumFromValue(int64(5), "BIT(8)")
+	require.NoError(t, err)
+	require.Equal(t, "5", d.String())
+	d, err = NewDatumFromValue(int64(-1), "BIT(64)")
+	require.NoError(t, err)
+	require.Equal(t, "18446744073709551615", d.String())
+
+	// NULL BIT survives.
+	d, err = NewDatumFromValue(nil, "BIT(8)")
+	require.NoError(t, err)
+	require.Equal(t, "NULL", d.String())
+
+	// Case-insensitive on the type spelling.
+	d, err = NewDatumFromValue([]byte{0x07}, "bit(3)")
+	require.NoError(t, err)
+	require.Equal(t, "7", d.String())
 }
 
 // TestNewDatumFromValueBinaryString tests that binary strings are hex-encoded
