@@ -883,6 +883,29 @@ func TestDiff(t *testing.T) {
 			) ENGINE InnoDB DEFAULT CHARSET utf8mb4`,
 			expected: "ALTER TABLE `t1` ADD COLUMN `extra` json NOT NULL DEFAULT (json_object())",
 		},
+		// MySQL column identifiers are case-insensitive — `id` and `ID`
+		// refer to the same column. A diff between two CREATE TABLE
+		// statements that differ only in column-name case should produce
+		// no ALTER. The PK case is the one gh-ost's `modify-change-case-pk`
+		// localtest exercises.
+		{
+			name:     "PrimaryKeyColumnCaseOnly",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c1 INT NOT NULL DEFAULT 0)",
+			target:   "CREATE TABLE t1 (ID INT PRIMARY KEY, c1 INT NOT NULL DEFAULT 0)",
+			expected: "",
+		},
+		{
+			name:     "NonPrimaryKeyColumnCaseOnly",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c2 INT NOT NULL DEFAULT 0)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, C2 INT NOT NULL DEFAULT 0)",
+			expected: "",
+		},
+		{
+			name:     "CompoundPrimaryKeyColumnCaseOnly",
+			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+			target:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (A, B))",
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
