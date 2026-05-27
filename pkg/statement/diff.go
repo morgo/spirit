@@ -211,8 +211,12 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			// MODIFY existing column if:
 			// 1. Column definition changed (and not just PK-related changes)
 			// 2. Column needs explicit positioning
+			// needsExplicitPosition is keyed by lowercased column name, so
+			// look up with the same normalization to avoid missing a
+			// position-only change when the target's spelling is in mixed
+			// or upper case.
 			needsModify := (!ct.columnsEqualWithContext(sourceCol, &targetCol, target) && !pkOnlyChange && !pkDroppedNullabilityChange) ||
-				needsExplicitPosition[targetCol.Name]
+				needsExplicitPosition[strings.ToLower(targetCol.Name)]
 
 			if needsModify {
 				clause := fmt.Sprintf("MODIFY COLUMN %s", formatColumnDefinition(&targetCol))
