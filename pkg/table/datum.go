@@ -27,6 +27,16 @@ type Datum struct {
 	forceHexEncode bool    // when true, always hex-encode the value in String()
 }
 
+// isBITType reports whether the given MySQL column type is a BIT(N) type.
+// Used to gate the BIT-specific []byte → uint64 decoding in NewDatumFromValue.
+func isBITType(mysqlTp string) bool {
+	baseType := strings.ToUpper(removeWidth(mysqlTp))
+	if before, _, found := strings.Cut(baseType, "("); found {
+		baseType = before
+	}
+	return baseType == "BIT"
+}
+
 func mySQLTypeToDatumTp(mysqlTp string) datumTp {
 	// Normalize to uppercase and remove width specifications
 	normalized := strings.ToUpper(removeWidth(mysqlTp))
@@ -41,6 +51,14 @@ func mySQLTypeToDatumTp(mysqlTp string) datumTp {
 	case "INT", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT":
 		return signedType
 	case "INT UNSIGNED", "BIGINT UNSIGNED", "SMALLINT UNSIGNED", "TINYINT UNSIGNED", "MEDIUMINT UNSIGNED":
+		return unsignedType
+	case "BIT":
+		// BIT(N) arrives from the binlog as int64 (go-mysql's decodeBit).
+		// Classifying as unsignedType makes NewDatum reinterpret the int64
+		// bit pattern as uint64 — preserving BIT(64) values with the high
+		// bit set — and Datum.String() emits a bare numeric literal that
+		// MySQL coerces to a bit pattern, rather than a quoted string
+		// (which MySQL would otherwise interpret byte-by-byte as bits).
 		return unsignedType
 	case "FLOAT", "DOUBLE", "DECIMAL":
 		// Treat floats as unknownType so they get formatted as-is
@@ -170,6 +188,20 @@ func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 	}
 
 	tp := mySQLTypeToDatumTp(mysqlType)
+
+	// BIT(N) is classified as unsignedType, but its wire form depends on
+	// the source: the Go MySQL driver returns []byte (big-endian bit
+	// pattern); the binlog reader returns int64. Decode []byte to uint64
+	// here so the generic unsignedType path below sees a numeric value
+	// and doesn't try to ParseUint on raw bit bytes (which would fail on
+	// any byte that isn't an ASCII decimal digit).
+	if b, ok := value.([]byte); ok && isBITType(mysqlType) {
+		var u uint64
+		for _, by := range b {
+			u = (u << 8) | uint64(by)
+		}
+		value = u
+	}
 
 	// Convert []byte to string for non-numeric types
 	if b, ok := value.([]byte); ok {

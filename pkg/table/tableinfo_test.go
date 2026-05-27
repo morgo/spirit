@@ -212,6 +212,31 @@ func TestDiscoveryBalancesTable(t *testing.T) {
 	require.Equal(t, "0", t1.maxValue.String())
 }
 
+// TestPrimaryKeyIsMemoryComparableRejectsBIT regresses a gap exposed when
+// BIT was reclassified from unknownType to unsignedType in
+// mySQLTypeToDatumTp: the change makes BIT-keyed tables pass the original
+// unknownType check, but the chunker's setMinMax path returns BIT as raw
+// big-endian bytes that newDatumFromMySQL can't parse as decimal. Until
+// the min/max read path is BIT-aware, BIT primary keys must be rejected
+// upfront with ErrUnsupportedPKType.
+func TestPrimaryKeyIsMemoryComparableRejectsBIT(t *testing.T) {
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS bitpk`)
+	testutils.RunSQL(t, `CREATE TABLE bitpk (b BIT(8) NOT NULL, v INT NOT NULL, PRIMARY KEY (b))`)
+	testutils.RunSQL(t, `INSERT INTO bitpk (b, v) VALUES (b'00000001', 1), (b'00000010', 2)`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	t1 := NewTableInfo(db, "test", "bitpk")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.ErrorIs(t, t1.PrimaryKeyIsMemoryComparable(), ErrUnsupportedPKType)
+}
+
 func TestDiscoveryCompositeNonComparable(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS compnoncomparable`)
 	table := `CREATE TABLE compnoncomparable (
