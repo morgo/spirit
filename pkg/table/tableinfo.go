@@ -310,6 +310,19 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 	if slices.Contains(t.keyDatums, unknownType) {
 		return ErrUnsupportedPKType
 	}
+	// BIT is classified as unsignedType so the binlog applier emits the
+	// value as a numeric literal (see mySQLTypeToDatumTp), but BIT primary
+	// keys are not supported end-to-end: setMinMax issues a SELECT that
+	// returns BIT as raw big-endian bytes, and the chunker's
+	// newDatumFromMySQL path parses those as decimal strings — which
+	// fails or produces wrong bounds. Until the min/max read path knows
+	// how to decode BIT bytes, reject BIT PKs upfront with the same error
+	// they returned before BIT got its own datumTp.
+	for _, mysqlTp := range t.keyColumnsMySQLTp {
+		if isBITType(mysqlTp) {
+			return ErrUnsupportedPKType
+		}
+	}
 	return nil
 }
 
@@ -320,6 +333,15 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 func (t *TableInfo) setMinMax(ctx context.Context) error {
 	if t.keyDatums[0] == binaryType {
 		return nil // we don't min/max binary types for now.
+	}
+	// BIT is classified as unsignedType so the applier emits the value as
+	// a numeric literal, but `SELECT min(bit_col)` returns raw big-endian
+	// bytes that newDatumFromMySQL can't parse as decimal. BIT primary
+	// keys are rejected upfront by PrimaryKeyIsMemoryComparable; skip
+	// here so SetInfo can complete and the rejection can fire on a
+	// well-formed TableInfo.
+	if isBITType(t.keyColumnsMySQLTp[0]) {
+		return nil
 	}
 	quotedKey := QuoteColumns(t.KeyColumns[:1])
 	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", quotedKey, quotedKey, t.QuotedTableName)
