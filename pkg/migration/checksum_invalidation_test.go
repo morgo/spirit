@@ -18,20 +18,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeChecker is a checksum.Checker stand-in whose Run and DifferencesFound
+// mockChecker is a checksum.Checker stand-in whose Run and DifferencesFound
 // are scripted by the test. It lets a test drive (*Runner).checksum and
 // (*Runner).DumpCheckpoint without standing up a real checker / source-target
 // divergence.
-type fakeChecker struct {
+type mockChecker struct {
 	runErr           error
 	differencesFound atomic.Uint64
 }
 
-func (f *fakeChecker) Run(ctx context.Context) error { return f.runErr }
-func (f *fakeChecker) GetProgress() string           { return "fake" }
-func (f *fakeChecker) StartTime() time.Time          { return time.Now() }
-func (f *fakeChecker) ExecTime() time.Duration       { return 0 }
-func (f *fakeChecker) DifferencesFound() uint64      { return f.differencesFound.Load() }
+func (m *mockChecker) Run(ctx context.Context) error { return m.runErr }
+func (m *mockChecker) GetProgress() string           { return "mock" }
+func (m *mockChecker) StartTime() time.Time          { return time.Now() }
+func (m *mockChecker) ExecTime() time.Duration       { return 0 }
+func (m *mockChecker) DifferencesFound() uint64      { return m.differencesFound.Load() }
 
 // setupRunnerForChecksumTest creates a real table, runs the runner setup as
 // far as creating the checkpoint table on disk, and returns a Runner that can
@@ -110,7 +110,7 @@ func TestChecksumErrorPreservesCheckpoint(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			t.Cleanup(cancel)
 			r.cancelFunc = func() { cancelled = true; cancel() }
-			r.checker = &fakeChecker{runErr: tc.err}
+			r.checker = &mockChecker{runErr: tc.err}
 
 			err := r.checksum(ctx)
 			require.Error(t, err, "the checker's error must propagate")
@@ -153,15 +153,15 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 	advanceUntilWatermark(t, r.copyChunker)
 	advanceUntilWatermark(t, r.checksumChunker)
 
-	// Swap in a fake checker whose DifferencesFound() we control. The
+	// Swap in a mock checker whose DifferencesFound() we control. The
 	// invariant only looks at this value (and the chunker's watermark);
 	// it never calls Run, so the runErr doesn't matter.
-	fake := &fakeChecker{}
-	r.checker = fake
+	mock := &mockChecker{}
+	r.checker = mock
 	r.status.Set(status.Checksum)
 
 	// --- Case 1: current pass has had differences. Watermark must be "". ---
-	fake.differencesFound.Store(1)
+	mock.differencesFound.Store(1)
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
 	copierWM, checksumWM := latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copierWM, "copier_watermark should always be persisted")
@@ -169,7 +169,7 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 		"checksum_watermark must be empty while DifferencesFound > 0")
 
 	// --- Case 2: counter reset (next pass starts clean). Watermark restored. ---
-	fake.differencesFound.Store(0)
+	mock.differencesFound.Store(0)
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
 	copierWM, checksumWM = latestCheckpointWatermarks(t, r)
 	require.NotEmpty(t, copierWM)
