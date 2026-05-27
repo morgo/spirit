@@ -1043,22 +1043,14 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 		return err
 	}
 	r.status.Set(status.Checksum)
-	if err := r.checker.Run(ctx); err != nil {
-		// See pkg/migration/runner.go (Runner.checksum) for the rationale:
-		// the periodic checkpoint dumper persists the checksum low-watermark
-		// while a checksum is in flight, so a permanent failure after the
-		// configured retries would otherwise leave a watermark that lets the
-		// next run skip the broken chunks and cut over on top of corrupt
-		// data. Invalidate the checkpoint here too. As in the migration
-		// runner, we skip the invalidation when the parent context is
-		// cancelled — that case is operator-initiated stop / deadline, and
-		// the partial checksum_watermark is legitimate resume progress.
-		if ctx.Err() == nil {
-			r.fatalError()
-		}
-		return err
-	}
-	return nil
+	// On a checker error we just propagate. The DumpCheckpoint invariant
+	// guarantees that any persisted checksum_watermark describes only
+	// verified-clean chunks, so a resumed run either replays the checksum
+	// from scratch (empty watermark, set whenever the failing pass had any
+	// repair) or resumes safely from a watermark that came from a clean
+	// pass. See pkg/migration/runner.go DumpCheckpoint for the full
+	// rationale.
+	return r.checker.Run(ctx)
 }
 
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
@@ -1360,13 +1352,24 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
+	// Safety invariant: only persist the checksum_watermark if the current
+	// checksum pass has had zero differences. The chunker advances its
+	// low-watermark past every chunk it sees Feedback() for, including
+	// chunks that needed a recopy — but a recopy isn't a verification.
+	// Reading DifferencesFound() *after* the watermark catches any chunk
+	// in the watermark that was repaired (the per-chunk path increments
+	// differencesFound strictly before chunker.Feedback). When set,
+	// suppress the watermark so a restart re-validates from the start of
+	// the checksum phase. See pkg/migration/runner.go DumpCheckpoint for
+	// the full rationale.
 	var checksumWatermark string
-	if r.status.Get() >= status.Checksum {
-		if r.checker != nil {
-			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
-			if err != nil {
-				return status.ErrWatermarkNotReady
-			}
+	if r.status.Get() >= status.Checksum && r.checker != nil {
+		wm, wmErr := r.checksumChunker.GetLowWatermark()
+		if wmErr != nil {
+			return status.ErrWatermarkNotReady
+		}
+		if r.checker.DifferencesFound() == 0 {
+			checksumWatermark = wm
 		}
 	}
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
