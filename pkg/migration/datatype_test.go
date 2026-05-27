@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"testing"
@@ -911,19 +912,32 @@ func TestBinaryToVarbinaryConcurrentDML(t *testing.T) {
 		 WHERE table_schema=DATABASE() AND table_name='bin2varbin' AND column_name='data'`).Scan(&colType))
 	require.Contains(t, colType, "varbinary")
 
-	// The known update-target rows must have their full 20-byte values
-	// preserved (with trailing zeros).
-	var dataLen1, dataLen2 int
+	// The known update-target rows must contain the post-UPDATE bytes
+	// (with their trailing zeros). Comparing the full 20-byte value — not
+	// just OCTET_LENGTH — ensures the binlog UPDATE path actually
+	// replayed: the rows started life with non-zero-trailing data, so a
+	// missed UPDATE leaves the rowcopied initial value behind and this
+	// assertion fails.
+	var data1, data2 []byte
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-		`SELECT OCTET_LENGTH(data) FROM bin2varbin WHERE info = 'update-target-1' LIMIT 1`).Scan(&dataLen1))
-	require.Equal(t, 20, dataLen1, "update-target-1 must keep full 20-byte width after binlog replay")
+		`SELECT data FROM bin2varbin WHERE info = 'update-target-1' LIMIT 1`).Scan(&data1))
+	wantData1, err := hex.DecodeString("ffeeddcc00000000000000000000000000000000")
+	require.NoError(t, err)
+	require.Equal(t, wantData1, data1, "update-target-1 must hold its post-UPDATE 20-byte value")
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-		`SELECT OCTET_LENGTH(data) FROM bin2varbin WHERE info = 'update-target-2' LIMIT 1`).Scan(&dataLen2))
-	require.Equal(t, 20, dataLen2, "update-target-2 must keep full 20-byte width after binlog replay")
+		`SELECT data FROM bin2varbin WHERE info = 'update-target-2' LIMIT 1`).Scan(&data2))
+	wantData2, err := hex.DecodeString("aabbccdd11111111111111111100000000000000")
+	require.NoError(t, err)
+	require.Equal(t, wantData2, data2, "update-target-2 must hold its post-UPDATE 20-byte value")
 
-	// No row inserted during migration should be shorter than 20 bytes —
-	// every INSERT value above is exactly 20 bytes wide and BINARY(20) is
-	// the source column type.
+	// At least one 'insert-during' row must exist — otherwise the binlog
+	// INSERT path was not exercised and the next assertion is vacuous.
+	var insertCount int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM bin2varbin WHERE info = 'insert-during'`).Scan(&insertCount))
+	require.Positive(t, insertCount, "no concurrent INSERTs reached the binlog path — test is vacuous")
+
+	// And every one of them must keep its full 20-byte width.
 	var shortRows int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
 		`SELECT COUNT(*) FROM bin2varbin WHERE info = 'insert-during' AND OCTET_LENGTH(data) <> 20`).Scan(&shortRows))
@@ -998,9 +1012,15 @@ func runBitDMLTest(t *testing.T, tableName, bitType string, values []uint64, col
 	// binlog path.
 	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (v, %s) SELECT 0, 0", tableName, colName), 5000)
 
-	// One row per test value, inserted before migration starts. We update
-	// these mid-migration so the new value flows through the binlog
-	// applier rather than the chunker SELECT.
+	// One row per test value, inserted before migration starts with the
+	// BIT column at 0 — a sentinel that's different from every non-zero
+	// test value. We then UPDATE these mid-migration to flip the BIT to
+	// `val` via the binlog applier. If the UPDATE never replays, the
+	// post-migration BIT value remains at the seed (0) instead of `val`,
+	// and the assertion at the bottom catches it. The companion `v=v+1`
+	// in the UPDATE statement gives us a second signal that's monotone
+	// regardless of the BIT value involved (covers the val=0 case where
+	// seed and target both happen to be zero).
 	type marker struct {
 		id  int64
 		val uint64
@@ -1008,7 +1028,7 @@ func runBitDMLTest(t *testing.T, tableName, bitType string, values []uint64, col
 	markers := make([]marker, len(values))
 	for i, v := range values {
 		res, err := tt.DB.ExecContext(t.Context(),
-			fmt.Sprintf("INSERT INTO %s (v, %s) VALUES (?, ?)", tableName, colName), -1-i, v)
+			fmt.Sprintf("INSERT INTO %s (v, %s) VALUES (?, 0)", tableName, colName), -1-i)
 		require.NoError(t, err)
 		id, err := res.LastInsertId()
 		require.NoError(t, err)
@@ -1071,13 +1091,21 @@ func runBitDMLTest(t *testing.T, tableName, bitType string, values []uint64, col
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowsAfterMigration))
 	require.Equal(t, rowsBeforeMigration, rowsAfterMigration, "row count after migration must match")
 
-	// Each marker row's stored bit value must match what we wrote. We
-	// compare via CAST(... AS UNSIGNED) so we can read it back as uint64.
-	for _, mk := range markers {
+	// Each marker row must show two things: (1) at least one UPDATE
+	// replayed — `v` was seeded negative and is only ever incremented,
+	// so v > -1-i proves the UPDATE path fired; (2) the stored BIT value
+	// matches what the UPDATE wrote. The combination is what makes the
+	// test non-vacuous: a missed UPDATE leaves v at the seed; a buggy
+	// BIT serialization leaves a different bit pattern in the column.
+	for i, mk := range markers {
 		var got uint64
+		var v int
 		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
-			fmt.Sprintf("SELECT CAST(%s AS UNSIGNED) FROM %s WHERE id = ?", colName, tableName), mk.id).
-			Scan(&got))
+			fmt.Sprintf("SELECT v, CAST(%s AS UNSIGNED) FROM %s WHERE id = ?", colName, tableName), mk.id).
+			Scan(&v, &got))
+		require.Greaterf(t, v, -1-i,
+			"marker id=%d: v stayed at seed (%d) — no UPDATE replayed for this row",
+			mk.id, -1-i)
 		require.Equalf(t, mk.val, got,
 			"marker id=%d expected %s value 0x%016x but got 0x%016x",
 			mk.id, bitType, mk.val, got)
