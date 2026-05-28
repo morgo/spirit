@@ -65,27 +65,21 @@ func TestRenamePKColumnBlocked(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestRenameBlockedWithBufferedCopier covers the gate on column
-// renames when the buffered copier (--buffered) is opted in. The
-// always-buffered binlog subscription is not the concern — see the
-// renameCheck doc comment for the generated/virtual-column edge cases
-// that motivate the gate.
-func TestRenameBlockedWithBufferedCopier(t *testing.T) {
+// TestRenameAllowedWithBufferedCopier covers that column renames are
+// permitted under the buffered copier (--buffered). The buffered copier
+// uses the same ColumnMapping intersection as the unbuffered path, so
+// renames flow through identically; generated/virtual columns are
+// excluded from the intersection on both source and target.
+func TestRenameAllowedWithBufferedCopier(t *testing.T) {
 	r := Resources{
 		Statement: statement.MustNew("ALTER TABLE t1 RENAME COLUMN c1 TO c2")[0],
 		Buffered:  true,
 	}
-	err := renameCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "buffered copier")
+	require.NoError(t, renameCheck(t.Context(), r, slog.Default()))
 
-	// CHANGE COLUMN rename is also blocked under the buffered copier.
 	r.Statement = statement.MustNew("ALTER TABLE t1 CHANGE c1 c2 VARCHAR(100)")[0]
-	err = renameCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "buffered copier")
+	require.NoError(t, renameCheck(t.Context(), r, slog.Default()))
 
-	// CHANGE COLUMN without a rename is fine under the buffered copier.
 	r.Statement = statement.MustNew("ALTER TABLE t1 CHANGE c1 c1 VARCHAR(100)")[0] //nolint: dupword
 	require.NoError(t, renameCheck(t.Context(), r, slog.Default()))
 }
