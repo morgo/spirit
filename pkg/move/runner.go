@@ -13,12 +13,12 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/buildinfo"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/move/check"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -47,7 +47,7 @@ type sourceInfo struct {
 	db         *sql.DB
 	config     *mysql.Config
 	dsn        string
-	replClient *repl.Client
+	replClient *change.Client
 	tables     []*table.TableInfo // this source's TableInfo objects (bound to this source's db)
 }
 
@@ -423,13 +423,13 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
 	for i := range r.sources {
 		src := &r.sources[i]
-		replConfig := repl.NewClientDefaultConfig()
+		replConfig := change.NewClientDefaultConfig()
 		replConfig.Logger = r.logger
 		replConfig.CancelFunc = r.fatalError
 		replConfig.DDLFilterSchema = src.config.DBName
 		replConfig.DDLFilterTables = r.move.SourceTables
 		replConfig.DBConfig = r.dbConfig
-		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		src.replClient = change.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
 	}
 
 	// Run post-setup checks
@@ -686,7 +686,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Disable both watermark optimizations so that all changes can be flushed.
 	// For non-memory-comparable PKs this also drains the buffered map and
 	// switches the subscription into FIFO queue mode (see
-	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	// pkg/change/subscription_buffered.go), so the call can return an error.
 	if err := r.setWatermarkOptimizationAll(ctx, false); err != nil {
 		return err
 	}
@@ -751,7 +751,7 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		for _, tbl := range r.sources[i].tables {
 			go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 		}
-		r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+		r.sources[i].replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 	}
 
 	// Start go routines for checkpointing and dumping status. The returned
@@ -1025,7 +1025,7 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// Perform a checksum operation
 	// Collect all source DBs and repl clients for the checksum.
 	sourceDBs := make([]*sql.DB, len(r.sources))
-	feeds := make([]*repl.Client, len(r.sources))
+	feeds := make([]*change.Client, len(r.sources))
 	for i := range r.sources {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient
@@ -1220,7 +1220,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	defer utils.CloseAndLog(chunker)
 
 	sourceDBs := make([]*sql.DB, len(r.sources))
-	feeds := make([]*repl.Client, len(r.sources))
+	feeds := make([]*change.Client, len(r.sources))
 	for i := range r.sources {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient
@@ -1258,7 +1258,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
 			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
 			for i := range r.sources {
-				r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+				r.sources[i].replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 			}
 			timer := time.NewTimer(remaining)
 			select {
@@ -1495,7 +1495,7 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 
 // setWatermarkOptimizationAll sets watermark optimization on all replication
 // clients. Each subscription may drain its outgoing store on the toggle (see
-// pkg/repl/subscription_buffered.go), so this can return the drain error.
+// pkg/change/subscription_buffered.go), so this can return the drain error.
 func (r *Runner) setWatermarkOptimizationAll(ctx context.Context, enabled bool) error {
 	for i := range r.sources {
 		if err := r.sources[i].replClient.SetWatermarkOptimization(ctx, enabled); err != nil {

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -47,11 +47,11 @@ func TestNewCutOverValidation(t *testing.T) {
 	require.ErrorContains(t, err, "repl client must be non-nil")
 
 	// Empty tables.
-	cfg := repl.NewClientDefaultConfig()
+	cfg := change.NewClientDefaultConfig()
 	cfg.CancelFunc = func() bool { return false }
 	srcConfig, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	replClient := repl.NewClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
+	replClient := change.NewClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 
 	_, err = NewCutOver([]CutOverSource{{
 		DB:         db,
@@ -102,9 +102,9 @@ func TestCutOverSingleSource(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(replDB)
 
-	cfg := repl.NewClientDefaultConfig()
+	cfg := change.NewClientDefaultConfig()
 	cfg.CancelFunc = func() bool { return false }
-	replClient := repl.NewClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
+	replClient := change.NewClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 	require.NoError(t, replClient.Run(ctx))
 	defer replClient.Close()
 

@@ -18,7 +18,7 @@ func init() {
 // supported: bufferedMap routes those subscriptions through its FIFO queue
 // mode, which preserves binlog order so the target's collation-aware
 // uniqueness produces the correct end state. See
-// pkg/repl/subscription_buffered.go for the routing rules.
+// pkg/change/subscription_buffered.go for the routing rules.
 func tableCompatibilityCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 	for _, tbl := range r.SourceTables {
 		if len(tbl.KeyColumns) == 0 {
