@@ -20,8 +20,8 @@ import (
 // construct their own Source value and pass it to spirit via the
 // Move/Migration config.
 //
-// Lifecycle: construct → AddSubscription(...) or Subscribe(...)* →
-// Run(ctx) OR OpenFromPosition(ctx, pos) → Flush / BlockWait /
+// Lifecycle: construct → AddSubscription(...)* → Run(ctx) OR
+// OpenFromPosition(ctx, pos) → Flush / BlockWait /
 // FlushUnderTableLock as needed → Close().
 //
 // Events flow PUSH-style: when a row event matching one of the
@@ -50,30 +50,16 @@ import (
 // these methods as best-effort no-ops or return zero values; spirit's
 // binlog-specific call sites will eventually be retired.
 type Source interface {
-	// Subscribe registers a Subscription. The source uses sub.Tables()
-	// to determine which (schema, table) pairs to filter for; ROW events
-	// matching those tables are pushed to sub.HasChanged. Must be called
-	// before Run / OpenFromPosition. Today's only Subscription
-	// implementation is *bufferedMap (see subscription_buffered.go).
-	Subscribe(sub Subscription) error
-
-	// AddSubscription is the historical helper that constructs a
-	// bufferedMap from (currentTable, newTable, chunker) and registers
-	// it. Provided on the interface so existing callers don't need to
-	// change shape.
+	// AddSubscription constructs a bufferedMap from (currentTable,
+	// newTable, chunker) and registers it. ROW events matching the
+	// registered (schema, table) pair are pushed to the subscription's
+	// HasChanged. Must be called before Run / OpenFromPosition.
 	AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error
 
 	// Run starts streaming from the current source head and spawns the
 	// reader goroutine. Implementations perform any required validation
 	// (privileges, connectivity, server settings) as part of Run.
 	Run(ctx context.Context) error
-
-	// OpenFromPosition is the resume-time entry point. It primes the
-	// source's internal position to the opaque string previously
-	// returned by Position(), then starts streaming as if Run had been
-	// called. Implementations validate the position is still resumable
-	// (e.g. MySQL: the binlog file has not been purged).
-	OpenFromPosition(ctx context.Context, pos string) error
 
 	// Flush requests that all registered subscriptions flush their
 	// buffered changes to their targets. Blocks until the flush
@@ -90,23 +76,6 @@ type Source interface {
 	// Used by the runner around cutover to drain the in-flight backlog.
 	// Returns when drained or ctx cancels.
 	BlockWait(ctx context.Context) error
-
-	// Position returns the latest safe-to-resume position as an opaque
-	// string. The implementation owns the encoding; spirit never parses
-	// it. Advances only at transaction commit boundaries.
-	Position() string
-
-	// GetBinlogApplyPosition is the MySQL-binlog-typed form of Position.
-	// Returns the zero value for non-binlog implementations.
-	// To be retired once consumers migrate to opaque Position strings.
-	GetBinlogApplyPosition() mysql.Position
-
-	// SetFlushedPos sets the safe-flushed binlog position. The
-	// MySQL-binlog implementation uses this during resume from a
-	// checkpoint; OpenFromPosition is the cross-implementation
-	// equivalent. No-op on non-binlog implementations.
-	// To be retired once consumers migrate to OpenFromPosition.
-	SetFlushedPos(pos mysql.Position)
 
 	// GetDeltaLen returns the total number of pending changes across
 	// all registered subscriptions. Used by callers to decide whether
@@ -138,7 +107,32 @@ type Source interface {
 
 	// Close releases all resources. Safe to call more than once.
 	Close()
-}
 
-// Compile-time assertion that the binlog-backed Client satisfies Source.
-var _ Source = (*Client)(nil)
+	// Deprecated methods:
+	// To be replaced by generic ones soon
+
+	// GetBinlogApplyPosition is the MySQL-binlog-typed form of Position.
+	// Returns the zero value for non-binlog implementations.
+	// To be retired once consumers migrate to opaque Position strings.
+	GetBinlogApplyPosition() mysql.Position
+
+	// SetFlushedPos sets the safe-flushed binlog position. The
+	// MySQL-binlog implementation uses this during resume from a
+	// checkpoint; OpenFromPosition is the cross-implementation
+	// equivalent. No-op on non-binlog implementations.
+	// To be retired once consumers migrate to OpenFromPosition.
+	SetFlushedPos(pos mysql.Position)
+
+	// Suggestions for generic methods:
+	// OpenFromPosition is the resume-time entry point. It primes the
+	// source's internal position to the opaque string previously
+	// returned by Position(), then starts streaming as if Run had been
+	// called. Implementations validate the position is still resumable
+	// (e.g. MySQL: the binlog file has not been purged).
+	// OpenFromPosition(ctx context.Context, pos string) error
+
+	// Position returns the latest safe-to-resume position as an opaque
+	// string. The implementation owns the encoding; spirit never parses
+	// it. Advances only at transaction commit boundaries.
+	// Position() string
+}

@@ -53,7 +53,7 @@ func TestCutOver(t *testing.T) {
 	t1new := table.NewTableInfo(db, cfg.DBName, "_cutovert1_new")
 	t1old := "_cutovert1_old"
 	logger := slog.Default()
-	feed := change.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestMDLLockFails(t *testing.T) {
 	t1new := table.NewTableInfo(db, cfg.DBName, "_mdllocks_new")
 	t1old := "test_old"
 	logger := slog.Default()
-	feed := change.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestInvalidOptions(t *testing.T) {
 	require.NoError(t, t1.SetInfo(t.Context()))
 	t1new := table.NewTableInfo(db, cfg.DBName, "_invalid_t1_new")
 	t1old := "test_old"
-	feed := change.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))

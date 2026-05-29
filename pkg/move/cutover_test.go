@@ -51,7 +51,7 @@ func TestNewCutOverValidation(t *testing.T) {
 	cfg.CancelFunc = func() bool { return false }
 	srcConfig, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	replClient := change.NewClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
+	replClient := change.NewBinlogClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 
 	_, err = NewCutOver([]CutOverSource{{
 		DB:         db,
@@ -104,7 +104,7 @@ func TestCutOverSingleSource(t *testing.T) {
 
 	cfg := change.NewClientDefaultConfig()
 	cfg.CancelFunc = func() bool { return false }
-	replClient := change.NewClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
+	replClient := change.NewBinlogClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 	require.NoError(t, replClient.Run(ctx))
 	defer replClient.Close()
 

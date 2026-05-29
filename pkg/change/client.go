@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +18,9 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 )
+
+// Compile-time assertion that the binlog-backed Client satisfies Source.
+var _ Source = (*Client)(nil)
 
 type Client struct {
 	// mu protects position fields (bufferedPos / flushedPos), the
@@ -87,9 +89,11 @@ type Client struct {
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
-// NewClient creates a new Client instance.
-// config.Applier is required!
-func NewClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) *Client {
+// NewBinlogClient constructs the binlog-backed change.Source. The
+// returned Source talks to MySQL via go-mysql's BinlogSyncer; future
+// alternative sources (e.g. VStream) will live behind their own
+// constructors. config.Applier is required.
+func NewBinlogClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) Source {
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
@@ -116,33 +120,9 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 	}
 }
 
-// Subscribe satisfies Source.
-//
-// It registers a pre-constructed Subscription. The current binlog
-// implementation only accepts *bufferedMap — callers that want a
-// bufferedMap built for them should use AddSubscription instead.
-func (c *Client) Subscribe(sub Subscription) error {
-	if sub == nil {
-		return errors.New("Subscribe: nil subscription")
-	}
-	tables := sub.Tables()
-	if len(tables) < 1 {
-		return errors.New("Subscribe: subscription has no tables")
-	}
-	currentTable := tables[0]
-	bm, ok := sub.(*bufferedMap)
-	if !ok {
-		return fmt.Errorf("Subscribe: unsupported Subscription type %T; only *bufferedMap is supported, use AddSubscription to construct one", sub)
-	}
-	key := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
-	if !c.subs.AddBuffered(key, bm) {
-		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
-	}
-	return nil
-}
-
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
+// Satisfies Source interface.
 func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
 	// If the PK is not memory comparable we still use the buffered map, but it
@@ -197,12 +177,16 @@ func (c *Client) getBufferedPos() mysql.Position {
 
 // SetFlushedPos updates the known safe position that all changes have been flushed.
 // It is used for resuming from a checkpoint.
+// Satisfies Source interface.
 func (c *Client) SetFlushedPos(pos mysql.Position) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.flushedPos = pos
 }
 
+// AllChangesFlushed returns true if all buffered changes across all
+// subscriptions have been flushed to the target tables.
+// Satisfies Source interface.
 func (c *Client) AllChangesFlushed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -220,23 +204,8 @@ func (c *Client) AllChangesFlushed() bool {
 	return true
 }
 
-// Position satisfies Source.
-//
-// It returns the safe-flushed binlog position encoded as
-// "<binlog-file>:<offset>". Returns "" when no position has been
-// observed yet, signaling that a fresh Run is required.
-func (c *Client) Position() string {
-	pos := c.GetBinlogApplyPosition()
-	if pos.Name == "" {
-		return ""
-	}
-	return formatBinlogPosition(pos)
-}
-
-// GetBinlogApplyPosition satisfies Source.
-//
-// It returns the safe-flushed binlog position as a mysql.Position. New
-// code should prefer the opaque Position() string.
+// GetBinlogApplyPosition returns the last flushed binlog position. It is used for checkpointing and resuming.
+// Satisfies Source interface.
 func (c *Client) GetBinlogApplyPosition() mysql.Position {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -245,6 +214,7 @@ func (c *Client) GetBinlogApplyPosition() mysql.Position {
 
 // GetDeltaLen returns the total number of changes
 // that are pending across all subscriptions.
+// Satisfies Source interface.
 func (c *Client) GetDeltaLen() int {
 	deltaLen := 0
 	for _, subscription := range c.subs.Snapshot() {
@@ -290,26 +260,9 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	}, nil
 }
 
-// OpenFromPosition satisfies Source.
-//
-// It primes flushedPos from the opaque position string previously
-// returned by Position(), then starts streaming as Run would.
-func (c *Client) OpenFromPosition(ctx context.Context, pos string) error {
-	if pos == "" {
-		return errors.New("OpenFromPosition: empty position; use Run instead for a fresh start")
-	}
-	parsed, err := parseBinlogPositionString(pos)
-	if err != nil {
-		return fmt.Errorf("OpenFromPosition: %w", err)
-	}
-	c.mu.Lock()
-	c.flushedPos = parsed
-	c.mu.Unlock()
-	return c.Run(ctx)
-}
-
 // Run initializes the binlog syncer and starts the binlog reader.
 // It returns an error if the initialization fails.
+// Satisfies Source interface.
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -921,6 +874,7 @@ func (c *Client) Flush(ctx context.Context) error {
 // StopPeriodicFlush stops the periodic flush goroutine started by
 // StartPeriodicFlush and blocks until that goroutine has fully exited.
 // Safe to call when no periodic flush is running (no-op).
+// Satisfies Source interface.
 func (c *Client) StopPeriodicFlush() {
 	c.periodicFlushLock.Lock()
 	cancel := c.periodicFlushCancel
@@ -943,6 +897,7 @@ func (c *Client) StopPeriodicFlush() {
 // MUST NOT prefix with `go` — the loop is spawned internally.
 //
 // Calling Start while a flush is already running is a no-op.
+// Satisfies Source interface.
 func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
 	c.periodicFlushLock.Lock()
 	if c.periodicFlushCancel != nil {
@@ -986,6 +941,7 @@ func (c *Client) runPeriodicFlush(ctx context.Context, interval time.Duration, d
 // We do not need to guarantee that they are flushed though, so
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
+// Satisfies Source interface.
 func (c *Client) BlockWait(ctx context.Context) error {
 	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {
@@ -1055,28 +1011,4 @@ func (c *Client) SetWatermarkOptimization(ctx context.Context, newVal bool) erro
 		}
 	}
 	return nil
-}
-
-// formatBinlogPosition encodes a mysql.Position as the opaque string
-// returned by Client.Position(). The format is "<binlog-file>:<offset>".
-func formatBinlogPosition(p mysql.Position) string {
-	return p.Name + ":" + strconv.FormatUint(uint64(p.Pos), 10)
-}
-
-// parseBinlogPositionString is the inverse of formatBinlogPosition.
-// It splits on the LAST ':' so binlog file names that happen to contain
-// a ':' (unusual but possible) round-trip cleanly. Returns an error if
-// the offset portion does not parse as a uint32.
-func parseBinlogPositionString(s string) (mysql.Position, error) {
-	idx := strings.LastIndex(s, ":")
-	if idx <= 0 || idx == len(s)-1 {
-		return mysql.Position{}, fmt.Errorf("malformed position %q: expected <binlog-file>:<offset>", s)
-	}
-	name := s[:idx]
-	offsetStr := s[idx+1:]
-	offset, err := strconv.ParseUint(offsetStr, 10, 32)
-	if err != nil {
-		return mysql.Position{}, fmt.Errorf("malformed position %q: offset is not a uint32: %w", s, err)
-	}
-	return mysql.Position{Name: name, Pos: uint32(offset)}, nil
 }

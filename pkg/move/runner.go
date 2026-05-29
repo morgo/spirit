@@ -47,7 +47,7 @@ type sourceInfo struct {
 	db         *sql.DB
 	config     *mysql.Config
 	dsn        string
-	replClient *change.Client
+	replClient change.Source
 	tables     []*table.TableInfo // this source's TableInfo objects (bound to this source's db)
 }
 
@@ -429,7 +429,7 @@ func (r *Runner) setup(ctx context.Context) error {
 		replConfig.DDLFilterSchema = src.config.DBName
 		replConfig.DDLFilterTables = r.move.SourceTables
 		replConfig.DBConfig = r.dbConfig
-		src.replClient = change.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		src.replClient = change.NewBinlogClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
 	}
 
 	// Run post-setup checks
@@ -1025,7 +1025,7 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// Perform a checksum operation
 	// Collect all source DBs and repl clients for the checksum.
 	sourceDBs := make([]*sql.DB, len(r.sources))
-	feeds := make([]*change.Client, len(r.sources))
+	feeds := make([]change.Source, len(r.sources))
 	for i := range r.sources {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient
@@ -1220,7 +1220,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	defer utils.CloseAndLog(chunker)
 
 	sourceDBs := make([]*sql.DB, len(r.sources))
-	feeds := make([]*change.Client, len(r.sources))
+	feeds := make([]change.Source, len(r.sources))
 	for i := range r.sources {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient

@@ -17,7 +17,7 @@ import (
 // CutOverSource holds per-source state needed for the cutover.
 type CutOverSource struct {
 	DB         *sql.DB
-	ReplClient *change.Client
+	ReplClient change.Source
 	Tables     []*table.TableInfo
 }
 
