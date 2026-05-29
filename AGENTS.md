@@ -159,7 +159,7 @@ cmd/
 pkg/
   migration/  → Orchestrator for single-table schema changes (main entry point)
   move/       → Orchestrator for multi-table cross-server migrations
-  repl/       → Binlog replication client (acts as MySQL replica)
+  change/     → Binlog replication client (acts as MySQL replica)
   copier/     → Parallel row copying (unbuffered and buffered algorithms)
   applier/    → Write layer for target tables (single-target and sharded)
   table/      → Chunking strategies (optimistic, composite, multi)
@@ -203,7 +203,7 @@ Each package has its own `README.md` with detailed documentation. Key packages t
 ### `pkg/migration`
 The main orchestrator. `runner.go` contains the core migration loop. `Migration` struct is the Kong CLI binding. The `Run()` method drives the full lifecycle. See `cutover.go` for the atomic rename logic.
 
-### `pkg/repl`
+### `pkg/change`
 Acts as a MySQL replica using [go-mysql](https://github.com/go-mysql-org/go-mysql). One subscription type — the **bufferedMap** — stores the full row image from the binlog and writes via the applier. It has two internal flush modes:
 - **Map mode** (default for memory-comparable PKs) — keeps one entry per PK in a map; multiple events on the same PK dedupe to the latest image. Used for integer/binary PKs where Go map-key equality matches MySQL row identity.
 - **Queue mode** (post-copy for non-memory-comparable PKs like `VARCHAR` collations) — FIFO queue preserving binlog order. Required because case-insensitive collations break the map-key-equality assumption. Slower; only entered after `SetWatermarkOptimization(false)`.

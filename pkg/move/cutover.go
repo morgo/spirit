@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -17,7 +17,7 @@ import (
 // CutOverSource holds per-source state needed for the cutover.
 type CutOverSource struct {
 	DB         *sql.DB
-	ReplClient *repl.Client
+	ReplClient *change.Client
 	Tables     []*table.TableInfo
 }
 
@@ -114,7 +114,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 	// Check ALL changes flushed.
 	for i, src := range c.sources {
 		if !src.ReplClient.AllChangesFlushed() {
-			return fmt.Errorf("%w on source %d, final flush might be broken", repl.ErrChangesNotFlushed, i)
+			return fmt.Errorf("%w on source %d, final flush might be broken", change.ErrChangesNotFlushed, i)
 		}
 	}
 

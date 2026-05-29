@@ -326,7 +326,7 @@ func TestOldTableNameTruncation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &change{
+			c := &tableChange{
 				table: &table.TableInfo{
 					TableName: tt.tableName,
 				},
@@ -374,11 +374,11 @@ func TestOldTableNameTruncationCollision(t *testing.T) {
 	startTime := time.Date(2025, 6, 15, 10, 30, 45, 0, time.UTC)
 	prefix := strings.Repeat("x", 50)
 
-	c1 := &change{
+	c1 := &tableChange{
 		table:  &table.TableInfo{TableName: prefix + "_aaaaaaaaaaa"},
 		runner: &Runner{migration: &Migration{SkipDropAfterCutover: true}, startTime: startTime},
 	}
-	c2 := &change{
+	c2 := &tableChange{
 		table:  &table.TableInfo{TableName: prefix + "_bbbbbbbbbbb"},
 		runner: &Runner{migration: &Migration{SkipDropAfterCutover: true}, startTime: startTime},
 	}

@@ -1,4 +1,4 @@
-package repl
+package change
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 // outgoing store inline.
 //
 // Memory-comparable PKs always use the map. See
-// pkg/repl/subscription_buffered.go for the routing rules.
+// pkg/change/subscription_buffered.go for the routing rules.
 
 type Subscription interface {
 	HasChanged(key, row []any, deleted bool)

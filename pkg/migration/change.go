@@ -11,7 +11,7 @@ import (
 	"github.com/block/spirit/pkg/utils"
 )
 
-type change struct {
+type tableChange struct {
 	stmt     *statement.AbstractStatement
 	table    *table.TableInfo
 	newTable *table.TableInfo
@@ -27,7 +27,7 @@ type change struct {
 	runner *Runner
 }
 
-func (c *change) createNewTable(ctx context.Context) error {
+func (c *tableChange) createNewTable(ctx context.Context) error {
 	newName := utils.NewTableName(c.table.TableName)
 	// drop the newName if we've decided to call this func.
 	if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.table.SchemaName, newName); err != nil {
@@ -48,7 +48,7 @@ func (c *change) createNewTable(ctx context.Context) error {
 // It has been pre-checked it is not a rename, or modifying the PRIMARY KEY.
 // We first attempt to do this using ALGORITHM=COPY so we don't burn
 // an INSTANT version. But surprisingly this is not supported for all DDLs (issue #277)
-func (c *change) alterNewTable(ctx context.Context) error {
+func (c *tableChange) alterNewTable(ctx context.Context) error {
 	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n "+c.stmt.TrimAlter()+", ALGORITHM=COPY",
 		c.newTable.SchemaName, c.newTable.TableName); err != nil {
 		// Retry without the ALGORITHM=COPY. If there is a second error, then the DDL itself
@@ -71,7 +71,7 @@ func (c *change) alterNewTable(ctx context.Context) error {
 	return c.preserveAutoIncrement(ctx)
 }
 
-func (c *change) preserveAutoIncrement(ctx context.Context) error {
+func (c *tableChange) preserveAutoIncrement(ctx context.Context) error {
 	// Get AUTO_INCREMENT from the original table.
 	var originalAutoInc sql.NullInt64
 	err := c.runner.db.QueryRowContext(ctx,
@@ -112,11 +112,11 @@ func (c *change) preserveAutoIncrement(ctx context.Context) error {
 	return nil
 }
 
-func (c *change) dropOldTable(ctx context.Context) error {
+func (c *tableChange) dropOldTable(ctx context.Context) error {
 	return dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.table.SchemaName, c.oldTableName())
 }
 
-func (c *change) oldTableName() string {
+func (c *tableChange) oldTableName() string {
 	if !c.runner.migration.SkipDropAfterCutover {
 		return utils.OldTableName(c.table.TableName)
 	}
@@ -124,7 +124,7 @@ func (c *change) oldTableName() string {
 	return utils.OldTableNameWithTimestamp(c.table.TableName, timestamp)
 }
 
-func (c *change) attemptInstantDDL(ctx context.Context) error {
+func (c *tableChange) attemptInstantDDL(ctx context.Context) error {
 	if !c.runner.migration.SkipForceKill {
 		return dbconn.ForceExec(
 			ctx,
@@ -140,7 +140,7 @@ func (c *change) attemptInstantDDL(ctx context.Context) error {
 	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n ALGORITHM=INSTANT, "+c.stmt.Alter, c.table.SchemaName, c.table.TableName)
 }
 
-func (c *change) attemptInplaceDDL(ctx context.Context) error {
+func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
 	if !c.runner.migration.SkipForceKill {
 		return dbconn.ForceExec(
 			ctx,
@@ -156,7 +156,7 @@ func (c *change) attemptInplaceDDL(ctx context.Context) error {
 	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter, c.table.SchemaName, c.table.TableName)
 }
 
-func (c *change) cleanup(ctx context.Context) error {
+func (c *tableChange) cleanup(ctx context.Context) error {
 	if c.newTable != nil {
 		if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.newTable.SchemaName, c.newTable.TableName); err != nil {
 			return err
@@ -172,7 +172,7 @@ func (c *change) cleanup(ctx context.Context) error {
 // operation, because keeping track of which operations are "INSTANT"
 // is incredibly difficult. It will depend on MySQL minor version,
 // and could possibly be specific to the table.
-func (c *change) attemptMySQLDDL(ctx context.Context) error {
+func (c *tableChange) attemptMySQLDDL(ctx context.Context) error {
 	err := c.attemptInstantDDL(ctx)
 	if err == nil {
 		c.runner.usedInstantDDL = true // success
@@ -202,7 +202,7 @@ func (c *change) attemptMySQLDDL(ctx context.Context) error {
 	return err
 }
 
-func (c *change) Close() error {
+func (c *tableChange) Close() error {
 	if c.table != nil {
 		return c.table.Close()
 	}

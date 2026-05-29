@@ -1,5 +1,5 @@
-// Package repl contains binary log subscription functionality.
-package repl
+// Package change contains binary log subscription functionality.
+package change
 
 import (
 	"crypto/rand"
@@ -39,7 +39,7 @@ const (
 	// the next caller will park until that row drains. This keeps wide
 	// rows (LONGTEXT / BLOB / large JSON) from OOMing the migrator
 	// while still guaranteeing forward progress regardless of row width.
-	// See pkg/repl/subscription_buffered.go for the accounting model.
+	// See pkg/change/subscription_buffered.go for the accounting model.
 	//
 	// Operators should be aware that pausing the binlog reader for an
 	// extended period risks falling past the source's binlog retention

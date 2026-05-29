@@ -923,7 +923,7 @@ func TestDSN(t *testing.T) {
 					Password: &pw,
 					Host:     tc.host,
 				},
-				changes: []*change{
+				changes: []*tableChange{
 					{
 						stmt: &statement.AbstractStatement{
 							Schema: tc.schema,

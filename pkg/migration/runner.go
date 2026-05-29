@@ -14,12 +14,12 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/buildinfo"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
@@ -50,10 +50,10 @@ type Runner struct {
 
 	// Changes enccapsulates all changes
 	// With a stmt, alter, table, newTable.
-	changes []*change
+	changes []*tableChange
 
-	status     status.State // must use atomic helpers to change.
-	replClient *repl.Client // feed contains all binlog subscription activity.
+	status     status.State   // must use atomic helpers to change.
+	replClient *change.Client // feed contains all binlog subscription activity.
 	throttler  throttler.Throttler
 
 	copier       copier.Copier
@@ -105,9 +105,9 @@ func NewRunner(m *Migration) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	changes := make([]*change, 0, len(stmts))
+	changes := make([]*tableChange, 0, len(stmts))
 	for _, stmt := range stmts {
-		changes = append(changes, &change{
+		changes = append(changes, &tableChange{
 			stmt: stmt,
 		})
 	}
@@ -286,7 +286,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Disable both watermark optimizations so that all changes can be flushed.
 	// For non-memory-comparable PKs this also drains the buffered map and
 	// switches the subscription into FIFO queue mode (see
-	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	// pkg/change/subscription_buffered.go), so the call can return an error.
 	if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
 		return err
 	}
@@ -574,11 +574,11 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 
 	// Set the binlog position.
 	// Create a binlog subscriber
-	replConfig := repl.NewClientDefaultConfig()
+	replConfig := change.NewClientDefaultConfig()
 	replConfig.Logger = r.logger
 	replConfig.CancelFunc = r.fatalError
 	replConfig.DBConfig = r.dbConfig
-	r.replClient = repl.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig)
+	r.replClient = change.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig)
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
 	for _, change := range r.changes {
@@ -590,7 +590,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		}
 	}
 
-	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []*repl.Client{r.replClient}, &checksum.CheckerConfig{
+	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []*change.Client{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: r.migration.TargetChunkTime,
 		DBConfig:        r.dbConfig,
@@ -790,7 +790,7 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 	for _, change := range r.changes {
 		go change.table.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 	}
-	r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+	r.replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 	// Start go routines for checkpointing and dumping status. The returned
 	// wait function is invoked from Close() so we can be sure no late
 	// checkpoint INSERT lands after teardown begins.
@@ -1564,7 +1564,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	checker, err := checksum.NewChecker(
 		[]*sql.DB{r.db},
 		chunker,
-		[]*repl.Client{r.replClient},
+		[]*change.Client{r.replClient},
 		&checksum.CheckerConfig{
 			// TODO(#831): once the throttler can size threads dynamically,
 			// replace the hard-coded 1 with the migration's thread count.
@@ -1597,7 +1597,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		// and have to be drained under the cutover's table lock.
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
 			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
-			r.replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+			r.replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 			timer := time.NewTimer(remaining)
 			select {
 			case <-ctx.Done():

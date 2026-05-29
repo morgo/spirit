@@ -31,7 +31,7 @@ There is one replication client for all changes, and a subscription is added for
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The copier and [replication client](../repl/README.md) are running in parallel during step 3. The only hard requirement is that the replication client starts before the copier so we can ensure that all changes are tracked.
+The copier and [replication client](../change/README.md) are running in parallel during step 3. The only hard requirement is that the replication client starts before the copier so we can ensure that all changes are tracked.
 
 The copier is essentially a dirty-copy, in that each chunk does not correctly keep track of changes being made. This is reconciled via the replication client, which is able to detect any changes that have been made, and apply them to the new table consistently.
 
@@ -48,7 +48,7 @@ So when we describe Spirit as a "non-blocking schema change tool" that is a bit 
 
 The common **data lock** concern is the source table. The default (unbuffered) copier issues `INSERT IGNORE INTO _new ... SELECT FROM original`, and the `SELECT` side of `INSERT ... SELECT` takes shared row locks rather than using MVCC. Production workloads touching the same rows can contend with those locks. The main knob to mitigate this is `target-chunk-time`: smaller chunks mean each copy statement holds locks for less time.
 
-If hot rows on the source table make even short-chunk contention unacceptable, use `--buffered`. The buffered copier reads rows into Spirit and writes them through the applier instead of running `INSERT ... SELECT`, so it takes no locks on the source. The replication client is already always buffered — it applies binlog row images via `REPLACE INTO _new VALUES (...)` and never touches the source — so `--buffered` plus the always-buffered subscription eliminates source-side data lock contention end-to-end. See [pkg/repl/README.md](../repl/README.md) for the subscription design.
+If hot rows on the source table make even short-chunk contention unacceptable, use `--buffered`. The buffered copier reads rows into Spirit and writes them through the applier instead of running `INSERT ... SELECT`, so it takes no locks on the source. The replication client is already always buffered — it applies binlog row images via `REPLACE INTO _new VALUES (...)` and never touches the source — so `--buffered` plus the always-buffered subscription eliminates source-side data lock contention end-to-end. See [pkg/change/README.md](../change/README.md) for the subscription design.
 
 The following are cases where **metadata locks** are required:
 

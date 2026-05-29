@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
@@ -25,7 +25,7 @@ type SingleChecker struct {
 	sync.Mutex
 
 	concurrency      int
-	feed             *repl.Client
+	feed             *change.Client
 	db               *sql.DB
 	trxPool          *dbconn.TrxPool // reader trx pool
 	isInvalid        bool
@@ -350,7 +350,7 @@ func (c *SingleChecker) initConnPool(ctx context.Context) error {
 	// Assert that the change set is empty. This should always
 	// be the case because we are under a lock.
 	if !c.feed.AllChangesFlushed() {
-		return repl.ErrChangesNotFlushed
+		return change.ErrChangesNotFlushed
 	}
 	// Create a set of connections which can be used to checksum
 	// The table. They MUST be created before the lock is released
@@ -495,7 +495,7 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	// This must not run while initConnPool holds the table lock, because
 	// the periodic flush executes DML (INSERT/DELETE) against the locked
 	// table, which would deadlock with the lock holder.
-	c.feed.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+	c.feed.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 	defer c.feed.StopPeriodicFlush()
 
 	// Create a yield-timeout context to limit how long a single checksum pass

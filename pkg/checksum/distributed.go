@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
@@ -33,7 +33,7 @@ type DistributedChecker struct {
 	sync.Mutex
 
 	concurrency      int
-	feeds            []*repl.Client
+	feeds            []*change.Client
 	sourceDBs        []*sql.DB // all source database connections
 	applier          applier.Applier
 	sourcePools      []sourcePool      // one per source DB, created during initConnPool
@@ -395,7 +395,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// Assert that the change set is empty on all feeds.
 	for i, feed := range c.feeds {
 		if !feed.AllChangesFlushed() {
-			return fmt.Errorf("feed %d: %w", i, repl.ErrChangesNotFlushed)
+			return fmt.Errorf("feed %d: %w", i, change.ErrChangesNotFlushed)
 		}
 	}
 
@@ -524,7 +524,7 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	// - The memory requirements for 1MM deltas seems reasonable, but for a multi-day
 	//   checksum it is reasonable to assume it may exceed this.
 	for _, feed := range c.feeds {
-		feed.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+		feed.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 	}
 	defer func() {
 		for _, feed := range c.feeds {
