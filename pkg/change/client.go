@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -115,6 +116,31 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 	}
 }
 
+// Subscribe satisfies Source.
+//
+// It registers a pre-constructed Subscription. The current binlog
+// implementation only accepts *bufferedMap — callers that want a
+// bufferedMap built for them should use AddSubscription instead.
+func (c *Client) Subscribe(sub Subscription) error {
+	if sub == nil {
+		return errors.New("Subscribe: nil subscription")
+	}
+	tables := sub.Tables()
+	if len(tables) < 1 {
+		return errors.New("Subscribe: subscription has no tables")
+	}
+	currentTable := tables[0]
+	bm, ok := sub.(*bufferedMap)
+	if !ok {
+		return fmt.Errorf("Subscribe: unsupported Subscription type %T; only *bufferedMap is supported, use AddSubscription to construct one", sub)
+	}
+	key := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
+	if !c.subs.AddBuffered(key, bm) {
+		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
+	}
+	return nil
+}
+
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
 func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
@@ -194,6 +220,23 @@ func (c *Client) AllChangesFlushed() bool {
 	return true
 }
 
+// Position satisfies Source.
+//
+// It returns the safe-flushed binlog position encoded as
+// "<binlog-file>:<offset>". Returns "" when no position has been
+// observed yet, signaling that a fresh Run is required.
+func (c *Client) Position() string {
+	pos := c.GetBinlogApplyPosition()
+	if pos.Name == "" {
+		return ""
+	}
+	return formatBinlogPosition(pos)
+}
+
+// GetBinlogApplyPosition satisfies Source.
+//
+// It returns the safe-flushed binlog position as a mysql.Position. New
+// code should prefer the opaque Position() string.
 func (c *Client) GetBinlogApplyPosition() mysql.Position {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -245,6 +288,24 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 		Name: binlogFile,
 		Pos:  binlogPos,
 	}, nil
+}
+
+// OpenFromPosition satisfies Source.
+//
+// It primes flushedPos from the opaque position string previously
+// returned by Position(), then starts streaming as Run would.
+func (c *Client) OpenFromPosition(ctx context.Context, pos string) error {
+	if pos == "" {
+		return errors.New("OpenFromPosition: empty position; use Run instead for a fresh start")
+	}
+	parsed, err := parseBinlogPositionString(pos)
+	if err != nil {
+		return fmt.Errorf("OpenFromPosition: %w", err)
+	}
+	c.mu.Lock()
+	c.flushedPos = parsed
+	c.mu.Unlock()
+	return c.Run(ctx)
 }
 
 // Run initializes the binlog syncer and starts the binlog reader.
@@ -994,4 +1055,28 @@ func (c *Client) SetWatermarkOptimization(ctx context.Context, newVal bool) erro
 		}
 	}
 	return nil
+}
+
+// formatBinlogPosition encodes a mysql.Position as the opaque string
+// returned by Client.Position(). The format is "<binlog-file>:<offset>".
+func formatBinlogPosition(p mysql.Position) string {
+	return p.Name + ":" + strconv.FormatUint(uint64(p.Pos), 10)
+}
+
+// parseBinlogPositionString is the inverse of formatBinlogPosition.
+// It splits on the LAST ':' so binlog file names that happen to contain
+// a ':' (unusual but possible) round-trip cleanly. Returns an error if
+// the offset portion does not parse as a uint32.
+func parseBinlogPositionString(s string) (mysql.Position, error) {
+	idx := strings.LastIndex(s, ":")
+	if idx <= 0 || idx == len(s)-1 {
+		return mysql.Position{}, fmt.Errorf("malformed position %q: expected <binlog-file>:<offset>", s)
+	}
+	name := s[:idx]
+	offsetStr := s[idx+1:]
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil {
+		return mysql.Position{}, fmt.Errorf("malformed position %q: offset is not a uint32: %w", s, err)
+	}
+	return mysql.Position{Name: name, Pos: uint32(offset)}, nil
 }
