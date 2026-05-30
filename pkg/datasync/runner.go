@@ -524,7 +524,38 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName 
 //
 // This is MySQL→MySQL schema replication; a future heterogeneous target
 // (e.g. Postgres) would translate or pre-create the schema instead.
+//
+// The DDL runs with a relaxed sql_mode. The source's SHOW CREATE TABLE can
+// carry legacy column definitions — most commonly a TIMESTAMP/DATETIME with a
+// zero-date default ('0000-00-00 00:00:00') — that the target's strict
+// sql_mode (TRADITIONAL: NO_ZERO_DATE/NO_ZERO_IN_DATE/STRICT_*) rejects with
+// "Invalid default value" (error 1067). We recreate the tables exactly as the
+// source defines them, so we clear sql_mode for the CREATE statements. The DDL
+// runs on a single dedicated connection so the SET SESSION applies to it, and
+// we restore the mode before returning that connection to the pool (data
+// writes keep the strict mode).
 func (r *Runner) createTargetTables(ctx context.Context) error {
+	conn, err := r.target.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire target connection for DDL: %w", err)
+	}
+	defer utils.CloseAndLog(conn)
+
+	var prevSQLMode string
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&prevSQLMode); err != nil {
+		return fmt.Errorf("failed to read target sql_mode: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "SET SESSION sql_mode = ''"); err != nil {
+		return fmt.Errorf("failed to relax sql_mode for table creation: %w", err)
+	}
+	defer func() {
+		// Restore before the connection returns to the pool so data writes
+		// aren't silently relaxed.
+		if _, err := conn.ExecContext(ctx, "SET SESSION sql_mode = ?", prevSQLMode); err != nil {
+			r.logger.Warn("failed to restore sql_mode after table creation", "error", err)
+		}
+	}()
+
 	for _, t := range r.sourceTables {
 		var name, createStmt string
 		row := r.source.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+t.QuotedTableName)
@@ -532,7 +563,7 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 			return fmt.Errorf("failed to read CREATE TABLE for source %s: %w", t.TableName, err)
 		}
 		var exists int
-		err := r.target.DB.QueryRowContext(ctx,
+		err := conn.QueryRowContext(ctx,
 			"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
 			r.target.Config.DBName, t.TableName).Scan(&exists)
 		if err == nil {
@@ -543,7 +574,7 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("failed to check if table %s exists on target: %w", t.TableName, err)
 		}
-		if _, err := r.target.DB.ExecContext(ctx, createStmt); err != nil {
+		if _, err := conn.ExecContext(ctx, createStmt); err != nil {
 			return fmt.Errorf("failed to create table %s on target: %w", t.TableName, err)
 		}
 		r.logger.Info("created table on target", "table", t.TableName, "database", r.target.Config.DBName)

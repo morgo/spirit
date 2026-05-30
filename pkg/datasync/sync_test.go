@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -385,5 +386,75 @@ func TestSyncForce(t *testing.T) {
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t1").Scan(&n))
 	require.Equal(t, 3, n)
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t2").Scan(&n))
+	require.Equal(t, 2, n)
+}
+
+// TestSyncCreateTableLegacyDefault verifies that target tables are created with
+// a relaxed sql_mode. The source DDL can carry a legacy zero-date default that
+// a strict target (sql_mode=TRADITIONAL, as the import's injected target uses)
+// would reject with "Invalid default value" (1067). The data itself has valid
+// timestamps, so only the CREATE needs the relaxed mode.
+func TestSyncCreateTableLegacyDefault(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_legacy_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_legacy_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_legacy_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_legacy_src`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_legacy_dest`)
+
+	// Create the source table with a legacy zero-date TIMESTAMP default — the
+	// server default (NO_ZERO_DATE) rejects it, so use a relaxed connection.
+	// The rows themselves carry valid timestamps.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	laxDB, err := sql.Open("mysql", src.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(laxDB)
+	laxConn, err := laxDB.Conn(ctx)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(laxConn)
+	_, err = laxConn.ExecContext(ctx, "SET SESSION sql_mode = ''")
+	require.NoError(t, err)
+	_, err = laxConn.ExecContext(ctx,
+		"CREATE TABLE t1 (id INT PRIMARY KEY, updated_at TIMESTAMP NOT NULL DEFAULT '0000-00-00 00:00:00')")
+	require.NoError(t, err)
+	_, err = laxConn.ExecContext(ctx,
+		"INSERT INTO t1 (id, updated_at) VALUES (1,'2025-01-01 00:00:00'),(2,'2025-01-02 00:00:00')")
+	require.NoError(t, err)
+
+	// Inject a STRICT (TRADITIONAL) target — this is what rejects the zero-date
+	// default during CREATE without the relaxed-DDL fix.
+	targetCfg := dest.Clone()
+	if targetCfg.Params == nil {
+		targetCfg.Params = map[string]string{}
+	}
+	targetCfg.Params["sql_mode"] = "TRADITIONAL"
+	targetDB, err := sql.Open("mysql", targetCfg.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB) // injected target: the runner doesn't own/close it
+	target := applier.Target{DB: targetDB, Config: targetCfg, KeyRange: "0"}
+
+	s := &Sync{
+		SourceDSN:       src.FormatDSN(),
+		Target:          &target,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		WriteThreads:    2,
+		CopyOnly:        true,
+	}
+	runner, err := NewRunner(s)
+	require.NoError(t, err)
+	require.NoError(t, runner.Run(ctx)) // would fail with 1067 without the relaxed-DDL fix
+	require.NoError(t, runner.Close())
+
+	tgt, err := sql.Open("mysql", dest.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
 	require.Equal(t, 2, n)
 }
