@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,6 +95,24 @@ func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	}
 }
 
+// schemaPredicate returns the information_schema.table_schema filter clause
+// and its bind args. For a normal connection it filters on the literal
+// SchemaName. For a Vitess shard-targeted connection — where SchemaName is a
+// routing string like "keyspace:-80@primary" rather than a physical schema —
+// the literal would never match the physical vt_<keyspace>_<shard> schema and
+// the query would be ambiguous across shards. In that case we filter on
+// DATABASE() instead, which vtgate pushes down to the underlying tablet where
+// it resolves to the physical schema, keeping the result shard-scoped.
+//
+// The predicate is written to be placed first in the WHERE clause so its
+// (zero or one) bind args prepend cleanly to any trailing args.
+func (t *TableInfo) schemaPredicate() (string, []any) {
+	if strings.ContainsAny(t.SchemaName, ":@") {
+		return "table_schema=DATABASE()", nil
+	}
+	return "table_schema=?", []any{t.SchemaName}
+}
+
 // PrimaryKeyValues helps extract the PRIMARY KEY from a row image.
 // It uses our knowledge of the ordinal position of columns to find the
 // position of primary key columns (there might be more than one).
@@ -140,7 +159,9 @@ func (t *TableInfo) setRowEstimate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=? AND table_name=?", t.SchemaName, t.TableName).Scan(&t.EstimatedRows)
+	pred, args := t.schemaPredicate()
+	args = append(args, t.TableName)
+	err = t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE "+pred+" AND table_name=?", args...).Scan(&t.EstimatedRows)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("table %s.%s does not exist", t.SchemaName, t.TableName)
@@ -151,9 +172,10 @@ func (t *TableInfo) setRowEstimate(ctx context.Context) error {
 }
 
 func (t *TableInfo) setIndexes(ctx context.Context) error {
-	rows, err := t.db.QueryContext(ctx, "SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE table_schema=? AND table_name=? AND index_name != 'PRIMARY'",
-		t.SchemaName,
-		t.TableName,
+	pred, args := t.schemaPredicate()
+	args = append(args, t.TableName)
+	rows, err := t.db.QueryContext(ctx, "SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE "+pred+" AND table_name=? AND index_name != 'PRIMARY'",
+		args...,
 	)
 	if err != nil {
 		return err
@@ -178,9 +200,10 @@ func (t *TableInfo) setIndexes(ctx context.Context) error {
 }
 
 func (t *TableInfo) setColumns(ctx context.Context) error {
-	rows, err := t.db.QueryContext(ctx, "SELECT column_name, column_type, GENERATION_EXPRESSION FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ORDINAL_POSITION",
-		t.SchemaName,
-		t.TableName,
+	pred, args := t.schemaPredicate()
+	args = append(args, t.TableName)
+	rows, err := t.db.QueryContext(ctx, "SELECT column_name, column_type, GENERATION_EXPRESSION FROM information_schema.columns WHERE "+pred+" AND table_name=? ORDER BY ORDINAL_POSITION",
+		args...,
 	)
 	if err != nil {
 		return err
@@ -224,11 +247,11 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 // DescIndex describes the columns in an index.
 func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 	cols := []string{}
+	pred, args := t.schemaPredicate()
+	args = append(args, t.TableName, keyName)
 	//nolint: noctx // too much refactoring to add context here
-	rows, err := t.db.Query("SELECT column_name FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND index_name=? ORDER BY seq_in_index",
-		t.SchemaName,
-		t.TableName,
-		keyName,
+	rows, err := t.db.Query("SELECT column_name FROM INFORMATION_SCHEMA.STATISTICS WHERE "+pred+" AND TABLE_NAME=? AND index_name=? ORDER BY seq_in_index",
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -254,9 +277,10 @@ func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 // setPrimaryKey sets the primary key and also the primary key type.
 // A primary key can contain multiple columns.
 func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
-	rows, err := t.db.QueryContext(ctx, "SELECT column_name FROM information_schema.key_column_usage WHERE table_schema=? and table_name=? and constraint_name='PRIMARY' ORDER BY ORDINAL_POSITION",
-		t.SchemaName,
-		t.TableName,
+	pred, args := t.schemaPredicate()
+	args = append(args, t.TableName)
+	rows, err := t.db.QueryContext(ctx, "SELECT column_name FROM information_schema.key_column_usage WHERE "+pred+" and table_name=? and constraint_name='PRIMARY' ORDER BY ORDINAL_POSITION",
+		args...,
 	)
 	if err != nil {
 		return err
@@ -282,9 +306,11 @@ func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
 	}
 	for i, col := range t.KeyColumns {
 		// Get primary key type and auto_inc info.
-		query := "SELECT column_type, extra FROM information_schema.columns WHERE table_schema=? AND table_name=? and column_name=?"
+		pred, args := t.schemaPredicate()
+		args = append(args, t.TableName, col)
+		query := "SELECT column_type, extra FROM information_schema.columns WHERE " + pred + " AND table_name=? and column_name=?"
 		var extra, pkType string
-		err = t.db.QueryRowContext(ctx, query, t.SchemaName, t.TableName, col).Scan(&pkType, &extra)
+		err = t.db.QueryRowContext(ctx, query, args...).Scan(&pkType, &extra)
 		if err != nil {
 			return err
 		}
