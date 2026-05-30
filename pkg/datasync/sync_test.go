@@ -303,3 +303,87 @@ func TestSyncResume(t *testing.T) {
 	require.Equal(t, 3, countRows("t1"), "resume must not duplicate or drop rows")
 	require.Equal(t, 2, countRows("t2"), "resume must not duplicate or drop rows")
 }
+
+// TestSyncForce verifies the Force flag: when a resumable checkpoint exists the
+// target is kept and resumed (no drop); when it can't resume (no checkpoint but
+// a non-empty target) the target database is dropped and recreated so the copy
+// can proceed instead of tripping the fresh-sync target-empty guard.
+func TestSyncForce(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_force_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_force_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_force_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_force_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_force_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_force_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_force_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_force_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_force_dest`)
+
+	newSync := func(force bool) *Sync {
+		return &Sync{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			CopyOnly:        true,
+			Force:           force,
+		}
+	}
+	run := func(force bool) error {
+		r, nerr := NewRunner(newSync(force))
+		require.NoError(t, nerr)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		rerr := r.Run(ctx)
+		require.NoError(t, r.Close())
+		return rerr
+	}
+
+	tgt, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	tableExists := func(name string) bool {
+		var n int
+		require.NoError(t, tgt.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM information_schema.TABLES WHERE table_schema='sync_force_dest' AND table_name=?", name).Scan(&n))
+		return n == 1
+	}
+
+	// First copy completes and writes a checkpoint.
+	require.NoError(t, run(false))
+
+	// Sentinel table not present in the source: survives a resume, vanishes
+	// on a force drop+recreate.
+	testutils.RunSQL(t, `CREATE TABLE sync_force_dest._keep_me (id INT PRIMARY KEY)`)
+
+	// Force with a resumable checkpoint present: must NOT drop — the sentinel
+	// (and the checkpoint) survive.
+	require.NoError(t, run(true))
+	require.True(t, tableExists("_keep_me"), "force must not drop when a resumable checkpoint exists")
+	require.True(t, tableExists("t1"))
+
+	// Simulate "can't resume": remove the checkpoint table but leave the data,
+	// so the target is non-empty with no resumable checkpoint.
+	testutils.RunSQL(t, "DROP TABLE sync_force_dest._spirit_sync_checkpoint")
+
+	// Without force this would fail the target-empty guard.
+	require.Error(t, run(false), "a non-empty target with no checkpoint must fail without force")
+
+	// With force it drops + recreates: the sentinel is gone and the data is
+	// freshly re-copied.
+	require.NoError(t, run(true))
+	require.False(t, tableExists("_keep_me"), "force must drop+recreate when it cannot resume")
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t1").Scan(&n))
+	require.Equal(t, 3, n)
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t2").Scan(&n))
+	require.Equal(t, 2, n)
+}

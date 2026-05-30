@@ -464,11 +464,58 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 		return fmt.Errorf("failed to connect to target server to ensure database: %w", err)
 	}
 	defer utils.CloseAndLog(adminDB)
+	// Force: drop and recreate the target database unless a resumable
+	// checkpoint exists. We do this here, on the admin connection (no database
+	// selected) and before r.target.DB is ever queried, so no live connection
+	// has the database selected when it's dropped. A resumable run is left
+	// intact and resumes as normal.
+	if r.sync.Force {
+		resumable, rerr := r.hasResumableCheckpoint(ctx, adminDB, cfg.DBName)
+		if rerr != nil {
+			return rerr
+		}
+		if resumable {
+			r.logger.Info("force set, but a resumable checkpoint exists; keeping target and resuming", "database", cfg.DBName)
+		} else {
+			r.logger.Warn("force set and no resumable checkpoint; dropping and recreating target database", "database", cfg.DBName)
+			if err := dbconn.Exec(ctx, adminDB, "DROP DATABASE IF EXISTS %n", cfg.DBName); err != nil {
+				return fmt.Errorf("failed to drop target database %q: %w", cfg.DBName, err)
+			}
+		}
+	}
 	if err := dbconn.Exec(ctx, adminDB, "CREATE DATABASE IF NOT EXISTS %n", cfg.DBName); err != nil {
 		return fmt.Errorf("failed to create target database %q: %w", cfg.DBName, err)
 	}
 	r.logger.Info("ensured target database exists", "database", cfg.DBName)
 	return nil
+}
+
+// hasResumableCheckpoint reports whether the target database holds a sync
+// checkpoint that can be resumed from (a row carrying a copier watermark). It
+// runs on the passed connection (typically the no-database admin connection),
+// using fully-qualified names so it works without a selected database — and so
+// it can be called before r.target.DB is opened.
+func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName string) (bool, error) {
+	var exists int
+	e := db.QueryRowContext(ctx,
+		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
+		dbName, syncCheckpointTableName).Scan(&exists)
+	if errors.Is(e, sql.ErrNoRows) {
+		return false, nil
+	}
+	if e != nil {
+		return false, fmt.Errorf("failed to check for checkpoint table: %w", e)
+	}
+	var watermark string
+	e = db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT IFNULL(copier_watermark, '') FROM `%s`.`%s` WHERE id = 1", dbName, syncCheckpointTableName)).Scan(&watermark)
+	if errors.Is(e, sql.ErrNoRows) {
+		return false, nil
+	}
+	if e != nil {
+		return false, fmt.Errorf("failed to read checkpoint: %w", e)
+	}
+	return watermark != "", nil
 }
 
 // createTargetTables creates each source table on the target using the
