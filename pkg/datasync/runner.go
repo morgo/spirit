@@ -147,21 +147,28 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.source = sourceInfo{db: db, config: cfg, dsn: r.sync.SourceDSN}
 
-	// Resolve the single target: use the caller-supplied one, else
-	// auto-create the database (if missing) and open it from TargetDSN.
+	// Resolve the single target. The target database is auto-created (if
+	// missing) on both paths — the import's per-shard target databases are
+	// not guaranteed to pre-exist on the destination cluster.
 	if r.sync.Target != nil {
 		r.target = *r.sync.Target
+		// The injected target DB connects lazily, so ensure its database
+		// exists before the first query (createTargetTables / checkpoint).
+		if err := r.ensureTargetDatabase(ctx, r.target.Config); err != nil {
+			return err
+		}
 	} else {
-		if err := r.ensureTargetDatabase(ctx); err != nil {
+		tcfg, terr := mysql.ParseDSN(r.sync.TargetDSN)
+		if terr != nil {
+			return fmt.Errorf("failed to parse target DSN: %w", terr)
+		}
+		// Create the database before opening — a DSN-scoped open pings it.
+		if err := r.ensureTargetDatabase(ctx, tcfg); err != nil {
 			return err
 		}
 		tdb, terr := dbconn.New(r.sync.TargetDSN, r.dbConfig)
 		if terr != nil {
 			return fmt.Errorf("failed to connect to target: %w", terr)
-		}
-		tcfg, terr := mysql.ParseDSN(r.sync.TargetDSN)
-		if terr != nil {
-			return fmt.Errorf("failed to parse target DSN: %w", terr)
 		}
 		r.target = applier.Target{KeyRange: "0", DB: tdb, Config: tcfg}
 		r.ownsTarget = true
@@ -397,16 +404,16 @@ func (r *Runner) createApplier() (applier.Applier, error) {
 }
 
 // ensureTargetDatabase creates the target database if it does not already
-// exist, by connecting to the target server without selecting a database.
-// Only used on the TargetDSN path (a caller-injected Target already has an
-// open connection to an existing database).
-func (r *Runner) ensureTargetDatabase(ctx context.Context) error {
-	cfg, err := mysql.ParseDSN(r.sync.TargetDSN)
-	if err != nil {
-		return fmt.Errorf("failed to parse target DSN: %w", err)
+// exist, by connecting to the target server (from the target's config)
+// without selecting a database. Used on both the injected-Target and
+// TargetDSN paths — the import's per-shard target databases are not
+// guaranteed to pre-exist on the destination cluster.
+func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) error {
+	if cfg == nil {
+		return errors.New("target config is nil; cannot ensure target database")
 	}
 	if cfg.DBName == "" {
-		return errors.New("target DSN must include a database name")
+		return errors.New("target must include a database name")
 	}
 	adminCfg := cfg.Clone()
 	adminCfg.DBName = ""
