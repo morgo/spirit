@@ -188,9 +188,31 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	if !r.resuming {
 		// Watermark optimization ON during the copy: change events for keys
-		// the copier has not reached yet are discarded (those rows are
-		// copied directly), avoiding redundant work. (No change feed in
-		// copy-only mode, so nothing to optimize.)
+		// the copier has not reached yet (above the watermark) are discarded,
+		// because the copier will copy those rows directly — avoiding
+		// redundant work. (No change feed in copy-only mode, so nothing to
+		// optimize.)
+		//
+		// CORRECTNESS CAVEAT — read replicas:
+		// keyAboveWatermark is only safe when the copier reads from a source
+		// that reflects every change the change feed has already delivered.
+		// That holds on a PRIMARY (a committed change is immediately visible
+		// to a later SELECT), but NOT on a lagging REPLICA: an update to an
+		// above-watermark key can be observed on the change stream — and
+		// discarded — while the copier's later read of that key on the
+		// replica still returns the pre-update (stale) value. The discarded
+		// change is then silently lost on the target (the copier read is
+		// delayed by replica lag; the change stream is not).
+		//
+		// The intended safety net is the post-copy checksum, which re-reads
+		// and repairs divergent rows — but we cannot yet rely on checksumming
+		// for the read-replica import path: it needs privileges the read-only
+		// source credential lacks (performance_schema / table locks /
+		// CONNECTION_ADMIN). Until the checksum works there, enabling
+		// keyAboveWatermark against a replica source (e.g. the strata import,
+		// which targets @replica / TabletType=REPLICA) yields only
+		// best-effort consistency. Reading from the PRIMARY, or running the
+		// checksum, removes the hazard.
 		if !r.sync.CopyOnly {
 			if err := r.replClient.SetWatermarkOptimization(ctx, true); err != nil {
 				return err
