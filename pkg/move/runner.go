@@ -95,12 +95,6 @@ type Runner struct {
 var _ status.Task = (*Runner)(nil)
 
 func NewRunner(m *Move) (*Runner, error) {
-	if m.Source != nil && len(m.SourceDSNs) > 1 {
-		return nil, errors.New("Move.Source (injected change.Source) is not compatible with multiple SourceDSNs; the injected source covers exactly one logical source")
-	}
-	if m.Source != nil && m.Applier == nil {
-		return nil, errors.New("Move.Source requires Move.Applier to also be set; the injected change.Source needs the same applier instance the copier uses")
-	}
 	r := &Runner{
 		move:   m,
 		logger: slog.Default(),
@@ -324,16 +318,15 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// Read checkpoint from its store (targets[0] for a read-only injected
-	// source, sources[0] otherwise — see checkpointStore).
-	cpDB, cpDBName := r.checkpointStore()
+	// Read checkpoint from sources[0] by convention.
+	src0 := &r.sources[0]
 	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_positions, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
-		cpDBName, checkpointTableName)
+		src0.config.DBName, checkpointTableName)
 	var copierWatermark, binlogPositionsJSON, stmt string
 	var id int
-	err = cpDB.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt)
+	err = src0.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt)
 	if err != nil {
-		return fmt.Errorf("could not read from checkpoint table '%s': %w", checkpointTableName, err)
+		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
 	}
 
 	// Parse per-source positions (opaque strings owned by the source impl),
@@ -373,7 +366,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
-	r.checkpointTable = table.NewTableInfo(cpDB, cpDBName, checkpointTableName)
+	r.checkpointTable = table.NewTableInfo(src0.db, src0.config.DBName, checkpointTableName)
 	r.usedResumeFromCheckpoint = true
 	return nil
 }
@@ -417,21 +410,9 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	// Create one repl client per source, all sharing the same applier.
-	// If the Move config provides a pre-constructed change.Source (e.g.
-	// for a PlanetScale VStream-based import), wire it in for sources[0]
-	// instead of constructing a binlog client. The injected Source must
-	// match the single-source case — providing both Move.Source AND
-	// multiple SourceDSNs is rejected at NewRunner. The applier is also
-	// caller-provided in that case (Move.Applier), so both BinlogClient
-	// and out-of-tree sources receive their applier the same way:
-	// at construction time, not via a post-construction setter.
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
 	for i := range r.sources {
 		src := &r.sources[i]
-		if i == 0 && r.move.Source != nil {
-			src.replClient = r.move.Source
-			continue
-		}
 		replConfig := change.NewClientDefaultConfig()
 		replConfig.Logger = r.logger
 		replConfig.CancelFunc = r.fatalError
@@ -540,34 +521,24 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	return nil
 }
 
-// checkpointStore returns the database connection and schema where the
-// _spirit_checkpoint table lives: always the first target,
-// deterministically. targets[0] is always writable — the source may be
-// read-only (e.g. a PlanetScale VStream import) — and there is always at
-// least one target. resumeStateCheck reads from the same place so the
-// read and write sides stay consistent.
-func (r *Runner) checkpointStore() (*sql.DB, string) {
-	return r.targets[0].DB, r.targets[0].Config.DBName
-}
-
-// createCheckpointTable creates the checkpoint table on the first target
-// (see checkpointStore).
+// createCheckpointTable creates checkpoint table on SOURCE (not target).
+// createCheckpointTable creates checkpoint table on sources[0] by convention.
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	db, dbName := r.checkpointStore()
-	if err := dbconn.Exec(ctx, db, "DROP TABLE IF EXISTS %n.%n", dbName, checkpointTableName); err != nil {
+	src0 := &r.sources[0]
+	if err := dbconn.Exec(ctx, src0.db, "DROP TABLE IF EXISTS %n.%n", src0.config.DBName, checkpointTableName); err != nil {
 		return err
 	}
-	if err := dbconn.Exec(ctx, db, `CREATE TABLE %n.%n (
+	if err := dbconn.Exec(ctx, src0.db, `CREATE TABLE %n.%n (
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
 	binlog_positions TEXT,
 	statement TEXT
 	)`,
-		dbName, checkpointTableName); err != nil {
+		src0.config.DBName, checkpointTableName); err != nil {
 		return err
 	}
-	r.checkpointTable = table.NewTableInfo(db, dbName, checkpointTableName)
+	r.checkpointTable = table.NewTableInfo(src0.db, src0.config.DBName, checkpointTableName)
 	return nil
 }
 
@@ -586,23 +557,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	// ForceKill and RejectReadOnly are true by default in NewDBConfig().
-	// For an injected, read-only change.Source (a Vitess/PlanetScale VStream
-	// import) we disable both:
-	//   - ForceKill needs CONNECTION_ADMIN/SUPER (which a read-only customer
-	//     credential won't have), and the import never acquires a source lock
-	//     anyway, so it can never fire.
-	//   - RejectReadOnly is an Aurora-failover guard that turns a read-only
-	//     server error into driver.ErrBadConn. The injected source connects
-	//     to a read-only replica on purpose (e.g. PlanetScale's @replica),
-	//     so leaving it on loops every source statement to
-	//     "driver: bad connection". dbConfig is only used to open the source
-	//     connection here (the target is caller-supplied via Move.Targets),
-	//     so this does not weaken the target's failover safety.
-	if r.move.Source != nil {
-		r.dbConfig.ForceKill = false
-		r.dbConfig.RejectReadOnly = false
-	}
+	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
 	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
 
@@ -731,20 +686,6 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logger.Info("All tables copied successfully.")
 
-	// Import path: an injected, read-only change.Source (Move.Source, e.g.
-	// a PlanetScale VStream import). The checksum needs table locks the
-	// source can't provide — an eventually-consistent checksum that retries
-	// failed chunks is future work — so skip it. The cutover is likewise a
-	// no-op for now: the data has been copied and replicated to the target,
-	// but there is deliberately no last-mile sequencing to drain the final
-	// changes or trigger a failover. An external cutover is future work.
-	if r.move.Source != nil {
-		r.logger.Info("Import source: skipping checksum and performing no-op cutover (data copied to target; no last-mile sequencing)")
-		r.status.Set(status.CutOver)
-		r.logger.Info("Move operation complete.")
-		return nil
-	}
-
 	// Post-copy phase: drain the binlog, restore secondary indexes,
 	// ANALYZE TABLE, run the initial checksum. While the sentinel blocks
 	// cutover, waitOnSentinelTable runs a continuous checksum loop in the
@@ -778,9 +719,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err = cutover.Run(ctx); err != nil {
 		return err
 	}
-	// Delete checkpoint table from its store (see checkpointStore).
-	cpDB, cpDBName := r.checkpointStore()
-	if err := dbconn.Exec(ctx, cpDB, "DROP TABLE IF EXISTS %n.%n", cpDBName, checkpointTableName); err != nil {
+	// Delete checkpoint table from sources[0].
+	src0 := &r.sources[0]
+	if err := dbconn.Exec(ctx, src0.db, "DROP TABLE IF EXISTS %n.%n", src0.config.DBName, checkpointTableName); err != nil {
 		return err
 	}
 	r.logger.Info("Move operation complete.")
@@ -829,8 +770,8 @@ func (r *Runner) fatalError() bool {
 	// If we don't do this, the move will permanently be blocked from proceeding.
 	// Letting it start again is the better choice.
 	// Use a background context since the move context may already be cancelled.
-	if r.checkpointTable != nil && len(r.targets) > 0 {
-		if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
+	if r.checkpointTable != nil && len(r.sources) > 0 {
+		if err := dbconn.Exec(context.Background(), r.sources[0].db, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
 			r.logger.Error("could not remove checkpoint",
 				"error", err,
 			)
@@ -910,7 +851,6 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		Targets:        r.targets,
 		SourceTables:   r.sourceTables,
 		CreateSentinel: r.move.CreateSentinel,
-		InjectedSource: r.move.Source != nil,
 	}, r.logger, scope)
 }
 
@@ -1429,7 +1369,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	r.logger.Info("checkpoint",
 		"low-watermark", copierWatermark,
 		"binlog-positions", string(positionsJSON))
-	err = dbconn.Exec(ctx, r.targets[0].DB, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_positions, statement) VALUES (%?, %?, %?, %?)",
+	err = dbconn.Exec(ctx, r.sources[0].db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_positions, statement) VALUES (%?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		copierWatermark,
@@ -1447,20 +1387,9 @@ func (r *Runner) Cancel() {
 	r.cancelFunc()
 }
 
-// createApplier returns the applier the runner should use. If the
-// caller supplied one via Move.Applier, that instance is returned
-// verbatim — required when Move.Source is injected so the source's
-// subscriptions and the copier share one logical apply path.
-// Otherwise the runner constructs the appropriate applier based on the
-// number of targets.
-//
-// Note: The applier is NOT started here. The copier will start it when
-// it begins copying.
+// createApplier creates the appropriate applier based on the number of targets.
+// Note: The applier is NOT started here. The copier will start it when it begins copying.
 func (r *Runner) createApplier() (applier.Applier, error) {
-	if r.move.Applier != nil {
-		r.logger.Info("Using caller-provided applier from Move.Applier")
-		return r.move.Applier, nil
-	}
 	if len(r.targets) == 1 && r.targets[0].KeyRange == "0" {
 		// Single target - use SingleTargetApplier
 		appl, err := applier.NewSingleTargetApplier(r.targets[0], &applier.ApplierConfig{

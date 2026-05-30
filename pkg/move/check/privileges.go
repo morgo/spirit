@@ -35,16 +35,6 @@ var grantedRolesRegexp = regexp.MustCompile("`([^`]+)`@`[^`]+`")
 // active on every connection, so we tolerate its presence as a substitute for
 // CONNECTION_ADMIN and PROCESS.
 func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
-	// An injected, read-only change.Source (e.g. a Vitess/PlanetScale VStream
-	// import) authenticates over gRPC and uses none of the privileges this
-	// check verifies — binlog reading (REPLICATION SLAVE/CLIENT), RELOAD,
-	// LOCK TABLES, or force-kill (CONNECTION_ADMIN/PROCESS). The move skips
-	// the checksum and the source-side lock entirely, so the check is
-	// inapplicable; skip it.
-	if r.InjectedSource {
-		logger.Info("skipping source privilege check: source is an injected change.Source (authenticates via gRPC; no binlog/lock/force-kill privileges required)")
-		return nil
-	}
 	for i, src := range r.Sources {
 		if err := checkSourcePrivileges(ctx, src, r, logger); err != nil {
 			return fmt.Errorf("source %d: %w", i, err)

@@ -63,12 +63,10 @@ func TestResumeStateCheck(t *testing.T) {
 		require.Contains(t, err.Error(), "does not exist")
 	})
 
-	// Create checkpoint table for remaining tests. The runner always stores
-	// the checkpoint on targets[0] (see Runner.checkpointStore), so create
-	// it on the target here. resumeStateCheck only verifies that the table
-	// exists, so the columns here just need to match the move-runner schema
-	// for hygiene.
-	_, err = targetDB.ExecContext(t.Context(), `CREATE TABLE resume_tgt._spirit_checkpoint (
+	// Create checkpoint table for remaining tests. resumeStateCheck only
+	// verifies that the table exists, so the columns here just need to match
+	// the move-runner schema for hygiene.
+	_, err = sourceDB.ExecContext(t.Context(), `CREATE TABLE resume_src._spirit_checkpoint (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		copier_watermark TEXT,
 		checksum_watermark TEXT,
@@ -77,7 +75,7 @@ func TestResumeStateCheck(t *testing.T) {
 	)`)
 	require.NoError(t, err)
 	defer func() {
-		_, _ = targetDB.ExecContext(t.Context(), "DROP TABLE IF EXISTS resume_tgt._spirit_checkpoint")
+		_, _ = sourceDB.ExecContext(t.Context(), "DROP TABLE IF EXISTS resume_src._spirit_checkpoint")
 	}()
 	// Test 2: Checkpoint exists but no target tables should fail
 	t.Run("checkpoint exists but no target tables fails", func(t *testing.T) {

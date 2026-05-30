@@ -13,17 +13,6 @@ func init() {
 
 // configurationCheck verifies the MySQL configuration on all source databases.
 func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
-	// An injected, read-only change.Source (e.g. a Vitess/PlanetScale VStream
-	// import) does not have Spirit read the source binlog directly — the
-	// VStream gRPC feed does that on the source side. The server-side binlog
-	// settings this check verifies (binlog_format, binlog_row_image,
-	// log_slave_updates, binlog_order_commits, etc.) are therefore irrelevant,
-	// and the source connection (via vtgate) may not even expose them
-	// reliably. Skip the check for an injected source.
-	if r.InjectedSource {
-		logger.Info("skipping source configuration check: source is an injected change.Source (Spirit does not read the source binlog directly; server-side binlog settings do not apply)")
-		return nil
-	}
 	if len(r.Sources) == 0 {
 		return errors.New("no sources configured")
 	}
