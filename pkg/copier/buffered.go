@@ -186,6 +186,10 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		chunkStartTime := time.Now()
 		rows, err := c.readChunkData(ctx, chunk)
 		if err != nil {
+			// The read comes from the source (e.g. a Vitess/vtgate the importer
+			// doesn't control), so log the error here — it's the root cause that
+			// would otherwise only be inferable from the aborted copy.
+			c.logger.Error("readWorker failed to read chunk data from source", "chunk", chunk.String(), "error", err)
 			c.setInvalid()
 			return fmt.Errorf("failed to read chunk data: %w", err)
 		}
@@ -237,6 +241,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 		// Apply the rows
 		if err := c.applier.Apply(ctx, chunk, rows, callback); err != nil {
+			c.logger.Error("readWorker failed to apply rows", "chunk", chunk.String(), "error", err)
 			c.setInvalid()
 			return fmt.Errorf("failed to apply rows: %w", err)
 		}
