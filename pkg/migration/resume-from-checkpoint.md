@@ -13,27 +13,25 @@ CREATE TABLE _tablename_chkpnt (
     id INT AUTO_INCREMENT PRIMARY KEY,
     copier_watermark TEXT,                                  -- where row copy left off (JSON)
     checksum_watermark TEXT,                                -- where checksum left off (JSON, if applicable)
-    binlog_name VARCHAR(255),                               -- e.g., "mysql-bin.000042"
-    binlog_pos INT,                                         -- e.g., 4567
+    binlog_position VARCHAR(255),                           -- opaque change.Source position, e.g. "mysql-bin.000042:4567"
     statement TEXT,                                         -- the DDL statement being executed
     original_table_name VARCHAR(64) NOT NULL DEFAULT '',    -- full untruncated table name (single-table only; '' for multi-table)
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-The checkpoint captures everything needed to resume: where the copier was, the binlog position for the replication client to start streaming from, and the original DDL statement.
+The checkpoint captures everything needed to resume: where the copier was, the opaque change-source position to resume streaming from, and the original DDL statement.
 
 ## What happens on resume
 
 When a new Runner starts (`Runner.Run()` → `setup()`), it always attempts `resumeFromCheckpoint()` first. This performs several validation steps before committing to the resume path:
 
 1. **Check `_<table>_new` exists** — if the shadow table is gone, there's nothing to resume.
-2. **Read checkpoint table** — fetch the saved watermarks, binlog position, statement, and `original_table_name`.
+2. **Read checkpoint table** — fetch the saved watermarks, position, statement, and `original_table_name`.
 3. **Validate DDL statement matches** — the checkpoint must be for the same alter. In `--strict` mode, a mismatch is a hard error. In non-strict mode, Spirit discards the checkpoint and starts fresh.
 4. **Validate `original_table_name` matches** (single-table mode) — guards against the rare collision where two long table names truncate to the same checkpoint table name. A mismatch causes Spirit to discard the checkpoint and start fresh.
-5. **Validate binlog file still exists** — queries `SHOW BINARY LOGS` to verify the checkpoint's binlog file hasn't been purged. If it has, resume is not possible and Spirit falls back to `newMigration()`.
-6. **Set up copier, checker, and replication client** — create the replication client and add subscriptions for each table.
-7. **Start binlog streaming** — `replClient.Run()` begins streaming from the saved position.
+5. **Set up copier, checker, and change source** — create the change source and add subscriptions for each table.
+6. **Resume streaming from the saved position** — `replClient.StartFromPosition(ctx, position)` primes the source's internal position and begins streaming. The source validates the position is still resumable; if it isn't (e.g. the MySQL binlog file has been purged), `change.ErrPositionNotFound` is returned and surfaces as `status.ErrBinlogNotFound`, causing Spirit to fall back to `newMigration()`.
 
 If any step fails (and strict mode is not enabled), Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch. This means resume is best-effort — Spirit will always make forward progress even if the checkpoint is unusable.
 
@@ -49,7 +47,7 @@ MySQL automatically deletes old binlog files based on `binlog_expire_logs_second
 
 One reason resume can fail is **binlog expiry**. If the checkpoint references a binlog file that has been purged, Spirit cannot resume because changes in the gap would be lost.
 
-Spirit detects this early by checking `SHOW BINARY LOGS` before creating any resources. If the file is missing, it returns `status.ErrBinlogNotFound` immediately, avoiding partial initialization that would need cleanup.
+The change source is responsible for detecting this when resume begins. The binlog implementation validates the position inside `StartFromPosition` (against `SHOW BINARY LOGS`) and returns `change.ErrPositionNotFound` if the file is gone; the migration runner translates that to `status.ErrBinlogNotFound`. Strict mode then surfaces the error to the caller; non-strict mode logs and falls back to `newMigration()`.
 
 What happens next depends on whether strict mode is enabled:
 

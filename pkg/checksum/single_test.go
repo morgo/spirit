@@ -44,7 +44,7 @@ func TestBasicChecksum(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestBasicValidation(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 
 	_, err = NewChecker(nil, chunker, []change.Source{feed}, NewCheckerDefaultConfig()) // no source DBs
 	require.EqualError(t, err, "at least one source database must be provided")
@@ -127,7 +127,7 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -168,7 +168,7 @@ func TestFixCorrupt(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -219,7 +219,7 @@ func TestCorruptChecksum(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
@@ -254,7 +254,7 @@ func TestBoundaryCases(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
@@ -325,7 +325,7 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
@@ -361,7 +361,7 @@ func TestYieldTimeout(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -407,7 +407,7 @@ func TestFromWatermark(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()

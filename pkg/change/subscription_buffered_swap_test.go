@@ -69,7 +69,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
@@ -95,7 +95,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -145,7 +145,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 }
 
 // TestSwapPairEndToEndViaReplace drives the full end-to-end path: real
-// Client.Run, real binlog reader, real swap transactions on source,
+// binlogClient.Start, real binlog reader, real swap transactions on source,
 // real Flush calls, real destination state. With the REPLACE-based
 // applier this should complete successfully because REPLACE handles the
 // swap-pair shape natively — its "delete any unique-key conflict before
@@ -179,7 +179,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applierInstance, NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applierInstance, NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
@@ -198,7 +198,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, slot_id) VALUES %s",
 		dstTable.QuotedTableName, insertVals))
 
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	sub := getBufferedMap(t, client, srcTable.SchemaName+"."+srcTable.TableName)

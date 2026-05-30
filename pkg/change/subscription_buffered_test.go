@@ -94,11 +94,11 @@ func TestBufferedMapVariableColumns(t *testing.T) {
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 
 	defer client.Close()
 	defer utils.CloseAndLog(db)
@@ -144,11 +144,11 @@ func TestBufferedMapIllegalValues(t *testing.T) {
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 
 	defer client.Close()
 	defer utils.CloseAndLog(db)
@@ -217,7 +217,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   logger,
 		dbConfig: dbconn.NewDBConfig(),
@@ -234,7 +234,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -348,7 +348,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   logger,
 		dbConfig: dbconn.NewDBConfig(),
@@ -361,7 +361,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -445,13 +445,13 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -515,14 +515,14 @@ func TestBufferedMapQueueModeFlush(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -596,14 +596,14 @@ func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -662,14 +662,14 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.MarkAsComplete()
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -747,14 +747,14 @@ func TestBufferedMapToggleDrainFailureLeavesFlagUnchanged(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.MarkAsComplete()
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -820,13 +820,13 @@ func TestBufferedMapTogglePassthrough(t *testing.T) {
 	// a non-mode-changing toggle doesn't drain the map at all).
 	mockChunker.SimulateProgress(0.001)
 
-	client := &Client{
+	client := &binlogClient{
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -865,13 +865,13 @@ func TestBufferedMapConcurrentHasChanged(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:        client,
+		logger:   client.logger,
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]bufferedChange),
@@ -917,13 +917,13 @@ func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -961,13 +961,13 @@ func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:        client,
+		logger:   client.logger,
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]bufferedChange),
@@ -1008,13 +1008,13 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 	mockChunker.SimulateProgress(0.005) // Current position at 5
 
-	client := &Client{
+	client := &binlogClient{
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -1075,14 +1075,14 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -1129,14 +1129,14 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -1207,14 +1207,14 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
-	client := &Client{
+	client := &binlogClient{
 		db:       db,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -1263,11 +1263,11 @@ func newBareBufferedMap(softLimitBytes int64) *bufferedMap {
 		changes:              make(map[string]bufferedChange),
 		softLimitBytes:       softLimitBytes,
 		pkIsMemoryComparable: true,
-		// c and table are needed by the park-entry/exit log lines in
+		// logger and table are needed by the park-entry/exit log lines in
 		// HasChanged. Tests don't assert on these but must populate
 		// them or the logging path NPEs.
-		c:     &Client{logger: slog.Default()},
-		table: &table.TableInfo{SchemaName: "test", TableName: "bare"},
+		logger: slog.Default(),
+		table:  &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub
@@ -1485,7 +1485,7 @@ func TestBufferedMapQueueModeBackpressure(t *testing.T) {
 		softLimitBytes:        1024,
 		pkIsMemoryComparable:  false, // route to queue
 		watermarkOptimization: false, // post-copy: queue mode active
-		c:                     &Client{logger: slog.Default()},
+		logger:                slog.Default(),
 		table:                 &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
@@ -1740,11 +1740,11 @@ func TestBufferedMapGeometry(t *testing.T) {
 	}
 	appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// INSERT geometry data.
@@ -1914,11 +1914,11 @@ func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
 			}
 			appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 			require.NoError(t, err)
-			client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig()).(*Client)
+			client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig()).(*binlogClient)
 			chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 			require.NoError(t, err)
 			require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-			require.NoError(t, client.Run(t.Context()))
+			require.NoError(t, client.Start(t.Context()))
 			defer client.Close()
 
 			// Bump a non-JSON column on the source. With

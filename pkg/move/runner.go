@@ -24,7 +24,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 )
@@ -57,12 +56,6 @@ type sourceInfo struct {
 // or DSN parameter reordering.
 func (s *sourceInfo) sourceKey() string {
 	return s.config.Addr + "/" + s.config.DBName
-}
-
-// binlogPosition is used for JSON serialization of per-source binlog positions in checkpoints.
-type binlogPosition struct {
-	Name string `json:"name"`
-	Pos  uint32 `json:"pos"`
 }
 
 type Runner struct {
@@ -336,21 +329,16 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
 	}
 
-	// Restore per-source binlog positions, keyed by sourceKey (addr/dbname).
-	var positions map[string]binlogPosition
+	// Parse per-source positions (opaque strings owned by the source impl),
+	// keyed by sourceKey (addr/dbname).
+	var positions map[string]string
 	if err := json.Unmarshal([]byte(binlogPositionsJSON), &positions); err != nil {
 		return fmt.Errorf("could not parse binlog positions from checkpoint: %w", err)
 	}
 	for i := range r.sources {
-		key := r.sources[i].sourceKey()
-		pos, ok := positions[key]
-		if !ok {
-			return fmt.Errorf("checkpoint missing binlog position for source %s", key)
+		if _, ok := positions[r.sources[i].sourceKey()]; !ok {
+			return fmt.Errorf("checkpoint missing binlog position for source %s", r.sources[i].sourceKey())
 		}
-		r.sources[i].replClient.SetFlushedPos(gomysql.Position{
-			Name: pos.Name,
-			Pos:  pos.Pos,
-		})
 	}
 
 	// Delete rows above the watermark from all target tables before resuming.
@@ -369,10 +357,12 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// Start all replication clients.
+	// Open each source's change feed at its checkpointed position.
+	// OpenFromPosition primes the position and starts streaming in one call.
 	for i := range r.sources {
-		if err := r.sources[i].replClient.Run(ctx); err != nil {
-			return fmt.Errorf("failed to start repl client for source %d: %w", i, err)
+		key := r.sources[i].sourceKey()
+		if err := r.sources[i].replClient.StartFromPosition(ctx, positions[key]); err != nil {
+			return fmt.Errorf("failed to start change feed for source %d at %q: %w", i, positions[key], err)
 		}
 	}
 
@@ -523,7 +513,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 
 	// Start all replication clients.
 	for i := range r.sources {
-		if err := r.sources[i].replClient.Run(ctx); err != nil {
+		if err := r.sources[i].replClient.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start repl client for source %d: %w", i, err)
 		}
 	}
@@ -1337,11 +1327,11 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
-	// Collect per-source binlog positions, keyed by sourceKey (addr/dbname).
-	positions := make(map[string]binlogPosition)
+	// Collect per-source positions (opaque strings owned by the source
+	// implementation), keyed by sourceKey (addr/dbname).
+	positions := make(map[string]string)
 	for i := range r.sources {
-		pos := r.sources[i].replClient.GetBinlogApplyPosition()
-		positions[r.sources[i].sourceKey()] = binlogPosition{Name: pos.Name, Pos: pos.Pos}
+		positions[r.sources[i].sourceKey()] = r.sources[i].replClient.Position()
 	}
 	positionsJSON, err := json.Marshal(positions)
 	if err != nil {

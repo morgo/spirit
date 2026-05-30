@@ -58,7 +58,7 @@ func TestCutOver(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 
 	cutoverConfig := []*cutoverConfig{
 		{
@@ -117,7 +117,7 @@ func TestMDLLockFails(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 
 	cutoverConfig := []*cutoverConfig{
 		{
@@ -753,14 +753,16 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 
 	waitForStatus(t, m, status.WaitingOnSentinelTable)
 
-	// Verify binlog position advances while waiting.
-	binlogPos := m.replClient.GetBinlogApplyPosition()
+	// Verify the source position advances while waiting. Position() is an
+	// opaque string and the binlogClient's internal setBufferedPos enforces
+	// monotonicity, so NotEqual is a sufficient "advanced" check.
+	binlogPos := m.replClient.Position()
 	for range 4 {
 		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id) SELECT null FROM %s a, %s b, %s c LIMIT 1000", tableName, tableName, tableName, tableName))
 		require.NoError(t, m.replClient.BlockWait(t.Context()))
 		require.NoError(t, m.replClient.Flush(t.Context()))
-		newBinlogPos := m.replClient.GetBinlogApplyPosition()
-		require.Equal(t, 1, newBinlogPos.Compare(binlogPos))
+		newBinlogPos := m.replClient.Position()
+		require.NotEqual(t, binlogPos, newBinlogPos)
 		binlogPos = newBinlogPos
 	}
 

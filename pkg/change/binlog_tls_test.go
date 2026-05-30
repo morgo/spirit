@@ -79,7 +79,7 @@ func TestClientTLSConfiguration(t *testing.T) {
 			tlsConfig.TLSCertificatePath = tc.tlsCert
 
 			// Create a mock client (we can't actually connect without real DB)
-			client := &Client{
+			client := &binlogClient{
 				host:     tc.host,
 				username: "testuser",
 				password: "testpass",
@@ -91,7 +91,7 @@ func TestClientTLSConfiguration(t *testing.T) {
 			require.Equal(t, tc.tlsMode, client.dbConfig.TLSMode)
 			require.Equal(t, tc.tlsCert, client.dbConfig.TLSCertificatePath)
 
-			// Test the TLS mode validation logic that would be used in Run()
+			// Test the TLS mode validation logic that would be used in Start()
 			if tc.tlsMode == "DISABLED" {
 				// For disabled mode, TLS should not be configured in actual connection
 				require.Equal(t, "DISABLED", client.dbConfig.TLSMode)

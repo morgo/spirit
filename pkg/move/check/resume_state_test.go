@@ -63,13 +63,14 @@ func TestResumeStateCheck(t *testing.T) {
 		require.Contains(t, err.Error(), "does not exist")
 	})
 
-	// Create checkpoint table for remaining tests
+	// Create checkpoint table for remaining tests. resumeStateCheck only
+	// verifies that the table exists, so the columns here just need to match
+	// the move-runner schema for hygiene.
 	_, err = sourceDB.ExecContext(t.Context(), `CREATE TABLE resume_src._spirit_checkpoint (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		copier_watermark TEXT,
 		checksum_watermark TEXT,
-		binlog_name VARCHAR(255),
-		binlog_pos INT,
+		binlog_positions TEXT,
 		statement TEXT
 	)`)
 	require.NoError(t, err)
