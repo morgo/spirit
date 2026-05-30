@@ -229,3 +229,77 @@ func TestRunnerStatusTask(t *testing.T) {
 	require.True(t, p.Tables[0].IsComplete)
 	require.Equal(t, uint64(3), p.Tables[0].RowsCopied)
 }
+
+// TestSyncResume verifies that a copy-only sync writes a copier-watermark
+// checkpoint and that a second run against the same (non-empty) target detects
+// it and resumes — opening the chunker at the saved watermark instead of
+// tripping the fresh-sync target-empty check — leaving the data intact. Uses
+// two tables so the copier is a multi-chunker (as a real per-shard keyspace
+// import is), which always records a checkpoint.
+func TestSyncResume(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_resume_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_resume_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_resume_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_resume_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_resume_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_resume_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_resume_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_resume_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_resume_dest`)
+
+	newSync := func() *Sync {
+		return &Sync{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			CopyOnly:        true,
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// First run: copies both tables and records a checkpoint.
+	r1, err := NewRunner(newSync())
+	require.NoError(t, err)
+	require.NoError(t, r1.Run(ctx))
+	require.NoError(t, r1.Close())
+
+	tgt, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+
+	countRows := func(tbl string) int {
+		var n int
+		require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM "+tbl).Scan(&n))
+		return n
+	}
+	require.Equal(t, 3, countRows("t1"))
+	require.Equal(t, 2, countRows("t2"))
+
+	// A copy must persist a checkpoint with a copier watermark.
+	var wm string
+	require.NoError(t, tgt.QueryRowContext(context.Background(),
+		"SELECT IFNULL(copier_watermark, '') FROM _spirit_sync_checkpoint WHERE id = 1").Scan(&wm))
+	require.NotEmpty(t, wm, "a copy should record a copier watermark")
+
+	// Second run with the target left intact: it must detect the checkpoint and
+	// resume (open the chunker at the watermark) rather than fail the fresh
+	// target-empty check, and the data must be unchanged.
+	r2, err := NewRunner(newSync())
+	require.NoError(t, err)
+	require.NoError(t, r2.Run(ctx))
+	require.NoError(t, r2.Close())
+
+	require.Equal(t, 3, countRows("t1"), "resume must not duplicate or drop rows")
+	require.Equal(t, 2, countRows("t2"), "resume must not duplicate or drop rows")
+}
