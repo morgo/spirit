@@ -234,7 +234,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -361,7 +361,7 @@ func TestBufferedMapFlushWithoutLockRespectsWatermark(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -451,7 +451,7 @@ func TestBufferedMapQueueModeRouting(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -522,7 +522,7 @@ func TestBufferedMapQueueModeFlush(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -603,7 +603,7 @@ func TestBufferedMapQueueModeFIFOOrder(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -669,7 +669,7 @@ func TestBufferedMapTransitionDrainsOutgoing(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -754,7 +754,7 @@ func TestBufferedMapToggleDrainFailureLeavesFlagUnchanged(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,
@@ -826,7 +826,7 @@ func TestBufferedMapTogglePassthrough(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -871,7 +871,7 @@ func TestBufferedMapConcurrentHasChanged(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:        client,
+		logger:   client.logger,
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]bufferedChange),
@@ -923,7 +923,7 @@ func TestBufferedMapKeyOverwriteDedupes(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -967,7 +967,7 @@ func TestBufferedMapHasChangedNilAndEmpty(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:        client,
+		logger:   client.logger,
 		table:    srcTable,
 		newTable: dstTable,
 		changes:  make(map[string]bufferedChange),
@@ -1014,7 +1014,7 @@ func TestBufferedMapKeyAboveWatermarkCounters(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -1082,7 +1082,7 @@ func TestBufferedMapQueueFlushEmpty(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -1136,7 +1136,7 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -1214,7 +1214,7 @@ func TestBufferedMapQueueConcurrentFlush(t *testing.T) {
 	}
 
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		applier:              applierInstance,
 		table:                srcTable,
 		newTable:             dstTable,
@@ -1263,11 +1263,11 @@ func newBareBufferedMap(softLimitBytes int64) *bufferedMap {
 		changes:              make(map[string]bufferedChange),
 		softLimitBytes:       softLimitBytes,
 		pkIsMemoryComparable: true,
-		// c and table are needed by the park-entry/exit log lines in
+		// logger and table are needed by the park-entry/exit log lines in
 		// HasChanged. Tests don't assert on these but must populate
 		// them or the logging path NPEs.
-		c:     &binlogClient{logger: slog.Default()},
-		table: &table.TableInfo{SchemaName: "test", TableName: "bare"},
+		logger: slog.Default(),
+		table:  &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub
@@ -1485,7 +1485,7 @@ func TestBufferedMapQueueModeBackpressure(t *testing.T) {
 		softLimitBytes:        1024,
 		pkIsMemoryComparable:  false, // route to queue
 		watermarkOptimization: false, // post-copy: queue mode active
-		c:                     &binlogClient{logger: slog.Default()},
+		logger:                slog.Default(),
 		table:                 &table.TableInfo{SchemaName: "test", TableName: "bare"},
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)

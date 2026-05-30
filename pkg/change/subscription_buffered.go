@@ -3,6 +3,7 @@ package change
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,7 +102,11 @@ type bufferedMap struct {
 	// nil cond, so a missing init shows up loudly in tests.
 	cond *sync.Cond
 
-	c       *binlogClient   // reference back to the client.
+	// logger is supplied by the change.Source that owns this subscription.
+	// We keep only a *slog.Logger (not a back-pointer to the source) so the
+	// bufferedMap stays source-agnostic and can be reused by alternative
+	// implementations (e.g. a VStream change.Source).
+	logger  *slog.Logger
 	applier applier.Applier // applier for writing changes to the target
 
 	table    *table.TableInfo
@@ -246,7 +251,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// enter the buffer, so there is no point parking on their behalf.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
 		s.keysDroppedAbove.Add(1)
-		s.c.logger.Debug("key above watermark", "key", key[0])
+		s.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
 
@@ -258,7 +263,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// indistinguishable from one that's just slow.
 	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes && !s.closed {
 		s.timesParked.Add(1)
-		s.c.logger.Warn("subscription parked on soft memory limit",
+		s.logger.Warn("subscription parked on soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"size_bytes", s.sizeBytes,
 			"soft_limit_bytes", s.softLimitBytes,
@@ -267,7 +272,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		for s.sizeBytes >= s.softLimitBytes && !s.closed {
 			s.cond.Wait()
 		}
-		s.c.logger.Info("subscription unparked from soft memory limit",
+		s.logger.Info("subscription unparked from soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"parked_duration", time.Since(parkStart),
 			"size_bytes", s.sizeBytes,
@@ -375,7 +380,7 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		// has not asked us to drain everything (bypassWatermark).
 		if applyWatermarkFilter && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
 			s.keysSkippedBelow.Add(1)
-			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
+			s.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
 		}
@@ -440,7 +445,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 		upsertAffected = affectedRows
 	}
 
-	s.c.logger.Debug("flushBatch executed",
+	s.logger.Debug("flushBatch executed",
 		"table", s.table.TableName,
 		"underLock", lock != nil,
 		"deleteKeyCount", len(deleteKeys),
@@ -598,7 +603,7 @@ func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool
 	// Drain succeeded (or no drain needed) — safe to flip the flag now.
 	s.watermarkOptimization = enabled
 
-	s.c.logger.Info("watermark optimization toggled",
+	s.logger.Info("watermark optimization toggled",
 		"table", s.table.TableName,
 		"enabled", enabled,
 		"keys_added", s.keysAdded.Swap(0),

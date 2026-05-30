@@ -9,10 +9,10 @@ import (
 	"github.com/block/spirit/pkg/table"
 )
 
-// ErrPositionNotFound is returned by OpenFromPosition when the underlying
-// source can no longer resume from the requested opaque position — most
-// commonly because the binlog file has been purged on a MySQL source.
-// Wrapped with %w so callers can errors.Is against it.
+// ErrPositionNotFound is returned by StartFromPosition when the
+// underlying source can no longer resume from the requested opaque
+// position — most commonly because the binlog file has been purged on
+// a MySQL source. Wrapped with %w so callers can errors.Is against it.
 var ErrPositionNotFound = errors.New("change.Source: cannot resume from position; it is no longer available on the source")
 
 // Source is the abstraction spirit uses to consume a stream of row

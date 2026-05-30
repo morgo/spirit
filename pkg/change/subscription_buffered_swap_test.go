@@ -95,7 +95,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
 
 	sub := &bufferedMap{
-		c:                     client,
+		logger:                client.logger,
 		applier:               applierInstance,
 		table:                 srcTable,
 		newTable:              dstTable,

@@ -681,7 +681,7 @@ func TestAllChangesFlushed(t *testing.T) {
 
 	// Test 2: Add a subscription and verify initial state
 	sub := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -701,7 +701,7 @@ func TestAllChangesFlushed(t *testing.T) {
 
 	// Test 5: Test with multiple subscriptions
 	sub2 := &bufferedMap{
-		c:                    client,
+		logger:               client.logger,
 		table:                srcTable,
 		newTable:             dstTable,
 		changes:              make(map[string]bufferedChange),
@@ -865,7 +865,7 @@ func TestProcessDDLNotification(t *testing.T) {
 			table:    tbl,
 			newTable: newTbl,
 			changes:  make(map[string]bufferedChange),
-			c:        c,
+			logger:   c.logger,
 		}
 		require.True(t, c.subs.AddBuffered(dbName+".orders", sub))
 

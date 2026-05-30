@@ -908,7 +908,7 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
-	binlog_position VARCHAR(255),
+	binlog_position TEXT,
 	statement TEXT,
 	original_table_name VARCHAR(64) NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1126,14 +1126,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
-	// This is setup the same way in both code-paths,
-	// but we need to do it before we finish resumeFromCheckpoint
-	// because we need to check that the binlog file exists.
+	// Setup is the same shape as the fresh-start path; we do it here so
+	// the replClient and its subscriptions exist before we hand them the
+	// checkpointed position via StartFromPosition.
 	if err := r.setupCopierCheckerAndReplClient(ctx); err != nil {
 		return err
 	}
 
-	// Open the change source at the checkpointed position. OpenFromPosition
+	// Open the change source at the checkpointed position. StartFromPosition
 	// validates the position is still resumable (e.g. binlog file purged on
 	// MySQL) and starts streaming. If the source can no longer reach the
 	// position, surface it as status.ErrBinlogNotFound so strict-mode and
