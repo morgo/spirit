@@ -31,25 +31,42 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	if len(r.Sources) == 0 {
 		return errors.New("no sources configured")
 	}
-	// Check 1: Verify checkpoint table exists on sources[0] (by convention).
-	src0 := r.Sources[0]
-	if src0.DB == nil || src0.Config == nil {
-		return errors.New("source[0] database connection or config is not initialized")
-	}
+	// Check 1: Verify the checkpoint table exists where the runner stores
+	// it — on targets[0] when the source is read-only (CheckpointOnTarget,
+	// e.g. a PlanetScale VStream import), on sources[0] otherwise. This
+	// must mirror Runner.checkpointStore.
 	checkpointTableName := "_spirit_checkpoint"
+	var cpDB *sql.DB
+	var cpDBName string
+	if r.CheckpointOnTarget {
+		if len(r.Targets) == 0 {
+			return errors.New("no targets configured for checkpoint-on-target resume validation")
+		}
+		t0 := r.Targets[0]
+		if t0.DB == nil || t0.Config == nil {
+			return errors.New("target[0] database connection or config is not initialized")
+		}
+		cpDB, cpDBName = t0.DB, t0.Config.DBName
+	} else {
+		src0 := r.Sources[0]
+		if src0.DB == nil || src0.Config == nil {
+			return errors.New("source[0] database connection or config is not initialized")
+		}
+		cpDB, cpDBName = src0.DB, src0.Config.DBName
+	}
 	var checkpointExists int
-	err := src0.DB.QueryRowContext(ctx,
+	err := cpDB.QueryRowContext(ctx,
 		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-		src0.Config.DBName, checkpointTableName).Scan(&checkpointExists)
+		cpDBName, checkpointTableName).Scan(&checkpointExists)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("checkpoint table '%s.%s' does not exist; cannot resume", src0.Config.DBName, checkpointTableName)
+		return fmt.Errorf("checkpoint table '%s.%s' does not exist; cannot resume", cpDBName, checkpointTableName)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to check for checkpoint table: %w", err)
 	}
 
 	logger.Info("checkpoint table exists, validating target tables for resume",
-		"checkpoint_table", fmt.Sprintf("%s.%s", src0.Config.DBName, checkpointTableName))
+		"checkpoint_table", fmt.Sprintf("%s.%s", cpDBName, checkpointTableName))
 
 	// Check 2: Verify all source tables have corresponding target tables with matching schema
 	for _, sourceTable := range r.SourceTables {

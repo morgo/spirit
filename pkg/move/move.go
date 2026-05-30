@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -35,6 +36,32 @@ type Move struct {
 
 	ShardingProvider table.ShardingMetadataProvider `kong:"-"`
 	Targets          []applier.Target               `kong:"-"`
+
+	// Source optionally provides a pre-constructed change.Source to use
+	// for replication instead of constructing a built-in MySQL-binlog
+	// client from SourceDSN. When set, the runner uses this Source as
+	// the single source (the SourceDSN is still required for SQL queries
+	// — SHOW CREATE TABLE, sentinel-table writes, etc. — but no binlog
+	// client is constructed).
+	//
+	// Intended for callers (e.g. strata's PlanetScale import) that need
+	// a non-MySQL-binlog change source. Setting Source together with
+	// SourceDSNs (multi-source) is currently not supported.
+	Source change.Source `kong:"-"`
+
+	// Applier optionally provides a pre-constructed applier.Applier.
+	// When set, the runner uses this applier instead of constructing one
+	// internally. Required when Source is set: the injected change.Source
+	// (e.g. pkg/vstream.Source) needs the same applier instance the
+	// copier uses, so all writes flow through one logical apply path.
+	//
+	// When Source is set the runner treats it as a read-only import
+	// source: it skips the checksum phase and performs a no-op cutover
+	// (the data is copied and replicated to the target, but there is no
+	// last-mile sequencing or failover). A real checksum (eventually
+	// consistent, retrying failed chunks) and an external cutover are
+	// future work tracked outside this struct.
+	Applier applier.Applier `kong:"-"`
 }
 
 func (m *Move) Run() error {

@@ -37,6 +37,12 @@ type Resources struct {
 	Targets        []applier.Target
 	SourceTables   []*table.TableInfo
 	CreateSentinel bool
+	// CheckpointOnTarget reports that the _spirit_checkpoint table lives on
+	// targets[0] rather than sources[0]. Set when the source is a read-only
+	// injected change.Source (e.g. a PlanetScale VStream import). Mirrors
+	// Runner.checkpointStore so resume validation reads the checkpoint from
+	// the same place the runner writes it.
+	CheckpointOnTarget bool
 }
 
 type check struct {
