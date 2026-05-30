@@ -541,25 +541,17 @@ func (r *Runner) newCopy(ctx context.Context) error {
 }
 
 // checkpointStore returns the database connection and schema where the
-// _spirit_checkpoint table lives. When the source is an injected,
-// read-only change.Source (Move.Source — e.g. a PlanetScale VStream
-// import), the checkpoint lives on targets[0], which is always writable
-// and which we never want to avoid touching. Otherwise it lives on
-// sources[0] — the default required by reshard's 1:N topology, where a
-// checkpoint spread across N targets would be ambiguous. resumeStateCheck
-// applies the same rule (via Resources.CheckpointOnTarget) so the read
-// and write sides stay consistent.
+// _spirit_checkpoint table lives: always the first target,
+// deterministically. targets[0] is always writable — the source may be
+// read-only (e.g. a PlanetScale VStream import) — and there is always at
+// least one target. resumeStateCheck reads from the same place so the
+// read and write sides stay consistent.
 func (r *Runner) checkpointStore() (*sql.DB, string) {
-	if r.move.Source != nil {
-		return r.targets[0].DB, r.targets[0].Config.DBName
-	}
-	return r.sources[0].db, r.sources[0].config.DBName
+	return r.targets[0].DB, r.targets[0].Config.DBName
 }
 
-// createCheckpointTable creates the checkpoint table on the source or the
-// first target depending on checkpointStore() — the target when the
-// source is read-only (an injected Move.Source import), the source
-// otherwise.
+// createCheckpointTable creates the checkpoint table on the first target
+// (see checkpointStore).
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	db, dbName := r.checkpointStore()
 	if err := dbconn.Exec(ctx, db, "DROP TABLE IF EXISTS %n.%n", dbName, checkpointTableName); err != nil {
@@ -898,11 +890,10 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		}
 	}
 	return check.RunChecks(ctx, check.Resources{
-		Sources:            sources,
-		Targets:            r.targets,
-		SourceTables:       r.sourceTables,
-		CreateSentinel:     r.move.CreateSentinel,
-		CheckpointOnTarget: r.move.Source != nil,
+		Sources:        sources,
+		Targets:        r.targets,
+		SourceTables:   r.sourceTables,
+		CreateSentinel: r.move.CreateSentinel,
 	}, r.logger, scope)
 }
 

@@ -31,31 +31,19 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	if len(r.Sources) == 0 {
 		return errors.New("no sources configured")
 	}
-	// Check 1: Verify the checkpoint table exists where the runner stores
-	// it — on targets[0] when the source is read-only (CheckpointOnTarget,
-	// e.g. a PlanetScale VStream import), on sources[0] otherwise. This
-	// must mirror Runner.checkpointStore.
+	// Check 1: Verify the checkpoint table exists on targets[0], where the
+	// runner always stores it (see Runner.checkpointStore).
 	checkpointTableName := "_spirit_checkpoint"
-	var cpDB *sql.DB
-	var cpDBName string
-	if r.CheckpointOnTarget {
-		if len(r.Targets) == 0 {
-			return errors.New("no targets configured for checkpoint-on-target resume validation")
-		}
-		t0 := r.Targets[0]
-		if t0.DB == nil || t0.Config == nil {
-			return errors.New("target[0] database connection or config is not initialized")
-		}
-		cpDB, cpDBName = t0.DB, t0.Config.DBName
-	} else {
-		src0 := r.Sources[0]
-		if src0.DB == nil || src0.Config == nil {
-			return errors.New("source[0] database connection or config is not initialized")
-		}
-		cpDB, cpDBName = src0.DB, src0.Config.DBName
+	if len(r.Targets) == 0 {
+		return errors.New("no targets configured for resume validation")
 	}
+	t0 := r.Targets[0]
+	if t0.DB == nil || t0.Config == nil {
+		return errors.New("target[0] database connection or config is not initialized")
+	}
+	cpDBName := t0.Config.DBName
 	var checkpointExists int
-	err := cpDB.QueryRowContext(ctx,
+	err := t0.DB.QueryRowContext(ctx,
 		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
 		cpDBName, checkpointTableName).Scan(&checkpointExists)
 	if err == sql.ErrNoRows {
