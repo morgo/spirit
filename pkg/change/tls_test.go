@@ -72,7 +72,7 @@ func TestTLSConfigurationLogic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a mock client with the test configuration
-			client := &Client{
+			client := &binlogClient{
 				host:     tt.host,
 				dbConfig: tt.dbConfig,
 				cfg:      replication.BinlogSyncerConfig{},

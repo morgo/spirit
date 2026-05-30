@@ -101,7 +101,7 @@ type bufferedMap struct {
 	// nil cond, so a missing init shows up loudly in tests.
 	cond *sync.Cond
 
-	c       *Client         // reference back to the client.
+	c       *binlogClient   // reference back to the client.
 	applier applier.Applier // applier for writing changes to the target
 
 	table    *table.TableInfo

@@ -105,7 +105,7 @@ func TestCutOverSingleSource(t *testing.T) {
 	cfg := change.NewClientDefaultConfig()
 	cfg.CancelFunc = func() bool { return false }
 	replClient := change.NewBinlogClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
-	require.NoError(t, replClient.Run(ctx))
+	require.NoError(t, replClient.Start(ctx))
 	defer replClient.Close()
 
 	cutoverTbl := table.NewTableInfo(srcDB, srcName, "t1")

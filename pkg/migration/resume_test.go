@@ -193,7 +193,7 @@ func TestCheckpoint(t *testing.T) {
 	r = preSetup()
 	defer utils.CloseAndLog(r)
 	// Start the binary log feed just before copy rows starts.
-	// replClient.Run() is already called in resumeFromCheckpoint.
+	// replClient.Start() is already called in resumeFromCheckpoint.
 	require.NoError(t, r.resumeFromCheckpoint(t.Context()))
 	disableDynamicChunking(t, r.copyChunker)
 	// This opens the table at the checkpoint (table.OpenAtWatermark())
@@ -266,17 +266,16 @@ func TestCheckpointRestore(t *testing.T) {
 	// Now insert a fake checkpoint, this uses a known bad value
 	// from issue #125
 	watermark := "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"53926425\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"53926425\"],\"Inclusive\":false}}"
-	binlog := r.replClient.GetBinlogApplyPosition()
+	binlogPosition := r.replClient.Position()
 	err = dbconn.Exec(t.Context(), r.db, `INSERT INTO %n.%n
-	(copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement)
+	(copier_watermark, checksum_watermark, binlog_position, statement)
 	VALUES
-	(%?,  %?, %?, %?, %?)`,
+	(%?, %?, %?, %?)`,
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		watermark,
 		"",
-		binlog.Name,
-		binlog.Pos,
+		binlogPosition,
 		r.migration.Statement,
 	)
 	require.NoError(t, err)
@@ -967,7 +966,7 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 
 	// Now corrupt the checkpoint by setting an invalid binlog position.
 	// This simulates binlog expiry between stop and start.
-	testutils.RunSQL(t, `UPDATE _cleanup_test_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999`)
+	testutils.RunSQL(t, `UPDATE _cleanup_test_chkpnt SET binlog_position = 'nonexistent-bin.999999:999999999'`)
 
 	// Without strict mode: falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB", WithThreads(2))
@@ -1004,8 +1003,8 @@ func TestResumeFromCheckpointStrictBinlogExpired(t *testing.T) {
 	<-done
 	require.NoError(t, m.Close())
 
-	// Corrupt binlog name to simulate expiry
-	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_name = 'nonexistent-bin.999999', binlog_pos = 999999999`)
+	// Corrupt binlog position to simulate expiry
+	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_position = 'nonexistent-bin.999999:999999999'`)
 
 	// With strict mode: should error with ErrBinlogNotFound instead of silently restarting
 	m2 := NewTestRunner(t, "strictbinlogtest", "ENGINE=InnoDB",

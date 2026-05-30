@@ -24,7 +24,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 )
 
 // These are really consts, but set to var for testing.
@@ -646,7 +645,7 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	}
 
 	// Start the binary log feed now
-	if err := r.replClient.Run(ctx); err != nil {
+	if err := r.replClient.Start(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -909,8 +908,7 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
-	binlog_name VARCHAR(255),
-	binlog_pos INT,
+	binlog_position VARCHAR(255),
 	statement TEXT,
 	original_table_name VARCHAR(64) NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1050,10 +1048,10 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// we do not support recovery.
 	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.changes[0].stmt.Schema, r.checkpointTableName())
-	var copierWatermark, binlogName, statement, checksumWatermark, originalTableName string
-	var id, binlogPos int
+	var copierWatermark, binlogPosition, statement, checksumWatermark, originalTableName string
+	var id int
 	var createdAtStr string
-	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogName, &binlogPos, &statement, &originalTableName, &createdAtStr)
+	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogPosition, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
 		// Distinguish "checkpoint table exists but has no rows" — a normal
 		// "nothing to resume from" state — from a real read failure
@@ -1080,17 +1078,6 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// from another table's checkpoint.
 	if len(r.changes) == 1 && originalTableName != "" && originalTableName != r.changes[0].table.TableName {
 		return fmt.Errorf("%w: stored=%q expected=%q", status.ErrCheckpointCollision, originalTableName, r.changes[0].table.TableName)
-	}
-
-	// Validate the checkpoint's binlog position is still available on the server
-	// before creating any resources (replClient, subscriptions, etc.).
-	// This avoids partial initialization that would need cleanup on failure.
-	exists, err := r.binlogFileExists(ctx, binlogName)
-	if err != nil {
-		return fmt.Errorf("could not verify checkpoint binlog availability: %w", err)
-	}
-	if !exists {
-		return fmt.Errorf("%w: %s has been purged, cannot resume", status.ErrBinlogNotFound, binlogName)
 	}
 
 	// Check if the checkpoint is too old to safely resume.
@@ -1146,63 +1133,28 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	r.replClient.SetFlushedPos(gomysql.Position{
-		Name: binlogName,
-		Pos:  uint32(binlogPos),
-	})
-
-	// Start the replClient now. This is because if the checkpoint is so old there
-	// are no longer binary log files, we want to abandon resume-from-checkpoint
-	// and still be able to start from scratch.
-	// Start the binary log feed just before copy rows starts.
-	if err := r.replClient.Run(ctx); err != nil {
-		r.logger.Warn("resuming from checkpoint failed because resuming from the previous binlog position failed",
-			"log-file", binlogName,
-			"log-pos", binlogPos,
+	// Open the change source at the checkpointed position. OpenFromPosition
+	// validates the position is still resumable (e.g. binlog file purged on
+	// MySQL) and starts streaming. If the source can no longer reach the
+	// position, surface it as status.ErrBinlogNotFound so strict-mode and
+	// resume tests pick it up; otherwise propagate the error so the caller
+	// can abandon resume-from-checkpoint and start fresh.
+	if err := r.replClient.StartFromPosition(ctx, binlogPosition); err != nil {
+		r.logger.Warn("resuming from checkpoint failed because resuming from the previous source position failed",
+			"position", binlogPosition,
 		)
+		if errors.Is(err, change.ErrPositionNotFound) {
+			return fmt.Errorf("%w: %w", status.ErrBinlogNotFound, err)
+		}
 		return err
 	}
 	r.logger.Warn("resuming from checkpoint",
 		"copier-watermark", copierWatermark,
 		"checksum-watermark", checksumWatermark,
-		"log-file", binlogName,
-		"log-pos", binlogPos,
+		"position", binlogPosition,
 	)
 	r.usedResumeFromCheckpoint = true
 	return nil
-}
-
-// binlogFileExists reports whether the named binlog file is still
-// available on the server. Used to validate checkpoint binlog positions
-// before creating resources.
-//
-// Returns:
-//   - (true, nil)   — file present on the server, checkpoint is resumable.
-//   - (false, nil)  — file definitively not present, checkpoint must be
-//     discarded.
-//   - (_, err)      — could not determine (query / scan / iteration
-//     failed). Callers should surface this as a real
-//     error: a network blip should not be treated as
-//     "binlog purged", which would force a full re-copy.
-func (r *Runner) binlogFileExists(ctx context.Context, binlogName string) (bool, error) {
-	rows, err := r.db.QueryContext(ctx, "SHOW BINARY LOGS")
-	if err != nil {
-		return false, fmt.Errorf("query SHOW BINARY LOGS: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var logname, size, encrypted string
-	for rows.Next() {
-		if err := rows.Scan(&logname, &size, &encrypted); err != nil {
-			return false, fmt.Errorf("scan SHOW BINARY LOGS row: %w", err)
-		}
-		if logname == binlogName {
-			return true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterating SHOW BINARY LOGS: %w", err)
-	}
-	return false, nil
 }
 
 // initChunkers sets up the chunker(s) for the migration.
@@ -1315,8 +1267,8 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	if r.replClient == nil || copyChunker == nil {
 		return status.ErrWatermarkNotReady
 	}
-	// Retrieve the binlog position first and under a mutex.
-	binlog := r.replClient.GetBinlogApplyPosition()
+	// Retrieve the safe-flushed position first.
+	binlogPosition := r.replClient.Position()
 	copierWatermark, err := copyChunker.GetLowWatermark()
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
@@ -1364,20 +1316,18 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// add any other fields to this log line.
 	r.logger.Info("checkpoint",
 		"low-watermark", copierWatermark,
-		"log-file", binlog.Name,
-		"log-pos", binlog.Pos,
+		"position", binlogPosition,
 	)
 	originalTableName := ""
 	if len(r.changes) == 1 {
 		originalTableName = r.changes[0].table.TableName
 	}
-	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_name, binlog_pos, statement, original_table_name) VALUES (%?, %?, %?, %?, %?, %?)",
+	err = dbconn.Exec(ctx, r.db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (%?, %?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		copierWatermark,
 		checksumWatermark,
-		binlog.Name,
-		binlog.Pos,
+		binlogPosition,
 		r.migration.Statement,
 		originalTableName,
 	)

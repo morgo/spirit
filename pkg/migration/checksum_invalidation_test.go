@@ -37,7 +37,7 @@ func (m *mockChecker) DifferencesFound() uint64      { return m.differencesFound
 // far as creating the checkpoint table on disk, and returns a Runner that can
 // have its checker swapped and r.checksum() / r.DumpCheckpoint() called
 // directly. It deliberately stops short of starting the binlog feed
-// (replClient.Run) — these tests short-circuit the checker, so the binlog is
+// (replClient.Start) — these tests short-circuit the checker, so the binlog is
 // unnecessary.
 func setupRunnerForChecksumTest(t *testing.T, tableName string) *Runner {
 	t.Helper()
@@ -147,7 +147,7 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 	disableDynamicChunking(t, r.copyChunker)
 	disableDynamicChunking(t, r.checksumChunker)
 	require.NoError(t, r.setupCopierCheckerAndReplClient(t.Context()))
-	require.NoError(t, r.replClient.Run(t.Context()))
+	require.NoError(t, r.replClient.Start(t.Context()))
 	t.Cleanup(func() { r.replClient.Close() })
 
 	advanceUntilWatermark(t, r.copyChunker)

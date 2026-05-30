@@ -159,7 +159,7 @@ cmd/
 pkg/
   migration/  → Orchestrator for single-table schema changes (main entry point)
   move/       → Orchestrator for multi-table cross-server migrations
-  change/     → Binlog replication client (acts as MySQL replica)
+  change/     → change.Source abstraction + binlog implementation (acts as MySQL replica)
   copier/     → Parallel row copying (unbuffered and buffered algorithms)
   applier/    → Write layer for target tables (single-target and sharded)
   table/      → Chunking strategies (optimistic, composite, multi)
@@ -183,7 +183,7 @@ scripts/      → Build and run helper scripts
 
 1. **Attempt Instant/Inplace DDL** — if the change is metadata-only, apply directly
 2. **Create shadow table** (`_<table>_new`) with the altered schema
-3. **Start replication client** — subscribe to binlog events for the source table
+3. **Start change source** — subscribe to row events for the source table (binlog today; VStream / other backends can plug in via `change.Source`)
 4. **Copy rows** — parallel chunked copying from source to shadow table
 5. **Post-copy phase** — drain binlog backlog, run `ANALYZE TABLE`, run the **initial checksum** (correctness gate for cutover)
 6. **Sentinel wait** (optional, `--defer-cutover`) — block before cutover until `_spirit_sentinel` is dropped; a **continuous checksum** loop runs in the background and re-verifies the data, interrupted on sentinel drop (an in-flight chunk recopy is allowed to finish, bounded by an internal per-chunk timeout, since the DELETE+re-insert pair must stay atomic)
@@ -204,7 +204,7 @@ Each package has its own `README.md` with detailed documentation. Key packages t
 The main orchestrator. `runner.go` contains the core migration loop. `Migration` struct is the Kong CLI binding. The `Run()` method drives the full lifecycle. See `cutover.go` for the atomic rename logic.
 
 ### `pkg/change`
-Acts as a MySQL replica using [go-mysql](https://github.com/go-mysql-org/go-mysql). One subscription type — the **bufferedMap** — stores the full row image from the binlog and writes via the applier. It has two internal flush modes:
+Defines the `change.Source` interface — the abstraction spirit uses to consume row changes — and the binlog-backed implementation behind `NewBinlogClient`. The binlog backend acts as a MySQL replica using [go-mysql](https://github.com/go-mysql-org/go-mysql); future backends (e.g. Vitess VStream) can plug in by implementing `Source`. Resume positions are opaque strings (`Position` / `StartFromPosition`) so callers never parse implementation-specific formats. One subscription type — the **bufferedMap** — stores the full row image from the change feed and writes via the applier. It has two internal flush modes:
 - **Map mode** (default for memory-comparable PKs) — keeps one entry per PK in a map; multiple events on the same PK dedupe to the latest image. Used for integer/binary PKs where Go map-key equality matches MySQL row identity.
 - **Queue mode** (post-copy for non-memory-comparable PKs like `VARCHAR` collations) — FIFO queue preserving binlog order. Required because case-insensitive collations break the map-key-equality assumption. Slower; only entered after `SetWatermarkOptimization(false)`.
 

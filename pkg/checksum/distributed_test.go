@@ -59,7 +59,7 @@ func TestFixCorruptWithApplier(t *testing.T) {
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -157,7 +157,7 @@ func TestDistributedChecksum(t *testing.T) {
 	chunker, err := table.NewChunker(sourceTable, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(sourceTable, sourceTable, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	// Create distributed checker config
@@ -276,14 +276,14 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 	chunker0, err := table.NewChunker(src0Table, table.ChunkerConfig{NewTable: src0Table})
 	require.NoError(t, err)
 	require.NoError(t, feed0.AddSubscription(src0Table, src0Table, chunker0))
-	require.NoError(t, feed0.Run(t.Context()))
+	require.NoError(t, feed0.Start(t.Context()))
 
 	feed1 := change.NewBinlogClient(src1DB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, change.NewClientDefaultConfig())
 	defer feed1.Close()
 	chunker1, err := table.NewChunker(src1Table, table.ChunkerConfig{Logger: logger})
 	require.NoError(t, err)
 	require.NoError(t, feed1.AddSubscription(src1Table, src1Table, chunker1))
-	require.NoError(t, feed1.Run(t.Context()))
+	require.NoError(t, feed1.Start(t.Context()))
 	multiChunker := table.NewMultiChunker(chunker0, chunker1)
 	require.NoError(t, multiChunker.Open())
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,9 +21,9 @@ import (
 )
 
 // Compile-time assertion that the binlog-backed Client satisfies Source.
-var _ Source = (*Client)(nil)
+var _ Source = (*binlogClient)(nil)
 
-type Client struct {
+type binlogClient struct {
 	// mu protects position fields (bufferedPos / flushedPos), the
 	// streamer / syncer / cancelFunc tuple, and the cached
 	// binlogStatusStmt. Subscriptions live in c.subs with its own
@@ -103,7 +104,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 	} else if softLimit < 0 {
 		softLimit = 0 // explicit opt-out
 	}
-	return &Client{
+	return &binlogClient{
 		db:                         db,
 		dbConfig:                   config.DBConfig,
 		host:                       host,
@@ -123,7 +124,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
 // Satisfies Source interface.
-func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
+func (c *binlogClient) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
 	// If the PK is not memory comparable we still use the buffered map, but it
 	// needs to know that when the watermark optimizations are disabled
@@ -157,9 +158,9 @@ func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunke
 // `event.Position` is 4. Without the guard, that synthetic rotate
 // would drag bufferedPos back to {file, 4}, and a flush that ran
 // before subsequent events caught the position back up would publish
-// the rewound value via SetFlushedPos — silently regressing the
+// the rewound value into flushedPos — silently regressing the
 // checkpoint and forcing a large re-read on the next resume.
-func (c *Client) setBufferedPos(pos mysql.Position) {
+func (c *binlogClient) setBufferedPos(pos mysql.Position) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if pos.Compare(c.bufferedPos) <= 0 {
@@ -169,25 +170,16 @@ func (c *Client) setBufferedPos(pos mysql.Position) {
 }
 
 // getBufferedPos returns the buffered position under a mutex.
-func (c *Client) getBufferedPos() mysql.Position {
+func (c *binlogClient) getBufferedPos() mysql.Position {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.bufferedPos
 }
 
-// SetFlushedPos updates the known safe position that all changes have been flushed.
-// It is used for resuming from a checkpoint.
-// Satisfies Source interface.
-func (c *Client) SetFlushedPos(pos mysql.Position) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.flushedPos = pos
-}
-
 // AllChangesFlushed returns true if all buffered changes across all
 // subscriptions have been flushed to the target tables.
 // Satisfies Source interface.
-func (c *Client) AllChangesFlushed() bool {
+func (c *binlogClient) AllChangesFlushed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.bufferedPos.Compare(c.flushedPos) > 0 {
@@ -204,18 +196,43 @@ func (c *Client) AllChangesFlushed() bool {
 	return true
 }
 
-// GetBinlogApplyPosition returns the last flushed binlog position. It is used for checkpointing and resuming.
-// Satisfies Source interface.
-func (c *Client) GetBinlogApplyPosition() mysql.Position {
+// Position satisfies Source.
+//
+// It returns the safe-flushed binlog position encoded as
+// "<binlog-file>:<offset>". Returns "" when no position has been
+// observed yet, signaling that a fresh Start is required.
+func (c *binlogClient) Position() string {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.flushedPos
+	pos := c.flushedPos
+	c.mu.Unlock()
+	if pos.Name == "" {
+		return ""
+	}
+	return formatBinlogPosition(pos)
+}
+
+// StartFromPosition satisfies Source.
+//
+// It primes flushedPos from the opaque position string previously
+// returned by Position(), then begins streaming as Start would.
+func (c *binlogClient) StartFromPosition(ctx context.Context, pos string) error {
+	if pos == "" {
+		return errors.New("StartFromPosition: empty position; use Start instead for a fresh start")
+	}
+	parsed, err := parseBinlogPositionString(pos)
+	if err != nil {
+		return fmt.Errorf("StartFromPosition: %w", err)
+	}
+	c.mu.Lock()
+	c.flushedPos = parsed
+	c.mu.Unlock()
+	return c.Start(ctx)
 }
 
 // GetDeltaLen returns the total number of changes
 // that are pending across all subscriptions.
 // Satisfies Source interface.
-func (c *Client) GetDeltaLen() int {
+func (c *binlogClient) GetDeltaLen() int {
 	deltaLen := 0
 	for _, subscription := range c.subs.Snapshot() {
 		deltaLen += subscription.Length()
@@ -223,7 +240,7 @@ func (c *Client) GetDeltaLen() int {
 	return deltaLen
 }
 
-func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, error) {
+func (c *binlogClient) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, error) {
 	// We rotate the binary log before we start, so we can always safely just resume
 	// by reopening the binary log file at Position 4. This is required to get the table map.
 	// Why we need to recreate the syncer just after it is created is a mystery to me, but
@@ -260,10 +277,11 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 	}, nil
 }
 
-// Run initializes the binlog syncer and starts the binlog reader.
-// It returns an error if the initialization fails.
+// Start initializes the binlog syncer and spawns the binlog reader
+// goroutine. Returns once the reader is running; the stream itself
+// continues until Close is called or ctx is cancelled.
 // Satisfies Source interface.
-func (c *Client) Run(ctx context.Context) error {
+func (c *binlogClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -319,7 +337,7 @@ func (c *Client) Run(ctx context.Context) error {
 			return fmt.Errorf("could not verify binlog position: %w", err)
 		}
 		if impossible {
-			return errors.New("binlog position is impossible, the source may have already purged it")
+			return fmt.Errorf("%w: binlog %q is no longer on the server", ErrPositionNotFound, c.flushedPos.Name)
 		}
 	}
 	c.bufferedPos = c.flushedPos // set buffered to the initial flushed value
@@ -356,7 +374,7 @@ func (c *Client) Run(ctx context.Context) error {
 // older state, which a subsequent binlog event (in this or a later
 // flush) will correct. The eventual-consistency property holds in both
 // map mode and queue mode — see UpsertRows in pkg/applier/single_target.go.
-func (c *Client) recreateStreamer() error {
+func (c *binlogClient) recreateStreamer() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -398,7 +416,7 @@ func (c *Client) recreateStreamer() error {
 // readStream continuously reads the binlog stream. It is usually called in a go routine.
 // It will read the stream until the context is closed
 // *and* it continues on any errors
-func (c *Client) readStream(ctx context.Context) {
+func (c *binlogClient) readStream(ctx context.Context) {
 	defer c.streamWG.Done() // Signal completion when goroutine exits
 
 	c.mu.Lock()
@@ -603,7 +621,7 @@ func (c *Client) readStream(ctx context.Context) {
 // If ddlFilterTables is also set (alongside ddlFilterSchema), only DDL on those
 // specific tables within the schema triggers cancellation — this is used for partial
 // moves where only a subset of tables from a schema are being moved.
-func (c *Client) processDDLNotification(schema, table string) {
+func (c *binlogClient) processDDLNotification(schema, table string) {
 	if c.ddlFilterSchema != "" {
 		// Schema-level filtering: cancel on DDL in the specified schema.
 		if schema != c.ddlFilterSchema {
@@ -655,7 +673,7 @@ func (c *Client) processDDLNotification(schema, table string) {
 // (before and after image alike) contains every column, so PK extraction
 // works the same way for all event types and no reconstruction is needed.
 // If a MINIMAL image slips through we error out.
-func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
+func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
 	sub, ok := c.subs.Get(subName)
 	if !ok {
@@ -732,17 +750,17 @@ func (c *Client) processRowsEvent(ev *replication.BinlogEvent, e *replication.Ro
 //
 // IMPORTANT: This method must NOT call Close() because Close() calls
 // streamWG.Wait(), which would deadlock since readStream is the caller.
-func (c *Client) fatalError() bool {
+func (c *binlogClient) fatalError() bool {
 	if c.callerCancelFunc != nil {
 		return c.callerCancelFunc()
 	}
 	return false
 }
 
-func (c *Client) Close() {
+func (c *binlogClient) Close() {
 	c.isClosed.Store(true)
 
-	// Read cancelFunc under c.Lock — Run() writes it under the same lock.
+	// Read cancelFunc under c.Lock — Start() writes it under the same lock.
 	// We must not hold c.Lock across streamWG.Wait() below: readStream
 	// itself acquires c.Lock from inside its loop (setBufferedPos,
 	// recreateStreamer), and holding the lock during Wait would deadlock
@@ -768,8 +786,8 @@ func (c *Client) Close() {
 
 	// streamWG.Wait has returned, so readStream has exited and c.syncer
 	// is no longer raced by it. Close is not expected to run concurrently
-	// with Run() — the caller's sequenced-before edge (Run returned →
-	// Close called) makes Run's write of c.syncer visible here without
+	// with Start() — the caller's sequenced-before edge (Start returned →
+	// Close called) makes Start's write of c.syncer visible here without
 	// further synchronization.
 	if c.syncer != nil {
 		c.syncer.Close()
@@ -785,7 +803,7 @@ func (c *Client) Close() {
 //   - The second time reads through the changes generated by the first flush
 //     and updates the in memory applied position to match the server's position.
 //     This is required to satisfy the binlog position is updated for the c.AllChangesFlushed() check.
-func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock) error {
+func (c *binlogClient) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock) error {
 	if err := c.flush(ctx, true, lock); err != nil {
 		return err
 	}
@@ -805,7 +823,7 @@ func (c *Client) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock
 // This means that the actual buffered position might be slightly ahead by
 // the end of the flush. That's OK, we only set the flushed position to the known
 // safe buffered position taken at the start.
-func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
+func (c *binlogClient) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
 	c.mu.Lock()
 	newFlushedPos := c.bufferedPos
 	c.mu.Unlock()
@@ -833,14 +851,16 @@ func (c *Client) flush(ctx context.Context, underLock bool, lock *dbconn.TableLo
 	// because the low watermark optimization helps a lot in these cases because
 	// it reduces contention between the copier and the repl applier.
 	if allChangesFlushed {
-		c.SetFlushedPos(newFlushedPos)
+		c.mu.Lock()
+		c.flushedPos = newFlushedPos
+		c.mu.Unlock()
 	}
 	return nil
 }
 
 // Flush empties the changeset in a loop until the amount of changes is considered "trivial".
 // The loop is required, because changes continue to be added while the flush is occurring.
-func (c *Client) Flush(ctx context.Context) error {
+func (c *binlogClient) Flush(ctx context.Context) error {
 	for {
 		// Repeat in a loop until the changeset length is trivial
 		if err := c.flush(ctx, false, nil); err != nil {
@@ -875,7 +895,7 @@ func (c *Client) Flush(ctx context.Context) error {
 // StartPeriodicFlush and blocks until that goroutine has fully exited.
 // Safe to call when no periodic flush is running (no-op).
 // Satisfies Source interface.
-func (c *Client) StopPeriodicFlush() {
+func (c *binlogClient) StopPeriodicFlush() {
 	c.periodicFlushLock.Lock()
 	cancel := c.periodicFlushCancel
 	done := c.periodicFlushDone
@@ -898,7 +918,7 @@ func (c *Client) StopPeriodicFlush() {
 //
 // Calling Start while a flush is already running is a no-op.
 // Satisfies Source interface.
-func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
+func (c *binlogClient) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
 	c.periodicFlushLock.Lock()
 	if c.periodicFlushCancel != nil {
 		c.periodicFlushLock.Unlock()
@@ -913,7 +933,7 @@ func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration)
 	go c.runPeriodicFlush(flushCtx, interval, done)
 }
 
-func (c *Client) runPeriodicFlush(ctx context.Context, interval time.Duration, done chan struct{}) {
+func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Duration, done chan struct{}) {
 	defer close(done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -942,7 +962,7 @@ func (c *Client) runPeriodicFlush(ctx context.Context, interval time.Duration, d
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
 // Satisfies Source interface.
-func (c *Client) BlockWait(ctx context.Context) error {
+func (c *binlogClient) BlockWait(ctx context.Context) error {
 	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {
 		return err
@@ -1004,11 +1024,35 @@ func (c *Client) BlockWait(ctx context.Context) error {
 // Subscriptions are toggled against a snapshot so a long-running drain on
 // one subscription doesn't block processRowsEvent from finding
 // subscriptions for unrelated tables.
-func (c *Client) SetWatermarkOptimization(ctx context.Context, newVal bool) error {
+func (c *binlogClient) SetWatermarkOptimization(ctx context.Context, newVal bool) error {
 	for _, sub := range c.subs.Snapshot() {
 		if err := sub.SetWatermarkOptimization(ctx, newVal); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// formatBinlogPosition encodes a mysql.Position as the opaque string
+// returned by binlogClient.Position(). The format is "<binlog-file>:<offset>".
+func formatBinlogPosition(p mysql.Position) string {
+	return p.Name + ":" + strconv.FormatUint(uint64(p.Pos), 10)
+}
+
+// parseBinlogPositionString is the inverse of formatBinlogPosition.
+// It splits on the LAST ':' so binlog file names that happen to contain
+// a ':' (unusual but possible) round-trip cleanly. Returns an error if
+// the offset portion does not parse as a uint32.
+func parseBinlogPositionString(s string) (mysql.Position, error) {
+	idx := strings.LastIndex(s, ":")
+	if idx <= 0 || idx == len(s)-1 {
+		return mysql.Position{}, fmt.Errorf("malformed position %q: expected <binlog-file>:<offset>", s)
+	}
+	name := s[:idx]
+	offsetStr := s[idx+1:]
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil {
+		return mysql.Position{}, fmt.Errorf("malformed position %q: offset is not a uint32: %w", s, err)
+	}
+	return mysql.Position{Name: name, Pos: uint32(offset)}, nil
 }

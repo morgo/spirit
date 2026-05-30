@@ -2,12 +2,18 @@ package change
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
-	"github.com/go-mysql-org/go-mysql/mysql"
 )
+
+// ErrPositionNotFound is returned by OpenFromPosition when the underlying
+// source can no longer resume from the requested opaque position — most
+// commonly because the binlog file has been purged on a MySQL source.
+// Wrapped with %w so callers can errors.Is against it.
+var ErrPositionNotFound = errors.New("change.Source: cannot resume from position; it is no longer available on the source")
 
 // Source is the abstraction spirit uses to consume a stream of row
 // changes from a source database. It exists so spirit's replication
@@ -20,8 +26,8 @@ import (
 // construct their own Source value and pass it to spirit via the
 // Move/Migration config.
 //
-// Lifecycle: construct → AddSubscription(...)* → Run(ctx) OR
-// OpenFromPosition(ctx, pos) → Flush / BlockWait /
+// Lifecycle: construct → AddSubscription(...)* → Start(ctx) OR
+// StartFromPosition(ctx, pos) → Flush / BlockWait /
 // FlushUnderTableLock as needed → Close().
 //
 // Events flow PUSH-style: when a row event matching one of the
@@ -31,35 +37,41 @@ import (
 // loop on this interface — the caller registers subscriptions and lets
 // the source drive them.
 //
-// The surface area is intentionally broad to match the existing Client
-// API so all spirit consumers (pkg/migration, pkg/move, pkg/checksum)
-// can switch from `*Client` to `Source` without churning every
-// callsite. Two pieces of the surface are MySQL-binlog-specific and
-// will need to be generalized in a follow-up:
-//
-//   - GetBinlogApplyPosition() returns mysql.Position (file+offset).
-//     The opaque Position() string is the new general form; consumers
-//     that today reach for mysql.Position for checkpoint serialization
-//     should migrate to Position() + OpenFromPosition.
-//   - SetFlushedPos(mysql.Position) likewise. OpenFromPosition replaces
-//     it for the resume case; mid-stream position updates are an
-//     internal binlog concern that should not be on this interface
-//     long-term.
-//
-// Alternative implementations that don't speak file+offset implement
-// these methods as best-effort no-ops or return zero values; spirit's
-// binlog-specific call sites will eventually be retired.
+// The surface area is intentionally broad to match the existing
+// binlog-backed implementation so all spirit consumers (pkg/migration,
+// pkg/move, pkg/checksum) program against the interface. Resume-time
+// positions are opaque strings (Position / StartFromPosition) so that
+// alternative implementations can encode whatever they need
+// (file+offset, GTID, VStream position, etc.) without leaking to
+// callers.
 type Source interface {
 	// AddSubscription constructs a bufferedMap from (currentTable,
 	// newTable, chunker) and registers it. ROW events matching the
 	// registered (schema, table) pair are pushed to the subscription's
-	// HasChanged. Must be called before Run / OpenFromPosition.
+	// HasChanged. Must be called before Start / StartFromPosition.
 	AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error
 
-	// Run starts streaming from the current source head and spawns the
-	// reader goroutine. Implementations perform any required validation
-	// (privileges, connectivity, server settings) as part of Run.
-	Run(ctx context.Context) error
+	// Start begins streaming from the current source head and spawns the
+	// reader goroutine. Returns once the reader is running; the stream
+	// itself continues until Close is called or ctx is cancelled.
+	// Implementations perform any required validation (privileges,
+	// connectivity, server settings) before returning.
+	Start(ctx context.Context) error
+
+	// StartFromPosition is the resume-time entry point. It primes the
+	// source's internal position to the opaque string previously
+	// returned by Position(), then begins streaming as if Start had
+	// been called. Implementations validate the position is still
+	// resumable (e.g. MySQL: the binlog file has not been purged); an
+	// unresumable position is returned wrapped with ErrPositionNotFound.
+	StartFromPosition(ctx context.Context, pos string) error
+
+	// Position returns the latest safe-to-resume position as an opaque
+	// string. The implementation owns the encoding; spirit never parses
+	// it. Advances only at transaction commit boundaries. Returns "" if
+	// no position has been observed yet, signaling that a fresh Start is
+	// required.
+	Position() string
 
 	// Flush requests that all registered subscriptions flush their
 	// buffered changes to their targets. Blocks until the flush
@@ -107,32 +119,4 @@ type Source interface {
 
 	// Close releases all resources. Safe to call more than once.
 	Close()
-
-	// Deprecated methods:
-	// To be replaced by generic ones soon
-
-	// GetBinlogApplyPosition is the MySQL-binlog-typed form of Position.
-	// Returns the zero value for non-binlog implementations.
-	// To be retired once consumers migrate to opaque Position strings.
-	GetBinlogApplyPosition() mysql.Position
-
-	// SetFlushedPos sets the safe-flushed binlog position. The
-	// MySQL-binlog implementation uses this during resume from a
-	// checkpoint; OpenFromPosition is the cross-implementation
-	// equivalent. No-op on non-binlog implementations.
-	// To be retired once consumers migrate to OpenFromPosition.
-	SetFlushedPos(pos mysql.Position)
-
-	// Suggestions for generic methods:
-	// OpenFromPosition is the resume-time entry point. It primes the
-	// source's internal position to the opaque string previously
-	// returned by Position(), then starts streaming as if Run had been
-	// called. Implementations validate the position is still resumable
-	// (e.g. MySQL: the binlog file has not been purged).
-	// OpenFromPosition(ctx context.Context, pos string) error
-
-	// Position returns the latest safe-to-resume position as an opaque
-	// string. The implementation owns the encoding; spirit never parses
-	// it. Advances only at transaction commit boundaries.
-	// Position() string
 }

@@ -46,11 +46,11 @@ func TestReplClient(t *testing.T) {
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// Insert into t1.
@@ -91,7 +91,7 @@ func TestReplClientComplex(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: time.Second})
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestReplClientComplex(t *testing.T) {
 	require.NoError(t, err)
 	// Attach copier's keyabovewatermark to the repl client
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 	require.NoError(t, client.SetWatermarkOptimization(t.Context(), true))
 
@@ -183,15 +183,11 @@ func TestReplClientResumeFromImpossible(t *testing.T) {
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	client.SetFlushedPos(mysql.Position{
-		Name: "impossible",
-		Pos:  uint32(12345),
-	})
-	err = client.Run(t.Context())
+	err = client.StartFromPosition(t.Context(), "impossible:12345")
 	require.Error(t, err)
 }
 
@@ -211,14 +207,14 @@ func TestReplClientResumeFromPoint(t *testing.T) {
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 	pos, err := client.getCurrentBinlogPosition(t.Context())
 	require.NoError(t, err)
 	pos.Pos = 4
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	client.Close()
 }
 
@@ -245,18 +241,18 @@ func TestReplClientOpts(t *testing.T) {
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 	require.Equal(t, 0, db.Stats().InUse) // no connections in use.
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// Disable key above watermark.
 	require.NoError(t, client.SetWatermarkOptimization(t.Context(), false))
 
-	startingPos := client.GetBinlogApplyPosition()
+	startingPos := client.Position()
 
 	// Delete more than 10000 keys so the FLUSH has to run in chunks.
 	testutils.RunSQL(t, "DELETE FROM replclientoptst1 WHERE a BETWEEN 10 and 50000")
@@ -272,7 +268,7 @@ func TestReplClientOpts(t *testing.T) {
 	require.Equal(t, 0, client.GetDeltaLen())
 
 	// The binlog position should have changed.
-	require.NotEqual(t, startingPos, client.GetBinlogApplyPosition())
+	require.NotEqual(t, startingPos, client.Position())
 }
 
 // TestPeriodicFlushLifecycle exercises the StartPeriodicFlush /
@@ -310,11 +306,11 @@ func TestPeriodicFlushLifecycle(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd,
-		applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+		applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// callWithin runs fn in a goroutine and returns true if it completes
@@ -401,7 +397,7 @@ func TestReplClientQueue(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2, TargetChunkTime: 1000})
 	require.NoError(t, err)
@@ -410,7 +406,7 @@ func TestReplClientQueue(t *testing.T) {
 	require.NoError(t, err)
 	// Attach chunker's keyabovewatermark to the repl client
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// Delete from the table, because there is no keyabove watermark
@@ -471,11 +467,11 @@ func TestBlockWait(t *testing.T) {
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// We test that BlockWait does not flush the binlog if the buffered position is advancing by
@@ -541,11 +537,11 @@ func TestDDLNotification(t *testing.T) {
 		cancelled <- struct{}{}
 		return true
 	}
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// Alter the existing table ddl_t2, check that we get notification of it.
@@ -605,13 +601,13 @@ func TestCompositePKUpdate(t *testing.T) {
 	// Create replication client
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
 
 	// Add subscription - note that keyAboveWatermark is disabled for composite PKs
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
 
 	// Update the from_id (part of the primary key)
@@ -673,7 +669,7 @@ func TestAllChangesFlushed(t *testing.T) {
 		PRIMARY KEY (id)
 	)`
 	srcTable, dstTable := setupTestTables(t, t1, t2)
-	client := &Client{
+	client := &binlogClient{
 		db:       nil,
 		logger:   slog.Default(),
 		dbConfig: dbconn.NewDBConfig(),
@@ -740,7 +736,7 @@ func TestAllChangesFlushed(t *testing.T) {
 //
 // Regression gate for the Copilot review on #853.
 func TestSetBufferedPosIsMonotonic(t *testing.T) {
-	client := &Client{logger: slog.Default()}
+	client := &binlogClient{logger: slog.Default()}
 
 	// Initial setBufferedPos always wins (zero-value start).
 	start := mysql.Position{Name: "binlog.000010", Pos: 5000}
@@ -802,11 +798,11 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 
 	clientConfig := NewClientDefaultConfig()
 	clientConfig.CancelFunc = func() bool { cancel(); return true }
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*Client)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
-	require.NoError(t, client.Run(ctx))
+	require.NoError(t, client.Start(ctx))
 
 	// Ensure we are no longer on the initial binary log.
 	_, err = db.ExecContext(t.Context(), "FLUSH BINARY LOGS")
@@ -835,9 +831,9 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 
 func TestProcessDDLNotification(t *testing.T) {
 	// Helper: create a minimal Client with the given filter config and a cancel tracker.
-	makeClient := func(filterSchema string, filterTables []string) (*Client, *bool) {
+	makeClient := func(filterSchema string, filterTables []string) (*binlogClient, *bool) {
 		cancelled := false
-		c := &Client{
+		c := &binlogClient{
 			logger:           slog.Default(),
 			callerCancelFunc: func() bool { cancelled = true; return true },
 			ddlFilterSchema:  filterSchema,
@@ -860,7 +856,7 @@ func TestProcessDDLNotification(t *testing.T) {
 
 	t.Run("default mode: cancels on exact subscription match", func(t *testing.T) {
 		cancelled := false
-		c := &Client{
+		c := &binlogClient{
 			logger:           slog.Default(),
 			callerCancelFunc: func() bool { cancelled = true; return true },
 			subs:             newSubscriptionRegistry(),
@@ -926,7 +922,7 @@ func TestProcessDDLNotification(t *testing.T) {
 	})
 
 	t.Run("no cancel func: does not panic", func(t *testing.T) {
-		c := &Client{
+		c := &binlogClient{
 			logger:          slog.Default(),
 			ddlFilterSchema: "mydb",
 			subs:            newSubscriptionRegistry(),
