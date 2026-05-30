@@ -189,9 +189,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	if !r.resuming {
 		// Watermark optimization ON during the copy: change events for keys
 		// the copier has not reached yet are discarded (those rows are
-		// copied directly), avoiding redundant work.
-		if err := r.replClient.SetWatermarkOptimization(ctx, true); err != nil {
-			return err
+		// copied directly), avoiding redundant work. (No change feed in
+		// copy-only mode, so nothing to optimize.)
+		if !r.sync.CopyOnly {
+			if err := r.replClient.SetWatermarkOptimization(ctx, true); err != nil {
+				return err
+			}
 		}
 		r.status.Set(status.CopyRows)
 		r.logger.Info("Starting initial copy")
@@ -201,15 +204,25 @@ func (r *Runner) Run(ctx context.Context) error {
 		// Disable the watermark optimization and drain the copy-phase
 		// backlog so every change observed so far is applied before
 		// steady-state streaming.
-		if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
-			return err
+		if !r.sync.CopyOnly {
+			if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+				return err
+			}
+			if err := r.replClient.Flush(ctx); err != nil {
+				return fmt.Errorf("failed to flush after initial copy: %w", err)
+			}
 		}
-		if err := r.replClient.Flush(ctx); err != nil {
-			return fmt.Errorf("failed to flush after initial copy: %w", err)
-		}
-		r.logger.Info("Initial copy complete; entering continuous sync")
 	}
 
+	// Copy-only sync ends here: the snapshot has been copied to the target,
+	// and there is no change capture to continue. Returns nil (no error).
+	if r.sync.CopyOnly {
+		r.logger.Info("Copy-only sync complete: data copied to target; replication disabled, exiting",
+			"total_time", time.Since(r.startTime).Round(time.Second))
+		return nil
+	}
+
+	r.logger.Info("Initial copy complete; entering continuous sync")
 	return r.runContinuous(ctx)
 }
 
@@ -285,6 +298,16 @@ func (r *Runner) setup(ctx context.Context) error {
 	r.applier, err = r.createApplier()
 	if err != nil {
 		return err
+	}
+
+	// Copy-only sync skips replication entirely: no change source, no
+	// checkpoint, no resume. Just verify the target is empty and run the
+	// one-shot copy. (Used while the source's change feed is unavailable.)
+	if r.sync.CopyOnly {
+		if err := r.checkTargetEmpty(ctx); err != nil {
+			return err
+		}
+		return r.startFresh(ctx)
 	}
 
 	// Wire the change source: injected (e.g. VStream), or a built-in MySQL
@@ -462,10 +485,11 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 	return nil
 }
 
-// buildSubscriptions creates a chunker per source table, registers a
-// subscription on the change feed, and returns the chunkers for assembly
-// into the copy multi-chunker.
-func (r *Runner) buildSubscriptions() ([]table.Chunker, error) {
+// buildChunkers creates a chunker per source table and, unless this is a
+// copy-only sync, registers a subscription on the change feed so changes
+// during the copy are captured + deduped. Returns the chunkers for
+// assembly into the copy multi-chunker.
+func (r *Runner) buildChunkers() ([]table.Chunker, error) {
 	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	for _, tbl := range r.sourceTables {
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
@@ -475,8 +499,10 @@ func (r *Runner) buildSubscriptions() ([]table.Chunker, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := r.replClient.AddSubscription(tbl, nil, cc); err != nil {
-			return nil, err
+		if !r.sync.CopyOnly {
+			if err := r.replClient.AddSubscription(tbl, nil, cc); err != nil {
+				return nil, err
+			}
 		}
 		chunkers = append(chunkers, cc)
 	}
@@ -492,7 +518,7 @@ func (r *Runner) startFresh(ctx context.Context) error {
 		return err
 	}
 
-	chunkers, err := r.buildSubscriptions()
+	chunkers, err := r.buildChunkers()
 	if err != nil {
 		return err
 	}
@@ -514,8 +540,11 @@ func (r *Runner) startFresh(ctx context.Context) error {
 	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
-	if err := r.replClient.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start change source: %w", err)
+	// Copy-only sync has no change feed to start.
+	if !r.sync.CopyOnly {
+		if err := r.replClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start change source: %w", err)
+		}
 	}
 	return nil
 }
@@ -525,7 +554,7 @@ func (r *Runner) startFresh(ctx context.Context) error {
 // optimization so every change applies, and opens the feed at the
 // checkpointed position.
 func (r *Runner) startResume(ctx context.Context, pos string) error {
-	chunkers, err := r.buildSubscriptions()
+	chunkers, err := r.buildChunkers()
 	if err != nil {
 		return err
 	}
@@ -609,7 +638,10 @@ func (r *Runner) dumpCheckpointLoop(ctx context.Context, done chan struct{}) {
 // startBackgroundRoutines starts the periodic flush (which advances the
 // applied position and keeps the target caught up) and the status logger.
 func (r *Runner) startBackgroundRoutines(ctx context.Context) {
-	r.replClient.StartPeriodicFlush(ctx, r.sync.FlushInterval)
+	// Copy-only sync has no change feed, so no periodic flush.
+	if !r.sync.CopyOnly {
+		r.replClient.StartPeriodicFlush(ctx, r.sync.FlushInterval)
+	}
 	r.watchDone = make(chan struct{})
 	go r.watchStatus(ctx)
 }
@@ -624,18 +656,25 @@ func (r *Runner) watchStatus(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if r.status.Get() == status.CopyRows {
+			// pending-changes only applies when there's a change feed
+			// (nil in copy-only mode).
+			pending := 0
+			if r.replClient != nil {
+				pending = r.replClient.GetDeltaLen()
+			}
+			switch {
+			case r.status.Get() == status.CopyRows && r.copier != nil:
 				r.logger.Info("sync status",
 					"phase", "initial-copy",
 					"progress", r.copier.GetProgress(),
 					"eta", r.copier.GetETA(),
-					"pending-changes", r.replClient.GetDeltaLen(),
+					"pending-changes", pending,
 					"elapsed", time.Since(r.startTime).Round(time.Second),
 				)
-			} else {
+			case r.replClient != nil:
 				r.logger.Info("sync status",
 					"phase", "continuous",
-					"pending-changes", r.replClient.GetDeltaLen(),
+					"pending-changes", pending,
 					"position", r.replClient.Position(),
 					"elapsed", time.Since(r.startTime).Round(time.Second),
 				)

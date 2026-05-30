@@ -111,3 +111,51 @@ func TestSyncE2E(t *testing.T) {
 	}
 	require.NoError(t, runner.Close())
 }
+
+// TestSyncCopyOnly verifies copy-only mode: the initial copy runs and the
+// runner returns on its own — no change source, no continuous phase, no
+// cancellation needed.
+func TestSyncCopyOnly(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_copyonly_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_copyonly_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_copyonly_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_copyonly_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_copyonly_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_copyonly_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	// Leave the target database absent — copy-only must auto-create it.
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_copyonly_dest`)
+
+	s := &Sync{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		WriteThreads:    2,
+		CopyOnly:        true,
+	}
+	runner, err := NewRunner(s)
+	require.NoError(t, err)
+
+	// Copy-only Run returns on its own once the copy completes (no cancel).
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	require.NoError(t, runner.Run(ctx))
+	require.NoError(t, runner.Close())
+
+	tgt, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	var n int
+	require.NoError(t, tgt.QueryRow("SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n)
+	var v string
+	require.NoError(t, tgt.QueryRow("SELECT val FROM t1 WHERE id = 2").Scan(&v))
+	require.Equal(t, "two", v)
+}

@@ -50,6 +50,13 @@ type Sync struct {
 	// batching trade-off. Defaults to change.DefaultFlushInterval.
 	FlushInterval time.Duration `name:"flush-interval" help:"How often to flush buffered changes to the target during continuous sync." default:"30s"`
 
+	// CopyOnly performs only the initial copy and then returns — no change
+	// capture, no continuous replication, no checkpoint. No change.Source is
+	// constructed or required. Used when the source's change feed is
+	// unavailable (e.g. PlanetScale VStream gRPC access is pending) to
+	// validate the one-shot data copy on its own.
+	CopyOnly bool `name:"copy-only" help:"Only run the initial copy, then exit (no continuous change capture)." default:"false"`
+
 	// Source optionally provides a pre-constructed change.Source to use
 	// for replication instead of constructing a built-in MySQL-binlog
 	// client from SourceDSN. When set, the runner uses this as the change
