@@ -19,6 +19,9 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 )
 
+// Compile-time assertion that the binlog-backed Client satisfies Source.
+var _ Source = (*Client)(nil)
+
 type Client struct {
 	// mu protects position fields (bufferedPos / flushedPos), the
 	// streamer / syncer / cancelFunc tuple, and the cached
@@ -86,9 +89,11 @@ type Client struct {
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
-// NewClient creates a new Client instance.
-// config.Applier is required!
-func NewClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) *Client {
+// NewBinlogClient constructs the binlog-backed change.Source. The
+// returned Source talks to MySQL via go-mysql's BinlogSyncer; future
+// alternative sources (e.g. VStream) will live behind their own
+// constructors. config.Applier is required.
+func NewBinlogClient(db *sql.DB, host string, username, password string, appl applier.Applier, config *ClientConfig) Source {
 	if config.DBConfig == nil {
 		config.DBConfig = dbconn.NewDBConfig() // default DB config
 	}
@@ -117,6 +122,7 @@ func NewClient(db *sql.DB, host string, username, password string, appl applier.
 
 // AddSubscription adds a new subscription.
 // Returns an error if a subscription already exists for the given table.
+// Satisfies Source interface.
 func (c *Client) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
 	// If the PK is not memory comparable we still use the buffered map, but it
@@ -171,12 +177,16 @@ func (c *Client) getBufferedPos() mysql.Position {
 
 // SetFlushedPos updates the known safe position that all changes have been flushed.
 // It is used for resuming from a checkpoint.
+// Satisfies Source interface.
 func (c *Client) SetFlushedPos(pos mysql.Position) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.flushedPos = pos
 }
 
+// AllChangesFlushed returns true if all buffered changes across all
+// subscriptions have been flushed to the target tables.
+// Satisfies Source interface.
 func (c *Client) AllChangesFlushed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -194,6 +204,8 @@ func (c *Client) AllChangesFlushed() bool {
 	return true
 }
 
+// GetBinlogApplyPosition returns the last flushed binlog position. It is used for checkpointing and resuming.
+// Satisfies Source interface.
 func (c *Client) GetBinlogApplyPosition() mysql.Position {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -202,6 +214,7 @@ func (c *Client) GetBinlogApplyPosition() mysql.Position {
 
 // GetDeltaLen returns the total number of changes
 // that are pending across all subscriptions.
+// Satisfies Source interface.
 func (c *Client) GetDeltaLen() int {
 	deltaLen := 0
 	for _, subscription := range c.subs.Snapshot() {
@@ -249,6 +262,7 @@ func (c *Client) getCurrentBinlogPosition(ctx context.Context) (mysql.Position, 
 
 // Run initializes the binlog syncer and starts the binlog reader.
 // It returns an error if the initialization fails.
+// Satisfies Source interface.
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -860,6 +874,7 @@ func (c *Client) Flush(ctx context.Context) error {
 // StopPeriodicFlush stops the periodic flush goroutine started by
 // StartPeriodicFlush and blocks until that goroutine has fully exited.
 // Safe to call when no periodic flush is running (no-op).
+// Satisfies Source interface.
 func (c *Client) StopPeriodicFlush() {
 	c.periodicFlushLock.Lock()
 	cancel := c.periodicFlushCancel
@@ -882,6 +897,7 @@ func (c *Client) StopPeriodicFlush() {
 // MUST NOT prefix with `go` — the loop is spawned internally.
 //
 // Calling Start while a flush is already running is a no-op.
+// Satisfies Source interface.
 func (c *Client) StartPeriodicFlush(ctx context.Context, interval time.Duration) {
 	c.periodicFlushLock.Lock()
 	if c.periodicFlushCancel != nil {
@@ -925,6 +941,7 @@ func (c *Client) runPeriodicFlush(ctx context.Context, interval time.Duration, d
 // We do not need to guarantee that they are flushed though, so
 // you need to call Flush() to do that. This call times out!
 // The default timeout is 10 seconds, after which an error will be returned.
+// Satisfies Source interface.
 func (c *Client) BlockWait(ctx context.Context) error {
 	targetPos, err := c.getCurrentBinlogPosition(ctx)
 	if err != nil {

@@ -223,7 +223,7 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 				Threads:  1,
 			})
 			require.NoError(t, err)
-			client := change.NewClient(db, tc.host, "user", "pass", appl, clientConfig)
+			client := change.NewBinlogClient(db, tc.host, "user", "pass", appl, clientConfig)
 			require.NotNil(t, client)
 
 			// Verify TLS config is stored

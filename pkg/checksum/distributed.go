@@ -33,7 +33,7 @@ type DistributedChecker struct {
 	sync.Mutex
 
 	concurrency      int
-	feeds            []*change.Client
+	feeds            []change.Source
 	sourceDBs        []*sql.DB // all source database connections
 	applier          applier.Applier
 	sourcePools      []sourcePool      // one per source DB, created during initConnPool

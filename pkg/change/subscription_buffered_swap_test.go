@@ -179,7 +179,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applierInstance, NewClientDefaultConfig())
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applierInstance, NewClientDefaultConfig()).(*Client)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))

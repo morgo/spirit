@@ -33,7 +33,7 @@ const (
 
 type CutOver struct {
 	db       *sql.DB
-	feed     *change.Client
+	feed     change.Source
 	config   []*cutoverConfig
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
@@ -48,7 +48,7 @@ type cutoverConfig struct {
 
 // NewCutOver contains the logic to perform the final cut over. It can cutover multiple tables
 // at once based on config. A replication feed which is used to ensure consistency before the cut over.
-func NewCutOver(db *sql.DB, config []*cutoverConfig, feed *change.Client, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*CutOver, error) {
+func NewCutOver(db *sql.DB, config []*cutoverConfig, feed change.Source, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*CutOver, error) {
 	if feed == nil {
 		return nil, errors.New("feed must be non-nil")
 	}

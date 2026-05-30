@@ -52,8 +52,8 @@ type Runner struct {
 	// With a stmt, alter, table, newTable.
 	changes []*tableChange
 
-	status     status.State   // must use atomic helpers to change.
-	replClient *change.Client // feed contains all binlog subscription activity.
+	status     status.State  // must use atomic helpers to change.
+	replClient change.Source // feed contains all binlog subscription activity.
 	throttler  throttler.Throttler
 
 	copier       copier.Copier
@@ -578,7 +578,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	replConfig.Logger = r.logger
 	replConfig.CancelFunc = r.fatalError
 	replConfig.DBConfig = r.dbConfig
-	r.replClient = change.NewClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig)
+	r.replClient = change.NewBinlogClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig)
 	// For each of the changes, we know the new table exists now
 	// So we should call SetInfo to populate the columns etc.
 	for _, change := range r.changes {
@@ -590,7 +590,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		}
 	}
 
-	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []*change.Client{r.replClient}, &checksum.CheckerConfig{
+	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.migration.Threads,
 		TargetChunkTime: r.migration.TargetChunkTime,
 		DBConfig:        r.dbConfig,
@@ -1564,7 +1564,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	checker, err := checksum.NewChecker(
 		[]*sql.DB{r.db},
 		chunker,
-		[]*change.Client{r.replClient},
+		[]change.Source{r.replClient},
 		&checksum.CheckerConfig{
 			// TODO(#831): once the throttler can size threads dynamically,
 			// replace the hard-coded 1 with the migration's thread count.

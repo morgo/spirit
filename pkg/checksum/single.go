@@ -25,7 +25,7 @@ type SingleChecker struct {
 	sync.Mutex
 
 	concurrency      int
-	feed             *change.Client
+	feed             change.Source
 	db               *sql.DB
 	trxPool          *dbconn.TrxPool // reader trx pool
 	isInvalid        bool
