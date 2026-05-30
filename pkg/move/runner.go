@@ -586,13 +586,22 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	// ForceKill is true by default in NewDBConfig(). For an injected,
-	// read-only change.Source (a Vitess/PlanetScale VStream import) we
-	// disable it: force-kill needs CONNECTION_ADMIN/SUPER (which a
-	// read-only customer credential won't have), and the import never
-	// acquires a source lock anyway, so it can never fire.
+	// ForceKill and RejectReadOnly are true by default in NewDBConfig().
+	// For an injected, read-only change.Source (a Vitess/PlanetScale VStream
+	// import) we disable both:
+	//   - ForceKill needs CONNECTION_ADMIN/SUPER (which a read-only customer
+	//     credential won't have), and the import never acquires a source lock
+	//     anyway, so it can never fire.
+	//   - RejectReadOnly is an Aurora-failover guard that turns a read-only
+	//     server error into driver.ErrBadConn. The injected source connects
+	//     to a read-only replica on purpose (e.g. PlanetScale's @replica),
+	//     so leaving it on loops every source statement to
+	//     "driver: bad connection". dbConfig is only used to open the source
+	//     connection here (the target is caller-supplied via Move.Targets),
+	//     so this does not weaken the target's failover safety.
 	if r.move.Source != nil {
 		r.dbConfig.ForceKill = false
+		r.dbConfig.RejectReadOnly = false
 	}
 	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
