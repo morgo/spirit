@@ -159,3 +159,73 @@ func TestSyncCopyOnly(t *testing.T) {
 	require.NoError(t, tgt.QueryRow("SELECT val FROM t1 WHERE id = 2").Scan(&v))
 	require.Equal(t, "two", v)
 }
+
+// TestRunnerStatusTask exercises the status.Task surface (Progress, Status,
+// DumpCheckpoint, Cancel) concurrently with Run, validating both the values
+// reported and the locking around the progress fields (run with -race).
+func TestRunnerStatusTask(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_statustask_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_statustask_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_statustask_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_statustask_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_statustask_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_statustask_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_statustask_dest`)
+
+	s := &Sync{
+		SourceDSN:       src.FormatDSN(),
+		TargetDSN:       dest.FormatDSN(),
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		WriteThreads:    2,
+		CopyOnly:        true,
+	}
+	runner, err := NewRunner(s)
+	require.NoError(t, err)
+
+	// Safe to poll before Run starts: reports the Initial state, no panic, and
+	// the copy-only checkpoint is a no-op.
+	require.Equal(t, status.Initial, runner.Progress().CurrentState)
+	require.NotEmpty(t, runner.Status())
+	require.NoError(t, runner.DumpCheckpoint(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Hammer the status.Task accessors from another goroutine while Run runs,
+	// so the race detector covers the locking around copier/copyChunker/etc.
+	done := make(chan struct{})
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_ = runner.Progress()
+				_ = runner.Status()
+				_ = runner.DumpCheckpoint(ctx)
+			}
+		}
+	}()
+
+	runErr := runner.Run(ctx)
+	close(done)
+	<-pollDone
+	require.NoError(t, runErr)
+	runner.Cancel() // post-run cancel must be harmless
+	require.NoError(t, runner.Close())
+
+	// After a completed copy, Progress reports the table as fully copied.
+	p := runner.Progress()
+	require.Len(t, p.Tables, 1)
+	require.Equal(t, "t1", p.Tables[0].TableName)
+	require.True(t, p.Tables[0].IsComplete)
+	require.Equal(t, uint64(3), p.Tables[0].RowsCopied)
+}

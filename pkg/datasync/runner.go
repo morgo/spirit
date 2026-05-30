@@ -77,7 +77,15 @@ type Runner struct {
 	// cancellation. Guarded by fatalMu.
 	fatalMu  sync.Mutex
 	fatalErr error
+
+	// progMu guards the progress-related fields (copier, copyChunker,
+	// replClient, startTime, cancelFunc) that Run assigns during setup and
+	// that the status.Task accessors (Progress/Status/DumpCheckpoint/Cancel)
+	// read concurrently from a separate monitoring goroutine.
+	progMu sync.RWMutex
 }
+
+var _ status.Task = (*Runner)(nil)
 
 // NewRunner validates the Sync config and returns a Runner. The CLI
 // supplies defaults via kong; programmatic callers get the same defaults
@@ -111,9 +119,12 @@ func (r *Runner) SetLogger(logger *slog.Logger) {
 // until ctx is cancelled. A clean cancellation returns nil; a fatal
 // source event (e.g. DDL) returns an error.
 func (r *Runner) Run(ctx context.Context) error {
-	ctx, r.cancelFunc = context.WithCancel(ctx)
-	defer r.cancelFunc()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r.progMu.Lock()
+	r.cancelFunc = cancel
 	r.startTime = time.Now()
+	r.progMu.Unlock()
 	r.logger.Info("Starting sync", "source_dsn", redactDSN(r.sync.SourceDSN))
 
 	r.dbConfig = dbconn.NewDBConfig()
@@ -336,14 +347,14 @@ func (r *Runner) setup(ctx context.Context) error {
 	// binlog client constructed from the source DSN. Sync replicates a whole
 	// schema, so the DDL filter is by schema only (no table list).
 	if r.sync.Source != nil {
-		r.replClient = r.sync.Source
+		r.setReplClient(r.sync.Source)
 	} else {
 		replConfig := change.NewClientDefaultConfig()
 		replConfig.Logger = r.logger
 		replConfig.CancelFunc = r.fatalError
 		replConfig.DDLFilterSchema = r.source.config.DBName
 		replConfig.DBConfig = r.dbConfig
-		r.replClient = change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig)
+		r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
 	}
 
 	// If a checkpoint already exists on the target, resume from it: skip the
@@ -544,9 +555,9 @@ func (r *Runner) startFresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	r.copyChunker = table.NewMultiChunker(chunkers...)
+	r.setCopyChunker(table.NewMultiChunker(chunkers...))
 
-	r.copier, err = copier.NewCopier(r.source.db, r.copyChunker, &copier.CopierConfig{
+	cp, err := copier.NewCopier(r.source.db, r.copyChunker, &copier.CopierConfig{
 		Concurrency:     r.sync.Threads,
 		TargetChunkTime: r.sync.TargetChunkTime,
 		Logger:          r.logger,
@@ -559,6 +570,7 @@ func (r *Runner) startFresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	r.setCopier(cp)
 	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
@@ -580,7 +592,7 @@ func (r *Runner) startResume(ctx context.Context, pos string) error {
 	if err != nil {
 		return err
 	}
-	r.copyChunker = table.NewMultiChunker(chunkers...)
+	r.setCopyChunker(table.NewMultiChunker(chunkers...))
 	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
@@ -759,6 +771,163 @@ func (r *Runner) Close() error {
 		}
 	}
 	return nil
+}
+
+// --- progress-field setters (guard the fields the status.Task accessors read) ---
+
+func (r *Runner) setReplClient(c change.Source) {
+	r.progMu.Lock()
+	r.replClient = c
+	r.progMu.Unlock()
+}
+
+func (r *Runner) setCopier(c copier.Copier) {
+	r.progMu.Lock()
+	r.copier = c
+	r.progMu.Unlock()
+}
+
+func (r *Runner) setCopyChunker(c table.Chunker) {
+	r.progMu.Lock()
+	r.copyChunker = c
+	r.progMu.Unlock()
+}
+
+// --- status.Task ---
+//
+// Runner implements status.Task so a caller (e.g. tern's import engine) can
+// surface live progress and force a checkpoint, the same way it monitors a
+// spirit migration.Runner. These accessors are safe to call concurrently with
+// Run from another goroutine.
+
+// Progress returns a structured snapshot of the sync's current state: the
+// phase, a short human-readable summary, and per-table copy progress during
+// the initial copy.
+func (r *Runner) Progress() status.Progress {
+	state := r.status.Get()
+
+	r.progMu.RLock()
+	cp := r.copier
+	chunker := r.copyChunker
+	repl := r.replClient
+	r.progMu.RUnlock()
+
+	var summary string
+	switch state { //nolint:exhaustive // sync only uses Initial/CopyRows/ApplyChangeset
+	case status.CopyRows:
+		if cp != nil {
+			summary = fmt.Sprintf("%s copyRows ETA %s", cp.GetProgress(), cp.GetETA())
+		} else {
+			summary = "copyRows"
+		}
+	case status.ApplyChangeset:
+		if repl != nil {
+			summary = fmt.Sprintf("continuous sync position=%s pending-changes=%d", repl.Position(), repl.GetDeltaLen())
+		} else {
+			summary = "continuous sync"
+		}
+	default:
+		summary = state.String()
+	}
+
+	// Per-table progress: the multi-chunker reports each table; fall back to
+	// the single-table chunker view if it's not a multi-chunker.
+	var tables []status.TableProgress
+	if mc, ok := chunker.(interface {
+		PerTableProgress() []table.TableProgress
+	}); ok {
+		for _, tp := range mc.PerTableProgress() {
+			tables = append(tables, status.TableProgress{
+				TableName:  tp.TableName,
+				RowsCopied: tp.RowsCopied,
+				RowsTotal:  tp.RowsTotal,
+				IsComplete: tp.IsComplete,
+			})
+		}
+	} else if chunker != nil {
+		rowsCopied, _, rowsTotal := chunker.Progress()
+		name := ""
+		if ts := chunker.Tables(); len(ts) > 0 {
+			name = ts[0].TableName
+		}
+		tables = append(tables, status.TableProgress{
+			TableName:  name,
+			RowsCopied: rowsCopied,
+			RowsTotal:  rowsTotal,
+			IsComplete: chunker.IsRead(),
+		})
+	}
+
+	return status.Progress{CurrentState: state, Summary: summary, Tables: tables}
+}
+
+// Status returns a one-line, human-readable status for logging. It does not
+// log itself; status.WatchTask (when used) logs the returned value.
+func (r *Runner) Status() string {
+	state := r.status.Get()
+
+	r.progMu.RLock()
+	cp := r.copier
+	repl := r.replClient
+	start := r.startTime
+	r.progMu.RUnlock()
+
+	elapsed := time.Since(start).Round(time.Second)
+	switch state { //nolint:exhaustive // sync only uses Initial/CopyRows/ApplyChangeset
+	case status.CopyRows:
+		progress, eta := "", ""
+		if cp != nil {
+			progress, eta = cp.GetProgress(), cp.GetETA()
+		}
+		pending := 0
+		if repl != nil {
+			pending = repl.GetDeltaLen()
+		}
+		return fmt.Sprintf("sync status: state=%s copy-progress=%s copy-eta=%s pending-changes=%d total-time=%s",
+			state.String(), progress, eta, pending, elapsed)
+	case status.ApplyChangeset:
+		pos := ""
+		pending := 0
+		if repl != nil {
+			pos, pending = repl.Position(), repl.GetDeltaLen()
+		}
+		return fmt.Sprintf("sync status: state=%s position=%s pending-changes=%d total-time=%s",
+			state.String(), pos, pending, elapsed)
+	default:
+		return fmt.Sprintf("sync status: state=%s total-time=%s", state.String(), elapsed)
+	}
+}
+
+// DumpCheckpoint records the current source position on the target so a
+// restart can resume the continuous stream. It is a no-op for a copy-only
+// sync (no change feed, nothing to resume).
+func (r *Runner) DumpCheckpoint(ctx context.Context) error {
+	if r.sync.CopyOnly {
+		return nil
+	}
+	r.progMu.RLock()
+	repl := r.replClient
+	r.progMu.RUnlock()
+	if repl == nil {
+		return nil // change feed not wired up yet; nothing to checkpoint
+	}
+	// Idempotent: createCheckpointTable uses CREATE TABLE IF NOT EXISTS, so
+	// this is safe even if continuous sync hasn't created the table yet.
+	if err := r.createCheckpointTable(ctx); err != nil {
+		return err
+	}
+	return r.dumpCheckpoint(ctx)
+}
+
+// Cancel stops the sync by cancelling the Run context. Safe to call before
+// Run has started (no-op until cancelFunc is set).
+func (r *Runner) Cancel() {
+	r.progMu.RLock()
+	cancel := r.cancelFunc
+	r.progMu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // redactDSN strips credentials from a DSN for safe logging.
