@@ -149,6 +149,14 @@ func (c *buffered) Run(ctx context.Context) error {
 	}
 
 	if c.isInvalid.Load() {
+		// Surface the underlying error (the first read worker to fail sets
+		// isInvalid and returns its error, which errgroup.Wait returns here)
+		// instead of swallowing it — otherwise the real cause (a source read
+		// failure, a target write/warning, an external cancel, etc.) is lost
+		// and callers only ever see "copy failed due to earlier errors".
+		if err != nil {
+			return fmt.Errorf("copy failed due to earlier errors: %w", err)
+		}
 		return errors.New("copy failed due to earlier errors")
 	}
 	return err
