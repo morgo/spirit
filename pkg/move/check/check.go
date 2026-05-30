@@ -37,6 +37,12 @@ type Resources struct {
 	Targets        []applier.Target
 	SourceTables   []*table.TableInfo
 	CreateSentinel bool
+	// InjectedSource reports that the move is driven by a pre-constructed,
+	// read-only change.Source (Move.Source — e.g. a Vitess/PlanetScale
+	// VStream import) rather than a MySQL binlog client. The source-privilege
+	// check is skipped for such a source: it authenticates over gRPC and uses
+	// none of the binlog/LOCK TABLES/force-kill privileges the check verifies.
+	InjectedSource bool
 }
 
 type check struct {

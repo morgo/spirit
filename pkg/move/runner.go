@@ -586,7 +586,14 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
-	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
+	// ForceKill is true by default in NewDBConfig(). For an injected,
+	// read-only change.Source (a Vitess/PlanetScale VStream import) we
+	// disable it: force-kill needs CONNECTION_ADMIN/SUPER (which a
+	// read-only customer credential won't have), and the import never
+	// acquires a source lock anyway, so it can never fire.
+	if r.move.Source != nil {
+		r.dbConfig.ForceKill = false
+	}
 	// Buffered copier needs more connections due to parallel read/write workers
 	r.dbConfig.MaxOpenConnections = r.move.Threads + r.move.WriteThreads + 2
 
@@ -894,6 +901,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		Targets:        r.targets,
 		SourceTables:   r.sourceTables,
 		CreateSentinel: r.move.CreateSentinel,
+		InjectedSource: r.move.Source != nil,
 	}, r.logger, scope)
 }
 
