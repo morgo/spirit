@@ -50,6 +50,15 @@ type TableInfo struct {
 	statisticsLock              sync.Mutex
 	DisableAutoUpdateStatistics atomic.Bool
 
+	// DisableAnalyze skips the ANALYZE TABLE that setRowEstimate would
+	// otherwise run to refresh the optimizer's row estimate. ANALYZE TABLE
+	// writes to the statistics tables, so it requires INSERT on the table
+	// and a writable server. Set this when reading from a least-privilege
+	// (SELECT-only) or read-only source — e.g. sync's Vitess/PlanetScale
+	// replica — so the row estimate comes straight from information_schema,
+	// which only needs SELECT. Set before calling SetInfo.
+	DisableAnalyze bool
+
 	// Host is an optional identifier for the MySQL server this table belongs to.
 	// It is used by MultiChunker to disambiguate tables with the same SchemaName
 	// and TableName on different servers (e.g., in N:M move operations).
@@ -136,11 +145,16 @@ func (t *TableInfo) SetInfo(ctx context.Context) error {
 // setRowEstimate is a separate function so it can be repeated continuously
 // Since if a schema migration takes 14 days, it could change.
 func (t *TableInfo) setRowEstimate(ctx context.Context) error {
-	_, err := t.db.ExecContext(ctx, "ANALYZE TABLE "+t.QuotedTableName)
-	if err != nil {
-		return err
+	// ANALYZE TABLE refreshes the optimizer's row estimate. It writes to the
+	// statistics tables, so it requires INSERT on the table and a writable
+	// server; callers reading from a least-privilege (SELECT-only) or
+	// read-only source set DisableAnalyze to skip it (see the field doc).
+	if !t.DisableAnalyze {
+		if _, err := t.db.ExecContext(ctx, "ANALYZE TABLE "+t.QuotedTableName); err != nil {
+			return err
+		}
 	}
-	err = t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", t.TableName).Scan(&t.EstimatedRows)
+	err := t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", t.TableName).Scan(&t.EstimatedRows)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("table %s.%s does not exist", t.SchemaName, t.TableName)
