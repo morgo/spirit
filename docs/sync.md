@@ -64,6 +64,7 @@ source privileges depend on the change feed:
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
+- [copy-only](#copy-only)
 - [force](#force)
 - [gtid](#gtid)
 
@@ -113,6 +114,18 @@ How many concurrent write threads to use on the target.
 
 How often buffered changes are applied to the target during continuous sync —
 the replication-latency vs. batching trade-off.
+
+### copy-only
+
+- Type: Boolean
+- Default value: `false`
+
+Run only the initial copy and then exit — no change capture, no continuous
+replication. Use it for a one-shot snapshot, or when the source cannot provide
+a change feed (e.g. a managed Vitess without binlog/VStream access, or a
+replica lacking the `REPLICATION` privileges the binlog client needs). A
+checkpoint is still written, so a re-run resumes the copy (or no-ops if it had
+already completed) rather than starting over.
 
 ### force
 
