@@ -98,23 +98,50 @@ func (b *Boundary) comparesTo(b2 *Boundary) bool {
 	return true
 }
 
-// valuesString uses only values and ignores inclusive operation,
-// to get a string representation of Values in Boundary.
+// valuesString renders the boundary values as a comma-separated list of JSON
+// string literals (used inside Boundary.JSON's "Value" array).
 func (b *Boundary) valuesString() string {
 	vals := make([]string, len(b.Value))
 	for i, v := range b.Value {
-		// We have to *also* quote numeric types to avoid JSON float behavior
-		// See Issue #125; this doesn't apply to string types
-		// because they are already quoted by datum.String()
-		// We also force-quote binary strings, because there is no JSON handling
-		// for a hex values, and it needs quoting in this context.
-		if v.IsNumeric() || v.IsBinaryString() {
-			vals[i] = fmt.Sprintf(`"%s"`, v)
-		} else {
-			vals[i] = v.String()
-		}
+		vals[i] = jsonQuoteDatum(v)
 	}
 	return strings.Join(vals, ",")
+}
+
+// jsonQuoteDatum renders a boundary datum as a JSON string literal (always
+// quoted, properly escaped). Numeric values are quoted to avoid JSON float
+// behavior (#125); binary values are hex-encoded ("0x...") so they round-trip
+// via datumValFromString. Crucially it uses json.Marshal rather than
+// Datum.String() (which SQL-escapes for WHERE clauses): a string value that is
+// valid in a MySQL string literal but not in JSON — e.g. a VARCHAR PK holding a
+// control byte like 0x16, or an embedded quote — must be JSON-escaped here, or
+// the checkpoint watermark becomes unparseable and resume fails permanently.
+func jsonQuoteDatum(v Datum) string {
+	var s string
+	switch {
+	case v.IsNumeric():
+		s = fmt.Sprintf("%v", v.Val)
+	case v.IsBinaryString():
+		bs, ok := v.Val.(string)
+		if !ok {
+			bs = fmt.Sprintf("%v", v.Val)
+		}
+		if len(bs) == 0 {
+			s = "0x00" // MySQL binary string needs at least one character
+		} else {
+			s = fmt.Sprintf("%#x", bs)
+		}
+	default:
+		var ok bool
+		if s, ok = v.Val.(string); !ok {
+			s = fmt.Sprintf("%v", v.Val)
+		}
+	}
+	// json.Marshal of a (valid-UTF8) string never errors and escapes anything
+	// JSON requires escaped; binary values took the hex branch above so they're
+	// ASCII here.
+	out, _ := json.Marshal(s)
+	return string(out)
 }
 
 type JSONChunk struct {
