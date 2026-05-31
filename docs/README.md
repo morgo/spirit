@@ -6,6 +6,7 @@ Spirit is a single binary with subcommands for MySQL schema and data operations:
 |------------|---------|
 | [**`spirit migrate`**](migrate.md) | Online schema change tool — applies `ALTER TABLE` statements to large tables without blocking reads or writes |
 | [**`spirit move`**](move.md) | Logical table mover — copies whole schemas (or a subset of tables) between different MySQL servers |
+| [**`spirit sync`**](sync.md) | Continuous replicator (**experimental**) — initial copy then streams changes from a source to a target until interrupted; no cutover |
 | [**`spirit lint`**](lint.md) | Schema linter — validates an entire MySQL schema against built-in lint rules |
 | [**`spirit diff`**](diff.md) | Schema differ — compares two MySQL schemas and lints the changes |
 | [**`spirit fmt`**](fmt.md) | Schema file formatter — canonicalizes `CREATE TABLE` `.sql` files by round-tripping them through MySQL |
