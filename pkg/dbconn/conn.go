@@ -292,7 +292,12 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	// So that we recycle the connection if we inadvertently connect to an old primary which is now a read only replica.
 	// This behaviour has been observed during blue/green upgrades and failover on AWS Aurora.
 	// See also: https://github.com/go-sql-driver/mysql?tab=readme-ov-file#rejectreadonly
-	cfg.RejectReadOnly = true
+	//
+	// Disabled for an injected, read-only change.Source (a Vitess/PlanetScale
+	// VStream import) via DBConfig.RejectReadOnly: that source is a read-only
+	// replica on purpose, and rejectReadOnly would turn its read-only
+	// responses into "driver: bad connection".
+	cfg.RejectReadOnly = config.RejectReadOnly
 	cfg.InterpolateParams = config.InterpolateParams
 	// Allow cleartext password authentication only when TLS is configured
 	// (required for AWS RDS IAM auth, safe because the connection uses TLS).
