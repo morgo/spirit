@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/alecthomas/kong"
 	"github.com/block/spirit/pkg/buildinfo"
+	"github.com/block/spirit/pkg/datasync"
 	spiritfmt "github.com/block/spirit/pkg/fmt"
 	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/migration"
@@ -21,6 +22,7 @@ var cli struct {
 	Version buildinfo.VersionFlag `name:"version" short:"v" help:"Show version information and exit."`
 	Migrate migration.Migration   `cmd:"" help:"Run an online schema change on a table."`
 	Move    move.Move             `cmd:"" help:"Move tables between MySQL servers."`
+	Sync    datasync.Sync         `cmd:"" help:"[EXPERIMENTAL] Continuously sync tables from a source to a target (initial copy, then stream changes until cancelled)."`
 	Lint    lint.LintCmd          `cmd:"" help:"Lint an entire MySQL schema."`
 	Diff    lint.DiffCmd          `cmd:"" help:"Diff two MySQL schemas and lint the changes."`
 	Fmt     spiritfmt.FmtCmd      `cmd:"" help:"Canonicalize CREATE TABLE .sql files by round-tripping through MySQL."`
