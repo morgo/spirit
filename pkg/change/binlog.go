@@ -126,22 +126,25 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 // Satisfies Source interface.
 func (c *binlogClient) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
-	// If the PK is not memory comparable we still use the buffered map, but it
-	// needs to know that when the watermark optimizations are disabled
-	// (i.e. we've finished copying and we're about to start checksum),
-	// that it needs to act like a FIFO queue. This is a requirement because of edge
-	// cases caused by collations since A == a, but in our map they would
-	// not compare as equal.
-	if !c.subs.AddBuffered(subKey, &bufferedMap{
-		table:                currentTable,
-		newTable:             newTable,
-		changes:              make(map[string]bufferedChange),
-		logger:               c.logger,
-		chunker:              chunker,
-		applier:              c.applier,
-		pkIsMemoryComparable: currentTable.PrimaryKeyIsMemoryComparable() == nil,
-		softLimitBytes:       c.subscriptionSoftLimitBytes,
-	}) {
+	// Build the buffered subscription via the shared public constructor so the
+	// in-tree binlog client and out-of-tree change.Source implementations
+	// (e.g. a VStream source) construct it the same way. The bufferedMap
+	// transparently handles a non-memory-comparable PK: once the watermark
+	// optimizations are disabled (copy done, checksum about to start) it acts
+	// like a FIFO queue, which is required because of collation edge cases
+	// (A == a on the server, but not in our map).
+	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
+		CurrentTable:   currentTable,
+		NewTable:       newTable,
+		Applier:        c.applier,
+		Chunker:        chunker,
+		Logger:         c.logger,
+		SoftLimitBytes: c.subscriptionSoftLimitBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)
+	}
+	if !c.subs.Add(subKey, sub) {
 		return fmt.Errorf("subscription already exists for table %s.%s", currentTable.SchemaName, currentTable.TableName)
 	}
 	return nil

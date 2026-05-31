@@ -687,7 +687,8 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
-	require.True(t, client.subs.AddBuffered(encodeSchemaTable(srcTable.SchemaName, srcTable.TableName), sub))
+	sub.cond = sync.NewCond(&sub.Mutex)
+	require.True(t, client.subs.Add(encodeSchemaTable(srcTable.SchemaName, srcTable.TableName), sub))
 	require.True(t, client.AllChangesFlushed(), "Should be flushed with empty subscription")
 
 	// Test 3: Add changes and verify not flushed
@@ -707,7 +708,8 @@ func TestAllChangesFlushed(t *testing.T) {
 		changes:              make(map[string]bufferedChange),
 		pkIsMemoryComparable: true,
 	}
-	require.True(t, client.subs.AddBuffered("test2", sub2))
+	sub2.cond = sync.NewCond(&sub2.Mutex)
+	require.True(t, client.subs.Add("test2", sub2))
 	sub2.HasChanged([]any{2}, nil, false)
 	require.False(t, client.AllChangesFlushed(), "Should not be flushed with changes in any subscription")
 
@@ -867,7 +869,8 @@ func TestProcessDDLNotification(t *testing.T) {
 			changes:  make(map[string]bufferedChange),
 			logger:   c.logger,
 		}
-		require.True(t, c.subs.AddBuffered(dbName+".orders", sub))
+		sub.cond = sync.NewCond(&sub.Mutex)
+		require.True(t, c.subs.Add(dbName+".orders", sub))
 
 		// DDL on the subscribed table should cancel.
 		c.processDDLNotification(dbName, "orders")
