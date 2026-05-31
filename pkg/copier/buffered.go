@@ -35,6 +35,8 @@ type buffered struct {
 	concurrency      int
 	rowsPerSecond    uint64
 	isInvalid        atomic.Bool
+	errMu            sync.Mutex // guards firstErr
+	firstErr         error      // first error that invalidated the copy (any goroutine)
 	startTime        time.Time
 	throttler        throttler.Throttler
 	dbConfig         *dbconn.DBConfig
@@ -148,16 +150,15 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = closeErr
 	}
 
-	if c.isInvalid.Load() {
-		// Surface the underlying error (the first read worker to fail sets
-		// isInvalid and returns its error, which errgroup.Wait returns here)
-		// instead of swallowing it — otherwise the real cause (a source read
-		// failure, a target write/warning, an external cancel, etc.) is lost
-		// and callers only ever see "copy failed due to earlier errors".
-		if err != nil {
-			return fmt.Errorf("copy failed due to earlier errors: %w", err)
-		}
-		return errors.New("copy failed due to earlier errors")
+	// A failure inside an async applier callback (e.g. a chunklet the target
+	// rejected with a warning) is reported to the callback in the applier's own
+	// goroutine — it never flows through errGrp or applier.Wait, both of which
+	// return nil in that case. Surface the first captured error so callers get
+	// the real root cause instead of a generic "copy failed" message (or, worse,
+	// a nil error that looks like success). Read/apply errors that already came
+	// back through errGrp take precedence and leave this untouched.
+	if err == nil {
+		err = c.getFirstErr()
 	}
 	return err
 }
@@ -177,7 +178,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 				return nil
 			}
 			c.logger.Error("readWorker got error from chunker", "error", err)
-			c.setInvalid()
+			c.setInvalid(err)
 			return err
 		}
 		c.logger.Debug("readWorker got chunk", "chunk", chunk.String())
@@ -186,12 +187,9 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		chunkStartTime := time.Now()
 		rows, err := c.readChunkData(ctx, chunk)
 		if err != nil {
-			// The read comes from the source (e.g. a Vitess/vtgate the importer
-			// doesn't control), so log the error here — it's the root cause that
-			// would otherwise only be inferable from the aborted copy.
-			c.logger.Error("readWorker failed to read chunk data from source", "chunk", chunk.String(), "error", err)
-			c.setInvalid()
-			return fmt.Errorf("failed to read chunk data: %w", err)
+			readErr := fmt.Errorf("failed to read chunk data: %w", err)
+			c.setInvalid(readErr)
+			return readErr
 		}
 
 		// Handle empty chunks immediately
@@ -218,7 +216,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		callback := func(affectedRows int64, err error) {
 			if err != nil {
 				c.logger.Error("applier callback received error", "chunk", capturedChunk.String(), "error", err)
-				c.setInvalid()
+				c.setInvalid(err)
 				return
 			}
 
@@ -241,9 +239,9 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 		// Apply the rows
 		if err := c.applier.Apply(ctx, chunk, rows, callback); err != nil {
-			c.logger.Error("readWorker failed to apply rows", "chunk", chunk.String(), "error", err)
-			c.setInvalid()
-			return fmt.Errorf("failed to apply rows: %w", err)
+			applyErr := fmt.Errorf("failed to apply rows: %w", err)
+			c.setInvalid(applyErr)
+			return applyErr
 		}
 	}
 
@@ -251,8 +249,25 @@ func (c *buffered) readWorker(ctx context.Context) error {
 	return nil
 }
 
-func (c *buffered) setInvalid() {
+// setInvalid marks the copy as failed and records the first error that caused
+// it. It is called from the read workers and from async applier callbacks, so
+// it captures only the first error and is safe for concurrent use.
+func (c *buffered) setInvalid(err error) {
+	if err != nil {
+		c.errMu.Lock()
+		if c.firstErr == nil {
+			c.firstErr = err
+		}
+		c.errMu.Unlock()
+	}
 	c.isInvalid.Store(true)
+}
+
+// getFirstErr returns the first error that invalidated the copy, or nil.
+func (c *buffered) getFirstErr() error {
+	c.errMu.Lock()
+	defer c.errMu.Unlock()
+	return c.firstErr
 }
 
 func (c *buffered) SetThrottler(throttler throttler.Throttler) {

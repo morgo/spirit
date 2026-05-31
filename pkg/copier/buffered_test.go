@@ -165,9 +165,15 @@ func TestBufferedCopierDataTypeConversionError(t *testing.T) {
 	copier, err := NewCopier(db, chunker, cfg)
 	require.NoError(t, err)
 
-	// Run the copier - should fail with conversion error
+	// Run the copier - should fail with conversion error.
 	err = copier.Run(t.Context())
 	require.Error(t, err, "Copier should return an error when data conversion fails")
+	// The failure happens in the applier's async callback, not on the errgroup
+	// path, so Run must surface that captured error rather than masking it with
+	// a generic "copy failed due to earlier errors" message.
+	require.ErrorContains(t, err, "unsafe warning",
+		"buffered copier must surface the real applier error, got: %v", err)
+	require.NotContains(t, err.Error(), "copy failed due to earlier errors")
 
 	// Verify early exit by checking how many chunks were processed
 	_, chunksCopied, _ := copier.GetChunker().Progress()
