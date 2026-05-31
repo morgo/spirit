@@ -708,6 +708,7 @@ func TestPREFERREDModeDISABLEDFallback(t *testing.T) {
 		LockWaitTimeout:          60,
 		RangeOptimizerMaxMemSize: 8388608,
 		InterpolateParams:        true,
+		RejectReadOnly:           true, // production default (see NewDBConfig)
 	}
 
 	// Create a fallback config as done in the New() function
