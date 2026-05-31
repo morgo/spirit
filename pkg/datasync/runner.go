@@ -147,12 +147,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.logger.Info("Starting sync", "source_dsn", redactDSN(r.sync.SourceDSN))
 
 	r.sourceDBConfig = dbconn.NewDBConfig()
-	// Sync only ever reads from the source (copy SELECTs + the change feed).
-	// It never writes to the source, acquires no source locks, and performs
-	// no cutover, so it needs only SELECT on the source schema (plus
-	// REPLICATION SLAVE/CLIENT when the change feed is the built-in MySQL
-	// binlog client, which that client validates on Start). Disable the two
-	// dbConfig behaviours that would otherwise demand more:
+	// Sync only ever reads the source data (copy SELECTs + the change feed).
+	// It never writes the source's data, acquires no source locks, and
+	// performs no cutover. With an injected change.Source it needs only SELECT
+	// on the source schema; the built-in MySQL binlog client additionally
+	// needs REPLICATION SLAVE/CLIENT (validated on Start) and RELOAD, because
+	// it issues FLUSH BINARY LOGS to establish its start position. Disable the
+	// two dbConfig behaviours that would otherwise demand more:
 	//   - ForceKill needs CONNECTION_ADMIN/PROCESS + performance_schema, and
 	//     is only used to break metadata locks during cutover — which sync
 	//     never does.

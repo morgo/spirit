@@ -32,16 +32,26 @@ checkpoint rather than re-copying from scratch.
 | Cutover | atomic rename | none |
 | Source | MySQL | MySQL (a pluggable `change.Source` allows other producers) |
 
-The source is treated as **read-only**: `sync` needs only `SELECT` on the
-source schema (plus `REPLICATION SLAVE`/`REPLICATION CLIENT` for the binlog
-change feed), runs no `ANALYZE`, acquires no source locks, and performs no
-cutover, so it can run against a replica.
+`sync` never writes to the source, runs no `ANALYZE`, acquires no source
+locks, and performs no cutover, so it can run against a replica. The exact
+source privileges depend on the change feed:
+
+- **Built-in MySQL binlog source** (default, from `--source-dsn`): needs
+  `SELECT` on the source schema, `REPLICATION SLAVE` + `REPLICATION CLIENT`
+  for the binlog stream, and `RELOAD` — the binlog reader runs
+  `FLUSH BINARY LOGS` to establish/advance its start position, so it is not
+  a pure `SELECT`-only role even though it never modifies your data.
+- **Injected `change.Source`** (e.g. a Vitess/PlanetScale VStream supplied by
+  a programmatic caller): the feed is driven entirely by that source, so the
+  built-in binlog privileges (`REPLICATION *`, `RELOAD`) do not apply — only
+  `SELECT` on the source schema is required for the initial copy.
 
 ## Requirements
 
 - **MySQL 8.0+** on both ends
-- Source: `binlog_format=ROW`, `log_bin=ON`, and `REPLICATION SLAVE` /
-  `REPLICATION CLIENT` privileges for the change feed
+- Source (built-in binlog feed): `binlog_format=ROW`, `log_bin=ON`, and
+  `SELECT` + `REPLICATION SLAVE` + `REPLICATION CLIENT` + `RELOAD` privileges
+  (`RELOAD` is required for the `FLUSH BINARY LOGS` the reader issues)
 
 ## Configuration
 
