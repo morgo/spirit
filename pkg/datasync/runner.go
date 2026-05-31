@@ -67,7 +67,12 @@ type Runner struct {
 
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
-	dbConfig   *dbconn.DBConfig
+	// sourceDBConfig connects to the read-only source: ForceKill and
+	// RejectReadOnly are disabled (see Run). targetDBConfig connects to the
+	// writable target and keeps the standard safe defaults — most importantly
+	// RejectReadOnly=true for Aurora-failover safety.
+	sourceDBConfig *dbconn.DBConfig
+	targetDBConfig *dbconn.DBConfig
 
 	// watchDone is closed when the status-logging goroutine exits.
 	watchDone chan struct{}
@@ -130,7 +135,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.progMu.Unlock()
 	r.logger.Info("Starting sync", "source_dsn", redactDSN(r.sync.SourceDSN))
 
-	r.dbConfig = dbconn.NewDBConfig()
+	r.sourceDBConfig = dbconn.NewDBConfig()
 	// Sync only ever reads from the source (copy SELECTs + the change feed).
 	// It never writes to the source, acquires no source locks, and performs
 	// no cutover, so it needs only SELECT on the source schema (plus
@@ -143,15 +148,26 @@ func (r *Runner) Run(ctx context.Context) error {
 	//   - RejectReadOnly is an Aurora-failover guard that turns a read-only
 	//     server error into driver.ErrBadConn; sync's source is read-only by
 	//     design (e.g. a Vitess/PlanetScale replica), so it must not fire.
-	r.dbConfig.ForceKill = false
-	r.dbConfig.RejectReadOnly = false
-	r.dbConfig.MaxOpenConnections = 100
+	r.sourceDBConfig.ForceKill = false
+	r.sourceDBConfig.RejectReadOnly = false
+	r.sourceDBConfig.MaxOpenConnections = 100
+
+	// The target is written to (table creation, the copy/apply, the
+	// checkpoint, and CREATE DATABASE on the admin connection), so it keeps the
+	// standard safe defaults — crucially RejectReadOnly=true, so that if the
+	// target Aurora fails over and we land on a demoted, now-read-only primary,
+	// writes turn into driver.ErrBadConn and the pool reconnects instead of
+	// silently erroring. Only the relaxations the target genuinely shares with
+	// the source are applied (no cutover here either, so ForceKill is left at
+	// its default but never fires).
+	r.targetDBConfig = dbconn.NewDBConfig()
+	r.targetDBConfig.MaxOpenConnections = 100
 
 	// Open the source SQL connection. Even when the change feed is an
 	// injected non-MySQL source, spirit still needs SQL access to the
 	// source for SHOW TABLES / SHOW CREATE TABLE and the initial-copy
 	// SELECTs.
-	db, err := dbconn.New(r.sync.SourceDSN, r.dbConfig)
+	db, err := dbconn.New(r.sync.SourceDSN, r.sourceDBConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to source: %w", err)
 	}
@@ -180,7 +196,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.ensureTargetDatabase(ctx, tcfg); err != nil {
 			return err
 		}
-		tdb, terr := dbconn.New(r.sync.TargetDSN, r.dbConfig)
+		tdb, terr := dbconn.New(r.sync.TargetDSN, r.targetDBConfig)
 		if terr != nil {
 			return fmt.Errorf("failed to connect to target: %w", terr)
 		}
@@ -336,7 +352,7 @@ func (r *Runner) setup(ctx context.Context) error {
 			replConfig.Logger = r.logger
 			replConfig.CancelFunc = r.fatalError
 			replConfig.DDLFilterSchema = r.source.config.DBName
-			replConfig.DBConfig = r.dbConfig
+			replConfig.DBConfig = r.sourceDBConfig
 			r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
 		}
 	}
@@ -435,7 +451,7 @@ func (r *Runner) createApplier() (applier.Applier, error) {
 		return r.sync.Applier, nil
 	}
 	appl, err := applier.NewSingleTargetApplier(r.target, &applier.ApplierConfig{
-		DBConfig: r.dbConfig,
+		DBConfig: r.targetDBConfig,
 		Logger:   r.logger,
 		Threads:  r.sync.WriteThreads,
 	})
@@ -459,7 +475,7 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 	}
 	adminCfg := cfg.Clone()
 	adminCfg.DBName = ""
-	adminDB, err := dbconn.New(adminCfg.FormatDSN(), r.dbConfig)
+	adminDB, err := dbconn.New(adminCfg.FormatDSN(), r.targetDBConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to target server to ensure database: %w", err)
 	}
@@ -622,7 +638,7 @@ func (r *Runner) buildCopyPipeline() error {
 		Logger:          r.logger,
 		Throttler:       &throttler.Noop{},
 		MetricsSink:     &metrics.NoopSink{},
-		DBConfig:        r.dbConfig,
+		DBConfig:        r.sourceDBConfig,
 		Applier:         r.applier,
 		Buffered:        true, // sync always uses the buffered copier
 	})
