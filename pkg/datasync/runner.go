@@ -669,15 +669,32 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 	if err := r.buildCopyPipeline(); err != nil {
 		return err
 	}
-	if err := r.copyChunker.OpenAtWatermark(watermark); err != nil {
-		return fmt.Errorf("failed to open copier at checkpoint watermark: %w", err)
+	// Open at the saved watermark when we have one; otherwise (the prior
+	// attempt failed before writing its first checkpoint) open from the start
+	// and re-copy. The copy is idempotent (INSERT IGNORE), and we still skip
+	// the fresh-sync target-empty check because this import owns the
+	// (partially-populated) target.
+	if watermark != "" {
+		if err := r.copyChunker.OpenAtWatermark(watermark); err != nil {
+			return fmt.Errorf("failed to open copier at checkpoint watermark: %w", err)
+		}
+	} else {
+		if err := r.copyChunker.Open(); err != nil {
+			return err
+		}
 	}
 	if !r.sync.CopyOnly {
 		if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
 			return err
 		}
-		if err := r.replClient.StartFromPosition(ctx, pos); err != nil {
-			return fmt.Errorf("failed to resume change source from position %q: %w", pos, err)
+		if pos != "" {
+			if err := r.replClient.StartFromPosition(ctx, pos); err != nil {
+				return fmt.Errorf("failed to resume change source from position %q: %w", pos, err)
+			}
+		} else if err := r.replClient.Start(ctx); err != nil {
+			// No saved position (prior attempt failed before checkpointing):
+			// start the feed fresh; changes apply with the optimization off.
+			return fmt.Errorf("failed to start change source: %w", err)
 		}
 	}
 	return r.createCheckpointTable(ctx)
@@ -729,31 +746,39 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 		r.target.Config.DBName, syncCheckpointTableName, watermark, pos)
 }
 
-// readCheckpoint returns the saved copier watermark and change-feed position
-// from the target checkpoint table, and whether a resumable checkpoint exists
-// (a row carrying a copier watermark).
+// readCheckpoint reports whether the target carries a sync checkpoint and, if
+// so, the saved copier watermark + change-feed position.
+//
+// The "resume" signal is the existence of the checkpoint TABLE, not merely a
+// saved watermark. The table is created (in startFresh) before any rows are
+// copied, so its presence means a prior attempt of this import already owns
+// the target — even if that attempt died before writing its first watermark
+// row, leaving partial data behind. Treating that as resumable lets the retry
+// re-copy idempotently instead of tripping the fresh-sync target-empty guard.
+// (watermark/pos may be empty in that case; startResume handles it.)
 func (r *Runner) readCheckpoint(ctx context.Context) (watermark, pos string, ok bool, err error) {
 	var exists int
 	e := r.target.DB.QueryRowContext(ctx,
 		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
 		r.target.Config.DBName, syncCheckpointTableName).Scan(&exists)
 	if errors.Is(e, sql.ErrNoRows) {
-		return "", "", false, nil
+		return "", "", false, nil // no checkpoint table → not a prior import; fresh sync
 	}
 	if e != nil {
 		return "", "", false, fmt.Errorf("failed to check for checkpoint table: %w", e)
 	}
+	// The table exists: a prior attempt owns this target. Read its (optional)
+	// saved watermark/position.
 	e = r.target.DB.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT IFNULL(copier_watermark, ''), IFNULL(source_position, '') FROM `%s`.`%s` WHERE id = 1",
 			r.target.Config.DBName, syncCheckpointTableName)).Scan(&watermark, &pos)
 	if errors.Is(e, sql.ErrNoRows) {
-		return "", "", false, nil
+		return "", "", true, nil // table exists but no row written yet → resume, re-copy from scratch
 	}
 	if e != nil {
 		return "", "", false, fmt.Errorf("failed to read checkpoint: %w", e)
 	}
-	// Resume only when we have a copier watermark to open the chunker at.
-	return watermark, pos, watermark != "", nil
+	return watermark, pos, true, nil
 }
 
 // dumpCheckpointLoop periodically records the source position on the

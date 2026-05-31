@@ -305,6 +305,70 @@ func TestSyncResume(t *testing.T) {
 	require.Equal(t, 2, countRows("t2"), "resume must not duplicate or drop rows")
 }
 
+// TestSyncResumeNoWatermarkRow simulates a prior attempt that created the
+// checkpoint table and copied data but died before writing its first watermark
+// row. The re-run must treat the checkpoint table's existence as "this import
+// owns the target" and resume (re-copy) rather than tripping the fresh-sync
+// target-empty check on the partial data.
+func TestSyncResumeNoWatermarkRow(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_norow_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_norow_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_norow_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_norow_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_norow_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_norow_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_norow_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_norow_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_norow_dest`)
+
+	newSync := func() *Sync {
+		return &Sync{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			CopyOnly:        true,
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// First run completes: target has data + a checkpoint table with a row.
+	r1, err := NewRunner(newSync())
+	require.NoError(t, err)
+	require.NoError(t, r1.Run(ctx))
+	require.NoError(t, r1.Close())
+
+	// Simulate "died before first checkpoint row": keep the data + the
+	// checkpoint table, but remove its row.
+	testutils.RunSQL(t, "DELETE FROM sync_norow_dest._spirit_sync_checkpoint")
+
+	// Re-run: must resume (checkpoint table exists) and re-copy, not fail the
+	// target-empty check on the leftover data.
+	r2, err := NewRunner(newSync())
+	require.NoError(t, err)
+	require.NoError(t, r2.Run(ctx))
+	require.NoError(t, r2.Close())
+
+	tgt, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n)
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t2").Scan(&n))
+	require.Equal(t, 2, n)
+}
+
 // TestSyncForce verifies the Force flag: when a resumable checkpoint exists the
 // target is kept and resumed (no drop); when it can't resume (no checkpoint but
 // a non-empty target) the target database is dropped and recreated so the copy
