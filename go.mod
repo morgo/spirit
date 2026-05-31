@@ -6,7 +6,7 @@ require (
 	github.com/alecthomas/kong v0.7.1
 	github.com/go-ini/ini v1.67.0
 	github.com/go-mysql-org/go-mysql v1.15.1-0.20260526024741-088eb1fbf0ea
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/pingcap/errors v0.11.5-0.20260310054046-9c8b3586e4b2
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260504140133-511dba1dbe17
