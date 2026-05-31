@@ -1,10 +1,29 @@
 package table
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestBoundaryJSONControlChar guards against the watermark-corruption bug: a
+// string PK value containing a control byte (e.g. 0x16) that is valid in a
+// MySQL string literal but not in JSON must be JSON-escaped, so the checkpoint
+// watermark stays parseable and resume works.
+func TestBoundaryJSONControlChar(t *testing.T) {
+	b := &Boundary{
+		Value:     []Datum{{Val: "foo\x16bar", Tp: unknownType}},
+		Inclusive: true,
+	}
+	j := b.JSON()
+	require.True(t, json.Valid([]byte(j)), "boundary JSON must be valid: %q", j)
+
+	// And the value round-trips back through JSON unchanged.
+	var parsed JSONBoundary
+	require.NoError(t, json.Unmarshal([]byte(j), &parsed))
+	require.Equal(t, []string{"foo\x16bar"}, parsed.Value)
+}
 
 func TestChunk2String(t *testing.T) {
 	chunk := &Chunk{

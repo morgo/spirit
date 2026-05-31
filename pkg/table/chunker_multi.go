@@ -244,9 +244,15 @@ func (m *multiChunker) OpenAtWatermark(watermark string) error {
 	// Open each chunker - either at watermark if available, or from scratch if not
 	for tableName, chunker := range m.chunkers {
 		if tableWatermark, hasWatermark := watermarks[tableName]; hasWatermark {
-			// Table has a watermark, resume from checkpoint
+			// Table has a watermark, resume from checkpoint. If the watermark
+			// can't be opened (e.g. an older checkpoint whose value wasn't
+			// JSON-safe), fall back to copying this table from scratch rather
+			// than permanently failing the whole resume — the copy is
+			// idempotent (INSERT IGNORE), so re-copying is safe.
 			if err := chunker.OpenAtWatermark(tableWatermark); err != nil {
-				return fmt.Errorf("could not open chunker for table %q at watermark: %w", tableName, err)
+				if oerr := chunker.Open(); oerr != nil {
+					return fmt.Errorf("could not open chunker for table %q (watermark failed: %w): %w", tableName, err, oerr)
+				}
 			}
 		} else {
 			// Table doesn't have a watermark (wasn't ready when checkpoint was saved)
