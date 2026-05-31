@@ -59,6 +59,15 @@ type Sync struct {
 	// target-empty guard.
 	Force bool `name:"force" help:"Drop and recreate the target database when the copy cannot resume from a checkpoint." default:"false"`
 
+	// DisableContinuousChecksum turns off the post-copy eventually-consistent
+	// checksum. The checker is on by default — it's what produces the
+	// "data is known consistent" signal that programmatic callers (e.g.
+	// the import feature) gate on. Disabling is intended for tests and
+	// for source/target pairs whose schemas the checker cannot read (a
+	// future heterogeneous-applier case). Hidden because operators
+	// normally want it on.
+	DisableContinuousChecksum bool `name:"disable-continuous-checksum" help:"Disable the post-copy continuous checksum (advanced)." default:"false" hidden:""`
+
 	// Source optionally provides a pre-constructed change.Source to use
 	// for replication instead of constructing a built-in MySQL-binlog
 	// client from SourceDSN. When set, the runner uses this as the change

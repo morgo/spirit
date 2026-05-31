@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
@@ -102,6 +103,16 @@ type Runner struct {
 	// that the status.Task accessors (Progress/Status/DumpCheckpoint/Cancel)
 	// read concurrently from a separate monitoring goroutine.
 	progMu sync.RWMutex
+
+	// continuousChecker is constructed in runContinuous (after the initial
+	// copy and post-copy flush) and runs in a sibling goroutine until ctx
+	// cancels. Programmatic callers can read FirstCleanPass / ChecksumStats
+	// through accessors on Runner. nil before runContinuous and when
+	// DisableContinuousChecksum is set.
+	continuousChecker  *checksum.ContinuousChecker
+	continuousChunker  table.Chunker
+	continuousReadyCh  chan struct{} // closed once continuousChecker is assigned
+	continuousCheckerInitOnce sync.Once
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -125,7 +136,11 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.FlushInterval <= 0 {
 		s.FlushInterval = change.DefaultFlushInterval
 	}
-	return &Runner{sync: s, logger: slog.Default()}, nil
+	return &Runner{
+		sync:              s,
+		logger:            slog.Default(),
+		continuousReadyCh: make(chan struct{}),
+	}, nil
 }
 
 // SetLogger overrides the logger (used by programmatic callers to capture
@@ -277,9 +292,12 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // runContinuous creates/maintains the target checkpoint and blocks until
 // the context is cancelled, while the periodic flush (started in
-// startBackgroundRoutines) keeps applying buffered changes. On a clean
-// cancellation it drains the final backlog and returns nil; on a fatal
-// source event it returns that error.
+// startBackgroundRoutines) keeps applying buffered changes. In parallel,
+// the continuous (eventually-consistent) checksum walks the data and
+// surfaces a FirstCleanPass signal for callers that gate on
+// "data is known consistent". On a clean cancellation it drains the final
+// backlog and returns nil; on a fatal source event or a checksum failure
+// it returns that error.
 func (r *Runner) runContinuous(ctx context.Context) error {
 	// status moves off CopyRows so the status goroutine logs the continuous
 	// phase. The checkpoint table and the periodic checkpoint loop were already
@@ -289,7 +307,54 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	r.status.Set(status.ApplyChangeset)
 
 	r.logger.Info("Continuous sync running; will run until cancelled")
-	<-ctx.Done()
+
+	// Spawn the continuous checksum (unless disabled). It uses a separate
+	// chunker so checkpoint state is unaffected. The change feed keeps
+	// applying via the periodic-flush loop already running from
+	// startBackgroundRoutines; the checker is purely an observer of the
+	// resulting source/target convergence.
+	checksumCtx, cancelChecksum := context.WithCancel(ctx)
+	defer cancelChecksum()
+	checksumDone := make(chan struct{})
+	var checksumErr error
+	if !r.sync.DisableContinuousChecksum {
+		go func() {
+			defer close(checksumDone)
+			checksumErr = r.runContinuousChecksum(checksumCtx)
+		}()
+	} else {
+		// Closed channel so the wait below is a no-op when disabled.
+		close(checksumDone)
+	}
+
+	// Wait for either ctx cancellation (the normal shutdown path) or the
+	// checksum exiting on its own (which means it failed — a clean run
+	// never returns until ctx is cancelled).
+	select {
+	case <-ctx.Done():
+		// Normal cancellation. Fall through; we still want the drain logic.
+	case <-checksumDone:
+		// Checksum exited before our parent ctx cancelled. If its return
+		// value is non-nil, that's a real verifier failure that should
+		// fail the sync. The defer above cancels our own derived ctx; we
+		// also need to cancel the parent ctx so the drain doesn't sit
+		// waiting on a healthy change feed.
+		if checksumErr != nil && ctx.Err() == nil {
+			r.logger.Error("continuous checksum failed; stopping sync", "error", checksumErr)
+			// Trigger the drain + shutdown path with a context cancellation.
+			r.progMu.RLock()
+			cancelParent := r.cancelFunc
+			r.progMu.RUnlock()
+			if cancelParent != nil {
+				cancelParent()
+			}
+		}
+	}
+
+	// Make sure the checksum goroutine is fully shut down before we drain
+	// & checkpoint, so its in-flight queries don't fight the final flush.
+	cancelChecksum()
+	<-checksumDone
 
 	if ferr := r.fatal(); ferr != nil {
 		r.logger.Error("Sync stopping due to fatal source event", "error", ferr)
@@ -319,7 +384,120 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
 	r.logger.Info("Sync stopped", "total_time", time.Since(r.startTime).Round(time.Second))
+	// A real checksum failure outranks a clean nil — surface it so the
+	// caller (and exit code) reflect the underlying problem rather than
+	// just "ctx cancelled."
+	if checksumErr != nil && !errors.Is(checksumErr, context.Canceled) {
+		return fmt.Errorf("continuous checksum failed: %w", checksumErr)
+	}
 	return nil
+}
+
+// runContinuousChecksum builds a separate continuous-checksum chunker over
+// the source tables and drives a ContinuousChecker until ctx is cancelled
+// or a permanent failure surfaces. The checker uses READ COMMITTED reads
+// (no table lock, no TrxPool), so it can run against a live system; see
+// pkg/checksum/continuous.go for the convergence model.
+func (r *Runner) runContinuousChecksum(ctx context.Context) error {
+	chunker, err := r.buildContinuousChunker()
+	if err != nil {
+		return fmt.Errorf("build continuous-checksum chunker: %w", err)
+	}
+	if err := chunker.Open(); err != nil {
+		return fmt.Errorf("open continuous-checksum chunker: %w", err)
+	}
+	defer utils.CloseAndLog(chunker)
+
+	checker, err := checksum.NewContinuousChecker(
+		r.source.db, r.target.DB, chunker, r.replClient,
+		checksum.ContinuousCheckerConfig{
+			Concurrency:     r.sync.Threads,
+			TargetChunkTime: r.sync.TargetChunkTime,
+			Logger:          r.logger,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("construct continuous checker: %w", err)
+	}
+
+	// Publish the checker + chunker so accessors (FirstCleanPass,
+	// ChecksumStats) can observe state from other goroutines. Close
+	// continuousReadyCh exactly once, so callers can block on it.
+	r.progMu.Lock()
+	r.continuousChecker = checker
+	r.continuousChunker = chunker
+	r.progMu.Unlock()
+	r.continuousCheckerInitOnce.Do(func() { close(r.continuousReadyCh) })
+
+	runErr := checker.Run(ctx)
+	// A clean ctx-cancel run returns ctx.Err(); upstream filters that.
+	return runErr
+}
+
+// buildContinuousChunker constructs a multi-chunker covering every source
+// table. Unlike the copy chunker, this one isn't wired into the change
+// feed (the checker doesn't need watermark filtering — every event has
+// already been applied by the live replication path before the checker
+// reads each chunk).
+func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
+	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
+	for _, tbl := range r.sourceTables {
+		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
+			TargetChunkTime: r.sync.TargetChunkTime,
+			Logger:          r.logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("new continuous-checksum chunker for %s: %w", tbl.TableName, err)
+		}
+		chunkers = append(chunkers, cc)
+	}
+	return table.NewMultiChunker(chunkers...), nil
+}
+
+// FirstCleanPass returns a channel that is closed the first time the
+// continuous checksum completes a clean pass — i.e. every chunk has gone
+// clean at least once, including via retry. Programmatic callers that
+// gate on "data is known consistent" (e.g. the import feature) should
+// block on this channel. Returns nil if continuous checksum is disabled.
+//
+// Safe to call before Run; the channel returned will fire once the
+// checker has been constructed inside runContinuousChecksum AND its
+// first pass completes. Callers can use ChecksumReady to block until the
+// checker exists.
+func (r *Runner) FirstCleanPass() <-chan struct{} {
+	if r.sync.DisableContinuousChecksum {
+		return nil
+	}
+	// Wait for the checker to exist before we can return its signal.
+	<-r.continuousReadyCh
+	r.progMu.RLock()
+	defer r.progMu.RUnlock()
+	if r.continuousChecker == nil {
+		return nil
+	}
+	return r.continuousChecker.FirstCleanPass()
+}
+
+// ChecksumReady returns a channel that is closed once the continuous
+// checker has been constructed (i.e. the initial copy + post-copy flush
+// have completed and runContinuousChecksum has started). Useful for
+// callers that want to poll ChecksumStats without racing against the
+// checker not yet existing.
+func (r *Runner) ChecksumReady() <-chan struct{} {
+	return r.continuousReadyCh
+}
+
+// ChecksumStats returns a point-in-time snapshot of continuous-checksum
+// counters. Returns the zero value when the checker has not yet been
+// constructed (initial copy still running) or when continuous checksum
+// is disabled.
+func (r *Runner) ChecksumStats() checksum.ContinuousCheckerStats {
+	r.progMu.RLock()
+	defer r.progMu.RUnlock()
+	if r.continuousChecker == nil {
+		return checksum.ContinuousCheckerStats{}
+	}
+	return r.continuousChecker.Stats()
 }
 
 // setup discovers the source tables, builds the applier and change
