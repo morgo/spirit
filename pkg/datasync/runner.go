@@ -274,7 +274,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// — and finishes immediately if the copy had already completed. The applier
 	// copies with INSERT IGNORE, so re-copying the chunks straddling the
 	// watermark is idempotent.
-	if !r.resuming {
+	if !r.sync.CopyOnly && !r.resuming {
 		// Watermark optimization ON during a fresh continuous copy: change
 		// events for keys the copier has not reached yet (above the watermark)
 		// are discarded, because the copier will copy those rows directly.
@@ -300,15 +300,29 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.copier.Run(ctx); err != nil {
 		return fmt.Errorf("copy failed: %w", err)
 	}
-	if !r.resuming {
-		if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
-			return err
+	if !r.sync.CopyOnly {
+		if !r.resuming {
+			if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+				return err
+			}
+		}
+		// Drain the copy-phase backlog so every change observed so far is
+		// applied before steady-state streaming.
+		if err := r.replClient.Flush(ctx); err != nil {
+			return fmt.Errorf("failed to flush after copy: %w", err)
 		}
 	}
-	// Drain the copy-phase backlog so every change observed so far is
-	// applied before steady-state streaming.
-	if err := r.replClient.Flush(ctx); err != nil {
-		return fmt.Errorf("failed to flush after copy: %w", err)
+
+	// Copy-only ends here: the snapshot is on the target and there is no change
+	// capture to continue. A final checkpoint records the copier's completed
+	// watermark so a re-run resumes to a no-op instead of re-copying.
+	if r.sync.CopyOnly {
+		if err := r.dumpCheckpoint(ctx); err != nil {
+			r.logger.Warn("final checkpoint write failed", "error", err)
+		}
+		r.logger.Info("Copy-only sync complete: data copied to target; replication disabled, exiting",
+			"total_time", time.Since(r.startTime).Round(time.Second))
+		return nil
 	}
 
 	r.logger.Info("Copy complete; entering continuous sync")
@@ -575,22 +589,25 @@ func (r *Runner) setup(ctx context.Context) error {
 		return err
 	}
 
-	// Wire the change source: injected (e.g. VStream), or a built-in MySQL
-	// binlog client constructed from the source DSN. Sync replicates a whole
-	// schema, so the DDL filter is by schema only.
-	if r.sync.Source != nil {
-		r.setReplClient(r.sync.Source)
-	} else {
-		replConfig := change.NewClientDefaultConfig()
-		replConfig.Logger = r.logger
-		replConfig.CancelFunc = r.fatalError
-		replConfig.DDLFilterSchema = r.source.config.DBName
-		replConfig.DBConfig = r.sourceDBConfig
-		if r.sync.GTID {
-			r.logger.Info("EXPERIMENTAL: using GTID-based change source")
-			r.setReplClient(change.NewGTIDClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+	// Wire the change source (continuous mode only): injected (e.g. VStream),
+	// or a built-in MySQL binlog client constructed from the source DSN. Sync
+	// replicates a whole schema, so the DDL filter is by schema only. Copy-only
+	// sync constructs no change source.
+	if !r.sync.CopyOnly {
+		if r.sync.Source != nil {
+			r.setReplClient(r.sync.Source)
 		} else {
-			r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+			replConfig := change.NewClientDefaultConfig()
+			replConfig.Logger = r.logger
+			replConfig.CancelFunc = r.fatalError
+			replConfig.DDLFilterSchema = r.source.config.DBName
+			replConfig.DBConfig = r.sourceDBConfig
+			if r.sync.GTID {
+				r.logger.Info("EXPERIMENTAL: using GTID-based change source")
+				r.setReplClient(change.NewGTIDClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+			} else {
+				r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+			}
 		}
 	}
 
@@ -847,8 +864,10 @@ func (r *Runner) buildChunkers() ([]table.Chunker, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := r.replClient.AddSubscription(tbl, nil, cc); err != nil {
-			return nil, err
+		if !r.sync.CopyOnly {
+			if err := r.replClient.AddSubscription(tbl, nil, cc); err != nil {
+				return nil, err
+			}
 		}
 		chunkers = append(chunkers, cc)
 	}
@@ -896,8 +915,11 @@ func (r *Runner) startFresh(ctx context.Context) error {
 	if err := r.copyChunker.Open(); err != nil {
 		return err
 	}
-	if err := r.replClient.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start change source: %w", err)
+	// Copy-only sync has no change feed to start.
+	if !r.sync.CopyOnly {
+		if err := r.replClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start change source: %w", err)
+		}
 	}
 	return r.createCheckpointTable(ctx)
 }
@@ -929,17 +951,19 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 			return err
 		}
 	}
-	if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
-		return err
-	}
-	if pos != "" {
-		if err := r.replClient.StartFromPosition(ctx, pos); err != nil {
-			return fmt.Errorf("failed to resume change source from position %q: %w", pos, err)
+	if !r.sync.CopyOnly {
+		if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
+			return err
 		}
-	} else if err := r.replClient.Start(ctx); err != nil {
-		// No saved position (prior attempt failed before checkpointing):
-		// start the feed fresh; changes apply with the optimization off.
-		return fmt.Errorf("failed to start change source: %w", err)
+		if pos != "" {
+			if err := r.replClient.StartFromPosition(ctx, pos); err != nil {
+				return fmt.Errorf("failed to resume change source from position %q: %w", pos, err)
+			}
+		} else if err := r.replClient.Start(ctx); err != nil {
+			// No saved position (prior attempt failed before checkpointing):
+			// start the feed fresh; changes apply with the optimization off.
+			return fmt.Errorf("failed to start change source: %w", err)
+		}
 	}
 	return r.createCheckpointTable(ctx)
 }
@@ -1048,7 +1072,10 @@ func (r *Runner) dumpCheckpointLoop(ctx context.Context, done chan struct{}) {
 // periodic checkpoint loop. The checkpoint loop runs for the whole run (copy
 // and continuous), so a restart at any point resumes from the last checkpoint.
 func (r *Runner) startBackgroundRoutines(ctx context.Context) {
-	r.replClient.StartPeriodicFlush(ctx, r.sync.FlushInterval)
+	// Copy-only sync has no change feed, so no periodic flush.
+	if !r.sync.CopyOnly {
+		r.replClient.StartPeriodicFlush(ctx, r.sync.FlushInterval)
+	}
 	r.watchDone = make(chan struct{})
 	go r.watchStatus(ctx)
 	r.checkpointDone = make(chan struct{})
