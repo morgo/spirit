@@ -15,6 +15,7 @@ This will copy all tables from the source database to the target database, verif
 
 - [create-sentinel](#create-sentinel)
 - [defer-secondary-indexes](#defer-secondary-indexes)
+- [gtid](#gtid)
 - [source-dsn](#source-dsn)
 - [target-chunk-time](#target-chunk-time)
 - [target-dsn](#target-dsn)
@@ -51,6 +52,37 @@ Each continuous-checksum pass runs once with no internal retry (the loop itself 
 - Default value: `false`
 
 When set to `true`, target tables are created without secondary indexes. The indexes are restored from the source schema just before cutover. This can significantly speed up the initial data load for tables with many secondary indexes.
+
+### gtid
+
+- Type: Boolean
+- Default value: `false`
+
+> **⚠️ Experimental.** See the full caveats and on-disk-format warning in the
+> [migrate `--gtid` documentation](migrate.md#gtid).
+
+When set to `true`, Move switches each source's replication change feed from
+the default binlog **file + offset** coordinate to a MySQL **GTID set**
+coordinate. Behaviour is identical to [`spirit migrate --gtid`](migrate.md#gtid)
+in every other respect — the copier, applier, checksum, sentinel wait, cutover,
+and checkpoint contract are unchanged.
+
+For N:M moves (multiple `SourceDSNs`) the flag is applied uniformly to **every**
+source — Move does not support mixing GTID and file+offset across sources in a
+single run. Each source's checkpointed coordinate is stored independently in the
+checkpoint table's `binlog_positions` JSON, keyed by source address+database, so
+a partial failure on one source still resumes the others from their own GTID sets.
+
+**Requirements (on every source):**
+
+- `gtid_mode = ON`
+- `enforce_gtid_consistency = ON`
+
+```bash
+spirit move --gtid \
+            --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
+            --target-dsn "user:pass@tcp(target-host:3306)/mydb"
+```
 
 ### source-dsn
 

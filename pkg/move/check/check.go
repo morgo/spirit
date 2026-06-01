@@ -37,6 +37,10 @@ type Resources struct {
 	Targets        []applier.Target
 	SourceTables   []*table.TableInfo
 	CreateSentinel bool
+	// GTID, when true, opts the move into the experimental GTID-based change
+	// source. The configuration check uses this to additionally validate
+	// gtid_mode and enforce_gtid_consistency on every source.
+	GTID bool
 }
 
 type check struct {

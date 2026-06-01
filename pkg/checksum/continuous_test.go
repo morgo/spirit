@@ -549,10 +549,7 @@ func TestMultiplePassesResetCounters(t *testing.T) {
 
 	// Wait for at least 2 passes
 	deadline := time.After(3 * time.Second)
-	for {
-		if c.Stats().PassesCompleted >= 2 {
-			break
-		}
+	for c.Stats().PassesCompleted < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("did not reach 2 passes in time; stats=%+v", c.Stats())

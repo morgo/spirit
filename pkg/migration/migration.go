@@ -55,6 +55,11 @@ type Migration struct {
 	// using INSERT IGNORE .. SELECT. This is also required for cross-server moves.
 	Buffered bool `name:"buffered" help:"Use the buffered copier based on the lock-free DBLog algorithm" optional:"" default:"false"`
 
+	// GTID switches the change source from binlog file+position to MySQL GTIDs.
+	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and
+	// enforce_gtid_consistency=ON on the source.
+	GTID bool `name:"gtid" help:"EXPERIMENTAL: use GTID-based change source instead of binlog file+position" optional:"" default:"false"`
+
 	CheckpointMaxAge     time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 	ChecksumYieldTimeout time.Duration `name:"checksum-yield-timeout" help:"Maximum duration for a single checksum pass before yielding to release long-running REPEATABLE READ transactions (reduces InnoDB HLL growth)" optional:"" default:"24h"`
 

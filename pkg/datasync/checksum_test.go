@@ -3,7 +3,6 @@ package datasync
 import (
 	"context"
 	"database/sql"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,7 +103,7 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(seedSrc)
 	for i := 1; i <= 500; i++ {
-		_, err := seedSrc.Exec(`INSERT INTO sync_checksum_busy_src.t1 VALUES (?, CONCAT('v', ?), 0)`, i, i)
+		_, err := seedSrc.ExecContext(t.Context(), `INSERT INTO sync_checksum_busy_src.t1 VALUES (?, CONCAT('v', ?), 0)`, i, i)
 		require.NoError(t, err)
 	}
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_busy_dest`)
@@ -139,21 +138,21 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(srcDB)
 
+	// Writer cancellation is via writerCtx; ticker drives the rate.
+	writerCtx, stopWriter := context.WithCancel(context.Background())
 	writerDone := make(chan struct{})
-	var writerStops atomic.Bool
 	go func() {
 		defer close(writerDone)
 		tick := time.NewTicker(50 * time.Millisecond)
 		defer tick.Stop()
 		i := 0
 		for {
-			if writerStops.Load() {
-				return
-			}
 			select {
+			case <-writerCtx.Done():
+				return
 			case <-tick.C:
 				id := (i % 500) + 1
-				_, _ = srcDB.Exec(`UPDATE sync_checksum_busy_src.t1 SET counter = counter + 1 WHERE id = ?`, id)
+				_, _ = srcDB.ExecContext(writerCtx, `UPDATE sync_checksum_busy_src.t1 SET counter = counter + 1 WHERE id = ?`, id)
 				i++
 			}
 		}
@@ -165,7 +164,7 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	case <-runner.FirstCleanPass():
 		t.Logf("FirstCleanPass fired; stats=%+v", runner.ChecksumStats())
 	case <-time.After(120 * time.Second):
-		writerStops.Store(true)
+		stopWriter()
 		<-writerDone
 		cancel()
 		t.Fatalf("FirstCleanPass did not fire within 120s under load; stats=%+v", runner.ChecksumStats())
@@ -178,7 +177,7 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	// recovered without surfacing permanent failures.
 	require.Equal(t, uint64(0), stats.PermanentFailures, "should not see permanent failures with normal replication")
 
-	writerStops.Store(true)
+	stopWriter()
 	<-writerDone
 	cancel()
 	select {
