@@ -109,10 +109,24 @@ type Runner struct {
 	// cancels. Programmatic callers can read FirstCleanPass / ChecksumStats
 	// through accessors on Runner. nil before runContinuous and when
 	// DisableContinuousChecksum is set.
+	//
+	// continuousReadyCh closes once we know the readiness state is final:
+	// either the checker has been constructed (enabled path) OR we know it
+	// never will be (disabled path, pre-closed in NewRunner). Callers can
+	// safely wait on ChecksumReady() in both cases.
+	//
+	// firstCleanPassCh is the Runner-owned signal forwarded from the
+	// checker's own FirstCleanPass channel. Owning a separate channel
+	// keeps the FirstCleanPass accessor non-blocking — callers can grab it
+	// before Run starts and select on it without deadlocking. It stays
+	// open forever when continuous checksum is disabled or the run exits
+	// without observing a clean pass.
 	continuousChecker         *checksum.ContinuousChecker
 	continuousChunker         table.Chunker
-	continuousReadyCh         chan struct{} // closed once continuousChecker is assigned
+	continuousReadyCh         chan struct{}
+	firstCleanPassCh          chan struct{}
 	continuousCheckerInitOnce sync.Once
+	firstCleanPassInitOnce    sync.Once
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -136,11 +150,22 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.FlushInterval <= 0 {
 		s.FlushInterval = change.DefaultFlushInterval
 	}
-	return &Runner{
+	r := &Runner{
 		sync:              s,
 		logger:            slog.Default(),
 		continuousReadyCh: make(chan struct{}),
-	}, nil
+		firstCleanPassCh:  make(chan struct{}),
+	}
+	// When continuous checksum is disabled, the checker will never be
+	// constructed — pre-close the ready signal so ChecksumReady() doesn't
+	// block forever. firstCleanPassCh stays open: with no checker there's
+	// no "data is known consistent" signal to fire, and callers should
+	// inspect Sync.DisableContinuousChecksum (or get nil from
+	// FirstCleanPass()) to disambiguate.
+	if s.DisableContinuousChecksum {
+		close(r.continuousReadyCh)
+	}
+	return r, nil
 }
 
 // SetLogger overrides the logger (used by programmatic callers to capture
@@ -439,6 +464,20 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	r.progMu.Unlock()
 	r.continuousCheckerInitOnce.Do(func() { close(r.continuousReadyCh) })
 
+	// Forward the checker's first-clean-pass signal to the Runner-owned
+	// channel that the FirstCleanPass accessor returns. This decouples
+	// the accessor (which must be non-blocking and safe to call before
+	// Run) from the checker's lifecycle.
+	go func() {
+		select {
+		case <-checker.FirstCleanPass():
+			r.firstCleanPassInitOnce.Do(func() { close(r.firstCleanPassCh) })
+		case <-ctx.Done():
+			// Run exited before a clean pass was observed. Leave the
+			// channel open — callers should see Run's return error.
+		}
+	}()
+
 	runErr := checker.Run(ctx)
 	// A clean ctx-cancel run returns ctx.Err(); upstream filters that.
 	return runErr
@@ -468,31 +507,30 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 // continuous checksum completes a clean pass — i.e. every chunk has gone
 // clean at least once, including via retry. Programmatic callers that
 // gate on "data is known consistent" (e.g. the import feature) should
-// block on this channel. Returns nil if continuous checksum is disabled.
+// block on this channel.
 //
-// Safe to call before Run; the channel returned will fire once the
-// checker has been constructed inside runContinuousChecksum AND its
-// first pass completes. Callers can use ChecksumReady to block until the
-// checker exists.
+// The accessor is non-blocking: it returns immediately with a channel
+// the caller can wait on. The Runner-owned channel is closed by an
+// internal goroutine once the checker fires its own FirstCleanPass —
+// so it's safe to call before Run, after Run, or from a watchdog.
+//
+// Returns nil when continuous checksum is disabled. The signal never
+// fires in that case (there's no checker), so callers gating on
+// consistency should inspect Sync.DisableContinuousChecksum or check
+// for nil before selecting.
 func (r *Runner) FirstCleanPass() <-chan struct{} {
 	if r.sync.DisableContinuousChecksum {
 		return nil
 	}
-	// Wait for the checker to exist before we can return its signal.
-	<-r.continuousReadyCh
-	r.progMu.RLock()
-	defer r.progMu.RUnlock()
-	if r.continuousChecker == nil {
-		return nil
-	}
-	return r.continuousChecker.FirstCleanPass()
+	return r.firstCleanPassCh
 }
 
 // ChecksumReady returns a channel that is closed once the continuous
-// checker has been constructed (i.e. the initial copy + post-copy flush
-// have completed and runContinuousChecksum has started). Useful for
-// callers that want to poll ChecksumStats without racing against the
-// checker not yet existing.
+// checker's readiness state is final. In the enabled path that means the
+// checker has been constructed (the initial copy + post-copy flush have
+// completed and runContinuousChecksum has started). In the disabled
+// path the channel is pre-closed in NewRunner — so callers waiting on
+// it don't deadlock.
 func (r *Runner) ChecksumReady() <-chan struct{} {
 	return r.continuousReadyCh
 }

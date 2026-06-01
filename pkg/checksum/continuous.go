@@ -11,10 +11,8 @@
 //
 // A "pass" walks every chunk once, then drains a delayed-retry queue to
 // empty. The pass completes (cleanly) only when every chunk has gone clean
-// at least once — either on its initial read, or on a retry. Chunks that
-// fail twice in a row with the source unchanged are real divergence and
-// surface as an error from Run (the recopier is future work, tracked by the
-// caller).
+// at least once — either on its initial read, or on a retry, or via a
+// recopy when stable divergence is detected.
 //
 // First-attempt failures are common — the target legitimately lags the
 // source — so failures are not noisy events. They go through a retry queue:
@@ -29,8 +27,11 @@
 //       changing during the retry window. Replace originalSrcCRC with
 //       newSrcCRC, increment consecutiveSrcChanged, re-enqueue at the tail
 //       with a fresh not-before of now+RetryDelay.
-//     - Else (newSrcCRC == originalSrcCRC, target still wrong) → real
-//       divergence. Run returns an error.
+//     - Else (newSrcCRC == originalSrcCRC, target still wrong) → stable
+//       divergence. With a Recopier configured (production case), invoke
+//       it to overwrite the chunk on the target from the source; on
+//       success the chunk counts as passed (in the per-pass "recopies"
+//       bucket). Without a Recopier the run returns ErrPermanentDivergence.
 //
 // Hot chunks slow but do not block pass completion: they cycle to the back
 // of the FIFO while other entries resolve. A genuinely permanently-hot row
@@ -231,14 +232,14 @@ type ContinuousChecker struct {
 	// Per-pass histogram of how many attempts each chunk needed before
 	// it went clean. Buckets are non-overlapping. "attempts" counts every
 	// read of the chunk (the initial fresh-walk read + each retry read).
-	// recopiesThisPass is the catch-all for chunks that needed 10+
-	// attempts to converge; once the recopier lands it will instead
-	// count actual recopy operations triggered after a retry threshold.
+	// recopiesThisPass is the count of chunks rewritten by the configured
+	// Recopier (the stable-divergence self-heal path); rare 10+ attempt
+	// retry outliers fold into passedUnder10AttemptsThisPass.
 	passedFirstAttemptThisPass    atomic.Uint64 // 1 attempt
 	passedSecondAttemptThisPass   atomic.Uint64 // 2 attempts
 	passedUnder5AttemptsThisPass  atomic.Uint64 // 3-4 attempts
-	passedUnder10AttemptsThisPass atomic.Uint64 // 5-9 attempts
-	recopiesThisPass              atomic.Uint64 // 10+ attempts (future: actual recopies)
+	passedUnder10AttemptsThisPass atomic.Uint64 // 5+ attempts via retry
+	recopiesThisPass              atomic.Uint64 // chunks rewritten by Recopier
 
 	permanentFailures atomic.Uint64
 	retryQueueDepth   atomic.Int64

@@ -139,6 +139,9 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	defer utils.CloseAndLog(srcDB)
 
 	// Writer cancellation is via writerCtx; ticker drives the rate.
+	// Errors are surfaced via t.Logf — silently swallowing them would
+	// hide connection drops or syntax issues that should be diagnosable.
+	// Cancellation-induced errors are filtered (expected on shutdown).
 	writerCtx, stopWriter := context.WithCancel(context.Background())
 	writerDone := make(chan struct{})
 	go func() {
@@ -152,14 +155,17 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 				return
 			case <-tick.C:
 				id := (i % 500) + 1
-				_, _ = srcDB.ExecContext(writerCtx, `UPDATE sync_checksum_busy_src.t1 SET counter = counter + 1 WHERE id = ?`, id)
+				if _, err := srcDB.ExecContext(writerCtx, `UPDATE sync_checksum_busy_src.t1 SET counter = counter + 1 WHERE id = ?`, id); err != nil && writerCtx.Err() == nil {
+					t.Logf("background writer UPDATE failed: %v", err)
+				}
 				i++
 			}
 		}
 	}()
 
 	// First clean pass must still fire — give it a generous window to
-	// account for retries that need the 20s default delay.
+	// account for the per-chunk retry delay (default 1m, see
+	// checksum.DefaultContinuousRetryDelay).
 	select {
 	case <-runner.FirstCleanPass():
 		t.Logf("FirstCleanPass fired; stats=%+v", runner.ChecksumStats())
