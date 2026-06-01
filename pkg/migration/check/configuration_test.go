@@ -7,6 +7,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,10 +24,32 @@ import (
 func TestConfiguration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	r := Resources{
 		DB:    db,
 		Table: &table.TableInfo{TableName: "test", SchemaName: "test"},
+	}
+
+	err = configurationCheck(t.Context(), r, slog.Default())
+	require.NoError(t, err)
+}
+
+// TestConfigurationGTID exercises the GTID branch on the happy path. The
+// test MySQL container is configured with gtid_mode=ON and
+// enforce_gtid_consistency=ON; if either is OFF the check should surface a
+// clear error rather than falling through to a stream-level failure.
+// Negative branches are deliberately not toggled here for the same
+// SET-GLOBAL-races reason described on TestConfiguration.
+func TestConfigurationGTID(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	r := Resources{
+		DB:    db,
+		Table: &table.TableInfo{TableName: "test", SchemaName: "test"},
+		GTID:  true,
 	}
 
 	err = configurationCheck(t.Context(), r, slog.Default())

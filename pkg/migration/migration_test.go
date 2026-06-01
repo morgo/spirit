@@ -996,3 +996,16 @@ func TestSplitReplicaDSNs(t *testing.T) {
 		})
 	}
 }
+
+// TestE2EGTIDChangeSource exercises the experimental --gtid path end-to-end.
+// Same shape as TestE2ENullAlterEmpty but with the GTID change source wired in.
+func TestE2EGTIDChangeSource(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "t1e2egtid", `CREATE TABLE t1e2egtid (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	m := NewTestMigration(t, WithTable("t1e2egtid"), WithAlter("ENGINE=InnoDB"), WithGTID(true))
+	require.NoError(t, m.Run())
+}

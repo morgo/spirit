@@ -360,7 +360,12 @@ func (r *Runner) setup(ctx context.Context) error {
 		replConfig.CancelFunc = r.fatalError
 		replConfig.DDLFilterSchema = r.source.config.DBName
 		replConfig.DBConfig = r.sourceDBConfig
-		r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+		if r.sync.GTID {
+			r.logger.Info("EXPERIMENTAL: using GTID-based change source")
+			r.setReplClient(change.NewGTIDClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+		} else {
+			r.setReplClient(change.NewBinlogClient(r.source.db, r.source.config.Addr, r.source.config.User, r.source.config.Passwd, r.applier, replConfig))
+		}
 	}
 
 	// If a checkpoint exists on the target, resume: open the copier chunker at

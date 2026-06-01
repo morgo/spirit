@@ -411,6 +411,9 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// Create one repl client per source, all sharing the same applier.
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
+	if r.move.GTID {
+		r.logger.Info("EXPERIMENTAL: using GTID-based change source")
+	}
 	for i := range r.sources {
 		src := &r.sources[i]
 		replConfig := change.NewClientDefaultConfig()
@@ -419,7 +422,11 @@ func (r *Runner) setup(ctx context.Context) error {
 		replConfig.DDLFilterSchema = src.config.DBName
 		replConfig.DDLFilterTables = r.move.SourceTables
 		replConfig.DBConfig = r.dbConfig
-		src.replClient = change.NewBinlogClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		if r.move.GTID {
+			src.replClient = change.NewGTIDClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		} else {
+			src.replClient = change.NewBinlogClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		}
 	}
 
 	// Run post-setup checks
@@ -851,6 +858,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		Targets:        r.targets,
 		SourceTables:   r.sourceTables,
 		CreateSentinel: r.move.CreateSentinel,
+		GTID:           r.move.GTID,
 	}, r.logger, scope)
 }
 
