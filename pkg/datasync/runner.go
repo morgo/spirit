@@ -408,11 +408,21 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	}
 	defer utils.CloseAndLog(chunker)
 
+	// Construct the recopier — invoked by the checker when retry detects
+	// stable target divergence. Without one configured, the checker would
+	// instead return ErrPermanentDivergence and abort the sync. The
+	// applier and target DB are already running from the copy phase.
+	recopier, err := checksum.NewMySQLRecopier(r.source.db, r.target.DB, r.applier, r.targetDBConfig, r.logger)
+	if err != nil {
+		return fmt.Errorf("construct continuous-checksum recopier: %w", err)
+	}
+
 	checker, err := checksum.NewContinuousChecker(
 		r.source.db, r.target.DB, chunker, r.replClient,
 		checksum.ContinuousCheckerConfig{
 			Concurrency:     r.sync.Threads,
 			TargetChunkTime: r.sync.TargetChunkTime,
+			Recopier:        recopier,
 			Logger:          r.logger,
 		},
 	)

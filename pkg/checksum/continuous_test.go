@@ -388,6 +388,153 @@ func TestReadError(t *testing.T) {
 	require.True(t, errors.Is(err, readErr), "expected wrapped read error, got %v", err)
 }
 
+// ---------------------------------------------------------------------------
+// Recopier tests
+// ---------------------------------------------------------------------------
+
+// fakeRecopier is a Recopier used by tests. recopyFn is what fires when
+// the checker decides to recopy; calls increments per invocation so tests
+// can assert "the recopier was called N times".
+type fakeRecopier struct {
+	mu       sync.Mutex
+	calls    int
+	chunks   []*table.Chunk
+	recopyFn func(ctx context.Context, chunk *table.Chunk) error
+}
+
+func (r *fakeRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
+	r.mu.Lock()
+	r.calls++
+	r.chunks = append(r.chunks, chunk)
+	fn := r.recopyFn
+	r.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, chunk)
+	}
+	return nil
+}
+
+func (r *fakeRecopier) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+// TestRecopyOnStableDivergence: a chunk mismatches twice with the source
+// CRC unchanged. With a Recopier configured, the checker calls Recopy
+// instead of returning ErrPermanentDivergence; the pass completes cleanly
+// and the chunk is counted in the recopies bucket.
+func TestRecopyOnStableDivergence(t *testing.T) {
+	chunker := newTestChunker(2)
+	// The fake recopier "fixes" the chunk so subsequent reads pass. We
+	// gate behavior on whether the chunk has been recopied: after recopy,
+	// the readChunk hook returns (42, 42); before recopy it returns (100, 99).
+	var recopied sync.Map // chunk pointer → recopied? (bool)
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			recopied.Store(chunk, true)
+			return nil
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			if _, ok := recopied.Load(chunk); ok {
+				return 42, 42, 1000, nil // post-recopy reads match
+			}
+			return 100, 99, 1000, nil // pre-recopy mismatch (stable: src always 100)
+		},
+	)
+
+	stop, _ := runUntil(t, c)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire; stats=%+v calls=%d", c.Stats(), recopier.callCount())
+	}
+	stats := c.Stats()
+	require.Equal(t, uint64(0), stats.PermanentFailures, "with a Recopier, no permanent failures")
+	require.GreaterOrEqual(t, recopier.callCount(), 2, "both chunks should have been recopied")
+
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestRecopyFailurePropagates: when the Recopier returns an error, the
+// checker propagates it out of Run rather than retrying or silently
+// continuing.
+func TestRecopyFailurePropagates(t *testing.T) {
+	chunker := newTestChunker(1)
+	recopyErr := errors.New("simulated recopy failure")
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			return recopyErr
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			return 100, 99, 1000, nil // stable mismatch
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := c.Run(ctx)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, recopyErr), "expected wrapped recopy error, got %v", err)
+	// PermanentFailures must NOT be bumped — the recopy attempt is the
+	// alternative to permanent failure, not an additional outcome.
+	require.Equal(t, uint64(0), c.Stats().PermanentFailures)
+}
+
+// TestRecopyNotCalledForHotChunk: a hot chunk (source CRC keeps changing
+// across retries) must NOT trigger recopy. Recopy only fires when the
+// source CRC is stable across the retry window.
+func TestRecopyNotCalledForHotChunk(t *testing.T) {
+	chunker := newTestChunker(1)
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			return nil
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	// Source CRC keeps changing on each read; target lags. Eventually
+	// (on attempt 4) the target catches up and the chunk passes via the
+	// retry path — never a recopy.
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			switch attempt {
+			case 1:
+				return 100, 99, 1000, nil
+			case 2:
+				return 200, 99, 1000, nil // src changed, tgt unchanged → hot
+			case 3:
+				return 300, 200, 1000, nil // src changed, tgt matches *previous* src
+				// On the dispatcher side this is: tgt(200) != originalSrc(200)? wait
+				// originalSrc was updated to 200 last time. tgt==originalSrc → pass.
+			default:
+				return 300, 300, 1000, nil
+			}
+		},
+	)
+	stop, _ := runUntil(t, c)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire; stats=%+v calls=%d", c.Stats(), recopier.callCount())
+	}
+	require.Equal(t, 0, recopier.callCount(), "hot chunks must not trigger recopy")
+	require.Equal(t, uint64(0), c.Stats().PermanentFailures)
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
 // TestMultiplePassesResetCounters: after a clean pass, counters reset for
 // the next pass (ChunksThisPass, ChunksPassedThisPass) while lifetime
 // counters (PassesCompleted) accumulate.

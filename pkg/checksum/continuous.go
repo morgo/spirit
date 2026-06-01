@@ -74,11 +74,28 @@ import (
 )
 
 // ErrPermanentDivergence is returned by Run when a chunk fails twice in a
-// row with the source CRC unchanged — i.e. the target has data the source
-// does not, and the source is not racing. A future recopier will turn this
-// into a self-heal; for now Run propagates it so callers (and tests) can
-// see the failure mode explicitly.
+// row with the source CRC unchanged AND no Recopier is configured — i.e.
+// the target has data the source does not, the source is not racing, and
+// the checker has no way to self-heal. With a Recopier configured this
+// error is never returned: stable divergence triggers a Recopy and the
+// chunk is counted in the per-pass "recopies" bucket.
+//
+// This can technically false-positive if replication lag exceeds the
+// retry delay — there may be changes that are still pending but we've not
+// observed them yet. The retry delay defaults to 1 minute for that reason.
 var ErrPermanentDivergence = errors.New("checksum: permanent divergence detected")
+
+// Recopier knows how to overwrite a single chunk's worth of data on the
+// target from the source. It is invoked when the continuous checker's
+// retry path detects stable target divergence — i.e. the source CRC is
+// unchanged across a retry window but the target CRC is still wrong.
+//
+// Recopy must be safe to call concurrently from multiple worker
+// goroutines; implementations are expected to serialize internally where
+// needed (see MySQLRecopier for the production implementation).
+type Recopier interface {
+	Recopy(ctx context.Context, chunk *table.Chunk) error
+}
 
 // ErrRetryQueueFull is returned by Run when the delayed-retry queue
 // exceeds MaxQueueSize. This is the back-pressure signal for "source churn
@@ -89,7 +106,7 @@ var ErrRetryQueueFull = errors.New("checksum: retry queue full")
 // fields. Exported so callers can reference them when tuning.
 const (
 	DefaultContinuousConcurrency     = 4
-	DefaultContinuousRetryDelay      = 20 * time.Second
+	DefaultContinuousRetryDelay      = time.Minute
 	DefaultContinuousMaxQueueSize    = 1024
 	DefaultContinuousTargetChunkTime = 1 * time.Second
 )
@@ -102,7 +119,8 @@ type ContinuousCheckerConfig struct {
 
 	// RetryDelay is the minimum wait between attempts for any given chunk —
 	// measured from the *last* attempt of that chunk, not from the original
-	// failure. Default 20s.
+	// failure. Default 1m, because changes are queued in the replication
+	// applier for 30s by default.
 	RetryDelay time.Duration
 
 	// MaxQueueSize is the cap on entries in the delayed-retry queue. When
@@ -113,6 +131,14 @@ type ContinuousCheckerConfig struct {
 	// TargetChunkTime, if set, is passed through to chunker feedback so the
 	// walker tunes chunk size to roughly this duration. Default 1s.
 	TargetChunkTime time.Duration
+
+	// Recopier is invoked when the retry path detects stable target
+	// divergence (src CRC unchanged across a retry window, target still
+	// wrong). When nil, that condition surfaces as ErrPermanentDivergence
+	// from Run — useful for tests and for callers that prefer to halt
+	// rather than self-heal. Production sync callers should provide
+	// MySQLRecopier.
+	Recopier Recopier
 
 	Logger *slog.Logger
 }
@@ -151,10 +177,12 @@ type ContinuousCheckerStats struct {
 	PassedSecondAttemptThisPass   uint64 // 2 attempts (1 retry)
 	PassedUnder5AttemptsThisPass  uint64 // 3-4 attempts
 	PassedUnder10AttemptsThisPass uint64 // 5-9 attempts
-	// RecopiesThisPass is currently the catch-all for chunks that
-	// converged after 10+ attempts. Once the recopier lands it will
-	// instead count chunks escalated to a recopy operation past a
-	// configured retry threshold.
+	// RecopiesThisPass is the count of chunks that were recopied this
+	// pass — i.e. retry detected stable target divergence (source CRC
+	// unchanged across the retry window, target still wrong) and the
+	// configured Recopier rewrote the chunk from source. Zero when no
+	// Recopier is configured (those failures surface as
+	// ErrPermanentDivergence and abort the run instead).
 	RecopiesThisPass uint64
 
 	// RetryQueueDepth is the current size of the delayed-retry queue.
@@ -206,11 +234,11 @@ type ContinuousChecker struct {
 	// recopiesThisPass is the catch-all for chunks that needed 10+
 	// attempts to converge; once the recopier lands it will instead
 	// count actual recopy operations triggered after a retry threshold.
-	passedFirstAttemptThisPass     atomic.Uint64 // 1 attempt
-	passedSecondAttemptThisPass    atomic.Uint64 // 2 attempts
-	passedUnder5AttemptsThisPass   atomic.Uint64 // 3-4 attempts
-	passedUnder10AttemptsThisPass  atomic.Uint64 // 5-9 attempts
-	recopiesThisPass               atomic.Uint64 // 10+ attempts (future: actual recopies)
+	passedFirstAttemptThisPass    atomic.Uint64 // 1 attempt
+	passedSecondAttemptThisPass   atomic.Uint64 // 2 attempts
+	passedUnder5AttemptsThisPass  atomic.Uint64 // 3-4 attempts
+	passedUnder10AttemptsThisPass atomic.Uint64 // 5-9 attempts
+	recopiesThisPass              atomic.Uint64 // 10+ attempts (future: actual recopies)
 
 	permanentFailures atomic.Uint64
 	retryQueueDepth   atomic.Int64
@@ -273,8 +301,14 @@ type workResult struct {
 	item *workItem
 
 	// passed is true iff the chunk satisfied the pass criterion (initial
-	// match, or retry match against original or new source CRC).
+	// match, retry match against original or new source CRC, or a
+	// successful recopy).
 	passed bool
+
+	// recopied is true iff this result represents a successful Recopy
+	// (passed=true also set). Distinguishes "passed via retry" from
+	// "passed via recopy" in the per-pass histogram.
+	recopied bool
 
 	// newSrcCRC / newTgtCRC are the values just read. Used by the driver
 	// to populate a re-enqueued retryEntry on the hot-chunk path.
@@ -283,12 +317,12 @@ type workResult struct {
 	newCount  uint64
 
 	// permanent is true iff this is a retry that failed with the source
-	// CRC unchanged — i.e. real divergence. Run will exit with
-	// ErrPermanentDivergence.
+	// CRC unchanged AND no Recopier is configured — i.e. real divergence
+	// with no self-heal path. Run will exit with ErrPermanentDivergence.
 	permanent bool
 
-	// err is set on any read or query failure; the dispatcher returns it
-	// from Run.
+	// err is set on any read or query failure (or a Recopy failure); the
+	// dispatcher returns it from Run.
 	err error
 }
 
@@ -678,7 +712,29 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		// the dispatcher; res.passed stays false, res.permanent stays false.
 		return res
 	}
-	// Source unchanged, target still wrong → permanent divergence.
+
+	// Source unchanged, target still wrong → stable divergence. With a
+	// Recopier configured, self-heal by recopying the chunk; otherwise
+	// surface ErrPermanentDivergence (legacy behavior — preserved for
+	// tests and for callers that want to halt rather than self-heal).
+	if c.cfg.Recopier != nil {
+		if err := c.cfg.Recopier.Recopy(ctx, item.chunk); err != nil {
+			res.err = fmt.Errorf("recopy chunk %s: %w", item.chunk.String(), err)
+			return res
+		}
+		// The Recopier already logs the user-facing "chunk recopied" line
+		// (with row count + elapsed). Add a Debug companion with the CRC +
+		// attempt context that the recopier doesn't see.
+		c.cfg.Logger.Debug("continuous checksum: recopy completed",
+			"chunk", item.chunk.String(),
+			"sourceCRC", srcCRC,
+			"targetCRC", tgtCRC,
+			"attempts_before_recopy", item.attempts+1,
+		)
+		res.passed = true
+		res.recopied = true
+		return res
+	}
 	res.permanent = true
 	return res
 }
@@ -693,7 +749,7 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	}
 	if res.passed {
 		c.chunksPassedThisPass.Add(1)
-		c.bucketPassed(res.item)
+		c.bucketPassed(res.item, res.recopied)
 		return nil
 	}
 	if res.permanent {
@@ -755,10 +811,19 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 // bucketPassed records a passed chunk into the per-pass attempts histogram.
 // For fresh-walk passes (isRetry=false) total attempts = 1. For retries,
 // item.attempts counts reads completed BEFORE this one, so total = item.attempts + 1.
+//
+// recopied=true means the chunk was passed via a Recopy operation (the
+// stable-divergence self-heal path) — it goes into the dedicated
+// recopies bucket regardless of how many attempts preceded the recopy.
+//
 // mismatchesThisPass is NOT incremented here — it's already bumped once on
 // the original first-time mismatch in handleResult, so the histogram retry
-// buckets sum to MismatchesThisPass on a clean pass.
-func (c *ContinuousChecker) bucketPassed(item *workItem) {
+// + recopies buckets sum to MismatchesThisPass on a clean pass.
+func (c *ContinuousChecker) bucketPassed(item *workItem, recopied bool) {
+	if recopied {
+		c.recopiesThisPass.Add(1)
+		return
+	}
 	if !item.isRetry {
 		c.passedFirstAttemptThisPass.Add(1)
 		return
@@ -769,10 +834,12 @@ func (c *ContinuousChecker) bucketPassed(item *workItem) {
 		c.passedSecondAttemptThisPass.Add(1)
 	case total < 5:
 		c.passedUnder5AttemptsThisPass.Add(1)
-	case total < 10:
-		c.passedUnder10AttemptsThisPass.Add(1)
 	default:
-		c.recopiesThisPass.Add(1)
+		// 5+ retry attempts. Fold any 10+ outliers into the same bucket;
+		// with a Recopier configured those are rare (stable divergence
+		// would trigger recopy before then) and the precision isn't
+		// worth a separate bucket.
+		c.passedUnder10AttemptsThisPass.Add(1)
 	}
 }
 
