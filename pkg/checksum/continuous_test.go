@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,9 +202,6 @@ func TestCleanPassQuietTable(t *testing.T) {
 // to the version we first saw on the source). Counts as a pass.
 func TestTargetCatchesUpToOriginal(t *testing.T) {
 	chunker := newTestChunker(3)
-	var srcCRC atomic.Int64
-	srcCRC.Store(100)
-
 	c := newTestChecker(t, chunker, fastConfig(),
 		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
 			if attempt == 1 {

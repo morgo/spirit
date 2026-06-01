@@ -3,6 +3,7 @@ package datasync
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,14 +99,23 @@ func TestSyncContinuousChecksumWithBackgroundWrites(t *testing.T) {
 	testutils.RunSQL(t, `CREATE DATABASE sync_checksum_busy_src`)
 	testutils.RunSQL(t, `CREATE TABLE sync_checksum_busy_src.t1 (id INT PRIMARY KEY, val VARCHAR(255), counter INT DEFAULT 0)`)
 	// Seed a few hundred rows so the checker has real work to do (multiple chunks).
-	// Build a multi-row INSERT in one statement (RunSQL takes no args).
+	// One multi-row INSERT is much faster than 500 round-trips and matches
+	// the intent of the original comment.
 	seedSrc, err := sql.Open("mysql", sourceDSN)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(seedSrc)
-	for i := 1; i <= 500; i++ {
-		_, err := seedSrc.ExecContext(t.Context(), `INSERT INTO sync_checksum_busy_src.t1 VALUES (?, CONCAT('v', ?), 0)`, i, i)
-		require.NoError(t, err)
+	const seedRows = 500
+	placeholders := make([]string, 0, seedRows)
+	args := make([]any, 0, seedRows*2)
+	for i := 1; i <= seedRows; i++ {
+		placeholders = append(placeholders, "(?, CONCAT('v', ?), 0)")
+		args = append(args, i, i)
 	}
+	_, err = seedSrc.ExecContext(t.Context(),
+		`INSERT INTO sync_checksum_busy_src.t1 VALUES `+strings.Join(placeholders, ","),
+		args...,
+	)
+	require.NoError(t, err)
 	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_checksum_busy_dest`)
 
 	s := &Sync{

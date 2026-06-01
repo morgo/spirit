@@ -378,9 +378,14 @@ func NewContinuousChecker(
 }
 
 // Run drives the checker until ctx is cancelled or a permanent failure is
-// detected. A clean cancellation returns nil. A permanent failure (a chunk
-// that mismatched twice in a row with the source CRC unchanged) returns
-// ErrPermanentDivergence. A queue-cap overflow returns ErrRetryQueueFull.
+// detected. On ctx cancellation Run returns ctx.Err() (typically
+// context.Canceled or context.DeadlineExceeded); callers that want to
+// treat a clean shutdown as nil should filter that themselves (see how
+// datasync.Runner.runContinuous does it). A permanent failure — a chunk
+// that mismatched twice in a row with the source CRC unchanged and no
+// Recopier was configured — returns ErrPermanentDivergence. A queue-cap
+// overflow returns ErrRetryQueueFull. Errors from the chunker walker
+// (chunker.Next failures) are wrapped and returned.
 func (c *ContinuousChecker) Run(ctx context.Context) error {
 	// Workers and dispatcher communicate through these channels; both are
 	// buffered to Concurrency so the dispatcher's send/recv loop doesn't
@@ -391,16 +396,22 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 	// Cancellable sub-context so worker goroutines can be torn down on
 	// Run return without depending on the parent ctx being cancelled.
 	workerCtx, workerCancel := context.WithCancel(ctx)
-	defer workerCancel()
 
 	var workerWG sync.WaitGroup
 	for i := 0; i < c.cfg.Concurrency; i++ {
 		workerWG.Add(1)
 		go c.worker(workerCtx, &workerWG, workCh, resultCh)
 	}
-	// On return: close workCh so workers drain and exit cleanly, then wait.
-	// The cancel above is the backstop for workers blocked mid-query.
+	// Shutdown order matters on early error returns (ErrPermanentDivergence,
+	// ErrRetryQueueFull, walker error): a worker that has just produced a
+	// result may be blocked on `case resultCh <- res:` because the
+	// dispatcher returned without draining. Closing workCh alone doesn't
+	// wake it — it's not in the workCh recv arm. Wait() would then hang
+	// until the parent ctx happens to cancel. Cancel workerCtx first so
+	// workers' inner select's `<-ctx.Done()` arm fires; close workCh too
+	// for workers idle on the recv arm; then Wait.
 	defer func() {
+		workerCancel()
 		close(workCh)
 		workerWG.Wait()
 	}()
