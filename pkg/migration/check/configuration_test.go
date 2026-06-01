@@ -7,6 +7,7 @@ import (
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
+	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,6 +24,7 @@ import (
 func TestConfiguration(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	r := Resources{
 		DB:    db,
@@ -42,6 +44,7 @@ func TestConfiguration(t *testing.T) {
 func TestConfigurationGTID(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
 
 	r := Resources{
 		DB:    db,

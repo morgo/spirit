@@ -51,10 +51,18 @@ func TestGTIDClient(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
-// TestGTIDStartFromImpossiblePosition verifies that resuming from a GTID
-// set that doesn't cover @@GLOBAL.gtid_purged surfaces as
-// ErrPositionNotFound.
-func TestGTIDStartFromImpossiblePosition(t *testing.T) {
+// TestGTIDStartFromMalformedPosition verifies that StartFromPosition
+// rejects an input string that is not a valid GTID set (including the
+// common operator mistake of resuming a legacy file:offset checkpoint
+// against the GTID client). The parse failure surfaces as
+// ErrPositionNotFound so migration strict-mode treats it as a real
+// "cannot resume from this checkpoint" rather than silently restarting.
+//
+// The gtid_purged path (server has dropped binlogs we'd need) is
+// validated inside Start() against @@GLOBAL.gtid_purged and is not
+// exercised here — flipping global gtid_purged on a shared test
+// container would race with every other concurrent test.
+func TestGTIDStartFromMalformedPosition(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
@@ -75,9 +83,11 @@ func TestGTIDStartFromImpossiblePosition(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(t1, t2, chunker))
 
-	// Malformed input string.
-	err = client.StartFromPosition(t.Context(), "not-a-valid-gtid-set")
+	// A non-GTID input (e.g. a legacy file:offset checkpoint) is the
+	// most likely real-world trigger for this branch.
+	err = client.StartFromPosition(t.Context(), "binlog.000123:4567")
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPositionNotFound)
 }
 
 // TestGTIDRoundtripPosition verifies that the opaque Position string

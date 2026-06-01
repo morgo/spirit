@@ -235,13 +235,22 @@ func (c *gtidClient) Position() string {
 // StartFromPosition satisfies Source. It primes flushedGTID from the
 // previously-returned opaque string, validates it is still resumable
 // against gtid_purged, then begins streaming as Start would.
+//
+// Parse failures are wrapped with ErrPositionNotFound. This matters
+// because the most likely real-world parse failure is an operator
+// resuming a legacy file:offset checkpoint (binlog.000123:4567)
+// against the GTID client (or vice-versa). Without the wrap the
+// generic parse error falls through pkg/migration's strict-mode
+// classifier and silently restarts from scratch, losing checkpoint
+// progress; with the wrap the strict-mode caller sees it as
+// status.ErrBinlogNotFound and aborts loudly.
 func (c *gtidClient) StartFromPosition(ctx context.Context, pos string) error {
 	if pos == "" {
 		return errors.New("StartFromPosition: empty position; use Start instead for a fresh start")
 	}
 	parsed, err := mysql.ParseMysqlGTIDSet(normalizeGTIDString(pos))
 	if err != nil {
-		return fmt.Errorf("StartFromPosition: parse %q: %w", pos, err)
+		return fmt.Errorf("%w: StartFromPosition: cannot parse %q as a GTID set (legacy file:offset checkpoint?): %w", ErrPositionNotFound, pos, err)
 	}
 	c.mu.Lock()
 	c.flushedGTID = parsed
@@ -502,7 +511,17 @@ func (c *gtidClient) readStream(ctx context.Context) {
 			}
 			ddlTables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
-				c.logger.Error("Skipping query that was unable to parse", "gtid", c.getBufferedGTID().String())
+				// The TiDB parser does not understand all syntax (CREATE/DROP
+				// TRIGGER, certain ALTER USER variants, etc.) — these are
+				// expected misses, not bugs. We include the parser error and
+				// the schema so an operator can diagnose unexpected payloads,
+				// but deliberately omit the query itself: it can contain user
+				// data and ends up in logs. (Same rationale as the binlog
+				// client.)
+				c.logger.Error("Skipping query that was unable to parse",
+					"error", err,
+					"schema", string(event.Schema),
+					"gtid", c.getBufferedGTID().String())
 				continue
 			}
 			// MySQL emits a synthetic GTID for DDL statements too, but the
