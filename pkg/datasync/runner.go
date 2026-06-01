@@ -109,9 +109,9 @@ type Runner struct {
 	// cancels. Programmatic callers can read FirstCleanPass / ChecksumStats
 	// through accessors on Runner. nil before runContinuous and when
 	// DisableContinuousChecksum is set.
-	continuousChecker  *checksum.ContinuousChecker
-	continuousChunker  table.Chunker
-	continuousReadyCh  chan struct{} // closed once continuousChecker is assigned
+	continuousChecker         *checksum.ContinuousChecker
+	continuousChunker         table.Chunker
+	continuousReadyCh         chan struct{} // closed once continuousChecker is assigned
 	continuousCheckerInitOnce sync.Once
 }
 

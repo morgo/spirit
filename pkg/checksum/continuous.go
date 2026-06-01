@@ -135,6 +135,12 @@ type ContinuousCheckerStats struct {
 	// current pass (either initially or via retry).
 	ChunksPassedThisPass uint64
 
+	// MismatchesThisPass is how many chunks mismatched on their initial
+	// (fresh-walk) read in the current pass and were enqueued for retry.
+	// On a clean pass this equals the number of chunks that ultimately
+	// passed via retry rather than first-attempt. Resets each pass.
+	MismatchesThisPass uint64
+
 	// RetryQueueDepth is the current size of the delayed-retry queue.
 	RetryQueueDepth int
 
@@ -174,7 +180,8 @@ type ContinuousChecker struct {
 	currentPass          atomic.Uint64
 	chunksThisPass       atomic.Uint64
 	chunksPassedThisPass atomic.Uint64
-	mismatchesDetected   atomic.Uint64
+	mismatchesThisPass   atomic.Uint64 // resets each pass
+	mismatchesDetected   atomic.Uint64 // lifetime
 	permanentFailures    atomic.Uint64
 	retryQueueDepth      atomic.Int64
 	hotChunkCount        atomic.Int64
@@ -342,8 +349,12 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		c.currentPass.Store(passNum)
 		c.chunksThisPass.Store(0)
 		c.chunksPassedThisPass.Store(0)
+		c.mismatchesThisPass.Store(0)
 
-		c.cfg.Logger.Info("continuous checksum pass starting", "pass", passNum)
+		// Debug-level so production logs aren't swamped on a many-pass
+		// steady state — the pass-complete line at Info is the summary
+		// most operators want.
+		c.cfg.Logger.Debug("continuous checksum pass starting", "pass_number", passNum)
 		passStart := time.Now()
 
 		if err := c.runOnePass(ctx, workCh, resultCh); err != nil {
@@ -352,9 +363,19 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 
 		c.passesCompleted.Add(1)
 		c.signalFirstCleanPass()
+		chunks := c.chunksThisPass.Load()
+		viaRetry := c.mismatchesThisPass.Load()
+		// On a clean pass every chunk passed, so first-attempt = total - via-retry.
+		// Guard against underflow in case counters were tweaked unexpectedly.
+		var firstAttempt uint64
+		if chunks >= viaRetry {
+			firstAttempt = chunks - viaRetry
+		}
 		c.cfg.Logger.Info("continuous checksum pass complete",
-			"pass", passNum,
-			"chunks", c.chunksThisPass.Load(),
+			"pass_number", passNum,
+			"total_chunks", chunks,
+			"passed_first_attempt", firstAttempt,
+			"passed_via_retry", viaRetry,
 			"duration", time.Since(passStart).Round(time.Millisecond),
 		)
 	}
@@ -657,10 +678,14 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	}
 
 	// Mismatch — enqueue a retry. Either a fresh-walk first-time mismatch,
-	// or a hot-chunk re-enqueue from a retry attempt.
+	// or a hot-chunk re-enqueue from a retry attempt. These are routine
+	// during a busy sync (the target legitimately lags by replication
+	// delay) so they log at Debug — operators see the per-pass summary
+	// at Info instead.
 	if !res.item.isRetry {
 		c.mismatchesDetected.Add(1)
-		c.cfg.Logger.Info("continuous checksum: chunk mismatch, queuing retry",
+		c.mismatchesThisPass.Add(1)
+		c.cfg.Logger.Debug("continuous checksum: chunk mismatch, queuing retry",
 			"chunk", res.item.chunk.String(),
 			"sourceCRC", res.newSrcCRC,
 			"targetCRC", res.newTgtCRC,
@@ -678,7 +703,7 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	// "original" with the current source CRC so a future retry can match
 	// against this newer witnessed version, and re-enqueue at the tail.
 	newConsecutive := res.item.consecutiveSrcChanged + 1
-	c.cfg.Logger.Info("continuous checksum: hot chunk, re-queuing",
+	c.cfg.Logger.Debug("continuous checksum: hot chunk, re-queuing",
 		"chunk", res.item.chunk.String(),
 		"sourceCRC", res.newSrcCRC,
 		"targetCRC", res.newTgtCRC,
@@ -755,6 +780,7 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 		CurrentPass:          c.currentPass.Load(),
 		ChunksThisPass:       c.chunksThisPass.Load(),
 		ChunksPassedThisPass: c.chunksPassedThisPass.Load(),
+		MismatchesThisPass:   c.mismatchesThisPass.Load(),
 		RetryQueueDepth:      int(c.retryQueueDepth.Load()),
 		HotChunkCount:        int(c.hotChunkCount.Load()),
 		MismatchesDetected:   c.mismatchesDetected.Load(),
