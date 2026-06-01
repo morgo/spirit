@@ -99,6 +99,13 @@ func WithBuffered(b bool) RunnerOption {
 	}
 }
 
+// WithGTID enables the experimental GTID-based change source.
+func WithGTID(b bool) RunnerOption {
+	return func(m *Migration) {
+		m.GTID = b
+	}
+}
+
 // WithTestThrottler enables the test throttler (slows the copier
 // so the repl client has time to observe events).
 func WithTestThrottler() RunnerOption {

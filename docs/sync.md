@@ -41,10 +41,13 @@ source privileges depend on the change feed:
   for the binlog stream, and `RELOAD` — the binlog reader runs
   `FLUSH BINARY LOGS` to establish/advance its start position, so it is not
   a pure `SELECT`-only role even though it never modifies your data.
+  See [`--gtid`](#gtid) below to switch to the experimental GTID-based feed,
+  which removes the `RELOAD` / `FLUSH BINARY LOGS` requirement.
 - **Injected `change.Source`** (e.g. a Vitess/PlanetScale VStream supplied by
   a programmatic caller): the feed is driven entirely by that source, so the
   built-in binlog privileges (`REPLICATION *`, `RELOAD`) do not apply — only
-  `SELECT` on the source schema is required for the initial copy.
+  `SELECT` on the source schema is required for the initial copy. `--gtid` is
+  ignored when an injected source is supplied.
 
 ## Requirements
 
@@ -62,6 +65,7 @@ source privileges depend on the change feed:
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
 - [force](#force)
+- [gtid](#gtid)
 
 ### source-dsn
 
@@ -120,3 +124,38 @@ checkpoint exists. A resumable run (checkpoint present) is left intact and
 resumes as normal; this only resets a target that is non-empty with no usable
 checkpoint, which would otherwise trip the fresh-sync target-empty guard.
 Intended for testing/iterating.
+
+### gtid
+
+- Type: Boolean
+- Default value: `false`
+
+> **⚠️ Experimental.** See the full caveats and on-disk-format warning in the
+> [migrate `--gtid` documentation](migrate.md#gtid).
+
+When set to `true`, the built-in MySQL binlog source switches from the default
+binlog **file + offset** coordinate to a MySQL **GTID set** coordinate. The
+copy phase, applier, checkpoint contract, and continuous-stream lifecycle are
+otherwise unchanged.
+
+Sync-specific notes:
+
+- **Ignored when an injected `Source` is supplied** (e.g. a programmatic caller
+  passing a Vitess/PlanetScale VStream `change.Source`) — the flag only
+  controls how Sync constructs its own MySQL binlog client.
+- **No `RELOAD` / `FLUSH BINARY LOGS` requirement.** Unlike the default
+  file+offset path, the GTID feed reads `@@GLOBAL.gtid_executed` to discover
+  positions, so the source role can drop `RELOAD` and `FLUSH BINARY LOGS` calls
+  disappear from the run. The other built-in feed privileges
+  (`SELECT`, `REPLICATION SLAVE`, `REPLICATION CLIENT`) still apply.
+
+**Requirements (on the source):**
+
+- `gtid_mode = ON`
+- `enforce_gtid_consistency = ON`
+
+```bash
+spirit sync --gtid \
+            --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
+            --target-dsn "user:pass@tcp(target-host:3306)/mydb"
+```

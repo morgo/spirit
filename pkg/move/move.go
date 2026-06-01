@@ -18,6 +18,11 @@ type Move struct {
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 
+	// GTID switches the change source from binlog file+position to MySQL GTIDs.
+	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and
+	// enforce_gtid_consistency=ON on every source.
+	GTID bool `name:"gtid" help:"EXPERIMENTAL: use GTID-based change source instead of binlog file+position" default:"false"`
+
 	// SourceTables optionally specifies a list of tables to move.
 	// If empty, all tables in the source database will be moved.
 	// This is useful for Vitess MoveTables operations where only specific tables should be moved.
