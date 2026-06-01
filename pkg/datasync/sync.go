@@ -50,6 +50,16 @@ type Sync struct {
 	// batching trade-off. Defaults to change.DefaultFlushInterval.
 	FlushInterval time.Duration `name:"flush-interval" help:"How often to flush buffered changes to the target during continuous sync." default:"30s"`
 
+	// CopyOnly performs only the initial copy and then returns — no change
+	// capture and no continuous replication, so no change.Source is
+	// constructed or required. Useful for a one-shot snapshot, or when the
+	// source cannot provide a change feed (e.g. a managed Vitess without
+	// binlog/VStream access, or a replica lacking the REPLICATION privileges
+	// the built-in binlog client needs). A final checkpoint is still written,
+	// so a later run resumes the copy from there (or no-ops if it had already
+	// completed) rather than starting over.
+	CopyOnly bool `name:"copy-only" help:"Only run the initial copy, then exit (no continuous change capture)." default:"false"`
+
 	// Force, when set, makes the runner drop and recreate the target database
 	// at startup *unless* a resumable checkpoint exists — i.e. it only nukes
 	// the target when the copy could not have resumed anyway. A resumable
