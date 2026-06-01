@@ -137,9 +137,25 @@ type ContinuousCheckerStats struct {
 
 	// MismatchesThisPass is how many chunks mismatched on their initial
 	// (fresh-walk) read in the current pass and were enqueued for retry.
-	// On a clean pass this equals the number of chunks that ultimately
-	// passed via retry rather than first-attempt. Resets each pass.
+	// On a clean pass this equals PassedSecondAttemptThisPass +
+	// PassedUnder5AttemptsThisPass + PassedUnder10AttemptsThisPass +
+	// RecopiesThisPass — i.e. every chunk that needed at least one retry
+	// to converge. Resets each pass.
 	MismatchesThisPass uint64
+
+	// Per-pass histogram of attempts-to-converge. "attempts" counts every
+	// read of the chunk (initial fresh-walk + each retry). Buckets are
+	// non-overlapping; their sum equals ChunksPassedThisPass on a clean
+	// pass. All reset each pass.
+	PassedFirstAttemptThisPass    uint64 // 1 attempt (no retry needed)
+	PassedSecondAttemptThisPass   uint64 // 2 attempts (1 retry)
+	PassedUnder5AttemptsThisPass  uint64 // 3-4 attempts
+	PassedUnder10AttemptsThisPass uint64 // 5-9 attempts
+	// RecopiesThisPass is currently the catch-all for chunks that
+	// converged after 10+ attempts. Once the recopier lands it will
+	// instead count chunks escalated to a recopy operation past a
+	// configured retry threshold.
+	RecopiesThisPass uint64
 
 	// RetryQueueDepth is the current size of the delayed-retry queue.
 	RetryQueueDepth int
@@ -175,16 +191,30 @@ type ContinuousChecker struct {
 	chunker  table.Chunker
 	feed     change.Source
 
-	// atomically-updated counters
+	// atomically-updated counters. The "ThisPass" counters reset at the
+	// start of each pass; lifetime counters accumulate forever.
 	passesCompleted      atomic.Uint64
 	currentPass          atomic.Uint64
 	chunksThisPass       atomic.Uint64
 	chunksPassedThisPass atomic.Uint64
-	mismatchesThisPass   atomic.Uint64 // resets each pass
-	mismatchesDetected   atomic.Uint64 // lifetime
-	permanentFailures    atomic.Uint64
-	retryQueueDepth      atomic.Int64
-	hotChunkCount        atomic.Int64
+	mismatchesThisPass   atomic.Uint64 // any chunk that needed >=1 retry
+	mismatchesDetected   atomic.Uint64 // lifetime mismatches
+
+	// Per-pass histogram of how many attempts each chunk needed before
+	// it went clean. Buckets are non-overlapping. "attempts" counts every
+	// read of the chunk (the initial fresh-walk read + each retry read).
+	// recopiesThisPass is the catch-all for chunks that needed 10+
+	// attempts to converge; once the recopier lands it will instead
+	// count actual recopy operations triggered after a retry threshold.
+	passedFirstAttemptThisPass     atomic.Uint64 // 1 attempt
+	passedSecondAttemptThisPass    atomic.Uint64 // 2 attempts
+	passedUnder5AttemptsThisPass   atomic.Uint64 // 3-4 attempts
+	passedUnder10AttemptsThisPass  atomic.Uint64 // 5-9 attempts
+	recopiesThisPass               atomic.Uint64 // 10+ attempts (future: actual recopies)
+
+	permanentFailures atomic.Uint64
+	retryQueueDepth   atomic.Int64
+	hotChunkCount     atomic.Int64
 
 	statsMu          sync.RWMutex
 	firstCleanPassAt time.Time
@@ -350,6 +380,11 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		c.chunksThisPass.Store(0)
 		c.chunksPassedThisPass.Store(0)
 		c.mismatchesThisPass.Store(0)
+		c.passedFirstAttemptThisPass.Store(0)
+		c.passedSecondAttemptThisPass.Store(0)
+		c.passedUnder5AttemptsThisPass.Store(0)
+		c.passedUnder10AttemptsThisPass.Store(0)
+		c.recopiesThisPass.Store(0)
 
 		// Debug-level so production logs aren't swamped on a many-pass
 		// steady state — the pass-complete line at Info is the summary
@@ -363,19 +398,14 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 
 		c.passesCompleted.Add(1)
 		c.signalFirstCleanPass()
-		chunks := c.chunksThisPass.Load()
-		viaRetry := c.mismatchesThisPass.Load()
-		// On a clean pass every chunk passed, so first-attempt = total - via-retry.
-		// Guard against underflow in case counters were tweaked unexpectedly.
-		var firstAttempt uint64
-		if chunks >= viaRetry {
-			firstAttempt = chunks - viaRetry
-		}
 		c.cfg.Logger.Info("continuous checksum pass complete",
 			"pass_number", passNum,
-			"total_chunks", chunks,
-			"passed_first_attempt", firstAttempt,
-			"passed_via_retry", viaRetry,
+			"total_chunks", c.chunksThisPass.Load(),
+			"first_attempt", c.passedFirstAttemptThisPass.Load(),
+			"second_attempt", c.passedSecondAttemptThisPass.Load(),
+			"under_5_attempts", c.passedUnder5AttemptsThisPass.Load(),
+			"under_10_attempts", c.passedUnder10AttemptsThisPass.Load(),
+			"recopies", c.recopiesThisPass.Load(),
 			"duration", time.Since(passStart).Round(time.Millisecond),
 		)
 	}
@@ -663,6 +693,7 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	}
 	if res.passed {
 		c.chunksPassedThisPass.Add(1)
+		c.bucketPassed(res.item)
 		return nil
 	}
 	if res.permanent {
@@ -721,6 +752,30 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 	})
 }
 
+// bucketPassed records a passed chunk into the per-pass attempts histogram.
+// For fresh-walk passes (isRetry=false) total attempts = 1. For retries,
+// item.attempts counts reads completed BEFORE this one, so total = item.attempts + 1.
+// mismatchesThisPass is NOT incremented here — it's already bumped once on
+// the original first-time mismatch in handleResult, so the histogram retry
+// buckets sum to MismatchesThisPass on a clean pass.
+func (c *ContinuousChecker) bucketPassed(item *workItem) {
+	if !item.isRetry {
+		c.passedFirstAttemptThisPass.Add(1)
+		return
+	}
+	total := item.attempts + 1
+	switch {
+	case total == 2:
+		c.passedSecondAttemptThisPass.Add(1)
+	case total < 5:
+		c.passedUnder5AttemptsThisPass.Add(1)
+	case total < 10:
+		c.passedUnder10AttemptsThisPass.Add(1)
+	default:
+		c.recopiesThisPass.Add(1)
+	}
+}
+
 // readChunkCRC issues the source and target BIT_XOR(CRC32(...)) queries in
 // parallel against the two databases, returning the CRCs and row counts.
 // Returns the first error from either side.
@@ -776,16 +831,21 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 	firstAt := c.firstCleanPassAt
 	c.statsMu.RUnlock()
 	return ContinuousCheckerStats{
-		PassesCompleted:      c.passesCompleted.Load(),
-		CurrentPass:          c.currentPass.Load(),
-		ChunksThisPass:       c.chunksThisPass.Load(),
-		ChunksPassedThisPass: c.chunksPassedThisPass.Load(),
-		MismatchesThisPass:   c.mismatchesThisPass.Load(),
-		RetryQueueDepth:      int(c.retryQueueDepth.Load()),
-		HotChunkCount:        int(c.hotChunkCount.Load()),
-		MismatchesDetected:   c.mismatchesDetected.Load(),
-		PermanentFailures:    c.permanentFailures.Load(),
-		FirstCleanPassAt:     firstAt,
+		PassesCompleted:               c.passesCompleted.Load(),
+		CurrentPass:                   c.currentPass.Load(),
+		ChunksThisPass:                c.chunksThisPass.Load(),
+		ChunksPassedThisPass:          c.chunksPassedThisPass.Load(),
+		MismatchesThisPass:            c.mismatchesThisPass.Load(),
+		PassedFirstAttemptThisPass:    c.passedFirstAttemptThisPass.Load(),
+		PassedSecondAttemptThisPass:   c.passedSecondAttemptThisPass.Load(),
+		PassedUnder5AttemptsThisPass:  c.passedUnder5AttemptsThisPass.Load(),
+		PassedUnder10AttemptsThisPass: c.passedUnder10AttemptsThisPass.Load(),
+		RecopiesThisPass:              c.recopiesThisPass.Load(),
+		RetryQueueDepth:               int(c.retryQueueDepth.Load()),
+		HotChunkCount:                 int(c.hotChunkCount.Load()),
+		MismatchesDetected:            c.mismatchesDetected.Load(),
+		PermanentFailures:             c.permanentFailures.Load(),
+		FirstCleanPassAt:              firstAt,
 	}
 }
 
