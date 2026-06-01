@@ -44,6 +44,10 @@ type Resources struct {
 	TLSMode            string
 	TLSCertificatePath string
 	Buffered           bool
+	// GTID, when true, opts the migration into the experimental GTID-based
+	// change source. The configuration check uses this to additionally
+	// validate gtid_mode and enforce_gtid_consistency on the source.
+	GTID bool
 }
 
 type check struct {

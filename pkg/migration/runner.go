@@ -459,6 +459,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			TLSCertificatePath:   r.migration.TLSCertificatePath,
 			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
 			Buffered:             r.migration.Buffered,
+			GTID:                 r.migration.GTID,
 		}, r.logger, scope); err != nil {
 			return err
 		}

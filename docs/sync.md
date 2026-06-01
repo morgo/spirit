@@ -148,6 +148,12 @@ Sync-specific notes:
   positions, so the source role can drop `RELOAD` and `FLUSH BINARY LOGS` calls
   disappear from the run. The other built-in feed privileges
   (`SELECT`, `REPLICATION SLAVE`, `REPLICATION CLIENT`) still apply.
+- **Known limitation: no preflight check.** `spirit sync` does not yet have a
+  preflight check system the way [`migrate`](migrate.md) and [`move`](move.md)
+  do, so the GTID prerequisites below are **not** validated up-front. If the
+  source server has `gtid_mode=OFF` (or `enforce_gtid_consistency=OFF`) the
+  failure surfaces later as a stream-level error rather than a clear preflight
+  message. Validate these settings yourself before passing `--gtid`.
 
 **Requirements (on the source):**
 

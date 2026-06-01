@@ -858,6 +858,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		Targets:        r.targets,
 		SourceTables:   r.sourceTables,
 		CreateSentinel: r.move.CreateSentinel,
+		GTID:           r.move.GTID,
 	}, r.logger, scope)
 }
 
