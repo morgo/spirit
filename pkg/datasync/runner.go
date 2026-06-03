@@ -495,10 +495,20 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	}
 	defer utils.CloseAndLog(chunker)
 
+	// Restart the applier before the recopier touches it. The copier
+	// stops the applier when the initial copy finishes (see buffered.go:
+	// Stop closes chunkletBuffer), which leaves any later Apply call
+	// panicking with "send on closed channel". Start is idempotent and
+	// reinitializes the channels on a previously-stopped applier, so
+	// calling it here is the cheapest way to keep the recopier path
+	// working in both fresh and CopyOnly continuous-sync modes.
+	if err := r.applier.Start(ctx); err != nil {
+		return fmt.Errorf("restart applier for continuous checksum: %w", err)
+	}
+
 	// Construct the recopier — invoked by the checker when retry detects
 	// stable target divergence. Without one configured, the checker would
-	// instead return ErrPermanentDivergence and abort the sync. The
-	// applier and target DB are already running from the copy phase.
+	// instead return ErrPermanentDivergence and abort the sync.
 	recopier, err := checksum.NewMySQLRecopier(r.source.db, r.target.DB, r.applier, r.targetDBConfig, r.logger)
 	if err != nil {
 		return fmt.Errorf("construct continuous-checksum recopier: %w", err)
