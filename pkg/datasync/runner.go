@@ -502,9 +502,18 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	// reinitializes the channels on a previously-stopped applier, so
 	// calling it here is the cheapest way to keep the recopier path
 	// working in both fresh and CopyOnly continuous-sync modes.
+	//
+	// Pair with a deferred Stop so the worker + feedback-coordinator
+	// goroutines exit when this function returns (otherwise goleak
+	// catches the leak under -race).
 	if err := r.applier.Start(ctx); err != nil {
 		return fmt.Errorf("restart applier for continuous checksum: %w", err)
 	}
+	defer func() {
+		if cerr := r.applier.Stop(); cerr != nil {
+			r.logger.Warn("continuous checksum: applier stop failed", "error", cerr)
+		}
+	}()
 
 	// Construct the recopier — invoked by the checker when retry detects
 	// stable target divergence. Without one configured, the checker would
