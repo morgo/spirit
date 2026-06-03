@@ -188,10 +188,12 @@ func TestSyncInitialCopy(t *testing.T) {
 	require.Equal(t, "two", v)
 }
 
-// TestSyncCopyOnly verifies CopyOnly mode: the initial copy runs and Run
-// returns on its own — no change source is constructed (so no REPLICATION/
-// RELOAD privileges or change feed are required), no continuous phase, and no
-// cancellation is needed. A checkpoint is still written so a re-run resumes.
+// TestSyncCopyOnly verifies the CopyOnly path: initial copy runs (no
+// change source constructed, so no REPLICATION/RELOAD privileges
+// required), then the continuous checksum keeps running until the
+// context is cancelled. FirstCleanPass is signalled once the checker
+// observes source == target; that gates the cancel. A clean ctx-cancel
+// returns nil and the snapshot remains on the target.
 func TestSyncCopyOnly(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -219,12 +221,34 @@ func TestSyncCopyOnly(t *testing.T) {
 	runner, err := NewRunner(s)
 	require.NoError(t, err)
 
-	// CopyOnly Run returns on its own once the copy completes (no cancel).
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	require.NoError(t, runner.Run(ctx))
+	runDone := make(chan error, 1)
+	go func() { runDone <- runner.Run(ctx) }()
+
+	// Wait for the checker to publish a first clean pass — that's the
+	// signal that source and target are known consistent. With a quiescent
+	// source this should happen well within the test deadline.
+	select {
+	case <-runner.FirstCleanPass():
+	case err := <-runDone:
+		t.Fatalf("Run returned before FirstCleanPass: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for FirstCleanPass: %v", ctx.Err())
+	}
+
+	// Run is still going after the clean pass — it's supposed to block
+	// until cancelled. Cancel now and expect a clean nil return.
+	cancel()
+	select {
+	case err := <-runDone:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
 	require.NoError(t, runner.Close())
 
+	// Snapshot landed on target with the right values.
 	tgt, err := sql.Open("mysql", targetDSN)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(tgt)
