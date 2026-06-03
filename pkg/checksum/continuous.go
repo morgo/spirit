@@ -98,11 +98,6 @@ type Recopier interface {
 	Recopy(ctx context.Context, chunk *table.Chunk) error
 }
 
-// ErrRetryQueueFull is returned by Run when the delayed-retry queue
-// exceeds MaxQueueSize. This is the back-pressure signal for "source churn
-// is outrunning the verifier" — see the package doc.
-var ErrRetryQueueFull = errors.New("checksum: retry queue full")
-
 // Default values applied by NewContinuousChecker for zero-valued config
 // fields. Exported so callers can reference them when tuning.
 const (
@@ -194,6 +189,15 @@ type ContinuousCheckerStats struct {
 	// changing on the source across multiple retry windows.
 	HotChunkCount int
 
+	// WalkerStalls is the lifetime count of times the dispatcher refused
+	// to read a fresh chunk from the walker because the retry queue was
+	// already at MaxQueueSize. Each stall represents the checker holding
+	// back the walker until existing retries drain enough to make room —
+	// it does not abort the run. A persistently rising value means source
+	// churn is outpacing the verifier (consider tuning MaxQueueSize,
+	// Concurrency, or RetryDelay).
+	WalkerStalls uint64
+
 	// MismatchesDetected is the lifetime count of initial-read mismatches
 	// (does not include re-failures within a single retry sequence).
 	MismatchesDetected uint64
@@ -244,6 +248,7 @@ type ContinuousChecker struct {
 	permanentFailures atomic.Uint64
 	retryQueueDepth   atomic.Int64
 	hotChunkCount     atomic.Int64
+	walkerStalls      atomic.Uint64
 
 	statsMu          sync.RWMutex
 	firstCleanPassAt time.Time
@@ -383,9 +388,14 @@ func NewContinuousChecker(
 // treat a clean shutdown as nil should filter that themselves (see how
 // datasync.Runner.runContinuous does it). A permanent failure — a chunk
 // that mismatched twice in a row with the source CRC unchanged and no
-// Recopier was configured — returns ErrPermanentDivergence. A queue-cap
-// overflow returns ErrRetryQueueFull. Errors from the chunker walker
-// (chunker.Next failures) are wrapped and returned.
+// Recopier was configured — returns ErrPermanentDivergence. Errors from
+// the chunker walker (chunker.Next failures) are wrapped and returned.
+//
+// MaxQueueSize is a soft backpressure threshold rather than a hard cap:
+// when the retry queue reaches it, the dispatcher stops reading fresh
+// chunks from the walker until existing retries drain enough to make
+// room. The walker blocks on its send; workers continue draining.
+// WalkerStalls in the stats snapshot counts how often this has fired.
 func (c *ContinuousChecker) Run(ctx context.Context) error {
 	// Workers and dispatcher communicate through these channels; both are
 	// buffered to Concurrency so the dispatcher's send/recv loop doesn't
@@ -481,11 +491,18 @@ func (c *ContinuousChecker) runOnePass(ctx context.Context, workCh chan<- *workI
 	inFlight := 0
 	walkerDone := false
 	var pendingFresh *workItem // single-slot prefetch from walkCh
+	// walkerStallActive tracks the edge into "queue full, walker stalled" so
+	// we bump walkerStalls exactly once per stall episode (not on every
+	// iteration we stay stalled).
+	walkerStallActive := false
 
+	// enqueueRetry never refuses a retry — back-pressure is applied on the
+	// walker-receive side (walkRecv below), so once a result is in hand we
+	// always carry the retry through. If the queue is briefly over
+	// MaxQueueSize because a result came back during a stall, we'd rather
+	// process the existing retry and re-stall the walker than drop the
+	// chunk's divergence info.
 	enqueueRetry := func(e *retryEntry) error {
-		if queue.Len()+inFlight >= c.cfg.MaxQueueSize {
-			return ErrRetryQueueFull
-		}
 		queue.PushBack(e)
 		c.retryQueueDepth.Store(int64(queue.Len()))
 		if e.consecutiveSrcChanged >= 2 {
@@ -547,10 +564,24 @@ func (c *ContinuousChecker) runOnePass(ctx context.Context, workCh chan<- *workI
 
 		// walkRecv is enabled only when we don't already have a staged
 		// fresh item — keeps the walker pacing one-ahead of the dispatcher.
+		// It is also disabled when the retry queue has hit MaxQueueSize:
+		// that's the back-pressure path that pauses fresh chunk intake
+		// until workers drain existing retries (the walker blocks on its
+		// own send, so this naturally yields). Each transition into the
+		// stalled state bumps WalkerStalls so operators can see pressure.
 		var walkRecv <-chan *workItem
-		if pendingFresh == nil && !walkerDone {
+		stalled := queue.Len() >= c.cfg.MaxQueueSize
+		if pendingFresh == nil && !walkerDone && !stalled {
 			walkRecv = walkCh
 		}
+		if stalled && !walkerStallActive {
+			c.walkerStalls.Add(1)
+			c.cfg.Logger.Warn("continuous checksum: stalling walker; retry queue at MaxQueueSize",
+				"queue_depth", queue.Len(),
+				"max_queue_size", c.cfg.MaxQueueSize,
+			)
+		}
+		walkerStallActive = stalled
 
 		// Only enable the send arm if we have something to send.
 		var emitTarget chan<- *workItem
@@ -922,6 +953,7 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 		RecopiesThisPass:              c.recopiesThisPass.Load(),
 		RetryQueueDepth:               int(c.retryQueueDepth.Load()),
 		HotChunkCount:                 int(c.hotChunkCount.Load()),
+		WalkerStalls:                  c.walkerStalls.Load(),
 		MismatchesDetected:            c.mismatchesDetected.Load(),
 		PermanentFailures:             c.permanentFailures.Load(),
 		FirstCleanPassAt:              firstAt,

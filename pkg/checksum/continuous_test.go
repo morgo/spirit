@@ -317,9 +317,11 @@ func TestPermanentDivergence(t *testing.T) {
 	}
 }
 
-// TestQueueCapExceeded: many chunks mismatch, retry delay is long, queue
-// fills up past MaxQueueSize ⇒ ErrRetryQueueFull.
-func TestQueueCapExceeded(t *testing.T) {
+// TestQueueCapBackpressure: many chunks mismatch, retry delay is long,
+// queue fills up to MaxQueueSize. The walker should be back-pressured —
+// not aborted — so Run blocks until ctx cancels, with WalkerStalls > 0
+// in the stats snapshot and RetryQueueDepth capped at MaxQueueSize.
+func TestQueueCapBackpressure(t *testing.T) {
 	chunker := newTestChunker(20)
 	cfg := fastConfig()
 	cfg.MaxQueueSize = 4
@@ -334,8 +336,22 @@ func TestQueueCapExceeded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := c.Run(ctx)
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrRetryQueueFull), "expected ErrRetryQueueFull, got %v", err)
+	// Clean back-pressure now: ctx cancellation is the only exit.
+	require.True(t, errors.Is(err, context.DeadlineExceeded),
+		"expected context.DeadlineExceeded, got %v", err)
+	stats := c.Stats()
+	require.GreaterOrEqual(t, stats.WalkerStalls, uint64(1),
+		"expected at least one walker stall while queue was at MaxQueueSize")
+	// Queue can briefly exceed MaxQueueSize: in-flight workers can finish
+	// and the resultCh buffer can hold results that haven't been processed
+	// yet, both of which become retries when the dispatcher next services
+	// the result arm. The overshoot is bounded by inflight + buffered
+	// results = 2*Concurrency in the worst case. The test cares that the
+	// queue stays bounded near MaxQueueSize, not unbounded — anything
+	// dramatically larger would be the symptom of a real back-pressure
+	// failure. See enqueueRetry's doc comment in continuous.go.
+	require.LessOrEqual(t, stats.RetryQueueDepth, cfg.MaxQueueSize+2*cfg.Concurrency,
+		"queue depth should stay bounded under back-pressure")
 }
 
 // TestFirstCleanPassMonotonic: after first clean pass, subsequent drift
