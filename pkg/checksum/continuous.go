@@ -413,13 +413,16 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		go c.worker(workerCtx, &workerWG, workCh, resultCh)
 	}
 	// Shutdown order matters on early error returns (ErrPermanentDivergence,
-	// ErrRetryQueueFull, walker error): a worker that has just produced a
-	// result may be blocked on `case resultCh <- res:` because the
-	// dispatcher returned without draining. Closing workCh alone doesn't
-	// wake it — it's not in the workCh recv arm. Wait() would then hang
-	// until the parent ctx happens to cancel. Cancel workerCtx first so
-	// workers' inner select's `<-ctx.Done()` arm fires; close workCh too
-	// for workers idle on the recv arm; then Wait.
+	// walker error): a worker that has just produced a result may be
+	// blocked on `case resultCh <- res:` because the dispatcher returned
+	// without draining. Closing workCh alone doesn't wake it — it's not
+	// in the workCh recv arm. Wait() would then hang until the parent
+	// ctx happens to cancel. Cancel workerCtx first so workers' inner
+	// select's `<-ctx.Done()` arm fires; close workCh too for workers
+	// idle on the recv arm; then Wait. (A queue-cap overflow no longer
+	// short-circuits Run — back-pressure pauses the walker instead — so
+	// this teardown path only runs on the two real error categories
+	// above and on parent ctx cancellation.)
 	defer func() {
 		workerCancel()
 		close(workCh)
@@ -469,8 +472,10 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 
 // runOnePass walks the chunker once and drains the retry queue, returning
 // nil only when both are exhausted (a clean pass). Returns ctx.Err() on
-// cancellation, ErrPermanentDivergence on real drift, or ErrRetryQueueFull
-// on overflow.
+// cancellation or ErrPermanentDivergence on real drift. There is no
+// queue-overflow return — when queue.Len() reaches MaxQueueSize the
+// dispatcher disables the walker-receive arm so the walker blocks on
+// its send, applying soft back-pressure rather than aborting the pass.
 //
 // The dispatcher uses a peek-then-commit pattern: it picks an emit
 // candidate (a staged fresh item, or a due retry head) and lets the outer

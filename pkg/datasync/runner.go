@@ -503,10 +503,16 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	// calling it here is the cheapest way to keep the recopier path
 	// working in both fresh and CopyOnly continuous-sync modes.
 	//
-	// Pair with a deferred Stop so the worker + feedback-coordinator
-	// goroutines exit when this function returns (otherwise goleak
-	// catches the leak under -race).
-	if err := r.applier.Start(ctx); err != nil {
+	// We pass context.WithoutCancel(ctx) to Start so the applier's
+	// worker context is *not* tied to the parent: the recopier uses
+	// context.WithoutCancel(ctx) between its DELETE and Apply to keep
+	// that pair atomic, and if the applier workers exited on parent
+	// cancel they would abandon the recopier's in-flight chunklet —
+	// leaving the target with rows deleted but not yet rewritten. The
+	// deferred Stop is the only thing that tears them down, and it
+	// runs only after checker.Run has waited for all its workers
+	// (recopier included) to finish, so the chunklet always lands.
+	if err := r.applier.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("restart applier for continuous checksum: %w", err)
 	}
 	defer func() {
