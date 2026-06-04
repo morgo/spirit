@@ -122,7 +122,7 @@ func TestTypePedantic_InferredFK_Mismatch(t *testing.T) {
 	violations := filterRule(newTypePedantic(t).Lint(tables, nil), "inferred_fk")
 	require.Len(t, violations, 1)
 	v := violations[0]
-	require.Equal(t, SeverityError, v.Severity)
+	require.Equal(t, SeverityWarning, v.Severity)
 	require.Equal(t, "orders", v.Location.Table)
 	require.Equal(t, "customer_id", *v.Location.Column)
 	require.Contains(t, v.Message, "customers")
@@ -193,6 +193,8 @@ func TestTypePedantic_InferredFK_DisabledViaConfig(t *testing.T) {
 }
 
 func TestTypePedantic_InferredFK_ConfigurableSeverity(t *testing.T) {
+	// Default is warning (heuristic can false-positive on generic names like
+	// client_id); users who want strict gating can opt back into error.
 	tables := parseTables(t,
 		`CREATE TABLE customers (id BIGINT UNSIGNED PRIMARY KEY)`,
 		`CREATE TABLE orders (id BIGINT UNSIGNED PRIMARY KEY, customer_id INT NOT NULL)`,
@@ -202,12 +204,12 @@ func TestTypePedantic_InferredFK_ConfigurableSeverity(t *testing.T) {
 		"checkSameName":    "true",
 		"checkInferredFK":  "true",
 		"ignoreColumns":    "id",
-		"fkSeverity":       "warning",
+		"fkSeverity":       "error",
 		"sameNameSeverity": "warning",
 	}))
 	violations := filterRule(l.Lint(tables, nil), "inferred_fk")
 	require.Len(t, violations, 1)
-	require.Equal(t, SeverityWarning, violations[0].Severity)
+	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
 func TestTypePedantic_InferredFK_FromChanges(t *testing.T) {

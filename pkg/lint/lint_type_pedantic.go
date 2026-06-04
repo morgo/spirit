@@ -43,7 +43,7 @@ func (l *TypePedanticLinter) DefaultConfig() map[string]string {
 		"checkInferredFK":  "true",
 		"requireIndexed":   "true",
 		"ignoreColumns":    "id",
-		"fkSeverity":       "error",
+		"fkSeverity":       "warning",
 		"sameNameSeverity": "warning",
 	}
 }
@@ -57,7 +57,7 @@ func (l *TypePedanticLinter) setDefaults() {
 	l.checkInferredFK = true
 	l.requireIndexed = true
 	l.ignoreColumns = map[string]struct{}{"id": {}}
-	l.fkSeverity = SeverityError
+	l.fkSeverity = SeverityWarning
 	l.sameNameSeverity = SeverityWarning
 }
 
