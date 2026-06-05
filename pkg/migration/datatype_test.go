@@ -398,8 +398,9 @@ func testEnumDrop(t *testing.T, enableBuffered, useGTID bool) {
 		 WHERE table_schema='test' AND table_name=? AND column_name='status'`, tableName).Scan(&colType))
 	require.Contains(t, colType, "enum('active','pending','archived')")
 
-	// No row should land on the empty-set sentinel, which would mean an
-	// ordinal pointed at a value that no longer exists in the target.
+	// No row should land on the empty-string sentinel ('', MySQL's
+	// invalid-ENUM value at ordinal 0), which would mean an ordinal
+	// pointed at a value that no longer exists in the target.
 	var blanks int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
 		fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE status = ''`, tableName)).Scan(&blanks))

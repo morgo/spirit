@@ -22,7 +22,8 @@ func init() {
 //
 //   - Dropping existing values from anywhere in the list. Retained values
 //     keep their string form; rows that held a dropped value land in the
-//     target as ” and the post-cutover checksum catches the mismatch.
+//     target as ” (the empty string — MySQL's invalid-ENUM sentinel) and
+//     the post-cutover checksum catches the mismatch.
 //   - Appending new values at the end of the list.
 //
 // The unsafe shapes — reordering (a kept value changes its relative

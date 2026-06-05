@@ -160,7 +160,8 @@ func isPrefix(oldElems, newElems []string) bool {
 // table's element list and writes the resulting string into the target.
 // Any retained value therefore decodes to the same string the target
 // accepts. Rows whose value was dropped from the new enum land in the
-// target as ” — the post-cutover checksum catches that mismatch, so the
+// target as ” (the empty string — MySQL's invalid-ENUM sentinel, ordinal
+// 0), which the post-cutover checksum catches as a mismatch, so the
 // migration fails closed if such rows existed.
 func isCompatibleEnumChange(existingElems, newElems []string) bool {
 	existingSet := make(map[string]struct{}, len(existingElems))
