@@ -316,7 +316,8 @@ func (c *gtidClient) Start(ctx context.Context) error {
 	}
 	c.bufferedGTID = c.flushedGTID.Clone()
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
-	c.streamer, err = c.syncer.StartSyncGTID(c.flushedGTID)
+	// Clone to avoid data race
+	c.streamer, err = c.syncer.StartSyncGTID(c.flushedGTID.Clone())
 	if err != nil {
 		c.syncer.Close()
 		c.syncer = nil
