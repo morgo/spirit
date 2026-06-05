@@ -74,10 +74,50 @@ func TestEnumReorderCheck(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
-	// Buffered + remove ENUM value: should fail
+	// Buffered + drop ENUM value from the middle: should pass.
+	// Retained values keep their relative order; rows that held the dropped
+	// value will fail the post-cutover checksum, not the preflight check.
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active', 'pending') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	require.NoError(t, err)
+
+	// Buffered + drop ENUM value from the start: should pass.
+	r = Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('inactive', 'pending') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	require.NoError(t, err)
+
+	// Buffered + drop multiple ENUM values: should pass.
+	r = Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	require.NoError(t, err)
+
+	// Buffered + drop a value and append a new one: should pass.
+	r = Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active', 'pending', 'archived') NOT NULL")[0],
+		Buffered:  true,
+	}
+	err = enumReorderCheck(t.Context(), r, slog.Default())
+	require.NoError(t, err)
+
+	// Buffered + drop a value and re-add it elsewhere: should fail.
+	// 'active' is dropped from position 1 and reintroduced at the end —
+	// that breaks the relative-order invariant for retained values.
+	r = Resources{
+		Table:     tbl,
+		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('inactive', 'pending', 'active') NOT NULL")[0],
 		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())

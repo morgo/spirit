@@ -304,6 +304,134 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	require.ErrorContains(t, migrationErr, "unsafe SET value reorder")
 }
 
+// TestEnumDrop verifies that dropping an ENUM value from anywhere in the
+// definition is accepted by the preflight check and that the migration
+// succeeds end-to-end when no rows hold the dropped value.
+//
+// The change-replay path decodes ENUM ordinals against the SOURCE table's
+// element list, so retained values still arrive at the target as their
+// original string and MySQL maps them onto the new (smaller) enum without
+// data corruption.
+//
+// The matrix covers both copy modes (buffered/unbuffered) and both change
+// sources (binlog file+position and GTID). The decode happens in
+// TableInfo.DecodeBinlogRow, which both pkg/change clients call, but we
+// exercise them separately so a future divergence between the two source
+// implementations can't silently break ENUM drops on one of them.
+func TestEnumDrop(t *testing.T) {
+	t.Parallel()
+	for _, useGTID := range []bool{false, true} {
+		source := "binlog"
+		if useGTID {
+			source = "gtid"
+		}
+		t.Run(source, func(t *testing.T) {
+			t.Run("unbuffered", func(t *testing.T) {
+				testEnumDrop(t, false, useGTID)
+			})
+			t.Run("buffered", func(t *testing.T) {
+				testEnumDrop(t, true, useGTID)
+			})
+		})
+	}
+}
+
+func testEnumDrop(t *testing.T, enableBuffered, useGTID bool) {
+	// Unique table per matrix cell so the four combinations stay independent.
+	tableName := fmt.Sprintf("enumdrop_%s_%s",
+		map[bool]string{true: "gtid", false: "binlog"}[useGTID],
+		map[bool]string{true: "buf", false: "unbuf"}[enableBuffered])
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending', 'archived') NOT NULL
+	)`, tableName))
+	// Seed only with retained values; 'inactive' will be dropped and must
+	// not appear in any row when the checksum runs.
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'active'", tableName), 3000)
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'pending'", tableName), 3000)
+	_, err := tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (status) VALUES ('archived')", tableName))
+	require.NoError(t, err)
+
+	m := NewTestRunner(t, tableName, "MODIFY COLUMN status ENUM('active', 'pending', 'archived') NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(enableBuffered),
+		WithGTID(useGTID),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		// Concurrent DML uses only retained values; binlog ordinals for
+		// 'pending' (3) and 'archived' (4) under the source enum must
+		// still resolve to the right strings in the target.
+		for i := 1; i <= 100; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('active')`, tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('pending')`, tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('archived')`, tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'pending' WHERE id = %d`, tableName, i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'archived' WHERE id = %d`, tableName, 3000+i))
+		}
+	}()
+
+	require.NoError(t, m.Run(ctx))
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+
+	// The new column definition must omit 'inactive'.
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT column_type FROM information_schema.columns
+		 WHERE table_schema='test' AND table_name=? AND column_name='status'`, tableName).Scan(&colType))
+	require.Contains(t, colType, "enum('active','pending','archived')")
+
+	// No row should land on the empty-string sentinel ('', MySQL's
+	// invalid-ENUM value at ordinal 0), which would mean an ordinal
+	// pointed at a value that no longer exists in the target.
+	var blanks int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE status = ''`, tableName)).Scan(&blanks))
+	require.Zero(t, blanks, "rows landed as the empty enum value — likely a change ordinal decode mismatch")
+}
+
+// TestEnumDropWithDroppedValueInData verifies the safety net: when rows
+// actually hold the dropped value, the migration must fail (either at
+// insert time in strict mode, or at the post-cutover checksum). The
+// preflight check is intentionally permissive — it relies on data-level
+// verification to catch genuine data loss.
+func TestEnumDropWithDroppedValueInData(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "enumdrop_unsafe", `CREATE TABLE enumdrop_unsafe (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending') NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO enumdrop_unsafe (status) SELECT 'active'", 1000)
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO enumdrop_unsafe (status) VALUES ('inactive')")
+	require.NoError(t, err)
+
+	m := NewTestRunner(t, "enumdrop_unsafe", "MODIFY COLUMN status ENUM('active', 'pending') NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	err = m.Run(t.Context())
+	require.Error(t, err, "migration with rows holding a dropped enum value must not silently succeed")
+	require.NoError(t, m.Close())
+}
+
 // TestEnumToVarchar verifies that ENUM → VARCHAR migrations correctly
 // decode binlog ordinals into element strings so that buffered replay
 // writes the original values (e.g. "active") to the new VARCHAR column

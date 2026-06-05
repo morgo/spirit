@@ -147,6 +147,49 @@ func isPrefix(oldElems, newElems []string) bool {
 	return true
 }
 
+// isCompatibleEnumChange returns true if newElems is a binlog-ordinal-safe
+// modification of existingElems:
+//
+//   - Values present in BOTH lists must appear in the same RELATIVE ORDER
+//     (existing values may be dropped from anywhere, but not moved).
+//   - Values in newElems that are NOT in existingElems must appear only
+//     AFTER all retained existing values (new values are appended at end,
+//     never interleaved among or before existing values).
+//
+// The buffered replay path decodes binlog ENUM ordinals against the SOURCE
+// table's element list and writes the resulting string into the target.
+// Any retained value therefore decodes to the same string the target
+// accepts. Rows whose value was dropped from the new enum land in the
+// target as ” (the empty string — MySQL's invalid-ENUM sentinel, ordinal
+// 0), which the post-cutover checksum catches as a mismatch, so the
+// migration fails closed if such rows existed.
+func isCompatibleEnumChange(existingElems, newElems []string) bool {
+	existingSet := make(map[string]struct{}, len(existingElems))
+	for _, e := range existingElems {
+		existingSet[e] = struct{}{}
+	}
+
+	j := 0
+	sawNew := false
+	for _, e := range newElems {
+		if _, isExisting := existingSet[e]; isExisting {
+			if sawNew {
+				return false // an existing value appears after a brand-new value
+			}
+			for j < len(existingElems) && existingElems[j] != e {
+				j++
+			}
+			if j >= len(existingElems) {
+				return false // existing value out of relative order, or repeated in newElems
+			}
+			j++
+		} else {
+			sawNew = true
+		}
+	}
+	return true
+}
+
 // modifiedColumn describes a column in an ALTER TABLE that is being
 // modified via MODIFY COLUMN or CHANGE COLUMN.
 type modifiedColumn struct {
