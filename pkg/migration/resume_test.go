@@ -627,63 +627,6 @@ FROM compositevarcharpk a WHERE version='1'`)
 	require.NoError(t, m2.Close())
 }
 
-func TestResumeFromCheckpointStrict(t *testing.T) {
-	t.Parallel()
-	tt := testutils.NewTestTable(t, "resumestricttest", `CREATE TABLE resumestricttest (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		pad varbinary(1024) NOT NULL,
-		PRIMARY KEY (id)
-	)`)
-	tt.SeedRows(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024)", 100000)
-
-	alterSQL := "ADD INDEX(pad);"
-
-	// Kick off a migration with --strict enabled and let it run until the first checkpoint is available
-	m := NewTestRunner(t, "resumestricttest", alterSQL,
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithStrict(),
-		WithTestThrottler())
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		err := m.Run(ctx)
-		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
-	}()
-
-	waitForCheckpoint(t, m)
-
-	// Cancel + wait for Run to fully return before Close. See
-	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
-	cancel()
-	<-done
-	require.NoError(t, m.Close())
-
-	// Insert some more dummy data
-	testutils.RunSQL(t, "INSERT INTO resumestricttest (pad) SELECT RANDOM_BYTES(1024) FROM resumestricttest LIMIT 1000")
-
-	// Start a _different_ migration on the same table. We don't expect this to work when --strict is enabled
-	// since the --alter doesn't match what is recorded in the checkpoint table
-	runner2 := NewTestRunner(t, "resumestricttest", "ENGINE=INNODB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithStrict())
-
-	err := runner2.Run(t.Context())
-	require.Error(t, err)
-	require.ErrorIs(t, err, status.ErrMismatchedAlter)
-	require.NoError(t, runner2.Close())
-
-	// We should be able to force the migration to run even though there's a mismatched --alter
-	// by disabling --strict
-	runner3 := NewTestRunner(t, "resumestricttest", "ENGINE=INNODB", WithThreads(4))
-	require.NoError(t, runner3.Run(t.Context()))
-	require.False(t, runner3.usedResumeFromCheckpoint)
-	require.NoError(t, runner3.Close())
-}
-
 // TestResumeFromCheckpointPhantom tests that there is not a phantom row issue
 // when resuming from checkpoint. i.e. consider the following scenario:
 // 1) A new row is inserted at the end of the table, and the copier copies it.. but the low watermark never advances past this point
@@ -976,52 +919,10 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 	// This simulates binlog expiry between stop and start.
 	testutils.RunSQL(t, `UPDATE _cleanup_test_chkpnt SET binlog_position = 'nonexistent-bin.999999:999999999'`)
 
-	// Without strict mode: falls back to newMigration and completes successfully.
+	// Resume falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "cleanup_test", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
 	require.False(t, m2.usedResumeFromCheckpoint) // Should NOT have resumed because binlog was invalid
-	require.NoError(t, m2.Close())
-}
-
-func TestResumeFromCheckpointStrictBinlogExpired(t *testing.T) {
-	t.Parallel()
-	tt := testutils.NewTestTable(t, "strictbinlogtest", `CREATE TABLE strictbinlogtest (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		name varchar(255) NOT NULL,
-		pad varbinary(1024) NOT NULL,
-		PRIMARY KEY (id)
-	)`)
-	tt.SeedRows(t, "INSERT INTO strictbinlogtest (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
-
-	// First run: create a checkpoint
-	m := NewTestRunner(t, "strictbinlogtest", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithTestThrottler())
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = m.Run(ctx)
-	}()
-
-	waitForCheckpoint(t, m)
-	cancel()
-	<-done
-	require.NoError(t, m.Close())
-
-	// Corrupt binlog position to simulate expiry
-	testutils.RunSQL(t, `UPDATE _strictbinlogtest_chkpnt SET binlog_position = 'nonexistent-bin.999999:999999999'`)
-
-	// With strict mode: should error with ErrBinlogNotFound instead of silently restarting
-	m2 := NewTestRunner(t, "strictbinlogtest", "ENGINE=InnoDB",
-		WithThreads(2),
-		WithStrict())
-
-	err := m2.Run(t.Context())
-	require.Error(t, err)
-	require.ErrorIs(t, err, status.ErrBinlogNotFound)
 	require.NoError(t, m2.Close())
 }
 
@@ -1058,53 +959,10 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
 	testutils.RunSQL(t, `UPDATE _chkpttooold_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
 
-	// Without strict mode: falls back to newMigration and completes successfully.
+	// Resume falls back to newMigration and completes successfully.
 	m2 := NewTestRunner(t, "chkpttooold", "ENGINE=InnoDB", WithThreads(2))
 	require.NoError(t, m2.Run(t.Context()))
 	require.False(t, m2.usedResumeFromCheckpoint) // Should NOT have resumed because checkpoint was too old
-	require.NoError(t, m2.Close())
-}
-
-// TestResumeFromCheckpointStrictTooOld tests that when strict mode is enabled
-// and a checkpoint exceeds CheckpointMaxAge, the migration fails with
-// ErrCheckpointTooOld rather than silently starting fresh.
-func TestResumeFromCheckpointStrictTooOld(t *testing.T) {
-	t.Parallel()
-	tt := testutils.NewTestTable(t, "strictoldtest", `CREATE TABLE strictoldtest (
-		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-		name VARCHAR(255) NOT NULL,
-		pad VARCHAR(1000) NOT NULL default 'x')`)
-	tt.SeedRows(t, "INSERT INTO strictoldtest (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
-
-	// First run: create a checkpoint
-	m := NewTestRunner(t, "strictoldtest", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithTestThrottler())
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = m.Run(ctx)
-	}()
-
-	waitForCheckpoint(t, m)
-	cancel()
-	<-done
-	require.NoError(t, m.Close())
-
-	// Backdate the checkpoint's created_at to simulate an old checkpoint (8 days ago).
-	testutils.RunSQL(t, `UPDATE _strictoldtest_chkpnt SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)`)
-
-	// With strict mode: should error with ErrCheckpointTooOld instead of silently restarting.
-	m2 := NewTestRunner(t, "strictoldtest", "ENGINE=InnoDB",
-		WithThreads(2),
-		WithStrict())
-
-	err := m2.Run(t.Context())
-	require.Error(t, err)
-	require.ErrorIs(t, err, status.ErrCheckpointTooOld)
 	require.NoError(t, m2.Close())
 }
 
@@ -1182,43 +1040,5 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 	require.NoError(t, m2.Run(t.Context()))
 	require.False(t, m2.usedResumeFromCheckpoint,
 		"resume should be skipped when checkpoint records a different original table name")
-	require.NoError(t, m2.Close())
-}
-
-// TestResumeFromCheckpointStrictCollision asserts that under --strict, a
-// truncation-collision (different original_table_name) surfaces as
-// ErrCheckpointCollision rather than silently starting a fresh migration.
-func TestResumeFromCheckpointStrictCollision(t *testing.T) {
-	t.Parallel()
-	tt := testutils.NewTestTable(t, "strictcollision", `CREATE TABLE strictcollision (
-		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-		name VARCHAR(255) NOT NULL,
-		pad VARCHAR(1000) NOT NULL default 'x')`)
-	tt.SeedRows(t, "INSERT INTO strictcollision (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
-
-	m := NewTestRunner(t, "strictcollision", "ENGINE=InnoDB",
-		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond),
-		WithTestThrottler())
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = m.Run(ctx)
-	}()
-	waitForCheckpoint(t, m)
-	cancel()
-	<-done
-	require.NoError(t, m.Close())
-
-	testutils.RunSQL(t, `UPDATE _strictcollision_chkpnt SET original_table_name = 'someothertable'`)
-
-	m2 := NewTestRunner(t, "strictcollision", "ENGINE=InnoDB",
-		WithThreads(2),
-		WithStrict())
-	err := m2.Run(t.Context())
-	require.Error(t, err)
-	require.ErrorIs(t, err, status.ErrCheckpointCollision)
 	require.NoError(t, m2.Close())
 }

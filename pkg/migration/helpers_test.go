@@ -128,13 +128,6 @@ func WithDeferCutOver() RunnerOption {
 	}
 }
 
-// WithStrict enables strict mode (mismatched ALTER detection on resume).
-func WithStrict() RunnerOption {
-	return func(m *Migration) {
-		m.Strict = true
-	}
-}
-
 // WithDBName overrides the database name (for tests using CreateUniqueTestDatabase).
 func WithDBName(name string) RunnerOption {
 	return func(m *Migration) {
