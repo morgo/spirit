@@ -402,6 +402,28 @@ func (r *Runner) setup(ctx context.Context) error {
 		return nil
 	}
 
+	// Resolve the number of apply (write) threads against the target now that
+	// it is connected. WriteThreads==0 means "auto-size": on Aurora it becomes
+	// the instance vCPU count; on non-Aurora it is an error (there is no
+	// reliable vCPU signal to size from — the CLI default of 4 keeps
+	// interactive users out of this path).
+	r.move.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.targets[0].DB, r.move.WriteThreads)
+	if err != nil {
+		return err
+	}
+	// Now that write threads are known, grow connection pools to cover both the
+	// copy (read) threads and the apply (write) threads. The initial pool (set
+	// before connecting) used the requested value, which may have been 0.
+	if poolSize := r.move.Threads + r.move.WriteThreads + 2; poolSize > r.dbConfig.MaxOpenConnections {
+		r.dbConfig.MaxOpenConnections = poolSize
+		for i := range r.sources {
+			r.sources[i].db.SetMaxOpenConns(poolSize)
+		}
+		for i := range r.targets {
+			r.targets[i].DB.SetMaxOpenConns(poolSize)
+		}
+	}
+
 	// Create a single applier instance shared by all repl clients and the copier.
 	r.logger.Info("Creating shared applier")
 	r.applier, err = r.createApplier()

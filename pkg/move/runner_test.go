@@ -96,6 +96,7 @@ func testMoveWithConcurrentWrites(t *testing.T, deferSecondaryIndexes bool) {
 		TargetDSN:             targetDSN,
 		TargetChunkTime:       100 * time.Millisecond,
 		Threads:               2,
+		WriteThreads:          2,
 		CreateSentinel:        false,
 		DeferSecondaryIndexes: deferSecondaryIndexes,
 	}
@@ -278,6 +279,7 @@ func TestMoveWithNewTableCreation(t *testing.T) {
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 100 * time.Millisecond,
 		Threads:         2,
+		WriteThreads:    2,
 		CreateSentinel:  true,
 	}
 	wg.Go(func() {
@@ -372,6 +374,7 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 100 * time.Millisecond,
 		Threads:         2,
+		WriteThreads:    2,
 		CreateSentinel:  false,
 	}
 
@@ -420,6 +423,7 @@ func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 100 * time.Millisecond,
 		Threads:         2,
+		WriteThreads:    2,
 	}
 
 	err := move.Run()

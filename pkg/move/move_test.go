@@ -103,6 +103,7 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 		TargetDSN:             targetDSN,
 		TargetChunkTime:       100 * time.Millisecond,
 		Threads:               1,
+		WriteThreads:          1,
 		DeferSecondaryIndexes: deferSecondaryIndexes,
 	}
 	r, err := NewRunner(move)
@@ -195,6 +196,7 @@ func TestEmptyDatabaseMove(t *testing.T) {
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 5 * time.Second,
 		Threads:         4,
+		WriteThreads:    4,
 		CreateSentinel:  false,
 	}
 

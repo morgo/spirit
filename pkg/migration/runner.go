@@ -172,27 +172,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Map TLS configuration from migration to dbConfig
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
-	// The copier and checker will use Threads to limit N tasks concurrently,
-	// but we also set it at the DB pool level with +1. Because the copier and
-	// the replication applier use the same pool, it allows for some natural throttling
-	// of the copier if the replication applier is lagging. Because it's +1 it
-	// means that the replication applier can always make progress immediately,
-	// and does not need to wait for free slots from the copier *until* it needs
-	// copy in more than 1 thread.
+	// Size the connection pool the same way for both the buffered and
+	// unbuffered paths:
 	//
-	// Pool size grows monotonically across migration phases — later phases
-	// (checksum, cutover) ratchet the limit upward via SetMaxOpenConns but
-	// never shrink it. That is deliberate: each phase's increase reflects
-	// its own connection budget, and by the time we're past the copy phase
-	// the copier/applier backpressure that motivated the starting +1 no
-	// longer applies. There is no point past which a smaller pool would
-	// help, so there is nothing to restore.
-	r.dbConfig.MaxOpenConnections = r.migration.Threads + 1
-	if !r.migration.Unbuffered {
-		// Buffered has many more connections because it fans out x8 more write threads
-		// Plus it has read threads. Set this high and figure it out later.
-		r.dbConfig.MaxOpenConnections = 100
-	}
+	//	pool = threads + write-threads + 1
+	//
+	//	- threads        copier + checksum read concurrency
+	//	- write-threads  replication-applier write concurrency
+	//	- +1             headroom for control-plane queries (feedback,
+	//	                 checkpoints) so they don't wait behind a fully
+	//	                 saturated copier + applier
+	//
+	// WriteThreads may still be 0 here — that's the "auto-size on Aurora"
+	// sentinel, which can only be resolved once we have a connection to probe
+	// the server. So this seeds the pool with what's known now, and
+	// setupCopierCheckerAndReplClient grows it to the final size after
+	// resolving WriteThreads. The pool only ever grows (via SetMaxOpenConns);
+	// later phases (checksum, cutover) ratchet it further but never shrink it.
+	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + 1
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", maskPasswordInDSN(r.dsn()), err)
@@ -493,6 +490,25 @@ func (r *Runner) checkpointTableName() string {
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
+
+	// Resolve the number of apply (write) threads now that we have a
+	// connection. WriteThreads==0 means "auto-size": on Aurora it becomes the
+	// instance vCPU count; on non-Aurora it is an error (there is no reliable
+	// vCPU signal to size from — the CLI default of 4 keeps interactive users
+	// out of this path). Idempotent: a resolved (non-zero) value passes
+	// through unchanged if this runs again.
+	r.migration.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.db, r.migration.WriteThreads)
+	if err != nil {
+		return err
+	}
+	// Finalize the pool now that WriteThreads is known: threads + write-threads
+	// + 1 (see the MaxOpenConnections doc in Run). This is a no-op unless
+	// WriteThreads was auto-sized up from 0; the pool only ever grows.
+	if poolSize := r.migration.Threads + r.migration.WriteThreads + 1; poolSize > r.dbConfig.MaxOpenConnections {
+		r.dbConfig.MaxOpenConnections = poolSize
+		r.db.SetMaxOpenConns(poolSize)
+	}
+
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 
 	// We always create an applier — the replication client requires one to
@@ -511,7 +527,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		&applier.ApplierConfig{
 			Logger:   r.logger,
 			DBConfig: r.dbConfig,
-			Threads:  r.migration.Threads,
+			Threads:  r.migration.WriteThreads,
 		},
 	)
 	if err != nil {
