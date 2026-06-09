@@ -112,6 +112,7 @@ func TestCheckpoint(t *testing.T) {
 			TargetChunkTime:  100 * time.Millisecond,
 			Table:            "cpt1",
 			Alter:            "ENGINE=InnoDB",
+			Unbuffered:       true, // steps the unbuffered copier's CopyChunk directly
 			useTestThrottler: true,
 		})
 		require.NoError(t, err)
@@ -319,6 +320,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		TargetChunkTime:  100 * time.Millisecond,
 		Table:            "binarypk",
 		Alter:            "ENGINE=InnoDB",
+		Unbuffered:       true, // steps the unbuffered copier's CopyChunk directly
 		useTestThrottler: true,
 	})
 	require.NoError(t, err)
@@ -349,13 +351,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 
 	// Try and resume and then check if we used a checkpoint for resuming.
 	r2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "binarypk",
-		Alter:    "ENGINE=InnoDB",
+		Host:       cfg.Addr,
+		Username:   cfg.User,
+		Password:   &cfg.Passwd,
+		Database:   cfg.DBName,
+		Threads:    2,
+		Table:      "binarypk",
+		Alter:      "ENGINE=InnoDB",
+		Unbuffered: true, // resume the unbuffered first-run checkpoint with the same copier
 	})
 	require.NoError(t, err)
 	require.NoError(t, r2.Run(t.Context()))
@@ -446,6 +449,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 			Table:            "cpt1difft1",
 			Alter:            alter,
 			TargetChunkTime:  100 * time.Millisecond,
+			Unbuffered:       true, // steps the unbuffered copier's CopyChunk directly
 			useTestThrottler: true,
 		})
 		require.NoError(t, err)
@@ -714,6 +718,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Table:            "phantomtest",
 		Alter:            "ENGINE=InnoDB",
 		TargetChunkTime:  100 * time.Millisecond,
+		Unbuffered:       true, // steps the unbuffered copier's CopyChunk directly
 		useTestThrottler: true,
 	})
 	require.NoError(t, err)
@@ -784,6 +789,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Table:           "phantomtest",
 		Alter:           "ENGINE=InnoDB",
 		TargetChunkTime: 100 * time.Millisecond,
+		Unbuffered:      true, // resume the unbuffered first-run checkpoint with the same copier
 	})
 	require.NoError(t, err)
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())

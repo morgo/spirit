@@ -92,10 +92,12 @@ func WithTargetChunkTime(d time.Duration) RunnerOption {
 	}
 }
 
-// WithBuffered enables or disables the buffered copier.
+// WithBuffered enables (b=true) or disables (b=false) the buffered copier.
+// Buffered copy is the default, so this sets the inverse Unbuffered field;
+// WithBuffered(false) opts a test back into the legacy unbuffered copier.
 func WithBuffered(b bool) RunnerOption {
 	return func(m *Migration) {
-		m.Buffered = b
+		m.Unbuffered = !b
 	}
 }
 

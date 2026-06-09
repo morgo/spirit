@@ -14,7 +14,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 ## Configuration
 
 - [alter](#alter)
-- [buffered](#buffered)
 - [checkpoint-max-age](#checkpoint-max-age)
 - [checksum-yield-timeout](#checksum-yield-timeout)
 - [conf](#conf)
@@ -42,6 +41,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
   - [REQUIRED](#required)
   - [VERIFY\_CA](#verify_ca)
   - [VERIFY\_IDENTITY](#verify_identity)
+- [unbuffered](#unbuffered)
 - [username](#username)
 
 ### alter
@@ -53,22 +53,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 The alter table command to perform. The default value is a _null alter table_, which can be useful for testing.
 
 See also: `--statement`.
-
-### buffered
-
-- Type: Boolean
-- Default value: `false`
-
-When set to `true`, Spirit uses the buffered copy algorithm (based on [Netflix's DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)) instead of the default `INSERT IGNORE .. SELECT` approach. The buffered copier reads rows from the source table into memory and then inserts them into the new table, fanning out writes across many parallel threads. Changes from replication are also applied in a similar buffered way.
-
-The advantages of buffered copy are:
-
-- **No data locks on the source table** — the source is only read, never locked for writes. This eliminates contention between the copier and OLTP workloads on hot rows.
-- **Cross-server compatibility** — the same algorithm is used by the `move` command to copy tables between different MySQL servers.
-
-The buffered copier requires `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since it relies on reading all column values from the binary log.
-
-Note: buffered copy is not yet supported for multi-table migrations (i.e. when using `--statement` with multiple `ALTER TABLE` statements).
 
 ### checkpoint-max-age
 
@@ -555,6 +539,22 @@ spirit migrate --tls-mode VERIFY_IDENTITY \
        --threads 10
 ```
 **Result**: Uses embedded RDS certificate with full verification for RDS hostname.
+
+### unbuffered
+
+- Type: Boolean
+- Default value: `false`
+
+By default Spirit uses the **buffered** copy algorithm (based on [Netflix's DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)). The buffered copier reads rows from the source table into memory and then inserts them into the new table, fanning out writes across many parallel threads. Changes from replication are also applied in a similar buffered way.
+
+The advantages of buffered copy are:
+
+- **No data locks on the source table** — the source is only read, never locked for writes. This eliminates contention between the copier and OLTP workloads on hot rows.
+- **Cross-server compatibility** — the same algorithm is used by the `move` command to copy tables between different MySQL servers.
+
+Setting `--unbuffered` opts back into the **legacy** mechanism of using `INSERT IGNORE .. SELECT` directly in MySQL. This was the default in older versions of Spirit and is still supported for now, but it has the downside of requiring more locking on the source table: the `SELECT` side of `INSERT .. SELECT` takes shared row locks rather than using MVCC, so it can contend with production workloads touching the same rows. (Smaller `--target-chunk-time` values mitigate this by holding those locks for less time per chunk.)
+
+Both copiers require `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since Spirit's replication subscription reads all column values from the binary log.
 
 ### username
 

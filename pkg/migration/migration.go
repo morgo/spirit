@@ -50,10 +50,12 @@ type Migration struct {
 	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:""`
 	TLSCertificatePath string `name:"tls-ca" help:"Path to custom TLS CA certificate file" optional:""`
 
-	// Buffered copy uses the DBLog algorithm for copying and replication applying.
-	// It reads rows from the source and inserts them into the target, rather than
-	// using INSERT IGNORE .. SELECT. This is also required for cross-server moves.
-	Buffered bool `name:"buffered" help:"Use the buffered copier based on the lock-free DBLog algorithm" optional:"" default:"false"`
+	// Buffered copy (the default) uses the DBLog algorithm for copying and
+	// replication applying. It reads rows from the source and inserts them into
+	// the target, rather than using INSERT IGNORE .. SELECT, and is also required
+	// for cross-server moves. Unbuffered opts back into the legacy
+	// INSERT IGNORE .. SELECT copier.
+	Unbuffered bool `name:"unbuffered" help:"Use the legacy unbuffered copier (INSERT IGNORE .. SELECT) instead of the default buffered DBLog copier" optional:"" default:"false"`
 
 	// GTID switches the change source from binlog file+position to MySQL GTIDs.
 	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and

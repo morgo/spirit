@@ -19,7 +19,7 @@ Spirit is a single binary with subcommands for MySQL schema and data operations:
 - Use **`spirit diff`** to compare two MySQL schemas and lint the differences.
 - Use **`spirit fmt`** to canonicalize `CREATE TABLE` `.sql` files so they match MySQL's internal representation (e.g., `BOOLEAN` → `TINYINT(1)`).
 
-Both `migrate` and `move` share the same core engine: they stream binlog changes, copy rows in parallel, verify data with a checksum, and perform an atomic cutover. The `move` subcommand always uses the [buffered copy](migrate.md#buffered) algorithm, while `migrate` defaults to unbuffered `INSERT .. SELECT` (with `--buffered` available as an option).
+Both `migrate` and `move` share the same core engine: they stream binlog changes, copy rows in parallel, verify data with a checksum, and perform an atomic cutover. The `move` subcommand always uses the buffered copy algorithm, and `migrate` now defaults to it too (with [`--unbuffered`](migrate.md#unbuffered) available to opt back into the legacy `INSERT .. SELECT` copier).
 
 ## Building
 

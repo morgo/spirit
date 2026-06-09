@@ -20,9 +20,9 @@ This separation of concerns makes the copier easier to test and maintain. The co
 
 Spirit provides two copier implementations:
 
-### Unbuffered Copier (Default)
+### Unbuffered Copier (Legacy)
 
-The unbuffered copier uses `INSERT IGNORE INTO ... SELECT` statements to copy data directly within MySQL. This is the **default and recommended** implementation for schema changes.
+The unbuffered copier uses `INSERT IGNORE INTO ... SELECT` statements to copy data directly within MySQL. This is the legacy mechanism — the default in older versions of Spirit — and is still supported via `--unbuffered`, but its `SELECT` side takes shared row locks (see Disadvantages below), so the buffered copier is now the default.
 
 **Advantages:**
 - Minimal data transfer between Spirit and MySQL
@@ -35,9 +35,9 @@ The unbuffered copier uses `INSERT IGNORE INTO ... SELECT` statements to copy da
 
 The locking issue is mitigated by using smaller chunks with dynamic chunk sizing, which yields locks frequently enough to avoid blocking other queries.
 
-### Buffered Copier
+### Buffered Copier (Default)
 
-The buffered copier implements a producer/consumer pattern inspired by [DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b). Multiple reader goroutines extract rows from the source table and send them to an applier, which breaks them into chunklets and writes them to the target.
+The buffered copier implements a producer/consumer pattern inspired by [DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b). Multiple reader goroutines extract rows from the source table and send them to an applier, which breaks them into chunklets and writes them to the target. It is the **default** implementation for schema changes.
 
 **Advantages:**
 - Can copy data between different MySQL servers
@@ -49,7 +49,7 @@ The buffered copier implements a producer/consumer pattern inspired by [DBLog](h
 - Higher network overhead between Spirit and MySQL
 - More CPU usage for serialization/deserialization
 
-**Status:** The buffered copier is considered stable. It is primarily used for move operations where cross-server copying is required, but can also be used for schema changes by passing the `--buffered` option to `spirit`.
+**Status:** The buffered copier is considered stable and is the default for schema changes. It is also used for all move operations, where cross-server copying is required. Pass `--unbuffered` to `spirit` to use the legacy unbuffered copier instead.
 
 ## Interface
 
@@ -103,7 +103,7 @@ type CopierConfig struct {
 - **`MetricsSink`** (default: `NoopSink`): Destination for metrics like chunk processing time and row counts.
 - **`DBConfig`**: Database connection configuration including retry settings.
 - **`Applier`**: Used by the buffered copier to write rows to the target. The migration runner shares one applier between the copier and the replication client, so this field may be set even when the copier itself is unbuffered — the unbuffered copier ignores it. Required (non-nil) when `Buffered` is true.
-- **`Buffered`** (default: `false`): Selects between the buffered and unbuffered copier implementations. The buffered copier streams rows through `Applier`; the unbuffered copier issues `INSERT IGNORE INTO _new ... SELECT FROM original` directly and ignores `Applier`.
+- **`Buffered`** (config zero value: `false`): Selects between the buffered and unbuffered copier implementations. The buffered copier streams rows through `Applier`; the unbuffered copier issues `INSERT IGNORE INTO _new ... SELECT FROM original` directly and ignores `Applier`. Note the layering: the struct's zero value is `false`, but the migration runner sets it to `true` by default (passing `false` only when `--unbuffered` is given), and the move/sync runners always set it to `true`.
 
 ## Usage
 
