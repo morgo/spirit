@@ -109,6 +109,7 @@ func TestCheckpoint(t *testing.T) {
 			Password:         &cfg.Passwd,
 			Database:         cfg.DBName,
 			Threads:          1,
+			WriteThreads:     1,
 			TargetChunkTime:  100 * time.Millisecond,
 			Table:            "cpt1",
 			Alter:            "ENGINE=InnoDB",
@@ -240,13 +241,14 @@ func TestCheckpointRestore(t *testing.T) {
 	require.NoError(t, err)
 
 	r, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "cpt2",
-		Alter:    "ENGINE=InnoDB",
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      2,
+		WriteThreads: 2,
+		Table:        "cpt2",
+		Alter:        "ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	require.Equal(t, "initial", r.status.Get().String())
@@ -282,13 +284,14 @@ func TestCheckpointRestore(t *testing.T) {
 	require.NoError(t, r.Close())
 
 	r2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "cpt2",
-		Alter:    "ENGINE=InnoDB",
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      2,
+		WriteThreads: 2,
+		Table:        "cpt2",
+		Alter:        "ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	require.NoError(t, r2.Run(t.Context()))
@@ -316,6 +319,7 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		Password:         &cfg.Passwd,
 		Database:         cfg.DBName,
 		Threads:          1,
+		WriteThreads:     1,
 		TargetChunkTime:  100 * time.Millisecond,
 		Table:            "binarypk",
 		Alter:            "ENGINE=InnoDB",
@@ -349,13 +353,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 
 	// Try and resume and then check if we used a checkpoint for resuming.
 	r2, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
-		Table:    "binarypk",
-		Alter:    "ENGINE=InnoDB",
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      2,
+		WriteThreads: 2,
+		Table:        "binarypk",
+		Alter:        "ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	require.NoError(t, r2.Run(t.Context()))
@@ -443,6 +448,7 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 			Password:         &cfg.Passwd,
 			Database:         cfg.DBName,
 			Threads:          2,
+			WriteThreads:     2,
 			Table:            "cpt1difft1",
 			Alter:            alter,
 			TargetChunkTime:  100 * time.Millisecond,
@@ -711,6 +717,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Password:         &cfg.Passwd,
 		Database:         cfg.DBName,
 		Threads:          2,
+		WriteThreads:     2,
 		Table:            "phantomtest",
 		Alter:            "ENGINE=InnoDB",
 		TargetChunkTime:  100 * time.Millisecond,
@@ -781,6 +788,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Password:        &cfg.Passwd,
 		Database:        cfg.DBName,
 		Threads:         2,
+		WriteThreads:    2,
 		Table:           "phantomtest",
 		Alter:           "ENGINE=InnoDB",
 		TargetChunkTime: 100 * time.Millisecond,

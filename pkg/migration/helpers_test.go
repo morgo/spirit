@@ -64,6 +64,13 @@ func WithThreads(n int) RunnerOption {
 	}
 }
 
+// WithWriteThreads sets the number of concurrent apply (write) threads.
+func WithWriteThreads(n int) RunnerOption {
+	return func(m *Migration) {
+		m.WriteThreads = n
+	}
+}
+
 // WithTable sets the table name for the migration.
 func WithTable(name string) RunnerOption {
 	return func(m *Migration) {
@@ -204,11 +211,12 @@ func newTestMigration(t *testing.T, opts ...RunnerOption) *Migration {
 	require.NoError(t, err)
 
 	migration := &Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  2,
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      2,
+		WriteThreads: 2,
 	}
 	for _, opt := range opts {
 		opt(migration)

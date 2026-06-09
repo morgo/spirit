@@ -34,6 +34,7 @@ type Migration struct {
 	Table                string        `name:"table" help:"Table" optional:""`
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
+	WriteThreads         int           `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets 0 is an error" optional:"" default:"4"`
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
 	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
@@ -91,6 +92,9 @@ func (m *Migration) Validate() error {
 	}
 	if m.Threads < 0 {
 		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
+	}
+	if m.WriteThreads < 0 {
+		return fmt.Errorf("--write-threads must be non-negative, got %d", m.WriteThreads)
 	}
 	if m.TargetChunkTime < 0 {
 		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)

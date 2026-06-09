@@ -54,6 +54,44 @@ const (
 	auroraVCPUsQuery = `SELECT @@innodb_purge_threads`
 )
 
+// auroraVCPUs reads the instance vCPU count from @@innodb_purge_threads, which
+// Aurora pins to the vCPU count (issue #831). It returns an error if the value
+// is non-positive. This is only meaningful on Aurora — callers should gate on
+// IsAurora first.
+func auroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
+	var vCPUs int
+	if err := db.QueryRowContext(ctx, auroraVCPUsQuery).Scan(&vCPUs); err != nil {
+		return 0, fmt.Errorf("reading @@innodb_purge_threads for vCPU count: %w", err)
+	}
+	if vCPUs <= 0 {
+		return 0, fmt.Errorf("@@innodb_purge_threads returned non-positive value %d", vCPUs)
+	}
+	return vCPUs, nil
+}
+
+// ResolveWriteThreads resolves the number of apply (write) threads to use
+// against a target. A positive requested value is returned unchanged. Zero
+// means "auto-size": on Aurora it resolves to the instance vCPU count
+// (@@innodb_purge_threads); on non-Aurora there is no reliable vCPU signal to
+// size from, so it is an error — callers must pass an explicit positive value.
+// A negative value is rejected.
+func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int) (int, error) {
+	if requested < 0 {
+		return 0, fmt.Errorf("write threads must be non-negative, got %d", requested)
+	}
+	if requested > 0 {
+		return requested, nil
+	}
+	isAurora, err := IsAurora(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	if !isAurora {
+		return 0, errors.New("write threads cannot be auto-sized on a non-Aurora target: set write-threads to a positive value")
+	}
+	return auroraVCPUs(ctx, db)
+}
+
 // activeThreadsPollInterval mirrors commitLatencyPollInterval — we want fast
 // enough to catch sustained CPU pressure without hammering the perf-schema
 // join. Var (not const) so tests can shorten it.
@@ -109,12 +147,11 @@ func NewActiveThreadsThrottler(db *sql.DB, logger *slog.Logger) (*ActiveThreads,
 }
 
 func (a *ActiveThreads) Open(ctx context.Context) error {
-	if err := a.db.QueryRowContext(ctx, auroraVCPUsQuery).Scan(&a.vCPUs); err != nil {
-		return fmt.Errorf("reading @@innodb_purge_threads for vCPU count: %w", err)
+	vCPUs, err := auroraVCPUs(ctx, a.db)
+	if err != nil {
+		return err
 	}
-	if a.vCPUs <= 0 {
-		return fmt.Errorf("@@innodb_purge_threads returned non-positive value %d", a.vCPUs)
-	}
+	a.vCPUs = int64(vCPUs)
 	a.logger.Info("Aurora active-threads throttler enabled", "vCPUs", a.vCPUs)
 	if err := a.UpdateLag(ctx); err != nil {
 		return err

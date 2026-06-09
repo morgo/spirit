@@ -173,13 +173,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Map TLS configuration from migration to dbConfig
 	r.dbConfig.TLSMode = r.migration.TLSMode
 	r.dbConfig.TLSCertificatePath = r.migration.TLSCertificatePath
-	// The copier and checker will use Threads to limit N tasks concurrently,
-	// but we also set it at the DB pool level with +1. Because the copier and
-	// the replication applier use the same pool, it allows for some natural throttling
-	// of the copier if the replication applier is lagging. Because it's +1 it
-	// means that the replication applier can always make progress immediately,
-	// and does not need to wait for free slots from the copier *until* it needs
-	// copy in more than 1 thread.
+	// The copier and checker use Threads to limit N tasks concurrently, but we
+	// also set it at the DB pool level with +1. Because the copier and the
+	// replication applier use the same pool, it allows for some natural
+	// throttling of the copier if the replication applier is lagging. Because
+	// it's +1 it means that the replication applier can always make progress
+	// immediately, and does not need to wait for free slots from the copier
+	// *until* it needs copy in more than 1 thread.
+	//
+	// This is the starting size. Once WriteThreads is resolved (it may be 0 =
+	// auto until we've probed the server — see setupCopierCheckerAndReplClient)
+	// the pool grows to Threads+WriteThreads+1 so the applier's write threads
+	// have their own connections.
 	//
 	// Pool size grows monotonically across migration phases — later phases
 	// (checksum, cutover) ratchet the limit upward via SetMaxOpenConns but
@@ -540,6 +545,26 @@ func (r *Runner) checkpointTableName() string {
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
+
+	// Resolve the number of apply (write) threads now that we have a
+	// connection. WriteThreads==0 means "auto-size": on Aurora it becomes the
+	// instance vCPU count; on non-Aurora it is an error (there is no reliable
+	// vCPU signal to size from — the CLI default of 4 keeps interactive users
+	// out of this path). Idempotent: a resolved (non-zero) value passes
+	// through unchanged if this runs again.
+	r.migration.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.db, r.migration.WriteThreads)
+	if err != nil {
+		return err
+	}
+	// Grow the connection pool so the apply (write) threads have connections in
+	// addition to the copy/checksum threads. The pool only grows (see the
+	// MaxOpenConnections doc in Run); buffered mode's larger fixed pool wins
+	// when it is already bigger.
+	if poolSize := r.migration.Threads + r.migration.WriteThreads + 1; poolSize > r.dbConfig.MaxOpenConnections {
+		r.dbConfig.MaxOpenConnections = poolSize
+		r.db.SetMaxOpenConns(poolSize)
+	}
+
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 
 	// We always create an applier — the replication client requires one to
@@ -557,7 +582,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		&applier.ApplierConfig{
 			Logger:   r.logger,
 			DBConfig: r.dbConfig,
-			Threads:  r.migration.Threads,
+			Threads:  r.migration.WriteThreads,
 		},
 	)
 	if err != nil {
