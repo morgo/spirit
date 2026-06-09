@@ -813,26 +813,14 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// We always attempt to resume from a checkpoint.
 	if err = r.resumeFromCheckpoint(ctx); err != nil {
-		// Strict mode prevents silent loss of checkpoint progress.
-		// A mismatched alter means the user changed the DDL between runs.
-		// An expired binlog means the checkpoint can't be used because
-		// changes would be lost in the replication gap.
-		// A checkpoint that is too old means replaying binlogs would be
-		// slower than starting fresh.
-		// A truncation collision means the checkpoint belongs to a
-		// different long table that shares our truncated prefix.
-		// In all cases, strict mode surfaces the error rather than
-		// silently restarting from scratch.
-		if r.migration.Strict && (errors.Is(err, status.ErrMismatchedAlter) || errors.Is(err, status.ErrBinlogNotFound) || errors.Is(err, status.ErrCheckpointTooOld) || errors.Is(err, status.ErrCheckpointCollision)) {
-			return err
-		}
-
+		// Resume is best-effort: a mismatched alter, expired binlog, too-old
+		// checkpoint, or truncation collision all mean the checkpoint can't be
+		// used. Spirit logs the reason and falls back to a fresh migration so
+		// it always makes forward progress.
 		r.logger.Info("could not resume from checkpoint",
 			"reason", err,
 		) // explain why it failed.
 
-		// Since we are not strict, we are allowed to
-		// start a new migration.
 		if err := r.newMigration(ctx); err != nil {
 			return err
 		}
@@ -1148,9 +1136,9 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Open the change source at the checkpointed position. StartFromPosition
 	// validates the position is still resumable (e.g. binlog file purged on
 	// MySQL) and starts streaming. If the source can no longer reach the
-	// position, surface it as status.ErrBinlogNotFound so strict-mode and
-	// resume tests pick it up; otherwise propagate the error so the caller
-	// can abandon resume-from-checkpoint and start fresh.
+	// position, surface it as status.ErrBinlogNotFound so resume tests pick it
+	// up; otherwise propagate the error so the caller can abandon
+	// resume-from-checkpoint and start fresh.
 	if err := r.replClient.StartFromPosition(ctx, binlogPosition); err != nil {
 		r.logger.Warn("resuming from checkpoint failed because resuming from the previous source position failed",
 			"position", binlogPosition,

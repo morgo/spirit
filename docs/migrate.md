@@ -31,7 +31,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [skip-drop-after-cutover](#skip-drop-after-cutover)
 - [skip-force-kill](#skip-force-kill)
 - [statement](#statement)
-- [strict](#strict)
 - [table](#table)
 - [target-chunk-time](#target-chunk-time)
 - [threads](#threads)
@@ -70,7 +69,7 @@ This protects against resuming from very stale checkpoints where replaying the a
 
 When Spirit reads a checkpoint, it relies on the columns of the checkpoint table matching the columns the current binary expects:
 
-- **If the checkpoint table schema differs** between versions (columns added, removed, or reordered), the resume read will fail and Spirit logs a warning and starts a fresh migration. This is true in both strict and non-strict modes — [`--strict`](#strict) does not currently hard-fail on a checkpoint-table schema mismatch, so progress from the previous binary version is silently discarded.
+- **If the checkpoint table schema differs** between versions (columns added, removed, or reordered), the resume read will fail and Spirit logs a warning and starts a fresh migration. Progress from the previous binary version is silently discarded.
 - **If the checkpoint table schema is unchanged but the *meaning* of stored values has changed** between versions (for example, a watermark format change, a routing-policy change, or a new applier behavior), Spirit cannot detect the mismatch. The resume will silently succeed and the new binary will reinterpret the old checkpoint, which can produce incorrect results.
 
 Operationally, this means:
@@ -200,9 +199,8 @@ The main practical differences vs. the default path:
 A resume from checkpoint fails fast if `@@GLOBAL.gtid_purged` is no longer a
 subset of the checkpointed GTID set (i.e. the source has dropped binlogs Spirit
 would need to re-apply). In that case Spirit surfaces
-`change.Source: cannot resume from position`, which under default (non-strict)
-mode causes a restart from scratch, and under [`--strict`](#strict) causes an
-exit with `status.ErrBinlogNotFound`.
+`change.Source: cannot resume from position`, logs the reason, and restarts the
+migration from scratch.
 
 ```bash
 spirit migrate --gtid \
@@ -344,26 +342,6 @@ There are some restrictions to `--statement`:
 - When sending multiple statements, all statements must be `ALTER TABLE` statements.
 - When sending multiple statements, the `INSTANT` and `INPLACE` optimizations will be skipped. This means that metadata-only changes that would execute instantly if submitted alone will require a full table copy.
 - When sending multiple statements, all statements must operate on tables in the same underlying database (aka schema).
-
-### strict
-
-- Type: Boolean
-- Default value: `false`
-
-> **⚠️ Not recommended.** In most cases, the default behavior (idempotent restart) is safer and more convenient. `--strict` was added for a specific internal use case and is generally the wrong choice for new deployments. If a previous migration was interrupted, the default behavior will safely clean up and restart, which is almost always what you want.
-
-By default, Spirit will automatically clean up old checkpoints before starting the schema change. This allows schema changes to always proceed forward, at the cost of potentially lost progress from a previous incomplete run.
-
-When set to `true`, if Spirit encounters a checkpoint belonging to a previous migration, it will validate that the statement being executed matches the statement from the previous run (whether provided via `--alter` or `--statement`). If the validation fails (e.g., the statement was changed between runs, or the binlog position is no longer available), Spirit will exit with an error rather than silently restarting from scratch.
-
-The scenarios where `--strict` causes Spirit to fail rather than restart are:
-- The migration statement changed between runs (checkpoint has a different statement)
-- The binlog file referenced by the checkpoint has been purged from the server
-- The checkpoint is too old to safely resume (replaying binlogs would be slower than restarting)
-
-In all of these cases, the default (non-strict) behavior is to log a warning and start fresh, which is usually the correct action.
-
-Note: a checkpoint-table schema mismatch (typically caused by resuming with a different Spirit binary version — see [Resuming across Spirit binary versions](#resuming-across-spirit-binary-versions)) is **not** one of the strict-mode hard-fail cases. In both strict and non-strict mode Spirit logs a warning and starts a fresh migration.
 
 ### table
 
