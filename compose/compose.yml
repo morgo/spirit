@@ -35,17 +35,18 @@ services:
     environment:
       MYSQL_DSN: tsandbox:msandbox@tcp(mysql)/test
 
-  # Dedicated runner for the version-agnostic recovery / resume-from-checkpoint
-  # suite (pkg/migration/resume_test.go, behind `//go:build recovery`). It is
-  # gated to this one service so it isn't re-run against every MySQL version in
-  # the matrix — the recovery logic is Spirit's own and doesn't vary by server
-  # version. Invoked by .github/workflows/mysql8.0.45-recovery-docker.yml against
-  # the base 8.0.45 image (GTID enabled above, for the GTID resume tests).
-  # The -run filter restricts the run to the recovery tests; see resume_test.go.
-  recovery-test:
+  # Dedicated runner for the version-agnostic "single-version" suite
+  # (pkg/migration/{resume,singleversion,lint}_test.go, behind
+  # `//go:build singleversion`). It is gated to this one service so it isn't
+  # re-run against every MySQL version in the matrix — these tests exercise
+  # Spirit's own logic and don't vary by server version. Invoked by
+  # .github/workflows/mysql8.0.45-singleversion-docker.yml against the base
+  # 8.0.45 image (GTID enabled above, for the GTID resume tests). The -run filter
+  # restricts the run to the suite's tests; see singleversion_test.go.
+  singleversion-test:
     build:
       context: ../
-    command: bash -c "go test -json -race -v -tags recovery -run 'Resume|Checkpoint' -timeout=10m -parallel=4 ./pkg/migration/... | tee /proc/1/fd/1 | tparse -all"
+    command: bash -c "go test -json -race -v -tags singleversion -run 'Resume|Checkpoint|UniqueOnNonUniqueData|ChunkerPrefetching|Unparsable|Lint' -timeout=10m -parallel=4 ./pkg/migration/... | tee /proc/1/fd/1 | tparse -all"
     depends_on:
       mysql:
         condition: service_healthy

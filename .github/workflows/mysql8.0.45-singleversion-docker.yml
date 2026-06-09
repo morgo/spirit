@@ -1,4 +1,4 @@
-name: MySQL 8.0.45 recovery suite /w docker-compose
+name: MySQL 8.0.45 single-version suite /w docker-compose
 on:
   push:
     branches: [ main ]
@@ -23,14 +23,15 @@ jobs:
               - '!**/*.md'
               - '!docs/**'
 
-      # Runs the version-agnostic recovery / resume-from-checkpoint suite
-      # (pkg/migration/resume_test.go, behind `//go:build recovery`) once,
-      # against the base 8.0.45 image. The other version-matrix jobs omit the
-      # `recovery` build tag and therefore skip this suite. See the recovery-test
-      # service in compose/compose.yml and the header of resume_test.go.
-      - name: Recovery suite
+      # Runs the version-agnostic "single-version" suite
+      # (pkg/migration/{resume,singleversion,lint}_test.go, behind
+      # `//go:build singleversion`) once, against the base 8.0.45 image. The
+      # other version-matrix jobs omit the `singleversion` build tag and so skip
+      # these files. See the singleversion-test service in compose/compose.yml
+      # and the header of singleversion_test.go.
+      - name: Single-version suite
         if: steps.filter.outputs.code == 'true'
-        run: docker compose -f compose.yml up mysql recovery-test --abort-on-container-exit --exit-code-from recovery-test
+        run: docker compose -f compose.yml up mysql singleversion-test --abort-on-container-exit --exit-code-from singleversion-test
         working-directory: compose
 
       - name: Skip — documentation-only change
