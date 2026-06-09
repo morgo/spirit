@@ -213,7 +213,7 @@ The applier issues `REPLACE INTO target VALUES (...)` from inline row images (no
 ### `pkg/copier`
 Two algorithms:
 - **Buffered** (default) — producer/consumer pattern; required for cross-server migrations (`pkg/move`) and the default for single-server schema changes. Reads rows into Spirit and writes them through the applier, taking no locks on the source.
-- **Unbuffered** (`--unbuffered`) — `INSERT IGNORE INTO ... SELECT` directly in MySQL; the legacy copier. Selected via `CopierConfig.Buffered`: the migration runner sets `Buffered = !Unbuffered`, so the buffered copier runs unless `--unbuffered` is passed. The copier ignores the applier when `Buffered` is false even if one is supplied.
+- **Unbuffered** (`--unbuffered`) — `INSERT IGNORE INTO ... SELECT` directly in MySQL; the legacy copier. Selected via `CopierConfig.Unbuffered`, which the migration runner wires straight from `--unbuffered`, so the buffered copier runs unless `--unbuffered` is passed. The copier ignores the applier when `Unbuffered` is true even if one is supplied.
 
 ### `pkg/table`
 Three chunker implementations:

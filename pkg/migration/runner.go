@@ -543,7 +543,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		MetricsSink:     r.metricsSink,
 		DBConfig:        r.dbConfig,
 		Applier:         appl,
-		Buffered:        !r.migration.Unbuffered,
+		Unbuffered:      r.migration.Unbuffered,
 	})
 	if err != nil {
 		return err

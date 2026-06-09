@@ -90,7 +90,7 @@ type CopierConfig struct {
     MetricsSink                   metrics.Sink
     DBConfig                      *dbconn.DBConfig
     Applier                       applier.Applier
-    Buffered                      bool
+    Unbuffered                    bool
 }
 ```
 
@@ -102,8 +102,8 @@ type CopierConfig struct {
 - **`Logger`** (default: `slog.Default()`): Structured logger for debugging and monitoring.
 - **`MetricsSink`** (default: `NoopSink`): Destination for metrics like chunk processing time and row counts.
 - **`DBConfig`**: Database connection configuration including retry settings.
-- **`Applier`**: Used by the buffered copier to write rows to the target. The migration runner shares one applier between the copier and the replication client, so this field may be set even when the copier itself is unbuffered — the unbuffered copier ignores it. Required (non-nil) when `Buffered` is true.
-- **`Buffered`** (config zero value: `false`): Selects between the buffered and unbuffered copier implementations. The buffered copier streams rows through `Applier`; the unbuffered copier issues `INSERT IGNORE INTO _new ... SELECT FROM original` directly and ignores `Applier`. Note the layering: the struct's zero value is `false`, but the migration runner sets it to `true` by default (passing `false` only when `--unbuffered` is given), and the move/sync runners always set it to `true`.
+- **`Applier`**: Used by the buffered copier to write rows to the target. The migration runner shares one applier between the copier and the replication client, so this field may be set even when the copier itself is unbuffered — the unbuffered copier ignores it. Required (non-nil) for the buffered copier (i.e. whenever `Unbuffered` is false).
+- **`Unbuffered`** (default: `false`): Selects between the buffered and unbuffered copier implementations. When `false` (the default), the buffered copier streams rows through `Applier`; when `true`, the legacy unbuffered copier issues `INSERT IGNORE INTO _new ... SELECT FROM original` directly and ignores `Applier`. Both the struct's zero value and `NewCopierDefaultConfig()` leave this `false`, so the buffered copier is the default and a non-nil `Applier` is required. The migration runner sets `Unbuffered` from `--unbuffered`; the move/sync runners always leave it `false`.
 
 ## Usage
 
@@ -132,8 +132,11 @@ if err := chunker.Open(); err != nil {
     return err
 }
 
-// Create copier with default config
+// Create copier. NewCopierDefaultConfig() selects the buffered copier by
+// default (which requires an Applier — see the buffered example below); opt
+// into the legacy unbuffered copier with Unbuffered = true.
 config := copier.NewCopierDefaultConfig()
+config.Unbuffered = true
 config.Concurrency = 8
 config.Throttler = myThrottler
 
@@ -193,10 +196,10 @@ if err != nil {
     return err
 }
 
-// Create copier with buffered mode
+// Create copier with buffered mode (the default). NewCopierDefaultConfig()
+// selects the buffered copier, so all that's required is supplying the Applier.
 config := copier.NewCopierDefaultConfig()
 config.Applier = rowApplier
-config.Buffered = true
 
 copier, err := copier.NewCopier(sourceDB, chunker, config)
 if err != nil {
