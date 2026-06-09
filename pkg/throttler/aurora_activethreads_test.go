@@ -108,3 +108,47 @@ func TestCanReadActiveThreads_LocalMySQL(t *testing.T) {
 	// since runner.setupThrottler depends on it as the gate.
 	require.NoError(t, CanReadActiveThreads(t.Context(), db))
 }
+
+func TestResolveWriteThreads_PassThroughPositive(t *testing.T) {
+	// A positive value is returned unchanged without touching the DB, so a
+	// nil DB is safe here.
+	n, err := ResolveWriteThreads(t.Context(), nil, 8)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+}
+
+func TestResolveWriteThreads_RejectsNegative(t *testing.T) {
+	_, err := ResolveWriteThreads(t.Context(), nil, -1)
+	require.ErrorContains(t, err, "non-negative")
+}
+
+func TestResolveWriteThreads_NilDBWhenAutoSizing(t *testing.T) {
+	// Auto-sizing (requested==0) must reject a nil DB rather than panic.
+	_, err := ResolveWriteThreads(t.Context(), nil, 0)
+	require.ErrorContains(t, err, "no database connection")
+}
+
+func TestResolveWriteThreads_NonAuroraErrors_LocalMySQL(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// 0 means "auto-size". On a stock (non-Aurora) MySQL there is no reliable
+	// vCPU signal, so auto-sizing must fail rather than guess.
+	_, err = ResolveWriteThreads(t.Context(), db, 0)
+	require.ErrorContains(t, err, "non-Aurora")
+}
+
+func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// @@innodb_purge_threads exists on stock MySQL too (it just isn't pinned
+	// to the vCPU count there). The query and positive-value check should
+	// still succeed — this guards the shared helper used by both the
+	// active-threads throttler and write-thread auto-sizing.
+	vCPUs, err := auroraVCPUs(t.Context(), db)
+	require.NoError(t, err)
+	require.Positive(t, vCPUs)
+}

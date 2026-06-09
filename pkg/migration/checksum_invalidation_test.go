@@ -53,13 +53,14 @@ func setupRunnerForChecksumTest(t *testing.T, tableName string) *Runner {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	r, err := NewRunner(&Migration{
-		Host:     cfg.Addr,
-		Username: cfg.User,
-		Password: &cfg.Passwd,
-		Database: cfg.DBName,
-		Threads:  1,
-		Table:    tableName,
-		Alter:    "ENGINE=InnoDB",
+		Host:         cfg.Addr,
+		Username:     cfg.User,
+		Password:     &cfg.Passwd,
+		Database:     cfg.DBName,
+		Threads:      1,
+		WriteThreads: 1,
+		Table:        tableName,
+		Alter:        "ENGINE=InnoDB",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { utils.CloseAndLog(r) })
