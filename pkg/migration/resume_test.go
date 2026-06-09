@@ -1,3 +1,23 @@
+//go:build recovery
+
+// This file holds the recovery / resume-from-checkpoint suite. It exercises
+// Spirit's own checkpoint-and-resume logic, which is independent of the MySQL
+// server version — so there is no value in re-running it against every MySQL
+// version in CI. It is gated behind the `recovery` build tag and run in one
+// dedicated CI job against MySQL 8.0.45 (GTID enabled, for the GTID resume
+// tests) — see .github/workflows/mysql8.0.45-recovery-docker.yml and the
+// `recovery-test` service in compose/compose.yml. Every other version job runs
+// without the tag and so excludes this file.
+//
+// The dedicated job selects these tests with `-run 'Resume|Checkpoint'`, so new
+// recovery tests added here should keep "Resume" or "Checkpoint" in their name
+// to be picked up.
+//
+// To run it locally:
+//
+//	go test -tags recovery -run 'Resume|Checkpoint' ./pkg/migration/...
+//
+// A plain `go test ./...` (no tag) skips this file.
 package migration
 
 import (

@@ -1,0 +1,36 @@
+name: MySQL 8.0.45 recovery suite /w docker-compose
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect non-docs changes
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+
+      # Runs the version-agnostic recovery / resume-from-checkpoint suite
+      # (pkg/migration/resume_test.go, behind `//go:build recovery`) once,
+      # against the base 8.0.45 image. The other version-matrix jobs omit the
+      # `recovery` build tag and therefore skip this suite. See the recovery-test
+      # service in compose/compose.yml and the header of resume_test.go.
+      - name: Recovery suite
+        if: steps.filter.outputs.code == 'true'
+        run: docker compose -f compose.yml up mysql recovery-test --abort-on-container-exit --exit-code-from recovery-test
+        working-directory: compose
+
+      - name: Skip — documentation-only change
+        if: steps.filter.outputs.code != 'true'
+        run: echo "Documentation-only change detected; skipping tests."
