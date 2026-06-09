@@ -978,7 +978,16 @@ func (r *Runner) startFresh(ctx context.Context) error {
 	}
 	// Copy-only sync has no change feed to start.
 	if !r.sync.CopyOnly {
-		if err := r.replClient.Start(ctx); err != nil {
+		// The change-feed reader must outlive ctx. On a clean shutdown ctx is
+		// cancelled first, and only then does the drain path (runContinuous)
+		// issue its final Flush. That Flush relies on the reader goroutine to
+		// keep advancing the buffered binlog position so BlockWait can converge;
+		// if the reader were tied to ctx it would already be dead, the buffered
+		// position would be frozen, and the final flush would spin (re-flushing
+		// binary logs) until it burned its entire shutdownFlushTimeout budget.
+		// Tie the reader's lifetime to Close() instead — Close() cancels its own
+		// derived context — by handing it a cancellation-detached ctx here.
+		if err := r.replClient.Start(context.WithoutCancel(ctx)); err != nil {
 			return fmt.Errorf("failed to start change source: %w", err)
 		}
 	}
@@ -1016,11 +1025,14 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 		if err := r.replClient.SetWatermarkOptimization(ctx, false); err != nil {
 			return err
 		}
+		// The reader must outlive ctx so the drain-time final Flush can
+		// converge; see the matching comment in startFresh. Close() stops it.
+		streamCtx := context.WithoutCancel(ctx)
 		if pos != "" {
-			if err := r.replClient.StartFromPosition(ctx, pos); err != nil {
+			if err := r.replClient.StartFromPosition(streamCtx, pos); err != nil {
 				return fmt.Errorf("failed to resume change source from position %q: %w", pos, err)
 			}
-		} else if err := r.replClient.Start(ctx); err != nil {
+		} else if err := r.replClient.Start(streamCtx); err != nil {
 			// No saved position (prior attempt failed before checkpointing):
 			// start the feed fresh; changes apply with the optimization off.
 			return fmt.Errorf("failed to start change source: %w", err)
