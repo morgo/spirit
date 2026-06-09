@@ -953,7 +953,7 @@ func (r *Runner) buildCopyPipeline() error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.sourceDBConfig,
 		Applier:         r.applier,
-		Buffered:        true, // sync always uses the buffered copier
+		Unbuffered:      false, // sync always uses the buffered copier
 	})
 	if err != nil {
 		return err
