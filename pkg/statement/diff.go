@@ -143,15 +143,17 @@ func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement
 func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	var clauses []string
 
-	// Build maps for easier lookup
+	// Build maps for easier lookup. Keys are lowercased so identifier
+	// matching is case-insensitive — MySQL treats column names that
+	// differ only in case as the same column.
 	sourceColumns := make(map[string]*Column)
 	for i := range ct.Columns {
-		sourceColumns[ct.Columns[i].Name] = &ct.Columns[i]
+		sourceColumns[strings.ToLower(ct.Columns[i].Name)] = &ct.Columns[i]
 	}
 
 	targetColumns := make(map[string]*Column)
 	for i := range target.Columns {
-		targetColumns[target.Columns[i].Name] = &target.Columns[i]
+		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
 	}
 
 	// Handle PRIMARY KEY changes (inline column-level PRIMARY KEY)
@@ -163,7 +165,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	// Collect DROP operations and sort by name for deterministic output
 	var dropClauses []string
 	for _, sourceCol := range ct.Columns {
-		if _, exists := targetColumns[sourceCol.Name]; !exists {
+		if _, exists := targetColumns[strings.ToLower(sourceCol.Name)]; !exists {
 			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", quoteIdent(sourceCol.Name)))
 		}
 	}
@@ -179,7 +181,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 	// Generate the ALTER clauses in target order
 	var prevColumn string
 	for i, targetCol := range target.Columns {
-		sourceCol, existsInSource := sourceColumns[targetCol.Name]
+		sourceCol, existsInSource := sourceColumns[strings.ToLower(targetCol.Name)]
 
 		if !existsInSource {
 			// ADD new column
@@ -202,19 +204,23 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			// Also check if only nullability changed due to PK drop
 			// (PK columns are NOT NULL, dropping PK makes them NULL)
 			pkDroppedNullabilityChange := pkDropped &&
-				sourceCol.Name == pkColumn &&
+				strings.EqualFold(sourceCol.Name, pkColumn) &&
 				sourceCol.PrimaryKey && !targetCol.PrimaryKey &&
 				!sourceCol.Nullable && targetCol.Nullable
 
 			// MODIFY existing column if:
 			// 1. Column definition changed (and not just PK-related changes)
 			// 2. Column needs explicit positioning
+			// needsExplicitPosition is keyed by lowercased column name, so
+			// look up with the same normalization to avoid missing a
+			// position-only change when the target's spelling is in mixed
+			// or upper case.
 			needsModify := (!ct.columnsEqualWithContext(sourceCol, &targetCol, target) && !pkOnlyChange && !pkDroppedNullabilityChange) ||
-				needsExplicitPosition[targetCol.Name]
+				needsExplicitPosition[strings.ToLower(targetCol.Name)]
 
 			if needsModify {
 				clause := fmt.Sprintf("MODIFY COLUMN %s", formatColumnDefinition(&targetCol))
-				if needsExplicitPosition[targetCol.Name] {
+				if needsExplicitPosition[strings.ToLower(targetCol.Name)] {
 					if prevColumn == "" {
 						clause += " FIRST"
 					} else {
@@ -237,24 +243,26 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 }
 
 // calculateColumnPositioning determines which columns need explicit positioning (FIRST/AFTER).
-// Returns a map of column names that need explicit positioning.
+// Returns a map of column names (lowercased) that need explicit positioning.
+// Map keys are lowercased to match the source/target column maps built by
+// the caller, since column identifiers in MySQL are case-insensitive.
 func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceColumns, targetColumns map[string]*Column) map[string]bool {
 	needsExplicitPosition := make(map[string]bool)
 
 	var prevColumn string
 	for _, targetCol := range target.Columns {
-		_, existsInSource := sourceColumns[targetCol.Name]
+		_, existsInSource := sourceColumns[strings.ToLower(targetCol.Name)]
 
 		if !existsInSource {
 			// New columns always need explicit positioning
-			needsExplicitPosition[targetCol.Name] = true
+			needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
 		} else {
 			// Existing column - check if its position changed
 			sourcePrevCol := getPreviousColumn(ct.Columns, targetCol.Name)
 
 			// Check if this is an implicit or explicit position change
-			_, prevColExistedInSource := sourceColumns[prevColumn]
-			_, sourcePrevColStillExists := targetColumns[sourcePrevCol]
+			_, prevColExistedInSource := sourceColumns[strings.ToLower(prevColumn)]
+			_, sourcePrevColStillExists := targetColumns[strings.ToLower(sourcePrevCol)]
 
 			implicitChange := false
 			switch {
@@ -267,12 +275,12 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 			case sourcePrevCol != "" && !sourcePrevColStillExists:
 				// Previous column was dropped, position change is implicit
 				implicitChange = true
-			case prevColumn == sourcePrevCol:
+			case strings.EqualFold(prevColumn, sourcePrevCol):
 				// Same previous column, check if we need cascading
 				// Cascading happens if the previous column was repositioned
-				if prevColumn != "" && needsExplicitPosition[prevColumn] && prevColExistedInSource {
+				if prevColumn != "" && needsExplicitPosition[strings.ToLower(prevColumn)] && prevColExistedInSource {
 					// Previous column was repositioned, so this column needs repositioning too
-					needsExplicitPosition[targetCol.Name] = true
+					needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
 				}
 				implicitChange = true
 			default:
@@ -281,7 +289,7 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 			}
 
 			if !implicitChange {
-				needsExplicitPosition[targetCol.Name] = true
+				needsExplicitPosition[strings.ToLower(targetCol.Name)] = true
 			}
 		}
 
@@ -311,14 +319,17 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 
 	// If the PK columns are the same (regardless of inline vs table-level representation),
 	// no change is needed. MySQL normalizes inline PK to table-level PK in SHOW CREATE TABLE,
-	// so we need to compare semantically rather than syntactically.
-	if slices.Equal(sourcePKColumns, targetPKColumns) {
+	// so we need to compare semantically rather than syntactically. Column
+	// identifiers are case-insensitive in MySQL, so PK columns that differ
+	// only in case (e.g. `PRIMARY KEY (id)` vs `PRIMARY KEY (ID)`) are the
+	// same key.
+	if equalFoldStrings(sourcePKColumns, targetPKColumns) {
 		return "", "", false, ""
 	}
 
 	// Check for inline PK removal (column-level PRIMARY KEY)
 	for _, sourceCol := range ct.Columns {
-		targetCol, exists := targetColumns[sourceCol.Name]
+		targetCol, exists := targetColumns[strings.ToLower(sourceCol.Name)]
 		if exists && sourceCol.PrimaryKey && !targetCol.PrimaryKey {
 			// PRIMARY KEY was removed from this column (inline PK)
 			// But only drop it if there's no table-level PK in target
@@ -334,7 +345,7 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 
 	// Check for inline PK addition (column-level PRIMARY KEY)
 	for _, targetCol := range target.Columns {
-		sourceCol, exists := sourceColumns[targetCol.Name]
+		sourceCol, exists := sourceColumns[strings.ToLower(targetCol.Name)]
 		if exists && !sourceCol.PrimaryKey && targetCol.PrimaryKey {
 			// PRIMARY KEY was added to this column (inline PK)
 			// Add it if:
@@ -423,7 +434,8 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 
 	// Only handle inline PK <-> table-level PK transitions if the PK columns actually changed.
 	// If the columns are the same, the representations are semantically equivalent.
-	pkColumnsEqual := slices.Equal(sourcePKColumns, targetPKColumns)
+	// Compare case-insensitively, matching MySQL's column-name semantics.
+	pkColumnsEqual := equalFoldStrings(sourcePKColumns, targetPKColumns)
 
 	if sourceHasInlinePK && targetPKIndex != nil && !pkColumnsEqual {
 		// Inline PK -> table-level PK with different columns: drop the inline PK
@@ -701,7 +713,9 @@ func (to *TableOptions) getAutoIncrement() *string {
 // If a column's charset is nil, it inherits from the table. If it's explicitly set to the same as the table,
 // it's considered equal to nil (no explicit charset needed).
 func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable) bool {
-	if a.Name != b.Name {
+	// Column names are case-insensitive in MySQL, so `id` and `ID` refer
+	// to the same column.
+	if !strings.EqualFold(a.Name, b.Name) {
 		return false
 	}
 	if a.Type != b.Type {
@@ -800,7 +814,8 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 
 // columnsEqualIgnorePK checks if two columns are equal, ignoring the PrimaryKey attribute
 func columnsEqualIgnorePK(a, b *Column) bool {
-	if a.Name != b.Name {
+	// Column names are case-insensitive in MySQL.
+	if !strings.EqualFold(a.Name, b.Name) {
 		return false
 	}
 	if a.Type != b.Type {
@@ -874,12 +889,14 @@ func indexesEqual(a, b *Index) bool {
 	if a.Type != b.Type {
 		return false
 	}
-	// Compare using ColumnList if available, otherwise fall back to Columns
+	// Compare using ColumnList if available, otherwise fall back to Columns.
+	// Referenced column names are matched case-insensitively to mirror
+	// MySQL's column-identifier semantics.
 	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
 		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
 			return false
 		}
-	} else if !slices.Equal(a.Columns, b.Columns) {
+	} else if !equalFoldStrings(a.Columns, b.Columns) {
 		return false
 	}
 	if !ptrEqual(a.Invisible, b.Invisible) {
@@ -902,12 +919,13 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 	if a.Type != b.Type {
 		return false
 	}
-	// Compare using ColumnList if available, otherwise fall back to Columns
+	// Compare using ColumnList if available, otherwise fall back to Columns.
+	// Referenced column names are matched case-insensitively.
 	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
 		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
 			return false
 		}
-	} else if !slices.Equal(a.Columns, b.Columns) {
+	} else if !equalFoldStrings(a.Columns, b.Columns) {
 		return false
 	}
 	// Skip Invisible comparison
@@ -935,7 +953,8 @@ func indexColumnListsEqual(a, b []IndexColumn) bool {
 
 // indexColumnsEqual checks if two index columns are equal
 func indexColumnsEqual(a, b *IndexColumn) bool {
-	if a.Name != b.Name {
+	// Column identifiers are case-insensitive in MySQL.
+	if !strings.EqualFold(a.Name, b.Name) {
 		return false
 	}
 	if !ptrEqual(a.Expression, b.Expression) {

@@ -1,4 +1,4 @@
-package repl
+package change
 
 import (
 	"context"
@@ -188,7 +188,7 @@ func isMinimalRowImage(e *replication.RowsEvent) bool {
 //
 // pkg/migration.Runner has a near-identical helper (binlogFileExists)
 // over the same SHOW BINARY LOGS query. Consolidating into a single
-// shared helper would mean exposing it from pkg/repl or pulling both
+// shared helper would mean exposing it from pkg/change or pulling both
 // into a lower-level package; left as a follow-up.
 func binlogPositionIsImpossible(ctx context.Context, db *sql.DB, expectedLogName string) (bool, error) {
 	rows, err := db.QueryContext(ctx, "SHOW BINARY LOGS")

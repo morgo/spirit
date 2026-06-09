@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -53,12 +53,12 @@ func TestCutOver(t *testing.T) {
 	t1new := table.NewTableInfo(db, cfg.DBName, "_cutovert1_new")
 	t1old := "_cutovert1_old"
 	logger := slog.Default()
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 
 	cutoverConfig := []*cutoverConfig{
 		{
@@ -112,12 +112,12 @@ func TestMDLLockFails(t *testing.T) {
 	t1new := table.NewTableInfo(db, cfg.DBName, "_mdllocks_new")
 	t1old := "test_old"
 	logger := slog.Default()
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 
 	cutoverConfig := []*cutoverConfig{
 		{
@@ -181,7 +181,7 @@ func TestInvalidOptions(t *testing.T) {
 	require.NoError(t, t1.SetInfo(t.Context()))
 	t1new := table.NewTableInfo(db, cfg.DBName, "_invalid_t1_new")
 	t1old := "test_old"
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
@@ -753,14 +753,16 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 
 	waitForStatus(t, m, status.WaitingOnSentinelTable)
 
-	// Verify binlog position advances while waiting.
-	binlogPos := m.replClient.GetBinlogApplyPosition()
+	// Verify the source position advances while waiting. Position() is an
+	// opaque string and the binlogClient's internal setBufferedPos enforces
+	// monotonicity, so NotEqual is a sufficient "advanced" check.
+	binlogPos := m.replClient.Position()
 	for range 4 {
 		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (id) SELECT null FROM %s a, %s b, %s c LIMIT 1000", tableName, tableName, tableName, tableName))
 		require.NoError(t, m.replClient.BlockWait(t.Context()))
 		require.NoError(t, m.replClient.Flush(t.Context()))
-		newBinlogPos := m.replClient.GetBinlogApplyPosition()
-		require.Equal(t, 1, newBinlogPos.Compare(binlogPos))
+		newBinlogPos := m.replClient.Position()
+		require.NotEqual(t, binlogPos, newBinlogPos)
 		binlogPos = newBinlogPos
 	}
 

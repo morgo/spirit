@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
@@ -209,7 +209,7 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 			tlsConfig.TLSCertificatePath = tc.tlsCert
 
 			// Create replication client config with database config
-			clientConfig := repl.NewClientDefaultConfig()
+			clientConfig := change.NewClientDefaultConfig()
 			clientConfig.DBConfig = tlsConfig
 			// Create a mock database connection for testing
 			db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -223,7 +223,7 @@ func TestReplicationClientTLSConfig(t *testing.T) {
 				Threads:  1,
 			})
 			require.NoError(t, err)
-			client := repl.NewClient(db, tc.host, "user", "pass", appl, clientConfig)
+			client := change.NewBinlogClient(db, tc.host, "user", "pass", appl, clientConfig)
 			require.NotNil(t, client)
 
 			// Verify TLS config is stored

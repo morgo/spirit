@@ -1,8 +1,9 @@
-package repl
+package change
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,7 +102,11 @@ type bufferedMap struct {
 	// nil cond, so a missing init shows up loudly in tests.
 	cond *sync.Cond
 
-	c       *Client         // reference back to the client.
+	// logger is supplied by the change.Source that owns this subscription.
+	// We keep only a *slog.Logger (not a back-pointer to the source) so the
+	// bufferedMap stays source-agnostic and can be reused by alternative
+	// implementations (e.g. a VStream change.Source).
+	logger  *slog.Logger
 	applier applier.Applier // applier for writing changes to the target
 
 	table    *table.TableInfo
@@ -171,6 +176,72 @@ const (
 	// amortized-growth overhead is not explicitly accounted for.
 	queuedChangeOverhead = 48
 )
+
+// BufferedSubscriptionConfig configures NewBufferedSubscription.
+type BufferedSubscriptionConfig struct {
+	// CurrentTable is the source-side TableInfo. Required.
+	CurrentTable *table.TableInfo
+
+	// NewTable is the destination-side TableInfo. May be nil for
+	// MoveTables/import flows where source and destination share the
+	// same schema; in that case Subscription.Tables() returns
+	// [CurrentTable, nil].
+	NewTable *table.TableInfo
+
+	// Applier writes batched changes to the target. Required.
+	Applier applier.Applier
+
+	// Chunker provides the watermark filter + column mapping. Required.
+	Chunker table.MappedChunker
+
+	// Logger receives diagnostic events. Defaults to slog.Default()
+	// when nil.
+	Logger *slog.Logger
+
+	// SoftLimitBytes is the per-subscription byte cap before
+	// HasChanged blocks waiting on the flush path. Zero disables the
+	// cap. See bufferedMap.softLimitBytes for the semantics.
+	SoftLimitBytes int64
+}
+
+// NewBufferedSubscription constructs the default bufferedMap-backed
+// Subscription. It is the public counterpart to binlogClient's internal
+// AddSubscription helper: out-of-tree change.Source implementations
+// (e.g. strata's pkg/vstream) call this from their own AddSubscription to
+// build a Subscription the runner / copier can drive.
+//
+// The returned Subscription is not yet wired into a registry — the caller
+// is responsible for storing it and routing row events to its HasChanged
+// method. The internal sync.Cond is initialised before return (matching
+// subscriptionRegistry.AddBuffered) so HasChanged / Flush /
+// SetWatermarkOptimization are safe to call immediately.
+func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, error) {
+	if cfg.CurrentTable == nil {
+		return nil, fmt.Errorf("NewBufferedSubscription: CurrentTable is required")
+	}
+	if cfg.Applier == nil {
+		return nil, fmt.Errorf("NewBufferedSubscription: Applier is required")
+	}
+	if cfg.Chunker == nil {
+		return nil, fmt.Errorf("NewBufferedSubscription: Chunker is required")
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	sub := &bufferedMap{
+		table:                cfg.CurrentTable,
+		newTable:             cfg.NewTable,
+		changes:              make(map[string]bufferedChange),
+		logger:               logger,
+		chunker:              cfg.Chunker,
+		applier:              cfg.Applier,
+		pkIsMemoryComparable: cfg.CurrentTable.PrimaryKeyIsMemoryComparable() == nil,
+		softLimitBytes:       cfg.SoftLimitBytes,
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	return sub, nil
+}
 
 // estimateRowSize returns a rough byte estimate for a []any column slice
 // that bufferedMap holds in memory. The estimate is intentionally
@@ -246,7 +317,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// enter the buffer, so there is no point parking on their behalf.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
 		s.keysDroppedAbove.Add(1)
-		s.c.logger.Debug("key above watermark", "key", key[0])
+		s.logger.Debug("key above watermark", "key", key[0])
 		return
 	}
 
@@ -258,7 +329,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// indistinguishable from one that's just slow.
 	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes && !s.closed {
 		s.timesParked.Add(1)
-		s.c.logger.Warn("subscription parked on soft memory limit",
+		s.logger.Warn("subscription parked on soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"size_bytes", s.sizeBytes,
 			"soft_limit_bytes", s.softLimitBytes,
@@ -267,7 +338,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		for s.sizeBytes >= s.softLimitBytes && !s.closed {
 			s.cond.Wait()
 		}
-		s.c.logger.Info("subscription unparked from soft memory limit",
+		s.logger.Info("subscription unparked from soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"parked_duration", time.Since(parkStart),
 			"size_bytes", s.sizeBytes,
@@ -375,7 +446,7 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		// has not asked us to drain everything (bypassWatermark).
 		if applyWatermarkFilter && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
 			s.keysSkippedBelow.Add(1)
-			s.c.logger.Debug("key not below watermark", "key", change.originalKey[0])
+			s.logger.Debug("key not below watermark", "key", change.originalKey[0])
 			allChangesFlushed = false
 			continue
 		}
@@ -440,7 +511,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upser
 		upsertAffected = affectedRows
 	}
 
-	s.c.logger.Debug("flushBatch executed",
+	s.logger.Debug("flushBatch executed",
 		"table", s.table.TableName,
 		"underLock", lock != nil,
 		"deleteKeyCount", len(deleteKeys),
@@ -598,7 +669,7 @@ func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool
 	// Drain succeeded (or no drain needed) — safe to flip the flag now.
 	s.watermarkOptimization = enabled
 
-	s.c.logger.Info("watermark optimization toggled",
+	s.logger.Info("watermark optimization toggled",
 		"table", s.table.TableName,
 		"enabled", enabled,
 		"keys_added", s.keysAdded.Swap(0),

@@ -50,6 +50,15 @@ type TableInfo struct {
 	statisticsLock              sync.Mutex
 	DisableAutoUpdateStatistics atomic.Bool
 
+	// DisableAnalyze skips the ANALYZE TABLE that setRowEstimate would
+	// otherwise run to refresh the optimizer's row estimate. ANALYZE TABLE
+	// writes to the statistics tables, so it requires INSERT on the table
+	// and a writable server. Set this when reading from a least-privilege
+	// (SELECT-only) or read-only source — e.g. sync's Vitess/PlanetScale
+	// replica — so the row estimate comes straight from information_schema,
+	// which only needs SELECT. Set before calling SetInfo.
+	DisableAnalyze bool
+
 	// Host is an optional identifier for the MySQL server this table belongs to.
 	// It is used by MultiChunker to disambiguate tables with the same SchemaName
 	// and TableName on different servers (e.g., in N:M move operations).
@@ -136,11 +145,16 @@ func (t *TableInfo) SetInfo(ctx context.Context) error {
 // setRowEstimate is a separate function so it can be repeated continuously
 // Since if a schema migration takes 14 days, it could change.
 func (t *TableInfo) setRowEstimate(ctx context.Context) error {
-	_, err := t.db.ExecContext(ctx, "ANALYZE TABLE "+t.QuotedTableName)
-	if err != nil {
-		return err
+	// ANALYZE TABLE refreshes the optimizer's row estimate. It writes to the
+	// statistics tables, so it requires INSERT on the table and a writable
+	// server; callers reading from a least-privilege (SELECT-only) or
+	// read-only source set DisableAnalyze to skip it (see the field doc).
+	if !t.DisableAnalyze {
+		if _, err := t.db.ExecContext(ctx, "ANALYZE TABLE "+t.QuotedTableName); err != nil {
+			return err
+		}
 	}
-	err = t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=? AND table_name=?", t.SchemaName, t.TableName).Scan(&t.EstimatedRows)
+	err := t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", t.TableName).Scan(&t.EstimatedRows)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("table %s.%s does not exist", t.SchemaName, t.TableName)
@@ -151,8 +165,7 @@ func (t *TableInfo) setRowEstimate(ctx context.Context) error {
 }
 
 func (t *TableInfo) setIndexes(ctx context.Context) error {
-	rows, err := t.db.QueryContext(ctx, "SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE table_schema=? AND table_name=? AND index_name != 'PRIMARY'",
-		t.SchemaName,
+	rows, err := t.db.QueryContext(ctx, "SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE table_schema=DATABASE() AND table_name=? AND index_name != 'PRIMARY'",
 		t.TableName,
 	)
 	if err != nil {
@@ -178,8 +191,7 @@ func (t *TableInfo) setIndexes(ctx context.Context) error {
 }
 
 func (t *TableInfo) setColumns(ctx context.Context) error {
-	rows, err := t.db.QueryContext(ctx, "SELECT column_name, column_type, GENERATION_EXPRESSION FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ORDINAL_POSITION",
-		t.SchemaName,
+	rows, err := t.db.QueryContext(ctx, "SELECT column_name, column_type, GENERATION_EXPRESSION FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? ORDER BY ORDINAL_POSITION",
 		t.TableName,
 	)
 	if err != nil {
@@ -225,8 +237,7 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 	cols := []string{}
 	//nolint: noctx // too much refactoring to add context here
-	rows, err := t.db.Query("SELECT column_name FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND index_name=? ORDER BY seq_in_index",
-		t.SchemaName,
+	rows, err := t.db.Query("SELECT column_name FROM INFORMATION_SCHEMA.STATISTICS WHERE table_schema=DATABASE() AND TABLE_NAME=? AND index_name=? ORDER BY seq_in_index",
 		t.TableName,
 		keyName,
 	)
@@ -254,8 +265,7 @@ func (t *TableInfo) DescIndex(keyName string) ([]string, error) {
 // setPrimaryKey sets the primary key and also the primary key type.
 // A primary key can contain multiple columns.
 func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
-	rows, err := t.db.QueryContext(ctx, "SELECT column_name FROM information_schema.key_column_usage WHERE table_schema=? and table_name=? and constraint_name='PRIMARY' ORDER BY ORDINAL_POSITION",
-		t.SchemaName,
+	rows, err := t.db.QueryContext(ctx, "SELECT column_name FROM information_schema.key_column_usage WHERE table_schema=DATABASE() and table_name=? and constraint_name='PRIMARY' ORDER BY ORDINAL_POSITION",
 		t.TableName,
 	)
 	if err != nil {
@@ -282,9 +292,9 @@ func (t *TableInfo) setPrimaryKey(ctx context.Context) error {
 	}
 	for i, col := range t.KeyColumns {
 		// Get primary key type and auto_inc info.
-		query := "SELECT column_type, extra FROM information_schema.columns WHERE table_schema=? AND table_name=? and column_name=?"
+		query := "SELECT column_type, extra FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? and column_name=?"
 		var extra, pkType string
-		err = t.db.QueryRowContext(ctx, query, t.SchemaName, t.TableName, col).Scan(&pkType, &extra)
+		err = t.db.QueryRowContext(ctx, query, t.TableName, col).Scan(&pkType, &extra)
 		if err != nil {
 			return err
 		}
@@ -310,6 +320,19 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 	if slices.Contains(t.keyDatums, unknownType) {
 		return ErrUnsupportedPKType
 	}
+	// BIT is classified as unsignedType so the binlog applier emits the
+	// value as a numeric literal (see mySQLTypeToDatumTp), but BIT primary
+	// keys are not supported end-to-end: setMinMax issues a SELECT that
+	// returns BIT as raw big-endian bytes, and the chunker's
+	// newDatumFromMySQL path parses those as decimal strings — which
+	// fails or produces wrong bounds. Until the min/max read path knows
+	// how to decode BIT bytes, reject BIT PKs upfront with the same error
+	// they returned before BIT got its own datumTp.
+	for _, mysqlTp := range t.keyColumnsMySQLTp {
+		if isBITType(mysqlTp) {
+			return ErrUnsupportedPKType
+		}
+	}
 	return nil
 }
 
@@ -320,6 +343,15 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 func (t *TableInfo) setMinMax(ctx context.Context) error {
 	if t.keyDatums[0] == binaryType {
 		return nil // we don't min/max binary types for now.
+	}
+	// BIT is classified as unsignedType so the applier emits the value as
+	// a numeric literal, but `SELECT min(bit_col)` returns raw big-endian
+	// bytes that newDatumFromMySQL can't parse as decimal. BIT primary
+	// keys are rejected upfront by PrimaryKeyIsMemoryComparable; skip
+	// here so SetInfo can complete and the rejection can fire on a
+	// well-formed TableInfo.
+	if isBITType(t.keyColumnsMySQLTp[0]) {
+		return nil
 	}
 	quotedKey := QuoteColumns(t.KeyColumns[:1])
 	query := fmt.Sprintf("SELECT IFNULL(min(%s),'0'), IFNULL(max(%s),'0') FROM %s", quotedKey, quotedKey, t.QuotedTableName)

@@ -17,6 +17,13 @@ services:
     volumes:
       - mysql-standalone-data-dir:/var/lib/mysql
       - ./bootstrap.sql:/docker-entrypoint-initdb.d/bootstrap.sql
+    # gtid-mode + enforce-gtid-consistency are required by the experimental
+    # --gtid change source (pkg/change/gtid.go). The migration/move preflight
+    # configurationCheck rejects --gtid runs when these are OFF, so CI must
+    # boot with them ON to exercise the GTID path end-to-end. Version
+    # overlays (8.0.28.yml, 8.0.43.yml, 9.7.yml) only override image/ports
+    # so they inherit this command automatically.
+    command: --gtid-mode=on --enforce-gtid-consistency=on
 
   test:
     build:

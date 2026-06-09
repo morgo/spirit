@@ -36,6 +36,17 @@ type DBConfig struct {
 	RangeOptimizerMaxMemSize int64
 	InterpolateParams        bool
 	ForceKill                bool // If true, kill locking transactions to acquire metadata locks (default: true)
+	// RejectReadOnly maps to the go-sql-driver rejectReadOnly option: a
+	// statement that fails with a read-only error (1290/1792/1836) is turned
+	// into driver.ErrBadConn so database/sql throws the connection away and
+	// reconnects. This guards against landing on a demoted, now-read-only
+	// Aurora primary after a blue/green deploy or failover (default: true).
+	//
+	// An injected, read-only change.Source (e.g. a Vitess/PlanetScale VStream
+	// import) connects to a read-only replica on purpose. With this enabled,
+	// the replica's read-only responses would loop every source statement to
+	// "driver: bad connection", so the move runner disables it for that case.
+	RejectReadOnly bool
 	// TLS Configuration
 	TLSMode            string // TLS connection mode (DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY)
 	TLSCertificatePath string // Path to custom TLS certificate file
@@ -50,6 +61,7 @@ func NewDBConfig() *DBConfig {
 		RangeOptimizerMaxMemSize: 0,     // default is 8M, we set to unlimited. Not user configurable (may reconsider in the future).
 		InterpolateParams:        false, // default is false
 		ForceKill:                true,  // default is true
+		RejectReadOnly:           true,  // default is true (Aurora failover safety)
 		// TLS defaults
 		TLSMode:            "PREFERRED", // default to PREFERRED mode like MySQL
 		TLSCertificatePath: "",          // no custom certificate by default

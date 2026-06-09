@@ -1,4 +1,4 @@
-package repl
+package change
 
 import "github.com/go-mysql-org/go-mysql/replication"
 

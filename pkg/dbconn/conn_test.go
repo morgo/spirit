@@ -29,7 +29,7 @@ func assertDSNConfig(t *testing.T, dsnStr string, user, password, addr, dbName, 
 	require.Equal(t, true, cfg.RejectReadOnly)
 	require.Equal(t, interpolateParams, cfg.InterpolateParams)
 	require.Equal(t, "utf8mb4_bin", cfg.Collation)
-	require.Equal(t, `""`, cfg.Params["sql_mode"])
+	require.Equal(t, `"NO_AUTO_VALUE_ON_ZERO"`, cfg.Params["sql_mode"])
 	require.Equal(t, `"+00:00"`, cfg.Params["time_zone"])
 	require.Equal(t, `"read-committed"`, cfg.Params["transaction_isolation"])
 }

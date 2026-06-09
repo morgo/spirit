@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -80,7 +80,7 @@ func NewCheckerDefaultConfig() *CheckerConfig {
 // sourceDBs contains the source database connections (one for single-source migrations,
 // multiple for N:M moves). The distributed checker aggregates checksums across all sources.
 // The single checker uses sourceDBs[0].
-func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []*repl.Client, config *CheckerConfig) (Checker, error) {
+func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Source, config *CheckerConfig) (Checker, error) {
 	if len(sourceDBs) == 0 {
 		return nil, errors.New("at least one source database must be provided")
 	}

@@ -13,18 +13,17 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/buildinfo"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/move/check"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 )
@@ -47,7 +46,7 @@ type sourceInfo struct {
 	db         *sql.DB
 	config     *mysql.Config
 	dsn        string
-	replClient *repl.Client
+	replClient change.Source
 	tables     []*table.TableInfo // this source's TableInfo objects (bound to this source's db)
 }
 
@@ -57,12 +56,6 @@ type sourceInfo struct {
 // or DSN parameter reordering.
 func (s *sourceInfo) sourceKey() string {
 	return s.config.Addr + "/" + s.config.DBName
-}
-
-// binlogPosition is used for JSON serialization of per-source binlog positions in checkpoints.
-type binlogPosition struct {
-	Name string `json:"name"`
-	Pos  uint32 `json:"pos"`
 }
 
 type Runner struct {
@@ -336,21 +329,16 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
 	}
 
-	// Restore per-source binlog positions, keyed by sourceKey (addr/dbname).
-	var positions map[string]binlogPosition
+	// Parse per-source positions (opaque strings owned by the source impl),
+	// keyed by sourceKey (addr/dbname).
+	var positions map[string]string
 	if err := json.Unmarshal([]byte(binlogPositionsJSON), &positions); err != nil {
 		return fmt.Errorf("could not parse binlog positions from checkpoint: %w", err)
 	}
 	for i := range r.sources {
-		key := r.sources[i].sourceKey()
-		pos, ok := positions[key]
-		if !ok {
-			return fmt.Errorf("checkpoint missing binlog position for source %s", key)
+		if _, ok := positions[r.sources[i].sourceKey()]; !ok {
+			return fmt.Errorf("checkpoint missing binlog position for source %s", r.sources[i].sourceKey())
 		}
-		r.sources[i].replClient.SetFlushedPos(gomysql.Position{
-			Name: pos.Name,
-			Pos:  pos.Pos,
-		})
 	}
 
 	// Delete rows above the watermark from all target tables before resuming.
@@ -369,10 +357,12 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// Start all replication clients.
+	// Open each source's change feed at its checkpointed position.
+	// OpenFromPosition primes the position and starts streaming in one call.
 	for i := range r.sources {
-		if err := r.sources[i].replClient.Run(ctx); err != nil {
-			return fmt.Errorf("failed to start repl client for source %d: %w", i, err)
+		key := r.sources[i].sourceKey()
+		if err := r.sources[i].replClient.StartFromPosition(ctx, positions[key]); err != nil {
+			return fmt.Errorf("failed to start change feed for source %d at %q: %w", i, positions[key], err)
 		}
 	}
 
@@ -421,15 +411,22 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// Create one repl client per source, all sharing the same applier.
 	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
+	if r.move.GTID {
+		r.logger.Info("EXPERIMENTAL: using GTID-based change source")
+	}
 	for i := range r.sources {
 		src := &r.sources[i]
-		replConfig := repl.NewClientDefaultConfig()
+		replConfig := change.NewClientDefaultConfig()
 		replConfig.Logger = r.logger
 		replConfig.CancelFunc = r.fatalError
 		replConfig.DDLFilterSchema = src.config.DBName
 		replConfig.DDLFilterTables = r.move.SourceTables
 		replConfig.DBConfig = r.dbConfig
-		src.replClient = repl.NewClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		if r.move.GTID {
+			src.replClient = change.NewGTIDClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		} else {
+			src.replClient = change.NewBinlogClient(src.db, src.config.Addr, src.config.User, src.config.Passwd, r.applier, replConfig)
+		}
 	}
 
 	// Run post-setup checks
@@ -523,7 +520,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 
 	// Start all replication clients.
 	for i := range r.sources {
-		if err := r.sources[i].replClient.Run(ctx); err != nil {
+		if err := r.sources[i].replClient.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start repl client for source %d: %w", i, err)
 		}
 	}
@@ -686,7 +683,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Disable both watermark optimizations so that all changes can be flushed.
 	// For non-memory-comparable PKs this also drains the buffered map and
 	// switches the subscription into FIFO queue mode (see
-	// pkg/repl/subscription_buffered.go), so the call can return an error.
+	// pkg/change/subscription_buffered.go), so the call can return an error.
 	if err := r.setWatermarkOptimizationAll(ctx, false); err != nil {
 		return err
 	}
@@ -751,7 +748,7 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 		for _, tbl := range r.sources[i].tables {
 			go tbl.AutoUpdateStatistics(ctx, tableStatUpdateInterval, r.logger)
 		}
-		r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+		r.sources[i].replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 	}
 
 	// Start go routines for checkpointing and dumping status. The returned
@@ -861,6 +858,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		Targets:        r.targets,
 		SourceTables:   r.sourceTables,
 		CreateSentinel: r.move.CreateSentinel,
+		GTID:           r.move.GTID,
 	}, r.logger, scope)
 }
 
@@ -1025,7 +1023,7 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// Perform a checksum operation
 	// Collect all source DBs and repl clients for the checksum.
 	sourceDBs := make([]*sql.DB, len(r.sources))
-	feeds := make([]*repl.Client, len(r.sources))
+	feeds := make([]change.Source, len(r.sources))
 	for i := range r.sources {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient
@@ -1043,6 +1041,13 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 		return err
 	}
 	r.status.Set(status.Checksum)
+	// On a checker error we just propagate. The DumpCheckpoint invariant
+	// guarantees that any persisted checksum_watermark describes only
+	// verified-clean chunks, so a resumed run either replays the checksum
+	// from scratch (empty watermark, set whenever the failing pass had any
+	// repair) or resumes safely from a watermark that came from a clean
+	// pass. See pkg/migration/runner.go DumpCheckpoint for the full
+	// rationale.
 	return r.checker.Run(ctx)
 }
 
@@ -1213,7 +1218,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	defer utils.CloseAndLog(chunker)
 
 	sourceDBs := make([]*sql.DB, len(r.sources))
-	feeds := make([]*repl.Client, len(r.sources))
+	feeds := make([]change.Source, len(r.sources))
 	for i := range r.sources {
 		sourceDBs[i] = r.sources[i].db
 		feeds[i] = r.sources[i].replClient
@@ -1251,7 +1256,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
 			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
 			for i := range r.sources {
-				r.sources[i].replClient.StartPeriodicFlush(ctx, repl.DefaultFlushInterval)
+				r.sources[i].replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 			}
 			timer := time.NewTimer(remaining)
 			select {
@@ -1330,11 +1335,11 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
-	// Collect per-source binlog positions, keyed by sourceKey (addr/dbname).
-	positions := make(map[string]binlogPosition)
+	// Collect per-source positions (opaque strings owned by the source
+	// implementation), keyed by sourceKey (addr/dbname).
+	positions := make(map[string]string)
 	for i := range r.sources {
-		pos := r.sources[i].replClient.GetBinlogApplyPosition()
-		positions[r.sources[i].sourceKey()] = binlogPosition{Name: pos.Name, Pos: pos.Pos}
+		positions[r.sources[i].sourceKey()] = r.sources[i].replClient.Position()
 	}
 	positionsJSON, err := json.Marshal(positions)
 	if err != nil {
@@ -1345,13 +1350,24 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	if err != nil {
 		return status.ErrWatermarkNotReady // it might not be ready, we can try again.
 	}
+	// Safety invariant: only persist the checksum_watermark if the current
+	// checksum pass has had zero differences. The chunker advances its
+	// low-watermark past every chunk it sees Feedback() for, including
+	// chunks that needed a recopy — but a recopy isn't a verification.
+	// Reading DifferencesFound() *after* the watermark catches any chunk
+	// in the watermark that was repaired (the per-chunk path increments
+	// differencesFound strictly before chunker.Feedback). When set,
+	// suppress the watermark so a restart re-validates from the start of
+	// the checksum phase. See pkg/migration/runner.go DumpCheckpoint for
+	// the full rationale.
 	var checksumWatermark string
-	if r.status.Get() >= status.Checksum {
-		if r.checker != nil {
-			checksumWatermark, err = r.checksumChunker.GetLowWatermark()
-			if err != nil {
-				return status.ErrWatermarkNotReady
-			}
+	if r.status.Get() >= status.Checksum && r.checker != nil {
+		wm, wmErr := r.checksumChunker.GetLowWatermark()
+		if wmErr != nil {
+			return status.ErrWatermarkNotReady
+		}
+		if r.checker.DifferencesFound() == 0 {
+			checksumWatermark = wm
 		}
 	}
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
@@ -1477,7 +1493,7 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 
 // setWatermarkOptimizationAll sets watermark optimization on all replication
 // clients. Each subscription may drain its outgoing store on the toggle (see
-// pkg/repl/subscription_buffered.go), so this can return the drain error.
+// pkg/change/subscription_buffered.go), so this can return the drain error.
 func (r *Runner) setWatermarkOptimizationAll(ctx context.Context, enabled bool) error {
 	for i := range r.sources {
 		if err := r.sources[i].replClient.SetWatermarkOptimization(ctx, enabled); err != nil {

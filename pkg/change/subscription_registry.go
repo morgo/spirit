@@ -1,4 +1,4 @@
-package repl
+package change
 
 import "sync"
 
@@ -22,25 +22,20 @@ func newSubscriptionRegistry() *subscriptionRegistry {
 	return &subscriptionRegistry{subs: make(map[string]Subscription)}
 }
 
-// AddBuffered inserts sub under key. Returns false if a subscription with
-// this key already exists; the existing entry is left untouched and sub
-// is discarded by the caller.
+// Add inserts sub under key. Returns false if a subscription with this key
+// already exists; the existing entry is left untouched and sub is discarded
+// by the caller.
 //
-// Named AddBuffered (rather than Add) to flag the asymmetry with Get and
-// Snapshot: they return the Subscription interface, but this method takes
-// the concrete *bufferedMap so it can finish the two-step construction by
-// wiring sub.cond to sub.Mutex. That init can't live in a struct literal
-// because sync.NewCond needs the address of a field of the value being
-// constructed. If a second Subscription implementation is ever added,
-// introduce a sibling AddXxx for it, or switch to an interface-typed Add
-// and move the cond init into a type-specific constructor.
-func (r *subscriptionRegistry) AddBuffered(key string, sub *bufferedMap) bool {
+// sub must be fully constructed before it is added — in particular its
+// internal sync.Cond must already be wired (NewBufferedSubscription does
+// this). The registry only stores the value, so it is agnostic to the
+// concrete Subscription implementation.
+func (r *subscriptionRegistry) Add(key string, sub Subscription) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.subs[key]; exists {
 		return false
 	}
-	sub.cond = sync.NewCond(&sub.Mutex)
 	r.subs[key] = sub
 	return true
 }

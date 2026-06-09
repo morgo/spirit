@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -33,7 +33,7 @@ const (
 
 type CutOver struct {
 	db       *sql.DB
-	feed     *repl.Client
+	feed     change.Source
 	config   []*cutoverConfig
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
@@ -48,7 +48,7 @@ type cutoverConfig struct {
 
 // NewCutOver contains the logic to perform the final cut over. It can cutover multiple tables
 // at once based on config. A replication feed which is used to ensure consistency before the cut over.
-func NewCutOver(db *sql.DB, config []*cutoverConfig, feed *repl.Client, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*CutOver, error) {
+func NewCutOver(db *sql.DB, config []*cutoverConfig, feed change.Source, dbConfig *dbconn.DBConfig, logger *slog.Logger) (*CutOver, error) {
 	if feed == nil {
 		return nil, errors.New("feed must be non-nil")
 	}
@@ -191,7 +191,7 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 		return err
 	}
 	if !c.feed.AllChangesFlushed() {
-		return fmt.Errorf("%w, final flush might be broken", repl.ErrChangesNotFlushed)
+		return fmt.Errorf("%w, final flush might be broken", change.ErrChangesNotFlushed)
 	}
 
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")

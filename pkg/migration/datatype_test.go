@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"testing"
@@ -301,6 +302,134 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 
 	require.Error(t, migrationErr)
 	require.ErrorContains(t, migrationErr, "unsafe SET value reorder")
+}
+
+// TestEnumDrop verifies that dropping an ENUM value from anywhere in the
+// definition is accepted by the preflight check and that the migration
+// succeeds end-to-end when no rows hold the dropped value.
+//
+// The change-replay path decodes ENUM ordinals against the SOURCE table's
+// element list, so retained values still arrive at the target as their
+// original string and MySQL maps them onto the new (smaller) enum without
+// data corruption.
+//
+// The matrix covers both copy modes (buffered/unbuffered) and both change
+// sources (binlog file+position and GTID). The decode happens in
+// TableInfo.DecodeBinlogRow, which both pkg/change clients call, but we
+// exercise them separately so a future divergence between the two source
+// implementations can't silently break ENUM drops on one of them.
+func TestEnumDrop(t *testing.T) {
+	t.Parallel()
+	for _, useGTID := range []bool{false, true} {
+		source := "binlog"
+		if useGTID {
+			source = "gtid"
+		}
+		t.Run(source, func(t *testing.T) {
+			t.Run("unbuffered", func(t *testing.T) {
+				testEnumDrop(t, false, useGTID)
+			})
+			t.Run("buffered", func(t *testing.T) {
+				testEnumDrop(t, true, useGTID)
+			})
+		})
+	}
+}
+
+func testEnumDrop(t *testing.T, enableBuffered, useGTID bool) {
+	// Unique table per matrix cell so the four combinations stay independent.
+	tableName := fmt.Sprintf("enumdrop_%s_%s",
+		map[bool]string{true: "gtid", false: "binlog"}[useGTID],
+		map[bool]string{true: "buf", false: "unbuf"}[enableBuffered])
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending', 'archived') NOT NULL
+	)`, tableName))
+	// Seed only with retained values; 'inactive' will be dropped and must
+	// not appear in any row when the checksum runs.
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'active'", tableName), 3000)
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'pending'", tableName), 3000)
+	_, err := tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (status) VALUES ('archived')", tableName))
+	require.NoError(t, err)
+
+	m := NewTestRunner(t, tableName, "MODIFY COLUMN status ENUM('active', 'pending', 'archived') NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(enableBuffered),
+		WithGTID(useGTID),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		// Concurrent DML uses only retained values; binlog ordinals for
+		// 'pending' (3) and 'archived' (4) under the source enum must
+		// still resolve to the right strings in the target.
+		for i := 1; i <= 100; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('active')`, tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('pending')`, tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('archived')`, tableName))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'pending' WHERE id = %d`, tableName, i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'archived' WHERE id = %d`, tableName, 3000+i))
+		}
+	}()
+
+	require.NoError(t, m.Run(ctx))
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+
+	// The new column definition must omit 'inactive'.
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT column_type FROM information_schema.columns
+		 WHERE table_schema='test' AND table_name=? AND column_name='status'`, tableName).Scan(&colType))
+	require.Contains(t, colType, "enum('active','pending','archived')")
+
+	// No row should land on the empty-string sentinel ('', MySQL's
+	// invalid-ENUM value at ordinal 0), which would mean an ordinal
+	// pointed at a value that no longer exists in the target.
+	var blanks int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE status = ''`, tableName)).Scan(&blanks))
+	require.Zero(t, blanks, "rows landed as the empty enum value — likely a change ordinal decode mismatch")
+}
+
+// TestEnumDropWithDroppedValueInData verifies the safety net: when rows
+// actually hold the dropped value, the migration must fail (either at
+// insert time in strict mode, or at the post-cutover checksum). The
+// preflight check is intentionally permissive — it relies on data-level
+// verification to catch genuine data loss.
+func TestEnumDropWithDroppedValueInData(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "enumdrop_unsafe", `CREATE TABLE enumdrop_unsafe (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		status ENUM('active', 'inactive', 'pending') NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO enumdrop_unsafe (status) SELECT 'active'", 1000)
+	_, err := tt.DB.ExecContext(t.Context(), "INSERT INTO enumdrop_unsafe (status) VALUES ('inactive')")
+	require.NoError(t, err)
+
+	m := NewTestRunner(t, "enumdrop_unsafe", "MODIFY COLUMN status ENUM('active', 'pending') NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	err = m.Run(t.Context())
+	require.Error(t, err, "migration with rows holding a dropped enum value must not silently succeed")
+	require.NoError(t, m.Close())
 }
 
 // TestEnumToVarchar verifies that ENUM → VARCHAR migrations correctly
@@ -821,4 +950,292 @@ ADD SPATIAL INDEX idx_points_of_interest (points_of_interest)`)
 	var count int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM t1spatial`).Scan(&count))
 	require.Equal(t, 10, count)
+}
+
+// TestBinaryToVarbinaryConcurrentDML ports gh-ost's localtests/binary-to-varbinary
+// scenario (gh-ost issue #909) as positive regression coverage. A BINARY(N)
+// source column is migrated to VARBINARY(M) while concurrent DML touches
+// rows with trailing-zero values.
+//
+// Two write paths exist for these rows:
+//   - Rowcopy: INSERT IGNORE INTO new SELECT FROM source. MySQL handles the
+//     conversion server-side; the BINARY(N)'s right-padded value lands in
+//     VARBINARY verbatim.
+//   - Binlog replay: the applier reads the row image from the binlog and
+//     emits REPLACE INTO new VALUES (0x<bytes>). gh-ost's #909 was that
+//     trailing zeros were stripped from the row image, producing shorter
+//     VARBINARY values than the rowcopy path for the same source bytes.
+//
+// Spirit's current applier path (NewDatumFromValue with the BINARY source
+// type → forceHexEncode → %#x on the full byte string) does preserve the
+// 20-byte width, so this test passes on main. It exists to lock that
+// behavior in: any future change that drops the trailing zeros, switches
+// the source-type lookup, or changes how the binlog row image is shaped
+// would regress this test.
+func TestBinaryToVarbinaryConcurrentDML(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "bin2varbin", `CREATE TABLE bin2varbin (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		info VARCHAR(64) NOT NULL,
+		data BINARY(20) NOT NULL
+	)`)
+
+	// Seed rows that will be the targets of concurrent UPDATEs. Their
+	// initial data is non-zero-trailing so the binlog event during UPDATE
+	// produces a row image with trailing zeros — the failure mode.
+	_, err := tt.DB.ExecContext(t.Context(), `
+		INSERT INTO bin2varbin (info, data) VALUES
+		  ('pre-existing-1',  X'01020304050607080910111213141516171819ff'),
+		  ('pre-existing-2',  X'0102030405060708091011121314151617181900'),
+		  ('update-target-1', X'ffffffffffffffffffffffffffffffffffffffff'),
+		  ('update-target-2', X'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')`)
+	require.NoError(t, err)
+	// Add bulk rows so the copier actually has work to do and replay can
+	// race with rowcopy.
+	tt.SeedRows(t, "INSERT INTO bin2varbin (info, data) SELECT 'bulk', X'aabbccddeeff00000000000000000000000000ff'", 5000)
+
+	m := NewTestRunner(t, "bin2varbin", "MODIFY data VARBINARY(32) NOT NULL",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(true),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		for i := 0; i < 50; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			// INSERTs with trailing-zero data — exercise the binlog INSERT
+			// row image path.
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO bin2varbin (info, data) VALUES ('insert-during', X'aabbccdd00000000000000000000000000000000')`)
+			_, _ = tt.DB.ExecContext(ctx, `INSERT INTO bin2varbin (info, data) VALUES ('insert-during', X'11223344556677889900000000000000000000ee')`)
+			// UPDATEs of pre-existing rows to trailing-zero values —
+			// exercise the binlog UPDATE row image path.
+			_, _ = tt.DB.ExecContext(ctx, `UPDATE bin2varbin SET data = X'ffeeddcc00000000000000000000000000000000' WHERE info = 'update-target-1'`)
+			_, _ = tt.DB.ExecContext(ctx, `UPDATE bin2varbin SET data = X'aabbccdd11111111111111111100000000000000' WHERE info = 'update-target-2'`)
+		}
+	}()
+
+	migrationErr := m.Run(ctx)
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+	require.NoError(t, migrationErr, "BINARY(N) → VARBINARY(M) with concurrent DML must preserve trailing zeros (gh-ost #909 analog)")
+
+	// Target column must now be varbinary.
+	var colType string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT column_type FROM information_schema.columns
+		 WHERE table_schema=DATABASE() AND table_name='bin2varbin' AND column_name='data'`).Scan(&colType))
+	require.Contains(t, colType, "varbinary")
+
+	// The known update-target rows must contain the post-UPDATE bytes
+	// (with their trailing zeros). Comparing the full 20-byte value — not
+	// just OCTET_LENGTH — ensures the binlog UPDATE path actually
+	// replayed: the rows started life with non-zero-trailing data, so a
+	// missed UPDATE leaves the rowcopied initial value behind and this
+	// assertion fails.
+	var data1, data2 []byte
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT data FROM bin2varbin WHERE info = 'update-target-1' LIMIT 1`).Scan(&data1))
+	wantData1, err := hex.DecodeString("ffeeddcc00000000000000000000000000000000")
+	require.NoError(t, err)
+	require.Equal(t, wantData1, data1, "update-target-1 must hold its post-UPDATE 20-byte value")
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT data FROM bin2varbin WHERE info = 'update-target-2' LIMIT 1`).Scan(&data2))
+	wantData2, err := hex.DecodeString("aabbccdd11111111111111111100000000000000")
+	require.NoError(t, err)
+	require.Equal(t, wantData2, data2, "update-target-2 must hold its post-UPDATE 20-byte value")
+
+	// At least one 'insert-during' row must exist — otherwise the binlog
+	// INSERT path was not exercised and the next assertion is vacuous.
+	var insertCount int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM bin2varbin WHERE info = 'insert-during'`).Scan(&insertCount))
+	require.Positive(t, insertCount, "no concurrent INSERTs reached the binlog path — test is vacuous")
+
+	// And every one of them must keep its full 20-byte width.
+	var shortRows int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM bin2varbin WHERE info = 'insert-during' AND OCTET_LENGTH(data) <> 20`).Scan(&shortRows))
+	require.Zero(t, shortRows, "rows inserted during migration must keep their full 20-byte width")
+
+	// The bulk-seeded rows take the rowcopy path; they too should round-trip
+	// at their full 20-byte width. A regression in the rowcopy SELECT or in
+	// MySQL's BINARY→VARBINARY conversion would surface here, separately
+	// from the binlog-replay assertions above.
+	var bulkShortRows int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM bin2varbin WHERE info = 'bulk' AND OCTET_LENGTH(data) <> 20`).Scan(&bulkShortRows))
+	require.Zero(t, bulkShortRows, "rowcopied rows must keep their full 20-byte width")
+}
+
+// TestBitColumnDML ports gh-ost's localtests/bit-dml. The applier reads BIT
+// values from the binlog as int64 (per go-mysql's decodeBit) and feeds them
+// to Spirit's Datum, which has no specific BIT arm in mySQLTypeToDatumTp.
+// The int64 falls into the unknownType branch in NewDatum, gets formatted
+// with fmt.Sprint, and is then emitted as a *quoted SQL string literal* —
+// e.g. REPLACE INTO t (b) VALUES (..., "5", ...).
+//
+// MySQL interprets a string assigned to BIT(N) as the literal bit pattern
+// of the bytes, NOT as a numeric coercion. So `"5"` (a 1-byte string of
+// ASCII '5' = 0x35) lands in a BIT(8) column as bit pattern 0x35 (decimal
+// 53), and `"127"` (a 3-byte string) is 24 bits wide — wider than BIT(8) —
+// triggering MySQL's "Out of range value" warning that Spirit's strict
+// applier promotes to a fatal error.
+//
+// The failure mode is therefore:
+//   - For values whose textual representation in bytes is wider than N
+//     bits: Spirit aborts the migration with "Out of range value for
+//     column ...". Fail-loud, but blocks any concurrent-write workload
+//     from migrating a table with a BIT column.
+//   - For values that fit: the destination receives the wrong bit pattern.
+//     Caught by the checksum, also fail-loud.
+//
+// All three subtests fail on current main. The fix is to give BIT a
+// dedicated arm in mySQLTypeToDatumTp (most cleanly: unsignedType,
+// reinterpreting the int64 as uint64) so the SQL literal is emitted as
+// a numeric, not a quoted string.
+func TestBitColumnDML(t *testing.T) {
+	t.Parallel()
+	t.Run("BIT(1)", func(t *testing.T) {
+		t.Parallel()
+		runBitDMLTest(t, "bit1col", "BIT(1)", []uint64{0, 1}, "b1")
+	})
+
+	t.Run("BIT(8)", func(t *testing.T) {
+		t.Parallel()
+		runBitDMLTest(t, "bit8col", "BIT(8)", []uint64{0, 1, 127, 200, 255}, "b8")
+	})
+
+	t.Run("BIT(64) high bit set", func(t *testing.T) {
+		t.Parallel()
+		// Values with the top bit set become negative int64 after decoding,
+		// which is where the string-coercion path goes wrong.
+		runBitDMLTest(t, "bit64col", "BIT(64)",
+			[]uint64{0, 1, 1 << 63, (1 << 63) | 1, ^uint64(0)}, "b64")
+	})
+}
+
+func runBitDMLTest(t *testing.T, tableName, bitType string, values []uint64, colName string) {
+	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		v INT NOT NULL,
+		%s %s NOT NULL DEFAULT 0
+	)`, tableName, colName, bitType))
+
+	// Seed enough rows to give the chunker work; the bit value here doesn't
+	// matter — the assertions cover rows written during migration via the
+	// binlog path.
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (v, %s) SELECT 0, 0", tableName, colName), 5000)
+
+	// One row per test value, inserted before migration starts with the
+	// BIT column at 0 — a sentinel that's different from every non-zero
+	// test value. We then UPDATE these mid-migration to flip the BIT to
+	// `val` via the binlog applier. If the UPDATE never replays, the
+	// post-migration BIT value remains at the seed (0) instead of `val`,
+	// and the assertion at the bottom catches it. The companion `v=v+1`
+	// in the UPDATE statement gives us a second signal that's monotone
+	// regardless of the BIT value involved (covers the val=0 case where
+	// seed and target both happen to be zero).
+	type marker struct {
+		id  int64
+		val uint64
+	}
+	markers := make([]marker, len(values))
+	for i, v := range values {
+		res, err := tt.DB.ExecContext(t.Context(),
+			fmt.Sprintf("INSERT INTO %s (v, %s) VALUES (?, 0)", tableName, colName), -1-i)
+		require.NoError(t, err)
+		id, err := res.LastInsertId()
+		require.NoError(t, err)
+		markers[i] = marker{id: id, val: v}
+	}
+
+	// Capture the row count before the migration starts so we can assert
+	// no rows are lost or duplicated. SeedRows reaches the target by
+	// doubling, so the actual seeded count is not the requested number.
+	var rowsBeforeMigration int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowsBeforeMigration))
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(true),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	dmlDone := make(chan struct{})
+	go func() {
+		defer close(dmlDone)
+		for m.status.Get() < status.CopyRows {
+			time.Sleep(time.Millisecond)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		// UPDATE the marker rows mid-migration. Each update produces a
+		// binlog row image carrying the BIT value as int64; the applier
+		// REPLACEs the corresponding row in the shadow table.
+		for i := 0; i < 20; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			for _, mk := range markers {
+				_, _ = tt.DB.ExecContext(ctx,
+					fmt.Sprintf("UPDATE %s SET v = v + 1, %s = ? WHERE id = ?", tableName, colName),
+					mk.val, mk.id)
+			}
+		}
+	}()
+
+	migrationErr := m.Run(ctx)
+	cancel()
+	<-dmlDone
+	require.NoError(t, m.Close())
+	require.NoError(t, migrationErr, "BIT column DML migration must not fail checksum")
+
+	// Row count must match what was there before migration. The DML
+	// goroutine issues UPDATEs only — no inserts or deletes — so the
+	// count must be identical. INSERT IGNORE silently dropping a
+	// rowcopied row, or REPLACE INTO deleting one via a unique-key
+	// collision on a corrupted bit pattern, would surface here.
+	var rowsAfterMigration int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowsAfterMigration))
+	require.Equal(t, rowsBeforeMigration, rowsAfterMigration, "row count after migration must match")
+
+	// Each marker row must show two things: (1) at least one UPDATE
+	// replayed — `v` was seeded negative and is only ever incremented,
+	// so v > -1-i proves the UPDATE path fired; (2) the stored BIT value
+	// matches what the UPDATE wrote. The combination is what makes the
+	// test non-vacuous: a missed UPDATE leaves v at the seed; a buggy
+	// BIT serialization leaves a different bit pattern in the column.
+	for i, mk := range markers {
+		var got uint64
+		var v int
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+			fmt.Sprintf("SELECT v, CAST(%s AS UNSIGNED) FROM %s WHERE id = ?", colName, tableName), mk.id).
+			Scan(&v, &got))
+		require.Greaterf(t, v, -1-i,
+			"marker id=%d: v stayed at seed (%d) — no UPDATE replayed for this row",
+			mk.id, -1-i)
+		require.Equalf(t, mk.val, got,
+			"marker id=%d expected %s value 0x%016x but got 0x%016x",
+			mk.id, bitType, mk.val, got)
+	}
 }

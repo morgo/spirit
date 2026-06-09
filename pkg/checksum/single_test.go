@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/repl"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -39,14 +39,14 @@ func TestBasicChecksum(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 
 	require.NoError(t, checker.Run(t.Context()))
@@ -71,17 +71,17 @@ func TestBasicValidation(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 
-	_, err = NewChecker(nil, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig()) // no source DBs
+	_, err = NewChecker(nil, chunker, []change.Source{feed}, NewCheckerDefaultConfig()) // no source DBs
 	require.EqualError(t, err, "at least one source database must be provided")
 
-	_, err = NewChecker([]*sql.DB{db}, nil, []*repl.Client{feed}, NewCheckerDefaultConfig())
+	_, err = NewChecker([]*sql.DB{db}, nil, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.EqualError(t, err, "chunker must be non-nil")
 
 	_, err = NewChecker([]*sql.DB{db}, chunker, nil, NewCheckerDefaultConfig()) // no feed
@@ -122,17 +122,17 @@ func TestUnfixableUniqueChecksum(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	err = checker.Run(t.Context())
 	// Adding a UNIQUE INDEX to non-unique data: every attempt finds row
@@ -163,18 +163,18 @@ func TestFixCorrupt(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.FixDifferences = true
 	config.MaxRetries = 2
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	err = checker.Run(t.Context())
 	require.NoError(t, err) // yes there is corruption, but it was fixed.
@@ -185,7 +185,7 @@ func TestFixCorrupt(t *testing.T) {
 	require.Equal(t, uint64(0), singleChecker.differencesFound.Load()) // this is "0", because we fixed it.
 
 	// If we run the checker again, it will report zero differences.
-	checker2, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
+	checker2, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	err = checker2.Run(t.Context())
 	require.NoError(t, err)
@@ -214,15 +214,15 @@ func TestCorruptChecksum(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 	singleChecker, ok := checker.(*SingleChecker)
 	require.True(t, ok, "checker is not of type *SingleChecker")
@@ -249,15 +249,15 @@ func TestBoundaryCases(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok := checker.(*SingleChecker)
@@ -266,7 +266,7 @@ func TestBoundaryCases(t *testing.T) {
 
 	// UPDATE t1 to also be NULL
 	testutils.RunSQL(t, "UPDATE checkert1 SET c = NULL")
-	checker, err = NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
+	checker, err = NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 	// Type assert to *SingleChecker to access runChecksum
 	singleChecker, ok = checker.(*SingleChecker)
@@ -320,15 +320,15 @@ func TestChangeDataTypeDatetime(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, NewCheckerDefaultConfig())
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
 	require.NoError(t, err)
 	require.NoError(t, checker.Run(t.Context())) // fails
 }
@@ -356,12 +356,12 @@ func TestYieldTimeout(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
@@ -372,7 +372,7 @@ func TestYieldTimeout(t *testing.T) {
 	// long enough for at least one chunk to complete (setting the watermark)
 	// but short enough to trigger multiple yields over 100k rows.
 	config.YieldTimeout = 100 * time.Millisecond
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 
 	// The checksum should still pass despite yielding — it resumes from the watermark.
@@ -402,17 +402,17 @@ func TestFromWatermark(t *testing.T) {
 
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	feed := repl.NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), repl.NewClientDefaultConfig())
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
 	defer feed.Close()
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
 	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
-	require.NoError(t, feed.Run(t.Context()))
+	require.NoError(t, feed.Start(t.Context()))
 	require.NoError(t, chunker.Open())
 
 	config := NewCheckerDefaultConfig()
 	config.Watermark = "{\"Key\":[\"a\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"2\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"3\"],\"Inclusive\":false}}"
-	checker, err := NewChecker([]*sql.DB{db}, chunker, []*repl.Client{feed}, config)
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
 	require.NoError(t, err)
 	require.NoError(t, checker.Run(t.Context()))
 }

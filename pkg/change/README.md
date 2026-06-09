@@ -1,6 +1,8 @@
-# Replication Client
+# Change Source
 
-The replication client tracks changes to tables by acting as a MySQL replica. The [go-mysql library](https://github.com/go-mysql-org/go-mysql) does most of the heavy lifting by connecting to MySQL and parsing binary log events. Spirit's role is to manage subscriptions for each table being migrated, deduplicate changes, and coordinate with the copier to avoid redundant work.
+This package defines `change.Source` — the abstraction spirit uses to consume a stream of row changes from a source database — and the binlog-backed implementation behind `NewBinlogClient`. The implementation tracks changes by acting as a MySQL replica; the [go-mysql library](https://github.com/go-mysql-org/go-mysql) handles the connection and binary-log parsing, and spirit's role is to manage subscriptions for each table being migrated, deduplicate changes, and coordinate with the copier to avoid redundant work.
+
+The interface is source-agnostic: resume positions are opaque strings, lifecycle is `Start` / `StartFromPosition` / `Close`, and additional implementations (e.g. Vitess VStream) can plug in without touching the applier, the bufferedMap, or the migration runner. See [`source.go`](source.go) for the full interface.
 
 Each table tracked is represented by a `subscription`. There is a single
 subscription type — the **buffered map** — that stores the full row image
@@ -215,12 +217,11 @@ The replication client tracks two positions:
 - **Flushed position**: All events have been successfully applied to the target table
 
 ```go
-// Get the safe checkpoint position
-pos := client.GetBinlogApplyPosition()
+// Get the safe checkpoint position (opaque string owned by the source).
+pos := client.Position()
 
-// Resume from a checkpoint
-client.SetFlushedPos(savedPosition)
-err := client.Run(ctx)
+// Resume from a checkpoint — primes the position and starts streaming.
+err := client.StartFromPosition(ctx, savedPosition)
 ```
 
 Periodically, changes are flushed to advance the flushed position, which is then used as part of checkpoints. Because all replication changes are idempotent, it is understood that on recovery some changes will effectively be re-flushed, and the last ~1 minute of progress may have been lost.

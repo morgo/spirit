@@ -310,26 +310,33 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		return 0, nil
 	}
 
-	// Get the intersected column names to match with the values
-	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
-	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
+	// The intersected source and target column lists are parallel — row.values[i]
+	// is a value for source column sourceColumnNames[i], which corresponds to
+	// target column at the same ordinal in targetColumnList. With column renames
+	// the two lists differ; without renames they are identical.
+	mapping := chunkletData.chunk.ColumnMapping
+	_, targetColumnList := mapping.Columns()
+	sourceColumnNames, _ := mapping.ColumnsSlice()
 
 	// Build VALUES clauses for all rows in the chunklet
 	var valuesClauses []string
 	for _, row := range chunkletData.rows {
-		if len(columnNames) != len(row.values) {
+		if len(sourceColumnNames) != len(row.values) {
 			return 0, fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
-				chunkletData.chunk.String(), len(columnNames), len(row.values))
+				chunkletData.chunk.String(), len(sourceColumnNames), len(row.values))
 		}
 		var values []string
 		for i, value := range row.values {
-			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
+			// Type lookup uses the source table by the source column name —
+			// the value came from a source SELECT, and MySQL coerces on the
+			// destination INSERT if the target column type has widened.
+			columnType, ok := mapping.SourceTable().GetColumnMySQLType(sourceColumnNames[i])
 			if !ok {
-				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+				return 0, fmt.Errorf("column %s not found in source table info", sourceColumnNames[i])
 			}
 			datum, err := table.NewDatumFromValue(value, columnType)
 			if err != nil {
-				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
 			// datum.String() returns a complete pre-escaped SQL literal
 			// (NULL, a numeric, 0x… hex, or a "..."-quoted string). Safe
@@ -340,10 +347,10 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
 	}
 
-	// Build the INSERT statement
+	// Build the INSERT statement — target columns, with renames applied.
 	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
-		chunkletData.chunk.ColumnMapping.TargetTable().QuotedTableName,
-		columnList,
+		mapping.TargetTable().QuotedTableName,
+		targetColumnList,
 		strings.Join(valuesClauses, ", "),
 	)
 

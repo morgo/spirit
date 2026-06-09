@@ -11,7 +11,7 @@ import (
 
 // runRenameTest is a helper that creates a table, inserts data, runs a migration with the given
 // ALTER statement, and then verifies the data in the resulting table matches expectations.
-func runRenameTest(t *testing.T, tableName, createTable, insertData, alter string, verifyFunc func(t *testing.T, db *sql.DB)) {
+func runRenameTest(t *testing.T, enableBuffered bool, tableName, createTable, insertData, alter string, verifyFunc func(t *testing.T, db *sql.DB)) {
 	t.Helper()
 	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	testutils.RunSQLInDatabase(t, dbName, createTable)
@@ -19,7 +19,7 @@ func runRenameTest(t *testing.T, tableName, createTable, insertData, alter strin
 		testutils.RunSQLInDatabase(t, dbName, insertData)
 	}
 
-	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName), WithAlter(alter))
+	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName), WithAlter(alter), WithBuffered(enableBuffered))
 	require.NoError(t, m.Run())
 
 	if verifyFunc != nil {
@@ -33,7 +33,16 @@ func runRenameTest(t *testing.T, tableName, createTable, insertData, alter strin
 // TestRenameColumnSimple tests a simple column rename (RENAME COLUMN syntax).
 func TestRenameColumnSimple(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnSimple(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnSimple(t, true)
+	})
+}
+
+func testRenameColumnSimple(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_simple",
 		`CREATE TABLE rcol_simple (
 			id int NOT NULL AUTO_INCREMENT,
@@ -55,7 +64,16 @@ func TestRenameColumnSimple(t *testing.T) {
 // TestRenameColumnChangeType tests CHANGE COLUMN with rename and type change.
 func TestRenameColumnChangeType(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnChangeType(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnChangeType(t, true)
+	})
+}
+
+func testRenameColumnChangeType(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_chtype",
 		`CREATE TABLE rcol_chtype (
 			id int NOT NULL AUTO_INCREMENT,
@@ -83,7 +101,16 @@ func TestRenameColumnChangeType(t *testing.T) {
 // TestRenameColumnMultiple tests multiple column renames in a single ALTER.
 func TestRenameColumnMultiple(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnMultiple(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnMultiple(t, true)
+	})
+}
+
+func testRenameColumnMultiple(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_multi",
 		`CREATE TABLE rcol_multi (
 			id int NOT NULL AUTO_INCREMENT,
@@ -111,7 +138,16 @@ func TestRenameColumnMultiple(t *testing.T) {
 // (MySQL blocks renaming columns that have generated column dependencies.)
 func TestRenameColumnWithGeneratedColumnEnd(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnWithGeneratedColumnEnd(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnWithGeneratedColumnEnd(t, true)
+	})
+}
+
+func testRenameColumnWithGeneratedColumnEnd(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_genend",
 		`CREATE TABLE rcol_genend (
 			id int NOT NULL AUTO_INCREMENT,
@@ -139,7 +175,16 @@ func TestRenameColumnWithGeneratedColumnEnd(t *testing.T) {
 // (MySQL blocks renaming columns that have generated column dependencies.)
 func TestRenameColumnWithGeneratedColumnMiddle(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnWithGeneratedColumnMiddle(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnWithGeneratedColumnMiddle(t, true)
+	})
+}
+
+func testRenameColumnWithGeneratedColumnMiddle(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_genmid",
 		`CREATE TABLE rcol_genmid (
 			id int NOT NULL AUTO_INCREMENT,
@@ -168,7 +213,16 @@ func TestRenameColumnWithGeneratedColumnMiddle(t *testing.T) {
 // TestRenameColumnWithAddColumn tests rename combined with adding a new column.
 func TestRenameColumnWithAddColumn(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnWithAddColumn(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnWithAddColumn(t, true)
+	})
+}
+
+func testRenameColumnWithAddColumn(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_addcol",
 		`CREATE TABLE rcol_addcol (
 			id int NOT NULL AUTO_INCREMENT,
@@ -192,7 +246,16 @@ func TestRenameColumnWithAddColumn(t *testing.T) {
 // TestRenameColumnWithDropColumn tests rename combined with dropping a column.
 func TestRenameColumnWithDropColumn(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnWithDropColumn(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnWithDropColumn(t, true)
+	})
+}
+
+func testRenameColumnWithDropColumn(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_dropcol",
 		`CREATE TABLE rcol_dropcol (
 			id int NOT NULL AUTO_INCREMENT,
@@ -221,6 +284,15 @@ func TestRenameColumnWithDropColumn(t *testing.T) {
 // TestRenameColumnLargerDataset tests rename with enough data to exercise chunking.
 func TestRenameColumnLargerDataset(t *testing.T) {
 	t.Parallel()
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnLargerDataset(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnLargerDataset(t, true)
+	})
+}
+
+func testRenameColumnLargerDataset(t *testing.T, enableBuffered bool) {
 	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	tableName := "rcol_large"
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("DROP TABLE IF EXISTS %s, _%s_new", tableName, tableName))
@@ -238,7 +310,8 @@ func TestRenameColumnLargerDataset(t *testing.T) {
 	}
 	// Should have 16 rows now
 
-	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName), WithAlter("RENAME COLUMN old_name TO new_name"))
+	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
+		WithAlter("RENAME COLUMN old_name TO new_name"), WithBuffered(enableBuffered))
 	require.NoError(t, m.Run())
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
@@ -287,7 +360,16 @@ func TestRenameColumnPKBlocked(t *testing.T) {
 // TestRenameColumnChangeColumnWithTypeChange tests CHANGE COLUMN that renames + changes type on multiple columns.
 func TestRenameColumnChangeColumnWithTypeChange(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnChangeColumnWithTypeChange(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnChangeColumnWithTypeChange(t, true)
+	})
+}
+
+func testRenameColumnChangeColumnWithTypeChange(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_chg_tp",
 		`CREATE TABLE rcol_chg_tp (
 			id int NOT NULL AUTO_INCREMENT,
@@ -312,7 +394,16 @@ func TestRenameColumnChangeColumnWithTypeChange(t *testing.T) {
 // TestRenameColumnWithNullableColumns tests rename with nullable columns containing NULLs.
 func TestRenameColumnWithNullableColumns(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnWithNullableColumns(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnWithNullableColumns(t, true)
+	})
+}
+
+func testRenameColumnWithNullableColumns(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_null",
 		`CREATE TABLE rcol_null (
 			id int NOT NULL AUTO_INCREMENT,
@@ -344,7 +435,16 @@ func TestRenameColumnWithNullableColumns(t *testing.T) {
 // TestRenameColumnCompositeKey tests rename on a table with a composite primary key.
 func TestRenameColumnCompositeKey(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnCompositeKey(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnCompositeKey(t, true)
+	})
+}
+
+func testRenameColumnCompositeKey(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_compkey",
 		`CREATE TABLE rcol_compkey (
 			tenant_id int NOT NULL,
@@ -368,7 +468,16 @@ func TestRenameColumnCompositeKey(t *testing.T) {
 // drop column, and generated columns present (but not depending on the renamed column).
 func TestRenameColumnAllCombined(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnAllCombined(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnAllCombined(t, true)
+	})
+}
+
+func testRenameColumnAllCombined(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_combo",
 		`CREATE TABLE rcol_combo (
 			id int NOT NULL AUTO_INCREMENT,
@@ -399,6 +508,15 @@ func TestRenameColumnAllCombined(t *testing.T) {
 // the rename works through the full copy+checksum+binlog replay path.
 func TestRenameColumnForceCopyPath(t *testing.T) {
 	t.Parallel()
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnForceCopyPath(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnForceCopyPath(t, true)
+	})
+}
+
+func testRenameColumnForceCopyPath(t *testing.T, enableBuffered bool) {
 	dbName, _ := testutils.CreateUniqueTestDatabase(t)
 	tableName := "rcol_forcecopy"
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("DROP TABLE IF EXISTS %s, _%s_new", tableName, tableName))
@@ -418,7 +536,8 @@ func TestRenameColumnForceCopyPath(t *testing.T) {
 
 	// CHANGE COLUMN with type change forces the copy algorithm
 	m := NewTestMigration(t, WithDBName(dbName), WithTable(tableName),
-		WithAlter("CHANGE COLUMN old_name new_name varchar(200) NOT NULL"))
+		WithAlter("CHANGE COLUMN old_name new_name varchar(200) NOT NULL"),
+		WithBuffered(enableBuffered))
 	require.NoError(t, m.Run())
 
 	db, err := sql.Open("mysql", testutils.DSNForDatabase(dbName))
@@ -447,7 +566,16 @@ func TestRenameColumnForceCopyPath(t *testing.T) {
 // TestRenameColumnEmpty tests rename on an empty table.
 func TestRenameColumnEmpty(t *testing.T) {
 	t.Parallel()
-	runRenameTest(t,
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnEmpty(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnEmpty(t, true)
+	})
+}
+
+func testRenameColumnEmpty(t *testing.T, enableBuffered bool) {
+	runRenameTest(t, enableBuffered,
 		"rcol_empty",
 		`CREATE TABLE rcol_empty (
 			id int NOT NULL AUTO_INCREMENT,

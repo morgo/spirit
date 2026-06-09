@@ -106,6 +106,40 @@ func TestDiscovery(t *testing.T) {
 	require.Len(t, t1.Columns, 2)
 }
 
+// TestDiscoveryDisableAnalyze verifies that SetInfo works with DisableAnalyze
+// set: it must skip ANALYZE TABLE (which needs a writable server) and still
+// discover the schema and populate EstimatedRows straight from
+// information_schema. This is the path a read-only / replica source uses.
+func TestDiscoveryDisableAnalyze(t *testing.T) {
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS discoverynoanalyze`)
+	table := `CREATE TABLE discoverynoanalyze (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	testutils.RunSQL(t, table)
+	testutils.RunSQL(t, `insert into discoverynoanalyze values (1, 'a'), (2, 'b'), (3, 'c')`)
+	// Refresh the optimizer stats up front (the writable path) so the estimate
+	// is populated; DisableAnalyze must then read it back without re-analyzing.
+	testutils.RunSQL(t, `ANALYZE TABLE discoverynoanalyze`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		_ = db.Close()
+	}()
+
+	t1 := NewTableInfo(db, "test", "discoverynoanalyze")
+	t1.DisableAnalyze = true
+	require.NoError(t, t1.SetInfo(t.Context()))
+
+	require.Equal(t, "id", t1.KeyColumns[0])
+	require.True(t, t1.KeyIsAutoInc)
+	require.Len(t, t1.Columns, 2)
+	require.Equal(t, "1", t1.minValue.String())
+	require.Equal(t, "3", t1.maxValue.String())
+}
+
 func TestDiscoveryUInt(t *testing.T) {
 	testutils.RunSQL(t, `DROP TABLE IF EXISTS discoveryuintt1`)
 	table := `CREATE TABLE discoveryuintt1 (
@@ -210,6 +244,31 @@ func TestDiscoveryBalancesTable(t *testing.T) {
 	require.NoError(t, chunker.Open())
 	require.Equal(t, "0", t1.minValue.String())
 	require.Equal(t, "0", t1.maxValue.String())
+}
+
+// TestPrimaryKeyIsMemoryComparableRejectsBIT regresses a gap exposed when
+// BIT was reclassified from unknownType to unsignedType in
+// mySQLTypeToDatumTp: the change makes BIT-keyed tables pass the original
+// unknownType check, but the chunker's setMinMax path returns BIT as raw
+// big-endian bytes that newDatumFromMySQL can't parse as decimal. Until
+// the min/max read path is BIT-aware, BIT primary keys must be rejected
+// upfront with ErrUnsupportedPKType.
+func TestPrimaryKeyIsMemoryComparableRejectsBIT(t *testing.T) {
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS bitpk`)
+	testutils.RunSQL(t, `CREATE TABLE bitpk (b BIT(8) NOT NULL, v INT NOT NULL, PRIMARY KEY (b))`)
+	testutils.RunSQL(t, `INSERT INTO bitpk (b, v) VALUES (b'00000001', 1), (b'00000010', 2)`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	t1 := NewTableInfo(db, "test", "bitpk")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.ErrorIs(t, t1.PrimaryKeyIsMemoryComparable(), ErrUnsupportedPKType)
 }
 
 func TestDiscoveryCompositeNonComparable(t *testing.T) {

@@ -1,4 +1,4 @@
-package repl
+package change
 
 import (
 	"crypto/sha1"
@@ -92,7 +92,7 @@ func setupTestTables(t *testing.T, t1, t2 string) (*table.TableInfo, *table.Tabl
 	return srcTable, dstTable
 }
 
-func setupBufferedTest(t *testing.T) (*sql.DB, *Client, *table.TableInfo, *table.TableInfo) {
+func setupBufferedTest(t *testing.T) (*sql.DB, *binlogClient, *table.TableInfo, *table.TableInfo) {
 	t.Helper()
 	t1 := `CREATE TABLE subscription_test (
 		id INT NOT NULL,
@@ -116,11 +116,11 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client, *table.TableInfo, *table
 	}
 	applier, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
 	require.NoError(t, err)
-	client := NewClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig())
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier, NewClientDefaultConfig()).(*binlogClient)
 	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
 	require.NoError(t, err)
 	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-	require.NoError(t, client.Run(t.Context()))
+	require.NoError(t, client.Start(t.Context()))
 	return db, client, srcTable, dstTable
 }
 
@@ -128,7 +128,7 @@ func setupBufferedTest(t *testing.T) (*sql.DB, *Client, *table.TableInfo, *table
 // schema.table key, failing the test if the key is missing or if the
 // stored Subscription is not a *bufferedMap. Used by tests that inspect
 // subscription internals directly.
-func getBufferedMap(t *testing.T, c *Client, key string) *bufferedMap {
+func getBufferedMap(t *testing.T, c *binlogClient, key string) *bufferedMap {
 	t.Helper()
 	sub, ok := c.subs.Get(key)
 	require.True(t, ok, "no subscription registered for %q", key)
