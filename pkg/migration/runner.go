@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -462,7 +461,6 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			TLSMode:              r.migration.TLSMode,
 			TLSCertificatePath:   r.migration.TLSCertificatePath,
 			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
-			Buffered:             r.migration.Buffered,
 			GTID:                 r.migration.GTID,
 		}, r.logger, scope); err != nil {
 			return err
@@ -478,51 +476,6 @@ func (r *Runner) dsn() string {
 	cfg.Net = "tcp"
 	cfg.Addr = r.migration.Host
 	cfg.DBName = r.changes[0].stmt.Schema
-	return cfg.FormatDSN()
-}
-
-// splitReplicaDSNs splits a comma-separated list of replica DSNs.
-// A single DSN returns a single-element slice. Empty string returns nil.
-func splitReplicaDSNs(dsnList string) []string {
-	if dsnList == "" {
-		return nil
-	}
-	parts := strings.Split(dsnList, ",")
-	dsns := make([]string, 0, len(parts))
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed != "" {
-			dsns = append(dsns, trimmed)
-		}
-	}
-	return dsns
-}
-
-// maskPasswordInDSN masks the password in any DSN string for safe logging
-func maskPasswordInDSN(dsn string) string {
-	if dsn == "" {
-		return dsn
-	}
-
-	// Use MySQL driver's ParseDSN for robust parsing
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		// If parsing fails, fall back to the original DSN
-		// This preserves the original behavior for malformed DSNs
-		return dsn
-	}
-
-	// Check if the original DSN had a password field by looking for `:` before `@`
-	// This handles both empty passwords (user:@host) and non-empty passwords (user:pass@host)
-	atIndex := strings.Index(dsn, "@")
-	colonIndex := strings.Index(dsn, ":")
-	hasPasswordField := colonIndex != -1 && atIndex != -1 && colonIndex < atIndex
-
-	// Only mask if there was actually a password field in the original DSN
-	if hasPasswordField {
-		cfg.Passwd = "***"
-	}
-
 	return cfg.FormatDSN()
 }
 
@@ -566,8 +519,9 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// applied state.
 	//
 	// The same applier is handed to the copier, but the copier only uses it
-	// when buffered copy is opted in. Unbuffered copy issues INSERT IGNORE
-	// INTO _new ... SELECT FROM original directly and ignores the applier.
+	// for buffered copy (the default). Unbuffered copy (--unbuffered) issues
+	// INSERT IGNORE INTO _new ... SELECT FROM original directly and ignores the
+	// applier.
 	appl, err := applier.NewSingleTargetApplier(
 		applier.Target{DB: r.db},
 		&applier.ApplierConfig{
@@ -589,7 +543,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		MetricsSink:     r.metricsSink,
 		DBConfig:        r.dbConfig,
 		Applier:         appl,
-		Buffered:        r.migration.Buffered,
+		Unbuffered:      r.migration.Unbuffered,
 	})
 	if err != nil {
 		return err

@@ -47,17 +47,22 @@ type CopierConfig struct {
 	// Applier is used by the buffered copier to write rows to the destination.
 	// It is also used by callers (migration/move runner) for the replication
 	// client. Construction is shared so that both paths use the same applier
-	// when buffered copy is opted in. When Buffered is false the copier
-	// ignores the applier.
+	// for buffered copy (the default). When the unbuffered copier is selected
+	// (Unbuffered=true) the copier ignores the applier.
 	Applier applier.Applier
-	// Buffered selects between the buffered copier (which streams row images
-	// through Applier) and the unbuffered copier (which issues
-	// INSERT IGNORE INTO _new ... SELECT FROM original directly). Defaults to
-	// false (unbuffered).
-	Buffered bool
+	// Unbuffered selects the legacy unbuffered copier, which issues
+	// INSERT IGNORE INTO _new ... SELECT FROM original directly and ignores
+	// Applier. When false (the default), the buffered copier is used, which
+	// streams row images through Applier and therefore requires a non-nil
+	// Applier. NewCopierDefaultConfig leaves this false (buffered), matching the
+	// production default.
+	Unbuffered bool
 }
 
-// NewCopierDefaultConfig returns a default config for the copier.
+// NewCopierDefaultConfig returns a default config for the copier. It defaults
+// to the buffered copier (Unbuffered=false), matching the production default,
+// so callers must supply an Applier (see CopierConfig.Applier). Tests that want
+// the legacy unbuffered copier set Unbuffered=true, which needs no Applier.
 func NewCopierDefaultConfig() *CopierConfig {
 	return &CopierConfig{
 		Concurrency:     4,
@@ -80,11 +85,8 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 	if config.DBConfig == nil {
 		return nil, errors.New("dbConfig must be non-nil")
 	}
-	if config.Buffered {
-		if config.Applier == nil {
-			return nil, errors.New("buffered copier requires a non-nil Applier")
-		}
-		return &buffered{
+	if config.Unbuffered {
+		return &Unbuffered{
 			db:               db,
 			concurrency:      config.Concurrency,
 			throttler:        config.Throttler,
@@ -93,10 +95,12 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 			metricsSink:      config.MetricsSink,
 			dbConfig:         config.DBConfig,
 			copierEtaHistory: newcopierEtaHistory(),
-			applier:          config.Applier,
 		}, nil
 	}
-	return &Unbuffered{
+	if config.Applier == nil {
+		return nil, errors.New("buffered copier requires a non-nil Applier")
+	}
+	return &buffered{
 		db:               db,
 		concurrency:      config.Concurrency,
 		throttler:        config.Throttler,
@@ -105,5 +109,6 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 		metricsSink:      config.MetricsSink,
 		dbConfig:         config.DBConfig,
 		copierEtaHistory: newcopierEtaHistory(),
+		applier:          config.Applier,
 	}, nil
 }

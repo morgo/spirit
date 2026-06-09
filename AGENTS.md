@@ -111,7 +111,7 @@ assert.NoError(t, m.Close())
 m := NewTestRunner(t, "mytable", "ADD INDEX idx_a (a)",
     WithThreads(1),
     WithTargetChunkTime(100*time.Millisecond),
-    WithBuffered(true),
+    WithBuffered(false), // opt out of the default buffered copier
 )
 ```
 
@@ -212,8 +212,8 @@ The applier issues `REPLACE INTO target VALUES (...)` from inline row images (no
 
 ### `pkg/copier`
 Two algorithms:
-- **Unbuffered** (default) — `INSERT IGNORE INTO ... SELECT` directly in MySQL.
-- **Buffered** (`--buffered`) — producer/consumer pattern; required for cross-server migrations (`pkg/move`) and opt-in for single-server schema changes. Selected via `CopierConfig.Buffered`; ignores the applier when `Buffered` is false even if one is supplied.
+- **Buffered** (default) — producer/consumer pattern; required for cross-server migrations (`pkg/move`) and the default for single-server schema changes. Reads rows into Spirit and writes them through the applier, taking no locks on the source.
+- **Unbuffered** (`--unbuffered`) — `INSERT IGNORE INTO ... SELECT` directly in MySQL; the legacy copier. Selected via `CopierConfig.Unbuffered`, which the migration runner wires straight from `--unbuffered`, so the buffered copier runs unless `--unbuffered` is passed. The copier ignores the applier when `Unbuffered` is true even if one is supplied.
 
 ### `pkg/table`
 Three chunker implementations:
@@ -246,7 +246,7 @@ Key principles:
 
 ## Unsupported Features (Do Not Implement)
 
-- **RENAME column** — some rename operations are intentionally not supported. Renaming primary key columns, renaming in buffered mode, and dangerous overlap patterns (e.g., `RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...`) are blocked. Simple non-PK column renames in unbuffered mode are supported.
+- **RENAME column** — some rename operations are intentionally not supported. Renaming primary key columns and dangerous overlap patterns (e.g., `RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...`) are blocked. Simple non-PK column renames are supported in both the buffered and unbuffered copier paths.
 - **ALTER/DROP PRIMARY KEY** — primary key must remain unchanged
 - **Lossy conversions** (e.g., shortening VARCHAR below max data length)
 - **FOREIGN KEYS or TRIGGERS** on migrated tables

@@ -28,107 +28,90 @@ func TestEnumReorderCheck(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumchk")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + reorder ENUM: should fail
+	// Reorder ENUM: should fail
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('pending', 'active', 'inactive') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
-	// Unbuffered + reorder ENUM: should also fail — bufferedMap is now the
-	// binlog replay path for memory-comparable PKs regardless of the copy mode.
-	r.Buffered = false
-	err = enumReorderCheck(t.Context(), r, slog.Default())
-	require.Error(t, err)
-	require.ErrorContains(t, err, "unsafe ENUM value reorder")
-
-	// Buffered + append ENUM (safe): should pass
+	// Append ENUM (safe): should pass
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active', 'inactive', 'pending', 'archived') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
 
-	// Buffered + insert new ENUM value in middle: should fail
+	// Insert new ENUM value in middle: should fail
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active', 'suspended', 'inactive', 'pending') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
-	// Buffered + CHANGE COLUMN with reorder: should fail
+	// CHANGE COLUMN with reorder: should fail
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk CHANGE COLUMN status status ENUM('pending', 'active', 'inactive') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
-	// Buffered + drop ENUM value from the middle: should pass.
+	// Drop ENUM value from the middle: should pass.
 	// Retained values keep their relative order; rows that held the dropped
 	// value will fail the post-cutover checksum, not the preflight check.
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active', 'pending') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
 
-	// Buffered + drop ENUM value from the start: should pass.
+	// Drop ENUM value from the start: should pass.
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('inactive', 'pending') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
 
-	// Buffered + drop multiple ENUM values: should pass.
+	// Drop multiple ENUM values: should pass.
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
 
-	// Buffered + drop a value and append a new one: should pass.
+	// Drop a value and append a new one: should pass.
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('active', 'pending', 'archived') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
 
-	// Buffered + drop a value and re-add it elsewhere: should fail.
+	// Drop a value and re-add it elsewhere: should fail.
 	// 'active' is dropped from position 1 and reintroduced at the end —
 	// that breaks the relative-order invariant for retained values.
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk MODIFY COLUMN status ENUM('inactive', 'pending', 'active') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsafe ENUM value reorder")
 
-	// Buffered + non-ENUM column modification: should pass
+	// Non-ENUM column modification: should pass
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk ADD COLUMN name VARCHAR(255)")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
@@ -148,25 +131,18 @@ func TestEnumReorderCheckVarcharToEnum(t *testing.T) {
 	tbl := table.NewTableInfo(db, "test", "enumchk_varchar")
 	require.NoError(t, tbl.SetInfo(t.Context()))
 
-	// Buffered + VARCHAR→ENUM conversion: should pass (not a reorder)
+	// VARCHAR→ENUM conversion: should pass (not a reorder)
 	r := Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk_varchar MODIFY COLUMN state ENUM('active', 'inactive', 'pending') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)
 
-	// Unbuffered + VARCHAR→ENUM conversion: should also pass
-	r.Buffered = false
-	err = enumReorderCheck(t.Context(), r, slog.Default())
-	require.NoError(t, err)
-
-	// Buffered + CHANGE COLUMN VARCHAR→ENUM: should pass
+	// CHANGE COLUMN VARCHAR→ENUM: should pass
 	r = Resources{
 		Table:     tbl,
 		Statement: statement.MustNew("ALTER TABLE enumchk_varchar CHANGE COLUMN state state ENUM('active', 'inactive') NOT NULL")[0],
-		Buffered:  true,
 	}
 	err = enumReorderCheck(t.Context(), r, slog.Default())
 	require.NoError(t, err)

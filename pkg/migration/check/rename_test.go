@@ -65,25 +65,6 @@ func TestRenamePKColumnBlocked(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestRenameAllowedWithBufferedCopier covers that column renames are
-// permitted under the buffered copier (--buffered). The buffered copier
-// uses the same ColumnMapping intersection as the unbuffered path, so
-// renames flow through identically; generated/virtual columns are
-// excluded from the intersection on both source and target.
-func TestRenameAllowedWithBufferedCopier(t *testing.T) {
-	r := Resources{
-		Statement: statement.MustNew("ALTER TABLE t1 RENAME COLUMN c1 TO c2")[0],
-		Buffered:  true,
-	}
-	require.NoError(t, renameCheck(t.Context(), r, slog.Default()))
-
-	r.Statement = statement.MustNew("ALTER TABLE t1 CHANGE c1 c2 VARCHAR(100)")[0]
-	require.NoError(t, renameCheck(t.Context(), r, slog.Default()))
-
-	r.Statement = statement.MustNew("ALTER TABLE t1 CHANGE c1 c1 VARCHAR(100)")[0] //nolint: dupword
-	require.NoError(t, renameCheck(t.Context(), r, slog.Default()))
-}
-
 func TestRenameColumnNameOverlap(t *testing.T) {
 	// Pattern 1: RENAME COLUMN c1 TO n1, ADD COLUMN c1 ...
 	// The old name is reused by a new column — data corruption risk.
