@@ -82,6 +82,11 @@ func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int) (int, e
 	if requested > 0 {
 		return requested, nil
 	}
+	// Auto-sizing requires probing the server, so a usable DB is mandatory
+	// here (a positive requested value above never reaches this point).
+	if db == nil {
+		return 0, errors.New("cannot auto-size write threads: no database connection provided (set write-threads to a positive value)")
+	}
 	isAurora, err := IsAurora(ctx, db)
 	if err != nil {
 		return 0, err

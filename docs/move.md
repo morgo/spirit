@@ -115,6 +115,8 @@ How many chunks to copy in parallel from the source.
 ### write-threads
 
 - Type: Integer
-- Default value: `2`
+- Default value: `4`
 
 How many concurrent write threads to use per target when inserting rows. This controls the fan-out parallelism of the buffered copier's write side.
+
+A value of `0` means **auto**: on Aurora, the value is set to the target instance's vCPU count (read from `@@innodb_purge_threads`). On non-Aurora targets there is no reliable vCPU signal, so `0` is rejected with an error and you must set an explicit value. Because the default is `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.

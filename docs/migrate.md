@@ -36,6 +36,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [table](#table)
 - [target-chunk-time](#target-chunk-time)
 - [threads](#threads)
+- [write-threads](#write-threads)
 - [tls-ca](#tls-ca)
 - [tls-mode](#tls-mode)
   - [PREFERRED](#preferred)
@@ -416,13 +417,23 @@ Spirit uses `threads` to set the parallelism of:
 
 - The copier task
 - The checksum task
-- The replication applier task
 
-Internal to Spirit, the database pool size is set to `threads + 1`. This is intentional because the replication applier runs concurrently to the copier and checksum tasks, and using a shared-pool prevents the worst case of `threads * 2` being used. The tradeoff of `+1` allows the replication applier to always make some progress, while not bursting too far beyond the user's intended concurrency limit.
+The parallelism of the replication applier is controlled separately by [write-threads](#write-threads).
+
+Internal to Spirit, the database pool size is set to `threads + write-threads + 1`. This is intentional because the replication applier runs concurrently to the copier and checksum tasks: `threads` covers the copier/checksum work, `write-threads` covers the applier, and the trailing `+1` gives the applier a little headroom so it can always make some progress.
 
 You may want to wrap `threads` in automation and set it to a percentage of the cores of your database server. For example, if you have a 32-core machine you may choose to set this to `8`. Approximately 25% is a good starting point, making sure you always leave plenty of free cores for regular database operations. If your migration is IO bound and/or your IO latency is high (such as Aurora) you may even go higher than 25%.
 
 Note that Spirit does not support dynamically adjusting the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values.
+
+### write-threads
+
+- Type: Integer
+- Default value: `4`
+
+Sets the parallelism of the **replication applier** — the number of concurrent write threads used to apply changes (read from the binlog) to the new table. Copier and checksum parallelism are controlled separately by [threads](#threads).
+
+A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the instance vCPU count (read from `@@innodb_purge_threads`). On non-Aurora targets there is no reliable vCPU signal, so `0` is rejected with an error and you must set an explicit value. Because the default is `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
 
 ### tls-ca
 

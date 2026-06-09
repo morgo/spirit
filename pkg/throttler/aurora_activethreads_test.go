@@ -122,6 +122,12 @@ func TestResolveWriteThreads_RejectsNegative(t *testing.T) {
 	require.ErrorContains(t, err, "non-negative")
 }
 
+func TestResolveWriteThreads_NilDBWhenAutoSizing(t *testing.T) {
+	// Auto-sizing (requested==0) must reject a nil DB rather than panic.
+	_, err := ResolveWriteThreads(t.Context(), nil, 0)
+	require.ErrorContains(t, err, "no database connection")
+}
+
 func TestResolveWriteThreads_NonAuroraErrors_LocalMySQL(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
