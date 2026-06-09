@@ -14,7 +14,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 ## Configuration
 
 - [alter](#alter)
-- [buffered](#buffered)
 - [checkpoint-max-age](#checkpoint-max-age)
 - [checksum-yield-timeout](#checksum-yield-timeout)
 - [conf](#conf)
@@ -43,6 +42,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
   - [REQUIRED](#required)
   - [VERIFY\_CA](#verify_ca)
   - [VERIFY\_IDENTITY](#verify_identity)
+- [unbuffered](#unbuffered)
 - [username](#username)
 
 ### alter
@@ -54,22 +54,6 @@ spirit migrate --host mydb:3306 --username root --password secret \
 The alter table command to perform. The default value is a _null alter table_, which can be useful for testing.
 
 See also: `--statement`.
-
-### buffered
-
-- Type: Boolean
-- Default value: `false`
-
-When set to `true`, Spirit uses the buffered copy algorithm (based on [Netflix's DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)) instead of the default `INSERT IGNORE .. SELECT` approach. The buffered copier reads rows from the source table into memory and then inserts them into the new table, fanning out writes across many parallel threads. Changes from replication are also applied in a similar buffered way.
-
-The advantages of buffered copy are:
-
-- **No data locks on the source table** — the source is only read, never locked for writes. This eliminates contention between the copier and OLTP workloads on hot rows.
-- **Cross-server compatibility** — the same algorithm is used by the `move` command to copy tables between different MySQL servers.
-
-The buffered copier requires `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since it relies on reading all column values from the binary log.
-
-Note: buffered copy is not yet supported for multi-table migrations (i.e. when using `--statement` with multiple `ALTER TABLE` statements).
 
 ### checkpoint-max-age
 
@@ -402,7 +386,7 @@ The target is not a hard limit, but rather a guideline which is recalculated bas
 Larger values generally yield better performance, but have consequences:
 
 - A `5s` value means that at any point replicas will appear `5s` behind the source. Spirit does not support read-replicas, so we do not typically consider this a problem. See [replica-max-lag](#replica-max-lag) for more context.
-- Data locks (row locks) are held for the duration of each transaction, so even a `1s` chunk may lead to frustrating user experiences. Consider the scenario that a simple update query usually takes `<5ms`. If it tries to update a row that has just started being copied it will now take approximately `1.005s` to complete. In scenarios where there is a lot of contention around a few rows, this could even lead to a large backlog of queries waiting to be executed.
+- **With the legacy `--unbuffered` copier**, data locks (row locks) are held on the source for the duration of each chunk's `INSERT ... SELECT`, so even a `1s` chunk may lead to frustrating user experiences. Consider the scenario that a simple update query usually takes `<5ms`. If it tries to update a row that has just started being copied it will now take approximately `1.005s` to complete. In scenarios where there is a lot of contention around a few rows, this could even lead to a large backlog of queries waiting to be executed. The default buffered copier reads with MVCC and takes no source row locks, so this consequence does not apply to it — but a larger chunk still increases replica lag and the amount of data buffered in memory.
 - It is recommended to set the target chunk time to a value for which if queries increased by this much, user experience would still be acceptable even if a little frustrating. In some of our systems this means up to `2s`. We do not know of scenarios where values should ever exceed `5s`. If you can tolerate more unavailability, consider running DDL directly on the MySQL server.
 
 Note that Spirit does not support dynamically adjusting the target-chunk-time while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of [threads](#threads) or target-chunk-time, you can simply kill the Spirit process and start it again with different values.
@@ -566,6 +550,22 @@ spirit migrate --tls-mode VERIFY_IDENTITY \
        --threads 10
 ```
 **Result**: Uses embedded RDS certificate with full verification for RDS hostname.
+
+### unbuffered
+
+- Type: Boolean
+- Default value: `false`
+
+By default Spirit uses the **buffered** copy algorithm (based on [Netflix's DBLog](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b)). The buffered copier reads rows from the source table into memory and then inserts them into the new table, fanning out writes across many parallel threads. Changes from replication are also applied in a similar buffered way.
+
+The advantages of buffered copy are:
+
+- **No data locks on the source table** — the source is only read, never locked for writes. This eliminates contention between the copier and OLTP workloads on hot rows.
+- **Cross-server compatibility** — the same algorithm is used by the `move` command to copy tables between different MySQL servers.
+
+Setting `--unbuffered` opts back into the **legacy** mechanism of using `INSERT IGNORE .. SELECT` directly in MySQL. This was the default in older versions of Spirit and is still supported for now, but it has the downside of requiring more locking on the source table: the `SELECT` side of `INSERT .. SELECT` takes shared row locks rather than using MVCC, so it can contend with production workloads touching the same rows. (Smaller `--target-chunk-time` values mitigate this by holding those locks for less time per chunk.)
+
+Both copiers require `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since Spirit's replication subscription reads all column values from the binary log.
 
 ### username
 

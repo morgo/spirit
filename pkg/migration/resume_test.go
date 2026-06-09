@@ -84,6 +84,14 @@ func TestCheckpoint(t *testing.T) {
 	// This test manually steps through the migration process to verify
 	// watermark, checkpoint dump, and restore behavior.
 	// It uses specific INSERT patterns that produce exactly 11040 rows.
+	//
+	// It is intentionally unbuffered: it drives the copier's synchronous
+	// CopyChunk to complete chunks in a controlled order (2, 1, 3) and assert
+	// the exact watermark/progress at each step. The default buffered copier
+	// copies chunks in parallel and cannot be stepped deterministically, so
+	// this low-level watermark coverage stays on the unbuffered copier;
+	// buffered checkpoint/resume is covered by the TestResumeFromCheckpoint*
+	// E2E tests.
 	tbl := `CREATE TABLE cpt1 (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		id2 INT NOT NULL,
@@ -113,6 +121,7 @@ func TestCheckpoint(t *testing.T) {
 			TargetChunkTime:  100 * time.Millisecond,
 			Table:            "cpt1",
 			Alter:            "ENGINE=InnoDB",
+			Unbuffered:       true, // see the test's doc comment: intentionally unbuffered
 			useTestThrottler: true,
 		})
 		require.NoError(t, err)
@@ -302,7 +311,6 @@ func TestCheckpointRestore(t *testing.T) {
 // https://github.com/block/spirit/issues/381
 func TestCheckpointRestoreBinaryPK(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
 	tt := testutils.NewTestTable(t, "binarypk", `CREATE TABLE binarypk (
  main_id varbinary(16) NOT NULL,
  sub_id varchar(36) CHARACTER SET latin1 COLLATE latin1_swedish_ci GENERATED ALWAYS AS (jsonbody->>'$._id') STORED NOT NULL,
@@ -310,62 +318,30 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
  PRIMARY KEY (main_id,sub_id)
 )`)
 	tt.SeedRows(t, `INSERT INTO binarypk (main_id, jsonbody) SELECT RANDOM_BYTES(16), JSON_OBJECT('_id', "0xabc", 'name', 'bbb', 'randombytes', HEX(RANDOM_BYTES(1024)))`, 10000)
-	cfg, err := mysql.ParseDSN(testutils.DSN())
-	require.NoError(t, err)
 
-	r, err := NewRunner(&Migration{
-		Host:             cfg.Addr,
-		Username:         cfg.User,
-		Password:         &cfg.Passwd,
-		Database:         cfg.DBName,
-		Threads:          1,
-		WriteThreads:     1,
-		TargetChunkTime:  100 * time.Millisecond,
-		Table:            "binarypk",
-		Alter:            "ENGINE=InnoDB",
-		useTestThrottler: true,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "initial", r.status.Get().String())
-	// Usually we would call r.Run() but we want to step through
-	// the migration process manually.
-	r.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	r.dbConfig = dbconn.NewDBConfig()
-	// Get Table Info
-	r.changes[0].table = table.NewTableInfo(r.db, r.migration.Database, r.migration.Table)
-	require.NoError(t, r.changes[0].table.SetInfo(ctx))
-	require.NoError(t, r.changes[0].dropOldTable(ctx))
+	// Run slowly (single thread + throttler) with the default buffered copier
+	// so the copy is still in progress when we interrupt it once a checkpoint
+	// has been saved.
+	m := NewTestRunner(t, "binarypk", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		require.Error(t, m.Run(ctx)) // interrupted once a checkpoint is saved.
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
 
-	require.NoError(t, r.newMigration(t.Context()))
-
-	ccopier, ok := r.copier.(*copier.Unbuffered)
-	require.True(t, ok)
-
-	for range 3 {
-		chunk, err := r.copyChunker.Next()
-		require.NoError(t, err)
-		require.NoError(t, ccopier.CopyChunk(ctx, chunk))
-	}
-	// Dump checkpoint and close runner.
-	require.NoError(t, r.DumpCheckpoint(t.Context()))
-	require.NoError(t, r.Close())
-
-	// Try and resume and then check if we used a checkpoint for resuming.
-	r2, err := NewRunner(&Migration{
-		Host:         cfg.Addr,
-		Username:     cfg.User,
-		Password:     &cfg.Passwd,
-		Database:     cfg.DBName,
-		Threads:      2,
-		WriteThreads: 2,
-		Table:        "binarypk",
-		Alter:        "ENGINE=InnoDB",
-	})
-	require.NoError(t, err)
-	require.NoError(t, r2.Run(t.Context()))
-	require.True(t, r2.usedResumeFromCheckpoint) // managed to resume.
-	require.NoError(t, r2.Close())
+	// Resume with a fresh runner and confirm it picked up from the checkpoint.
+	m2 := NewTestRunner(t, "binarypk", "ENGINE=InnoDB", WithThreads(2))
+	require.NoError(t, m2.Run(t.Context()))
+	require.True(t, m2.usedResumeFromCheckpoint) // managed to resume.
+	require.NoError(t, m2.Close())
 }
 
 func TestCheckpointResumeDuringChecksum(t *testing.T) {
@@ -441,91 +417,49 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	preSetup := func(alter string) *Runner {
-		m, err := NewRunner(&Migration{
-			Host:             cfg.Addr,
-			Username:         cfg.User,
-			Password:         &cfg.Passwd,
-			Database:         cfg.DBName,
-			Threads:          2,
-			WriteThreads:     2,
-			Table:            "cpt1difft1",
-			Alter:            alter,
-			TargetChunkTime:  100 * time.Millisecond,
-			useTestThrottler: true,
-		})
-		require.NoError(t, err)
-		require.Equal(t, "initial", m.status.Get().String())
-		// Usually we would call m.Run() but we want to step through
-		// the migration process manually.
-		m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-		require.NoError(t, err)
-		m.dbConfig = dbconn.NewDBConfig()
-		// Get Table Info
-		m.changes[0].table = table.NewTableInfo(m.db, m.migration.Database, m.migration.Table)
-		require.NoError(t, m.changes[0].table.SetInfo(t.Context()))
-		require.NoError(t, m.changes[0].dropOldTable(t.Context()))
-		return m
-	}
-
-	m := preSetup("ADD COLUMN id3 INT NOT NULL DEFAULT 0, ADD INDEX(id2)")
-	// migrationRunner.Run usually calls m.Setup() here.
-	// Which first checks if the table can be restored from checkpoint.
-	// Because this is the first run, it can't.
-
-	require.Error(t, m.resumeFromCheckpoint(t.Context()))
-
-	require.NoError(t, m.newMigration(t.Context()))
-
-	// Now we are ready to start copying rows.
-	// Instead of calling m.copyRows() we will step through it manually.
-	// Since we want to checkpoint after a few chunks.
-
-	m.status.Set(status.CopyRows)
-	require.Equal(t, "copyRows", m.status.Get().String())
-
-	// first chunk.
-	chunk1, err := m.copyChunker.Next()
-	require.NoError(t, err)
-
-	chunk2, err := m.copyChunker.Next()
-	require.NoError(t, err)
-
-	chunk3, err := m.copyChunker.Next()
-	require.NoError(t, err)
-
-	// There is no watermark yet.
-	_, err = m.copyChunker.GetLowWatermark()
-	require.Error(t, err)
-	// Dump checkpoint also returns an error for the same reason.
-	require.Error(t, m.DumpCheckpoint(t.Context()))
-
-	ccopier, ok := m.copier.(*copier.Unbuffered)
-	require.True(t, ok)
-
-	// Because it's multi-threaded, we can't guarantee the order of the chunks.
-	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk2))
-	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk1))
-	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk3))
-
-	// The watermark should exist now, because migrateChunk()
-	// gives feedback back to table.
-
-	watermark, err := m.copyChunker.GetLowWatermark()
-	require.NoError(t, err)
-	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
-	// Dump a checkpoint
-	require.NoError(t, m.DumpCheckpoint(t.Context()))
-
-	// Close m
+	// First migration with one ALTER, using the default (buffered) copier:
+	// run slowly and interrupt once a checkpoint has been saved.
+	m := NewTestRunner(t, "cpt1difft1", "ADD COLUMN id3 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		require.Error(t, m.Run(ctx)) // interrupted once a checkpoint is saved.
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
 	require.NoError(t, m.Close())
 
-	// Now lets imagine that everything fails and we need to start
-	// from checkpoint again.
-
-	m = preSetup("ADD COLUMN id4 INT NOT NULL DEFAULT 0, ADD INDEX(id2)")
-	require.Error(t, m.resumeFromCheckpoint(t.Context())) // it should error because the ALTER does not match.
-	require.NoError(t, m.Close())
+	// A second migration with a DIFFERENT ALTER must refuse to resume from
+	// that checkpoint: the stored statement doesn't match. We call
+	// resumeFromCheckpoint in isolation to assert it returns ErrMismatchedAlter
+	// (in a full Run, the default best-effort mode would catch this and start
+	// fresh — see TestResumeFromCheckpointCleanupOnFailure). This check is
+	// copier-agnostic, so the runner uses the default buffered copier.
+	m2, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         2,
+		WriteThreads:    2,
+		Table:           "cpt1difft1",
+		Alter:           "ADD COLUMN id4 INT NOT NULL DEFAULT 0, ADD INDEX(id2)",
+		TargetChunkTime: 100 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	m2.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	m2.dbConfig = dbconn.NewDBConfig()
+	m2.changes[0].table = table.NewTableInfo(m2.db, m2.migration.Database, m2.migration.Table)
+	require.NoError(t, m2.changes[0].table.SetInfo(t.Context()))
+	require.NoError(t, m2.changes[0].dropOldTable(t.Context()))
+	require.ErrorIs(t, m2.resumeFromCheckpoint(t.Context()), status.ErrMismatchedAlter)
+	require.NoError(t, m2.Close())
 }
 
 func TestResumeFromCheckpointE2E(t *testing.T) {
@@ -696,6 +630,13 @@ func TestResumeFromCheckpointStrict(t *testing.T) {
 // The fix for this is simple:
 // - When resuming from checkpoint, we need to initialize the high watermark from a SELECT MAX(key) FROM the _new table.
 // - If this is done correctly, then on resume the DELETE will no longer be ignored.
+// TestResumeFromCheckpointPhantom is intentionally unbuffered: it is a
+// regression test for the legacy unbuffered copier's recopy behavior. It
+// manually copies a chunk, inserts that row into _new without feedback, then
+// deletes it from the source so the recopy-on-resume finds nothing — a
+// "phantom" that only arises on the INSERT IGNORE ... SELECT recopy path. The
+// buffered copier reads row images and applies via REPLACE rather than
+// recopying, so this scenario has no buffered equivalent.
 func TestResumeFromCheckpointPhantom(t *testing.T) {
 	t.Parallel()
 	testutils.NewTestTable(t, "phantomtest", `CREATE TABLE phantomtest (
@@ -721,6 +662,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Table:            "phantomtest",
 		Alter:            "ENGINE=InnoDB",
 		TargetChunkTime:  100 * time.Millisecond,
+		Unbuffered:       true, // see the test's doc comment: intentionally unbuffered
 		useTestThrottler: true,
 	})
 	require.NoError(t, err)
@@ -792,6 +734,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 		Table:           "phantomtest",
 		Alter:           "ENGINE=InnoDB",
 		TargetChunkTime: 100 * time.Millisecond,
+		Unbuffered:      true, // continues the unbuffered scenario above (see doc comment)
 	})
 	require.NoError(t, err)
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())

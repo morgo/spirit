@@ -121,7 +121,9 @@ func TestE2EBinlogSubscribingCompositeKey(t *testing.T) {
 	(1182,1),(1183,1),(1184,1),(1185,1),(1186,1),(1187,1),(1188,1),(1189,1),(1190,1),(1191,1),(1192,1),(1193,1),
 	(1194,1),(1195,1),(1196,1),(1197,1),(1198,1),(1199,1),(1200,1);`)
 
-	m := NewTestRunner(t, "e2et1", "ENGINE=InnoDB")
+	// This test steps through the unbuffered copier's synchronous CopyChunk
+	// API directly, so it opts out of the now-default buffered copier.
+	m := NewTestRunner(t, "e2et1", "ENGINE=InnoDB", WithBuffered(false))
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
 	require.Equal(t, status.Progress{CurrentState: status.Initial, Summary: "", Tables: nil}, m.Progress())
@@ -234,7 +236,8 @@ func TestE2EBinlogSubscribingCompositeKeyVarchar(t *testing.T) {
 	tt.SeedRows(t, "INSERT INTO e2et3 (session_id, event_id) SELECT UUID(), FLOOR(RAND()*1000)", 64)
 
 	m := NewTestRunner(t, "e2et3", "ENGINE=InnoDB",
-		WithTargetChunkTime(50*time.Millisecond))
+		WithTargetChunkTime(50*time.Millisecond),
+		WithBuffered(false))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -338,7 +341,8 @@ func TestE2EBinlogSubscribingCompositeKeyCollation(t *testing.T) {
 
 	m := NewTestRunner(t, "e2et_collation", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(false))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -487,7 +491,8 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 
 	m := NewTestRunner(t, "e2et_binary", "ENGINE=InnoDB",
 		WithThreads(1),
-		WithTargetChunkTime(100*time.Millisecond))
+		WithTargetChunkTime(100*time.Millisecond),
+		WithBuffered(false))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -629,7 +634,8 @@ func TestE2EBinlogSubscribingCompositeKeyDateTime(t *testing.T) {
 	}
 
 	m := NewTestRunner(t, "e2et4", "ENGINE=InnoDB",
-		WithTargetChunkTime(50*time.Millisecond))
+		WithTargetChunkTime(50*time.Millisecond),
+		WithBuffered(false))
 	defer func() {
 		require.NoError(t, m.Close())
 	}()
@@ -703,7 +709,7 @@ func TestE2EBinlogSubscribingNonCompositeKey(t *testing.T) {
 	testutils.RunSQL(t, `insert into e2et2 (id) values (2)`)
 	testutils.RunSQL(t, `insert into e2et2 (id) values (3)`)
 
-	m := NewTestRunner(t, "e2et2", "ENGINE=InnoDB")
+	m := NewTestRunner(t, "e2et2", "ENGINE=InnoDB", WithBuffered(false))
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
 
@@ -908,7 +914,7 @@ func TestE2EBinlogSubscribingRogueValues(t *testing.T) {
 	("1181 \". ",1),("11'82 \". ",1),("118\"3 \". ",1),("1184 \". ",1),("1185 \". ",1),("1186 \". ",1),("1187 \". ",1),("1188 \". ",1),("1189 \". ",1),("1190 \". ",1),("1191 \". ",1),
 	("1192 \". ",1),("1193 \". ",1),("1194 \". ",1),("1195 \". ",1),("119\"\"6 \". ",1),("1197 \". ",1),("1198 \". ",1),("1199 \". ",1),("1200 \". ",1);`)
 
-	m := NewTestRunner(t, "e2erogue", "ENGINE=InnoDB")
+	m := NewTestRunner(t, "e2erogue", "ENGINE=InnoDB", WithBuffered(false))
 	defer utils.CloseAndLog(m)
 	require.Equal(t, "initial", m.status.Get().String())
 

@@ -8,26 +8,30 @@ There is one change source (`change.Source`) for all changes, and a subscription
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 │                                    SPIRIT MIGRATION                                     │
 │                                                                                         │
-│  ┌──────────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              RUNNER (Orchestrator)                               │   │
-│  │                              pkg/migration/runner.go                             │   │
-│  │                                                                                  │   │
-│  │   Coordinates the entire migration lifecycle:                                    │   │
-│  │   1. Setup (create _new table, checkpoint table)                                 │   │
-│  │   2. Start change source                                                         │   │
-│  │   3. Run copier                                                                  │   │
-│  │   4. Disable watermark optimization                                              │   │
-│  │   5. Run initial checksum                                                        │   │
-│  │   6. Wait on defer-cutover sentinel (continuous checksum)                        │   │
-│  │   7. Perform cutover (RENAME TABLE)                                              │   │
-│  └──────────────────────────────────────────────────────────────────────────────────┘   │
-│         │                              │                              │                 │
-│         │ owns                         │ owns                         │ owns            │
-│         ▼                              ▼                              ▼                 │
-│  ┌─────────────┐              ┌─────────────────┐              ┌─────────────┐          │
-│  │   COPIER    │              │  CHANGE SOURCE  │              │   CHECKER   │          │
-│  │             │              │  (binlogClient) │              │  (Checksum) │          │
-│  └─────────────┘              └─────────────────┘              └─────────────┘          │
+│ ┌─────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │                   RUNNER (Orchestrator) — pkg/migration/runner.go                   │ │
+│ │                                                                                     │ │
+│ │          Owns and coordinates every component below, across the lifecycle:          │ │
+│ │            1. Setup (_new + checkpoint tables)   2. Start change source             │ │
+│ │           3. Run copier   4. Disable watermark opt.   5. Initial checksum           │ │
+│ │           6. Wait on defer-cutover sentinel    7. Cutover (RENAME TABLE)            │ │
+│ └─────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                         │
+│   ┌────────────────────┐        ┌────────────────────┐        ┌────────────────────┐    │
+│   │       COPIER       │        │   CHANGE SOURCE    │        │      CHECKER       │    │
+│   │                    │        │   (binlogClient)   │        │     (Checksum)     │    │
+│   │  reads the source  │        │   reads binlog;    │        │   verifies that    │    │
+│   │  table in chunks   │        │ one sub. per table │        │   source == _new   │    │
+│   └──────────┬─────────┘        └──────────┬─────────┘        └────────────────────┘    │
+│              │ row images                  │ row images                                 │
+│              │ (buffered copier)           │ (always)                                   │
+│              └──────────────┬──────────────┘                                            │
+│                             ▼                                                           │
+│                     ┌───────────────┐                                                   │
+│                     │    APPLIER    │ ── REPLACE INTO _new VALUES (…) ──►  _new table   │
+│                     │  pkg/applier  │                                                   │
+│                     └───────────────┘                                                   │
+│                                                                                         │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,18 +43,16 @@ Once copying is complete, a [checksum process](../checksum/README.md) is started
 
 ## What parts of the process are locking?
 
-To answer this question, we need to understand that there are two types of locks. Both can be an issue:
+To answer this question, we need to understand that there are two types of locks:
 
-1. Data locks, aka InnoDB row level locks. These are configurable via `innodb_lock_wait_timeout`: the server default is 50s, but spirit overwrites this to 3s.
-2. Metadata locks. These are configurable via `lock_wait_timeout`: the server default is 1 year(!), but spirit overwrites this to 30s (configurable by `--lock-wait-timeout`).
+1. **Data locks**, aka InnoDB row-level locks. These are configurable via `innodb_lock_wait_timeout`: the server default is 50s, but spirit overwrites this to 3s.
+2. **Metadata locks** (MDL). These are configurable via `lock_wait_timeout`: the server default is 1 year(!), but spirit overwrites this to 30s (configurable by `--lock-wait-timeout`).
 
-So when we describe Spirit as a "non-blocking schema change tool" that is a bit of a white lie. What it means is that we don't require a metadata lock for the entire 10h schema change, as built-in MySQL DDL often does. It does not mean that we do not require locks.
+**By default, Spirit takes no data locks on the source table.** The default buffered copier reads rows into Spirit and writes them to `_new` through the applier (`REPLACE INTO _new VALUES (...)`), and the change source is likewise always buffered — it applies binlog row images and never runs `SELECT FROM original`. Neither path holds shared row locks on the source, so there is no copier-vs-OLTP contention on hot rows. (The applier's `REPLACE INTO` does take locks, but only on `_new`, which nothing else touches.) See [pkg/change/README.md](../change/README.md) for the subscription design.
 
-The common **data lock** concern is the source table. The default (unbuffered) copier issues `INSERT IGNORE INTO _new ... SELECT FROM original`, and the `SELECT` side of `INSERT ... SELECT` takes shared row locks rather than using MVCC. Production workloads touching the same rows can contend with those locks. The main knob to mitigate this is `target-chunk-time`: smaller chunks mean each copy statement holds locks for less time.
+Data locks only re-enter the picture if you opt into the legacy `--unbuffered` copier, which issues `INSERT IGNORE INTO _new ... SELECT FROM original`. The `SELECT` side takes shared row locks rather than using MVCC, so it can contend with production workloads touching the same rows. When using `--unbuffered`, the main knob to mitigate this is `target-chunk-time`: smaller chunks mean each copy statement holds locks for less time.
 
-If hot rows on the source table make even short-chunk contention unacceptable, use `--buffered`. The buffered copier reads rows into Spirit and writes them through the applier instead of running `INSERT ... SELECT`, so it takes no locks on the source. The change source is already always buffered — it applies binlog row images via `REPLACE INTO _new VALUES (...)` and never touches the source — so `--buffered` plus the always-buffered subscription eliminates source-side data lock contention end-to-end. See [pkg/change/README.md](../change/README.md) for the subscription design.
-
-The following are cases where **metadata locks** are required:
+So the locking that *does* apply by default is **metadata locks**. When we describe Spirit as a "non-blocking schema change tool" that is a bit of a white lie: we don't hold an MDL for the entire 10h schema change, as built-in MySQL DDL often does, but we do need a brief exclusive MDL at a few points:
 
 * Spirit initially attempts INSTANT/INPLACE DDL. If this is compatible, it requires an exclusive metadata lock on the table.
 * Starting a checksum requires an initial exclusive metadata lock to ensure that all data is synchronized between the checksum threads.

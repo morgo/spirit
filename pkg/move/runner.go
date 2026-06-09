@@ -312,7 +312,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
 		Applier:         r.applier, // Use the shared applier
-		Buffered:        true,      // move always uses the buffered copier
+		Unbuffered:      false,     // move always uses the buffered copier
 	})
 	if err != nil {
 		return err
@@ -529,7 +529,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		MetricsSink:     &metrics.NoopSink{},
 		DBConfig:        r.dbConfig,
 		Applier:         r.applier, // Use the shared applier
-		Buffered:        true,      // move always uses the buffered copier
+		Unbuffered:      false,     // move always uses the buffered copier
 	})
 	if err != nil {
 		return err
