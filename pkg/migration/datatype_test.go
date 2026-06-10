@@ -1131,11 +1131,11 @@ func TestBitColumnDML(t *testing.T) {
 			[]uint64{0, 1, 1 << 63, (1 << 63) | 1, ^uint64(0)})
 	})
 
-	// Reproduces the exact column from the incident report:
+	// Reproduces the exact column definition from the incident report:
 	//   `summary_backfill` bit(1) NOT NULL DEFAULT b'0'
-	// The b'0' binary-literal default is the production form; this guards
-	// against any regression that's specific to the DEFAULT clause or the
-	// column name rather than the BIT width alone.
+	// This ensures Spirit can migrate BIT columns declared with a binary-literal
+	// DEFAULT (b'0'), in case schema/column-definition handling differs from a
+	// numeric DEFAULT 0.
 	t.Run("BIT(1) production default b'0'", func(t *testing.T) {
 		t.Parallel()
 		runBitDMLTest(t, "bit1prod", "summary_backfill", "BIT(1) NOT NULL DEFAULT b'0'", []uint64{0, 1})
