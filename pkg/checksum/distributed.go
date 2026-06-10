@@ -123,11 +123,20 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		"sourceChecksum", sourceChecksum, "sourceCount", sourceCount,
 		"targetChecksum", targetChecksum, "targetCount", targetCount)
 
-	if sourceChecksum != targetChecksum {
-		// The checksums do not match, so we first need
+	// Compare BOTH the aggregated checksum and the summed row count. Comparing
+	// the count is free (it is summed from the same per-source/per-target
+	// queries above) and it is critical in the distributed case: BIT_XOR is
+	// pair-cancelling, so if the SAME row exists on two source shards (a
+	// resharding bug that violates shard disjointness) its CRCs cancel to
+	// zero — a target with ZERO copies of that row would still match on the
+	// checksum alone. The summed counts (src=2, target=0) catch it. A count
+	// mismatch is treated identically to a checksum mismatch.
+	if mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount); mismatch.mismatched() {
+		// The source and target do not match, so we first need
 		// to inspect closely and report on the differences.
 		c.differencesFound.Add(1)
 		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(),
+			"reason", mismatch.reason(sourceCount, targetCount),
 			"sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum,
 			"sourceCount", sourceCount, "targetCount", targetCount)
 

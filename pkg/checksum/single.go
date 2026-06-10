@@ -76,11 +76,16 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	if err != nil {
 		return err
 	}
-	if sourceChecksum != targetChecksum {
-		// The checksums do not match, so we first need
+	// Compare BOTH the checksum and the row count. The row count is already
+	// returned by the query above, so comparing it is free, and it closes a
+	// defense-in-depth gap: a row whose CRC32 is 0 contributes nothing to the
+	// BIT_XOR, so its absence is invisible to the checksum but visible to the
+	// count. A count mismatch is treated identically to a checksum mismatch.
+	if mismatch := compareChunk(sourceChecksum, targetChecksum, sourceCount, targetCount); mismatch.mismatched() {
+		// The source and target do not match, so we first need
 		// to inspect closely and report on the differences.
 		c.differencesFound.Add(1)
-		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
+		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(), "reason", mismatch.reason(sourceCount, targetCount), "sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum, "sourceCount", sourceCount, "targetCount", targetCount)
 		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
 			return err
 		}
