@@ -777,6 +777,231 @@ func TestSetBufferedPosIsMonotonic(t *testing.T) {
 	require.Equal(t, nextFile, client.getBufferedPos())
 }
 
+// TestShouldSkipReplayedEvent unit-tests the pure skip decision used by
+// readStream during a post-recreateStreamer replay. eventPos is always
+// the event's END position (ev.Header.LogPos); the filter is the
+// flushedPos captured at recreation time, which is itself recorded from
+// event end positions — so <= means "fully contained in the flushed
+// prefix, durably applied to the target, must not be re-buffered".
+func TestShouldSkipReplayedEvent(t *testing.T) {
+	filter := mysql.Position{Name: "binlog.000010", Pos: 200}
+	tests := []struct {
+		name     string
+		eventPos mysql.Position
+		filter   mysql.Position
+		skip     bool
+	}{
+		{
+			name:     "zero filter never skips (no recreation since Start)",
+			eventPos: mysql.Position{Name: "binlog.000010", Pos: 100},
+			filter:   mysql.Position{},
+			skip:     false,
+		},
+		{
+			name:     "zero filter never skips even at file start",
+			eventPos: mysql.Position{Name: "binlog.000001", Pos: 4},
+			filter:   mysql.Position{},
+			skip:     false,
+		},
+		{
+			name:     "same file below filter: already flushed, skip",
+			eventPos: mysql.Position{Name: "binlog.000010", Pos: 100},
+			filter:   filter,
+			skip:     true,
+		},
+		{
+			name: "same file equal to filter: event end == flushedPos means " +
+				"the event was the last one included in the flush, skip",
+			eventPos: mysql.Position{Name: "binlog.000010", Pos: 200},
+			filter:   filter,
+			skip:     true,
+		},
+		{
+			name:     "same file just above filter: buffered-but-not-flushed, deliver",
+			eventPos: mysql.Position{Name: "binlog.000010", Pos: 201},
+			filter:   filter,
+			skip:     false,
+		},
+		{
+			name:     "earlier file: skip regardless of offset",
+			eventPos: mysql.Position{Name: "binlog.000009", Pos: 999999},
+			filter:   filter,
+			skip:     true,
+		},
+		{
+			name: "later file: deliver regardless of offset (filter can sit in " +
+				"an earlier file when no flush ran since a rotation)",
+			eventPos: mysql.Position{Name: "binlog.000011", Pos: 4},
+			filter:   filter,
+			skip:     false,
+		},
+		{
+			name: "numeric suffix ordering, not lexicographic: file .000100 " +
+				"is later than filter file .000099",
+			eventPos: mysql.Position{Name: "binlog.000100", Pos: 4},
+			filter:   mysql.Position{Name: "binlog.000099", Pos: 5000},
+			skip:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.skip, shouldSkipReplayedEvent(tt.eventPos, tt.filter))
+		})
+	}
+}
+
+// TestRecreateStreamerSkipsFlushedReplay locks in the fix for the
+// stale-image replay bug. recreateStreamer restarts the binlog dump at
+// position 4 of the current file; before the fix, readStream
+// re-delivered every replayed RowsEvent to the subscriptions. A
+// replayed event at or below the flushed position could regress a key
+// in the buffered map to an older row image, a periodic flush running
+// mid-replay would write that stale image to the target below the
+// persisted checkpoint, and a crash before the replay re-read the
+// newer event would make the regression permanent — resume streams
+// only events after the checkpoint, so the newer event is never
+// re-sent.
+//
+// The test:
+//  1. Streams an INSERT + UPDATE for the same PK and flushes them, so
+//     the target holds the newest image and flushedPos is past both
+//     events.
+//  2. Writes one more row AFTER the flush (buffered-but-not-flushed).
+//  3. Kills the syncer out from under readStream, forcing the
+//     consecutive-error path to call recreateStreamer, which replays
+//     the current binlog file from position 4.
+//  4. Asserts the already-flushed events were NOT re-buffered while the
+//     post-flush event WAS re-delivered.
+//  5. Kills the syncer again to assert a second recreation re-captures
+//     the then-current flushed position.
+func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replayskipt1, replayskipt2")
+	testutils.RunSQL(t, "CREATE TABLE replayskipt1 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE replayskipt2 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "replayskipt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "replayskipt2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// serverPos reads the server's current binlog position WITHOUT
+	// rotating (unlike getCurrentBinlogPosition, which FLUSHes BINARY
+	// LOGS first). Rotation must be avoided in the setup phase so the
+	// flushed events stay inside the file that the recreation replays.
+	serverPos := func() mysql.Position {
+		var name, fake string
+		var pos uint32
+		err := db.QueryRowContext(t.Context(), "SHOW MASTER STATUS").Scan(&name, &pos, &fake, &fake, &fake)
+		if err != nil {
+			// MySQL 8.2+ removed SHOW MASTER STATUS.
+			require.NoError(t, db.QueryRowContext(t.Context(), "SHOW BINARY LOG STATUS").Scan(&name, &pos, &fake, &fake, &fake))
+		}
+		return mysql.Position{Name: name, Pos: pos}
+	}
+	// waitBuffered waits (without rotating) until the reader has
+	// buffered everything the server has written so far.
+	waitBuffered := func() {
+		target := serverPos()
+		require.Eventually(t, func() bool {
+			return client.getBufferedPos().Compare(target) >= 0
+		}, 15*time.Second, 10*time.Millisecond, "reader did not catch up to %v", target)
+	}
+	// killSyncer closes the syncer out from under readStream. GetEvent
+	// then fails until maxConsecutiveErrors accumulate (~500ms), at
+	// which point readStream calls recreateStreamer and the dump
+	// restarts at position 4 of the current file.
+	killSyncer := func() {
+		client.mu.Lock()
+		syncer := client.syncer
+		client.mu.Unlock()
+		require.NotNil(t, syncer)
+		syncer.Close()
+	}
+	// replayFilter returns the filter captured by the last recreation.
+	replayFilter := func() mysql.Position {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.replayFilterPos
+	}
+
+	// E1: insert the row; E2: update it to its newest image. Both events
+	// land in the binlog file the dump is currently reading.
+	testutils.RunSQL(t, "INSERT INTO replayskipt1 (a, b) VALUES (1, 1)")
+	testutils.RunSQL(t, "UPDATE replayskipt1 SET b = 2 WHERE a = 1")
+	waitBuffered()
+	require.Equal(t, 1, client.GetDeltaLen(), "INSERT+UPDATE on the same PK should dedupe to one buffered change")
+
+	// Flush. The target now holds the newest image and flushedPos is at
+	// or past the end of the UPDATE event. (The low-level flush is used
+	// because the public Flush calls BlockWait, which rotates the binary
+	// log and would move the events out of the replayed file.)
+	require.NoError(t, client.flush(t.Context(), false, nil))
+	require.Equal(t, 0, client.GetDeltaLen())
+	flushedAtRecreate := client.Position()
+	require.NotEmpty(t, flushedAtRecreate)
+	var bVal int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 1").Scan(&bVal))
+	require.Equal(t, 2, bVal)
+
+	// Write one more event after the flush. It sits between flushedPos
+	// and the end of the file, so the replay MUST re-deliver it — it was
+	// never part of a flush.
+	testutils.RunSQL(t, "INSERT INTO replayskipt1 (a, b) VALUES (2, 5)")
+
+	killSyncer()
+
+	// BlockWait targets the server's position after rotating the binary
+	// log, and the reader can only reach it by going through the
+	// recreation and replaying the whole current file. Returning without
+	// error therefore means the replay has completed.
+	require.NoError(t, client.BlockWait(t.Context()))
+
+	// The recreation must have captured the flushed position as the
+	// replay filter.
+	require.Equal(t, flushedAtRecreate, formatBinlogPosition(replayFilter()),
+		"recreateStreamer should capture the flushed position at recreation time")
+
+	// The already-flushed INSERT+UPDATE must NOT have been re-buffered —
+	// re-buffering would regress key 1 to a stale image that a
+	// mid-replay flush could persist below the checkpoint. Only the
+	// post-flush INSERT (key 2) may be pending.
+	require.Equal(t, 1, client.GetDeltaLen(),
+		"only the unflushed post-flush event may be (re-)buffered; already-flushed events must be skipped")
+
+	require.NoError(t, client.flush(t.Context(), false, nil))
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 1").Scan(&bVal))
+	require.Equal(t, 2, bVal, "key 1 must keep its newest image")
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 2").Scan(&bVal))
+	require.Equal(t, 5, bVal, "the unflushed event must be re-delivered and applied")
+
+	// A second recreation must re-capture the THEN-current flushed
+	// position rather than keep the stale filter from the first one.
+	firstFilter := replayFilter()
+	secondFlushed := client.Position()
+	killSyncer()
+	require.NoError(t, client.BlockWait(t.Context()))
+	secondFilter := replayFilter()
+	require.Equal(t, secondFlushed, formatBinlogPosition(secondFilter),
+		"a second recreation must capture the then-current flushed position")
+	require.Positive(t, secondFilter.Compare(firstFilter),
+		"the second filter must be ahead of the first")
+	require.Equal(t, 0, client.GetDeltaLen(),
+		"nothing unflushed remains, so the second replay must re-buffer nothing")
+}
+
 // TestMaxRecreateAttemptsError tests that the readStream goroutine sets a stream error
 // and exits cleanly after exhausting the maximum number of streamer recreation attempts.
 func TestMaxRecreateAttemptsError(t *testing.T) {
