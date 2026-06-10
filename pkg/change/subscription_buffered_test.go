@@ -1978,3 +1978,98 @@ func fetchJSONColumnCRC(t *testing.T, col string, tbl *table.TableInfo) int64 {
 		col, col, tbl.QuotedTableName)).Scan(&ck))
 	return ck
 }
+
+// TestBufferedMapSeparatorInPKValues exercises PK values containing the
+// hash-key separator "-#-" end-to-end through the buffered map and the
+// applier flush path. Before hash-key components were escaped, two bugs
+// existed here:
+//
+//  1. Map collision: for a composite PK, ("a-#-b", "c") and ("a", "b-#-c")
+//     hashed to the same string, so the second event silently overwrote
+//     the first row's buffered change and one row was never applied.
+//  2. Wrong-arity SQL: a DELETE on a single-column PK whose value contains
+//     "-#-" was split into multiple values, producing
+//     DELETE ... WHERE (pk) IN (('a','b')) — MySQL error 1241.
+func TestBufferedMapSeparatorInPKValues(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id1 VARCHAR(64) NOT NULL,
+		id2 VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id1, id2)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id1 VARCHAR(64) NOT NULL,
+		id2 VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id1, id2)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &binlogClient{
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
+	}
+
+	sub := &bufferedMap{
+		logger:               client.logger,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+		// watermarkOptimization on => map mode (copy phase). MockChunker
+		// returns false from KeyAboveHighWatermark for string keys, so
+		// nothing is dropped.
+		watermarkOptimization: true,
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+
+	// Seed target with a row whose first PK component contains the
+	// separator, so the DELETE below has something to remove.
+	testutils.RunSQL(t, fmt.Sprintf(
+		`INSERT INTO %s (id1, id2, name) VALUES ('x-#-y', 'z', 'stale')`,
+		dstTable.QuotedTableName))
+
+	// These two upserts collide to the same map key without escaping.
+	sub.HasChanged([]any{"a-#-b", "c"}, []any{"a-#-b", "c", "first"}, false)
+	sub.HasChanged([]any{"a", "b-#-c"}, []any{"a", "b-#-c", "second"}, false)
+	// DELETE with separator inside a PK value: without unescape-aware
+	// splitting this produced a 4-value tuple for a 2-column key.
+	sub.HasChanged([]any{"x-#-y", "z"}, nil, true)
+	require.Len(t, sub.changes, 3,
+		"distinct PKs must occupy distinct map slots even when values contain the separator")
+
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Equal(t, 0, sub.Length())
+
+	rows, err := db.QueryContext(t.Context(),
+		fmt.Sprintf("SELECT id1, id2, name FROM %s ORDER BY id1, id2", dstTable.QuotedTableName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	var got []string
+	for rows.Next() {
+		var id1, id2, name string
+		require.NoError(t, rows.Scan(&id1, &id2, &name))
+		got = append(got, id1+"|"+id2+"="+name)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"a|b-#-c=second", "a-#-b|c=first"}, got,
+		"both upserted rows must be applied and the seeded row deleted")
+}
