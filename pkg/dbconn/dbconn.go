@@ -4,6 +4,7 @@ package dbconn
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,12 +19,24 @@ import (
 )
 
 const (
-	errLockWaitTimeout  = 1205
-	errDeadlock         = 1213
-	errCannotConnect    = 2003
-	errConnLost         = 2013
+	errLockWaitTimeout = 1205
+	errDeadlock        = 1213
+	// errCannotConnect (2003) and errConnLost (2013) are client-library CR_*
+	// codes: go-sql-driver itself never returns them as a *mysql.MySQLError
+	// (client-side failures surface as driver.ErrBadConn or
+	// mysql.ErrInvalidConn, handled separately in canRetryError). They are
+	// kept here because proxies (e.g. ProxySQL, RDS Proxy) can relay them
+	// inside real server error packets.
+	errCannotConnect = 2003
+	errConnLost      = 2013
+	// errReadOnly (1290) and errReadOnlyMode (1836) are usually consumed by
+	// go-sql-driver when RejectReadOnly is enabled (the spirit default) and
+	// converted to driver.ErrBadConn. They are kept here for the case where
+	// RejectReadOnly is disabled, e.g. the move runner disables it for
+	// read-only sources (see DBConfig.RejectReadOnly).
 	errReadOnly         = 1290
-	errQueryKilled      = 1836
+	errReadOnlyMode     = 1836
+	errQueryInterrupted = 1317 // ER_QUERY_INTERRUPTED: query was killed (e.g. KILL QUERY)
 	errCapacityExceeded = 3170
 	errFoundDuppKey     = 1062 // yes I know there's a typo
 )
@@ -74,14 +87,26 @@ func NewDBConfig() *DBConfig {
 // This is because it gets complicated in cases where the statement could
 // succeed but then there is a deadlock later on.
 func canRetryError(err error) bool {
-	var errNumber uint16
-	var val *mysql.MySQLError
-	if errors.As(err, &val) {
-		errNumber = val.Number
+	// Connection-level failures never surface as a *mysql.MySQLError:
+	// go-sql-driver returns driver.ErrBadConn when it is safe to retry on a
+	// new connection (nothing was written yet), and mysql.ErrInvalidConn when
+	// the connection died mid-statement (e.g. a network blip, the connection
+	// was killed, or an Aurora failover with RejectReadOnly enabled — the
+	// driver converts read-only errors 1290/1792/1836 into driver.ErrBadConn
+	// and discards the connection). Both are safe to retry here: every
+	// statement run through RetryableTransaction is idempotent (INSERT
+	// IGNORE / REPLACE / DELETE), and each retry starts a fresh transaction
+	// — database/sql hands BeginTx a new connection if the old one is dead.
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) {
+		return true
 	}
-	switch errNumber {
+	var val *mysql.MySQLError
+	if !errors.As(err, &val) {
+		return false
+	}
+	switch val.Number {
 	case errLockWaitTimeout, errDeadlock, errCannotConnect,
-		errConnLost, errReadOnly, errQueryKilled:
+		errConnLost, errReadOnly, errReadOnlyMode, errQueryInterrupted:
 		return true
 	default:
 		return false
