@@ -54,6 +54,14 @@ const (
 	auroraVCPUsQuery = `SELECT @@innodb_purge_threads`
 )
 
+// DefaultWriteThreads is the fallback apply (write) thread count used when
+// auto-sizing is requested (write-threads=0) but the target offers no reliable
+// vCPU signal to size from — i.e. a non-Aurora server. It must match the
+// `default:"4"` kong tags on the WriteThreads CLI flags (see Migration and
+// Move), so that requesting auto-sizing on non-Aurora lands on the same value
+// as not requesting it at all.
+const DefaultWriteThreads = 4
+
 // auroraVCPUs reads the instance vCPU count from @@innodb_purge_threads, which
 // Aurora pins to the vCPU count (issue #831). It returns an error if the value
 // is non-positive. This is only meaningful on Aurora — callers should gate on
@@ -73,9 +81,9 @@ func auroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 // against a target. A positive requested value is returned unchanged. Zero
 // means "auto-size": on Aurora it resolves to the instance vCPU count
 // (@@innodb_purge_threads); on non-Aurora there is no reliable vCPU signal to
-// size from, so it is an error — callers must pass an explicit positive value.
+// size from, so it falls back to DefaultWriteThreads (logging that it did so).
 // A negative value is rejected.
-func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int) (int, error) {
+func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int, logger *slog.Logger) (int, error) {
 	if requested < 0 {
 		return 0, fmt.Errorf("write threads must be non-negative, got %d", requested)
 	}
@@ -92,7 +100,12 @@ func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int) (int, e
 		return 0, err
 	}
 	if !isAurora {
-		return 0, errors.New("write threads cannot be auto-sized on a non-Aurora target: set write-threads to a positive value")
+		// No reliable vCPU signal off Aurora, so we can't honor auto-sizing.
+		// Rather than fail, fall back to the default the user would have got
+		// had they not asked to auto-size at all.
+		logger.Info("write-threads=0 requested auto-sizing, but the target is not Aurora (no reliable vCPU signal); using the default instead",
+			"write_threads", DefaultWriteThreads)
+		return DefaultWriteThreads, nil
 	}
 	return auroraVCPUs(ctx, db)
 }

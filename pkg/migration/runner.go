@@ -493,11 +493,10 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 
 	// Resolve the number of apply (write) threads now that we have a
 	// connection. WriteThreads==0 means "auto-size": on Aurora it becomes the
-	// instance vCPU count; on non-Aurora it is an error (there is no reliable
-	// vCPU signal to size from — the CLI default of 4 keeps interactive users
-	// out of this path). Idempotent: a resolved (non-zero) value passes
-	// through unchanged if this runs again.
-	r.migration.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.db, r.migration.WriteThreads)
+	// instance vCPU count; on non-Aurora there is no reliable vCPU signal to
+	// size from, so it falls back to the default. Idempotent: a resolved
+	// (non-zero) value passes through unchanged if this runs again.
+	r.migration.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.db, r.migration.WriteThreads, r.logger)
 	if err != nil {
 		return err
 	}

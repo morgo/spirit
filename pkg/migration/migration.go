@@ -34,7 +34,7 @@ type Migration struct {
 	Table                string        `name:"table" help:"Table" optional:""`
 	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
-	WriteThreads         int           `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets 0 is an error" optional:"" default:"4"`
+	WriteThreads         int           `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" optional:"" default:"4"`
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
 	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`

@@ -404,10 +404,9 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// Resolve the number of apply (write) threads against the target now that
 	// it is connected. WriteThreads==0 means "auto-size": on Aurora it becomes
-	// the instance vCPU count; on non-Aurora it is an error (there is no
-	// reliable vCPU signal to size from — the CLI default of 4 keeps
-	// interactive users out of this path).
-	r.move.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.targets[0].DB, r.move.WriteThreads)
+	// the instance vCPU count; on non-Aurora there is no reliable vCPU signal
+	// to size from, so it falls back to the default.
+	r.move.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.targets[0].DB, r.move.WriteThreads, r.logger)
 	if err != nil {
 		return err
 	}
