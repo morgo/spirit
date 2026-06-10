@@ -403,4 +403,19 @@ func TestColumnRenameMap(t *testing.T) {
 	stmts = MustNew("ALTER TABLE t1 RENAME COLUMN a TO b, ADD COLUMN c INT")
 	renames = stmts[0].ColumnRenameMap()
 	require.Equal(t, map[string]string{"a": "b"}, renames)
+
+	// Case-only renames are not renames: MySQL column identifiers are
+	// case-insensitive, so the data mapping is unaffected.
+	stmts = MustNew("ALTER TABLE t1 RENAME COLUMN foo TO FOO")
+	renames = stmts[0].ColumnRenameMap()
+	require.Nil(t, renames)
+
+	stmts = MustNew("ALTER TABLE t1 CHANGE COLUMN foo FOO BIGINT")
+	renames = stmts[0].ColumnRenameMap()
+	require.Nil(t, renames)
+
+	// A real rename keeps the case as typed (consumers match case-insensitively)
+	stmts = MustNew("ALTER TABLE t1 RENAME COLUMN Foo TO Bar")
+	renames = stmts[0].ColumnRenameMap()
+	require.Equal(t, map[string]string{"Foo": "Bar"}, renames)
 }

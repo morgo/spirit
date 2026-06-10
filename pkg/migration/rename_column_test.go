@@ -563,6 +563,59 @@ func testRenameColumnForceCopyPath(t *testing.T, enableBuffered bool) {
 	require.Equal(t, "varchar(200)", colType)
 }
 
+// TestRenameColumnCaseInsensitive tests renames where the ALTER references
+// columns with different case than they were declared with. MySQL identifiers
+// are case-insensitive, so this must behave identically to a same-case rename.
+// Regression test: spirit previously matched rename names case-sensitively,
+// which silently dropped the renamed column from the copy intersection and
+// lost all of its data (the checksum uses the same intersection, so it could
+// not detect the loss).
+func TestRenameColumnCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	t.Run("unbuffered", func(t *testing.T) {
+		testRenameColumnCaseInsensitive(t, false)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		testRenameColumnCaseInsensitive(t, true)
+	})
+}
+
+func testRenameColumnCaseInsensitive(t *testing.T, enableBuffered bool) {
+	// The INT→BIGINT change forces Spirit's copy algorithm (it is neither
+	// INSTANT nor safe-INPLACE). A simple RENAME COLUMN on its own would
+	// succeed via MySQL's instant DDL and never exercise the copy path.
+	// Both the RENAME COLUMN and CHANGE COLUMN branches are covered, with
+	// the old names typed in a different case than declared.
+	// The renamed columns are deliberately nullable: with the bug, the
+	// columns silently dropped out of the copy intersection and every row
+	// got NULL (a NOT NULL column would at least abort on the missing
+	// default warning).
+	runRenameTest(t, enableBuffered,
+		"rcol_case",
+		`CREATE TABLE rcol_case (
+			id int NOT NULL AUTO_INCREMENT,
+			first_name varchar(100) DEFAULT NULL,
+			age_years int DEFAULT NULL,
+			PRIMARY KEY (id)
+		)`,
+		`INSERT INTO rcol_case (first_name, age_years) VALUES ('alice', 30), ('bob', 40), ('charlie', 50)`,
+		"RENAME COLUMN FIRST_NAME TO given_name, CHANGE COLUMN AGE_YEARS age_total BIGINT",
+		func(t *testing.T, db *sql.DB) {
+			t.Helper()
+			var count int
+			err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM rcol_case WHERE given_name IN ('alice','bob','charlie')").Scan(&count)
+			require.NoError(t, err)
+			require.Equal(t, 3, count)
+
+			var sum sql.NullInt64
+			err = db.QueryRowContext(t.Context(), "SELECT SUM(age_total) FROM rcol_case").Scan(&sum)
+			require.NoError(t, err)
+			require.True(t, sum.Valid)
+			require.Equal(t, int64(120), sum.Int64)
+		},
+	)
+}
+
 // TestRenameColumnEmpty tests rename on an empty table.
 func TestRenameColumnEmpty(t *testing.T) {
 	t.Parallel()
