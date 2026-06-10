@@ -779,101 +779,180 @@ func TestSetBufferedPosIsMonotonic(t *testing.T) {
 
 // TestShouldSkipReplayedEvent unit-tests the pure skip decision used by
 // readStream during a post-recreateStreamer replay. eventPos is always
-// the event's END position (ev.Header.LogPos); the filter is the
-// flushedPos captured at recreation time, which is itself recorded from
-// event end positions — so <= means "fully contained in the flushed
-// prefix, durably applied to the target, must not be re-buffered".
+// the event's END position (ev.Header.LogPos); the boundary is the
+// *live* bufferedPos — the high-water mark of everything already
+// processed. An event at or below bufferedPos is already faithfully
+// represented (applied to the target, or held in the buffered map with
+// its latest image), so <= means "must not be re-buffered". Filtering
+// against the live bufferedPos rather than a snapshot of flushedPos is
+// what keeps the filter safe when a periodic flush advances flushedPos
+// mid-replay — see the replayActive field comment.
 func TestShouldSkipReplayedEvent(t *testing.T) {
-	filter := mysql.Position{Name: "binlog.000010", Pos: 200}
+	buffered := mysql.Position{Name: "binlog.000010", Pos: 200}
 	tests := []struct {
-		name     string
-		eventPos mysql.Position
-		filter   mysql.Position
-		skip     bool
+		name         string
+		replayActive bool
+		eventPos     mysql.Position
+		bufferedPos  mysql.Position
+		skip         bool
 	}{
 		{
-			name:     "zero filter never skips (no recreation since Start)",
-			eventPos: mysql.Position{Name: "binlog.000010", Pos: 100},
-			filter:   mysql.Position{},
-			skip:     false,
+			name:         "replay inactive never skips (no recreation since Start)",
+			replayActive: false,
+			eventPos:     mysql.Position{Name: "binlog.000010", Pos: 100},
+			bufferedPos:  buffered,
+			skip:         false,
 		},
 		{
-			name:     "zero filter never skips even at file start",
-			eventPos: mysql.Position{Name: "binlog.000001", Pos: 4},
-			filter:   mysql.Position{},
-			skip:     false,
+			name:         "replay inactive never skips even at file start",
+			replayActive: false,
+			eventPos:     mysql.Position{Name: "binlog.000001", Pos: 4},
+			bufferedPos:  mysql.Position{},
+			skip:         false,
 		},
 		{
-			name:     "same file below filter: already flushed, skip",
-			eventPos: mysql.Position{Name: "binlog.000010", Pos: 100},
-			filter:   filter,
-			skip:     true,
+			name:         "same file below bufferedPos: already represented, skip",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000010", Pos: 100},
+			bufferedPos:  buffered,
+			skip:         true,
 		},
 		{
-			name: "same file equal to filter: event end == flushedPos means " +
-				"the event was the last one included in the flush, skip",
-			eventPos: mysql.Position{Name: "binlog.000010", Pos: 200},
-			filter:   filter,
-			skip:     true,
+			name: "same file equal to bufferedPos: event end == high-water " +
+				"mark means it is the last buffered event, skip",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000010", Pos: 200},
+			bufferedPos:  buffered,
+			skip:         true,
 		},
 		{
-			name:     "same file just above filter: buffered-but-not-flushed, deliver",
-			eventPos: mysql.Position{Name: "binlog.000010", Pos: 201},
-			filter:   filter,
-			skip:     false,
+			name: "same file just above bufferedPos: genuinely new event, " +
+				"deliver",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000010", Pos: 201},
+			bufferedPos:  buffered,
+			skip:         false,
 		},
 		{
-			name:     "earlier file: skip regardless of offset",
-			eventPos: mysql.Position{Name: "binlog.000009", Pos: 999999},
-			filter:   filter,
-			skip:     true,
+			name:         "earlier file: skip regardless of offset",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000009", Pos: 999999},
+			bufferedPos:  buffered,
+			skip:         true,
 		},
 		{
-			name: "later file: deliver regardless of offset (filter can sit in " +
-				"an earlier file when no flush ran since a rotation)",
-			eventPos: mysql.Position{Name: "binlog.000011", Pos: 4},
-			filter:   filter,
-			skip:     false,
+			name: "later file: deliver regardless of offset (bufferedPos can " +
+				"sit in an earlier file just after a rotation)",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000011", Pos: 4},
+			bufferedPos:  buffered,
+			skip:         false,
 		},
 		{
 			name: "numeric suffix ordering, not lexicographic: file .000100 " +
-				"is later than filter file .000099",
-			eventPos: mysql.Position{Name: "binlog.000100", Pos: 4},
-			filter:   mysql.Position{Name: "binlog.000099", Pos: 5000},
-			skip:     false,
+				"is later than bufferedPos file .000099",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000100", Pos: 4},
+			bufferedPos:  mysql.Position{Name: "binlog.000099", Pos: 5000},
+			skip:         false,
+		},
+		// The next two cases capture the regression the live-bufferedPos
+		// comparison fixes (Copilot review on #919): once a concurrent
+		// flush has advanced the high-water boundary, a *later* replayed
+		// event that a snapshot of the old flushedPos would have let
+		// through is now correctly skipped, because the boundary is read
+		// live. With buffered=200 a snapshot-of-old-flushedPos=100 would
+		// have delivered pos 150 and pos 200 (corrupting the map); the
+		// live boundary skips both.
+		{
+			name: "event below the live (advanced) bufferedPos is skipped " +
+				"even though it sits above where the replay's old flushedPos was",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000010", Pos: 150},
+			bufferedPos:  buffered,
+			skip:         true,
+		},
+		{
+			name: "the last buffered event is skipped at the live boundary, " +
+				"so a mid-replay flush cannot persist a stale image",
+			replayActive: true,
+			eventPos:     mysql.Position{Name: "binlog.000010", Pos: 200},
+			bufferedPos:  buffered,
+			skip:         true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.skip, shouldSkipReplayedEvent(tt.eventPos, tt.filter))
+			require.Equal(t, tt.skip, shouldSkipReplayedEvent(tt.replayActive, tt.eventPos, tt.bufferedPos))
 		})
 	}
+}
+
+// TestShouldSkipReplayedEventWidensWithBufferedPos exercises the core
+// property that motivated switching from a flushedPos snapshot to the
+// live bufferedPos: as the replay catches up and bufferedPos advances
+// (e.g. a concurrent periodic flush, or the replay crossing the old
+// high-water mark), events that were below an earlier boundary stay
+// skipped and the boundary widens to cover newly-buffered positions.
+// This is the unit-level expression of "flushedPos/bufferedPos advances
+// during replay -> later events also skipped".
+func TestShouldSkipReplayedEventWidensWithBufferedPos(t *testing.T) {
+	const file = "binlog.000010"
+	// Replay re-reads E1..E4. At recreate the high-water mark was 400.
+	// The boundary is the live bufferedPos; while it sits at 400, every
+	// replayed event up to 400 is skipped — none can corrupt the map.
+	boundary := mysql.Position{Name: file, Pos: 400}
+	for _, pos := range []uint32{100, 200, 300, 400} {
+		ev := mysql.Position{Name: file, Pos: pos}
+		require.True(t, shouldSkipReplayedEvent(true, ev, boundary),
+			"replayed event at %d must be skipped while bufferedPos is 400", pos)
+	}
+	// The first genuinely-new event (past the high-water mark) is
+	// delivered; that advances bufferedPos to its end position.
+	newEvent := mysql.Position{Name: file, Pos: 450}
+	require.False(t, shouldSkipReplayedEvent(true, newEvent, boundary),
+		"an event past the high-water mark must be delivered")
+	boundary = newEvent
+	// A subsequent live event is above the now-advanced boundary, so the
+	// filter is inert for it (delivered).
+	require.False(t, shouldSkipReplayedEvent(true, mysql.Position{Name: file, Pos: 500}, boundary),
+		"once the boundary advances, later live events are delivered")
 }
 
 // TestRecreateStreamerSkipsFlushedReplay locks in the fix for the
 // stale-image replay bug. recreateStreamer restarts the binlog dump at
 // position 4 of the current file; before the fix, readStream
 // re-delivered every replayed RowsEvent to the subscriptions. A
-// replayed event at or below the flushed position could regress a key
-// in the buffered map to an older row image, a periodic flush running
-// mid-replay would write that stale image to the target below the
-// persisted checkpoint, and a crash before the replay re-read the
-// newer event would make the regression permanent — resume streams
-// only events after the checkpoint, so the newer event is never
-// re-sent.
+// replayed event at or below the buffered high-water mark could regress
+// a key in the buffered map to an older row image, a periodic flush
+// running mid-replay would write that stale image to the target below
+// the persisted checkpoint, and a crash before the replay re-read the
+// newer event would make the regression permanent — resume streams only
+// events after the checkpoint, so the newer event is never re-sent.
+//
+// The filter compares each replayed event against the *live* bufferedPos
+// (not a snapshot of flushedPos), so every already-buffered event is
+// protected — both the flushed prefix (<= flushedPos) and the
+// buffered-but-unflushed window (flushedPos, bufferedPos]. The latter is
+// the gap the Copilot review on #919 flagged: a periodic flush can
+// advance flushedPos to bufferedPos mid-replay, and a snapshot of the
+// old flushedPos would leave that window unprotected.
 //
 // The test:
 //  1. Streams an INSERT + UPDATE for the same PK and flushes them, so
 //     the target holds the newest image and flushedPos is past both
 //     events.
-//  2. Writes one more row AFTER the flush (buffered-but-not-flushed).
+//  2. Writes one more row AFTER the flush and waits for it to buffer, so
+//     it sits in the (flushedPos, bufferedPos] window the snapshot fix
+//     would have missed.
 //  3. Kills the syncer out from under readStream, forcing the
 //     consecutive-error path to call recreateStreamer, which replays
 //     the current binlog file from position 4.
-//  4. Asserts the already-flushed events were NOT re-buffered while the
-//     post-flush event WAS re-delivered.
-//  5. Kills the syncer again to assert a second recreation re-captures
-//     the then-current flushed position.
+//  4. Asserts the already-buffered events were NOT re-buffered (neither
+//     the flushed key nor the unflushed one regressed) and the buffered
+//     map still holds the unflushed event's newest image.
+//  5. Kills the syncer again to assert a second recreation re-arms the
+//     filter and advances the diagnostic floor.
 func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
@@ -930,11 +1009,12 @@ func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
 		require.NotNil(t, syncer)
 		syncer.Close()
 	}
-	// replayFilter returns the filter captured by the last recreation.
-	replayFilter := func() mysql.Position {
+	// replayState returns whether replay filtering is armed and the
+	// diagnostic floor captured by the last recreation.
+	replayState := func() (bool, mysql.Position) {
 		client.mu.Lock()
 		defer client.mu.Unlock()
-		return client.replayFilterPos
+		return client.replayActive, client.replayFilterFloor
 	}
 
 	// E1: insert the row; E2: update it to its newest image. Both events
@@ -956,10 +1036,23 @@ func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 1").Scan(&bVal))
 	require.Equal(t, 2, bVal)
 
-	// Write one more event after the flush. It sits between flushedPos
-	// and the end of the file, so the replay MUST re-deliver it — it was
-	// never part of a flush.
+	// Write one more event after the flush and wait for the reader to
+	// buffer it. It now sits in the (flushedPos, bufferedPos] window —
+	// buffered with its newest image but not yet flushed. This is exactly
+	// the window a snapshot of the old flushedPos would have failed to
+	// protect; the live-bufferedPos filter must keep the replay from
+	// regressing it.
 	testutils.RunSQL(t, "INSERT INTO replayskipt1 (a, b) VALUES (2, 5)")
+	waitBuffered()
+	require.Equal(t, 1, client.GetDeltaLen(),
+		"the post-flush INSERT must be buffered before the recreation")
+
+	client.mu.Lock()
+	flushedBeforeRecreate := client.flushedPos
+	client.mu.Unlock()
+	bufferedBeforeRecreate := client.getBufferedPos()
+	require.Positive(t, bufferedBeforeRecreate.Compare(flushedBeforeRecreate),
+		"the unflushed event must put bufferedPos ahead of flushedPos before recreation")
 
 	killSyncer()
 
@@ -969,35 +1062,39 @@ func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
 	// error therefore means the replay has completed.
 	require.NoError(t, client.BlockWait(t.Context()))
 
-	// The recreation must have captured the flushed position as the
-	// replay filter.
-	require.Equal(t, flushedAtRecreate, formatBinlogPosition(replayFilter()),
-		"recreateStreamer should capture the flushed position at recreation time")
+	// The recreation must have armed replay filtering and captured a
+	// diagnostic floor at or above the buffered high-water mark observed
+	// before the kill (it cannot be below it — bufferedPos is monotonic).
+	active, floor := replayState()
+	require.True(t, active, "recreateStreamer must arm replay filtering")
+	require.GreaterOrEqual(t, floor.Compare(bufferedBeforeRecreate), 0,
+		"the diagnostic floor must be at or above the pre-recreation buffered position")
 
-	// The already-flushed INSERT+UPDATE must NOT have been re-buffered —
-	// re-buffering would regress key 1 to a stale image that a
-	// mid-replay flush could persist below the checkpoint. Only the
-	// post-flush INSERT (key 2) may be pending.
+	// Neither already-buffered event may have been regressed by the
+	// replay: key 1 (flushed) must not return to the buffer at all, and
+	// key 2 (buffered-but-unflushed) must keep its newest image rather
+	// than be overwritten by a replayed stale image. Delta stays 1 (just
+	// key 2, still holding b=5).
 	require.Equal(t, 1, client.GetDeltaLen(),
-		"only the unflushed post-flush event may be (re-)buffered; already-flushed events must be skipped")
+		"replay must not re-buffer already-buffered events; only the unflushed key 2 remains")
 
 	require.NoError(t, client.flush(t.Context(), false, nil))
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 1").Scan(&bVal))
 	require.Equal(t, 2, bVal, "key 1 must keep its newest image")
 	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 2").Scan(&bVal))
-	require.Equal(t, 5, bVal, "the unflushed event must be re-delivered and applied")
+	require.Equal(t, 5, bVal, "the unflushed event must keep its newest image and flush correctly")
 
-	// A second recreation must re-capture the THEN-current flushed
-	// position rather than keep the stale filter from the first one.
-	firstFilter := replayFilter()
-	secondFlushed := client.Position()
+	// A second recreation must re-arm the filter and advance the
+	// diagnostic floor rather than keep the stale floor from the first.
+	_, firstFloor := replayState()
 	killSyncer()
 	require.NoError(t, client.BlockWait(t.Context()))
-	secondFilter := replayFilter()
-	require.Equal(t, secondFlushed, formatBinlogPosition(secondFilter),
-		"a second recreation must capture the then-current flushed position")
-	require.Positive(t, secondFilter.Compare(firstFilter),
-		"the second filter must be ahead of the first")
+	activeAgain, secondFloor := replayState()
+	require.True(t, activeAgain, "a second recreation must keep replay filtering armed")
+	require.Positive(t, secondFloor.Compare(firstFloor),
+		"the second recreation's floor must be ahead of the first")
+	require.Equal(t, 0, client.GetDeltaLen(),
+		"nothing unflushed remains, so the second replay must re-buffer nothing")
 	require.Equal(t, 0, client.GetDeltaLen(),
 		"nothing unflushed remains, so the second replay must re-buffer nothing")
 }

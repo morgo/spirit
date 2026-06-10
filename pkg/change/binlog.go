@@ -66,24 +66,48 @@ type binlogClient struct {
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
 
-	// replayFilterPos, when non-zero, is the flushedPos captured at the
-	// moment the streamer was last recreated. recreateStreamer restarts
-	// the binlog dump at position 4 of the current file, so the stream
-	// replays events that were already processed. Events whose end
-	// position is at or below this filter were durably applied to the
-	// target before the recreation (the Position() contract: flushedPos
-	// is "safely written to new table") and must NOT be re-delivered to
-	// subscriptions: re-buffering them can regress a key in the buffered
-	// map to a stale row image, and a periodic flush running mid-replay
-	// would write that stale image below the persisted checkpoint. If
-	// the process then crashed before the replay re-read the newer
-	// event, a resume from the checkpoint would never re-send it and the
-	// row would silently keep the stale image forever. Events above the
-	// filter are re-delivered as before — they were buffered but not
-	// flushed, and re-buffering them is idempotent. Protected by mu;
-	// re-captured on every recreation and naturally inert once the
-	// stream advances past it (the <= comparison stops matching).
-	replayFilterPos mysql.Position
+	// replayActive is set when the streamer has been recreated and the
+	// dump is replaying events that were already processed.
+	// recreateStreamer restarts the binlog dump at position 4 of the
+	// current file, so the stream re-delivers everything from the start
+	// of the file. While this flag is set, readStream filters replayed
+	// RowsEvents against the *live* bufferedPos (see
+	// shouldSkipReplayedEvent): every event whose end position is at or
+	// below the current bufferedPos is already faithfully represented —
+	// either durably applied to the target (<= flushedPos, the
+	// Position() contract) or held in the buffered map with its latest
+	// deduped image (in (flushedPos, bufferedPos]) — so re-delivering it
+	// can only regress a key in the map to a stale row image.
+	//
+	// We compare against the live bufferedPos rather than a snapshot of
+	// flushedPos for correctness under a concurrent periodic flush: a
+	// flush running mid-replay advances flushedPos all the way to
+	// bufferedPos (the frozen high-water mark — setBufferedPos is
+	// monotonic so replayed events do not move it), and it can only do
+	// so safely if the map still holds the latest image for the whole
+	// (flushedPos, bufferedPos] window. Filtering only up to a snapshot
+	// of flushedPos would let a replayed event in that window overwrite
+	// the map's latest image with a stale one; the very next flush would
+	// then persist the stale image below the (now advanced) checkpoint,
+	// and a crash before the replay re-read the newer event would make
+	// the regression permanent (resume streams only events after the
+	// persisted checkpoint, so the newer event is never re-sent).
+	// Filtering up to bufferedPos covers the entire already-buffered
+	// prefix, so the map is never corrupted during replay.
+	//
+	// Events whose end position is above the live bufferedPos are
+	// genuinely new (the replay has caught up to and passed the
+	// high-water mark) and are delivered as normal; delivering one
+	// advances bufferedPos, so the boundary widens with the stream and
+	// the filter is naturally inert for all subsequent live events.
+	// Protected by mu; set on every recreation and cleared on Start.
+	replayActive bool
+
+	// replayFilterFloor records the bufferedPos captured at the moment
+	// the streamer was last recreated, purely for diagnostics/logging so
+	// operators can see where a replay began. It is NOT used in the skip
+	// decision (that consults the live bufferedPos). Protected by mu.
+	replayFilterFloor mysql.Position
 
 	// periodicFlushLock protects the cancel/done pair below. The cancel
 	// signals the periodic-flush goroutine to exit; the done channel is
@@ -198,37 +222,50 @@ func (c *binlogClient) getBufferedPos() mysql.Position {
 	return c.bufferedPos
 }
 
-// getReplayFilterPos returns the replay filter position under a mutex.
-// See the replayFilterPos field for semantics.
-func (c *binlogClient) getReplayFilterPos() mysql.Position {
+// getReplayFilterState returns, under a single lock acquisition, whether
+// replay filtering is currently armed and the live bufferedPos to filter
+// against. See the replayActive field for semantics.
+func (c *binlogClient) getReplayFilterState() (replayActive bool, bufferedPos mysql.Position) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.replayFilterPos
+	return c.replayActive, c.bufferedPos
 }
 
 // shouldSkipReplayedEvent reports whether a RowsEvent must not be
 // delivered to subscriptions because it is part of a post-recreation
-// replay of an already-flushed section of the binlog.
+// replay of a section of the binlog we have already buffered.
 //
-// eventPos is the event's END position: ev.Header.LogPos paired with
-// the log name the reader is currently in. flushedPos is itself
-// recorded from event end positions (bufferedPos is advanced with
-// ev.Header.LogPos), so an event whose end position compares
-// less-than-or-equal to replayFilterPos was fully contained in the
-// flushed prefix and is durably applied to the target. The comparison
-// uses the full (file, pos) ordering from mysql.Position.Compare so it
-// stays correct across binlog rotations: a replayed event in an earlier
-// file than the filter is skipped, and an event in a later file is
-// always delivered (the filter can sit in an earlier file than the
-// replayed dump when no flush ran since a rotation).
+// eventPos is the event's END position: ev.Header.LogPos paired with the
+// log name the reader is currently in. bufferedPos is the *live*
+// high-water mark of everything the reader has already processed (it is
+// advanced with ev.Header.LogPos and is monotonic, so a replay does not
+// move it). An event whose end position compares less-than-or-equal to
+// bufferedPos is already faithfully represented — durably applied to the
+// target if <= flushedPos, or held in the buffered map with its latest
+// deduped image if in (flushedPos, bufferedPos] — so re-delivering it
+// during a replay can only regress a key to a stale image. Such events
+// are skipped.
 //
-// A zero replayFilterPos (no streamer recreation since Start) never
-// skips anything.
-func shouldSkipReplayedEvent(eventPos, replayFilterPos mysql.Position) bool {
-	if replayFilterPos.Name == "" {
+// The comparison uses the full (file, pos) ordering from
+// mysql.Position.Compare so it stays correct across binlog rotations: a
+// replayed event in an earlier file than bufferedPos is skipped, and an
+// event in a later file is always delivered.
+//
+// Comparing against the live bufferedPos (rather than a snapshot of
+// flushedPos taken at recreation) is what makes the filter safe under a
+// periodic flush running concurrently with the replay: see the
+// replayActive field comment for the full argument. Because the boundary
+// is the live bufferedPos, it widens automatically as the replay catches
+// up and crosses the old high-water mark, so genuinely-new events (end
+// pos above bufferedPos) are always delivered.
+//
+// When replay filtering is not active (no streamer recreation since
+// Start) nothing is skipped.
+func shouldSkipReplayedEvent(replayActive bool, eventPos, bufferedPos mysql.Position) bool {
+	if !replayActive {
 		return false
 	}
-	return eventPos.Compare(replayFilterPos) <= 0
+	return eventPos.Compare(bufferedPos) <= 0
 }
 
 // AllChangesFlushed returns true if all buffered changes across all
@@ -411,7 +448,8 @@ func (c *binlogClient) Start(ctx context.Context) error {
 	// delivered and no filtering is needed. A stale filter from before a
 	// Close() followed by StartFromPosition() at an earlier checkpoint
 	// could otherwise wrongly suppress live events.
-	c.replayFilterPos = mysql.Position{}
+	c.replayActive = false
+	c.replayFilterFloor = mysql.Position{}
 	c.syncer = replication.NewBinlogSyncer(c.cfg)
 	c.streamer, err = c.syncer.StartSync(c.flushedPos)
 	if err != nil {
@@ -439,25 +477,33 @@ func (c *binlogClient) Start(ctx context.Context) error {
 // would leave the parser unable to decode rows.
 //
 // Re-reading from position 4 replays events we already processed, so
-// readStream filters the replay against the flushed position captured
-// here (replayFilterPos). Events at or below it were durably applied to
-// the target — the Position() contract — and re-buffering them could
-// regress a key in the buffered map to a stale row image; a periodic
-// flush running mid-replay would then write that stale image over newer
-// applied data, and a crash before the replay re-read the newer event
-// would make the regression permanent (resume streams only events after
-// the persisted checkpoint, so the newer event is never re-sent).
+// readStream filters the replay against the live bufferedPos while
+// replayActive is set. Every event at or below bufferedPos is already
+// faithfully represented: durably applied to the target (<= flushedPos,
+// the Position() contract) or held in the buffered map with its latest
+// deduped image (in (flushedPos, bufferedPos]). Re-buffering any of them
+// could regress a key to a stale row image; a periodic flush running
+// mid-replay would then write that stale image over newer data, and a
+// crash before the replay re-read the newer event would make the
+// regression permanent (resume streams only events after the persisted
+// checkpoint, so the newer event is never re-sent).
 //
-// Events after the captured position are re-delivered as before. They
-// were buffered but not yet flushed, and re-buffering them is safe
-// because the applier is idempotent: it uses REPLACE INTO so
-// re-applying any already-applied event simply re-inserts the same row
-// image, and re-applying an out-of-order event transiently sets the
-// destination to that row's older state, which a subsequent binlog
-// event (in this or a later flush) will correct — all such events are
-// above the checkpoint, so the convergence holds even across a crash.
-// The eventual-consistency property holds in both map mode and queue
-// mode — see UpsertRows in pkg/applier/single_target.go.
+// We filter up to the live bufferedPos rather than a snapshot of
+// flushedPos precisely because the periodic flush can advance flushedPos
+// to bufferedPos mid-replay: a snapshot of the old flushedPos would
+// leave the (flushedPos, bufferedPos] window unfiltered, and a replayed
+// event there could corrupt the map before that flush persists it. See
+// the replayActive field comment for the full argument.
+//
+// Events above the live bufferedPos are genuinely new — the replay has
+// caught up and crossed the high-water mark — and are delivered as
+// before. Delivering one advances bufferedPos, so the boundary widens
+// with the stream and the filter is inert for all subsequent live
+// events. Re-buffering remains safe regardless because the applier is
+// idempotent (REPLACE INTO inline row images) and all such events are
+// above the checkpoint; the eventual-consistency property holds in both
+// map mode and queue mode — see UpsertRows in
+// pkg/applier/single_target.go.
 func (c *binlogClient) recreateStreamer() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -468,12 +514,16 @@ func (c *binlogClient) recreateStreamer() error {
 		"syncer_exists", c.syncer != nil,
 		"streamer_exists", c.streamer != nil)
 
-	// Capture the current flushed position. readStream consults it via
+	// Arm replay filtering. readStream consults the live bufferedPos via
 	// shouldSkipReplayedEvent to suppress re-delivery of replayed row
-	// events that are already durably applied to the target. Captured
-	// fresh on every recreation so a later recreation filters against
-	// the then-current flushed position. See replayFilterPos.
-	c.replayFilterPos = c.flushedPos
+	// events that are already faithfully represented (applied to the
+	// target or held in the buffered map with their latest image).
+	// replayFilterFloor records where the replay began for diagnostics
+	// only; the skip decision uses the live bufferedPos so it stays
+	// correct when a concurrent flush advances flushedPos mid-replay.
+	// See replayActive.
+	c.replayActive = true
+	c.replayFilterFloor = c.bufferedPos
 
 	// Close the existing syncer completely
 	// Since we can't do anything with it.
@@ -659,17 +709,21 @@ func (c *binlogClient) readStream(ctx context.Context) {
 			//
 			// If the streamer was recreated, the dump restarted at
 			// position 4 of the current file and is replaying events we
-			// already processed. Events at or below the flushed position
-			// captured at recreation time are durably applied to the
-			// target and must not be re-buffered — see replayFilterPos.
-			// Only delivery is skipped: the generic position bookkeeping
-			// after the switch still runs (and is itself a no-op for
-			// replayed events thanks to setBufferedPos's monotonic guard).
+			// already processed. Events at or below the live bufferedPos
+			// are already faithfully represented (applied to the target,
+			// or held in the buffered map with their latest image) and
+			// must not be re-buffered — see replayActive. The live
+			// bufferedPos is read here (not a snapshot) so the filter
+			// stays correct when a concurrent periodic flush advances
+			// flushedPos mid-replay. Only delivery is skipped: the
+			// generic position bookkeeping after the switch still runs
+			// (and is itself a no-op for replayed events thanks to
+			// setBufferedPos's monotonic guard).
 			eventPos := mysql.Position{Name: currentLogName, Pos: ev.Header.LogPos}
-			if filterPos := c.getReplayFilterPos(); shouldSkipReplayedEvent(eventPos, filterPos) {
-				c.logger.Debug("skipping replayed rows event at or below the flushed position",
+			if replayActive, bufferedPos := c.getReplayFilterState(); shouldSkipReplayedEvent(replayActive, eventPos, bufferedPos) {
+				c.logger.Debug("skipping replayed rows event at or below the buffered position",
 					"event_position", eventPos,
-					"replay_filter_position", filterPos)
+					"buffered_position", bufferedPos)
 				break
 			}
 			if err = c.processRowsEvent(ev, event); err != nil {
