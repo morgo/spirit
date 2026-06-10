@@ -23,9 +23,15 @@ const (
 	requiredTLSConfigName = "required"
 	verifyCATLSConfigName = "verify_ca"
 	verifyIDTLSConfigName = "verify_identity"
-	maxConnLifetime       = time.Minute * 3
 	maxIdleConns          = 10
 )
+
+// maxConnLifetime is the default maximum lifetime for pooled connections.
+// It is a var (not a const) only so tests can shorten it; production code
+// must not modify it. Note that pools holding session-scoped state (such as
+// the metadata lock's GET_LOCK) are deliberately exempted from this limit —
+// see NewMetadataLock.
+var maxConnLifetime = time.Minute * 3
 
 // rdsAddr matches Amazon RDS hostnames with optional :port suffix.
 // It's used to automatically load the Amazon RDS CA and enable TLS.

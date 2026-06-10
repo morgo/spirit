@@ -122,3 +122,25 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		require.Error(t, err, "expected rollback to fail because transaction was killed")
 	}
 }
+
+func TestForceKillGracePeriod(t *testing.T) {
+	// The grace period is 90% of LockWaitTimeout with a floor of 0.9s.
+	// Fractional seconds must be preserved: converting via
+	// time.Duration(float64) * time.Second truncates 0.9 to 0, which
+	// would fire the kill timer immediately at LockWaitTimeout=1.
+	tests := []struct {
+		lockWaitTimeout int
+		expected        time.Duration
+	}{
+		{lockWaitTimeout: 1, expected: 900 * time.Millisecond},
+		{lockWaitTimeout: 2, expected: 1800 * time.Millisecond},
+		{lockWaitTimeout: 3, expected: 2700 * time.Millisecond},
+		{lockWaitTimeout: 30, expected: 27 * time.Second}, // default LockWaitTimeout
+		// The floor: values below 1 second still wait at least 0.9s.
+		{lockWaitTimeout: 0, expected: 900 * time.Millisecond},
+	}
+	for _, test := range tests {
+		require.Equal(t, test.expected, forceKillGracePeriod(test.lockWaitTimeout),
+			"forceKillGracePeriod(%d)", test.lockWaitTimeout)
+	}
+}
