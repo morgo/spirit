@@ -591,10 +591,13 @@ func (r *Runner) buildContinuousChunker() (table.Chunker, error) {
 }
 
 // FirstCleanPass returns a channel that is closed the first time the
-// continuous checksum completes a clean pass — i.e. every chunk has gone
-// clean at least once, including via retry. Programmatic callers that
-// gate on "data is known consistent" (e.g. the import feature) should
-// block on this channel.
+// continuous checksum completes a clean pass — i.e. every chunk was
+// READ-verified equal (on its initial read or via retry) and no chunk
+// needed a recopy. A pass that repaired chunks via recopy does not
+// qualify; the repaired ranges are re-verified by the following pass
+// before the signal can fire. Programmatic callers that gate on "data
+// is known consistent" (e.g. the import feature) should block on this
+// channel.
 //
 // The accessor is non-blocking: it returns immediately with a channel
 // the caller can wait on. The Runner-owned channel is closed by an

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
@@ -30,6 +31,18 @@ var (
 
 	ErrTableLockFound = errors.New("explicit table lock found! spirit cannot proceed")
 )
+
+// forceKillGracePeriod returns how long to wait before force-killing
+// transactions that are blocking our lock acquisition. It is 90% of the
+// configured lockWaitTimeout (in seconds), with a floor of 0.9 seconds
+// since the minimum LockWaitTimeout is 1 second.
+func forceKillGracePeriod(lockWaitTimeout int) time.Duration {
+	seconds := max(float64(lockWaitTimeout)*lockWaitTimeoutForceKillMultiplier, 0.9)
+	// Multiply before converting to time.Duration: time.Duration(seconds)
+	// truncates the float (0.9 -> 0), which would fire the kill timer
+	// immediately at LockWaitTimeout=1.
+	return time.Duration(seconds * float64(time.Second))
+}
 
 const (
 	// TableLockQuery is used to find tables that are locked by a LOCK TABLES command.
