@@ -1,7 +1,6 @@
 package statement
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
@@ -9,14 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// showCreateTable returns the SHOW CREATE TABLE output for a test table.
-func showCreateTable(t *testing.T, tt *testutils.TestTable) string {
-	t.Helper()
-	var name, createSQL string
-	err := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf("SHOW CREATE TABLE `%s`", tt.Name)).Scan(&name, &createSQL)
-	require.NoError(t, err)
-	return createSQL
-}
+// showCreateTable (defined in diff_column_options_test.go) takes (t, db,
+// tableName); call it as showCreateTable(t, tt.DB, tt.Name) below.
 
 // TestDiffIntegrationRemoveTableComment verifies that the empty COMMENT
 // clause emitted when a table comment is removed actually clears the comment
@@ -28,7 +21,7 @@ func TestDiffIntegrationRemoveTableComment(t *testing.T) {
 	target, err := ParseCreateTable("CREATE TABLE diff_comment_removal (a int)")
 	require.NoError(t, err)
 
-	source, err := ParseCreateTable(showCreateTable(t, tt))
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
 	require.NoError(t, err)
 
 	stmts, err := source.Diff(target, nil)
@@ -39,7 +32,7 @@ func TestDiffIntegrationRemoveTableComment(t *testing.T) {
 	// Apply the diff and verify the comment is really gone.
 	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
 	require.NoError(t, err)
-	postAlter := showCreateTable(t, tt)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
 	require.NotContains(t, postAlter, "COMMENT")
 
 	// Re-diff: the schemas now converge.
@@ -67,7 +60,7 @@ func TestDiffIntegrationFulltextParser(t *testing.T) {
 	target, err := ParseCreateTable("CREATE TABLE diff_ft_parser (id int primary key, b text, FULLTEXT KEY ft_b (b) WITH PARSER ngram)")
 	require.NoError(t, err)
 
-	source, err := ParseCreateTable(showCreateTable(t, tt))
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
 	require.NoError(t, err)
 
 	stmts, err := source.Diff(target, nil)
@@ -82,7 +75,7 @@ func TestDiffIntegrationFulltextParser(t *testing.T) {
 		_, err = tt.DB.ExecContext(t.Context(), stmt.Statement)
 		require.NoError(t, err)
 	}
-	postAlter := showCreateTable(t, tt)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, postAlter, "WITH PARSER `ngram`")
 
 	// Re-diff: the schemas now converge.
@@ -108,7 +101,7 @@ func TestDiffIntegrationFulltextRebuildPreservesParser(t *testing.T) {
 	target, err := ParseCreateTable("CREATE TABLE diff_ft_rebuild (id int primary key, b text, c text, FULLTEXT KEY ft_b (b, c) WITH PARSER ngram)")
 	require.NoError(t, err)
 
-	source, err := ParseCreateTable(showCreateTable(t, tt))
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
 	require.NoError(t, err)
 
 	stmts, err := source.Diff(target, nil)
@@ -120,7 +113,7 @@ func TestDiffIntegrationFulltextRebuildPreservesParser(t *testing.T) {
 	// parser must survive the rebuild.
 	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
 	require.NoError(t, err)
-	postAlter := showCreateTable(t, tt)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, postAlter, "FULLTEXT KEY `ft_b` (`b`,`c`)")
 	require.Contains(t, postAlter, "WITH PARSER `ngram`")
 
@@ -148,7 +141,7 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 	target, err := ParseCreateTable("CREATE TABLE diff_kbs (id int primary key, b varchar(100), KEY idx_b (b) KEY_BLOCK_SIZE=8) ROW_FORMAT=COMPRESSED")
 	require.NoError(t, err)
 
-	source, err := ParseCreateTable(showCreateTable(t, tt))
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
 	require.NoError(t, err)
 
 	stmts, err := source.Diff(target, nil)
@@ -163,7 +156,7 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 		_, err = tt.DB.ExecContext(t.Context(), stmt.Statement)
 		require.NoError(t, err)
 	}
-	postAlter := showCreateTable(t, tt)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, postAlter, "KEY `idx_b` (`b`) KEY_BLOCK_SIZE=8")
 
 	// Re-diff: the schemas now converge.
