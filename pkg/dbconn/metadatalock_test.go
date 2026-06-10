@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,25 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
+
+// closeOnce wraps MetadataLock.Close in a sync.Once. MetadataLock.Close is not
+// idempotent — it blocks on closeCh, so calling it twice deadlocks. Tests that
+// close the lock mid-flow still want a t.Cleanup safety net so that an earlier
+// assertion failure (which aborts the test before the explicit Close) cannot
+// leak a live MDL session holding GET_LOCK into later integration tests. This
+// helper returns a func that closes exactly once: register it via t.Cleanup
+// immediately after NewMetadataLock and call it wherever the test would
+// otherwise call mdl.Close() directly.
+func closeOnce(mdl *MetadataLock) func() error {
+	var (
+		once sync.Once
+		err  error
+	)
+	return func() error {
+		once.Do(func() { err = mdl.Close() })
+		return err
+	}
+}
 
 func TestMetadataLock(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "test"}
@@ -199,9 +219,8 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, mdl)
-
-	// Idle for several connection-cleaner cycles past the shortened lifetime.
-	time.Sleep(3 * time.Second)
+	closeMDL := closeOnce(mdl)
+	t.Cleanup(func() { _ = closeMDL() })
 
 	// Observe lock ownership from a separate connection.
 	observer, err := New(testutils.DSN(), NewDBConfig())
@@ -209,13 +228,25 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 	defer utils.CloseAndLog(observer)
 
 	lockName := computeLockName(&lockTableInfo)
-	var owner sql.NullInt64
 	stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?)", lockName)
-	require.NoError(t, observer.QueryRowContext(t.Context(), stmt).Scan(&owner))
-	require.True(t, owner.Valid,
-		"metadata lock was silently dropped: the MDL connection must be exempt from ConnMaxLifetime")
 
-	require.NoError(t, mdl.Close())
+	// The MDL connection stays idle (refresh is parked an hour out), so once
+	// maxConnLifetime (500ms) elapses the database/sql connection cleaner is
+	// free to close it on its next cycle. Without the SetConnMaxLifetime(0)
+	// fix that idle close silently drops the session-scoped GET_LOCK. Rather
+	// than a fixed sleep, poll IS_USED_LOCK across a window that comfortably
+	// covers several cleaner cycles: fail fast the instant the lock is seen
+	// dropped, otherwise confirm it survived the whole window.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var owner sql.NullInt64
+		require.NoError(t, observer.QueryRowContext(t.Context(), stmt).Scan(&owner))
+		require.True(t, owner.Valid,
+			"metadata lock was silently dropped: the MDL connection must be exempt from ConnMaxLifetime")
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	require.NoError(t, closeMDL())
 }
 
 // TestMetadataLockRefreshDoesNotStackLock pins the fix for the reference
@@ -242,6 +273,8 @@ func TestMetadataLockRefreshDoesNotStackLock(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, mdl)
+	closeMDL := closeOnce(mdl)
+	t.Cleanup(func() { _ = closeMDL() })
 
 	// Simulate three refresh ticks on the same session.
 	for range 3 {
@@ -265,7 +298,7 @@ func TestMetadataLockRefreshDoesNotStackLock(t *testing.T) {
 	require.Equal(t, 1, releases,
 		"refresh must not stack GET_LOCK references: each extra reference needs its own RELEASE_LOCK, so Close() could never free the lock")
 
-	require.NoError(t, mdl.Close())
+	require.NoError(t, closeMDL())
 }
 
 // TestMetadataLockCloseReleasesStackedLock pins Close()'s half of the
@@ -283,6 +316,11 @@ func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
 	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
 	require.NotNil(t, mdl)
+	// Close() is exercised mid-test below; the once-wrapper lets the cleanup
+	// double as a safety net if an earlier assertion aborts the test before
+	// that explicit Close runs, without risking a non-idempotent double Close.
+	closeMDL := closeOnce(mdl)
+	t.Cleanup(func() { _ = closeMDL() })
 
 	// Manually stack two extra references on the dedicated session
 	// (MaxOpenConnections=1 guarantees the same session), simulating what
@@ -302,7 +340,7 @@ func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(observer)
 
-	require.NoError(t, mdl.Close())
+	require.NoError(t, closeMDL())
 
 	// The lock must be immediately acquirable from another connection with a
 	// zero timeout — exactly what a back-to-back migration does on startup.
