@@ -281,18 +281,22 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 		return false
 	}
 
-	// A UNIQUE index enforces uniqueness over its exact column set. A wider
-	// covering index (UNIQUE or PK on more columns) enforces a *different*
-	// uniqueness scope and so does not subsume the constraint. UNIQUE is
-	// therefore only redundant when an exact-column-set duplicate also
-	// enforces uniqueness over those columns.
+	// A UNIQUE index enforces uniqueness over its exact key parts. Dropping it
+	// is only safe when another index enforces an *identical* uniqueness
+	// guarantee, which requires an EXACT key-part match — same columns, same
+	// prefix lengths, same expressions, same order. Prefix coverage is NOT
+	// sufficient here: UNIQUE(name) does not enforce uniqueness of a 10-char
+	// prefix, so UNIQUE(name(10)) is not redundant to it even though name(10)
+	// is "covered" by name for read purposes. Likewise a wider covering index
+	// (UNIQUE or PK on more columns) enforces a different uniqueness scope and
+	// does not subsume the constraint.
 	if indexA.Type == "UNIQUE" {
-		if len(partsA) != len(partsB) {
-			return false
-		}
 		if indexB.Type != "UNIQUE" && indexB.Type != "PRIMARY KEY" {
 			return false
 		}
+		// Exact key-part equality is required so dropping indexA never drops a
+		// uniqueness guarantee that indexB does not also provide.
+		return indexColumnsEqual(partsA, partsB)
 	}
 
 	// indexA is redundant when it is a coverable prefix of (or exact duplicate
@@ -516,8 +520,9 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 	} else {
 		// Prefix of PK is redundant
 		message = fmt.Sprintf(
-			"Index '%s' on columns (%s) has redundant PRIMARY KEY prefix suffix (%s). "+
-				"InnoDB automatically appends full PK columns (%s) to secondary indexes.",
+			"Index '%s' on columns (%s) has a redundant PRIMARY KEY suffix (%s) — a leading prefix of the PRIMARY KEY appearing at the end of the index. "+
+				"InnoDB automatically appends the full PK columns (%s) to secondary indexes, "+
+				"so spelling out part of the PK at the end of the index is redundant.",
 			index.Name,
 			fullCols,
 			redundantSuffixStr,

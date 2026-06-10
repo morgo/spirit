@@ -1331,6 +1331,54 @@ func TestRedundantIndexLinter_PrefixLengths(t *testing.T) {
 		require.NotContains(t, shortMsg, "duplicate", "differing prefix lengths are not duplicates")
 		require.False(t, longViolated, "name(20) must NOT be covered by name(10)")
 	})
+
+	t.Run("UNIQUE prefix index NOT redundant to UNIQUE full-column index", func(t *testing.T) {
+		// UNIQUE(name(10)) enforces uniqueness over the first 10 characters of
+		// name; UNIQUE(name) enforces uniqueness over the WHOLE column. The two
+		// constraints are different: dropping UNIQUE(name(10)) would stop
+		// rejecting rows that collide on their first 10 chars but differ
+		// overall. Redundancy for a UNIQUE candidate-for-removal therefore
+		// requires EXACT key-part equality (including prefix length), not the
+		// read-side prefix coverage that name(10) has under name. Neither index
+		// may be flagged.
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			UNIQUE KEY u_prefix (name(10)),
+			UNIQUE KEY u_full (name)
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		prefixViolated, prefixMsg := indexViolated(violations, "u_prefix")
+		fullViolated, fullMsg := indexViolated(violations, "u_full")
+		require.False(t, prefixViolated,
+			"UNIQUE(name(10)) must NOT be redundant to UNIQUE(name) — it enforces prefix uniqueness the full-column index does not; got: %s", prefixMsg)
+		require.False(t, fullViolated,
+			"UNIQUE(name) must NOT be redundant to UNIQUE(name(10)); got: %s", fullMsg)
+	})
+
+	t.Run("exact-duplicate UNIQUE prefix indexes ARE still flagged", func(t *testing.T) {
+		// Two UNIQUE indexes with the IDENTICAL prefix length enforce the exact
+		// same uniqueness guarantee, so one is a genuine duplicate of the other
+		// and must still be reported.
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			UNIQUE KEY u1 (name(10)),
+			UNIQUE KEY u2 (name(10))
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		violated, msg := indexViolated(violations, "u2")
+		require.True(t, violated, "exact-duplicate UNIQUE prefix indexes should be flagged, violations: %v", violations)
+		require.Contains(t, msg, "duplicate")
+	})
 }
 
 // TestRedundantIndexLinter_CaseInsensitiveColumns verifies that column-name
