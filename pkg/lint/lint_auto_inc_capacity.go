@@ -57,8 +57,12 @@ func (l *AutoIncCapacityLinter) String() string {
 // final shape rather than the pre-ALTER snapshot.
 func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
 	if l.threshold == 0 {
-		// Not configured (e.g. obtained via Get() and used directly):
-		// fall back to the default configuration.
+		// A zero threshold means this linter was constructed directly
+		// (e.g. &AutoIncCapacityLinter{}) without calling Configure, or the
+		// field was manually reset. Instances obtained via Get() always carry
+		// the non-zero default registered in init(), and Configure rejects a
+		// zero threshold, so this only guards against direct construction.
+		// Fall back to the default configuration in that case.
 		if err := l.Configure(l.DefaultConfig()); err != nil {
 			panic(err)
 		}
