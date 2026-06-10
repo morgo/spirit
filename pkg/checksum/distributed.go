@@ -135,14 +135,14 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		// The source and target do not match, so we first need
 		// to inspect closely and report on the differences.
 		c.differencesFound.Add(1)
-		c.logger.Warn("checksum mismatch for chunk", "chunk", chunk.String(),
+		c.logger.Warn("chunk verification failed", "chunk", chunk.String(),
 			"reason", mismatch.reason(sourceCount, targetCount),
 			"sourceChecksum", sourceChecksum, "targetChecksum", targetChecksum,
 			"sourceCount", sourceCount, "targetCount", targetCount)
 
 		// For distributed case, we can't easily inspect differences across multiple sources/targets
 		// So we'll just log the mismatch and proceed to fix
-		c.logger.Warn("distributed checksum mismatch detected, will recopy chunk")
+		c.logger.Warn("distributed chunk verification failed, will recopy chunk")
 
 		// Are we allowed to fix the differences? If not, return an error.
 		// This is mostly used by the test-suite.
