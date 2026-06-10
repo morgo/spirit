@@ -342,15 +342,21 @@ func TestQueueCapBackpressure(t *testing.T) {
 	stats := c.Stats()
 	require.GreaterOrEqual(t, stats.WalkerStalls, uint64(1),
 		"expected at least one walker stall while queue was at MaxQueueSize")
-	// Queue can briefly exceed MaxQueueSize: in-flight workers can finish
-	// and the resultCh buffer can hold results that haven't been processed
-	// yet, both of which become retries when the dispatcher next services
-	// the result arm. The overshoot is bounded by inflight + buffered
-	// results = 2*Concurrency in the worst case. The test cares that the
-	// queue stays bounded near MaxQueueSize, not unbounded — anything
-	// dramatically larger would be the symptom of a real back-pressure
-	// failure. See enqueueRetry's doc comment in continuous.go.
-	require.LessOrEqual(t, stats.RetryQueueDepth, cfg.MaxQueueSize+2*cfg.Concurrency,
+	// Queue can briefly exceed MaxQueueSize. Three sources of work have
+	// already passed the back-pressure gate (which only throttles fresh
+	// walker intake) by the time the queue reaches MaxQueueSize, and each
+	// becomes a retry when its result is serviced:
+	//   - in-flight workers              (up to Concurrency)
+	//   - results buffered in resultCh   (up to Concurrency)
+	//   - the single-slot pendingFresh prefetch the dispatcher stages
+	//     one-ahead of itself             (1)
+	// so the worst-case overshoot is 2*Concurrency+1, not 2*Concurrency.
+	// (Concurrency=1 here => bound 7; the +1 slot is what made the old
+	// 2*Concurrency bound flake at depth 7.) The test cares that the queue
+	// stays bounded near MaxQueueSize, not unbounded — anything dramatically
+	// larger would be the symptom of a real back-pressure failure. See
+	// enqueueRetry's doc comment in continuous.go.
+	require.LessOrEqual(t, stats.RetryQueueDepth, cfg.MaxQueueSize+2*cfg.Concurrency+1,
 		"queue depth should stay bounded under back-pressure")
 }
 
