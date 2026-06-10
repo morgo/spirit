@@ -48,6 +48,8 @@ func unescapeHashComponent(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
+		// defensive: HashKey output never ends in a lone backslash, so the
+		// bound only guards against indexing past a malformed input.
 		if s[i] == '\\' && i+1 < len(s) {
 			i++
 		}
