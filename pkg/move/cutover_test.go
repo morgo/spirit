@@ -196,6 +196,14 @@ func TestCutOverFuncCalledOnceAcrossRenameRetry(t *testing.T) {
 	testutils.RunSQLInDatabase(t, srcName, `CREATE TABLE t1_old (id INT NOT NULL PRIMARY KEY)`)
 
 	dbConfig := dbconn.NewDBConfig()
+	// Pin MaxRetries explicitly so the rename retry loop's iteration count does
+	// not depend on the dbconn default, and shorten renameRetryWait so the test
+	// (which times a DROP to land between rename attempts) is fast and not
+	// coupled to the production constant. Restore on cleanup.
+	dbConfig.MaxRetries = 5
+	originalRenameRetryWait := renameRetryWait
+	renameRetryWait = 250 * time.Millisecond
+	t.Cleanup(func() { renameRetryWait = originalRenameRetryWait })
 	logger := slog.Default()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -235,15 +243,15 @@ func TestCutOverFuncCalledOnceAcrossRenameRetry(t *testing.T) {
 	// Drop the leftover t1_old after the first rename attempt has failed so
 	// that a subsequent retry (under the still-held t1 lock) can succeed.
 	// DROP TABLE t1_old is not blocked by the cutover's LOCK TABLES, which
-	// only locks t1. The first rename attempt happens within a few hundred
-	// milliseconds; retries are spaced renameRetryWait (1s) apart, so a drop
-	// at 1.5s lands between attempts. (1500ms is used as a literal rather
-	// than 1.5*renameRetryWait so this test also compiles against code that
-	// predates the under-lock retry, to demonstrate the original bug.)
+	// only locks t1. The first rename attempt happens promptly; retries are
+	// spaced renameRetryWait apart. Sleeping 1.5*renameRetryWait reliably
+	// lands the drop between the first and second rename attempts regardless
+	// of the constant's value.
+	dropSleep := renameRetryWait * 3 / 2
 	dropDone := make(chan struct{})
 	go func() {
 		defer close(dropDone)
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(dropSleep)
 		_, _ = srcDB.ExecContext(context.Background(), "DROP TABLE IF EXISTS t1_old")
 	}()
 

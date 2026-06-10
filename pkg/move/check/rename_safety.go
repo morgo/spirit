@@ -45,6 +45,12 @@ func renameSafetyCheck(ctx context.Context, r Resources, _ *slog.Logger) error {
 		}
 	}
 	for i, src := range r.Sources {
+		// Guard against partially-populated Resources so a missing connection or
+		// config surfaces as a descriptive error rather than a nil dereference
+		// panic (mirrors resume_state_check).
+		if src.DB == nil || src.Config == nil {
+			return fmt.Errorf("source %d database connection or config is not initialized", i)
+		}
 		for _, tbl := range r.SourceTables {
 			oldName := CutoverOldName(tbl.TableName)
 			var exists int

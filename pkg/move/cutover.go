@@ -113,7 +113,8 @@ func (c *CutOver) Run(ctx context.Context) error {
 				c.logger.Error("cutover failed after the cutover function had already succeeded; not retrying",
 					"error", err.Error())
 				return fmt.Errorf("cutover failed after the cutover function succeeded; "+
-					"source tables are unlocked and not yet renamed, manual intervention required: %w", err)
+					"source tables are unlocked and not fully renamed (the rename may have "+
+					"partially applied), manual intervention required: %w", err)
 			}
 			c.logger.Warn("cutover failed", "error", err.Error())
 			continue
