@@ -295,6 +295,11 @@ func (a *AbstractStatement) AlterContainsAddUnique() error {
 // for any RENAME COLUMN or CHANGE COLUMN (with a different name) specs
 // in this ALTER TABLE statement. Returns nil if there are no renames
 // or if this is not an ALTER TABLE statement.
+// MySQL column identifiers are case-insensitive, so a case-only change
+// (e.g. foo → FOO) is not considered a rename: the data mapping is
+// unaffected and case-insensitive identity matching handles it. The map
+// keys and values keep the case as typed in the ALTER; consumers must
+// match them against declared column names case-insensitively.
 func (a *AbstractStatement) ColumnRenameMap() map[string]string {
 	alterStmt, ok := (*a.StmtNode).(*ast.AlterTableStmt)
 	if !ok {
@@ -306,25 +311,22 @@ func (a *AbstractStatement) ColumnRenameMap() map[string]string {
 		case ast.AlterTableRenameColumn:
 			// ALTER TABLE t RENAME COLUMN old TO new
 			if spec.OldColumnName != nil && spec.NewColumnName != nil {
-				oldName := spec.OldColumnName.Name.O
-				newName := spec.NewColumnName.Name.O
-				if oldName != newName {
+				// Name.L is the lower-cased form of Name.O.
+				if spec.OldColumnName.Name.L != spec.NewColumnName.Name.L {
 					if renames == nil {
 						renames = make(map[string]string)
 					}
-					renames[oldName] = newName
+					renames[spec.OldColumnName.Name.O] = spec.NewColumnName.Name.O
 				}
 			}
 		case ast.AlterTableChangeColumn:
 			// ALTER TABLE t CHANGE COLUMN old new <type>
 			if spec.OldColumnName != nil && len(spec.NewColumns) > 0 {
-				oldName := spec.OldColumnName.Name.O
-				newName := spec.NewColumns[0].Name.Name.O
-				if oldName != newName {
+				if spec.OldColumnName.Name.L != spec.NewColumns[0].Name.Name.L {
 					if renames == nil {
 						renames = make(map[string]string)
 					}
-					renames[oldName] = newName
+					renames[spec.OldColumnName.Name.O] = spec.NewColumns[0].Name.Name.O
 				}
 			}
 		}
