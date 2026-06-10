@@ -31,25 +31,30 @@ type CreateTable struct {
 
 // Column represents a table column definition
 type Column struct {
-	Raw           *ast.ColumnDef    `json:"-"`
-	Name          string            `json:"name"`
-	Type          string            `json:"type"`
-	Length        *int              `json:"length,omitempty"`
-	Precision     *int              `json:"precision,omitempty"`
-	Scale         *int              `json:"scale,omitempty"`
-	Unsigned      *bool             `json:"unsigned,omitempty"`
-	EnumValues    []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
-	SetValues     []string          `json:"set_values,omitempty"`  // Permitted values for SET type
-	Nullable      bool              `json:"nullable"`
-	Default       *string           `json:"default,omitempty"`
-	DefaultIsExpr bool              `json:"default_is_expr,omitempty"` // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
-	AutoInc       bool              `json:"auto_increment"`
-	PrimaryKey    bool              `json:"primary_key"`
-	Unique        bool              `json:"unique"`
-	Comment       *string           `json:"comment,omitempty"`
-	Charset       *string           `json:"charset,omitempty"`
-	Collation     *string           `json:"collation,omitempty"`
-	Options       map[string]string `json:"options,omitempty"`
+	Raw             *ast.ColumnDef    `json:"-"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type"`
+	Length          *int              `json:"length,omitempty"`
+	Precision       *int              `json:"precision,omitempty"`
+	Scale           *int              `json:"scale,omitempty"`
+	Unsigned        *bool             `json:"unsigned,omitempty"`
+	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
+	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
+	Nullable        bool              `json:"nullable"`
+	Default         *string           `json:"default,omitempty"`
+	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
+	OnUpdate        *string           `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
+	GeneratedExpr   *string           `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
+	GeneratedStored bool              `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
+	Check           *string           `json:"check,omitempty"`            // Column-level CHECK (...) constraint expression
+	SRID            *uint32           `json:"srid,omitempty"`             // SRID attribute for spatial columns
+	AutoInc         bool              `json:"auto_increment"`
+	PrimaryKey      bool              `json:"primary_key"`
+	Unique          bool              `json:"unique"`
+	Comment         *string           `json:"comment,omitempty"`
+	Charset         *string           `json:"charset,omitempty"`
+	Collation       *string           `json:"collation,omitempty"`
+	Options         map[string]string `json:"options,omitempty"`
 }
 
 // IndexColumn represents a column or expression in an index
@@ -346,6 +351,12 @@ func (ct *CreateTable) parseToStruct() {
 		}
 	}
 
+	// Hoist column-level CHECK constraints into table-level constraints, the
+	// same way MySQL does in SHOW CREATE TABLE. This keeps the parsed form
+	// canonical so a diff against a live (already-hoisted) table converges and
+	// never tries to DROP the live CHECK. See normalizeColumnChecks.
+	ct.normalizeColumnChecks()
+
 	// Auto-generate MySQL default names for unnamed indexes
 	ct.autoNameIndexes()
 
@@ -357,6 +368,94 @@ func (ct *CreateTable) parseToStruct() {
 	// Parse partition options
 	if ct.Raw.Partition != nil {
 		ct.Partition = ct.parsePartitionOptions(ct.Raw.Partition)
+	}
+}
+
+// normalizeColumnChecks hoists column-level CHECK constraints into table-level
+// constraints, mirroring what MySQL does in SHOW CREATE TABLE. Without this,
+// a column-level CHECK lives only in Column.Check while the live table (after
+// the ALTER is applied) reports the same constraint in CreateTable.Constraints.
+// A re-diff would then (a) keep emitting MODIFY COLUMN because Column.Check
+// differs and (b) try to DROP the live CHECK because it is absent from the
+// target's Constraints. Hoisting at parse time keeps the parsed form canonical
+// so the re-diff converges and no constraint is ever dropped.
+//
+// MySQL auto-names unnamed CHECK constraints `<table>_chk_<n>`. We replicate
+// that here: user-named CHECKs keep their name; unnamed ones are numbered in
+// the order they are encountered (existing table-level CHECKs first, then the
+// hoisted column-level CHECKs in column order).
+//
+// Naming caveat: MySQL numbers CHECKs in true declaration order, interleaving
+// column-level and table-level CHECKs by their position in the statement. The
+// TiDB parser does not expose reliable per-node source offsets, so when a table
+// mixes column-level and table-level CHECKs our generated `_chk_<n>` numbers can
+// differ from MySQL's. This is purely cosmetic and never causes a constraint to
+// be dropped or a re-diff to diverge: diffConstraints pairs CHECK constraints by
+// expression when the names differ (see matchedByExpression in diffConstraints),
+// so the round-trip still converges. The common case — a table whose CHECKs are
+// all column-level — numbers identically to MySQL.
+func (ct *CreateTable) normalizeColumnChecks() {
+	// Track names already in use so generated names never collide with a
+	// user-supplied constraint name.
+	usedNames := make(map[string]bool)
+	for i := range ct.Constraints {
+		if ct.Constraints[i].Name != "" {
+			usedNames[ct.Constraints[i].Name] = true
+		}
+	}
+
+	// Append a hoisted table-level CHECK for each column-level CHECK, then
+	// clear the column-level field so it no longer participates in column
+	// equality or column-definition emission.
+	for i := range ct.Columns {
+		col := &ct.Columns[i]
+		if col.Check == nil {
+			continue
+		}
+		// Recover the user-supplied constraint name (if any) from the raw
+		// column option; unnamed ones are auto-numbered below.
+		name := ""
+		if col.Raw != nil {
+			for _, opt := range col.Raw.Options {
+				if opt.Tp == ast.ColumnOptionCheck {
+					name = opt.ConstraintName
+					break
+				}
+			}
+		}
+		expr := *col.Check
+		definition := fmt.Sprintf("CHECK (%s)", expr)
+		ct.Constraints = append(ct.Constraints, Constraint{
+			Name:       name,
+			Type:       "CHECK",
+			Expression: &expr,
+			Definition: &definition,
+		})
+		col.Check = nil
+		if name != "" {
+			usedNames[name] = true
+		}
+	}
+
+	// Number the unnamed CHECK constraints `<table>_chk_<n>`. Resolve indices
+	// (not pointers) after all appends are complete so a slice reallocation
+	// during the append loop above cannot leave us with dangling references.
+	counter := 0
+	for i := range ct.Constraints {
+		c := &ct.Constraints[i]
+		if c.Type != "CHECK" || c.Name != "" {
+			continue
+		}
+		var name string
+		for {
+			counter++
+			name = fmt.Sprintf("%s_chk_%d", ct.TableName, counter)
+			if !usedNames[name] {
+				break
+			}
+		}
+		usedNames[name] = true
+		c.Name = name
 	}
 }
 
@@ -438,6 +537,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 		Options:  make(map[string]string),
 	}
 
+	// Spatial types are parsed as TypeGeometry with a subtype; recover the
+	// specific type name (point, polygon, ...) so it round-trips correctly
+	// when emitting MODIFY/ADD COLUMN.
+	if col.Tp.GetType() == mysql.TypeGeometry {
+		geoType := col.Tp.GetGeometryType()
+		if geoStr := geoType.String(); geoStr != "" {
+			column.Type = geoStr
+		}
+	}
+
 	// Check if this is a binary type (VARBINARY, BLOB, etc.)
 	// The TiDB parser converts binary types to their text equivalents,
 	// so we need to check the binary flag and convert back
@@ -479,12 +588,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	}
 
 	// Extract charset and collation from the type itself
-	// (they may be overridden by column options later)
-	if charset := col.Tp.GetCharset(); charset != "" {
-		column.Charset = &charset
-	}
-	if collation := col.Tp.GetCollate(); collation != "" {
-		column.Collation = &collation
+	// (they may be overridden by column options later).
+	// Spatial types are skipped: the parser assigns them a synthetic
+	// "binary" charset/collation, which is not valid SQL to emit.
+	if col.Tp.GetType() != mysql.TypeGeometry {
+		if charset := col.Tp.GetCharset(); charset != "" {
+			column.Charset = &charset
+		}
+		if collation := col.Tp.GetCollate(); collation != "" {
+			column.Collation = &collation
+		}
 	}
 
 	// Extract ENUM/SET permitted values
@@ -549,6 +662,38 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 			if opt.StrValue != "" {
 				column.Collation = &opt.StrValue
 			}
+		case ast.ColumnOptionOnUpdate:
+			// ON UPDATE CURRENT_TIMESTAMP[(n)] — only valid for TIMESTAMP/DATETIME.
+			// Reuse parseExpression so the stored form matches DEFAULT handling:
+			// lowercased, with "()" stripped from zero-arg timestamp functions.
+			if opt.Expr != nil {
+				if exprStr, ok := ct.parseExpression(opt.Expr).(string); ok && exprStr != "" {
+					column.OnUpdate = &exprStr
+				}
+			}
+		case ast.ColumnOptionGenerated:
+			// GENERATED ALWAYS AS (expr) [STORED|VIRTUAL]
+			if opt.Expr != nil {
+				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
+					column.GeneratedExpr = &exprStr
+					column.GeneratedStored = opt.Stored
+				}
+			}
+		case ast.ColumnOptionCheck:
+			// Column-level CHECK (expr). Note that MySQL normalizes these to
+			// table-level constraints in SHOW CREATE TABLE output, so this is
+			// only seen when parsing user-written (non-canonical) statements.
+			if opt.Expr != nil {
+				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
+					column.Check = &exprStr
+				}
+			}
+		case ast.ColumnOptionSrid:
+			// SRID n — spatial reference system id for spatial columns.
+			// SHOW CREATE TABLE emits this as /*!80003 SRID n */ which the
+			// parser unwraps as a regular column option.
+			srid := opt.Srid
+			column.SRID = &srid
 		default:
 			// Store unknown options for flexibility
 			column.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -652,8 +797,14 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 		constr.Type = "CHECK"
 
 		if constraint.Expr != nil {
-			expr := ct.parseExpression(constraint.Expr)
-			if exprStr, ok := expr.(string); ok {
+			// Use restoreExpressionText (not parseExpression) so the stored
+			// expression has any balanced outer parentheses stripped. MySQL's
+			// SHOW CREATE TABLE wraps the CHECK body in an extra set of parens
+			// (e.g. CHECK ((`age` >= 0))) while user-written DDL usually does
+			// not (CHECK (age >= 0)). Normalizing both to the unwrapped form
+			// (`age`>=0) lets the two compare equal so a re-diff converges
+			// instead of emitting a spurious DROP+ADD.
+			if exprStr, ok := restoreExpressionText(constraint.Expr); ok {
 				constr.Expression = &exprStr
 				// Generate definition string
 				definition := fmt.Sprintf("CHECK (%s)", exprStr)
@@ -1062,6 +1213,31 @@ func isExpressionDefault(expr ast.ExprNode) bool {
 	default:
 		return false
 	}
+}
+
+// restoreExpressionText restores an expression AST node to its SQL text,
+// stripping redundant outer parentheses. MySQL's SHOW CREATE TABLE wraps
+// generated-column and CHECK expressions in an extra set of parentheses
+// (e.g. GENERATED ALWAYS AS ((`a` + 1))); stripping them ensures a
+// user-written `AS (a + 1)` compares equal to the canonical form.
+// Unlike parseExpression, the result is NOT lowercased and string literals
+// keep their quotes — these expressions may contain case-sensitive literals.
+func restoreExpressionText(expr ast.ExprNode) (string, bool) {
+	for {
+		paren, ok := expr.(*ast.ParenthesesExpr)
+		if !ok {
+			break
+		}
+		expr = paren.Expr
+	}
+
+	var sb strings.Builder
+	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+	if err := expr.Restore(rCtx); err != nil {
+		return "", false
+	}
+
+	return sb.String(), true
 }
 
 // parseExpression converts an expression to a string representation
