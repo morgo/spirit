@@ -69,6 +69,12 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 		// PRIMARY KEY itself never participates in suffix/prefix-of-PK checks
 		// against itself, and the checks below are only meaningful for
 		// secondary indexes.
+		//
+		// UNIQUE indexes are also excluded from the partial-PK-suffix branch
+		// (handled inside hasRedundantPKSuffix): a UNIQUE index's trailing
+		// columns are part of its uniqueness scope, not auto-appended PK
+		// bookkeeping, so trimming them would silently drop a data-integrity
+		// constraint.
 		if primaryKey != nil && index.Type != "PRIMARY KEY" {
 			// Check: Redundant PK suffix
 			// The index explicitly includes PK columns at its end. InnoDB
@@ -105,7 +111,7 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 			}
 
 			if isRedundantToIndex(index, otherIndex) {
-				isDuplicate := len(index.Columns) == len(otherIndex.Columns)
+				isDuplicate := indexColumnsEqual(indexParts(index), indexParts(otherIndex))
 				violations = append(violations, createRedundancyViolation(
 					table.GetTableName(),
 					index,
@@ -122,9 +128,135 @@ func (l *RedundantIndexLinter) checkTableIndexes(table *statement.CreateTable) [
 	return violations
 }
 
+// indexParts returns the structured key parts of an index. The deprecated
+// Index.Columns field is a flat []string that silently drops expression key
+// parts (functional indexes) and prefix lengths (col(n)), so all comparison
+// logic in this linter operates on ColumnList instead. Index.Columns is only
+// used for human-readable violation messages.
+func indexParts(index statement.Index) []statement.IndexColumn {
+	if len(index.ColumnList) > 0 {
+		return index.ColumnList
+	}
+	// Synthesized indexes (column-level PRIMARY KEY / UNIQUE produced by
+	// GetIndexes) only populate the flat Columns slice. Build equivalent plain
+	// key parts so comparison logic still sees the columns.
+	if len(index.Columns) == 0 {
+		return nil
+	}
+	parts := make([]statement.IndexColumn, 0, len(index.Columns))
+	for _, c := range index.Columns {
+		parts = append(parts, statement.IndexColumn{Name: c})
+	}
+	return parts
+}
+
+// renderIndexPart formats a single key part for human-readable messages,
+// including prefix lengths (col(10)) and expression parts ((LOWER(name))).
+func renderIndexPart(p statement.IndexColumn) string {
+	if p.Expression != nil {
+		return "(" + *p.Expression + ")"
+	}
+	if p.Length != nil {
+		return fmt.Sprintf("%s(%d)", p.Name, *p.Length)
+	}
+	return p.Name
+}
+
+// renderIndexParts formats a list of key parts for human-readable messages.
+func renderIndexParts(parts []statement.IndexColumn) string {
+	rendered := make([]string, 0, len(parts))
+	for _, p := range parts {
+		rendered = append(rendered, renderIndexPart(p))
+	}
+	return strings.Join(rendered, ", ")
+}
+
+// renderIndexColumns formats an index's columns for human-readable messages.
+// It uses the structured key parts (which carry prefix lengths and
+// expressions), falling back to the flat Columns slice for synthesized indexes
+// (e.g. column-level PRIMARY KEY / UNIQUE) via indexParts.
+func renderIndexColumns(index statement.Index) string {
+	return renderIndexParts(indexParts(index))
+}
+
+// indexColumnPartCovers reports whether key part b can serve every lookup that
+// key part a serves, when both occupy the same position in two indexes.
+//
+// Semantics:
+//   - Expression parts are opaque: an expression is covered only by an
+//     identical expression. A plain column never covers (or is covered by) an
+//     expression.
+//   - A prefix part col(n) is covered by the full column col (no length) or by
+//     a longer-or-equal prefix col(m) where m >= n. The reverse is false: a
+//     full column is NOT covered by a shorter prefix, because the prefix lacks
+//     covering-scan and full-ordering capability.
+//   - Column-name comparison is case-insensitive, matching MySQL identifier
+//     semantics.
+func indexColumnPartCovers(a, b statement.IndexColumn) bool {
+	// Expression parts only match identical expressions.
+	if a.Expression != nil || b.Expression != nil {
+		if a.Expression == nil || b.Expression == nil {
+			return false
+		}
+		return *a.Expression == *b.Expression
+	}
+
+	// Both are plain column references.
+	if !strings.EqualFold(a.Name, b.Name) {
+		return false
+	}
+
+	// b must cover at least as much of the column as a.
+	// nil Length means the full column (covers any prefix length).
+	if b.Length == nil {
+		return true
+	}
+	if a.Length == nil {
+		// a needs the full column but b only indexes a prefix → not covered.
+		return false
+	}
+	return *b.Length >= *a.Length
+}
+
+// indexColumnsEqual reports whether two key-part lists are identical, including
+// column names (case-insensitive), prefix lengths, and expressions. This is the
+// exact-duplicate test: i1(name(10)) and i2(name) are NOT equal, and two
+// identical functional indexes ARE equal.
+func indexColumnsEqual(a, b []statement.IndexColumn) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !indexColumnPartCovers(a[i], b[i]) || !indexColumnPartCovers(b[i], a[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isColumnListPrefixCoveredBy reports whether every leading key part of a is
+// covered by the corresponding key part of b (a is a "coverable prefix" of b).
+// Used to decide whether index a is redundant to index b.
+func isColumnListPrefixCoveredBy(a, b []statement.IndexColumn) bool {
+	if len(a) > len(b) {
+		return false
+	}
+	for i := range a {
+		if !indexColumnPartCovers(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // isRedundantToIndex checks if indexA is redundant to indexB.
-// Returns true if indexA is a prefix of indexB OR if they're duplicates,
-// AND any constraint indexA enforces is also enforced by indexB.
+// Returns true if indexA is a coverable prefix of indexB OR if they're exact
+// duplicates, AND any constraint indexA enforces is also enforced by indexB.
+//
+// Comparison operates on ColumnList so that expression key parts and prefix
+// lengths are honoured: a functional index is only redundant to another index
+// carrying the identical expression part, and a prefix index col(n) is covered
+// by col but not vice versa.
 func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 	// FULLTEXT and SPATIAL indexes serve specialized purposes and are not
 	// interchangeable with B-tree indexes (or each other).
@@ -141,8 +273,11 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 		return false
 	}
 
-	// indexA cannot be redundant if it has MORE columns than indexB
-	if len(indexA.Columns) > len(indexB.Columns) {
+	partsA := indexParts(indexA)
+	partsB := indexParts(indexB)
+
+	// indexA cannot be redundant if it has MORE key parts than indexB.
+	if len(partsA) > len(partsB) {
 		return false
 	}
 
@@ -152,7 +287,7 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 	// therefore only redundant when an exact-column-set duplicate also
 	// enforces uniqueness over those columns.
 	if indexA.Type == "UNIQUE" {
-		if len(indexA.Columns) != len(indexB.Columns) {
+		if len(partsA) != len(partsB) {
 			return false
 		}
 		if indexB.Type != "UNIQUE" && indexB.Type != "PRIMARY KEY" {
@@ -160,18 +295,17 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 		}
 	}
 
-	// Check if all columns of indexA match the prefix of indexB in exact order
-	for i := range indexA.Columns {
-		if indexA.Columns[i] != indexB.Columns[i] {
-			return false
-		}
-	}
+	// indexA is redundant when it is a coverable prefix of (or exact duplicate
+	// of) indexB.
+	return isColumnListPrefixCoveredBy(partsA, partsB)
+}
 
-	// At this point, indexA is either:
-	// - A prefix of indexB (len(indexA) < len(indexB)), OR
-	// - A duplicate of indexB (len(indexA) == len(indexB))
-	// Both cases are redundant!
-	return true
+// isPlainPKColumn reports whether index key part p is a plain column reference
+// (no prefix length, no expression) whose name matches the given PK column.
+// InnoDB auto-appends the *full* PK column to secondary indexes, so a prefixed
+// or expression key part does not stand in for a PK column.
+func isPlainPKColumn(p statement.IndexColumn, pkColumn string) bool {
+	return p.Expression == nil && p.Length == nil && strings.EqualFold(p.Name, pkColumn)
 }
 
 // hasRedundantPKPrefix checks if a secondary index leads with the full
@@ -192,11 +326,12 @@ func hasRedundantPKPrefix(index statement.Index, primaryKey statement.Index) (bo
 	if pkLen == 0 {
 		return false, 0
 	}
-	if len(index.Columns) <= pkLen {
+	parts := indexParts(index)
+	if len(parts) <= pkLen {
 		return false, 0
 	}
 	for i := range pkLen {
-		if index.Columns[i] != primaryKey.Columns[i] {
+		if !isPlainPKColumn(parts[i], primaryKey.Columns[i]) {
 			return false, 0
 		}
 	}
@@ -209,23 +344,30 @@ func hasRedundantPKPrefix(index statement.Index, primaryKey statement.Index) (bo
 //
 // In InnoDB, secondary indexes automatically include PK columns, so explicitly
 // adding them at the end is redundant.
+//
+// UNIQUE indexes are excluded from the *partial*-PK-suffix branch: the trailing
+// columns of a UNIQUE index are part of its uniqueness scope (UNIQUE (x, y, a)
+// is not implied by PK (a, b)), so trimming them would drop a data-integrity
+// constraint. A full-PK suffix on a UNIQUE index is still flagged because the
+// PK already guarantees uniqueness, making the spelled-out suffix vacuous.
 func hasRedundantPKSuffix(index statement.Index, primaryKey statement.Index) (bool, int) {
 	if len(primaryKey.Columns) == 0 {
 		return false, 0
 	}
 
-	// Index must be longer than PK to have a suffix
-	if len(index.Columns) <= len(primaryKey.Columns) {
+	parts := indexParts(index)
+	pkLen := len(primaryKey.Columns)
+	indexLen := len(parts)
+
+	// Index must be longer than PK to have a suffix.
+	if indexLen <= pkLen {
 		return false, 0
 	}
 
-	pkLen := len(primaryKey.Columns)
-	indexLen := len(index.Columns)
-
-	// Try to match the full PK at the end
+	// Try to match the full PK at the end.
 	fullMatch := true
 	for i := range pkLen {
-		if index.Columns[indexLen-pkLen+i] != primaryKey.Columns[i] {
+		if !isPlainPKColumn(parts[indexLen-pkLen+i], primaryKey.Columns[i]) {
 			fullMatch = false
 			break
 		}
@@ -235,12 +377,19 @@ func hasRedundantPKSuffix(index statement.Index, primaryKey statement.Index) (bo
 		return true, pkLen // Full PK suffix is redundant
 	}
 
+	// A partial PK suffix on a UNIQUE index is part of its uniqueness scope,
+	// not redundant auto-append bookkeeping. Only the full-PK case above is
+	// vacuous for UNIQUE; stop here.
+	if index.Type == "UNIQUE" {
+		return false, 0
+	}
+
 	// Check if index ends with a PREFIX of PK
 	// e.g., PK (a, b, c) and INDEX (x, a, b) - the (a, b) suffix is redundant
 	for prefixLen := pkLen - 1; prefixLen > 0; prefixLen-- {
 		match := true
 		for i := range prefixLen {
-			if index.Columns[indexLen-prefixLen+i] != primaryKey.Columns[i] {
+			if !isPlainPKColumn(parts[indexLen-prefixLen+i], primaryKey.Columns[i]) {
 				match = false
 				break
 			}
@@ -257,12 +406,15 @@ func hasRedundantPKSuffix(index statement.Index, primaryKey statement.Index) (bo
 func createRedundancyViolation(tableName string, redundantIndex statement.Index, coveringIndex statement.Index, isDuplicate bool, redundantToPK bool) Violation {
 	var message, suggestion string
 
+	redundantCols := renderIndexColumns(redundantIndex)
+	coveringCols := renderIndexColumns(coveringIndex)
+
 	if isDuplicate {
 		if redundantToPK {
 			message = fmt.Sprintf(
 				"Index '%s' on columns (%s) is a duplicate of the PRIMARY KEY",
 				redundantIndex.Name,
-				strings.Join(redundantIndex.Columns, ", "),
+				redundantCols,
 			)
 			suggestion = fmt.Sprintf(
 				"Drop index '%s' as it duplicates the PRIMARY KEY. "+
@@ -273,7 +425,7 @@ func createRedundancyViolation(tableName string, redundantIndex statement.Index,
 			message = fmt.Sprintf(
 				"Index '%s' on columns (%s) is a duplicate of index '%s'",
 				redundantIndex.Name,
-				strings.Join(redundantIndex.Columns, ", "),
+				redundantCols,
 				coveringIndex.Name,
 			)
 			suggestion = fmt.Sprintf(
@@ -289,8 +441,8 @@ func createRedundancyViolation(tableName string, redundantIndex statement.Index,
 			message = fmt.Sprintf(
 				"Index '%s' on columns (%s) is redundant - covered by PRIMARY KEY on columns (%s)",
 				redundantIndex.Name,
-				strings.Join(redundantIndex.Columns, ", "),
-				strings.Join(coveringIndex.Columns, ", "),
+				redundantCols,
+				coveringCols,
 			)
 			suggestion = fmt.Sprintf(
 				"Consider dropping index '%s' as it is fully covered by the PRIMARY KEY. "+
@@ -301,9 +453,9 @@ func createRedundancyViolation(tableName string, redundantIndex statement.Index,
 			message = fmt.Sprintf(
 				"Index '%s' on columns (%s) is redundant - covered by index '%s' on columns (%s)",
 				redundantIndex.Name,
-				strings.Join(redundantIndex.Columns, ", "),
+				redundantCols,
 				coveringIndex.Name,
-				strings.Join(coveringIndex.Columns, ", "),
+				coveringCols,
 			)
 			suggestion = fmt.Sprintf(
 				"Consider dropping index '%s' as it is fully covered by '%s'. "+
@@ -331,9 +483,16 @@ func createRedundancyViolation(tableName string, redundantIndex statement.Index,
 
 // createPKSuffixViolation creates a violation for redundant PRIMARY KEY suffix
 func createPKSuffixViolation(tableName string, index statement.Index, primaryKey statement.Index, redundantColCount int) Violation {
-	redundantSuffix := index.Columns[len(index.Columns)-redundantColCount:]
-	usefulPrefix := index.Columns[:len(index.Columns)-redundantColCount]
+	// Slice over the structured key parts so prefix lengths / expression parts
+	// are positioned correctly even when the flat Columns slice would drop them.
+	parts := indexParts(index)
+	redundantSuffix := parts[len(parts)-redundantColCount:]
+	usefulPrefix := parts[:len(parts)-redundantColCount]
 	pkCols := primaryKey.Columns[:redundantColCount]
+
+	fullCols := renderIndexParts(parts)
+	redundantSuffixStr := renderIndexParts(redundantSuffix)
+	usefulPrefixStr := renderIndexParts(usefulPrefix)
 
 	var message, suggestion string
 
@@ -343,15 +502,15 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 			"Index '%s' on columns (%s) has redundant PRIMARY KEY suffix (%s). "+
 				"InnoDB automatically appends PK columns to secondary indexes.",
 			index.Name,
-			strings.Join(index.Columns, ", "),
-			strings.Join(redundantSuffix, ", "),
+			fullCols,
+			redundantSuffixStr,
 		)
 		suggestion = fmt.Sprintf(
 			"Redefine index '%s' as INDEX (%s). "+
 				"InnoDB will automatically append the PK columns (%s) internally, "+
 				"so explicitly including them wastes space and provides no benefit.",
 			index.Name,
-			strings.Join(usefulPrefix, ", "),
+			usefulPrefixStr,
 			strings.Join(pkCols, ", "),
 		)
 	} else {
@@ -360,15 +519,15 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 			"Index '%s' on columns (%s) has redundant PRIMARY KEY prefix suffix (%s). "+
 				"InnoDB automatically appends full PK columns (%s) to secondary indexes.",
 			index.Name,
-			strings.Join(index.Columns, ", "),
-			strings.Join(redundantSuffix, ", "),
+			fullCols,
+			redundantSuffixStr,
 			strings.Join(primaryKey.Columns, ", "),
 		)
 		suggestion = fmt.Sprintf(
 			"Redefine index '%s' as INDEX (%s). "+
 				"InnoDB will automatically append the full PK (%s) internally.",
 			index.Name,
-			strings.Join(usefulPrefix, ", "),
+			usefulPrefixStr,
 			strings.Join(primaryKey.Columns, ", "),
 		)
 	}
@@ -382,8 +541,8 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 		Context: map[string]any{
 			"index_name":          index.Name,
 			"full_columns":        index.Columns,
-			"useful_columns":      usefulPrefix,
-			"redundant_suffix":    redundantSuffix,
+			"useful_columns":      usefulPrefixStr,
+			"redundant_suffix":    redundantSuffixStr,
 			"primary_key_columns": primaryKey.Columns,
 			"redundant_col_count": redundantColCount,
 		},
@@ -393,22 +552,27 @@ func createPKSuffixViolation(tableName string, index statement.Index, primaryKey
 // createPKPrefixViolation creates a violation for a secondary index that
 // leads with the full PRIMARY KEY.
 func createPKPrefixViolation(tableName string, index statement.Index, primaryKey statement.Index, redundantColCount int) Violation {
-	redundantPrefix := index.Columns[:redundantColCount]
-	usefulSuffix := index.Columns[redundantColCount:]
+	parts := indexParts(index)
+	redundantPrefix := parts[:redundantColCount]
+	usefulSuffix := parts[redundantColCount:]
+
+	fullCols := renderIndexParts(parts)
+	redundantPrefixStr := renderIndexParts(redundantPrefix)
+	usefulSuffixStr := renderIndexParts(usefulSuffix)
 
 	message := fmt.Sprintf(
 		"Index '%s' on columns (%s) leads with PRIMARY KEY columns (%s). "+
 			"Point and equality lookups by PRIMARY KEY are served by the clustered index directly, "+
 			"and InnoDB appends PK columns to secondary indexes — the leading PK columns add no capability.",
 		index.Name,
-		strings.Join(index.Columns, ", "),
-		strings.Join(redundantPrefix, ", "),
+		fullCols,
+		redundantPrefixStr,
 	)
 	suggestion := fmt.Sprintf(
 		"Redefine index '%s' as INDEX (%s) — InnoDB will append PRIMARY KEY (%s) internally — "+
 			"or drop it entirely if the PRIMARY KEY alone covers the queries that use it.",
 		index.Name,
-		strings.Join(usefulSuffix, ", "),
+		usefulSuffixStr,
 		strings.Join(primaryKey.Columns, ", "),
 	)
 
@@ -421,8 +585,8 @@ func createPKPrefixViolation(tableName string, index statement.Index, primaryKey
 		Context: map[string]any{
 			"index_name":          index.Name,
 			"full_columns":        index.Columns,
-			"redundant_prefix":    redundantPrefix,
-			"useful_columns":      usefulSuffix,
+			"redundant_prefix":    redundantPrefixStr,
+			"useful_columns":      usefulSuffixStr,
 			"primary_key_columns": primaryKey.Columns,
 			"redundant_col_count": redundantColCount,
 		},

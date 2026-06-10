@@ -1108,6 +1108,252 @@ func TestRedundantIndexLinter_PostStateEvaluation(t *testing.T) {
 	require.True(t, flaggedAtAdd, "ADD INDEX should surface the leading-PK warning at the time the index is introduced")
 }
 
+// indexViolated is a small helper that reports whether the linter flagged
+// indexName, and returns the matching message when it did.
+func indexViolated(violations []Violation, indexName string) (bool, string) {
+	for _, v := range violations {
+		if v.Location != nil && v.Location.Index != nil && *v.Location.Index == indexName {
+			return true, v.Message
+		}
+	}
+	return false, ""
+}
+
+// TestRedundantIndexLinter_UniquePartialPKSuffix is a regression test for the
+// bug where a UNIQUE index whose trailing columns happened to be a (partial)
+// prefix of the PRIMARY KEY was flagged with a redundant-PK-suffix warning. The
+// suggested rewrite would have dropped real uniqueness columns from the index.
+//
+// A FULL-PK suffix on a UNIQUE index remains flagged (uniqueness is already
+// guaranteed by the PK, so the spelled-out suffix is vacuous), and non-unique
+// indexes with a partial-PK suffix are still flagged.
+func TestRedundantIndexLinter_UniquePartialPKSuffix(t *testing.T) {
+	tests := []struct {
+		name           string
+		createTable    string
+		index          string
+		expectViolated bool
+	}{
+		{
+			// UNIQUE (x, y, a) is NOT implied by PK (a, b). The trailing `a` is
+			// part of the uniqueness scope, not redundant PK bookkeeping.
+			name: "UNIQUE with partial-PK suffix NOT flagged",
+			createTable: `CREATE TABLE t1 (
+				a INT, b INT, x INT, y INT,
+				PRIMARY KEY (a, b),
+				UNIQUE KEY ux (x, y, a)
+			)`,
+			index:          "ux",
+			expectViolated: false,
+		},
+		{
+			// UNIQUE (x, a, b) ends with the FULL PK (a, b). Uniqueness over
+			// (x, a, b) is already guaranteed because (a, b) alone is unique, so
+			// spelling out the PK suffix is vacuous and is still flagged.
+			name: "UNIQUE with full-PK suffix still flagged",
+			createTable: `CREATE TABLE t1 (
+				a INT, b INT, x INT,
+				PRIMARY KEY (a, b),
+				UNIQUE KEY ux (x, a, b)
+			)`,
+			index:          "ux",
+			expectViolated: true,
+		},
+		{
+			// Non-unique INDEX (x, y, a) with PK (a, b): partial-PK suffix `a`
+			// is genuinely redundant (InnoDB auto-appends the PK), so still flag.
+			name: "non-unique with partial-PK suffix still flagged",
+			createTable: `CREATE TABLE t1 (
+				a INT, b INT, x INT, y INT,
+				PRIMARY KEY (a, b),
+				INDEX idx (x, y, a)
+			)`,
+			index:          "idx",
+			expectViolated: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linter := &RedundantIndexLinter{}
+			ct, err := statement.ParseCreateTable(tt.createTable)
+			require.NoError(t, err)
+
+			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+			violated, msg := indexViolated(violations, tt.index)
+			if tt.expectViolated {
+				require.True(t, violated, "expected %s to be flagged, violations: %v", tt.index, violations)
+				require.Contains(t, msg, "suffix")
+			} else {
+				require.False(t, violated, "expected %s NOT to be flagged, got: %s", tt.index, msg)
+			}
+		})
+	}
+}
+
+// TestRedundantIndexLinter_FunctionalIndexes is a regression test for the bug
+// where functional (expression) indexes were treated as zero-column indexes
+// (because the deprecated Index.Columns slice drops expression key parts) and
+// were therefore always reported as redundant to any ordinary index.
+func TestRedundantIndexLinter_FunctionalIndexes(t *testing.T) {
+	t.Run("functional index NOT redundant to ordinary index", func(t *testing.T) {
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			INDEX idx_name (name),
+			INDEX functional_index ((LOWER(name)))
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		require.Empty(t, violations, "expression index must not be redundant to an ordinary column index: %v", violations)
+	})
+
+	t.Run("two identical functional indexes flagged as duplicates", func(t *testing.T) {
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			INDEX f1 ((LOWER(name))),
+			INDEX f2 ((LOWER(name)))
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		violated, msg := indexViolated(violations, "f2")
+		require.True(t, violated, "identical functional indexes should be flagged as duplicates, violations: %v", violations)
+		require.Contains(t, msg, "duplicate")
+	})
+
+	t.Run("functional index redundant to same-expression-plus-more", func(t *testing.T) {
+		// INDEX ((LOWER(name))) is a coverable prefix of
+		// INDEX ((LOWER(name)), other): the leading expression key part is
+		// identical, so the shorter index is redundant to the longer one. The
+		// trailing column is deliberately NOT a PRIMARY KEY column so the only
+		// possible finding is the prefix-redundancy we are testing.
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			other INT,
+			INDEX f_short ((LOWER(name))),
+			INDEX f_long ((LOWER(name)), other)
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		shortViolated, shortMsg := indexViolated(violations, "f_short")
+		longViolated, _ := indexViolated(violations, "f_long")
+		require.True(t, shortViolated, "f_short should be redundant to f_long, violations: %v", violations)
+		require.Contains(t, shortMsg, "f_long")
+		require.False(t, longViolated, "f_long must NOT be flagged")
+	})
+
+	t.Run("different expressions NOT redundant", func(t *testing.T) {
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			INDEX f_lower ((LOWER(name))),
+			INDEX f_upper ((UPPER(name)))
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		require.Empty(t, violations, "distinct expression indexes must not be redundant: %v", violations)
+	})
+}
+
+// TestRedundantIndexLinter_PrefixLengths is a regression test for the bug where
+// prefix lengths were ignored (Index.Columns drops the (n) in col(n)), so a
+// prefix index col(10) and the full-column index col were reported as exact
+// duplicates of each other, including an (unsafe) suggestion to drop the full
+// index in favor of the prefix index.
+func TestRedundantIndexLinter_PrefixLengths(t *testing.T) {
+	t.Run("prefix index redundant to full-column index, not vice versa", func(t *testing.T) {
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			INDEX i1 (name(10)),
+			INDEX i2 (name)
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		i1Violated, i1Msg := indexViolated(violations, "i1")
+		i2Violated, _ := indexViolated(violations, "i2")
+		require.True(t, i1Violated, "i1 (name(10)) should be redundant to i2 (name), violations: %v", violations)
+		require.Contains(t, i1Msg, "redundant")
+		require.False(t, i2Violated, "i2 (full column) must NOT be flagged as redundant to a prefix index")
+	})
+
+	t.Run("equal prefix lengths are duplicates", func(t *testing.T) {
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			INDEX i1 (name(10)),
+			INDEX i2 (name(10))
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		violated, msg := indexViolated(violations, "i2")
+		require.True(t, violated, "equal-prefix indexes should be duplicates, violations: %v", violations)
+		require.Contains(t, msg, "duplicate")
+	})
+
+	t.Run("longer prefix covers shorter prefix but not the reverse", func(t *testing.T) {
+		// name(20) covers name(10); name(10) does NOT cover name(20).
+		createTable := `CREATE TABLE t1 (
+			id INT PRIMARY KEY,
+			name VARCHAR(255),
+			INDEX i_short (name(10)),
+			INDEX i_long (name(20))
+		)`
+		linter := &RedundantIndexLinter{}
+		ct, err := statement.ParseCreateTable(createTable)
+		require.NoError(t, err)
+
+		violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+		shortViolated, shortMsg := indexViolated(violations, "i_short")
+		longViolated, _ := indexViolated(violations, "i_long")
+		require.True(t, shortViolated, "name(10) should be covered by name(20), violations: %v", violations)
+		require.NotContains(t, shortMsg, "duplicate", "differing prefix lengths are not duplicates")
+		require.False(t, longViolated, "name(20) must NOT be covered by name(10)")
+	})
+}
+
+// TestRedundantIndexLinter_CaseInsensitiveColumns verifies that column-name
+// comparison is case-insensitive (MySQL identifiers are case-insensitive), so
+// INDEX (A) is recognised as redundant to INDEX (a, b).
+func TestRedundantIndexLinter_CaseInsensitiveColumns(t *testing.T) {
+	createTable := `CREATE TABLE t1 (
+		id INT PRIMARY KEY,
+		a INT,
+		b INT,
+		INDEX i1 (A),
+		INDEX i2 (a, b)
+	)`
+	linter := &RedundantIndexLinter{}
+	ct, err := statement.ParseCreateTable(createTable)
+	require.NoError(t, err)
+
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	violated, msg := indexViolated(violations, "i1")
+	require.True(t, violated, "INDEX (A) should be redundant to INDEX (a, b) (case-insensitive), violations: %v", violations)
+	require.Contains(t, msg, "redundant")
+}
+
 // TestRedundantIndexLinter_AlterTableComplex tests a complex scenario
 // with multiple tables and ALTER statements.
 func TestRedundantIndexLinter_AlterTableComplex(t *testing.T) {
