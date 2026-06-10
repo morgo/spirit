@@ -778,16 +778,18 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		return false
 	}
 	// Normalize default values for nullable columns:
-	// For nullable columns, nil and "NULL" are semantically equivalent.
-	// User might write `VARCHAR(255) NULL` but MySQL outputs `VARCHAR(255) DEFAULT NULL`.
+	// For nullable columns, nil and the NULL *keyword* are semantically
+	// equivalent. User might write `VARCHAR(255) NULL` but MySQL outputs
+	// `VARCHAR(255) DEFAULT NULL`. A quoted string literal 'NULL'
+	// (DefaultIsString) is NOT the keyword and must not collapse — it is a
+	// real default that differs from no-default.
 	sourceDefault := a.Default
 	targetDefault := b.Default
 	if a.Nullable {
-		// Normalize: treat nil and "NULL" as equivalent for nullable columns
-		if sourceDefault != nil && *sourceDefault == "NULL" {
+		if sourceDefault != nil && *sourceDefault == "NULL" && !a.DefaultIsString {
 			sourceDefault = nil
 		}
-		if targetDefault != nil && *targetDefault == "NULL" {
+		if targetDefault != nil && *targetDefault == "NULL" && !b.DefaultIsString {
 			targetDefault = nil
 		}
 	}
@@ -795,6 +797,15 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		return false
 	}
 	if a.DefaultIsExpr != b.DefaultIsExpr {
+		return false
+	}
+	if !columnExtendedAttributesEqual(a, b) {
+		return false
+	}
+	// A quoted string literal default ('TRUE') is a different value than the
+	// same text as a keyword/number default (TRUE), even when the stored
+	// strings match — so quotedness is part of column identity.
+	if a.DefaultIsString != b.DefaultIsString {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -878,16 +889,16 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 		return false
 	}
 	// Normalize default values for nullable columns:
-	// For nullable columns, nil and "NULL" are semantically equivalent.
-	// User might write `VARCHAR(255) NULL` but MySQL outputs `VARCHAR(255) DEFAULT NULL`.
+	// For nullable columns, nil and the NULL *keyword* are semantically
+	// equivalent. A quoted string literal 'NULL' (DefaultIsString) is NOT
+	// the keyword and must not collapse.
 	sourceDefault := a.Default
 	targetDefault := b.Default
 	if a.Nullable {
-		// Normalize: treat nil and "NULL" as equivalent for nullable columns
-		if sourceDefault != nil && *sourceDefault == "NULL" {
+		if sourceDefault != nil && *sourceDefault == "NULL" && !a.DefaultIsString {
 			sourceDefault = nil
 		}
-		if targetDefault != nil && *targetDefault == "NULL" {
+		if targetDefault != nil && *targetDefault == "NULL" && !b.DefaultIsString {
 			targetDefault = nil
 		}
 	}
@@ -895,6 +906,12 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 		return false
 	}
 	if a.DefaultIsExpr != b.DefaultIsExpr {
+		return false
+	}
+	if !columnExtendedAttributesEqual(a, b) {
+		return false
+	}
+	if a.DefaultIsString != b.DefaultIsString {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -917,6 +934,33 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 		return false
 	}
 	if !slices.Equal(a.SetValues, b.SetValues) {
+		return false
+	}
+	return true
+}
+
+// columnExtendedAttributesEqual compares the column attributes beyond the
+// basic type/nullability/default set: ON UPDATE (TIMESTAMP/DATETIME
+// auto-update), GENERATED ALWAYS AS expressions (including STORED vs
+// VIRTUAL), and SRID. These are semantically critical — omitting them from a
+// MODIFY COLUMN silently removes the behavior from the live table.
+//
+// Column-level CHECK constraints are intentionally NOT compared here: the
+// parser hoists them into table-level CreateTable.Constraints (see
+// normalizeColumnChecks), so they are diffed by diffConstraints instead. This
+// matches MySQL's SHOW CREATE TABLE, which always reports CHECKs at table
+// level, and keeps a re-diff convergent.
+func columnExtendedAttributesEqual(a, b *Column) bool {
+	if !ptrEqual(a.OnUpdate, b.OnUpdate) {
+		return false
+	}
+	if !ptrEqual(a.GeneratedExpr, b.GeneratedExpr) {
+		return false
+	}
+	if a.GeneratedExpr != nil && a.GeneratedStored != b.GeneratedStored {
+		return false
+	}
+	if !ptrEqual(a.SRID, b.SRID) {
 		return false
 	}
 	return true
@@ -1158,6 +1202,19 @@ func formatColumnDefinition(col *Column) string {
 		}
 	}
 
+	// Generated column clause — comes directly after the data type (and any
+	// charset/collation), before the NULL/NOT NULL attribute:
+	// col_name type GENERATED ALWAYS AS (expr) STORED|VIRTUAL [NOT NULL|NULL] ...
+	if col.GeneratedExpr != nil {
+		genClause := fmt.Sprintf("GENERATED ALWAYS AS (%s)", *col.GeneratedExpr)
+		if col.GeneratedStored {
+			genClause += " STORED"
+		} else {
+			genClause += " VIRTUAL"
+		}
+		parts = append(parts, genClause)
+	}
+
 	// Nullable
 	if !col.Nullable {
 		parts = append(parts, "NOT NULL")
@@ -1165,18 +1222,36 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, "NULL")
 	}
 
-	// Default value
-	if col.Default != nil {
+	// SRID attribute for spatial columns. MySQL's SHOW CREATE TABLE places
+	// this after the NULL/NOT NULL attribute (as /*!80003 SRID n */).
+	if col.SRID != nil {
+		parts = append(parts, fmt.Sprintf("SRID %d", *col.SRID))
+	}
+
+	// Default value (not permitted on generated columns)
+	if col.Default != nil && col.GeneratedExpr == nil {
 		defaultVal := *col.Default
 		switch {
 		case col.DefaultIsExpr:
 			// Expression defaults must be wrapped in parentheses, e.g. DEFAULT (json_object())
 			parts = append(parts, fmt.Sprintf("DEFAULT (%s)", defaultVal))
+		case col.DefaultIsString:
+			// Quoted string literal. The stored value is the true raw value
+			// (unescaped at parse time), so quote+escape exactly once. This
+			// must bypass the needsQuotes heuristic: a literal 'TRUE' or
+			// 'NULL' or '2020' has to stay quoted, otherwise MySQL would
+			// store the keyword/number instead of the string.
+			parts = append(parts, fmt.Sprintf("DEFAULT '%s'", sqlescape.EscapeString(defaultVal)))
 		case needsQuotes(defaultVal):
 			parts = append(parts, fmt.Sprintf("DEFAULT '%s'", sqlescape.EscapeString(defaultVal)))
 		default:
 			parts = append(parts, fmt.Sprintf("DEFAULT %s", defaultVal))
 		}
+	}
+
+	// ON UPDATE (TIMESTAMP/DATETIME auto-update) — comes after DEFAULT
+	if col.OnUpdate != nil {
+		parts = append(parts, fmt.Sprintf("ON UPDATE %s", *col.OnUpdate))
 	}
 
 	// Auto increment
@@ -1188,6 +1263,13 @@ func formatColumnDefinition(col *Column) string {
 	if col.Comment != nil {
 		parts = append(parts, fmt.Sprintf("COMMENT '%s'", sqlescape.EscapeString(*col.Comment)))
 	}
+
+	// NOTE: column-level CHECK constraints are deliberately not emitted here.
+	// The parser hoists them into table-level constraints (see
+	// normalizeColumnChecks), so they are emitted as ADD CONSTRAINT ... CHECK
+	// by diffConstraints. Emitting them inline in a MODIFY/ADD COLUMN would
+	// make MySQL hoist them to a table-level CHECK with an auto-name, breaking
+	// re-diff convergence and risking a spurious DROP CHECK.
 
 	return strings.Join(parts, " ")
 }

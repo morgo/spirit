@@ -3,6 +3,9 @@ package dbconn
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"testing"
@@ -11,11 +14,21 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
+	"github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
+	// Shorten the pooled-connection lifetime for the whole dbconn test binary.
+	// TestMetadataLockSurvivesConnMaxLifetime must observe a connection
+	// outliving its ConnMaxLifetime; with the 3-minute default that test would
+	// take minutes, and mutating this global from within the test would race
+	// with other tests calling New(). Setting it once here, before any test
+	// runs, is race-free and bounds that test to a few seconds (it uses
+	// t.Parallel() so the wait overlaps the rest of the suite).
+	maxConnLifetime = 5 * time.Second
 	goleak.VerifyTestMain(m)
 }
 
@@ -112,6 +125,112 @@ func TestRetryableTrx(t *testing.T) {
 	require.Error(t, err)
 	err = trx.Rollback() // now we can rollback.
 	require.NoError(t, err)
+}
+
+func TestCanRetryError(t *testing.T) {
+	// Server-side errors that are retryable.
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1205})) // lock wait timeout
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1213})) // deadlock
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1317})) // query interrupted (killed query)
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1290})) // read only (only seen if RejectReadOnly is disabled)
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1792})) // can't execute in read-only transaction (only seen if RejectReadOnly is disabled)
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1836})) // read only mode (only seen if RejectReadOnly is disabled)
+
+	// Connection-level failures from go-sql-driver are plain errors, not
+	// *mysql.MySQLError, and must be classified as retryable: this is how a
+	// lost connection, killed connection, or Aurora failover (with
+	// RejectReadOnly enabled) surfaces to spirit.
+	require.True(t, canRetryError(driver.ErrBadConn))
+	require.True(t, canRetryError(mysql.ErrInvalidConn))
+
+	// Wrapped variants must also be detected.
+	require.True(t, canRetryError(fmt.Errorf("exec failed: %w", &mysql.MySQLError{Number: 1213})))
+	require.True(t, canRetryError(fmt.Errorf("exec failed: %w", driver.ErrBadConn)))
+	require.True(t, canRetryError(fmt.Errorf("exec failed: %w", mysql.ErrInvalidConn)))
+
+	// Fatal errors must not be retried.
+	require.False(t, canRetryError(nil))
+	require.False(t, canRetryError(errors.New("not a mysql error")))
+	require.False(t, canRetryError(&mysql.MySQLError{Number: 1064})) // syntax error
+	require.False(t, canRetryError(&mysql.MySQLError{Number: 1062})) // duplicate key
+}
+
+// testRetryableTrxSurvivesKill blocks an UPDATE behind a row lock, kills it
+// with killStmtFmt ("KILL QUERY %d" or "KILL %d"), releases the lock, and
+// asserts that RetryableTransaction retries and ultimately succeeds.
+func testRetryableTrxSurvivesKill(t *testing.T, tableName, killStmtFmt string) {
+	config := NewDBConfig()
+	// Give plenty of headroom so the first attempt fails because it is
+	// killed (the behavior under test) rather than hitting a (similarly
+	// retryable) innodb lock wait timeout first.
+	config.InnodbLockWaitTimeout = 15
+	db, err := New(testutils.DSN(), config)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	require.NoError(t, Exec(t.Context(), db, "DROP TABLE IF EXISTS %n", tableName))
+	require.NoError(t, Exec(t.Context(), db, "CREATE TABLE %n (id INT NOT NULL PRIMARY KEY, colb INT)", tableName))
+	require.NoError(t, Exec(t.Context(), db, "INSERT INTO %n (id, colb) VALUES (1, 0)", tableName))
+
+	// Hold a row lock so the UPDATE below blocks, giving us time to find it
+	// in the processlist and kill it.
+	blocker, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = blocker.ExecContext(t.Context(), fmt.Sprintf("SELECT * FROM `%s` WHERE id = 1 FOR UPDATE", tableName))
+	require.NoError(t, err)
+
+	updateStmt := fmt.Sprintf("UPDATE `%s` SET colb = 99 WHERE id = 1", tableName)
+	killDone := make(chan struct{})
+	go func() {
+		defer close(killDone)
+		// Find the blocked UPDATE in the processlist.
+		var pid int
+		for range 200 {
+			err := db.QueryRowContext(t.Context(),
+				"SELECT processlist_id FROM performance_schema.threads WHERE processlist_info = ?",
+				updateStmt).Scan(&pid)
+			if err == nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if pid == 0 {
+			t.Error("timed out waiting for the UPDATE to appear in the processlist")
+			_ = blocker.Rollback()
+			return
+		}
+		_, err := db.ExecContext(t.Context(), fmt.Sprintf(killStmtFmt, pid))
+		assert.NoError(t, err)
+		// Release the row lock so the retry can succeed.
+		assert.NoError(t, blocker.Rollback())
+	}()
+
+	// The first attempt is killed mid-statement. RetryableTransaction must
+	// classify the failure as retryable and succeed on a later attempt.
+	_, err = RetryableTransaction(t.Context(), db, false, config, updateStmt)
+	<-killDone
+	require.NoError(t, err)
+
+	var colb int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT colb FROM `%s` WHERE id = 1", tableName)).Scan(&colb))
+	require.Equal(t, 99, colb)
+	require.NoError(t, Exec(t.Context(), db, "DROP TABLE IF EXISTS %n", tableName))
+}
+
+// TestRetryableTrxRetriesKilledQuery covers ER_QUERY_INTERRUPTED (1317):
+// KILL QUERY aborts the statement but leaves the connection intact. This is
+// what spirit's own force-kill machinery and DBA-issued KILL QUERY produce.
+func TestRetryableTrxRetriesKilledQuery(t *testing.T) {
+	testRetryableTrxSurvivesKill(t, "retry_kill_query", "KILL QUERY %d")
+}
+
+// TestRetryableTrxRetriesKilledConnection covers a connection that dies
+// mid-statement. The driver reports this as mysql.ErrInvalidConn (or
+// driver.ErrBadConn), not as a *mysql.MySQLError — the same shape as a
+// network blip or an Aurora failover. The retry begins a fresh transaction,
+// for which database/sql transparently provides a new connection.
+func TestRetryableTrxRetriesKilledConnection(t *testing.T) {
+	testRetryableTrxSurvivesKill(t, "retry_kill_conn", "KILL %d")
 }
 
 func TestForceExec(t *testing.T) {
