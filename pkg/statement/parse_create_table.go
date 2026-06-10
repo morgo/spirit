@@ -1209,17 +1209,21 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 }
 
 // stringLiteralValue returns the true, fully-unescaped value of a quoted
-// string-literal AST node (e.g. the value behind a single-quoted DEFAULT
-// whose inner apostrophe is doubled in SQL, or a
-// COMMENT containing escaped quotes) along with true. For any other
-// expression kind it returns ("", false).
+// string-literal AST node (for example the value behind a single-quoted
+// DEFAULT, or a COMMENT, whose contents include escaped quote or backslash
+// characters) along with true. For any other expression kind it returns an
+// empty string and false.
 //
 // This is the load-bearing fix for the string round-trip bugs: the TiDB
-// parser's Restore() re-emits a string literal in its *escaped* form
-// (inner quotes doubled, backslashes preserved), so the previous approach
-// of Restore-then-strip-outer-quotes left the value still escaped. Reading
-// the literal's value directly off the AST gives us the raw bytes, which
-// we can then escape exactly once at emission time.
+// parser's Restore re-emits a string literal in its re-escaped, still-quoted
+// form rather than as the raw value, so the previous approach of
+// Restore-then-strip-outer-quotes left the inner escaping in place. Reading
+// the literal's value directly off the AST yields the raw bytes, which we
+// then escape exactly once at emission time via sqlescape (backslash
+// escaping, which MySQL accepts in its default sql_mode). Note MySQL renders
+// a literal quote in SHOW CREATE TABLE as a doubled quote, which the parser
+// also accepts; the doubled and backslash forms are equivalent in the
+// default sql_mode.
 func stringLiteralValue(expr ast.ExprNode) (string, bool) {
 	if v, ok := expr.(*driver.ValueExpr); ok && v.Kind() == driver.KindString {
 		return v.GetString(), true
