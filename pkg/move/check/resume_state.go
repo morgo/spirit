@@ -80,7 +80,7 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			if err != nil {
 				return fmt.Errorf("failed to read target %d schema for table '%s': %w", i, sourceTable.TableName, err)
 			}
-			diff, err := schemaDiff(sourceCreate, targetCreate)
+			diff, err := schemaDiff(sourceTable.TableName, sourceCreate, targetCreate)
 			if err != nil {
 				return fmt.Errorf("failed to compare schema for table '%s' on target %d: %w", sourceTable.TableName, i, err)
 			}

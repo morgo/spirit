@@ -6,21 +6,30 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/statement"
 )
 
 // showCreateTable returns the SHOW CREATE TABLE statement for schema.table.
 func showCreateTable(ctx context.Context, db *sql.DB, schema, table string) (string, error) {
+	// Build the query with sqlescape's %n identifier verb so schema/table names
+	// containing backticks (or other identifier characters) are quoted safely,
+	// consistent with the rest of the codebase's identifier handling.
+	query, err := sqlescape.EscapeSQL("SHOW CREATE TABLE %n.%n", schema, table)
+	if err != nil {
+		return "", err
+	}
 	var name, createStmt string
-	row := db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", schema, table))
+	row := db.QueryRowContext(ctx, query)
 	if err := row.Scan(&name, &createStmt); err != nil {
 		return "", err
 	}
 	return createStmt, nil
 }
 
-// schemaDiff compares two CREATE TABLE statements and returns a human-readable
-// description of how they differ, or an empty string if they are equivalent.
+// schemaDiff compares two CREATE TABLE statements and returns a runnable
+// ALTER TABLE statement describing how they differ, or an empty string if they
+// are equivalent.
 //
 // The comparison is performed by parsing both statements with the TiDB parser
 // and diffing the structured form via statement.CreateTable.Diff. This canonical
@@ -33,9 +42,11 @@ func showCreateTable(ctx context.Context, db *sql.DB, schema, table string) (str
 //
 // "want" is treated as the source-of-truth (e.g. sources[0] or the move source);
 // "got" is the schema being validated (another source, or a pre-created target).
-// The returned ALTER clauses describe the transformation that would be required
-// to turn "got" into "want", which is what makes the message actionable.
-func schemaDiff(wantCreate, gotCreate string) (string, error) {
+// The returned statement describes the transformation that would be required to
+// turn "got" into "want", which is what makes the message actionable. "table" is
+// the real (logical) table name used to build the runnable "ALTER TABLE <table>"
+// prefix, escaped so identifiers containing backticks remain valid.
+func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 	want, err := statement.ParseCreateTable(wantCreate)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse reference CREATE TABLE: %w", err)
@@ -54,7 +65,12 @@ func schemaDiff(wantCreate, gotCreate string) (string, error) {
 	// Diff(got -> want): the returned clauses are the ALTER that would morph the
 	// validated schema ("got") into the reference schema ("want"). If nil, the
 	// two schemas are equivalent under the canonicalization rules above.
-	stmts, err := got.Diff(want, statement.NewDiffOptions())
+	//
+	// CreateTable.Diff is known to panic on some edge cases (formatting
+	// differences between SHOW CREATE TABLE output variants). A panic here would
+	// crash the move pre-flight checks, so guard the call and turn any panic into
+	// a normal error.
+	stmts, err := safeDiff(got, want)
 	if err != nil {
 		return "", fmt.Errorf("failed to diff CREATE TABLE statements: %w", err)
 	}
@@ -67,5 +83,26 @@ func schemaDiff(wantCreate, gotCreate string) (string, error) {
 			clauses = append(clauses, s.Alter)
 		}
 	}
-	return strings.Join(clauses, "; "), nil
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	// Prefix with an escaped "ALTER TABLE <table>" so the "reconcile with:" output
+	// is directly runnable. Multiple clauses are joined into a single ALTER.
+	prefix, err := sqlescape.EscapeSQL("ALTER TABLE %n ", table)
+	if err != nil {
+		return "", err
+	}
+	return prefix + strings.Join(clauses, ", "), nil
+}
+
+// safeDiff runs CreateTable.Diff but converts a panic into an error so a
+// malformed/edge-case schema can never crash the move pre-flight checks.
+func safeDiff(got, want *statement.CreateTable) (stmts []*statement.AbstractStatement, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stmts = nil
+			err = fmt.Errorf("panic diffing CREATE TABLE statements: %v", r)
+		}
+	}()
+	return got.Diff(want, statement.NewDiffOptions())
 }

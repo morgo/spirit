@@ -51,10 +51,16 @@ func sourceSchemaConsistencyCheck(ctx context.Context, r Resources, logger *slog
 	}
 
 	// Build the canonical table set and reference CREATE TABLE per table from
-	// sources[0].
+	// sources[0]. r.SourceTables comes from the runner's getTables, which only
+	// filters _spirit_checkpoint/_spirit_sentinel — so drop any leftover
+	// _new/_old shadow tables here too, matching listTables, so the comparison is
+	// symmetric and isn't thrown off by shadow tables on either side.
 	wantTables := make([]string, 0, len(r.SourceTables))
 	wantCreate := make(map[string]string, len(r.SourceTables))
 	for _, tbl := range r.SourceTables {
+		if isShadowTable(tbl.TableName) {
+			continue
+		}
 		create, err := showCreateTable(ctx, src0.DB, src0.Config.DBName, tbl.TableName)
 		if err != nil {
 			return fmt.Errorf("source 0 (%s): failed to read schema for table '%s': %w", src0.Config.DBName, tbl.TableName, err)
@@ -95,7 +101,7 @@ func sourceSchemaConsistencyCheck(ctx context.Context, r Resources, logger *slog
 			if err != nil {
 				return fmt.Errorf("source %d (%s): failed to read schema for table '%s': %w", i, src.Config.DBName, tbl, err)
 			}
-			diff, err := schemaDiff(wantCreate[tbl], gotCreate)
+			diff, err := schemaDiff(tbl, wantCreate[tbl], gotCreate)
 			if err != nil {
 				return fmt.Errorf("source %d (%s): failed to compare schema for table '%s': %w", i, src.Config.DBName, tbl, err)
 			}
@@ -112,7 +118,8 @@ func sourceSchemaConsistencyCheck(ctx context.Context, r Resources, logger *slog
 	return nil
 }
 
-// listTables returns the table names in the given source's database.
+// listTables returns the table names in the given source's database, excluding
+// Spirit-internal artifacts and leftover shadow tables (see isShadowTable).
 func listTables(ctx context.Context, r Resources, sourceIndex int) ([]string, error) {
 	src := r.Sources[sourceIndex]
 	rows, err := src.DB.QueryContext(ctx, "SHOW TABLES")
@@ -126,16 +133,27 @@ func listTables(ctx context.Context, r Resources, sourceIndex int) ([]string, er
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		// Skip Spirit-internal artifacts (_spirit_checkpoint, _spirit_sentinel,
-		// and any _new/_old shadow tables) so they never register as schema
-		// drift. The canonical table list from sources[0] is already filtered
-		// the same way by the runner's getTables.
-		if strings.HasPrefix(name, "_spirit_") || strings.HasSuffix(name, "_new") || strings.HasSuffix(name, "_old") {
+		// Skip shadow tables so they never register as schema drift. The runner's
+		// getTables only filters _spirit_checkpoint/_spirit_sentinel (not the
+		// _new/_old shadow tables), so the canonical list built from sources[0]
+		// (wantTables) must be filtered the same way here — see how wantTables is
+		// constructed in sourceSchemaConsistencyCheck.
+		if isShadowTable(name) {
 			continue
 		}
 		tables = append(tables, name)
 	}
 	return tables, rows.Err()
+}
+
+// isShadowTable reports whether name is a Spirit-internal artifact or a leftover
+// shadow table that must be ignored when comparing schemas across sources:
+// the _spirit_* checkpoint/sentinel tables and the _new/_old shadow tables left
+// behind by an in-flight or interrupted migration.
+func isShadowTable(name string) bool {
+	return strings.HasPrefix(name, "_spirit_") ||
+		strings.HasSuffix(name, "_new") ||
+		strings.HasSuffix(name, "_old")
 }
 
 // setDifference returns the elements of a that are not in b. Both inputs are

@@ -110,7 +110,7 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 	if err != nil {
 		return fmt.Errorf("failed to read target %d schema for table '%s': %w", targetIndex, tableName, err)
 	}
-	diff, err := schemaDiff(sourceCreate, targetCreate)
+	diff, err := schemaDiff(tableName, sourceCreate, targetCreate)
 	if err != nil {
 		return fmt.Errorf("failed to compare schema for table '%s' on target %d: %w", tableName, targetIndex, err)
 	}

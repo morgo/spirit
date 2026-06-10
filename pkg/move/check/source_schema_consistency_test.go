@@ -110,7 +110,9 @@ func TestSourceSchemaConsistencyCheck(t *testing.T) {
 		require.NoError(t, sourceSchemaConsistencyCheck(t.Context(), r, slog.Default()))
 	})
 
-	// Test 3: extra column on source 1 fails, naming the table.
+	// Test 3: extra column on source 1 fails, naming the table. The reconcile
+	// output must be a runnable "ALTER TABLE `users` ..." statement (the prefix
+	// makes the "Reconcile ... with:" message directly executable).
 	t.Run("extra column on source 1 fails", func(t *testing.T) {
 		_, err := src1DB.ExecContext(t.Context(), fmt.Sprintf("ALTER TABLE %s.users ADD COLUMN extra INT", src1Name))
 		require.NoError(t, err)
@@ -123,6 +125,8 @@ func TestSourceSchemaConsistencyCheck(t *testing.T) {
 		require.Contains(t, err.Error(), "users")
 		require.Contains(t, err.Error(), "extra")
 		require.Contains(t, err.Error(), "differs from source 0")
+		// The reconcile output is a runnable ALTER TABLE statement.
+		require.Contains(t, err.Error(), "ALTER TABLE `users` ")
 	})
 
 	// Test 4: different type with same column name fails.
@@ -198,6 +202,25 @@ func TestSourceSchemaConsistencyCheck(t *testing.T) {
 			SourceTables:   sourceTablesFor(t, src0DB, src0Name, "users"),
 			MoveEverything: true,
 		}
+		require.NoError(t, sourceSchemaConsistencyCheck(t.Context(), r, slog.Default()))
+	})
+
+	// Test 9: leftover _new/_old/_spirit_* shadow tables on a source are ignored
+	// in move-everything mode and must not register as table-set drift. The
+	// runner's getTables only filters _spirit_checkpoint/_spirit_sentinel, so the
+	// check must filter the shadow tables itself on both the wantTables and the
+	// listTables side.
+	t.Run("shadow tables are ignored in move-everything", func(t *testing.T) {
+		for _, shadow := range []string{"users_new", "users_old", "_spirit_checkpoint", "_spirit_sentinel"} {
+			_, err := src1DB.ExecContext(t.Context(), fmt.Sprintf("CREATE TABLE %s.`%s` (id INT NOT NULL PRIMARY KEY)", src1Name, shadow))
+			require.NoError(t, err)
+		}
+		defer func() {
+			for _, shadow := range []string{"users_new", "users_old", "_spirit_checkpoint", "_spirit_sentinel"} {
+				_, _ = src1DB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.`%s`", src1Name, shadow))
+			}
+		}()
+		r := baseResources(true, "users")
 		require.NoError(t, sourceSchemaConsistencyCheck(t.Context(), r, slog.Default()))
 	})
 }
