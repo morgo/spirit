@@ -1115,12 +1115,17 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	var createdAtStr string
 	err := r.db.QueryRowContext(ctx, query, queryArgs...).Scan(&id, &copierWatermark, &checksumWatermark, &binlogPosition, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
-		// Distinguish "checkpoint table exists but has no rows" — a normal
-		// "nothing to resume from" state — from a real read failure
-		// (permission denied, server gone, etc.) so an operator inspecting
-		// the log doesn't mistake an empty checkpoint for a permission
-		// issue.
+		// Distinguish "no checkpoint to resume from" — a normal state — from a
+		// real read failure (permission denied, server gone, etc.) so an
+		// operator inspecting the log doesn't mistake the absence of a
+		// checkpoint for a permission issue. In multi-table mode the read is
+		// filtered by statement, so ErrNoRows means "no checkpoint for this
+		// statement" — the shared table may still hold rows from other
+		// migrations — rather than "the table is empty".
 		if errors.Is(err, sql.ErrNoRows) {
+			if len(r.changes) > 1 {
+				return fmt.Errorf("no checkpoint found for this statement in table '%s', nothing to resume from", r.checkpointTableName())
+			}
 			return fmt.Errorf("checkpoint table '%s' is empty, nothing to resume from", r.checkpointTableName())
 		}
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
