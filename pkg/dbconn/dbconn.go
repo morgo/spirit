@@ -252,10 +252,9 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 		}
 	}()
 
-	// The threshold is hardcoded to be at least 0.9 seconds. This should be the minimum anyway,
+	// The grace period is hardcoded to be at least 0.9 seconds. This should be the minimum anyway,
 	// since the minimum LockWaitTimeout=1 second
-	threshold := max(float64(dbConfig.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier, 0.9)
-	duration := time.Duration(threshold) * time.Second
+	duration := forceKillGracePeriod(dbConfig.LockWaitTimeout)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	timer := time.AfterFunc(duration, func() {
