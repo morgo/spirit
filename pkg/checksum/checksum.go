@@ -14,7 +14,10 @@ import (
 )
 
 var (
-	// Query template for row checksums
+	// Query template for row checksums. The first %s is the column expression
+	// list from table.ColumnMapping.ChecksumExprs(), which already interleaves
+	// a '#' separator between values so content cannot shift across column
+	// boundaries undetected.
 	queryTemplate = "SELECT CRC32(CONCAT(%s)) as row_checksum, CONCAT_WS(',', %s) as pk FROM %s WHERE %s"
 
 	// ErrYieldTimeout is returned by runChecksum when the yield timeout expires.
