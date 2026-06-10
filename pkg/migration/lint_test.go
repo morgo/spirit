@@ -1,3 +1,9 @@
+//go:build singleversion
+
+// The linters test Spirit's own statement analysis, which is independent of the
+// MySQL server version — so they're part of the version-agnostic "single-version"
+// suite (build tag `singleversion`); see singleversion_test.go. A plain
+// `go test ./...` (no tag) skips this file.
 package migration
 
 import (

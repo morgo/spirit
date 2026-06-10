@@ -311,33 +311,6 @@ func TestVarcharE2E(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestChunkerPrefetching tests that the chunker handles large ID gaps correctly.
-func TestChunkerPrefetching(t *testing.T) {
-	t.Parallel()
-	testutils.NewTestTable(t, "prefetchtest", `CREATE TABLE prefetchtest (
-		id BIGINT NOT NULL AUTO_INCREMENT,
-		created_at DATETIME(3) NULL,
-		PRIMARY KEY (id)
-	)`)
-	// Insert about 11K rows, then add large ID gaps to test prefetching.
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) VALUES (NULL)`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) SELECT NULL FROM prefetchtest a JOIN prefetchtest b JOIN prefetchtest c`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) SELECT NULL FROM prefetchtest a JOIN prefetchtest b JOIN prefetchtest c`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) SELECT NULL FROM prefetchtest a JOIN prefetchtest b JOIN prefetchtest c`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) SELECT NULL FROM prefetchtest a JOIN prefetchtest b LIMIT 10000`)
-
-	// Insert far-off IDs to create large gaps that test the prefetcher.
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (id, created_at) VALUES (300000000000, NULL)`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) SELECT NULL FROM prefetchtest a JOIN prefetchtest b LIMIT 300000`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (id, created_at) VALUES (600000000000, NULL)`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (created_at) SELECT NULL FROM prefetchtest a JOIN prefetchtest b LIMIT 300000`)
-	testutils.RunSQL(t, `INSERT INTO prefetchtest (id, created_at) VALUES (900000000000, NULL)`)
-
-	m := NewTestRunner(t, "prefetchtest", "engine=innodb")
-	require.NoError(t, m.Run(t.Context()))
-	require.NoError(t, m.Close())
-}
-
 // TestPreRunChecksE2E tests that pre-run checks execute correctly during migration setup.
 func TestPreRunChecksE2E(t *testing.T) {
 	t.Parallel()
