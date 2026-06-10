@@ -1085,10 +1085,18 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 // analyzeTable runs ANALYZE TABLE for schemaName.tableName on the given target
 // connection and inspects the result set. ANALYZE TABLE reports per-table
 // problems (e.g. the table is missing) as a row in the result set with
-// Msg_type = "Error" (or "status"/"note" carrying a non-OK Msg_text) rather
-// than as a statement error, so plain Exec would return nil even when the
-// statistics were never refreshed. We read the rows and return an error on any
-// non-OK status so a silent no-op (the original cross-schema bug) cannot recur.
+// Msg_type = "Error" rather than as a statement error, so plain Exec would
+// return nil even when the statistics were never refreshed. We read the rows
+// and return an error on any "Error" row so a silent no-op (the original
+// cross-schema bug) cannot recur.
+//
+// A successful ANALYZE does not always report Msg_text = "OK": MySQL emits
+// "status" rows such as "Table is already up to date" and informational
+// "note"/"warning" rows that are not failures. We must only treat a row as a
+// failure when Msg_type = "Error" (the column that actually distinguishes a
+// failure), not when Msg_text differs from "OK". A missing table, for example,
+// reports an "Error" row followed by a trailing status row ("Operation
+// failed"); branching on Msg_type still detects it via the "Error" row.
 func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, schemaName, tableName string) error {
 	stmt, err := sqlescape.EscapeSQL("ANALYZE TABLE %n.%n", schemaName, tableName)
 	if err != nil {
@@ -1105,11 +1113,20 @@ func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, schemaName, table
 		if err := rows.Scan(&tbl, &op, &msgType, &msgText); err != nil {
 			return err
 		}
-		// A clean run reports Msg_type = "status" and Msg_text = "OK".
-		// Anything else (notably Msg_type "Error" for a missing table) means
-		// the statistics were not refreshed and we must not proceed to cutover.
-		if !strings.EqualFold(msgType, "status") || !strings.EqualFold(msgText, "OK") {
+		// Only Msg_type = "Error" indicates the statistics were not refreshed.
+		// Other rows ("status", "note", "warning") are not failures even when
+		// Msg_text is not "OK" (e.g. "Table is already up to date"); accept
+		// them, logging anything non-OK as a warning for visibility.
+		if strings.EqualFold(msgType, "error") {
 			return fmt.Errorf("ANALYZE TABLE %s.%s failed: %s: %s", schemaName, tableName, msgType, msgText)
+		}
+		if !strings.EqualFold(msgText, "OK") && r.logger != nil {
+			r.logger.Warn("ANALYZE TABLE reported a non-OK message",
+				"schema", schemaName,
+				"table", tableName,
+				"msg_type", msgType,
+				"msg_text", msgText,
+			)
 		}
 	}
 	return rows.Err()

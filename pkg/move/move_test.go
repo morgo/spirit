@@ -3,6 +3,7 @@ package move
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -421,14 +422,23 @@ func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
-	// analyzeTable does not use any Runner state, so a zero-value Runner is fine.
-	r := &Runner{}
+	// analyzeTable only reads r.logger (for non-error rows), so give it a real
+	// logger so the warning path does not dereference a nil pointer.
+	r := &Runner{logger: slog.Default()}
 
-	// An existing table analyzes cleanly.
+	// A freshly-created table analyzes cleanly (Msg_type "status").
+	require.NoError(t, r.analyzeTable(t.Context(), db, "w3c_analyze", "present"))
+
+	// Re-analyzing an already-analyzed table must also succeed. Depending on the
+	// MySQL version/engine this may report a non-"OK" status row (e.g. "Table is
+	// already up to date"); analyzeTable must treat any non-"Error" Msg_type as
+	// success and never abort on a non-OK Msg_text.
 	require.NoError(t, r.analyzeTable(t.Context(), db, "w3c_analyze", "present"))
 
 	// A missing table reports an Error row in the result set; analyzeTable must
-	// turn that into a returned error instead of a silent no-op.
+	// turn that into a returned error instead of a silent no-op. (MySQL emits an
+	// "Error" row followed by a trailing "status: Operation failed" row; the
+	// error must be detected via the "Error" Msg_type, not via the non-OK text.)
 	err = r.analyzeTable(t.Context(), db, "w3c_analyze", "does_not_exist")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ANALYZE TABLE")
