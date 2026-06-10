@@ -13,6 +13,11 @@ func TestDiff(t *testing.T) {
 		source   string
 		target   string
 		expected string // empty string means no diff expected
+		// expectedStatements, when set, asserts the full ordered list of
+		// emitted statements. Use it for diffs that intentionally produce more
+		// than one statement (e.g. option-only index changes split into a
+		// separate DROP and ADD). When set, expected is ignored.
+		expectedStatements []string
 	}{
 		{
 			name:     "NoChanges",
@@ -81,16 +86,25 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD UNIQUE INDEX `idx_email` (`email`)",
 		},
 		{
-			name:     "AddFulltextParser",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
-			expected: "ALTER TABLE `t1` DROP INDEX `ft_b`, ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram",
+			// Adding WITH PARSER to an index with an unchanged column list is
+			// an option-only change. A combined DROP+ADD in a single ALTER is a
+			// MySQL no-op, so the diff must emit two separate statements.
+			name:   "AddFulltextParser",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram",
+			},
 		},
 		{
-			name:     "RemoveFulltextParser",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
-			expected: "ALTER TABLE `t1` DROP INDEX `ft_b`, ADD FULLTEXT INDEX `ft_b` (`b`)",
+			name:   "RemoveFulltextParser",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`)",
+			},
 		},
 		{
 			name:     "FulltextParserNoChange",
@@ -107,16 +121,24 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP INDEX `ft_b`, ADD FULLTEXT INDEX `ft_b` (`b`, `c`) WITH PARSER ngram",
 		},
 		{
-			name:     "AddIndexKeyBlockSize",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
-			expected: "ALTER TABLE `t1` DROP INDEX `idx_b`, ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
+			// KEY_BLOCK_SIZE on an unchanged column list is an option-only
+			// change; emit it as two separate statements (see AddFulltextParser).
+			name:   "AddIndexKeyBlockSize",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
+			},
 		},
 		{
-			name:     "RemoveIndexKeyBlockSize",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
-			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
-			expected: "ALTER TABLE `t1` DROP INDEX `idx_b`, ADD INDEX `idx_b` (`b`)",
+			name:   "RemoveIndexKeyBlockSize",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`)",
+			},
 		},
 		{
 			name:     "IndexKeyBlockSizeNoChange",
@@ -996,9 +1018,15 @@ func TestDiff(t *testing.T) {
 			stmts, err := ct1.Diff(ct2, nil)
 			require.NoError(t, err)
 
-			if tt.expected == "" {
+			switch {
+			case len(tt.expectedStatements) > 0:
+				require.Len(t, stmts, len(tt.expectedStatements))
+				for i, want := range tt.expectedStatements {
+					require.Equal(t, want, stmts[i].Statement)
+				}
+			case tt.expected == "":
 				require.Nil(t, stmts, "expected nil for identical tables")
-			} else {
+			default:
 				require.Len(t, stmts, 1)
 				require.Equal(t, tt.expected, stmts[0].Statement)
 			}

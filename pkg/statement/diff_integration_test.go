@@ -50,9 +50,16 @@ func TestDiffIntegrationRemoveTableComment(t *testing.T) {
 	require.Nil(t, stmts)
 }
 
-// TestDiffIntegrationFulltextParser verifies that a WITH PARSER difference on
-// an otherwise identical index is detected and that the emitted ALTER is
-// accepted by a real MySQL server.
+// TestDiffIntegrationFulltextParser verifies that adding WITH PARSER to an
+// index whose column list is unchanged is detected, and that executing the
+// statements Diff() emits — exactly as Spirit's Runner would — actually applies
+// the parser change on a real MySQL server.
+//
+// This is a regression test for a silent-no-op bug: MySQL treats a combined
+// `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER as a no-op and
+// keeps the existing index. Diff() therefore emits the DROP and ADD as two
+// separate statements. The test executes only those emitted statements (no
+// extra manual ALTERs) and asserts the parser change took effect.
 func TestDiffIntegrationFulltextParser(t *testing.T) {
 	tt := testutils.NewTestTable(t, "diff_ft_parser",
 		"CREATE TABLE diff_ft_parser (id int primary key, b text, FULLTEXT KEY ft_b (b))")
@@ -65,22 +72,16 @@ func TestDiffIntegrationFulltextParser(t *testing.T) {
 
 	stmts, err := source.Diff(target, nil)
 	require.NoError(t, err)
-	require.Len(t, stmts, 1)
-	require.Equal(t, "ALTER TABLE `diff_ft_parser` DROP INDEX `ft_b`, ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram", stmts[0].Statement)
+	require.Len(t, stmts, 2, "option-only index change must be two separate statements")
+	require.Equal(t, "ALTER TABLE `diff_ft_parser` DROP INDEX `ft_b`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_ft_parser` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram", stmts[1].Statement)
 
-	// The emitted statement must be valid SQL.
-	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
-	require.NoError(t, err)
-
-	// Note: when a single ALTER drops and re-adds an index with the same name
-	// and column list, MySQL pairs the two clauses up and keeps the existing
-	// index, silently ignoring the parser change. Running the clauses as two
-	// separate ALTERs makes the change take effect.
-	_, err = tt.DB.ExecContext(t.Context(), "ALTER TABLE `diff_ft_parser` DROP INDEX `ft_b`")
-	require.NoError(t, err)
-	_, err = tt.DB.ExecContext(t.Context(), "ALTER TABLE `diff_ft_parser` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram")
-	require.NoError(t, err)
-
+	// Execute the emitted statements exactly as the Runner would, and verify
+	// the parser change actually took effect — no extra manual ALTERs.
+	for _, stmt := range stmts {
+		_, err = tt.DB.ExecContext(t.Context(), stmt.Statement)
+		require.NoError(t, err)
+	}
 	postAlter := showCreateTable(t, tt)
 	require.Contains(t, postAlter, "WITH PARSER `ngram`")
 
@@ -95,6 +96,11 @@ func TestDiffIntegrationFulltextParser(t *testing.T) {
 // TestDiffIntegrationFulltextRebuildPreservesParser verifies that an index
 // rebuilt for an unrelated reason (a column list change) preserves WITH PARSER
 // in the re-add, and that applying the diff to a real MySQL server converges.
+//
+// Unlike the option-only cases above, the column list genuinely changes here,
+// so MySQL really rebuilds the index. A combined `DROP INDEX x, ADD INDEX x
+// (<new cols>)` in a single ALTER is therefore NOT a no-op, and Diff() keeps it
+// as one statement.
 func TestDiffIntegrationFulltextRebuildPreservesParser(t *testing.T) {
 	tt := testutils.NewTestTable(t, "diff_ft_rebuild",
 		"CREATE TABLE diff_ft_rebuild (id int primary key, b text, c text, FULLTEXT KEY ft_b (b) WITH PARSER ngram)")
@@ -127,9 +133,14 @@ func TestDiffIntegrationFulltextRebuildPreservesParser(t *testing.T) {
 }
 
 // TestDiffIntegrationKeyBlockSize verifies that a KEY_BLOCK_SIZE difference on
-// an index is detected and that the emitted ALTER is accepted by a real MySQL
-// server. The table uses ROW_FORMAT=COMPRESSED because InnoDB silently ignores
+// an index whose column list is unchanged is detected, and that executing the
+// statements Diff() emits actually applies the change on a real MySQL server.
+// The table uses ROW_FORMAT=COMPRESSED because InnoDB silently ignores
 // index-level KEY_BLOCK_SIZE on uncompressed tables.
+//
+// Like the parser case, this is option-only, so Diff() emits a separate DROP
+// and ADD; a combined single ALTER would be a MySQL no-op. The test executes
+// only the emitted statements (no extra manual ALTERs).
 func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 	tt := testutils.NewTestTable(t, "diff_kbs",
 		"CREATE TABLE diff_kbs (id int primary key, b varchar(100), KEY idx_b (b)) ROW_FORMAT=COMPRESSED")
@@ -142,21 +153,16 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 
 	stmts, err := source.Diff(target, nil)
 	require.NoError(t, err)
-	require.Len(t, stmts, 1)
-	require.Equal(t, "ALTER TABLE `diff_kbs` DROP INDEX `idx_b`, ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8", stmts[0].Statement)
+	require.Len(t, stmts, 2, "option-only index change must be two separate statements")
+	require.Equal(t, "ALTER TABLE `diff_kbs` DROP INDEX `idx_b`", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_kbs` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8", stmts[1].Statement)
 
-	// The emitted statement must be valid SQL.
-	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
-	require.NoError(t, err)
-
-	// Same MySQL behavior as the parser case: a combined DROP+ADD of the same
-	// index name and column list keeps the existing index, so apply the
-	// clauses separately to make the change take effect.
-	_, err = tt.DB.ExecContext(t.Context(), "ALTER TABLE `diff_kbs` DROP INDEX `idx_b`")
-	require.NoError(t, err)
-	_, err = tt.DB.ExecContext(t.Context(), "ALTER TABLE `diff_kbs` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8")
-	require.NoError(t, err)
-
+	// Execute the emitted statements exactly as the Runner would, and verify
+	// KEY_BLOCK_SIZE actually took effect — no extra manual ALTERs.
+	for _, stmt := range stmts {
+		_, err = tt.DB.ExecContext(t.Context(), stmt.Statement)
+		require.NoError(t, err)
+	}
 	postAlter := showCreateTable(t, tt)
 	require.Contains(t, postAlter, "KEY `idx_b` (`b`) KEY_BLOCK_SIZE=8")
 
