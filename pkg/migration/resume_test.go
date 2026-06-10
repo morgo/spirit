@@ -991,3 +991,99 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 		"resume should be skipped when checkpoint records a different original table name")
 	require.NoError(t, m2.Close())
 }
+
+// TestCheckpointSharedMultiTableLifecycle covers the shared _spirit_checkpoint
+// table used by multi-table migrations (checkpointTableName is a const, so
+// every multi-table migration in a schema writes to the same table). It
+// verifies that:
+//
+//  1. another multi-table migration starting fresh (createCheckpointTable) or
+//     completing (dropCheckpoint) does not destroy a different migration's
+//     checkpoint rows — previously both paths issued a DROP TABLE, wiping
+//     concurrent progress and failing the victim's next DumpCheckpoint
+//     INSERT, which status.WatchTask escalates to a fatal cancel;
+//  2. resume reads only its own rows (keyed by statement), so a newer row
+//     from a different migration cannot mask ours;
+//  3. an interrupted multi-table migration still resumes from its checkpoint.
+func TestCheckpointSharedMultiTableLifecycle(t *testing.T) {
+	t.Parallel()
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+
+	// Tables for migration A (slow, interrupted after a checkpoint).
+	for _, tbl := range []string{"shared_cp_a1", "shared_cp_a2"} {
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tbl))
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			"INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tbl))
+	}
+	// Seed a1 with ~8000 rows so the throttled copy is still running when we
+	// interrupt it (the test throttler paces roughly one chunk per second).
+	testutils.RunSQLInDatabase(t, dbName,
+		"INSERT INTO shared_cp_a1 (id) SELECT null FROM shared_cp_a1 a, shared_cp_a1 b, shared_cp_a1 c LIMIT 1000")
+	testutils.RunSQLInDatabase(t, dbName,
+		"INSERT INTO shared_cp_a1 (id) SELECT null FROM shared_cp_a1 a, shared_cp_a1 b, shared_cp_a1 c LIMIT 7000")
+
+	// Tables for migration B (tiny, runs to completion).
+	for _, tbl := range []string{"shared_cp_b1", "shared_cp_b2"} {
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tbl))
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			"INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tbl))
+	}
+
+	stmtA := "ALTER TABLE shared_cp_a1 ENGINE=InnoDB; ALTER TABLE shared_cp_a2 ENGINE=InnoDB"
+	mA := NewTestRunnerFromStatement(t, stmtA,
+		WithDBName(dbName),
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+	require.Len(t, mA.changes, 2) // sanity: multi-table mode, shared checkpoint table
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = mA.Run(ctx) // interrupted once a checkpoint is saved
+	}()
+	waitForCheckpoint(t, mA)
+	// Cancel + wait for Run to fully return before Close. See
+	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
+	cancel()
+	<-done
+	require.NoError(t, mA.Close())
+
+	countRows := func(statement string) int {
+		var n int
+		require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+			"SELECT COUNT(*) FROM `%s` WHERE statement = ?", checkpointTableName), statement).Scan(&n))
+		return n
+	}
+	require.Positive(t, countRows(stmtA),
+		"migration A should have checkpoint rows after being interrupted")
+
+	// Migration B starts fresh and runs to completion in the same schema.
+	// Neither its createCheckpointTable nor its completion-time
+	// dropCheckpoint may touch A's rows.
+	stmtB := "ALTER TABLE shared_cp_b1 ENGINE=InnoDB; ALTER TABLE shared_cp_b2 ENGINE=InnoDB"
+	mB := NewTestRunnerFromStatement(t, stmtB, WithDBName(dbName), WithThreads(2))
+	require.NoError(t, mB.Run(t.Context()))
+	require.NoError(t, mB.Close())
+	require.Positive(t, countRows(stmtA),
+		"migration B clobbered the shared checkpoint table; migration A can no longer resume")
+	require.Zero(t, countRows(stmtB),
+		"migration B should clean up its own checkpoint rows on completion")
+
+	// Plant a newer row from a hypothetical concurrent migration C. Resume of
+	// A must filter to its own statement rather than take the newest row.
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+		"INSERT INTO `%s` (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name)"+
+			" VALUES ('x', '', 'y', 'ALTER TABLE unrelated ENGINE=InnoDB', '')",
+		checkpointTableName))
+
+	// Restart A: it must resume from its own checkpoint rows.
+	mA2 := NewTestRunnerFromStatement(t, stmtA, WithDBName(dbName), WithThreads(2))
+	require.NoError(t, mA2.Run(t.Context()))
+	require.True(t, mA2.usedResumeFromCheckpoint,
+		"migration A should resume from its own rows in the shared checkpoint table")
+	require.NoError(t, mA2.Close())
+}
