@@ -10,9 +10,11 @@
 // # Convergence model
 //
 // A "pass" walks every chunk once, then drains a delayed-retry queue to
-// empty. The pass completes (cleanly) only when every chunk has gone clean
-// at least once — either on its initial read, or on a retry, or via a
-// recopy when stable divergence is detected.
+// empty. The pass completes only when every chunk has resolved — either
+// READ-verified (its source and target CRCs observed equal on the initial
+// read or on a retry), or repaired via a recopy when stable divergence is
+// detected. A completed pass is "clean" only if it contained zero
+// recopies; see the first-clean-pass section below.
 //
 // First-attempt failures are common — the target legitimately lags the
 // source — so failures are not noisy events. They go through a retry queue:
@@ -30,8 +32,11 @@
 //     - Else (newSrcCRC == originalSrcCRC, target still wrong) → stable
 //       divergence. With a Recopier configured (production case), invoke
 //       it to overwrite the chunk on the target from the source; on
-//       success the chunk counts as passed (in the per-pass "recopies"
-//       bucket). Without a Recopier the run returns ErrPermanentDivergence.
+//       success the chunk counts as resolved for pass-completion purposes
+//       (in the per-pass "recopies" bucket), but the pass is no longer
+//       clean — the repaired rows were never observed equal, so they are
+//       re-verified by the next pass's fresh walk. Without a Recopier the
+//       run returns ErrPermanentDivergence.
 //
 // Hot chunks slow but do not block pass completion: they cycle to the back
 // of the FIFO while other entries resolve. A genuinely permanently-hot row
@@ -41,8 +46,15 @@
 // # First-clean-pass signal
 //
 // FirstCleanPass returns a channel that is closed the first time a pass
-// completes with every chunk having gone clean. The signal is monotonic:
-// once fired it stays fired, even if subsequent passes detect new drift.
+// completes with every chunk READ-verified equal AND zero recopies. A
+// recopy is a repair, not a verification: the rewritten rows were never
+// observed equal, and the recopy can race the live replication feed
+// (re-inserting a row whose concurrent delete the feed already applied,
+// leaving an orphan no future binlog event will remove). A pass that
+// contained any recopy is therefore ineligible; the repaired ranges are
+// re-read on the next pass's fresh walk, and the signal fires only once
+// a full pass needs no repairs at all. The signal is monotonic: once
+// fired it stays fired, even if subsequent passes detect new drift.
 // Downstream consumers (e.g. the import feature that gates on "data is
 // known consistent") read this channel; ongoing drift after that point is
 // observable via Stats.
@@ -142,7 +154,10 @@ type ContinuousCheckerConfig struct {
 // ContinuousCheckerStats is a snapshot of the checker's counters. All
 // fields are point-in-time; for monotonic totals, sample successively.
 type ContinuousCheckerStats struct {
-	// PassesCompleted is the number of clean passes finished so far.
+	// PassesCompleted is the number of passes finished so far. A pass
+	// completes when every chunk has resolved (READ-verified or recopied);
+	// only a pass with zero recopies counts as clean for the
+	// FirstCleanPass signal.
 	PassesCompleted uint64
 
 	// CurrentPass is the 1-indexed pass number in flight (0 before the
@@ -178,7 +193,10 @@ type ContinuousCheckerStats struct {
 	// unchanged across the retry window, target still wrong) and the
 	// configured Recopier rewrote the chunk from source. Zero when no
 	// Recopier is configured (those failures surface as
-	// ErrPermanentDivergence and abort the run instead).
+	// ErrPermanentDivergence and abort the run instead). A pass with
+	// RecopiesThisPass > 0 cannot be the first clean pass — recopied
+	// chunks are repaired, not verified, and are re-read on the next
+	// pass before FirstCleanPass can fire.
 	RecopiesThisPass uint64
 
 	// RetryQueueDepth is the current size of the delayed-retry queue.
@@ -306,14 +324,17 @@ type workItem struct {
 type workResult struct {
 	item *workItem
 
-	// passed is true iff the chunk satisfied the pass criterion (initial
-	// match, retry match against original or new source CRC, or a
-	// successful recopy).
+	// passed is true iff the chunk resolved for pass-completion purposes
+	// (initial match, retry match against original or new source CRC, or
+	// a successful recopy). Note a recopy "passes" only in the sense that
+	// the pass can finish — it also marks the pass ineligible to fire
+	// FirstCleanPass (see recopied below).
 	passed bool
 
 	// recopied is true iff this result represents a successful Recopy
 	// (passed=true also set). Distinguishes "passed via retry" from
-	// "passed via recopy" in the per-pass histogram.
+	// "repaired via recopy" in the per-pass histogram; any recopy makes
+	// the containing pass not-clean for the FirstCleanPass criterion.
 	recopied bool
 
 	// newSrcCRC / newTgtCRC are the values just read. Used by the driver
@@ -456,7 +477,25 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		}
 
 		c.passesCompleted.Add(1)
-		c.signalFirstCleanPass()
+		// A pass is "clean" — and eligible to fire FirstCleanPass — only if
+		// it contained zero recopies. A recopy is a repair, not a
+		// verification: the rewritten rows were never observed equal, and
+		// the recopy itself can race the live replication feed (its source
+		// SELECT can include a row whose concurrent delete the feed has
+		// already applied to the target, re-inserting an orphan that no
+		// future binlog event will remove). The repaired chunk's range is
+		// re-read by the next pass's fresh walk, so the signal fires only
+		// once a full pass needs no repairs at all. This mirrors the
+		// differencesFound == 0 follow-up-pass rule in SingleChecker /
+		// DistributedChecker.
+		if recopies := c.recopiesThisPass.Load(); recopies == 0 {
+			c.signalFirstCleanPass()
+		} else {
+			c.cfg.Logger.Info("continuous checksum: pass contained recopies; repaired chunks will be re-verified next pass",
+				"pass_number", passNum,
+				"recopies", recopies,
+			)
+		}
 		c.cfg.Logger.Info("continuous checksum pass complete",
 			"pass_number", passNum,
 			"total_chunks", c.chunksThisPass.Load(),
@@ -966,9 +1005,12 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 }
 
 // FirstCleanPass returns a channel that is closed the first time a pass
-// completes with every chunk having gone clean. The signal is monotonic:
-// once closed it stays closed. Callers that need a "data is known
-// consistent" gate should select on this channel. Safe to call
+// completes with every chunk READ-verified equal and zero recopies. A
+// pass containing a recopy does not qualify: the repaired rows were
+// never observed equal, so the signal waits for a follow-up pass that
+// re-reads them (and everything else) with no repairs needed. The signal
+// is monotonic: once closed it stays closed. Callers that need a "data
+// is known consistent" gate should select on this channel. Safe to call
 // concurrently with Run.
 func (c *ContinuousChecker) FirstCleanPass() <-chan struct{} {
 	return c.firstCleanPassCh
