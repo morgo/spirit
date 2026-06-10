@@ -737,16 +737,18 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		return false
 	}
 	// Normalize default values for nullable columns:
-	// For nullable columns, nil and "NULL" are semantically equivalent.
-	// User might write `VARCHAR(255) NULL` but MySQL outputs `VARCHAR(255) DEFAULT NULL`.
+	// For nullable columns, nil and the NULL *keyword* are semantically
+	// equivalent. User might write `VARCHAR(255) NULL` but MySQL outputs
+	// `VARCHAR(255) DEFAULT NULL`. A quoted string literal 'NULL'
+	// (DefaultIsString) is NOT the keyword and must not collapse — it is a
+	// real default that differs from no-default.
 	sourceDefault := a.Default
 	targetDefault := b.Default
 	if a.Nullable {
-		// Normalize: treat nil and "NULL" as equivalent for nullable columns
-		if sourceDefault != nil && *sourceDefault == "NULL" {
+		if sourceDefault != nil && *sourceDefault == "NULL" && !a.DefaultIsString {
 			sourceDefault = nil
 		}
-		if targetDefault != nil && *targetDefault == "NULL" {
+		if targetDefault != nil && *targetDefault == "NULL" && !b.DefaultIsString {
 			targetDefault = nil
 		}
 	}
@@ -757,6 +759,12 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		return false
 	}
 	if !columnExtendedAttributesEqual(a, b) {
+		return false
+	}
+	// A quoted string literal default ('TRUE') is a different value than the
+	// same text as a keyword/number default (TRUE), even when the stored
+	// strings match — so quotedness is part of column identity.
+	if a.DefaultIsString != b.DefaultIsString {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -840,16 +848,16 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 		return false
 	}
 	// Normalize default values for nullable columns:
-	// For nullable columns, nil and "NULL" are semantically equivalent.
-	// User might write `VARCHAR(255) NULL` but MySQL outputs `VARCHAR(255) DEFAULT NULL`.
+	// For nullable columns, nil and the NULL *keyword* are semantically
+	// equivalent. A quoted string literal 'NULL' (DefaultIsString) is NOT
+	// the keyword and must not collapse.
 	sourceDefault := a.Default
 	targetDefault := b.Default
 	if a.Nullable {
-		// Normalize: treat nil and "NULL" as equivalent for nullable columns
-		if sourceDefault != nil && *sourceDefault == "NULL" {
+		if sourceDefault != nil && *sourceDefault == "NULL" && !a.DefaultIsString {
 			sourceDefault = nil
 		}
-		if targetDefault != nil && *targetDefault == "NULL" {
+		if targetDefault != nil && *targetDefault == "NULL" && !b.DefaultIsString {
 			targetDefault = nil
 		}
 	}
@@ -860,6 +868,9 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 		return false
 	}
 	if !columnExtendedAttributesEqual(a, b) {
+		return false
+	}
+	if a.DefaultIsString != b.DefaultIsString {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -1130,6 +1141,13 @@ func formatColumnDefinition(col *Column) string {
 		case col.DefaultIsExpr:
 			// Expression defaults must be wrapped in parentheses, e.g. DEFAULT (json_object())
 			parts = append(parts, fmt.Sprintf("DEFAULT (%s)", defaultVal))
+		case col.DefaultIsString:
+			// Quoted string literal. The stored value is the true raw value
+			// (unescaped at parse time), so quote+escape exactly once. This
+			// must bypass the needsQuotes heuristic: a literal 'TRUE' or
+			// 'NULL' or '2020' has to stay quoted, otherwise MySQL would
+			// store the keyword/number instead of the string.
+			parts = append(parts, fmt.Sprintf("DEFAULT '%s'", sqlescape.EscapeString(defaultVal)))
 		case needsQuotes(defaultVal):
 			parts = append(parts, fmt.Sprintf("DEFAULT '%s'", sqlescape.EscapeString(defaultVal)))
 		default:
