@@ -51,8 +51,14 @@ func TestCastableTp(t *testing.T) {
 		{"mediumblob", "binary"},
 		{"longblob", "binary"},
 		{"varbinary", "binary"},
+		{"varbinary(255)", "binary"}, // variable-length: no padding, width not needed
 		{"char(100)", "char CHARACTER SET utf8mb4"},
-		{"binary(100)", "binary(0)"},
+		// binary(N) must preserve its width in the cast: binary(0) would
+		// truncate every value to zero bytes (checksum blindness), and a
+		// plain binary cast would not zero-pad, breaking widening migrations.
+		{"binary(100)", "binary(100)"},
+		{"binary(16)", "binary(16)"},
+		{"binary(1)", "binary(1)"},
 		{"datetime", "datetime"},
 		{"datetime(6)", "datetime"},
 		{"year", "char CHARACTER SET utf8mb4"},
