@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -36,6 +37,55 @@ var (
 	// enough for legitimate large/slow recopies on busy or distant replicas.
 	fixChunkTimeout = 10 * time.Minute
 )
+
+// chunkMismatch describes why a chunk's source and target disagreed. It is
+// returned by compareChunk so the caller can log a debuggable reason while
+// treating any mismatch (checksum OR row count) identically — same retry,
+// recopy, and differencesFound accounting.
+type chunkMismatch struct {
+	// checksumDiffers is true when the (aggregated) source and target CRC
+	// differ.
+	checksumDiffers bool
+	// countDiffers is true when the (aggregated) source and target row
+	// counts differ. This is the defense-in-depth signal that the CRC alone
+	// can miss: BIT_XOR is pair-cancelling, so a row duplicated across two
+	// sources (violating disjointness) or a row whose CRC32 happens to be 0
+	// contributes nothing to the XOR, yet the count still moves.
+	countDiffers bool
+}
+
+// mismatched reports whether the chunk is divergent for any reason.
+func (m chunkMismatch) mismatched() bool {
+	return m.checksumDiffers || m.countDiffers
+}
+
+// reason returns a human-readable description distinguishing a checksum
+// mismatch from a row-count mismatch (and reporting both when both differ)
+// for log/error debuggability. Only meaningful when mismatched() is true.
+func (m chunkMismatch) reason(srcCount, tgtCount uint64) string {
+	switch {
+	case m.checksumDiffers && m.countDiffers:
+		return fmt.Sprintf("checksum mismatch and row count mismatch (src=%d, target=%d)", srcCount, tgtCount)
+	case m.countDiffers:
+		return fmt.Sprintf("row count mismatch (src=%d, target=%d)", srcCount, tgtCount)
+	default:
+		return "checksum mismatch"
+	}
+}
+
+// compareChunk is the central decision function used by every checker to
+// decide whether a chunk's source and target agree. It compares BOTH the
+// (aggregated) CRC and the (aggregated) row count. Comparing the count is
+// free — the count is already returned alongside the CRC in the same query —
+// and it closes a defense-in-depth gap where the CRC alone is insufficient
+// (see chunkMismatch.countDiffers). A count mismatch is treated exactly like
+// a checksum mismatch by callers.
+func compareChunk(srcCRC, tgtCRC int64, srcCount, tgtCount uint64) chunkMismatch {
+	return chunkMismatch{
+		checksumDiffers: srcCRC != tgtCRC,
+		countDiffers:    srcCount != tgtCount,
+	}
+}
 
 type Checker interface {
 	// Run performs the checksum operation.
