@@ -3,6 +3,7 @@ package applier
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1130,4 +1131,44 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
+}
+
+// TestSingleTargetApplierCallbackPanicDecrements verifies that a panicking
+// callback still decrements callbacksInFlight, so a recovered panic upstream
+// cannot wedge Wait() forever. invokeCallback must balance the counter on every
+// exit path, not just normal return.
+func TestSingleTargetApplierCallbackPanicDecrements(t *testing.T) {
+	a := &SingleTargetApplier{
+		logger:      slog.New(slog.DiscardHandler),
+		pendingWork: make(map[int64]*pendingWork),
+	}
+
+	// Claim a unit of work the way the real claim paths do: increment
+	// callbacksInFlight under pendingMutex before invoking the callback.
+	a.pendingMutex.Lock()
+	a.callbacksInFlight++
+	a.pendingMutex.Unlock()
+
+	panicking := func(affectedRows int64, err error) {
+		panic("callback boom")
+	}
+
+	// invokeCallback must propagate the panic; recover it here the way an
+	// upstream goroutine would.
+	func() {
+		defer func() {
+			require.Equal(t, "callback boom", recover())
+		}()
+		a.invokeCallback(panicking, 0, nil)
+	}()
+
+	// Despite the panic, the deferred decrement must have run, so Wait()
+	// observes a balanced counter and returns promptly.
+	a.pendingMutex.Lock()
+	require.Equal(t, 0, a.callbacksInFlight)
+	a.pendingMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, a.Wait(ctx))
 }

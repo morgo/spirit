@@ -334,10 +334,16 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 // pendingMutex), then decrements callbacksInFlight. Must be called WITHOUT
 // pendingMutex held. See the completion invariant on pendingWork.
 func (a *ShardedApplier) invokeCallback(callback ApplyCallback, affectedRows int64, err error) {
+	// Decrement in a defer so callbacksInFlight is balanced on every exit path,
+	// including a panicking callback. Without this, a recovered panic upstream
+	// would leave callbacksInFlight stuck above zero and wedge Wait() forever.
+	// The panic still propagates after the deferred decrement runs.
+	defer func() {
+		a.pendingMutex.Lock()
+		a.callbacksInFlight--
+		a.pendingMutex.Unlock()
+	}()
 	callback(affectedRows, err)
-	a.pendingMutex.Lock()
-	a.callbacksInFlight--
-	a.pendingMutex.Unlock()
 }
 
 // Wait blocks until all pending work is complete and all callbacks have been invoked.
