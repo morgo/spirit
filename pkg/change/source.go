@@ -79,9 +79,13 @@ type Source interface {
 	Flush(ctx context.Context) error
 
 	// FlushUnderTableLock is the cutover-time variant of Flush: the
-	// caller holds a table lock on the source side and we drain the
-	// in-flight backlog against that quiescent state.
-	FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock) error
+	// caller holds table locks and we drain the in-flight backlog
+	// against that quiescent state. locks carries one lock per target
+	// server being written to (a single lock for single-target
+	// migrations; one per shard for sharded moves) — the applier
+	// executes each target's statements under that target's own lock,
+	// since LOCK TABLES blocks writes from every other connection.
+	FlushUnderTableLock(ctx context.Context, locks []*dbconn.TableLock) error
 
 	// BlockWait blocks until all events received from the underlying
 	// stream up to call-time have been delivered to their subscriptions.

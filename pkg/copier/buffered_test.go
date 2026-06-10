@@ -345,12 +345,12 @@ func (d *delayedCallbackApplier) Apply(ctx context.Context, chunk *table.Chunk, 
 	return d.realApplier.Apply(ctx, chunk, rows, wrappedCallback)
 }
 
-func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
-	return d.realApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, lock)
+func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, locks []*dbconn.TableLock) (int64, error) {
+	return d.realApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
 }
 
-func (d *delayedCallbackApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, lock *dbconn.TableLock) (int64, error) {
-	return d.realApplier.UpsertRows(ctx, mapping, rows, lock)
+func (d *delayedCallbackApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
+	return d.realApplier.UpsertRows(ctx, mapping, rows, locks)
 }
 
 func (d *delayedCallbackApplier) Wait(ctx context.Context) error {

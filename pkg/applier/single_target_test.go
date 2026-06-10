@@ -3,11 +3,13 @@ package applier
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -1018,4 +1020,69 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
+}
+
+// TestSingleTargetApplierUnderLock verifies the under-lock write path:
+// with one lock the statements execute on the lock's own transaction, and
+// supplying more than one lock is rejected (the single-target applier
+// writes through exactly one server, so multiple locks indicate a caller
+// bug such as per-shard locks being passed to the wrong applier).
+func TestSingleTargetApplierUnderLock(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS test_pr4_single_lock")
+	testutils.RunSQL(t, "CREATE DATABASE test_pr4_single_lock")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	target := base.Clone()
+	target.DBName = "test_pr4_single_lock"
+	targetDB, err := sql.Open("mysql", target.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	ctx := t.Context()
+	_, err = targetDB.ExecContext(ctx, `CREATE TABLE test_table (id INT PRIMARY KEY, name VARCHAR(100))`)
+	require.NoError(t, err)
+	_, err = targetDB.ExecContext(ctx, "INSERT INTO test_table VALUES (1, 'Alice'), (2, 'Bob')")
+	require.NoError(t, err)
+
+	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
+	require.NoError(t, targetTable.SetInfo(ctx))
+
+	applier, err := NewSingleTargetApplier(Target{DB: targetDB, Config: target, KeyRange: "0"}, NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	lock, err := dbconn.NewTableLock(ctx, targetDB, []*table.TableInfo{targetTable}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+
+	// More than one lock must be rejected before executing anything.
+	_, err = applier.UpsertRows(ctx, table.NewColumnMapping(targetTable, targetTable, nil),
+		[]LogicalRow{{RowImage: []any{int64(3), "Charlie"}}}, []*dbconn.TableLock{lock, lock})
+	require.ErrorContains(t, err, "at most one table lock")
+	_, err = applier.DeleteKeys(ctx, targetTable, targetTable,
+		[]string{utils.HashKey([]any{int64(1)})}, []*dbconn.TableLock{lock, lock})
+	require.ErrorContains(t, err, "at most one table lock")
+
+	// A single lock executes on the lock transaction.
+	affected, err := applier.UpsertRows(ctx, table.NewColumnMapping(targetTable, targetTable, nil),
+		[]LogicalRow{{RowImage: []any{int64(3), "Charlie"}}}, []*dbconn.TableLock{lock})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+	_, err = applier.DeleteKeys(ctx, targetTable, targetTable,
+		[]string{utils.HashKey([]any{int64(2)})}, []*dbconn.TableLock{lock})
+	require.NoError(t, err)
+
+	require.NoError(t, lock.Close(ctx))
+
+	var ids []int64
+	rows, err := targetDB.QueryContext(ctx, "SELECT id FROM test_table ORDER BY id")
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []int64{1, 3}, ids, "id=2 deleted and id=3 inserted under lock")
 }

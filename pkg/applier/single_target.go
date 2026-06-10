@@ -438,12 +438,32 @@ func (a *SingleTargetApplier) feedbackCoordinator() {
 	a.logger.Debug("feedbackCoordinator chunklet completions channel closed, exiting")
 }
 
+// singleLock extracts the only lock from locks. It returns nil for an
+// empty slice (no lock requested) and errors if more than one lock is
+// supplied: the SingleTargetApplier writes through exactly one server,
+// so receiving multiple locks indicates a caller bug (e.g. per-shard
+// locks passed to a single-target applier).
+func singleLock(locks []*dbconn.TableLock) (*dbconn.TableLock, error) {
+	switch len(locks) {
+	case 0:
+		return nil, nil
+	case 1:
+		return locks[0], nil
+	default:
+		return nil, fmt.Errorf("SingleTargetApplier expects at most one table lock, got %d", len(locks))
+	}
+}
+
 // DeleteKeys deletes rows by their key values synchronously.
 // The keys are hashed key strings (from utils.HashKey).
-// If lock is non-nil, the delete is executed under the table lock.
-func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
+// If locks contains a lock, the delete is executed under the table lock.
+func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, locks []*dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
+	}
+	lock, err := singleLock(locks)
+	if err != nil {
+		return 0, err
 	}
 	// For move operations, targetTable may be nil - use sourceTable for both
 	if targetTable == nil {
@@ -484,7 +504,7 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 
 // UpsertRows performs an upsert (REPLACE INTO ... VALUES) synchronously.
 // The rows are LogicalRow structs containing inline row images from the
-// binlog. If lock is non-nil, the upsert is executed under the table lock.
+// binlog. If locks contains a lock, the upsert is executed under the table lock.
 //
 // REPLACE semantics, and why we use them:
 //
@@ -522,9 +542,13 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 // We supply inline row images rather than `REPLACE INTO ... SELECT FROM
 // source`, so the read-after-commit race that motivated #746 does not
 // apply.
-func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
+	}
+	lock, err := singleLock(locks)
+	if err != nil {
+		return 0, err
 	}
 	_, targetColumnList := mapping.Columns()
 	sourceColumnNames, _ := mapping.ColumnsSlice()

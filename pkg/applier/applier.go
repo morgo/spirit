@@ -58,15 +58,20 @@ type Applier interface {
 
 	// DeleteKeys deletes rows by their key values synchronously.
 	// The keys are hashed key strings (from utils.HashKey).
-	// If lock is non-nil, the delete is executed under the table lock.
+	// If locks is non-empty, the delete is executed under the table lock(s):
+	// implementations writing to multiple targets receive one lock per target
+	// (acquired on that target's own connection) and must execute each
+	// target's statements under that target's lock. Single-target
+	// implementations expect exactly one lock.
 	// Returns the number of rows affected and any error.
-	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error)
+	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, locks []*dbconn.TableLock) (int64, error)
 
-	// UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
+	// UpsertRows performs an upsert (REPLACE INTO ... VALUES) synchronously.
 	// The rows are LogicalRow structs containing the row images.
-	// If lock is non-nil, the upsert is executed under the table lock.
+	// If locks is non-empty, the upsert is executed under the table lock(s);
+	// see DeleteKeys for the per-target lock contract.
 	// Returns the number of rows affected and any error.
-	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error)
+	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error)
 
 	// Wait blocks until all pending work is complete and all callbacks have been invoked
 	Wait(ctx context.Context) error

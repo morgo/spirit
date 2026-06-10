@@ -692,23 +692,28 @@ func (c *gtidClient) Close() {
 // binlog client: flush the in-flight delta, wait for the events the
 // flush itself generated to be ingested, then flush again so the
 // resume coordinate covers those.
-func (c *gtidClient) FlushUnderTableLock(ctx context.Context, lock *dbconn.TableLock) error {
-	if err := c.flush(ctx, true, lock); err != nil {
+func (c *gtidClient) FlushUnderTableLock(ctx context.Context, locks []*dbconn.TableLock) error {
+	if len(locks) == 0 {
+		// Flushing "under lock" without any lock would silently execute the
+		// statements outside the locks the caller believes are held.
+		return errors.New("FlushUnderTableLock requires at least one table lock")
+	}
+	if err := c.flush(ctx, true, locks); err != nil {
 		return err
 	}
 	if err := c.BlockWait(ctx); err != nil {
 		return err
 	}
-	return c.flush(ctx, true, lock)
+	return c.flush(ctx, true, locks)
 }
 
-func (c *gtidClient) flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
+func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) error {
 	c.mu.Lock()
 	newFlushedGTID := c.bufferedGTID.Clone()
 	c.mu.Unlock()
 	allChangesFlushed := true
 	for _, subscription := range c.subs.Snapshot() {
-		flushed, err := subscription.Flush(ctx, underLock, lock)
+		flushed, err := subscription.Flush(ctx, underLock, locks)
 		if err != nil {
 			return err
 		}
