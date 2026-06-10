@@ -1540,10 +1540,26 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			fmt.Fprintf(&sb, "`%s`", key.Column.Name.String())
-			// Add length if specified
-			if key.Length > 0 {
-				fmt.Fprintf(&sb, "(%d)", key.Length)
+			switch {
+			case key.Column != nil:
+				// Regular column reference
+				fmt.Fprintf(&sb, "`%s`", key.Column.Name.String())
+				// Add length if specified
+				if key.Length > 0 {
+					fmt.Fprintf(&sb, "(%d)", key.Length)
+				}
+			case key.Expr != nil:
+				// Functional (expression) index part, e.g. KEY ((lower(b))).
+				// Column is nil in this case; MySQL requires the expression
+				// to be wrapped in its own parentheses.
+				var exprSb strings.Builder
+				rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &exprSb)
+				if err := key.Expr.Restore(rCtx); err != nil {
+					return "", fmt.Errorf("failed to restore expression for index %q: %w", constraint.Name, err)
+				}
+				fmt.Fprintf(&sb, "(%s)", exprSb.String())
+			default:
+				return "", fmt.Errorf("index %q has a key part with neither a column nor an expression", constraint.Name)
 			}
 		}
 		sb.WriteString(")")
