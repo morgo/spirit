@@ -640,6 +640,11 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 	if !ptrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
 		if comment := target.TableOptions.getComment(); comment != nil {
 			clauses = append(clauses, fmt.Sprintf("COMMENT='%s'", sqlescape.EscapeString(*comment)))
+		} else {
+			// The source has a comment but the target does not: emit an
+			// explicit empty comment to clear it. Without this clause the
+			// difference would be detected but silently dropped.
+			clauses = append(clauses, "COMMENT=''")
 		}
 	}
 
@@ -908,6 +913,12 @@ func indexesEqual(a, b *Index) bool {
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
+	if !ptrEqual(a.KeyBlockSize, b.KeyBlockSize) {
+		return false
+	}
+	if !ptrEqual(a.ParserName, b.ParserName) {
+		return false
+	}
 	return true
 }
 
@@ -933,6 +944,12 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 		return false
 	}
 	if !ptrEqual(a.Comment, b.Comment) {
+		return false
+	}
+	if !ptrEqual(a.KeyBlockSize, b.KeyBlockSize) {
+		return false
+	}
+	if !ptrEqual(a.ParserName, b.ParserName) {
 		return false
 	}
 	return true
@@ -1150,6 +1167,16 @@ func formatAddIndex(idx *Index) string {
 	// USING clause
 	if idx.Using != nil {
 		parts = append(parts, fmt.Sprintf("USING %s", *idx.Using))
+	}
+
+	// KEY_BLOCK_SIZE
+	if idx.KeyBlockSize != nil {
+		parts = append(parts, fmt.Sprintf("KEY_BLOCK_SIZE=%d", *idx.KeyBlockSize))
+	}
+
+	// WITH PARSER (FULLTEXT indexes)
+	if idx.ParserName != nil {
+		parts = append(parts, fmt.Sprintf("WITH PARSER %s", *idx.ParserName))
 	}
 
 	// Comment

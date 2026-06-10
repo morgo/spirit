@@ -1498,6 +1498,20 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) USING BTREE COMMENT 'Name index' INVISIBLE",
 		},
 		{
+			name: "Missing FULLTEXT index with parser",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				bio TEXT,
+				FULLTEXT INDEX ft_bio (bio) WITH PARSER ngram
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				bio TEXT
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD FULLTEXT INDEX `ft_bio` (`bio`) WITH PARSER ngram",
+		},
+		{
 			name: "Composite index missing",
 			sourceCreateTable: `CREATE TABLE users (
 				id INT PRIMARY KEY,
