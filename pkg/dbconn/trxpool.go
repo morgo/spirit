@@ -22,16 +22,18 @@ type TrxPool struct {
 // NewTrxPool creates a pool of transactions which have already
 // had their read-view created in REPEATABLE READ isolation.
 func NewTrxPool(ctx context.Context, db *sql.DB, count int, config *DBConfig) (*TrxPool, error) {
-	checksumTxns := make([]*sql.Tx, 0, count)
+	pool := &TrxPool{trxs: make([]*sql.Tx, 0, count)}
 	for range count {
-		trx, _ := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
-		_, err := trx.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT")
+		trx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, pool.Close())
 		}
-		checksumTxns = append(checksumTxns, trx)
+		pool.trxs = append(pool.trxs, trx)
+		if _, err := trx.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
+			return nil, errors.Join(err, pool.Close())
+		}
 	}
-	return &TrxPool{trxs: checksumTxns}, nil
+	return pool, nil
 }
 
 // Get gets a transaction from the pool.
