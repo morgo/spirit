@@ -139,6 +139,48 @@ func TestColumnMappingWithRenames(t *testing.T) {
 	require.Equal(t, []string{"id", "c"}, tgtSlice)
 }
 
+func TestColumnMappingCaseInsensitive(t *testing.T) {
+	t1 := NewTableInfo(nil, "test", "t1")
+	t1new := NewTableInfo(nil, "test", "t1_new")
+
+	// Rename key typed with different case than the declared column:
+	// table declares "foo", user typed "RENAME COLUMN Foo TO bar".
+	// MySQL identifiers are case-insensitive, so the rename must still apply.
+	t1.NonGeneratedColumns = []string{"id", "foo"}
+	t1new.NonGeneratedColumns = []string{"id", "bar"}
+	m := NewColumnMapping(t1, t1new, map[string]string{"Foo": "bar"})
+	srcCols, tgtCols := m.ColumnsSlice()
+	require.Equal(t, []string{"id", "foo"}, srcCols)
+	require.Equal(t, []string{"id", "bar"}, tgtCols)
+
+	// Rename value typed with different case than the target declares:
+	// the mapping must emit the declared target name so downstream exact-name
+	// lookups (e.g. column type maps) succeed.
+	m = NewColumnMapping(t1, t1new, map[string]string{"foo": "BAR"})
+	srcCols, tgtCols = m.ColumnsSlice()
+	require.Equal(t, []string{"id", "foo"}, srcCols)
+	require.Equal(t, []string{"id", "bar"}, tgtCols)
+
+	// Identity match with a case difference between source and target
+	// declarations (e.g. a case-only CHANGE COLUMN foo FOO ...).
+	t1.NonGeneratedColumns = []string{"id", "foo"}
+	t1new.NonGeneratedColumns = []string{"id", "FOO"}
+	m = NewColumnMapping(t1, t1new, nil)
+	srcCols, tgtCols = m.ColumnsSlice()
+	require.Equal(t, []string{"id", "foo"}, srcCols)
+	require.Equal(t, []string{"id", "FOO"}, tgtCols)
+
+	// Claimed-target exclusion is case-insensitive: source [id, a, c],
+	// target [id, C] where A→c is the rename. source.c must NOT identity
+	// match target.C because it is claimed by the rename from source.a.
+	t1.NonGeneratedColumns = []string{"id", "a", "c"}
+	t1new.NonGeneratedColumns = []string{"id", "C"}
+	m = NewColumnMapping(t1, t1new, map[string]string{"A": "c"})
+	srcCols, tgtCols = m.ColumnsSlice()
+	require.Equal(t, []string{"id", "a"}, srcCols)
+	require.Equal(t, []string{"id", "C"}, tgtCols)
+}
+
 func TestColumnMappingTargetNil(t *testing.T) {
 	// When target is nil, source is used as target
 	t1 := NewTableInfo(nil, "test", "t1")

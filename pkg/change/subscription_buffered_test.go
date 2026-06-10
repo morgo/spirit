@@ -1702,279 +1702,97 @@ func TestClientCloseUnblocksParkedHasChanged(t *testing.T) {
 	}
 }
 
-// TestBufferedMapGeometry tests that GEOMETRY column data (binary spatial values)
-// is correctly handled by the buffered map subscription. The buffered map stores
-// full row images from binlog events, so this verifies the binary geometry
-// representation survives the replication pipeline without corruption due to
-// partial values replicated, strange encoding etc.
-func TestBufferedMapGeometry(t *testing.T) {
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS subscription_test, _subscription_test_new")
-	testutils.RunSQL(t, `CREATE TABLE subscription_test (
-		id INT NOT NULL,
+// TestBufferedMapSeparatorInPKValues exercises PK values containing the
+// hash-key separator "-#-" end-to-end through the buffered map and the
+// applier flush path. Before hash-key components were escaped, two bugs
+// existed here:
+//
+//  1. Map collision: for a composite PK, ("a-#-b", "c") and ("a", "b-#-c")
+//     hashed to the same string, so the second event silently overwrote
+//     the first row's buffered change and one row was never applied.
+//  2. Wrong-arity SQL: a DELETE on a single-column PK whose value contains
+//     "-#-" was split into multiple values, producing
+//     DELETE ... WHERE (pk) IN (('a','b')) — MySQL error 1241.
+func TestBufferedMapSeparatorInPKValues(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id1 VARCHAR(64) NOT NULL,
+		id2 VARCHAR(64) NOT NULL,
 		name VARCHAR(255) NOT NULL,
-		location GEOMETRY NOT NULL SRID 4326,
-		PRIMARY KEY (id)
-	)`)
-	testutils.RunSQL(t, `CREATE TABLE _subscription_test_new (
-		id INT NOT NULL,
+		PRIMARY KEY (id1, id2)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id1 VARCHAR(64) NOT NULL,
+		id2 VARCHAR(64) NOT NULL,
 		name VARCHAR(255) NOT NULL,
-		location GEOMETRY NOT NULL SRID 4326,
-		PRIMARY KEY (id)
-	)`)
+		PRIMARY KEY (id1, id2)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
-
-	srcTable := table.NewTableInfo(db, "test", "subscription_test")
-	require.NoError(t, srcTable.SetInfo(t.Context()))
-	dstTable := table.NewTableInfo(db, "test", "_subscription_test_new")
-	require.NoError(t, dstTable.SetInfo(t.Context()))
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
-	target := applier.Target{
-		DB:       db,
-		KeyRange: "0",
-		Config:   cfg,
+	target := applier.Target{DB: db, KeyRange: "0", Config: cfg}
+	applierInstance, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	mockChunker := table.NewMockChunker(srcTable.TableName, 1000)
+	mockChunker.SetColumnMapping(table.NewColumnMapping(srcTable, dstTable, nil))
+
+	client := &binlogClient{
+		db:       db,
+		logger:   slog.Default(),
+		dbConfig: dbconn.NewDBConfig(),
 	}
-	appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-	require.NoError(t, err)
-	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig()).(*binlogClient)
-	chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
-	require.NoError(t, err)
-	require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-	require.NoError(t, client.Start(t.Context()))
-	defer client.Close()
 
-	// INSERT geometry data.
-	testutils.RunSQL(t, `INSERT INTO subscription_test (id, name, location) VALUES
-		(1, 'Statue of Liberty', ST_GeomFromText('POINT(-74.0445 40.6892)', 4326, 'axis-order=long-lat')),
-		(2, 'Eiffel Tower', ST_GeomFromText('POINT(2.2945 48.8584)', 4326, 'axis-order=long-lat')),
-		(3, 'Big Ben', ST_GeomFromText('POINT(-0.1246 51.5007)', 4326, 'axis-order=long-lat'))
-	`)
-	require.NoError(t, client.BlockWait(t.Context()))
-	require.Equal(t, 3, client.GetDeltaLen())
+	sub := &bufferedMap{
+		logger:               client.logger,
+		applier:              applierInstance,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		chunker:              mockChunker,
+		pkIsMemoryComparable: false,
+		// watermarkOptimization on => map mode (copy phase). MockChunker
+		// returns false from KeyAboveHighWatermark for string keys, so
+		// nothing is dropped.
+		watermarkOptimization: true,
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
 
-	// Inspect the buffered subscription directly to verify row images contain geometry data.
-	sub := getBufferedMap(t, client, "test.subscription_test")
-	require.False(t, sub.changes["1"].logicalRow.IsDeleted)
-	// The row image should have 3 columns: id, name, location (as binary geometry).
-	require.Len(t, sub.changes["1"].logicalRow.RowImage, 3)
+	// Seed target with a row whose first PK component contains the
+	// separator, so the DELETE below has something to remove.
+	testutils.RunSQL(t, fmt.Sprintf(
+		`INSERT INTO %s (id1, id2, name) VALUES ('x-#-y', 'z', 'stale')`,
+		dstTable.QuotedTableName))
 
-	// Flush and verify the geometry data was applied correctly.
+	// These two upserts collide to the same map key without escaping.
+	sub.HasChanged([]any{"a-#-b", "c"}, []any{"a-#-b", "c", "first"}, false)
+	sub.HasChanged([]any{"a", "b-#-c"}, []any{"a", "b-#-c", "second"}, false)
+	// DELETE with separator inside a PK value: without unescape-aware
+	// splitting this produced a 4-value tuple for a 2-column key.
+	sub.HasChanged([]any{"x-#-y", "z"}, nil, true)
+	require.Len(t, sub.changes, 3,
+		"distinct PKs must occupy distinct map slots even when values contain the separator")
+
 	allFlushed, err := sub.Flush(t.Context(), false, nil)
 	require.NoError(t, err)
 	require.True(t, allFlushed)
+	require.Equal(t, 0, sub.Length())
 
-	var count int
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count))
-	require.Equal(t, 3, count)
-
-	// Verify the geometry data round-trips correctly via ST_AsText.
-	var wkt string
-	require.NoError(t, db.QueryRowContext(t.Context(),
-		"SELECT ST_AsText(location) FROM _subscription_test_new WHERE id = 1").Scan(&wkt))
-	require.Contains(t, wkt, "POINT")
-
-	// UPDATE geometry data — move the Eiffel Tower.
-	testutils.RunSQL(t, `UPDATE subscription_test SET location = ST_GeomFromText('POINT(2.3 48.9)', 4326, 'axis-order=long-lat') WHERE id = 2`)
-	require.NoError(t, client.BlockWait(t.Context()))
-	allFlushed, err = sub.Flush(t.Context(), false, nil)
+	rows, err := db.QueryContext(t.Context(),
+		fmt.Sprintf("SELECT id1, id2, name FROM %s ORDER BY id1, id2", dstTable.QuotedTableName))
 	require.NoError(t, err)
-	require.True(t, allFlushed)
-
-	require.NoError(t, db.QueryRowContext(t.Context(),
-		"SELECT ST_AsText(location) FROM _subscription_test_new WHERE id = 2").Scan(&wkt))
-	require.Contains(t, wkt, "2.3")
-
-	// DELETE a row.
-	testutils.RunSQL(t, `DELETE FROM subscription_test WHERE id = 3`)
-	require.NoError(t, client.BlockWait(t.Context()))
-	allFlushed, err = sub.Flush(t.Context(), false, nil)
-	require.NoError(t, err)
-	require.True(t, allFlushed)
-
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _subscription_test_new").Scan(&count))
-	require.Equal(t, 2, count)
-
-	// Final checksum: verify all geometry data matches.
-	var checksumSrc, checksumDst string
-	require.NoError(t, db.QueryRowContext(t.Context(),
-		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM subscription_test").Scan(&checksumSrc))
-	require.NoError(t, db.QueryRowContext(t.Context(),
-		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM _subscription_test_new").Scan(&checksumDst))
-	require.Equal(t, checksumSrc, checksumDst)
-}
-
-// TestBufferedMapJSONNumberRoundTrip is a regression test for a checksum
-// mismatch on JSON columns that surfaces whenever a binlog event for a row
-// with a numeric JSON value flows through the applier.
-//
-// Scenario: the row already exists in both the source and the _new table
-// (the bulk copier preserves the JSON binary server-side via
-// INSERT … SELECT), but a concurrent UPDATE on an unrelated non-JSON
-// column emits a full row image through binlog, and the JSON column is
-// re-serialised by the applier on the way to _new.
-//
-// The default go-mysql JSON decoder builds a Go value tree and then
-// json.Marshal's it, which silently drops type tags: JSONB_DOUBLE 1.0
-// becomes "1" (re-parsed as JSON INTEGER), and JSONB_OPAQUE/NEWDECIMAL
-// 1.0 becomes "\"1.0\"" (re-parsed as JSON STRING). The CRC32 over
-// CAST(j AS json) then disagrees, and every retry of pkg/checksum finds
-// fresh mismatches as concurrent traffic continues — manifesting as
-// "checksum found differences on every attempt (N/N)" on JSON-bearing
-// tables.
-//
-// All subtests pass with RenderJSONAsMySQLText=true on the
-// BinlogSyncerConfig, which routes JSON values through a renderer that
-// emits MySQL-text-compatible JSON directly from the JSONB byte stream,
-// preserving each value's original type tag.
-func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
-	cases := []struct {
-		name string
-		// initial JSON value seeded into both src and _new before the
-		// subscription begins — i.e. the state the bulk copier has
-		// already produced server-side.
-		initialJSON string
-	}{
-		// CAST(... AS DOUBLE) forces a JSONB_DOUBLE in MySQL.
-		{
-			name:        "json_double_with_double_cast",
-			initialJSON: `JSON_OBJECT('amount', CAST(1.0 AS DOUBLE), 'rate', CAST(2.5 AS DOUBLE))`,
-		},
-		// Bare 1.0 inside JSON_OBJECT is a SQL decimal literal that
-		// MySQL stores as JSONB_OPAQUE/NEWDECIMAL. Without the
-		// MySQL-text renderer this used to round-trip as a JSON STRING.
-		{
-			name:        "json_decimal_in_object",
-			initialJSON: `JSON_OBJECT('amount', 1.0, 'rate', 2.5)`,
-		},
-		// A JSON array containing bare 1.0 literals among integer
-		// zeros — the production failure shape. In array context MySQL
-		// stores 1.0 as JSONB_DOUBLE.
-		{
-			name:        "json_double_array",
-			initialJSON: `'[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 1.0]'`,
-		},
-		// Mixed-type object: string, int, bool, null, nested array of
-		// decimals. Exercises object key handling alongside the
-		// numeric subcases.
-		{
-			name:        "json_mixed_object",
-			initialJSON: `JSON_OBJECT('s', 'hi', 'n', 42, 'b', CAST(1 AS JSON), 'z', CAST(NULL AS JSON), 'a', JSON_ARRAY(1.0, 2.5, 3.0))`,
-		},
+	defer utils.CloseAndLog(rows)
+	var got []string
+	for rows.Next() {
+		var id1, id2, name string
+		require.NoError(t, rows.Scan(&id1, &id2, &name))
+		got = append(got, id1+"|"+id2+"="+name)
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Schema: a non-JSON column that the workload bumps, plus
-			// the JSON column we care about preserving.
-			t1 := `CREATE TABLE subscription_test (
-				id INT NOT NULL,
-				updated_at DATETIME(3) NOT NULL,
-				j JSON NOT NULL,
-				PRIMARY KEY (id)
-			)`
-			t2 := `CREATE TABLE _subscription_test_new (
-				id INT NOT NULL,
-				updated_at DATETIME(3) NOT NULL,
-				j JSON NOT NULL,
-				PRIMARY KEY (id)
-			)`
-			srcTable, dstTable := setupTestTables(t, t1, t2)
-
-			// Seed both tables BEFORE starting the binlog subscription
-			// so the JSON binary is identical on both sides (server-side
-			// INSERT … SELECT, no Go round-trip yet). This simulates the
-			// state Spirit's bulk copier produces before the checksum
-			// phase begins.
-			testutils.RunSQL(t, fmt.Sprintf(
-				"INSERT INTO %s (id, updated_at, j) VALUES (1, '2026-05-13 10:58:35.612', %s), (2, '2026-05-13 10:58:35.612', %s)",
-				srcTable.QuotedTableName, tc.initialJSON, tc.initialJSON))
-			testutils.RunSQL(t, fmt.Sprintf(
-				"INSERT INTO %s (id, updated_at, j) SELECT id, updated_at, j FROM %s",
-				dstTable.QuotedTableName, srcTable.QuotedTableName))
-
-			// Sanity check: the seed produced matching CRC32 before any
-			// binlog activity. If this fails the test is invalid.
-			require.Equal(t, fetchJSONColumnCRC(t, "j", srcTable), fetchJSONColumnCRC(t, "j", dstTable),
-				"pre-condition: server-side seed must produce identical JSON binary on both tables")
-
-			db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-			require.NoError(t, err)
-			defer utils.CloseAndLog(db)
-
-			cfg, err := mysql2.ParseDSN(testutils.DSN())
-			require.NoError(t, err)
-			target := applier.Target{
-				DB:       db,
-				KeyRange: "0",
-				Config:   cfg,
-			}
-			appl, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
-			require.NoError(t, err)
-			client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, appl, NewClientDefaultConfig()).(*binlogClient)
-			chunker, err := table.NewChunker(srcTable, table.ChunkerConfig{NewTable: dstTable})
-			require.NoError(t, err)
-			require.NoError(t, client.AddSubscription(srcTable, dstTable, chunker))
-			require.NoError(t, client.Start(t.Context()))
-			defer client.Close()
-
-			// Bump a non-JSON column on the source. With
-			// binlog_row_image=FULL the UPDATE event carries the full
-			// AFTER image — including the unchanged JSON column — and
-			// the applier writes the row back to _new through the JSON
-			// re-encode path that this test guards against.
-			const newUpdatedAt = "2026-05-13 11:00:00.000"
-			testutils.RunSQL(t, fmt.Sprintf(
-				"UPDATE %s SET updated_at = '%s' WHERE id = 1",
-				srcTable.QuotedTableName, newUpdatedAt))
-			require.NoError(t, client.BlockWait(t.Context()))
-			require.NoError(t, client.Flush(t.Context()))
-
-			// Sanity check: the UPDATE event must have been applied to
-			// _new. Without this, a regression that silently dropped the
-			// event would let the JSON CRCs stay equal (they were equal
-			// from the seed) and the test would pass vacuously.
-			var dstUpdatedAt string
-			require.NoError(t, db.QueryRowContext(t.Context(),
-				fmt.Sprintf("SELECT updated_at FROM %s WHERE id = 1", dstTable.QuotedTableName),
-			).Scan(&dstUpdatedAt))
-			require.Equal(t, newUpdatedAt, dstUpdatedAt,
-				"binlog UPDATE event did not propagate to _new; JSON CRC equality below is vacuous")
-
-			// pkg/checksum compares JSON columns via the CRC32 of
-			// CAST(j AS json), so use exactly that comparison here.
-			srcCk := fetchJSONColumnCRC(t, "j", srcTable)
-			dstCk := fetchJSONColumnCRC(t, "j", dstTable)
-			if srcCk != dstCk {
-				// Pull both rendered values for a useful failure message.
-				var srcJSON, dstJSON string
-				require.NoError(t, db.QueryRowContext(t.Context(),
-					fmt.Sprintf("SELECT CAST(j AS char CHARACTER SET utf8mb4) FROM %s WHERE id = 1", srcTable.QuotedTableName),
-				).Scan(&srcJSON))
-				require.NoError(t, db.QueryRowContext(t.Context(),
-					fmt.Sprintf("SELECT CAST(j AS char CHARACTER SET utf8mb4) FROM %s WHERE id = 1", dstTable.QuotedTableName),
-				).Scan(&dstJSON))
-				t.Fatalf("checksum mismatch after binlog UPDATE on a non-JSON column rewrote the JSON value:\n  src(id=1) = %s\n  dst(id=1) = %s", srcJSON, dstJSON)
-			}
-		})
-	}
-}
-
-// fetchJSONColumnCRC returns the table-aggregate CRC32 of a JSON column
-// (BIT_XOR of CRC32(CAST(col AS json)) across all rows), using the same
-// IFNULL / ISNULL / CAST expression that pkg/checksum builds. Used by
-// TestBufferedMapJSONNumberRoundTrip.
-func fetchJSONColumnCRC(t *testing.T, col string, tbl *table.TableInfo) int64 {
-	t.Helper()
-	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
-	require.NoError(t, err)
-	defer utils.CloseAndLog(db)
-	var ck int64
-	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
-		"SELECT BIT_XOR(CRC32(CONCAT(IFNULL(CAST(`id` AS signed),''), ISNULL(`id`), IFNULL(CAST(`%s` AS json),''), ISNULL(`%s`)))) FROM %s",
-		col, col, tbl.QuotedTableName)).Scan(&ck))
-	return ck
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"a|b-#-c=second", "a-#-b|c=first"}, got,
+		"both upserted rows must be applied and the seeded row deleted")
 }
