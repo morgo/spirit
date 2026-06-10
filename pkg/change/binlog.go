@@ -315,6 +315,16 @@ func (c *binlogClient) Start(ctx context.Context) error {
 		// See replication/json_mysql_text.go in the go-mysql fork for
 		// the renderer.
 		RenderJSONAsMySQLText: true,
+		// Decode TIMESTAMP values into UTC wall-clock strings. go-mysql
+		// stores the epoch via time.Unix (local time) and, when this is
+		// left nil, formats it in the spirit *process's* local timezone.
+		// Every connection the applier uses is pinned to time_zone='+00:00'
+		// (see dbconn), so a local-time string written back over a UTC
+		// session shifts the stored value by the process's UTC offset —
+		// silently corrupting TIMESTAMP columns on any host whose TZ isn't
+		// UTC. Pinning the decoder to UTC keeps the binlog replay path
+		// consistent with the UTC-pinned copier connections.
+		TimestampStringLocation: time.UTC,
 	}
 
 	// Apply TLS configuration using the same infrastructure as main database connections
