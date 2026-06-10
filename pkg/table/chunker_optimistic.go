@@ -129,7 +129,7 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 	// If there is a minimum value, we attempt to apply
 	// the minimum value optimization.
 	if t.chunkPtr.IsNil() {
-		t.chunkPtr = t.Ti.minValue
+		t.chunkPtr = t.Ti.MinValue()
 		return &Chunk{
 			ChunkSize:  t.chunkSize,
 			Key:        t.Ti.KeyColumns,
@@ -148,7 +148,7 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 	// need updating, in which case we synchronously refresh them.
 	// This helps reduce the risk of a very large unbounded
 	// chunk from a table that is actively growing.
-	atOrPastMax, err := t.chunkPtr.GreaterThanOrEqual(t.Ti.maxValue)
+	atOrPastMax, err := t.chunkPtr.GreaterThanOrEqual(t.Ti.MaxValue())
 	if err != nil {
 		return nil, fmt.Errorf("comparing chunkPtr to maxValue: %w", err)
 	}
@@ -158,7 +158,7 @@ func (t *chunkerOptimistic) Next() (*Chunk, error) {
 			return nil, err
 		}
 		// statistics may have raised maxValue; re-check.
-		atOrPastMax, err = t.chunkPtr.GreaterThanOrEqual(t.Ti.maxValue)
+		atOrPastMax, err = t.chunkPtr.GreaterThanOrEqual(t.Ti.MaxValue())
 		if err != nil {
 			return nil, fmt.Errorf("comparing chunkPtr to maxValue: %w", err)
 		}
@@ -312,12 +312,7 @@ func (t *chunkerOptimistic) Reset() error {
 
 	// Make sure min/max value are always specified
 	// To simplify the code in NextChunk funcs.
-	if t.Ti.minValue.IsNil() {
-		t.Ti.minValue = t.chunkPtr.MinValue()
-	}
-	if t.Ti.maxValue.IsNil() {
-		t.Ti.maxValue = t.chunkPtr.MaxValue()
-	}
+	t.Ti.setBoundsIfUnset(t.chunkPtr.MinValue(), t.chunkPtr.MaxValue())
 
 	return nil
 }
@@ -425,12 +420,7 @@ func (t *chunkerOptimistic) open() (err error) {
 
 	// Make sure min/max value are always specified
 	// To simplify the code in NextChunk funcs.
-	if t.Ti.minValue.IsNil() {
-		t.Ti.minValue = t.chunkPtr.MinValue()
-	}
-	if t.Ti.maxValue.IsNil() {
-		t.Ti.maxValue = t.chunkPtr.MaxValue()
-	}
+	t.Ti.setBoundsIfUnset(t.chunkPtr.MinValue(), t.chunkPtr.MaxValue())
 	return nil
 }
 
@@ -446,7 +436,7 @@ func (t *chunkerOptimistic) IsRead() bool {
 func (t *chunkerOptimistic) Progress() (uint64, uint64, uint64) {
 	maxValue, err := strconv.ParseUint(t.Ti.MaxValue().String(), 10, 64) // autoInc max
 	if err != nil {
-		maxValue = t.Ti.EstimatedRows // should not be needed.
+		maxValue = atomic.LoadUint64(&t.Ti.EstimatedRows) // should not be needed.
 	}
 	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), maxValue
 }

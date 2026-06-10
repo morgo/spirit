@@ -154,13 +154,19 @@ func (t *TableInfo) setRowEstimate(ctx context.Context) error {
 			return err
 		}
 	}
-	err := t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", t.TableName).Scan(&t.EstimatedRows)
+	// EstimatedRows is read without statisticsLock by the chunkers' Progress()
+	// (chunker_composite.go / chunker_optimistic.go), so it is accessed
+	// atomically rather than under the lock. Scan into a local and publish with
+	// an atomic store.
+	var estimatedRows uint64
+	err := t.db.QueryRowContext(ctx, "SELECT IFNULL(table_rows,0) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", t.TableName).Scan(&estimatedRows)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("table %s.%s does not exist", t.SchemaName, t.TableName)
 		}
 		return err
 	}
+	atomic.StoreUint64(&t.EstimatedRows, estimatedRows)
 	return nil
 }
 
@@ -394,15 +400,19 @@ func (t *TableInfo) AutoUpdateStatistics(ctx context.Context, interval time.Dura
 				logger.Error("error updating table statistics", "error", err)
 			}
 			logger.Info("table statistics updated",
-				"estimated-rows", t.EstimatedRows,
+				"estimated-rows", atomic.LoadUint64(&t.EstimatedRows),
 				"pk[0].max-value", t.MaxValue())
 		}
 	}
 }
 
-// statisticsNeedUpdating returns true if the statistics are considered order than a threshold.
+// statisticsNeedUpdating returns true if the statistics are considered older than a threshold.
 // this is useful for the chunker to synchronously check as it approaches the end of the table.
+// Reads statisticsLastUpdated under statisticsLock since updateTableStatistics
+// (driven by the background AutoUpdateStatistics goroutine) writes it.
 func (t *TableInfo) statisticsNeedUpdating() bool {
+	t.statisticsLock.Lock()
+	defer t.statisticsLock.Unlock()
 	threshold := time.Now().Add(-lastChunkStatisticsThreshold)
 	return t.statisticsLastUpdated.Before(threshold)
 }
@@ -428,6 +438,29 @@ func (t *TableInfo) MaxValue() Datum {
 	t.statisticsLock.Lock()
 	defer t.statisticsLock.Unlock()
 	return t.maxValue
+}
+
+// MinValue as a datum
+func (t *TableInfo) MinValue() Datum {
+	t.statisticsLock.Lock()
+	defer t.statisticsLock.Unlock()
+	return t.minValue
+}
+
+// setBoundsIfUnset populates min/max from a chunker's observed bounds, but only
+// for whichever is still unset (an empty or not-yet-analyzed table). Guarded by
+// statisticsLock so it is safe against a concurrent AutoUpdateStatistics, which
+// writes the same fields via setMinMax. The IsNil checks and assignments must
+// happen together under the lock so a stats refresh can't land between them.
+func (t *TableInfo) setBoundsIfUnset(minVal, maxVal Datum) {
+	t.statisticsLock.Lock()
+	defer t.statisticsLock.Unlock()
+	if t.minValue.IsNil() {
+		t.minValue = minVal
+	}
+	if t.maxValue.IsNil() {
+		t.maxValue = maxVal
+	}
 }
 
 func (t *TableInfo) wrapCastType(col string) (string, error) {
