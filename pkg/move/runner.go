@@ -1021,16 +1021,17 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	r.logger.Info("Running ANALYZE TABLE")
 	for _, target := range r.targets {
 		for _, tbl := range r.sourceTables {
-			// Qualify with the *target's* schema, not the source's. The move is
-			// otherwise schema-name-agnostic (the documented default is
-			// /src -> /dest), so addressing the table with tbl.SchemaName here
-			// pointed ANALYZE at the source schema. On a real cross-cluster
-			// target that table does not exist, and because ANALYZE reports a
-			// missing table as an *error row in the result set* (not a statement
-			// error) the no-op was invisible — the target entered cutover with
-			// stale statistics. See analyzeTable for the result-row check that
-			// makes such a silent no-op impossible going forward.
-			if err := r.analyzeTable(ctx, target.DB, target.Config.DBName, tbl.TableName); err != nil {
+			// Address the table UNQUALIFIED on the target's own connection. The
+			// previous code qualified ANALYZE with tbl.SchemaName (the *source*
+			// schema), which on a real cross-cluster target points at a schema
+			// that does not exist there; because ANALYZE reports a missing table
+			// as an *error row in the result set* (not a statement error) the
+			// no-op was invisible and the target entered cutover with stale
+			// statistics. Running it unqualified on target.DB matches the rest of
+			// the schema-name-agnostic move path and is also correct through a
+			// Vitess vtgate (where the logical schema name need not match the
+			// physical one). See analyzeTable for the result-row check.
+			if err := r.analyzeTable(ctx, target.DB, tbl.TableName); err != nil {
 				return err
 			}
 		}
@@ -1097,8 +1098,17 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 // failure), not when Msg_text differs from "OK". A missing table, for example,
 // reports an "Error" row followed by a trailing status row ("Operation
 // failed"); branching on Msg_type still detects it via the "Error" row.
-func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, schemaName, tableName string) error {
-	stmt, err := sqlescape.EscapeSQL("ANALYZE TABLE %n.%n", schemaName, tableName)
+// analyzeTable runs ANALYZE TABLE for tableName on db. The table is named
+// WITHOUT a schema qualifier on purpose: db is already connected to the
+// target's schema, and the rest of the move path is schema-name-agnostic
+// (it addresses tables unqualified against each connection's default DB).
+// Qualifying would also be wrong through a Vitess vtgate, where the logical
+// keyspace/schema name need not match the physical schema the connection
+// lands on. It inspects the result set so a failure surfaces as an error
+// rather than the silent no-op ANALYZE returns for a missing/unreachable
+// table.
+func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, tableName string) error {
+	stmt, err := sqlescape.EscapeSQL("ANALYZE TABLE %n", tableName)
 	if err != nil {
 		return err
 	}
@@ -1118,11 +1128,10 @@ func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, schemaName, table
 		// Msg_text is not "OK" (e.g. "Table is already up to date"); accept
 		// them, logging anything non-OK as a warning for visibility.
 		if strings.EqualFold(msgType, "error") {
-			return fmt.Errorf("ANALYZE TABLE %s.%s failed: %s: %s", schemaName, tableName, msgType, msgText)
+			return fmt.Errorf("ANALYZE TABLE %s failed: %s: %s", tableName, msgType, msgText)
 		}
 		if !strings.EqualFold(msgText, "OK") && r.logger != nil {
 			r.logger.Warn("ANALYZE TABLE reported a non-OK message",
-				"schema", schemaName,
 				"table", tableName,
 				"msg_type", msgType,
 				"msg_text", msgText,

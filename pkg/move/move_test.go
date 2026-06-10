@@ -389,9 +389,9 @@ func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 	// Copy the rows so the target table is created and populated.
 	require.NoError(t, r.copier.Run(ctx))
 
-	// Delete the *target* schema's stats row. A correct ANALYZE (qualified with
-	// the target schema) repopulates it; the buggy ANALYZE (qualified with the
-	// source schema) touches w3c_src.t1 instead and leaves this missing.
+	// Delete the *target* schema's stats row. A correct ANALYZE (run unqualified
+	// on the target's own connection) repopulates it; the buggy ANALYZE (qualified
+	// with the source schema) touched w3c_src.t1 instead and left this missing.
 	testutils.RunSQL(t, `DELETE FROM mysql.innodb_table_stats WHERE database_name = 'w3c_dest' AND table_name = 't1'`)
 	var beforeCount int
 	require.NoError(t, targetDB.QueryRowContext(ctx,
@@ -417,8 +417,11 @@ func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
 	testutils.RunSQL(t, `CREATE TABLE w3c_analyze.present (id INT PRIMARY KEY)`)
 	t.Cleanup(func() { testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_analyze`) })
 
+	// analyzeTable addresses the table UNQUALIFIED, so the connection must
+	// default to the target schema (as the real target.DB does) — connect with
+	// w3c_analyze as the default database rather than the usual `test`.
 	dbConfig := dbconn.NewDBConfig()
-	db, err := dbconn.New(testutils.DSN(), dbConfig)
+	db, err := dbconn.New(testutils.DSNForDatabase("w3c_analyze"), dbConfig)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
@@ -427,19 +430,19 @@ func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
 	r := &Runner{logger: slog.Default()}
 
 	// A freshly-created table analyzes cleanly (Msg_type "status").
-	require.NoError(t, r.analyzeTable(t.Context(), db, "w3c_analyze", "present"))
+	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
 
 	// Re-analyzing an already-analyzed table must also succeed. Depending on the
 	// MySQL version/engine this may report a non-"OK" status row (e.g. "Table is
 	// already up to date"); analyzeTable must treat any non-"Error" Msg_type as
 	// success and never abort on a non-OK Msg_text.
-	require.NoError(t, r.analyzeTable(t.Context(), db, "w3c_analyze", "present"))
+	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
 
 	// A missing table reports an Error row in the result set; analyzeTable must
 	// turn that into a returned error instead of a silent no-op. (MySQL emits an
 	// "Error" row followed by a trailing "status: Operation failed" row; the
 	// error must be detected via the "Error" Msg_type, not via the non-OK text.)
-	err = r.analyzeTable(t.Context(), db, "w3c_analyze", "does_not_exist")
+	err = r.analyzeTable(t.Context(), db, "does_not_exist")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ANALYZE TABLE")
 }
