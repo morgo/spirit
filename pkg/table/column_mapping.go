@@ -37,36 +37,48 @@ func NewColumnMapping(source, target *TableInfo, renames map[string]string) *Col
 }
 
 // computeIntersection calculates the column intersection between source and target.
+// MySQL column identifiers are case-insensitive, so all matching is performed
+// on lower-cased names: the rename map comes from the user's ALTER statement
+// and may use different case than the columns were declared with. The returned
+// slices always use the declared (information_schema) case so that downstream
+// exact-name lookups (e.g. column type maps) succeed.
 func (m *ColumnMapping) computeIntersection() ([]string, []string) {
-	// Build a set of target column names for fast lookup
-	t2Set := make(map[string]struct{}, len(m.targetTable.NonGeneratedColumns))
+	// Map of lower-cased target column name → declared target column name.
+	t2Set := make(map[string]string, len(m.targetTable.NonGeneratedColumns))
 	for _, col := range m.targetTable.NonGeneratedColumns {
-		t2Set[col] = struct{}{}
+		t2Set[strings.ToLower(col)] = col
+	}
+
+	// Lower-cased copy of the rename map (old→new).
+	renames := make(map[string]string, len(m.renames))
+	for oldName, newName := range m.renames {
+		renames[strings.ToLower(oldName)] = strings.ToLower(newName)
 	}
 
 	// Build a set of target columns that are "claimed" by renames.
 	// These cannot be used for identity matching by other source columns.
-	claimedTargets := make(map[string]struct{}, len(m.renames))
-	for _, newName := range m.renames {
+	claimedTargets := make(map[string]struct{}, len(renames))
+	for _, newName := range renames {
 		claimedTargets[newName] = struct{}{}
 	}
 
 	var srcCols, tgtCols []string
 	for _, srcCol := range m.sourceTable.NonGeneratedColumns {
+		srcLower := strings.ToLower(srcCol)
 		// Check if this column was renamed
-		if newName, ok := m.renames[srcCol]; ok {
-			if _, exists := t2Set[newName]; exists {
+		if newName, ok := renames[srcLower]; ok {
+			if declared, exists := t2Set[newName]; exists {
 				srcCols = append(srcCols, srcCol)
-				tgtCols = append(tgtCols, newName)
+				tgtCols = append(tgtCols, declared)
 				continue
 			}
 		}
 		// Identity match (same name in both tables), but only if the target
 		// column is not already claimed by a rename from another source column.
-		if _, exists := t2Set[srcCol]; exists {
-			if _, claimed := claimedTargets[srcCol]; !claimed {
+		if declared, exists := t2Set[srcLower]; exists {
+			if _, claimed := claimedTargets[srcLower]; !claimed {
 				srcCols = append(srcCols, srcCol)
-				tgtCols = append(tgtCols, srcCol)
+				tgtCols = append(tgtCols, declared)
 			}
 		}
 	}
