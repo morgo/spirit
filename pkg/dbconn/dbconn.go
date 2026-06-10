@@ -29,13 +29,15 @@ const (
 	// inside real server error packets.
 	errCannotConnect = 2003
 	errConnLost      = 2013
-	// errReadOnly (1290) and errReadOnlyMode (1836) are usually consumed by
-	// go-sql-driver when RejectReadOnly is enabled (the spirit default) and
-	// converted to driver.ErrBadConn. They are kept here for the case where
-	// RejectReadOnly is disabled, e.g. the move runner disables it for
-	// read-only sources (see DBConfig.RejectReadOnly).
-	errReadOnly         = 1290
-	errReadOnlyMode     = 1836
+	// errReadOnly (1290), errReadOnlyTransaction (1792) and errReadOnlyMode
+	// (1836) are usually consumed by go-sql-driver when RejectReadOnly is
+	// enabled (the spirit default) and converted to driver.ErrBadConn. They
+	// are kept here for the case where RejectReadOnly is disabled, e.g. the
+	// move runner disables it for read-only sources (see
+	// DBConfig.RejectReadOnly).
+	errReadOnly            = 1290
+	errReadOnlyTransaction = 1792 // ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION
+	errReadOnlyMode        = 1836
 	errQueryInterrupted = 1317 // ER_QUERY_INTERRUPTED: query was killed (e.g. KILL QUERY)
 	errCapacityExceeded = 3170
 	errFoundDuppKey     = 1062 // yes I know there's a typo
@@ -93,10 +95,12 @@ func canRetryError(err error) bool {
 	// the connection died mid-statement (e.g. a network blip, the connection
 	// was killed, or an Aurora failover with RejectReadOnly enabled — the
 	// driver converts read-only errors 1290/1792/1836 into driver.ErrBadConn
-	// and discards the connection). Both are safe to retry here: every
-	// statement run through RetryableTransaction is idempotent (INSERT
-	// IGNORE / REPLACE / DELETE), and each retry starts a fresh transaction
-	// — database/sql hands BeginTx a new connection if the old one is dead.
+	// and discards the connection). Retrying is safe because each retry starts
+	// a fresh transaction — database/sql hands BeginTx a new connection if the
+	// old one is dead. Note this function does not itself enforce idempotency;
+	// callers are responsible for routing only idempotent statements through
+	// RetryableTransaction. Spirit's own callers do so (INSERT IGNORE /
+	// REPLACE / DELETE by PK), but the function does not verify it.
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) {
 		return true
 	}
@@ -106,7 +110,8 @@ func canRetryError(err error) bool {
 	}
 	switch val.Number {
 	case errLockWaitTimeout, errDeadlock, errCannotConnect,
-		errConnLost, errReadOnly, errReadOnlyMode, errQueryInterrupted:
+		errConnLost, errReadOnly, errReadOnlyTransaction, errReadOnlyMode,
+		errQueryInterrupted:
 		return true
 	default:
 		return false

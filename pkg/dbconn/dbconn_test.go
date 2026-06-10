@@ -125,6 +125,7 @@ func TestCanRetryError(t *testing.T) {
 	require.True(t, canRetryError(&mysql.MySQLError{Number: 1213})) // deadlock
 	require.True(t, canRetryError(&mysql.MySQLError{Number: 1317})) // query interrupted (killed query)
 	require.True(t, canRetryError(&mysql.MySQLError{Number: 1290})) // read only (only seen if RejectReadOnly is disabled)
+	require.True(t, canRetryError(&mysql.MySQLError{Number: 1792})) // can't execute in read-only transaction (only seen if RejectReadOnly is disabled)
 	require.True(t, canRetryError(&mysql.MySQLError{Number: 1836})) // read only mode (only seen if RejectReadOnly is disabled)
 
 	// Connection-level failures from go-sql-driver are plain errors, not
