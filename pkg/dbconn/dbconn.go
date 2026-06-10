@@ -38,9 +38,9 @@ const (
 	errReadOnly            = 1290
 	errReadOnlyTransaction = 1792 // ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION
 	errReadOnlyMode        = 1836
-	errQueryInterrupted = 1317 // ER_QUERY_INTERRUPTED: query was killed (e.g. KILL QUERY)
-	errCapacityExceeded = 3170
-	errFoundDuppKey     = 1062 // yes I know there's a typo
+	errQueryInterrupted    = 1317 // ER_QUERY_INTERRUPTED: query was killed (e.g. KILL QUERY)
+	errCapacityExceeded    = 3170
+	errFoundDuppKey        = 1062 // yes I know there's a typo
 )
 
 type DBConfig struct {
