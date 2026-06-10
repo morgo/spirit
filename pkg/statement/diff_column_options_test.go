@@ -4,11 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/testutils"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,23 +134,35 @@ func TestDiffColumnAttributeOptions(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, g POINT NOT NULL SRID 4326)",
 			expected: "",
 		},
-		// Column-level CHECK constraints
+		// Column-level CHECK constraints. The parser hoists these into
+		// table-level constraints (mirroring MySQL's SHOW CREATE TABLE), so the
+		// diff emits ADD/DROP CONSTRAINT — not an inline MODIFY COLUMN CHECK.
+		// Emitting inline would make MySQL re-hoist the CHECK under a new
+		// auto-name, breaking re-diff convergence (see #930).
 		{
 			name:     "ColumnCheckAdded",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT CHECK (b > 0))",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) NULL CHECK (`b`>0)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `t1_chk_1` CHECK (`b`>0)",
 		},
 		{
 			name:     "ColumnCheckChanged",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT CHECK (b > 0))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT CHECK (b > 5))",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) NULL CHECK (`b`>5)",
+			expected: "ALTER TABLE `t1` DROP CHECK `t1_chk_1`, ADD CONSTRAINT `t1_chk_1` CHECK (`b`>5)",
 		},
 		{
 			name:     "ColumnCheckNoChange",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT CHECK (b > 0))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT CHECK (b > 0))",
+			expected: "",
+		},
+		{
+			// A column-level CHECK and the equivalent table-level CHECK parse to
+			// the same canonical (table-level) constraint, so no diff.
+			name:     "ColumnCheckVsTableCheckNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT CHECK (b > 0))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, CONSTRAINT t1_chk_1 CHECK (b > 0))",
 			expected: "",
 		},
 		// ADD COLUMN must carry the attributes too
@@ -237,35 +248,56 @@ func TestParseColumnAttributeOptions(t *testing.T) {
 
 	c := ct.Columns.ByName("c")
 	require.NotNil(t, c)
-	require.NotNil(t, c.Check)
-	require.Equal(t, "`c`>0", *c.Check)
+	// Column-level CHECK is hoisted into a table-level constraint (mirroring
+	// MySQL), so Column.Check is cleared and the constraint appears in
+	// ct.Constraints with MySQL's auto-generated name.
+	require.Nil(t, c.Check)
 	require.Empty(t, c.Options)
+
+	var chk *Constraint
+	for i := range ct.Constraints {
+		if ct.Constraints[i].Type == "CHECK" {
+			chk = &ct.Constraints[i]
+		}
+	}
+	require.NotNil(t, chk, "column-level CHECK should be hoisted to a table-level constraint")
+	require.Equal(t, "t1_chk_1", chk.Name)
+	require.NotNil(t, chk.Expression)
+	require.Equal(t, "`c`>0", *chk.Expression)
 }
 
 // openScratchDB creates (or recreates) the scratch database test_w1e and
 // returns a connection scoped to it. The database is dropped on cleanup.
+//
+// The DSN is parsed with mysql.ParseDSN and only the database name (DBName) is
+// swapped, so any query parameters in MYSQL_DSN (tls, parseTime, timeout, etc.)
+// are preserved on both the root connection and the scoped connection.
 func openScratchDB(t *testing.T) *sql.DB {
 	t.Helper()
-	baseDSN := testutils.DSN()
-	lastSlash := strings.LastIndex(baseDSN, "/")
-	require.GreaterOrEqual(t, lastSlash, 0, "could not parse DSN: %s", baseDSN)
-	rootDSN := baseDSN[:lastSlash+1]
+	const scratchDB = "test_w1e"
 
-	rootDB, err := sql.Open("mysql", rootDSN)
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err, "could not parse DSN")
+
+	rootCfg := cfg.Clone()
+	rootCfg.DBName = "" // connect without selecting a database
+	rootDB, err := sql.Open("mysql", rootCfg.FormatDSN())
 	require.NoError(t, err)
 	defer func() {
 		_ = rootDB.Close()
 	}()
-	_, err = rootDB.ExecContext(t.Context(), "DROP DATABASE IF EXISTS test_w1e")
+	_, err = rootDB.ExecContext(t.Context(), "DROP DATABASE IF EXISTS "+scratchDB)
 	require.NoError(t, err)
-	_, err = rootDB.ExecContext(t.Context(), "CREATE DATABASE test_w1e")
+	_, err = rootDB.ExecContext(t.Context(), "CREATE DATABASE "+scratchDB)
 	require.NoError(t, err)
 
-	db, err := sql.Open("mysql", rootDSN+"test_w1e")
+	scopedCfg := cfg.Clone()
+	scopedCfg.DBName = scratchDB
+	db, err := sql.Open("mysql", scopedCfg.FormatDSN())
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// t.Context() is already canceled during cleanup, so use Background.
-		_, _ = db.ExecContext(context.Background(), "DROP DATABASE IF EXISTS test_w1e")
+		_, _ = db.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+scratchDB)
 		_ = db.Close()
 	})
 	return db
@@ -451,18 +483,75 @@ func TestColumnAttributeOptionsMySQL(t *testing.T) {
 		)`
 		stmts := diffLiveTable(t, db, "chk_t", target)
 		require.Len(t, stmts, 1)
+		// The column-level CHECK is hoisted to a table-level constraint, so the
+		// emitted DDL is an ADD CONSTRAINT (not an inline MODIFY COLUMN), and it
+		// must not DROP anything on a first apply.
+		require.Contains(t, stmts[0].Statement, "ADD CONSTRAINT")
 		require.Contains(t, stmts[0].Statement, "CHECK (`b`>0)")
+		require.NotContains(t, stmts[0].Statement, "DROP CHECK",
+			"adding a CHECK must never drop an existing constraint")
 		execStatements(t, db, stmts)
 
-		// MySQL hoists column-level CHECK constraints to table-level
-		// constraints with an auto-generated name, so we verify against
-		// the canonical (table-level) form rather than full convergence.
 		finalCreate := showCreateTable(t, db, "chk_t")
 		require.Contains(t, finalCreate, "CHECK ((`b` > 0))")
 		requireNoSelfDiff(t, db, "chk_t")
 
+		// Re-diffing the live (now hoisted) table against the same target must
+		// converge to no further changes — this is the regression the fix for
+		// #930 guarantees. Previously the re-diff kept emitting MODIFY COLUMN
+		// and a spurious DROP CHECK.
+		requireConverged(t, db, "chk_t", target)
+
 		// The constraint must actually be enforced.
 		_, err = db.ExecContext(t.Context(), "INSERT INTO chk_t (id, b) VALUES (1, -5)")
 		require.Error(t, err, "expected CHECK constraint violation")
+	})
+
+	t.Run("AddNamedColumnLevelCheck", func(t *testing.T) {
+		_, err := db.ExecContext(t.Context(), `CREATE TABLE named_chk_t (
+			id int NOT NULL,
+			b int,
+			PRIMARY KEY (id)
+		)`)
+		require.NoError(t, err)
+
+		target := `CREATE TABLE named_chk_t (
+			id int NOT NULL,
+			b int CONSTRAINT b_positive CHECK (b > 0),
+			PRIMARY KEY (id)
+		)`
+		stmts := diffLiveTable(t, db, "named_chk_t", target)
+		require.Len(t, stmts, 1)
+		require.Contains(t, stmts[0].Statement, "ADD CONSTRAINT `b_positive`")
+		require.NotContains(t, stmts[0].Statement, "DROP CHECK")
+		execStatements(t, db, stmts)
+
+		finalCreate := showCreateTable(t, db, "named_chk_t")
+		require.Contains(t, finalCreate, "CONSTRAINT `b_positive`")
+		requireNoSelfDiff(t, db, "named_chk_t")
+		requireConverged(t, db, "named_chk_t", target)
+	})
+
+	t.Run("MultipleColumnLevelChecksConverge", func(t *testing.T) {
+		_, err := db.ExecContext(t.Context(), `CREATE TABLE multi_chk_t (
+			id int NOT NULL,
+			a int,
+			b int,
+			PRIMARY KEY (id)
+		)`)
+		require.NoError(t, err)
+
+		target := `CREATE TABLE multi_chk_t (
+			id int NOT NULL,
+			a int CHECK (a > 0),
+			b int CHECK (b < 100),
+			PRIMARY KEY (id)
+		)`
+		stmts := diffLiveTable(t, db, "multi_chk_t", target)
+		require.Len(t, stmts, 1)
+		require.NotContains(t, stmts[0].Statement, "DROP CHECK")
+		execStatements(t, db, stmts)
+		requireNoSelfDiff(t, db, "multi_chk_t")
+		requireConverged(t, db, "multi_chk_t", target)
 	})
 }

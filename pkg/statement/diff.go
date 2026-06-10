@@ -890,9 +890,14 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 // columnExtendedAttributesEqual compares the column attributes beyond the
 // basic type/nullability/default set: ON UPDATE (TIMESTAMP/DATETIME
 // auto-update), GENERATED ALWAYS AS expressions (including STORED vs
-// VIRTUAL), column-level CHECK constraints, and SRID. These are
-// semantically critical — omitting them from a MODIFY COLUMN silently
-// removes the behavior from the live table.
+// VIRTUAL), and SRID. These are semantically critical — omitting them from a
+// MODIFY COLUMN silently removes the behavior from the live table.
+//
+// Column-level CHECK constraints are intentionally NOT compared here: the
+// parser hoists them into table-level CreateTable.Constraints (see
+// normalizeColumnChecks), so they are diffed by diffConstraints instead. This
+// matches MySQL's SHOW CREATE TABLE, which always reports CHECKs at table
+// level, and keeps a re-diff convergent.
 func columnExtendedAttributesEqual(a, b *Column) bool {
 	if !ptrEqual(a.OnUpdate, b.OnUpdate) {
 		return false
@@ -901,9 +906,6 @@ func columnExtendedAttributesEqual(a, b *Column) bool {
 		return false
 	}
 	if a.GeneratedExpr != nil && a.GeneratedStored != b.GeneratedStored {
-		return false
-	}
-	if !ptrEqual(a.Check, b.Check) {
 		return false
 	}
 	if !ptrEqual(a.SRID, b.SRID) {
@@ -1150,11 +1152,12 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, fmt.Sprintf("COMMENT '%s'", sqlescape.EscapeString(*col.Comment)))
 	}
 
-	// Column-level CHECK constraint — the last clause in MySQL's
-	// column definition grammar.
-	if col.Check != nil {
-		parts = append(parts, fmt.Sprintf("CHECK (%s)", *col.Check))
-	}
+	// NOTE: column-level CHECK constraints are deliberately not emitted here.
+	// The parser hoists them into table-level constraints (see
+	// normalizeColumnChecks), so they are emitted as ADD CONSTRAINT ... CHECK
+	// by diffConstraints. Emitting them inline in a MODIFY/ADD COLUMN would
+	// make MySQL hoist them to a table-level CHECK with an auto-name, breaking
+	// re-diff convergence and risking a spurious DROP CHECK.
 
 	return strings.Join(parts, " ")
 }
