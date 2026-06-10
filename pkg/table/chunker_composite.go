@@ -495,8 +495,10 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 		}
 	}
 
-	// Check if key is greater than or equal to the current chunkPtr[0]
-	// Use GreaterThanOrEqual which supports all types (numeric, string, temporal)
+	// Check if key is above the current chunkPtr[0]. The comparison is
+	// conditional on key width (see below): strict GreaterThan for
+	// multi-column keys, GreaterThanOrEqual for single-column keys. Both
+	// support all types (numeric, string, temporal).
 	if len(t.chunkPtrs) == 0 {
 		// chunkPtrs not dispatched yet, key is above checkpointHighPtr.
 		// Same reasoning as the IsNil branch above: returning TRUE here
@@ -515,8 +517,10 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 	// optimization for the common case).
 	//
 	// Multi-column key: equality on the first column is ambiguous. With
-	// chunkPtrs = (5, 100), the tuple (5, 50) is BELOW the watermark
-	// (already dispatched/copied) even though key[0] == chunkPtrs[0].
+	// chunkPtrs = (5, 100), the tuple (5, 50) is BELOW the high watermark
+	// (already dispatched; chunkPtrs tracks dispatched chunks, not copied
+	// ones, which the low watermark tracks) even though key[0] ==
+	// chunkPtrs[0].
 	// Only a STRICTLY greater first column guarantees the full tuple sorts
 	// above every dispatched chunk's upper bound. Per the contract, on
 	// ambiguity we must return FALSE so the event is buffered, not dropped.
