@@ -230,6 +230,48 @@ func TestCorruptChecksum(t *testing.T) {
 	require.ErrorContains(t, err, "checksum mismatch")
 }
 
+// TestCorruptBinaryChecksum tests that the checksum detects corruption in a
+// fixed-length BINARY(N) column. Previously the checksum cast binary columns
+// to binary(0), which truncates every value to zero bytes — so any two values
+// produced identical CRCs and the contents of BINARY(N) columns were
+// completely invisible to the checksum.
+func TestCorruptBinaryChecksum(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS chkpcorruptbin1, _chkpcorruptbin1_new, _chkpcorruptbin1_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE chkpcorruptbin1 (a INT NOT NULL, b BINARY(16) NOT NULL, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _chkpcorruptbin1_new (a INT NOT NULL, b BINARY(16) NOT NULL, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _chkpcorruptbin1_chkpnt (a INT)") // for binlog advancement
+	testutils.RunSQL(t, "INSERT INTO chkpcorruptbin1 VALUES (1, UNHEX('00112233445566778899AABBCCDDEEFF'))")
+	testutils.RunSQL(t, "INSERT INTO _chkpcorruptbin1_new SELECT * FROM chkpcorruptbin1")
+	// Corrupt the binary value on the target: same length, different contents.
+	testutils.RunSQL(t, "UPDATE _chkpcorruptbin1_new SET b = UNHEX('FFEEDDCCBBAA99887766554433221100') WHERE a = 1")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "chkpcorruptbin1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_chkpcorruptbin1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	require.NoError(t, err)
+	singleChecker, ok := checker.(*SingleChecker)
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	err = singleChecker.runChecksum(t.Context())
+	require.ErrorContains(t, err, "checksum mismatch")
+}
+
 func TestBoundaryCases(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS checkert1, _checkert1_new, _checkert1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE checkert1 (a INT NOT NULL, b FLOAT, c VARCHAR(255), PRIMARY KEY (a))")
