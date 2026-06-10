@@ -56,7 +56,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	}()
 	if config.ForceKill {
 		// If ForceKill is true, we will wait for 90% of the configured LockWaitTimeout
-		threshold := time.Duration(float64(config.LockWaitTimeout)*lockWaitTimeoutForceKillMultiplier) * time.Second
+		threshold := forceKillGracePeriod(config.LockWaitTimeout)
 		var wg sync.WaitGroup
 		wg.Add(1)
 		timer := time.AfterFunc(threshold, func() {
