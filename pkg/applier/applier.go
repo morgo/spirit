@@ -58,18 +58,24 @@ type Applier interface {
 
 	// DeleteKeys deletes rows by their key values synchronously.
 	// The keys are hashed key strings (from utils.HashKey).
-	// If locks is non-empty, the delete is executed under the table lock(s):
-	// implementations writing to multiple targets receive one lock per target
-	// (acquired on that target's own connection) and must execute each
-	// target's statements under that target's lock. Single-target
-	// implementations expect exactly one lock.
+	// An empty locks slice means no under-lock flush: the delete runs on the
+	// regular write connection(s). When locks is non-empty, the delete is
+	// executed under the supplied table lock(s):
+	//   - Single-target implementations accept zero or one lock. Zero means no
+	//     under-lock flush; more than one lock is a caller bug and is an error.
+	//   - Multi-target (sharded) implementations expect one lock per target,
+	//     each acquired on that target's own connection, and execute each
+	//     target's statements under that target's lock (matched by connection
+	//     identity). A missing lock for any shard is an error.
 	// Returns the number of rows affected and any error.
 	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, locks []*dbconn.TableLock) (int64, error)
 
 	// UpsertRows performs an upsert (REPLACE INTO ... VALUES) synchronously.
 	// The rows are LogicalRow structs containing the row images.
-	// If locks is non-empty, the upsert is executed under the table lock(s);
-	// see DeleteKeys for the per-target lock contract.
+	// An empty locks slice means no under-lock flush; when locks is non-empty
+	// the upsert is executed under the supplied table lock(s). See DeleteKeys
+	// for the per-implementation lock contract (single-target accepts zero or
+	// one lock; sharded expects one lock per shard).
 	// Returns the number of rows affected and any error.
 	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error)
 
