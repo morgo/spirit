@@ -406,7 +406,7 @@ func (t *TableInfo) AutoUpdateStatistics(ctx context.Context, interval time.Dura
 	}
 }
 
-// statisticsNeedUpdating returns true if the statistics are considered order than a threshold.
+// statisticsNeedUpdating returns true if the statistics are considered older than a threshold.
 // this is useful for the chunker to synchronously check as it approaches the end of the table.
 // Reads statisticsLastUpdated under statisticsLock since updateTableStatistics
 // (driven by the background AutoUpdateStatistics goroutine) writes it.
