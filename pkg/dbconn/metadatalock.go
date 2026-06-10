@@ -56,20 +56,27 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	dbConfig.MaxOpenConnections = 1
 	// newConnection opens the dedicated pool for this lock. GET_LOCK is
 	// session scoped, so the pool must be exempt from the standard
-	// connection max lifetime: database/sql's connection cleaner
-	// proactively closes idle connections older than ConnMaxLifetime,
+	// client-side connection max lifetime: database/sql's connection
+	// cleaner proactively closes connections older than ConnMaxLifetime,
 	// which would silently release the lock until the next refresh tick
 	// re-acquired it on a fresh session — a window of up to refreshInterval
 	// during which another spirit instance could acquire the lock and start
-	// a concurrent migration on the same table. The refresh ticker already
-	// detects and replaces dead connections, so an unbounded lifetime is
-	// safe here.
+	// a concurrent migration on the same table.
+	//
+	// Setting the client lifetime to 0 only removes *client*-side recycling.
+	// The server still closes an idle session after wait_timeout seconds, so
+	// the connection (and its lock) is kept alive by the refresh ticker,
+	// which re-runs GET_LOCK every refreshInterval as a keepalive. This is
+	// only safe while refreshInterval < the server's wait_timeout; with the
+	// 1-minute refresh that holds for any sane wait_timeout (e.g. the 10
+	// minutes we configure). If the keepalive ever fails, the ticker tears
+	// the connection down and re-establishes it.
 	newConnection := func() (*sql.DB, error) {
 		db, err := New(dsn, &dbConfig)
 		if err != nil {
 			return nil, err
 		}
-		db.SetConnMaxLifetime(0) // see comment above
+		db.SetConnMaxLifetime(0) // see comment above; keepalive is the refresh ticker
 		return db, nil
 	}
 	var err error
@@ -150,30 +157,22 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	return mdl, nil
 }
 
-// getLocks acquires (or re-confirms) all locks on the dedicated session.
+// getLocks acquires (or renews) all locks on the dedicated session.
 // https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html#function_get-lock
 //
-// GET_LOCK is reference counted since MySQL 5.7: acquiring the same name N
-// times on one session requires N RELEASE_LOCK calls before the lock is
-// free. The refresh ticker calls this every refreshInterval on the same
-// session (the pool has MaxOpenConnections=1), so we must not blindly
-// re-acquire — the reference count would grow with every tick and Close()
-// could never fully release the lock. Instead, skip names this session
-// already holds; the IS_USED_LOCK check doubles as a keepalive and detects
-// dead connections just as GET_LOCK did.
+// The refresh ticker calls this every refreshInterval on the same session
+// (the pool has MaxOpenConnections=1). We deliberately re-run GET_LOCK each
+// time rather than just checking the lock: re-acquiring renews/re-asserts
+// the lock, doubles as the keepalive that keeps the session under the
+// server's wait_timeout, and transparently re-acquires on a fresh session
+// if the connection was lost. GET_LOCK is reference counted since MySQL
+// 5.7, so this stacks a reference per tick — that is harmless because
+// Close() releases the lock with a single RELEASE_ALL_LOCKS() (see
+// releaseLocks), which clears every stacked reference at once.
 func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error {
 	for _, lockName := range m.lockNames {
-		var alreadyHeld sql.NullInt64
-		stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?) = CONNECTION_ID()", lockName)
-		if err := m.db.QueryRowContext(ctx, stmt).Scan(&alreadyHeld); err != nil {
-			return fmt.Errorf("could not check metadata lock for %s: %w", lockName, err)
-		}
-		if alreadyHeld.Valid && alreadyHeld.Int64 == 1 {
-			// Already held by this session: do not stack another reference.
-			continue
-		}
 		var answer int
-		stmt = sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
+		stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
 		if err := m.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
 			return fmt.Errorf("could not acquire metadata lock for %s: %w", lockName, err)
 		}
@@ -190,29 +189,20 @@ func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error 
 }
 
 // releaseLocks explicitly releases all locks held by the dedicated session.
-// Because GET_LOCK is reference counted (see getLocks), RELEASE_LOCK is
-// called in a loop until it reports the session no longer holds the lock:
-// it returns 1 while references remain, then NULL once fully released (or 0
-// if another session holds it). A single release would leave the lock held
-// whenever more than one reference was ever stacked.
+// releaseLocks releases every named lock held by this session in a single
+// RELEASE_ALL_LOCKS() call. Because getLocks re-acquires (renews) on every
+// refresh tick, the locks accumulate a reference per tick; RELEASE_ALL_LOCKS
+// drops all of them — across every name and every stacked reference — at
+// once, so the lock is genuinely free when Close() returns. (A single
+// RELEASE_LOCK per name would leave the lock held whenever more than one
+// reference had stacked, which is the steady state here.)
 func (m *MetadataLock) releaseLocks(logger *slog.Logger) {
 	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer releaseCancel()
-	for _, lockName := range m.lockNames {
-		logger.Info("releasing metadata lock", "lock_name", lockName)
-		stmt := sqlescape.MustEscapeSQL("SELECT RELEASE_LOCK(%?)", lockName)
-		for {
-			var released sql.NullInt64
-			if err := m.db.QueryRowContext(releaseCtx, stmt).Scan(&released); err != nil {
-				logger.Warn("could not release metadata lock", "lock_name", lockName, "error", err)
-				break
-			}
-			if !released.Valid || released.Int64 != 1 {
-				// NULL: this session does not hold the lock (fully released).
-				// 0: held by another session. Nothing more to release.
-				break
-			}
-		}
+	logger.Info("releasing metadata locks", "lock_names", m.lockNames)
+	var released sql.NullInt64
+	if err := m.db.QueryRowContext(releaseCtx, "SELECT RELEASE_ALL_LOCKS()").Scan(&released); err != nil {
+		logger.Warn("could not release metadata locks", "error", err)
 	}
 }
 

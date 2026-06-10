@@ -249,21 +249,20 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 	require.NoError(t, closeMDL())
 }
 
-// TestMetadataLockRefreshDoesNotStackLock pins the fix for the reference
-// counting bug: GET_LOCK is reference counted since MySQL 5.7, so if every
-// refresh tick blindly re-ran GET_LOCK on the same session, N ticks left
-// N+1 references and Close()'s single RELEASE_LOCK could not actually free
-// the lock — a back-to-back migration on the same table would then fail its
-// immediate GET_LOCK(..., 0). The refresh must skip re-acquiring when
-// IS_USED_LOCK shows this session already holds the lock.
+// TestMetadataLockRefreshRenewsLock pins the refresh/release design. Each
+// refresh tick re-runs GET_LOCK, which renews the lock and serves as the
+// wait_timeout keepalive but, because GET_LOCK is reference counted since
+// MySQL 5.7, intentionally stacks a reference on the single-connection
+// session. That stacking is harmless precisely because the lock is released
+// with one RELEASE_ALL_LOCKS() (what Close()'s releaseLocks runs), which
+// drops every stacked reference across every name at once — so the lock is
+// genuinely free afterward, which is what the back-to-back-migration case
+// (immediate GET_LOCK(..., 0)) depends on.
 //
 // Refresh ticks are simulated deterministically by calling getLocks (the
 // exact function the ticker runs) instead of sleeping through real ticks.
-// The session's reference count is then measured by draining RELEASE_LOCK
-// on the same single-connection pool: each call returns 1 while references
-// remain and NULL once the lock is fully released.
-func TestMetadataLockRefreshDoesNotStackLock(t *testing.T) {
-	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "w2a-refresh-stack"}
+func TestMetadataLockRefreshRenewsLock(t *testing.T) {
+	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "w2a-refresh-renew"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
@@ -276,27 +275,31 @@ func TestMetadataLockRefreshDoesNotStackLock(t *testing.T) {
 	closeMDL := closeOnce(mdl)
 	t.Cleanup(func() { _ = closeMDL() })
 
-	// Simulate three refresh ticks on the same session.
+	lockName := computeLockName(&lockTableInfo)
+
+	// Simulate three refresh ticks on the same session. Each renews the lock
+	// (and, by design, stacks a reference); the session must stay the holder.
 	for range 3 {
 		require.NoError(t, mdl.getLocks(t.Context(), logger))
+		var heldByMe sql.NullInt64
+		stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?) = CONNECTION_ID()", lockName)
+		require.NoError(t, mdl.db.QueryRowContext(t.Context(), stmt).Scan(&heldByMe))
+		require.True(t, heldByMe.Valid && heldByMe.Int64 == 1, "refresh must keep the lock held by this session")
 	}
 
-	// Drain the lock's reference count. The pool has MaxOpenConnections=1,
-	// so these run on the same session that holds the lock.
-	lockName := computeLockName(&lockTableInfo)
-	releases := 0
-	for {
-		var released sql.NullInt64
-		stmt := sqlescape.MustEscapeSQL("SELECT RELEASE_LOCK(%?)", lockName)
-		require.NoError(t, mdl.db.QueryRowContext(t.Context(), stmt).Scan(&released))
-		if !released.Valid || released.Int64 != 1 {
-			break
-		}
-		releases++
-		require.LessOrEqual(t, releases, 10, "runaway GET_LOCK reference count")
-	}
-	require.Equal(t, 1, releases,
-		"refresh must not stack GET_LOCK references: each extra reference needs its own RELEASE_LOCK, so Close() could never free the lock")
+	// One RELEASE_ALL_LOCKS() must drop every stacked reference at once,
+	// leaving the lock free — the property Close()'s single release relies on.
+	// The pool has MaxOpenConnections=1, so this runs on the holding session.
+	var releasedCount sql.NullInt64
+	require.NoError(t, mdl.db.QueryRowContext(t.Context(), "SELECT RELEASE_ALL_LOCKS()").Scan(&releasedCount))
+	require.True(t, releasedCount.Valid && releasedCount.Int64 >= 1,
+		"RELEASE_ALL_LOCKS should report the stacked references it dropped")
+
+	var free sql.NullInt64
+	stmt := sqlescape.MustEscapeSQL("SELECT IS_FREE_LOCK(%?)", lockName)
+	require.NoError(t, mdl.db.QueryRowContext(t.Context(), stmt).Scan(&free))
+	require.True(t, free.Valid && free.Int64 == 1,
+		"one RELEASE_ALL_LOCKS() must fully free the lock despite stacked references")
 
 	require.NoError(t, closeMDL())
 }
