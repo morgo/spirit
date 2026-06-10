@@ -1578,6 +1578,11 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 				fmt.Fprintf(&sb, " KEY_BLOCK_SIZE=%d", opt.KeyBlockSize)
 			}
 
+			// Add WITH PARSER (FULLTEXT indexes)
+			if opt.ParserName.L != "" {
+				fmt.Fprintf(&sb, " WITH PARSER %s", opt.ParserName.String())
+			}
+
 			// Add COMMENT
 			if opt.Comment != "" {
 				fmt.Fprintf(&sb, " COMMENT '%s'", sqlescape.EscapeString(opt.Comment))

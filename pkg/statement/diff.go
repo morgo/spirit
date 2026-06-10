@@ -68,8 +68,11 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	columnClauses := ct.diffColumns(target)
 	alterClauses = append(alterClauses, columnClauses...)
 
-	// 2. Diff indexes (DROP, ADD)
-	indexClauses := ct.diffIndexes(target)
+	// 2. Diff indexes (DROP, ADD). Option-only index changes (same column
+	// list, different WITH PARSER / KEY_BLOCK_SIZE / etc.) are returned as
+	// separate statements because MySQL no-ops a combined DROP+ADD of the same
+	// index in a single ALTER.
+	indexClauses, separateIndexStatements := ct.diffIndexes(target)
 	alterClauses = append(alterClauses, indexClauses...)
 
 	// 3. Diff constraints (DROP, ADD)
@@ -87,6 +90,10 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 		alterClauses = append(alterClauses, partitionClauses...)
 		additionalStatements = extraStatements
 	}
+
+	// Option-only index changes run as their own ALTER statements, after the
+	// primary ALTER so they observe any column changes the re-add depends on.
+	additionalStatements = append(additionalStatements, separateIndexStatements...)
 
 	// Build the result
 	var results []*AbstractStatement
@@ -386,10 +393,17 @@ func (ct *CreateTable) getEffectivePrimaryKeyColumns() []string {
 	return nil
 }
 
-// diffIndexes compares indexes and returns ALTER clauses for differences
-func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
-	var clauses []string
-
+// diffIndexes compares indexes and returns ALTER clauses for differences.
+//
+// Most index changes are emitted into the combined ALTER (the returned
+// []string). However, an index whose column list is identical but whose
+// options differ (e.g. WITH PARSER or KEY_BLOCK_SIZE) cannot be changed by a
+// combined `DROP INDEX x, ADD INDEX x (<same cols>)` in a single ALTER: MySQL
+// pairs the two clauses up and keeps the existing index, silently ignoring the
+// option change. To make such a change actually take effect, the DROP and ADD
+// must run as two separate ALTER statements. Those are returned via the second
+// value as standalone clause-lists (each becomes its own ALTER statement).
+func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separateStatements [][]string) {
 	// Build maps for easier lookup
 	sourceIndexes := make(map[string]*Index)
 	for i := range ct.Indexes {
@@ -445,6 +459,13 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 	// Note: Table-level PK -> inline PK is handled in diffColumns to ensure correct order
 	// (DROP PRIMARY KEY must come before ADD PRIMARY KEY)
 
+	// optionOnlyChanged tracks index names whose column list is unchanged but
+	// whose options differ (e.g. WITH PARSER / KEY_BLOCK_SIZE). These must be
+	// emitted as separate DROP + ADD statements rather than combined into one
+	// ALTER, because MySQL no-ops a combined DROP+ADD of the same name and
+	// column list. Such indexes are routed out of dropClauses/addClauses below.
+	optionOnlyChanged := make(map[string]bool)
+
 	for i := range ct.Indexes {
 		sourceIdx := &ct.Indexes[i]
 		targetIdx, existsInTarget := targetIndexes[sourceIdx.Name]
@@ -462,13 +483,24 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 			}
 		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 			// Index exists but changed (and not just visibility) - need to drop and re-add
-			if sourceIdx.Type == "PRIMARY KEY" {
+			switch {
+			case sourceIdx.Type == "PRIMARY KEY":
 				// Only add if not already added above
 				if !pkDropAdded {
 					dropClauses = append(dropClauses, "DROP PRIMARY KEY")
 					pkDropAdded = true
 				}
-			} else {
+			case indexNeedsSeparateRebuild(sourceIdx, targetIdx):
+				// A no-op-prone option (WITH PARSER / KEY_BLOCK_SIZE) changed on
+				// an unchanged column list. A combined DROP+ADD in one ALTER
+				// would be a MySQL no-op, so emit two separate statements that
+				// MySQL will actually apply.
+				optionOnlyChanged[sourceIdx.Name] = true
+				separateStatements = append(separateStatements,
+					[]string{fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name))},
+					[]string{formatAddIndex(targetIdx)},
+				)
+			default:
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
 			}
 		}
@@ -492,6 +524,10 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 			// Index exists but changed - check if only visibility changed
 			if indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
 				// Only visibility changed - skip for now, handle in ALTER INDEX section
+				continue
+			}
+			// Option-only changes are emitted as separate statements above.
+			if optionOnlyChanged[targetIdx.Name] {
 				continue
 			}
 			// Other changes - need to drop and re-add (drop already handled above)
@@ -519,7 +555,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) []string {
 	slices.Sort(alterClauses)
 	clauses = append(clauses, alterClauses...)
 
-	return clauses
+	return clauses, separateStatements
 }
 
 // diffConstraints compares constraints and returns ALTER clauses for differences
@@ -640,6 +676,11 @@ func (ct *CreateTable) diffTableOptions(target *CreateTable, opts *DiffOptions) 
 	if !ptrEqual(ct.TableOptions.getComment(), target.TableOptions.getComment()) {
 		if comment := target.TableOptions.getComment(); comment != nil {
 			clauses = append(clauses, fmt.Sprintf("COMMENT='%s'", sqlescape.EscapeString(*comment)))
+		} else {
+			// The source has a comment but the target does not: emit an
+			// explicit empty comment to clear it. Without this clause the
+			// difference would be detected but silently dropped.
+			clauses = append(clauses, "COMMENT=''")
 		}
 	}
 
@@ -952,6 +993,12 @@ func indexesEqual(a, b *Index) bool {
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
+	if !ptrEqual(a.KeyBlockSize, b.KeyBlockSize) {
+		return false
+	}
+	if !ptrEqual(a.ParserName, b.ParserName) {
+		return false
+	}
 	return true
 }
 
@@ -979,7 +1026,54 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
+	if !ptrEqual(a.KeyBlockSize, b.KeyBlockSize) {
+		return false
+	}
+	if !ptrEqual(a.ParserName, b.ParserName) {
+		return false
+	}
 	return true
+}
+
+// indexColumnListIdentical reports whether two indexes have the same name,
+// type, and column list — regardless of their options.
+func indexColumnListIdentical(a, b *Index) bool {
+	if a.Name != b.Name {
+		return false
+	}
+	if a.Type != b.Type {
+		return false
+	}
+	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
+		return indexColumnListsEqual(a.ColumnList, b.ColumnList)
+	}
+	return equalFoldStrings(a.Columns, b.Columns)
+}
+
+// indexNeedsSeparateRebuild reports whether a changed index must be emitted as
+// two separate ALTER statements (DROP then ADD) rather than combined into one.
+//
+// When the column list is unchanged, MySQL pairs a combined `DROP INDEX x, ADD
+// INDEX x (<same cols>)` up and keeps the existing index — but only some
+// options are silently ignored this way. Verified against MySQL 8.0:
+//   - WITH PARSER  → ignored by the combined ALTER (must split)
+//   - KEY_BLOCK_SIZE → ignored by the combined ALTER (must split)
+//   - COMMENT      → applied by the combined ALTER (no split needed)
+//   - visibility   → never reaches here; handled via ALTER INDEX VISIBLE/INVISIBLE
+//
+// If the column list itself changes, MySQL really rebuilds the index, so a
+// combined ALTER is fine and this returns false.
+func indexNeedsSeparateRebuild(source, target *Index) bool {
+	if !indexColumnListIdentical(source, target) {
+		return false
+	}
+	if !ptrEqual(source.ParserName, target.ParserName) {
+		return true
+	}
+	if !ptrEqual(source.KeyBlockSize, target.KeyBlockSize) {
+		return true
+	}
+	return false
 }
 
 // indexColumnListsEqual checks if two index column lists are equal
@@ -1232,6 +1326,16 @@ func formatAddIndex(idx *Index) string {
 	// USING clause
 	if idx.Using != nil {
 		parts = append(parts, fmt.Sprintf("USING %s", *idx.Using))
+	}
+
+	// KEY_BLOCK_SIZE
+	if idx.KeyBlockSize != nil {
+		parts = append(parts, fmt.Sprintf("KEY_BLOCK_SIZE=%d", *idx.KeyBlockSize))
+	}
+
+	// WITH PARSER (FULLTEXT indexes)
+	if idx.ParserName != nil {
+		parts = append(parts, fmt.Sprintf("WITH PARSER %s", *idx.ParserName))
 	}
 
 	// Comment
