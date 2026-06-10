@@ -2,12 +2,17 @@ package lint
 
 import (
 	"fmt"
+	"math/bits"
 	"strconv"
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 )
+
+func init() {
+	Register(&AutoIncCapacityLinter{threshold: 85})
+}
 
 type AutoIncCapacityLinter struct {
 	threshold uint64
@@ -51,6 +56,13 @@ func (l *AutoIncCapacityLinter) String() string {
 // AUTO_INCREMENT or widens the column type is linted against the table's
 // final shape rather than the pre-ALTER snapshot.
 func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
+	if l.threshold == 0 {
+		// Not configured (e.g. obtained via Get() and used directly):
+		// fall back to the default configuration.
+		if err := l.Configure(l.DefaultConfig()); err != nil {
+			panic(err)
+		}
+	}
 	for _, ct := range PostState(existingTables, changes) {
 		if ct.TableOptions == nil || ct.TableOptions.AutoIncrement == nil {
 			// If the table definition doesn't include an AUTO_INCREMENT clause we can't check anything
@@ -80,16 +92,20 @@ func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, ch
 			case mysql.TypeLonglong: // bigint
 				bytes = 64
 			default:
-				// Unknown type, this can't happen!
+				// Non-integer auto-increment column (e.g. legacy FLOAT/DOUBLE
+				// AUTO_INCREMENT). We can't compute a capacity for it, so
+				// report it and skip the capacity check for this column.
 				violations = append(violations, Violation{
 					Linter: l,
 					Location: &Location{
 						Table:  ct.TableName,
 						Column: &col.Name,
 					},
-					Message:  fmt.Sprintf("unknown column type %q (%d). this is a bug!", col.Type, col.Raw.Tp.GetType()),
+					Message:  fmt.Sprintf("unsupported column type %q (%d) for an auto-increment column; capacity cannot be checked", col.Type, col.Raw.Tp.GetType()),
 					Severity: SeverityWarning,
 				})
+
+				continue
 			}
 
 			// Adjust for signed types
@@ -106,8 +122,17 @@ func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, ch
 				suggestions = append(suggestions, "consider using BIGINT for auto-increment columns")
 			}
 
-			// Check if auto_increment value exceeds threshold
-			threshold := maxValue * l.threshold / 100
+			// Check if auto_increment value exceeds threshold. The product
+			// maxValue*threshold can exceed 64 bits when maxValue is 2^64-1
+			// (BIGINT UNSIGNED), so compute it with a 128-bit intermediate
+			// via math/bits. The result is exact: identical to the naive
+			// maxValue*l.threshold/100 wherever that doesn't overflow, so
+			// the pass/fail boundaries for narrower types are unchanged.
+			// bits.Div64 cannot panic here because l.threshold <= 100
+			// (validated in Configure), which bounds the high word of the
+			// product below the divisor.
+			hi, lo := bits.Mul64(maxValue, l.threshold)
+			threshold, _ := bits.Div64(hi, lo, 100)
 			if autoInc > threshold {
 				violations = append(violations, Violation{
 					Severity: SeverityError,
