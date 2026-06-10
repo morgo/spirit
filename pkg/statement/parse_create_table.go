@@ -13,6 +13,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	driver "github.com/pingcap/tidb/pkg/parser/test_driver"
 	"github.com/pingcap/tidb/pkg/parser/types"
 )
 
@@ -42,12 +43,13 @@ type Column struct {
 	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
 	Nullable        bool              `json:"nullable"`
 	Default         *string           `json:"default,omitempty"`
-	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
-	OnUpdate        *string           `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
-	GeneratedExpr   *string           `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
-	GeneratedStored bool              `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
-	Check           *string           `json:"check,omitempty"`            // Column-level CHECK (...) constraint expression
-	SRID            *uint32           `json:"srid,omitempty"`             // SRID attribute for spatial columns
+	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`   // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
+	DefaultIsString bool              `json:"default_is_string,omitempty"` // true when the default is a quoted string literal (so it must be re-quoted on emission, even if it looks like a keyword/number)
+	OnUpdate        *string           `json:"on_update,omitempty"`         // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
+	GeneratedExpr   *string           `json:"generated_expr,omitempty"`    // Expression for GENERATED ALWAYS AS (...) columns
+	GeneratedStored bool              `json:"generated_stored,omitempty"`  // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
+	Check           *string           `json:"check,omitempty"`             // Column-level CHECK (...) constraint expression
+	SRID            *uint32           `json:"srid,omitempty"`              // SRID attribute for spatial columns
 	AutoInc         bool              `json:"auto_increment"`
 	PrimaryKey      bool              `json:"primary_key"`
 	Unique          bool              `json:"unique"`
@@ -144,6 +146,15 @@ type PartitionValues struct {
 	Type   string `json:"type"`   // "LESS_THAN", "IN", "MAXVALUE"
 	Values []any  `json:"values"` // The actual values
 }
+
+// partitionStringLiteral wraps a partition value that originated from a
+// quoted string literal (e.g. LIST COLUMNS on a VARCHAR column:
+// VALUES IN ('2020', 'asia')). Wrapping it in a distinct type preserves
+// the "this was a string" fact through the []any storage so emission can
+// quote it unconditionally — without it, a numeric-looking string value
+// like '2020' would be rendered bare and rejected by MySQL (error 1654).
+// Numeric/expression partition values remain plain Go strings.
+type partitionStringLiteral string
 
 // SubPartitionOptions represents subpartitioning configuration
 type SubPartitionOptions struct {
@@ -632,30 +643,28 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				// We track this so we can reproduce the correct syntax when generating ALTERs.
 				column.DefaultIsExpr = isExpressionDefault(opt.Expr)
 
-				defaultVal := ct.parseExpression(opt.Expr)
-				if defaultStr, ok := defaultVal.(string); ok && defaultStr != "" {
-					// Remove surrounding quotes if present for string literals
-					if len(defaultStr) >= 2 && defaultStr[0] == '\'' && defaultStr[len(defaultStr)-1] == '\'' {
-						defaultStr = defaultStr[1 : len(defaultStr)-1]
-					}
-
-					column.Default = &defaultStr
+				if literal, isStr := stringLiteralValue(opt.Expr); isStr {
+					// Quoted string literal default. Store the true, raw
+					// (fully-unescaped) value off the AST and remember it
+					// was a string so we re-quote it on emission — even if
+					// the value looks like a keyword (TRUE/NULL) or a
+					// number. Escaping happens exactly once, at emit time.
+					column.Default = &literal
+					column.DefaultIsString = true
 				} else {
-					// For non-string defaults (e.g., numeric, functions), use the raw expression
-					defaultRaw := fmt.Sprintf("%v", defaultVal)
+					// Non-string defaults (numeric, functions, expressions):
+					// keep the Restored text representation.
+					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(opt.Expr))
 					column.Default = &defaultRaw
 				}
 			}
 		case ast.ColumnOptionComment:
 			if opt.Expr != nil {
-				comment := ct.parseExpression(opt.Expr)
-				if commentStr, ok := comment.(string); ok && commentStr != "" {
-					// Remove surrounding quotes if present
-					if len(commentStr) >= 2 && commentStr[0] == '\'' && commentStr[len(commentStr)-1] == '\'' {
-						commentStr = commentStr[1 : len(commentStr)-1]
-					}
-
-					column.Comment = &commentStr
+				// A column comment is always a string literal; read its true
+				// value directly off the AST so quotes/backslashes survive
+				// the round-trip and are escaped exactly once on emission.
+				if literal, isStr := stringLiteralValue(opt.Expr); isStr && literal != "" {
+					column.Comment = &literal
 				}
 			}
 		case ast.ColumnOptionCollate:
@@ -1080,8 +1089,7 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 			Values: make([]any, 0, len(c.Exprs)),
 		}
 		for _, expr := range c.Exprs {
-			val := ct.parseExpression(expr)
-			values.Values = append(values.Values, val)
+			values.Values = append(values.Values, ct.parsePartitionValue(expr))
 		}
 
 		return values
@@ -1092,14 +1100,12 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 		}
 		for _, valList := range c.Values {
 			if len(valList) == 1 {
-				val := ct.parseExpression(valList[0])
-				values.Values = append(values.Values, val)
+				values.Values = append(values.Values, ct.parsePartitionValue(valList[0]))
 			} else {
 				// Multiple values in a single clause
 				subValues := make([]any, 0, len(valList))
 				for _, expr := range valList {
-					val := ct.parseExpression(expr)
-					subValues = append(subValues, val)
+					subValues = append(subValues, ct.parsePartitionValue(expr))
 				}
 
 				values.Values = append(values.Values, subValues...)
@@ -1116,6 +1122,18 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 	default:
 		return nil
 	}
+}
+
+// parsePartitionValue parses a single partition value expression. String
+// literals (LIST/RANGE COLUMNS on a string column) are wrapped in
+// partitionStringLiteral carrying their true raw value, so emission can
+// quote them unconditionally. Numeric literals and expressions (e.g.
+// YEAR(col)) fall back to the Restored text form as plain strings.
+func (ct *CreateTable) parsePartitionValue(expr ast.ExprNode) any {
+	if literal, isStr := stringLiteralValue(expr); isStr {
+		return partitionStringLiteral(literal)
+	}
+	return ct.parseExpression(expr)
 }
 
 // parseSubPartitionOptions converts subpartition options to SubPartitionOptions
@@ -1188,6 +1206,24 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 	}
 
 	return subDef
+}
+
+// stringLiteralValue returns the true, fully-unescaped value of a quoted
+// string-literal AST node (e.g. the value behind DEFAULT 'it”s' or a
+// COMMENT containing escaped quotes) along with true. For any other
+// expression kind it returns ("", false).
+//
+// This is the load-bearing fix for the string round-trip bugs: the TiDB
+// parser's Restore() re-emits a string literal in its *escaped* form
+// (inner quotes doubled, backslashes preserved), so the previous approach
+// of Restore-then-strip-outer-quotes left the value still escaped. Reading
+// the literal's value directly off the AST gives us the raw bytes, which
+// we can then escape exactly once at emission time.
+func stringLiteralValue(expr ast.ExprNode) (string, bool) {
+	if v, ok := expr.(*driver.ValueExpr); ok && v.Kind() == driver.KindString {
+		return v.GetString(), true
+	}
+	return "", false
 }
 
 // isExpressionDefault returns true when the default value expression should be

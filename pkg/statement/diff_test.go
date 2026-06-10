@@ -144,10 +144,14 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int(11) NOT NULL COMMENT 'Line1\\nLine2\\rLine3'",
 		},
 		{
-			name:     "ColumnCommentRogueValues2",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
-			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(50) DEFAULT "O'Brien")`,
-			expected: "ALTER TABLE `t1` ADD COLUMN `name` varchar(50) NULL DEFAULT 'O\\'\\'Brien'",
+			name:   "ColumnCommentRogueValues2",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target: `CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(50) DEFAULT "O'Brien")`,
+			// The true default is O'Brien (one apostrophe); it is escaped
+			// exactly once on emission. The previous expectation
+			// 'O\'\'Brien' was the double-escaping bug (parse left the
+			// value escaped, then emission escaped it again).
+			expected: "ALTER TABLE `t1` ADD COLUMN `name` varchar(50) NULL DEFAULT 'O\\'Brien'",
 		},
 
 		{
