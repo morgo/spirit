@@ -756,6 +756,9 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.DefaultIsExpr != b.DefaultIsExpr {
 		return false
 	}
+	if !columnExtendedAttributesEqual(a, b) {
+		return false
+	}
 	if a.AutoInc != b.AutoInc {
 		return false
 	}
@@ -856,6 +859,9 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.DefaultIsExpr != b.DefaultIsExpr {
 		return false
 	}
+	if !columnExtendedAttributesEqual(a, b) {
+		return false
+	}
 	if a.AutoInc != b.AutoInc {
 		return false
 	}
@@ -876,6 +882,31 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 		return false
 	}
 	if !slices.Equal(a.SetValues, b.SetValues) {
+		return false
+	}
+	return true
+}
+
+// columnExtendedAttributesEqual compares the column attributes beyond the
+// basic type/nullability/default set: ON UPDATE (TIMESTAMP/DATETIME
+// auto-update), GENERATED ALWAYS AS expressions (including STORED vs
+// VIRTUAL), column-level CHECK constraints, and SRID. These are
+// semantically critical — omitting them from a MODIFY COLUMN silently
+// removes the behavior from the live table.
+func columnExtendedAttributesEqual(a, b *Column) bool {
+	if !ptrEqual(a.OnUpdate, b.OnUpdate) {
+		return false
+	}
+	if !ptrEqual(a.GeneratedExpr, b.GeneratedExpr) {
+		return false
+	}
+	if a.GeneratedExpr != nil && a.GeneratedStored != b.GeneratedStored {
+		return false
+	}
+	if !ptrEqual(a.Check, b.Check) {
+		return false
+	}
+	if !ptrEqual(a.SRID, b.SRID) {
 		return false
 	}
 	return true
@@ -1064,6 +1095,19 @@ func formatColumnDefinition(col *Column) string {
 		}
 	}
 
+	// Generated column clause — comes directly after the data type (and any
+	// charset/collation), before the NULL/NOT NULL attribute:
+	// col_name type GENERATED ALWAYS AS (expr) STORED|VIRTUAL [NOT NULL|NULL] ...
+	if col.GeneratedExpr != nil {
+		genClause := fmt.Sprintf("GENERATED ALWAYS AS (%s)", *col.GeneratedExpr)
+		if col.GeneratedStored {
+			genClause += " STORED"
+		} else {
+			genClause += " VIRTUAL"
+		}
+		parts = append(parts, genClause)
+	}
+
 	// Nullable
 	if !col.Nullable {
 		parts = append(parts, "NOT NULL")
@@ -1071,8 +1115,14 @@ func formatColumnDefinition(col *Column) string {
 		parts = append(parts, "NULL")
 	}
 
-	// Default value
-	if col.Default != nil {
+	// SRID attribute for spatial columns. MySQL's SHOW CREATE TABLE places
+	// this after the NULL/NOT NULL attribute (as /*!80003 SRID n */).
+	if col.SRID != nil {
+		parts = append(parts, fmt.Sprintf("SRID %d", *col.SRID))
+	}
+
+	// Default value (not permitted on generated columns)
+	if col.Default != nil && col.GeneratedExpr == nil {
 		defaultVal := *col.Default
 		switch {
 		case col.DefaultIsExpr:
@@ -1085,6 +1135,11 @@ func formatColumnDefinition(col *Column) string {
 		}
 	}
 
+	// ON UPDATE (TIMESTAMP/DATETIME auto-update) — comes after DEFAULT
+	if col.OnUpdate != nil {
+		parts = append(parts, fmt.Sprintf("ON UPDATE %s", *col.OnUpdate))
+	}
+
 	// Auto increment
 	if col.AutoInc {
 		parts = append(parts, "AUTO_INCREMENT")
@@ -1093,6 +1148,12 @@ func formatColumnDefinition(col *Column) string {
 	// Comment
 	if col.Comment != nil {
 		parts = append(parts, fmt.Sprintf("COMMENT '%s'", sqlescape.EscapeString(*col.Comment)))
+	}
+
+	// Column-level CHECK constraint — the last clause in MySQL's
+	// column definition grammar.
+	if col.Check != nil {
+		parts = append(parts, fmt.Sprintf("CHECK (%s)", *col.Check))
 	}
 
 	return strings.Join(parts, " ")

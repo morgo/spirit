@@ -231,19 +231,19 @@ func TestDiff(t *testing.T) {
 			name:     "VirtualColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50), full_name VARCHAR(101) AS (CONCAT(first_name, ' ', last_name)) VIRTUAL)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `full_name` varchar(101) NULL",
+			expected: "ALTER TABLE `t1` ADD COLUMN `full_name` varchar(101) GENERATED ALWAYS AS (CONCAT(`first_name`, ' ', `last_name`)) VIRTUAL NULL",
 		},
 		{
 			name:     "StoredColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2), tax_rate DECIMAL(5,4))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2), tax_rate DECIMAL(5,4), total DECIMAL(10,2) AS (price * (1 + tax_rate)) STORED)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `total` decimal(10,2) NULL",
+			expected: "ALTER TABLE `t1` ADD COLUMN `total` decimal(10,2) GENERATED ALWAYS AS (`price`*(1+`tax_rate`)) STORED NULL",
 		},
 		{
 			name:     "Timestamps1",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, updated_at TIMESTAMP)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `updated_at` timestamp NULL DEFAULT current_timestamp",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `updated_at` timestamp NULL DEFAULT current_timestamp ON UPDATE current_timestamp",
 		},
 		{
 			name:     "Timestamps2",

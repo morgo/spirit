@@ -31,25 +31,30 @@ type CreateTable struct {
 
 // Column represents a table column definition
 type Column struct {
-	Raw           *ast.ColumnDef    `json:"-"`
-	Name          string            `json:"name"`
-	Type          string            `json:"type"`
-	Length        *int              `json:"length,omitempty"`
-	Precision     *int              `json:"precision,omitempty"`
-	Scale         *int              `json:"scale,omitempty"`
-	Unsigned      *bool             `json:"unsigned,omitempty"`
-	EnumValues    []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
-	SetValues     []string          `json:"set_values,omitempty"`  // Permitted values for SET type
-	Nullable      bool              `json:"nullable"`
-	Default       *string           `json:"default,omitempty"`
-	DefaultIsExpr bool              `json:"default_is_expr,omitempty"` // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
-	AutoInc       bool              `json:"auto_increment"`
-	PrimaryKey    bool              `json:"primary_key"`
-	Unique        bool              `json:"unique"`
-	Comment       *string           `json:"comment,omitempty"`
-	Charset       *string           `json:"charset,omitempty"`
-	Collation     *string           `json:"collation,omitempty"`
-	Options       map[string]string `json:"options,omitempty"`
+	Raw             *ast.ColumnDef    `json:"-"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type"`
+	Length          *int              `json:"length,omitempty"`
+	Precision       *int              `json:"precision,omitempty"`
+	Scale           *int              `json:"scale,omitempty"`
+	Unsigned        *bool             `json:"unsigned,omitempty"`
+	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
+	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
+	Nullable        bool              `json:"nullable"`
+	Default         *string           `json:"default,omitempty"`
+	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`  // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
+	OnUpdate        *string           `json:"on_update,omitempty"`        // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
+	GeneratedExpr   *string           `json:"generated_expr,omitempty"`   // Expression for GENERATED ALWAYS AS (...) columns
+	GeneratedStored bool              `json:"generated_stored,omitempty"` // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
+	Check           *string           `json:"check,omitempty"`            // Column-level CHECK (...) constraint expression
+	SRID            *uint32           `json:"srid,omitempty"`             // SRID attribute for spatial columns
+	AutoInc         bool              `json:"auto_increment"`
+	PrimaryKey      bool              `json:"primary_key"`
+	Unique          bool              `json:"unique"`
+	Comment         *string           `json:"comment,omitempty"`
+	Charset         *string           `json:"charset,omitempty"`
+	Collation       *string           `json:"collation,omitempty"`
+	Options         map[string]string `json:"options,omitempty"`
 }
 
 // IndexColumn represents a column or expression in an index
@@ -438,6 +443,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 		Options:  make(map[string]string),
 	}
 
+	// Spatial types are parsed as TypeGeometry with a subtype; recover the
+	// specific type name (point, polygon, ...) so it round-trips correctly
+	// when emitting MODIFY/ADD COLUMN.
+	if col.Tp.GetType() == mysql.TypeGeometry {
+		geoType := col.Tp.GetGeometryType()
+		if geoStr := geoType.String(); geoStr != "" {
+			column.Type = geoStr
+		}
+	}
+
 	// Check if this is a binary type (VARBINARY, BLOB, etc.)
 	// The TiDB parser converts binary types to their text equivalents,
 	// so we need to check the binary flag and convert back
@@ -479,12 +494,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	}
 
 	// Extract charset and collation from the type itself
-	// (they may be overridden by column options later)
-	if charset := col.Tp.GetCharset(); charset != "" {
-		column.Charset = &charset
-	}
-	if collation := col.Tp.GetCollate(); collation != "" {
-		column.Collation = &collation
+	// (they may be overridden by column options later).
+	// Spatial types are skipped: the parser assigns them a synthetic
+	// "binary" charset/collation, which is not valid SQL to emit.
+	if col.Tp.GetType() != mysql.TypeGeometry {
+		if charset := col.Tp.GetCharset(); charset != "" {
+			column.Charset = &charset
+		}
+		if collation := col.Tp.GetCollate(); collation != "" {
+			column.Collation = &collation
+		}
 	}
 
 	// Extract ENUM/SET permitted values
@@ -549,6 +568,38 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 			if opt.StrValue != "" {
 				column.Collation = &opt.StrValue
 			}
+		case ast.ColumnOptionOnUpdate:
+			// ON UPDATE CURRENT_TIMESTAMP[(n)] — only valid for TIMESTAMP/DATETIME.
+			// Reuse parseExpression so the stored form matches DEFAULT handling:
+			// lowercased, with "()" stripped from zero-arg timestamp functions.
+			if opt.Expr != nil {
+				if exprStr, ok := ct.parseExpression(opt.Expr).(string); ok && exprStr != "" {
+					column.OnUpdate = &exprStr
+				}
+			}
+		case ast.ColumnOptionGenerated:
+			// GENERATED ALWAYS AS (expr) [STORED|VIRTUAL]
+			if opt.Expr != nil {
+				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
+					column.GeneratedExpr = &exprStr
+					column.GeneratedStored = opt.Stored
+				}
+			}
+		case ast.ColumnOptionCheck:
+			// Column-level CHECK (expr). Note that MySQL normalizes these to
+			// table-level constraints in SHOW CREATE TABLE output, so this is
+			// only seen when parsing user-written (non-canonical) statements.
+			if opt.Expr != nil {
+				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
+					column.Check = &exprStr
+				}
+			}
+		case ast.ColumnOptionSrid:
+			// SRID n — spatial reference system id for spatial columns.
+			// SHOW CREATE TABLE emits this as /*!80003 SRID n */ which the
+			// parser unwraps as a regular column option.
+			srid := opt.Srid
+			column.SRID = &srid
 		default:
 			// Store unknown options for flexibility
 			column.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -1062,6 +1113,31 @@ func isExpressionDefault(expr ast.ExprNode) bool {
 	default:
 		return false
 	}
+}
+
+// restoreExpressionText restores an expression AST node to its SQL text,
+// stripping redundant outer parentheses. MySQL's SHOW CREATE TABLE wraps
+// generated-column and CHECK expressions in an extra set of parentheses
+// (e.g. GENERATED ALWAYS AS ((`a` + 1))); stripping them ensures a
+// user-written `AS (a + 1)` compares equal to the canonical form.
+// Unlike parseExpression, the result is NOT lowercased and string literals
+// keep their quotes — these expressions may contain case-sensitive literals.
+func restoreExpressionText(expr ast.ExprNode) (string, bool) {
+	for {
+		paren, ok := expr.(*ast.ParenthesesExpr)
+		if !ok {
+			break
+		}
+		expr = paren.Expr
+	}
+
+	var sb strings.Builder
+	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+	if err := expr.Restore(rCtx); err != nil {
+		return "", false
+	}
+
+	return sb.String(), true
 }
 
 // parseExpression converts an expression to a string representation
