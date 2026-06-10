@@ -1209,7 +1209,8 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 }
 
 // stringLiteralValue returns the true, fully-unescaped value of a quoted
-// string-literal AST node (e.g. the value behind DEFAULT 'it”s' or a
+// string-literal AST node (e.g. the value behind a single-quoted DEFAULT
+// whose inner apostrophe is doubled in SQL, or a
 // COMMENT containing escaped quotes) along with true. For any other
 // expression kind it returns ("", false).
 //

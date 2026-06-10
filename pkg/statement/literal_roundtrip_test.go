@@ -241,7 +241,8 @@ func TestRoundTrip_StringNullDefaultProducesDiff(t *testing.T) {
 
 // TestRoundTrip_PartitionStringValuesWithQuotes verifies that LIST COLUMNS
 // partition values on a string column round-trip, including a value that
-// looks numeric ('2020') and one containing a quote ('o”hare'). Before the
+// looks numeric ('2020') and one whose value contains an apostrophe (o'hare,
+// doubled in SQL). Before the
 // fix the numeric-looking value was emitted bare (MySQL error 1654) and the
 // quoted value lost its escaping.
 //
