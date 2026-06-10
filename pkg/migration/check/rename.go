@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
@@ -26,15 +27,20 @@ func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 		return errors.New("not a valid alter table statement")
 	}
 
-	// Build set of primary key columns for quick lookup (if table info is available)
+	// Build set of primary key columns for quick lookup (if table info is available).
+	// MySQL column identifiers are case-insensitive, so all comparisons in this
+	// check are performed on lower-cased names (the ALTER may type a column with
+	// different case than it was declared with). The TiDB parser's Name.L is the
+	// pre-lowercased form of Name.O.
 	pkColumns := make(map[string]struct{})
 	if r.Table != nil {
 		for _, col := range r.Table.KeyColumns {
-			pkColumns[col] = struct{}{}
+			pkColumns[strings.ToLower(col)] = struct{}{}
 		}
 	}
 
 	// Collect all renames and added columns to check for dangerous overlaps.
+	// All names are lower-cased.
 	// renamedFrom maps old_name → new_name for all renames in this ALTER.
 	renamedFrom := make(map[string]string)
 	// renamedTo maps new_name → old_name (the reverse) for overlap detection.
@@ -50,12 +56,14 @@ func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 
 		if spec.Tp == ast.AlterTableRenameColumn {
 			if spec.OldColumnName != nil {
-				if _, isPK := pkColumns[spec.OldColumnName.Name.O]; isPK {
+				if _, isPK := pkColumns[spec.OldColumnName.Name.L]; isPK {
 					return fmt.Errorf("renaming primary key column %q is not supported", spec.OldColumnName.Name.O)
 				}
-				if spec.NewColumnName != nil && spec.OldColumnName.Name.O != spec.NewColumnName.Name.O {
-					renamedFrom[spec.OldColumnName.Name.O] = spec.NewColumnName.Name.O
-					renamedTo[spec.NewColumnName.Name.O] = spec.OldColumnName.Name.O
+				// A case-only rename (foo → FOO) is not a rename for data-mapping
+				// purposes, since identifiers are case-insensitive.
+				if spec.NewColumnName != nil && spec.OldColumnName.Name.L != spec.NewColumnName.Name.L {
+					renamedFrom[spec.OldColumnName.Name.L] = spec.NewColumnName.Name.L
+					renamedTo[spec.NewColumnName.Name.L] = spec.OldColumnName.Name.L
 				}
 			}
 			continue
@@ -63,11 +71,11 @@ func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 
 		if spec.Tp == ast.AlterTableChangeColumn {
 			if spec.OldColumnName != nil && len(spec.NewColumns) > 0 {
-				oldName := spec.OldColumnName.Name.O
-				newName := spec.NewColumns[0].Name.Name.O
+				oldName := spec.OldColumnName.Name.L
+				newName := spec.NewColumns[0].Name.Name.L
 				if oldName != newName {
 					if _, isPK := pkColumns[oldName]; isPK {
-						return fmt.Errorf("renaming primary key column %q is not supported", oldName)
+						return fmt.Errorf("renaming primary key column %q is not supported", spec.OldColumnName.Name.O)
 					}
 					renamedFrom[oldName] = newName
 					renamedTo[newName] = oldName
@@ -78,7 +86,7 @@ func renameCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
 
 		if spec.Tp == ast.AlterTableAddColumns {
 			for _, col := range spec.NewColumns {
-				addedColumns[col.Name.Name.O] = struct{}{}
+				addedColumns[col.Name.Name.L] = struct{}{}
 			}
 		}
 	}

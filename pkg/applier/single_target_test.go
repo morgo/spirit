@@ -464,6 +464,84 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 	require.NoError(t, rows.Err())
 }
 
+// TestSingleTargetApplierDeleteKeysSeparatorInValues tests DeleteKeys with
+// string PK values containing the hash-key separator "-#-". Before hash-key
+// components were escaped, a single-column PK value containing "-#-" was
+// split into multiple values, producing DELETE ... WHERE (pk) IN (('a','b'))
+// — MySQL error 1241 "Operand should contain 1 column(s)" — which blocked
+// the flush forever.
+func TestSingleTargetApplierDeleteKeysSeparatorInValues(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_delete_sep_test")
+	testutils.RunSQL(t, "CREATE DATABASE single_delete_sep_test")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	target := base.Clone()
+	target.DBName = "single_delete_sep_test"
+	targetDB, err := sql.Open("mysql", target.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	// Single-column VARCHAR PK whose values contain the separator.
+	_, err = targetDB.ExecContext(t.Context(),
+		`CREATE TABLE test_table (id VARCHAR(64) PRIMARY KEY, name VARCHAR(100))`)
+	require.NoError(t, err)
+	_, err = targetDB.ExecContext(t.Context(),
+		`INSERT INTO test_table VALUES ('a-#-b', 'Alice'), ('plain', 'Bob'), ('-#-', 'Charlie')`)
+	require.NoError(t, err)
+
+	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
+	require.NoError(t, targetTable.SetInfo(t.Context()))
+
+	tar := Target{
+		DB:       targetDB,
+		Config:   target,
+		KeyRange: "0",
+	}
+	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	keysToDelete := []string{
+		utils.HashKey([]any{"a-#-b"}),
+		utils.HashKey([]any{"-#-"}),
+	}
+	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, keysToDelete, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), affectedRows)
+
+	var id, name string
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT id, name FROM test_table").Scan(&id, &name))
+	require.Equal(t, "plain", id)
+	require.Equal(t, "Bob", name)
+
+	// Composite PK: values containing the separator must round-trip into a
+	// tuple of the correct arity and delete exactly the intended row.
+	_, err = targetDB.ExecContext(t.Context(),
+		`CREATE TABLE test_composite (id1 VARCHAR(64), id2 VARCHAR(64), name VARCHAR(100), PRIMARY KEY (id1, id2))`)
+	require.NoError(t, err)
+	_, err = targetDB.ExecContext(t.Context(),
+		`INSERT INTO test_composite VALUES ('a-#-b', 'c', 'collide1'), ('a', 'b-#-c', 'collide2'), ('keep', 'me', 'safe')`)
+	require.NoError(t, err)
+
+	compositeTable := table.NewTableInfo(targetDB, target.DBName, "test_composite")
+	require.NoError(t, compositeTable.SetInfo(t.Context()))
+
+	affectedRows, err = applier.DeleteKeys(t.Context(), compositeTable, compositeTable,
+		[]string{utils.HashKey([]any{"a-#-b", "c"})}, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affectedRows, "only ('a-#-b','c') must be deleted, not ('a','b-#-c')")
+
+	var count int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM test_composite").Scan(&count))
+	require.Equal(t, 2, count)
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT name FROM test_composite WHERE id1 = 'a' AND id2 = 'b-#-c'").Scan(&name))
+	require.Equal(t, "collide2", name, "the colliding sibling row must survive the delete")
+}
+
 // TestSingleTargetApplierDeleteKeysEmpty tests DeleteKeys with empty key list
 func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_delete_empty_test")

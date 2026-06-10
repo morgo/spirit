@@ -37,7 +37,17 @@ func castableTp(tp string) string {
 	case "tinyblob", "blob", "mediumblob", "longblob", "varbinary":
 		return "binary"
 	case "binary":
-		return "binary(0)" // weirdly only binary needs special handling; blob etc is fine.
+		// Fixed-length binary needs special handling; blob etc is fine.
+		// We must preserve the width (e.g. binary(16)) in the cast:
+		//  - A plain CAST(col AS binary) does not pad, so a binary(50)->binary(100)
+		//    widening migration would checksum-mismatch (the two sides zero-pad
+		//    to different lengths). Casting both sides to the target's full type
+		//    pads them to the same length, since the cast type always comes from
+		//    the target table (see ColumnMapping.ChecksumExprs).
+		//  - CAST(col AS binary(0)) must never be used: it truncates every value
+		//    to zero bytes, which would make the checksum blind to the column's
+		//    contents entirely.
+		return tp
 	case "float", "double": // required for MySQL 5.7
 		return "char"
 	case "json":

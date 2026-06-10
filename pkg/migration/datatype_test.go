@@ -1107,7 +1107,7 @@ func TestBinaryToVarbinaryConcurrentDML(t *testing.T) {
 //   - For values that fit: the destination receives the wrong bit pattern.
 //     Caught by the checksum, also fail-loud.
 //
-// All three subtests fail on current main. The fix is to give BIT a
+// All subtests failed before commit fd73e807. The fix was to give BIT a
 // dedicated arm in mySQLTypeToDatumTp (most cleanly: unsignedType,
 // reinterpreting the int64 as uint64) so the SQL literal is emitted as
 // a numeric, not a quoted string.
@@ -1115,29 +1115,39 @@ func TestBitColumnDML(t *testing.T) {
 	t.Parallel()
 	t.Run("BIT(1)", func(t *testing.T) {
 		t.Parallel()
-		runBitDMLTest(t, "bit1col", "BIT(1)", []uint64{0, 1}, "b1")
+		runBitDMLTest(t, "bit1col", "b1", "BIT(1) NOT NULL DEFAULT 0", []uint64{0, 1})
 	})
 
 	t.Run("BIT(8)", func(t *testing.T) {
 		t.Parallel()
-		runBitDMLTest(t, "bit8col", "BIT(8)", []uint64{0, 1, 127, 200, 255}, "b8")
+		runBitDMLTest(t, "bit8col", "b8", "BIT(8) NOT NULL DEFAULT 0", []uint64{0, 1, 127, 200, 255})
 	})
 
 	t.Run("BIT(64) high bit set", func(t *testing.T) {
 		t.Parallel()
 		// Values with the top bit set become negative int64 after decoding,
 		// which is where the string-coercion path goes wrong.
-		runBitDMLTest(t, "bit64col", "BIT(64)",
-			[]uint64{0, 1, 1 << 63, (1 << 63) | 1, ^uint64(0)}, "b64")
+		runBitDMLTest(t, "bit64col", "b64", "BIT(64) NOT NULL DEFAULT 0",
+			[]uint64{0, 1, 1 << 63, (1 << 63) | 1, ^uint64(0)})
+	})
+
+	// Reproduces the exact column definition from the incident report:
+	//   `summary_backfill` bit(1) NOT NULL DEFAULT b'0'
+	// This ensures Spirit can migrate BIT columns declared with a binary-literal
+	// DEFAULT (b'0'), in case schema/column-definition handling differs from a
+	// numeric DEFAULT 0.
+	t.Run("BIT(1) production default b'0'", func(t *testing.T) {
+		t.Parallel()
+		runBitDMLTest(t, "bit1prod", "summary_backfill", "BIT(1) NOT NULL DEFAULT b'0'", []uint64{0, 1})
 	})
 }
 
-func runBitDMLTest(t *testing.T, tableName, bitType string, values []uint64, colName string) {
+func runBitDMLTest(t *testing.T, tableName, colName, colDef string, values []uint64) {
 	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		v INT NOT NULL,
-		%s %s NOT NULL DEFAULT 0
-	)`, tableName, colName, bitType))
+		%s %s
+	)`, tableName, colName, colDef))
 
 	// Seed enough rows to give the chunker work; the bit value here doesn't
 	// matter — the assertions cover rows written during migration via the
@@ -1240,6 +1250,6 @@ func runBitDMLTest(t *testing.T, tableName, bitType string, values []uint64, col
 			mk.id, -1-i)
 		require.Equalf(t, mk.val, got,
 			"marker id=%d expected %s value 0x%016x but got 0x%016x",
-			mk.id, bitType, mk.val, got)
+			mk.id, colDef, mk.val, got)
 	}
 }
