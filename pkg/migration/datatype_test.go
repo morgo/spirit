@@ -346,9 +346,13 @@ func testEnumDrop(t *testing.T, enableBuffered, useGTID bool) {
 		status ENUM('active', 'inactive', 'pending', 'archived') NOT NULL
 	)`, tableName))
 	// Seed only with retained values; 'inactive' will be dropped and must
-	// not appear in any row when the checksum runs.
-	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'active'", tableName), 3000)
-	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'pending'", tableName), 3000)
+	// not appear in any row when the checksum runs. A few hundred rows is
+	// plenty: WithTestThrottler() paces the copy (1s per chunk), so the runtime
+	// is driven by the chunk count, not the row count — a larger seed just adds
+	// I/O without changing what's exercised. The concurrent DML below targets
+	// ids well within this range.
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'active'", tableName), 200)
+	tt.SeedRows(t, fmt.Sprintf("INSERT INTO %s (status) SELECT 'pending'", tableName), 200)
 	_, err := tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO %s (status) VALUES ('archived')", tableName))
 	require.NoError(t, err)
 
@@ -382,7 +386,7 @@ func testEnumDrop(t *testing.T, enableBuffered, useGTID bool) {
 			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('pending')`, tableName))
 			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (status) VALUES ('archived')`, tableName))
 			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'pending' WHERE id = %d`, tableName, i))
-			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'archived' WHERE id = %d`, tableName, 3000+i))
+			_, _ = tt.DB.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET status = 'archived' WHERE id = %d`, tableName, 100+i))
 		}
 	}()
 
