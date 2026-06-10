@@ -311,16 +311,10 @@ func TestMoveReservedWordTableName(t *testing.T) {
 }
 
 // TestPostCopyAnalyzeTargetSchema is a regression test for the bug where
-// postCopyPhase ran ANALYZE TABLE against the *source* schema name instead of
-// the target's. The move is schema-name-agnostic everywhere else (the
-// documented default is /src -> /dest, with differently-named schemas), so the
-// ANALYZE silently no-op'd on a real cross-cluster target — the target entered
-// cutover with stale InnoDB statistics. We use the canonical /src -> /dest
-// pattern (here w3c_src -> w3c_dest), delete the target table's row from
-// mysql.innodb_table_stats, drive the runner through postCopyPhase, and assert
-// the row was repopulated for the *target* schema. On the unfixed code the
-// ANALYZE targets the source schema, so the target's stats row never reappears
-// and this test fails.
+// postCopyPhase ran ANALYZE against the source schema, silently no-op'ing on a
+// cross-cluster target (here w3c_src -> w3c_dest). It deletes the target's
+// mysql.innodb_table_stats row, runs postCopyPhase, and asserts the row is
+// repopulated; on the unfixed code it never reappears.
 func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -432,16 +426,12 @@ func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
 	// A freshly-created table analyzes cleanly (Msg_type "status").
 	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
 
-	// Re-analyzing an already-analyzed table must also succeed. Depending on the
-	// MySQL version/engine this may report a non-"OK" status row (e.g. "Table is
-	// already up to date"); analyzeTable must treat any non-"Error" Msg_type as
-	// success and never abort on a non-OK Msg_text.
+	// Re-analyzing succeeds too, even though it may report a non-OK status row
+	// ("Table is already up to date") — only Msg_type="Error" is a failure.
 	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
 
-	// A missing table reports an Error row in the result set; analyzeTable must
-	// turn that into a returned error instead of a silent no-op. (MySQL emits an
-	// "Error" row followed by a trailing "status: Operation failed" row; the
-	// error must be detected via the "Error" Msg_type, not via the non-OK text.)
+	// A missing table must surface as an error (via the Msg_type="Error" row),
+	// not a silent no-op.
 	err = r.analyzeTable(t.Context(), db, "does_not_exist")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ANALYZE TABLE")

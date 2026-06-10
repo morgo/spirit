@@ -1021,16 +1021,9 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	r.logger.Info("Running ANALYZE TABLE")
 	for _, target := range r.targets {
 		for _, tbl := range r.sourceTables {
-			// Address the table UNQUALIFIED on the target's own connection. The
-			// previous code qualified ANALYZE with tbl.SchemaName (the *source*
-			// schema), which on a real cross-cluster target points at a schema
-			// that does not exist there; because ANALYZE reports a missing table
-			// as an *error row in the result set* (not a statement error) the
-			// no-op was invisible and the target entered cutover with stale
-			// statistics. Running it unqualified on target.DB matches the rest of
-			// the schema-name-agnostic move path and is also correct through a
-			// Vitess vtgate (where the logical schema name need not match the
-			// physical one). See analyzeTable for the result-row check.
+			// Unqualified on target.DB: the old code qualified with the source
+			// schema, which doesn't exist on a cross-cluster target (and breaks
+			// through a vtgate). See analyzeTable.
 			if err := r.analyzeTable(ctx, target.DB, tbl.TableName); err != nil {
 				return err
 			}
@@ -1083,30 +1076,11 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	return r.checker.Run(ctx)
 }
 
-// analyzeTable runs ANALYZE TABLE for schemaName.tableName on the given target
-// connection and inspects the result set. ANALYZE TABLE reports per-table
-// problems (e.g. the table is missing) as a row in the result set with
-// Msg_type = "Error" rather than as a statement error, so plain Exec would
-// return nil even when the statistics were never refreshed. We read the rows
-// and return an error on any "Error" row so a silent no-op (the original
-// cross-schema bug) cannot recur.
-//
-// A successful ANALYZE does not always report Msg_text = "OK": MySQL emits
-// "status" rows such as "Table is already up to date" and informational
-// "note"/"warning" rows that are not failures. We must only treat a row as a
-// failure when Msg_type = "Error" (the column that actually distinguishes a
-// failure), not when Msg_text differs from "OK". A missing table, for example,
-// reports an "Error" row followed by a trailing status row ("Operation
-// failed"); branching on Msg_type still detects it via the "Error" row.
-// analyzeTable runs ANALYZE TABLE for tableName on db. The table is named
-// WITHOUT a schema qualifier on purpose: db is already connected to the
-// target's schema, and the rest of the move path is schema-name-agnostic
-// (it addresses tables unqualified against each connection's default DB).
-// Qualifying would also be wrong through a Vitess vtgate, where the logical
-// keyspace/schema name need not match the physical schema the connection
-// lands on. It inspects the result set so a failure surfaces as an error
-// rather than the silent no-op ANALYZE returns for a missing/unreachable
-// table.
+// analyzeTable runs ANALYZE TABLE for tableName on db, unqualified: db is
+// already connected to the target schema, and qualifying would be wrong
+// through a Vitess vtgate. It reads the result set rather than using Exec
+// because ANALYZE reports a missing table as a Msg_type="Error" row (not a
+// statement error), which would otherwise be a silent no-op.
 func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, tableName string) error {
 	stmt, err := sqlescape.EscapeSQL("ANALYZE TABLE %n", tableName)
 	if err != nil {
