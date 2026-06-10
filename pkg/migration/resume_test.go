@@ -1,3 +1,9 @@
+//go:build singleversion
+
+// This file holds the recovery / resume-from-checkpoint tests. They are part of
+// the version-agnostic "single-version" suite (build tag `singleversion`); see
+// singleversion_test.go for the suite's rationale, the dedicated CI job, and the
+// `-run` selection. A plain `go test ./...` (no tag) skips this file.
 package migration
 
 import (
