@@ -1486,11 +1486,42 @@ func (r *Runner) flushAllReplClients(ctx context.Context) error {
 //   - immediately after resume there is a delete for key=105 but we incorrectly
 //     skip it because it is above the watermark.
 func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark string) error {
-	for _, src := range r.sourceTables {
-		aboveClause, err := table.WatermarkAboveClause(src, copierWatermark)
-		if err != nil {
-			return fmt.Errorf("failed to parse watermark for table %s: %w", src.TableName, err)
+	// The checkpoint watermark format depends on how many chunkers the copy
+	// chunker wraps: a single (source, table) pair stores that chunker's own
+	// watermark (raw chunk JSON for auto-inc PKs, or the composite chunker's
+	// envelope), while multiple pairs store a JSON map keyed by
+	// table.QualifiedName(). WatermarkPerTable normalizes every format into
+	// a per-table map of raw chunk JSON.
+	allTables := make([]*table.TableInfo, 0, len(r.sources)*len(r.sourceTables))
+	for i := range r.sources {
+		allTables = append(allTables, r.sources[i].tables...)
+	}
+	watermarks, err := table.WatermarkPerTable(copierWatermark, allTables...)
+	if err != nil {
+		return fmt.Errorf("failed to parse copier watermark: %w", err)
+	}
+	for _, src := range allTables {
+		// A table without a watermark entry was not ready when the
+		// checkpoint was written. On resume the chunker restarts it from
+		// scratch (multiChunker.OpenAtWatermark falls back to Open()), so
+		// every row already copied to the target sits "above" the (empty)
+		// watermark and must be deleted before the recopy.
+		aboveClause := "1=1"
+		watermark, hasWatermark := watermarks[src.QualifiedName()]
+		if hasWatermark {
+			aboveClause, err = table.WatermarkAboveClause(src, watermark)
+			if err != nil {
+				return fmt.Errorf("failed to parse watermark for table %s: %w", src.TableName, err)
+			}
 		}
+		// With multiple sources, tables with the same name from different
+		// sources interleave in the same target table, so each source's
+		// DELETE may also remove another source's rows below that source's
+		// own watermark. That direction is safe: deleting too much can only
+		// cause missing rows, which the initial checksum (FixDifferences)
+		// detects and repairs before cutover. Deleting too little would
+		// leave phantom rows, which is the race this function exists to
+		// prevent.
 		for i, target := range r.targets {
 			deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s",
 				src.QuotedTableName, aboveClause)
@@ -1504,7 +1535,7 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 					"target", i,
 					"table", src.TableName,
 					"rowsDeleted", rowsDeleted,
-					"watermark", copierWatermark,
+					"watermark", watermark,
 				)
 			}
 		}

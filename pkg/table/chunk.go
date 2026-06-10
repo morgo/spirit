@@ -191,6 +191,18 @@ func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Validate the shape before converting. encoding/json silently ignores
+	// unknown keys, so JSON in a foreign format (such as the multi-chunker's
+	// per-table map or the composite chunker's {"ChunkJSON":...} envelope)
+	// would otherwise decode into a zero-value chunk and produce a nonsense
+	// WHERE clause downstream. Fail loudly instead. Watermark chunks always
+	// carry both bounds with one value per key column (see GetLowWatermark).
+	if len(chunk.Key) == 0 {
+		return nil, fmt.Errorf("chunk JSON has no Key columns (foreign or corrupt watermark format?): %s", jsonStr)
+	}
+	if len(chunk.LowerBound.Value) != len(chunk.Key) || len(chunk.UpperBound.Value) != len(chunk.Key) {
+		return nil, fmt.Errorf("chunk JSON boundary values do not match key columns: %s", jsonStr)
+	}
 	lowerVals, err := jsonStrings2Datums(ti, chunk.Key, chunk.LowerBound.Value)
 	if err != nil {
 		return nil, err
@@ -231,4 +243,57 @@ func WatermarkAboveClause(ti *TableInfo, watermarkJSON string) (string, error) {
 		return "", fmt.Errorf("watermark has no upper bound")
 	}
 	return expandRowConstructorComparison(chunk.Key, OpGreaterThan, chunk.UpperBound.Value), nil
+}
+
+// WatermarkPerTable parses a copier watermark in any of the formats produced
+// by the chunkers' GetLowWatermark implementations and normalizes it into a
+// map of TableInfo.QualifiedName() -> raw single-chunk JSON (the format
+// accepted by WatermarkAboveClause). The formats are owned by the chunkers:
+//
+//   - multiChunker (used for two or more chunkers): a JSON map keyed by
+//     QualifiedName, where each value is the child chunker's own watermark.
+//   - chunkerComposite: an envelope {"ChunkJSON": "...", "RowsCopied": N}.
+//   - chunkerOptimistic: the raw chunk JSON itself.
+//
+// The tables argument is required to attribute single-chunker watermarks
+// (which carry no table name) to their table: those formats are only produced
+// when the operation covers exactly one table, so passing more than one table
+// with a single-chunker watermark is an error.
+//
+// A table may be missing from the returned map: the multi-chunker omits
+// tables whose watermark was not ready when the checkpoint was written, and
+// restarts them from scratch on resume (see multiChunker.OpenAtWatermark).
+// Callers must treat a missing entry as "this table has no copy progress".
+func WatermarkPerTable(watermark string, tables ...*TableInfo) (map[string]string, error) {
+	// Try the multi-chunker map format first. The single-chunker formats
+	// never decode into map[string]string because they always contain at
+	// least one non-string value (Key is an array, RowsCopied is a number).
+	multi := map[string]string{}
+	if err := json.Unmarshal([]byte(watermark), &multi); err == nil {
+		out := make(map[string]string, len(multi))
+		for key, wm := range multi {
+			out[key] = unwrapCompositeWatermark(wm)
+		}
+		return out, nil
+	}
+	// Single-chunker format: it can only be attributed to a table if the
+	// operation covers exactly one.
+	if len(tables) != 1 {
+		return nil, fmt.Errorf("watermark is in single-table format but %d tables were supplied: %s", len(tables), watermark)
+	}
+	return map[string]string{
+		tables[0].QualifiedName(): unwrapCompositeWatermark(watermark),
+	}, nil
+}
+
+// unwrapCompositeWatermark unwraps the composite chunker's watermark envelope
+// ({"ChunkJSON": "...", "RowsCopied": N}) into the raw chunk JSON it carries.
+// A watermark in any other format (e.g. the optimistic chunker's raw chunk
+// JSON, which has no ChunkJSON field) is returned unchanged.
+func unwrapCompositeWatermark(watermark string) string {
+	var envelope compositeWatermark
+	if err := json.Unmarshal([]byte(watermark), &envelope); err == nil && envelope.ChunkJSON != "" {
+		return envelope.ChunkJSON
+	}
+	return watermark
 }
