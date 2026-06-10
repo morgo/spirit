@@ -112,31 +112,33 @@ func TestCanReadActiveThreads_LocalMySQL(t *testing.T) {
 func TestResolveWriteThreads_PassThroughPositive(t *testing.T) {
 	// A positive value is returned unchanged without touching the DB, so a
 	// nil DB is safe here.
-	n, err := ResolveWriteThreads(t.Context(), nil, 8)
+	n, err := ResolveWriteThreads(t.Context(), nil, 8, discardLogger())
 	require.NoError(t, err)
 	require.Equal(t, 8, n)
 }
 
 func TestResolveWriteThreads_RejectsNegative(t *testing.T) {
-	_, err := ResolveWriteThreads(t.Context(), nil, -1)
+	_, err := ResolveWriteThreads(t.Context(), nil, -1, discardLogger())
 	require.ErrorContains(t, err, "non-negative")
 }
 
 func TestResolveWriteThreads_NilDBWhenAutoSizing(t *testing.T) {
 	// Auto-sizing (requested==0) must reject a nil DB rather than panic.
-	_, err := ResolveWriteThreads(t.Context(), nil, 0)
+	_, err := ResolveWriteThreads(t.Context(), nil, 0, discardLogger())
 	require.ErrorContains(t, err, "no database connection")
 }
 
-func TestResolveWriteThreads_NonAuroraErrors_LocalMySQL(t *testing.T) {
+func TestResolveWriteThreads_NonAuroraUsesDefault_LocalMySQL(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
 	// 0 means "auto-size". On a stock (non-Aurora) MySQL there is no reliable
-	// vCPU signal, so auto-sizing must fail rather than guess.
-	_, err = ResolveWriteThreads(t.Context(), db, 0)
-	require.ErrorContains(t, err, "non-Aurora")
+	// vCPU signal, so auto-sizing falls back to the default rather than guess
+	// or fail.
+	n, err := ResolveWriteThreads(t.Context(), db, 0, discardLogger())
+	require.NoError(t, err)
+	require.Equal(t, DefaultWriteThreads, n)
 }
 
 func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
