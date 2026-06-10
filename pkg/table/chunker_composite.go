@@ -424,6 +424,10 @@ func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
 }
 
 // KeyAboveHighWatermark checks if a key is above the high watermark (chunkPtr).
+// TRUE means the caller will discard the event, so if there is any ambiguity
+// it is important to return FALSE (buffer the change). In particular, for
+// multi-column chunk keys only a strictly-greater first column is unambiguous;
+// see the comparison at the bottom of this function.
 // This optimization works with comparable types in key[0] (first column): numeric, string, binary, temporal.
 // For VARCHAR/TEXT with collations, Go's byte-order comparison may differ from MySQL's collation order
 // (e.g., 'aa' = 'AA' in utf8mb4_0900_ai_ci, or "ch" > "h" in utf8mb4_czech_ci), which can cause
@@ -502,7 +506,27 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 		// SELECT's snapshot. Return FALSE so the change is buffered.
 		return false
 	}
-	above, err := keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
+	// We only see key[0] here, but chunkPtrs is the full tuple upper bound
+	// of all dispatched chunks. How we compare depends on the key width:
+	//
+	// Single-column key: chunkPtrs[0] IS the (exclusive) upper bound, so a
+	// key equal to it will be read by the next chunk's SELECT — discarding
+	// the event is safe, and >= discards more events (a meaningful
+	// optimization for the common case).
+	//
+	// Multi-column key: equality on the first column is ambiguous. With
+	// chunkPtrs = (5, 100), the tuple (5, 50) is BELOW the watermark
+	// (already dispatched/copied) even though key[0] == chunkPtrs[0].
+	// Only a STRICTLY greater first column guarantees the full tuple sorts
+	// above every dispatched chunk's upper bound. Per the contract, on
+	// ambiguity we must return FALSE so the event is buffered, not dropped.
+	var above bool
+	var err error
+	if len(t.chunkKeys) > 1 {
+		above, err = keyDatum.GreaterThan(t.chunkPtrs[0])
+	} else {
+		above, err = keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
+	}
 	if err != nil {
 		t.logger.Error("comparing chunkPtrs[0] in KeyAboveHighWatermark", "error", err)
 		return false
