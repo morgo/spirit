@@ -29,6 +29,56 @@ func TestHashAndUnhashKey(t *testing.T) {
 	require.Equal(t, "'1234'", unhashed)
 }
 
+// TestHashKeySeparatorCollision pins the fix for hash-key collisions:
+// without escaping, ("a-#-b", "c") and ("a", "b-#-c") hash to the same
+// string, so one row's buffered change silently overwrites another's.
+func TestHashKeySeparatorCollision(t *testing.T) {
+	require.NotEqual(t,
+		HashKey([]any{"a-#-b", "c"}),
+		HashKey([]any{"a", "b-#-c"}))
+	require.NotEqual(t,
+		HashKey([]any{"a-#-b-#-c"}),
+		HashKey([]any{"a", "b", "c"}))
+	require.NotEqual(t,
+		HashKey([]any{"a#", "#b"}),
+		HashKey([]any{"a", "#", "b"}))
+	// Components containing escape characters must not collide either.
+	require.NotEqual(t,
+		HashKey([]any{`a\`, "b"}),
+		HashKey([]any{"a", `\b`}))
+}
+
+// TestHashKeyRoundTrip verifies that UnhashKeyToString recovers the exact
+// original values (correctly SQL-quoted) for components containing the
+// separator, escape characters, and edge-case values.
+func TestHashKeyRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		key  []any
+		want string
+	}{
+		{"plain single", []any{"hello"}, "'hello'"},
+		{"plain composite", []any{"a", "b"}, "('a','b')"},
+		{"separator in single key", []any{"a-#-b"}, "'a-#-b'"},
+		{"separator in composite components", []any{"a-#-b", "c"}, "('a-#-b','c')"},
+		{"separator in second component", []any{"a", "b-#-c"}, "('a','b-#-c')"},
+		{"bare hash", []any{"a#b", "c#"}, "('a#b','c#')"},
+		{"backslash", []any{`a\b`, `c\`}, `('a\\b','c\\')`}, // sqlescape doubles backslashes for SQL
+		{"backslash before hash", []any{`a\#b`}, `'a\\#b'`},
+		{"only separator", []any{"-#-"}, "'-#-'"},
+		{"empty single", []any{""}, "''"},
+		{"empty components", []any{"", ""}, "('','')"},
+		{"empty first component", []any{"", "a"}, "('','a')"},
+		{"trailing dash boundary", []any{"a-", "-b"}, "('a-','-b')"},
+		{"non-string types", []any{int64(42), "x"}, "('42','x')"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, UnhashKeyToString(HashKey(tc.key)))
+		})
+	}
+}
+
 func TestTruncateTableName(t *testing.T) {
 	// Short name that doesn't need truncation
 	require.Equal(t, "mytable", TruncateTableName("mytable", 21))
