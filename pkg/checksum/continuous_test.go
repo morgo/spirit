@@ -113,7 +113,38 @@ func newTestChecker(t *testing.T, chunker table.Chunker, cfg ContinuousCheckerCo
 	require.NoError(t, err)
 
 	attempts := sync.Map{}
-	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, error) {
+	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
+		var n int
+		if v, ok := attempts.Load(chunk); ok {
+			n = v.(int) + 1
+		} else {
+			n = 1
+		}
+		attempts.Store(chunk, n)
+		srcCRC, tgtCRC, count, err := read(ctx, chunk, n)
+		// The legacy 3-value read hook supplies a single row count that
+		// applies to BOTH source and target — these tests exercise CRC-only
+		// divergence with matching counts. Tests that need divergent counts
+		// use newTestCheckerSig below.
+		return srcCRC, tgtCRC, count, count, err
+	}
+	return c
+}
+
+// newTestCheckerSig is like newTestChecker but the read hook returns full
+// signatures (CRC + count) for source and target independently, so tests can
+// exercise row-count divergence with matching CRCs (the defense-in-depth gap
+// this comparison closes).
+func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg ContinuousCheckerConfig,
+	read func(ctx context.Context, chunk *table.Chunk, attempt int) (srcCRC, tgtCRC int64, srcCount, tgtCount uint64, err error),
+) *ContinuousChecker {
+	t.Helper()
+	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
+	c, err := NewContinuousChecker(srcDB, tgtDB, chunker, nil, cfg)
+	require.NoError(t, err)
+
+	attempts := sync.Map{}
+	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
 		var n int
 		if v, ok := attempts.Load(chunk); ok {
 			n = v.(int) + 1
@@ -675,6 +706,74 @@ func TestRecopyNotCalledForHotChunk(t *testing.T) {
 	require.Equal(t, uint64(0), c.Stats().PermanentFailures)
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestRecopyOnRowCountMismatch is the continuous-checker analog of the
+// defense-in-depth fix: the source and target CRCs MATCH on every read, but
+// the row counts differ and stay stable. Before the fix this passed silently
+// (CRC equality alone). Now the count divergence is treated like a checksum
+// mismatch: it enqueues a retry, the retry sees stable divergence (source
+// signature unchanged, target signature still wrong), and the configured
+// Recopier is invoked. After recopy the signatures match and the pass
+// completes cleanly.
+func TestRecopyOnRowCountMismatch(t *testing.T) {
+	chunker := newTestChunker(2)
+	var recopied sync.Map // chunk pointer → recopied? (bool)
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			recopied.Store(chunk, true)
+			return nil
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	c := newTestCheckerSig(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, uint64, error) {
+			if _, ok := recopied.Load(chunk); ok {
+				// Post-recopy: CRCs AND counts match.
+				return 42, 42, 10, 10, nil
+			}
+			// Pre-recopy: CRCs are IDENTICAL (the checksum-only check would
+			// pass!) but the source has one more row than the target. Stable
+			// across the retry window so it becomes a recopy, not a hot chunk.
+			return 42, 42, 11, 10, nil
+		},
+	)
+
+	stop, _ := runUntil(t, c)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire; stats=%+v calls=%d", c.Stats(), recopier.callCount())
+	}
+	stats := c.Stats()
+	require.Equal(t, uint64(0), stats.PermanentFailures)
+	require.Equal(t, uint64(2), stats.MismatchesDetected, "both chunks mismatch on row count despite equal CRC")
+	require.GreaterOrEqual(t, recopier.callCount(), 2, "both row-count-divergent chunks should have been recopied")
+
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestPermanentDivergenceOnRowCount: with matching CRCs but a stable row-count
+// difference and NO Recopier, the continuous checker must surface
+// ErrPermanentDivergence — the count mismatch is a real divergence, not a
+// silent pass.
+func TestPermanentDivergenceOnRowCount(t *testing.T) {
+	chunker := newTestChunker(1)
+	c := newTestCheckerSig(t, chunker, fastConfig(),
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, uint64, error) {
+			// CRCs always match; source always has one extra row.
+			return 100, 100, 6, 5, nil
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := c.Run(ctx)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrPermanentDivergence), "expected ErrPermanentDivergence, got %v", err)
+	require.Equal(t, uint64(1), c.Stats().PermanentFailures)
 }
 
 // TestMultiplePassesResetCounters: after a clean pass, counters reset for
