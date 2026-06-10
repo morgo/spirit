@@ -589,11 +589,12 @@ func checkpointAndStop(t *testing.T, move *Move) {
 	require.NoError(t, r.copier.Run(ctx))
 	require.NoError(t, r.DumpCheckpoint(ctx))
 
-	// Close everything manually, without cutover.
+	// Close everything manually, without cutover. Runner.Close() cancels and
+	// shuts down repl clients/chunkers and closes the targets, so call it
+	// first; it does not close the sources, so close the source DB afterwards.
 	r.cancelFunc()
-	require.NoError(t, r.sources[0].db.Close())
-	require.NoError(t, r.targets[0].DB.Close())
 	require.NoError(t, r.Close())
+	require.NoError(t, r.sources[0].db.Close())
 }
 
 // TestResumeFromCheckpointMultiTableE2E covers resume-from-checkpoint for a

@@ -185,6 +185,18 @@ func jsonStrings2Datums(ti *TableInfo, keys []string, vals []string) ([]Datum, e
 	return datums, nil
 }
 
+// truncateForError returns a short, log-safe rendering of a watermark JSON
+// string. Watermarks can be large (a multi-table map) and contain primary-key
+// values, so embedding the whole string in an error can bloat logs and leak
+// identifiers. We keep only a short prefix plus the total byte length.
+func truncateForError(s string) string {
+	const maxLen = 80
+	if len(s) <= maxLen {
+		return s
+	}
+	return fmt.Sprintf("%s… (%d bytes)", s[:maxLen], len(s))
+}
+
 func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 	var chunk JSONChunk
 	err := json.Unmarshal([]byte(jsonStr), &chunk)
@@ -198,10 +210,10 @@ func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 	// WHERE clause downstream. Fail loudly instead. Watermark chunks always
 	// carry both bounds with one value per key column (see GetLowWatermark).
 	if len(chunk.Key) == 0 {
-		return nil, fmt.Errorf("chunk JSON has no Key columns (foreign or corrupt watermark format?): %s", jsonStr)
+		return nil, fmt.Errorf("chunk JSON has no Key columns (foreign or corrupt watermark format?): %s", truncateForError(jsonStr))
 	}
 	if len(chunk.LowerBound.Value) != len(chunk.Key) || len(chunk.UpperBound.Value) != len(chunk.Key) {
-		return nil, fmt.Errorf("chunk JSON boundary values do not match key columns: %s", jsonStr)
+		return nil, fmt.Errorf("chunk JSON boundary values do not match key columns: %s", truncateForError(jsonStr))
 	}
 	lowerVals, err := jsonStrings2Datums(ti, chunk.Key, chunk.LowerBound.Value)
 	if err != nil {
