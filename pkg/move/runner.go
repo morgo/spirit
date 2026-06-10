@@ -17,6 +17,7 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/statement"
@@ -1020,7 +1021,16 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	r.logger.Info("Running ANALYZE TABLE")
 	for _, target := range r.targets {
 		for _, tbl := range r.sourceTables {
-			if err := dbconn.Exec(ctx, target.DB, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
+			// Qualify with the *target's* schema, not the source's. The move is
+			// otherwise schema-name-agnostic (the documented default is
+			// /src -> /dest), so addressing the table with tbl.SchemaName here
+			// pointed ANALYZE at the source schema. On a real cross-cluster
+			// target that table does not exist, and because ANALYZE reports a
+			// missing table as an *error row in the result set* (not a statement
+			// error) the no-op was invisible — the target entered cutover with
+			// stale statistics. See analyzeTable for the result-row check that
+			// makes such a silent no-op impossible going forward.
+			if err := r.analyzeTable(ctx, target.DB, target.Config.DBName, tbl.TableName); err != nil {
 				return err
 			}
 		}
@@ -1070,6 +1080,39 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// pass. See pkg/migration/runner.go DumpCheckpoint for the full
 	// rationale.
 	return r.checker.Run(ctx)
+}
+
+// analyzeTable runs ANALYZE TABLE for schemaName.tableName on the given target
+// connection and inspects the result set. ANALYZE TABLE reports per-table
+// problems (e.g. the table is missing) as a row in the result set with
+// Msg_type = "Error" (or "status"/"note" carrying a non-OK Msg_text) rather
+// than as a statement error, so plain Exec would return nil even when the
+// statistics were never refreshed. We read the rows and return an error on any
+// non-OK status so a silent no-op (the original cross-schema bug) cannot recur.
+func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, schemaName, tableName string) error {
+	stmt, err := sqlescape.EscapeSQL("ANALYZE TABLE %n.%n", schemaName, tableName)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return err
+	}
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		// ANALYZE TABLE returns: Table, Op, Msg_type, Msg_text.
+		var tbl, op, msgType, msgText string
+		if err := rows.Scan(&tbl, &op, &msgType, &msgText); err != nil {
+			return err
+		}
+		// A clean run reports Msg_type = "status" and Msg_text = "OK".
+		// Anything else (notably Msg_type "Error" for a missing table) means
+		// the statistics were not refreshed and we must not proceed to cutover.
+		if !strings.EqualFold(msgType, "status") || !strings.EqualFold(msgText, "OK") {
+			return fmt.Errorf("ANALYZE TABLE %s.%s failed: %s: %s", schemaName, tableName, msgType, msgText)
+		}
+	}
+	return rows.Err()
 }
 
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
