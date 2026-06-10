@@ -204,9 +204,10 @@ func simulateConnectionClose(t *testing.T, mdl *MetadataLock, logger *slog.Logge
 // closed. A second connection then verifies via IS_USED_LOCK that the lock
 // is still owned.
 func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
-	origLifetime := maxConnLifetime
-	maxConnLifetime = 500 * time.Millisecond
-	defer func() { maxConnLifetime = origLifetime }()
+	// maxConnLifetime is shortened to a few seconds for the whole package in
+	// TestMain (not mutated here — that would race with other tests' New()
+	// calls). This test waits past that lifetime, so run it in parallel.
+	t.Parallel()
 
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "w2a-conn-lifetime"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
@@ -230,14 +231,13 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 	lockName := computeLockName(&lockTableInfo)
 	stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?)", lockName)
 
-	// The MDL connection stays idle (refresh is parked an hour out), so once
-	// maxConnLifetime (500ms) elapses the database/sql connection cleaner is
-	// free to close it on its next cycle. Without the SetConnMaxLifetime(0)
-	// fix that idle close silently drops the session-scoped GET_LOCK. Rather
-	// than a fixed sleep, poll IS_USED_LOCK across a window that comfortably
-	// covers several cleaner cycles: fail fast the instant the lock is seen
-	// dropped, otherwise confirm it survived the whole window.
-	deadline := time.Now().Add(5 * time.Second)
+	// The MDL connection stays idle (refresh is parked an hour out), so once it
+	// ages past maxConnLifetime the database/sql connection cleaner is free to
+	// close it on its next cycle. Without the SetConnMaxLifetime(0) fix that
+	// idle close silently drops the session-scoped GET_LOCK. Poll IS_USED_LOCK
+	// across a window comfortably past the lifetime (covering an extra cleaner
+	// cycle): fail the instant the lock is seen dropped, else confirm survival.
+	deadline := time.Now().Add(maxConnLifetime + 5*time.Second)
 	for time.Now().Before(deadline) {
 		var owner sql.NullInt64
 		require.NoError(t, observer.QueryRowContext(t.Context(), stmt).Scan(&owner))

@@ -21,6 +21,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Shorten the pooled-connection lifetime for the whole dbconn test binary.
+	// TestMetadataLockSurvivesConnMaxLifetime must observe a connection
+	// outliving its ConnMaxLifetime; with the 3-minute default that test would
+	// take minutes, and mutating this global from within the test would race
+	// with other tests calling New(). Setting it once here, before any test
+	// runs, is race-free and bounds that test to a few seconds (it uses
+	// t.Parallel() so the wait overlaps the rest of the suite).
+	maxConnLifetime = 5 * time.Second
 	goleak.VerifyTestMain(m)
 }
 
