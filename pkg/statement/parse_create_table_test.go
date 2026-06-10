@@ -426,15 +426,17 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 					{
 						Name: "p_north",
 						Values: &PartitionValues{
-							Type:   "IN",
-							Values: []any{"north", "northeast"},
+							Type: "IN",
+							// String-literal partition values are stored as
+							// partitionStringLiteral so emission re-quotes them.
+							Values: []any{partitionStringLiteral("north"), partitionStringLiteral("northeast")},
 						},
 					},
 					{
 						Name: "p_south",
 						Values: &PartitionValues{
 							Type:   "IN",
-							Values: []any{"south"},
+							Values: []any{partitionStringLiteral("south")},
 						},
 					},
 				},

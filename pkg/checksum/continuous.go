@@ -10,9 +10,11 @@
 // # Convergence model
 //
 // A "pass" walks every chunk once, then drains a delayed-retry queue to
-// empty. The pass completes (cleanly) only when every chunk has gone clean
-// at least once — either on its initial read, or on a retry, or via a
-// recopy when stable divergence is detected.
+// empty. The pass completes only when every chunk has resolved — either
+// READ-verified (its source and target CRCs observed equal on the initial
+// read or on a retry), or repaired via a recopy when stable divergence is
+// detected. A completed pass is "clean" only if it contained zero
+// recopies; see the first-clean-pass section below.
 //
 // First-attempt failures are common — the target legitimately lags the
 // source — so failures are not noisy events. They go through a retry queue:
@@ -30,8 +32,11 @@
 //     - Else (newSrcCRC == originalSrcCRC, target still wrong) → stable
 //       divergence. With a Recopier configured (production case), invoke
 //       it to overwrite the chunk on the target from the source; on
-//       success the chunk counts as passed (in the per-pass "recopies"
-//       bucket). Without a Recopier the run returns ErrPermanentDivergence.
+//       success the chunk counts as resolved for pass-completion purposes
+//       (in the per-pass "recopies" bucket), but the pass is no longer
+//       clean — the repaired rows were never observed equal, so they are
+//       re-verified by the next pass's fresh walk. Without a Recopier the
+//       run returns ErrPermanentDivergence.
 //
 // Hot chunks slow but do not block pass completion: they cycle to the back
 // of the FIFO while other entries resolve. A genuinely permanently-hot row
@@ -41,8 +46,15 @@
 // # First-clean-pass signal
 //
 // FirstCleanPass returns a channel that is closed the first time a pass
-// completes with every chunk having gone clean. The signal is monotonic:
-// once fired it stays fired, even if subsequent passes detect new drift.
+// completes with every chunk READ-verified equal AND zero recopies. A
+// recopy is a repair, not a verification: the rewritten rows were never
+// observed equal, and the recopy can race the live replication feed
+// (re-inserting a row whose concurrent delete the feed already applied,
+// leaving an orphan no future binlog event will remove). A pass that
+// contained any recopy is therefore ineligible; the repaired ranges are
+// re-read on the next pass's fresh walk, and the signal fires only once
+// a full pass needs no repairs at all. The signal is monotonic: once
+// fired it stays fired, even if subsequent passes detect new drift.
 // Downstream consumers (e.g. the import feature that gates on "data is
 // known consistent") read this channel; ongoing drift after that point is
 // observable via Stats.
@@ -142,7 +154,10 @@ type ContinuousCheckerConfig struct {
 // ContinuousCheckerStats is a snapshot of the checker's counters. All
 // fields are point-in-time; for monotonic totals, sample successively.
 type ContinuousCheckerStats struct {
-	// PassesCompleted is the number of clean passes finished so far.
+	// PassesCompleted is the number of passes finished so far. A pass
+	// completes when every chunk has resolved (READ-verified or recopied);
+	// only a pass with zero recopies counts as clean for the
+	// FirstCleanPass signal.
 	PassesCompleted uint64
 
 	// CurrentPass is the 1-indexed pass number in flight (0 before the
@@ -178,7 +193,10 @@ type ContinuousCheckerStats struct {
 	// unchanged across the retry window, target still wrong) and the
 	// configured Recopier rewrote the chunk from source. Zero when no
 	// Recopier is configured (those failures surface as
-	// ErrPermanentDivergence and abort the run instead).
+	// ErrPermanentDivergence and abort the run instead). A pass with
+	// RecopiesThisPass > 0 cannot be the first clean pass — recopied
+	// chunks are repaired, not verified, and are re-read on the next
+	// pass before FirstCleanPass can fire.
 	RecopiesThisPass uint64
 
 	// RetryQueueDepth is the current size of the delayed-retry queue.
@@ -257,28 +275,43 @@ type ContinuousChecker struct {
 	firstCleanPassCh   chan struct{}
 
 	// readChunk performs the source+target CRC read for a single chunk and
-	// returns the new source CRC, new target CRC, and target row count
-	// (used for chunker feedback). Production wires this to readChunkCRC
-	// against sourceDB/targetDB; tests swap it to return deterministic
-	// CRCs without standing up two databases.
-	readChunk func(ctx context.Context, chunk *table.Chunk) (srcCRC, tgtCRC int64, tgtCount uint64, err error)
+	// returns the new source CRC, new target CRC, source row count, and
+	// target row count. The two counts are compared as a defense-in-depth
+	// check alongside the CRC (a row whose CRC32 is 0 is invisible to the
+	// XOR but visible to the count); tgtCount also feeds chunker feedback.
+	// Production wires this to readChunkCRC against sourceDB/targetDB; tests
+	// swap it to return deterministic CRCs/counts without standing up two
+	// databases.
+	readChunk func(ctx context.Context, chunk *table.Chunk) (srcCRC, tgtCRC int64, srcCount, tgtCount uint64, err error)
+}
+
+// chunkSig is the comparison identity for one side of a chunk: its CRC AND
+// its row count. The continuous checker compares whole signatures rather than
+// CRCs alone so a row-count mismatch is caught even when the CRC happens to
+// match (a row whose CRC32 is 0 is invisible to the BIT_XOR but moves the
+// count). "source changed" / "target caught up" decisions all operate on
+// signatures.
+type chunkSig struct {
+	crc   int64
+	count uint64
 }
 
 // retryEntry tracks one chunk that failed and is awaiting re-verification.
-// originalSrcCRC is updated each time we observe the source change while
-// the chunk is still pending — see the "hot chunk" path in the package doc.
+// originalSrc is updated each time we observe the source change while the
+// chunk is still pending — see the "hot chunk" path in the package doc.
 type retryEntry struct {
 	chunk *table.Chunk
 
-	originalSrcCRC int64
-	originalTgtCRC int64
+	originalSrc chunkSig
+	originalTgt chunkSig
 
 	// notBefore is the earliest wall-clock time this entry may be retried.
 	// Set to now + RetryDelay on enqueue and on each re-enqueue.
 	notBefore time.Time
 
-	// consecutiveSrcChanged counts retries on which the source CRC differed
-	// from the previous attempt. Surfaced as Stats.HotChunkCount when >=2.
+	// consecutiveSrcChanged counts retries on which the source signature
+	// differed from the previous attempt. Surfaced as Stats.HotChunkCount
+	// when >=2.
 	consecutiveSrcChanged int
 
 	// attempts is the number of times this entry has been re-read. Used
@@ -295,8 +328,8 @@ type workItem struct {
 	isRetry bool
 
 	// Only valid when isRetry is true:
-	originalSrcCRC        int64
-	originalTgtCRC        int64
+	originalSrc           chunkSig
+	originalTgt           chunkSig
 	consecutiveSrcChanged int
 	attempts              int
 }
@@ -306,21 +339,23 @@ type workItem struct {
 type workResult struct {
 	item *workItem
 
-	// passed is true iff the chunk satisfied the pass criterion (initial
-	// match, retry match against original or new source CRC, or a
-	// successful recopy).
+	// passed is true iff the chunk resolved for pass-completion purposes
+	// (initial match, retry match against the original or new source
+	// signature, or a successful recopy). Note a recopy "passes" only in
+	// the sense that the pass can finish — it also marks the pass
+	// ineligible to fire FirstCleanPass (see recopied below).
 	passed bool
 
 	// recopied is true iff this result represents a successful Recopy
 	// (passed=true also set). Distinguishes "passed via retry" from
-	// "passed via recopy" in the per-pass histogram.
+	// "repaired via recopy" in the per-pass histogram; any recopy makes
+	// the containing pass not-clean for the FirstCleanPass criterion.
 	recopied bool
 
-	// newSrcCRC / newTgtCRC are the values just read. Used by the driver
-	// to populate a re-enqueued retryEntry on the hot-chunk path.
-	newSrcCRC int64
-	newTgtCRC int64
-	newCount  uint64
+	// newSrc / newTgt are the signatures (CRC + count) just read. Used by
+	// the driver to populate a re-enqueued retryEntry on the hot-chunk path.
+	newSrc chunkSig
+	newTgt chunkSig
 
 	// permanent is true iff this is a retry that failed with the source
 	// CRC unchanged AND no Recopier is configured — i.e. real divergence
@@ -375,10 +410,7 @@ func NewContinuousChecker(
 		feed:             feed,
 		firstCleanPassCh: make(chan struct{}),
 	}
-	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, error) {
-		src, tgt, _, tgtCnt, err := readChunkCRC(ctx, sourceDB, targetDB, chunk)
-		return src, tgt, tgtCnt, err
-	}
+	c.readChunk = readChunkCRC2(sourceDB, targetDB)
 	return c, nil
 }
 
@@ -456,7 +488,25 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		}
 
 		c.passesCompleted.Add(1)
-		c.signalFirstCleanPass()
+		// A pass is "clean" — and eligible to fire FirstCleanPass — only if
+		// it contained zero recopies. A recopy is a repair, not a
+		// verification: the rewritten rows were never observed equal, and
+		// the recopy itself can race the live replication feed (its source
+		// SELECT can include a row whose concurrent delete the feed has
+		// already applied to the target, re-inserting an orphan that no
+		// future binlog event will remove). The repaired chunk's range is
+		// re-read by the next pass's fresh walk, so the signal fires only
+		// once a full pass needs no repairs at all. This mirrors the
+		// differencesFound == 0 follow-up-pass rule in SingleChecker /
+		// DistributedChecker.
+		if recopies := c.recopiesThisPass.Load(); recopies == 0 {
+			c.signalFirstCleanPass()
+		} else {
+			c.cfg.Logger.Info("continuous checksum: pass contained recopies; repaired chunks will be re-verified next pass",
+				"pass_number", passNum,
+				"recopies", recopies,
+			)
+		}
 		c.cfg.Logger.Info("continuous checksum pass complete",
 			"pass_number", passNum,
 			"total_chunks", c.chunksThisPass.Load(),
@@ -540,8 +590,8 @@ func (c *ContinuousChecker) runOnePass(ctx context.Context, workCh chan<- *workI
 					emit = &workItem{
 						chunk:                 e.chunk,
 						isRetry:               true,
-						originalSrcCRC:        e.originalSrcCRC,
-						originalTgtCRC:        e.originalTgtCRC,
+						originalSrc:           e.originalSrc,
+						originalTgt:           e.originalTgt,
 						consecutiveSrcChanged: e.consecutiveSrcChanged,
 						attempts:              e.attempts,
 					}
@@ -720,14 +770,15 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 	res := &workResult{item: item}
 
 	start := time.Now()
-	srcCRC, tgtCRC, tgtCount, err := c.readChunk(ctx, item.chunk)
+	srcCRC, tgtCRC, srcCount, tgtCount, err := c.readChunk(ctx, item.chunk)
 	if err != nil {
 		res.err = fmt.Errorf("read chunk %s: %w", item.chunk.String(), err)
 		return res
 	}
-	res.newSrcCRC = srcCRC
-	res.newTgtCRC = tgtCRC
-	res.newCount = tgtCount
+	newSrc := chunkSig{crc: srcCRC, count: srcCount}
+	newTgt := chunkSig{crc: tgtCRC, count: tgtCount}
+	res.newSrc = newSrc
+	res.newTgt = newTgt
 
 	// Feed chunker stats for fresh-walk reads so chunk sizing adapts. We
 	// deliberately skip retry reads — they re-evaluate the same chunk and
@@ -738,7 +789,10 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		c.chunker.Feedback(item.chunk, time.Since(start), tgtCount)
 	}
 
-	if srcCRC == tgtCRC {
+	// Compare the full signatures (CRC AND row count), not the CRC alone.
+	// A row-count mismatch is treated identically to a checksum mismatch:
+	// it flows through the same retry/recopy machinery below.
+	if newSrc == newTgt {
 		res.passed = true
 		return res
 	}
@@ -749,13 +803,15 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		return res
 	}
 
-	// Retry: apply the pass criterion of pkg-doc step 2.
-	if tgtCRC == item.originalSrcCRC || tgtCRC == srcCRC {
+	// Retry: apply the pass criterion of pkg-doc step 2, comparing whole
+	// signatures. The target passes if it has caught up to any witnessed
+	// source signature (the original one, or the current one).
+	if newTgt == item.originalSrc || newTgt == newSrc {
 		// Target has caught up to a witnessed source version.
 		res.passed = true
 		return res
 	}
-	if srcCRC != item.originalSrcCRC {
+	if newSrc != item.originalSrc {
 		// Hot chunk — source kept changing. Re-enqueued with new state by
 		// the dispatcher; res.passed stays false, res.permanent stays false.
 		return res
@@ -772,11 +828,13 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		}
 		// The Recopier already logs the user-facing "chunk recopied" line
 		// (with row count + elapsed). Add a Debug companion with the CRC +
-		// attempt context that the recopier doesn't see.
+		// count + attempt context that the recopier doesn't see.
 		c.cfg.Logger.Debug("continuous checksum: recopy completed",
 			"chunk", item.chunk.String(),
 			"sourceCRC", srcCRC,
 			"targetCRC", tgtCRC,
+			"sourceCount", srcCount,
+			"targetCount", tgtCount,
 			"attempts_before_recopy", item.attempts+1,
 		)
 		res.passed = true
@@ -804,12 +862,14 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 		c.permanentFailures.Add(1)
 		c.cfg.Logger.Error("continuous checksum: permanent divergence",
 			"chunk", res.item.chunk.String(),
-			"sourceCRC", res.newSrcCRC,
-			"targetCRC", res.newTgtCRC,
-			"originalSourceCRC", res.item.originalSrcCRC,
+			"sourceCRC", res.newSrc.crc,
+			"targetCRC", res.newTgt.crc,
+			"sourceCount", res.newSrc.count,
+			"targetCount", res.newTgt.count,
+			"originalSourceCRC", res.item.originalSrc.crc,
 		)
-		return fmt.Errorf("%w: chunk %s (source=%d target=%d)", ErrPermanentDivergence,
-			res.item.chunk.String(), res.newSrcCRC, res.newTgtCRC)
+		return fmt.Errorf("%w: chunk %s (source crc=%d count=%d, target crc=%d count=%d)", ErrPermanentDivergence,
+			res.item.chunk.String(), res.newSrc.crc, res.newSrc.count, res.newTgt.crc, res.newTgt.count)
 	}
 
 	// Mismatch — enqueue a retry. Either a fresh-walk first-time mismatch,
@@ -822,34 +882,38 @@ func (c *ContinuousChecker) handleResult(res *workResult, enqueueRetry func(*ret
 		c.mismatchesThisPass.Add(1)
 		c.cfg.Logger.Debug("continuous checksum: chunk mismatch, queuing retry",
 			"chunk", res.item.chunk.String(),
-			"sourceCRC", res.newSrcCRC,
-			"targetCRC", res.newTgtCRC,
+			"sourceCRC", res.newSrc.crc,
+			"targetCRC", res.newTgt.crc,
+			"sourceCount", res.newSrc.count,
+			"targetCount", res.newTgt.count,
 		)
 		return enqueueRetry(&retryEntry{
-			chunk:          res.item.chunk,
-			originalSrcCRC: res.newSrcCRC,
-			originalTgtCRC: res.newTgtCRC,
-			notBefore:      time.Now().Add(c.cfg.RetryDelay),
-			attempts:       1,
+			chunk:       res.item.chunk,
+			originalSrc: res.newSrc,
+			originalTgt: res.newTgt,
+			notBefore:   time.Now().Add(c.cfg.RetryDelay),
+			attempts:    1,
 		})
 	}
 
 	// Hot chunk: source changed across retry windows. Replace the
-	// "original" with the current source CRC so a future retry can match
-	// against this newer witnessed version, and re-enqueue at the tail.
+	// "original" with the current source signature so a future retry can
+	// match against this newer witnessed version, and re-enqueue at the tail.
 	newConsecutive := res.item.consecutiveSrcChanged + 1
 	c.cfg.Logger.Debug("continuous checksum: hot chunk, re-queuing",
 		"chunk", res.item.chunk.String(),
-		"sourceCRC", res.newSrcCRC,
-		"targetCRC", res.newTgtCRC,
-		"originalSourceCRC", res.item.originalSrcCRC,
+		"sourceCRC", res.newSrc.crc,
+		"targetCRC", res.newTgt.crc,
+		"sourceCount", res.newSrc.count,
+		"targetCount", res.newTgt.count,
+		"originalSourceCRC", res.item.originalSrc.crc,
 		"consecutiveSourceChanged", newConsecutive,
 		"attempts", res.item.attempts+1,
 	)
 	return enqueueRetry(&retryEntry{
 		chunk:                 res.item.chunk,
-		originalSrcCRC:        res.newSrcCRC,
-		originalTgtCRC:        res.newTgtCRC,
+		originalSrc:           res.newSrc,
+		originalTgt:           res.newTgt,
 		notBefore:             time.Now().Add(c.cfg.RetryDelay),
 		consecutiveSrcChanged: newConsecutive,
 		attempts:              res.item.attempts + 1,
@@ -928,6 +992,16 @@ func readChunkCRC(
 	return srcCRC, tgtCRC, srcCount, tgtCount, nil
 }
 
+// readChunkCRC2 adapts readChunkCRC to the readChunk field signature,
+// returning BOTH row counts so the checker can compare them. (readChunkCRC
+// already computes srcCount; the continuous checker previously discarded it,
+// which is the defense-in-depth gap this closes.)
+func readChunkCRC2(sourceDB, targetDB *sql.DB) func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
+	return func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
+		return readChunkCRC(ctx, sourceDB, targetDB, chunk)
+	}
+}
+
 // signalFirstCleanPass closes firstCleanPassCh on the first call and
 // records the wall-clock time. Subsequent calls are no-ops.
 func (c *ContinuousChecker) signalFirstCleanPass() {
@@ -966,9 +1040,12 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 }
 
 // FirstCleanPass returns a channel that is closed the first time a pass
-// completes with every chunk having gone clean. The signal is monotonic:
-// once closed it stays closed. Callers that need a "data is known
-// consistent" gate should select on this channel. Safe to call
+// completes with every chunk READ-verified equal and zero recopies. A
+// pass containing a recopy does not qualify: the repaired rows were
+// never observed equal, so the signal waits for a follow-up pass that
+// re-reads them (and everything else) with no repairs needed. The signal
+// is monotonic: once closed it stays closed. Callers that need a "data
+// is known consistent" gate should select on this channel. Safe to call
 // concurrently with Run.
 func (c *ContinuousChecker) FirstCleanPass() <-chan struct{} {
 	return c.firstCleanPassCh
