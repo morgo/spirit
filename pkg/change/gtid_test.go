@@ -170,7 +170,7 @@ func TestGTIDClientNonXIDCommit(t *testing.T) {
 	var support string
 	err = db.QueryRowContext(t.Context(), "SELECT SUPPORT FROM information_schema.ENGINES WHERE ENGINE='MyISAM'").Scan(&support)
 	if err != nil || (support != "YES" && support != "DEFAULT") {
-		t.Skipf("MyISAM engine not available (support=%q, err=%v); promotion logic is covered by TestGTIDPromotePendingGTID", support, err)
+		t.Skipf("MyISAM engine not available (support=%q, err=%v); skipping the end-to-end COMMIT/ROLLBACK QueryEvent regression coverage. The promotePendingGTID helper's semantics are still unit-tested separately by TestGTIDPromotePendingGTID, but that test does not exercise the readStream wiring this test covers", support, err)
 	}
 
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidmyisamt1, gtidmyisamt2, gtidmyisamt3")
