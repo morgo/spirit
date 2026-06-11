@@ -427,9 +427,9 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 
 	// Delete keys by PRIMARY KEY (id=2 and id=4)
 	// Note: DeleteKeys broadcasts to ALL shards since we track by PK, not vindex
-	keysToDelete := []string{
-		utils.HashKey([]any{int64(2)}),
-		utils.HashKey([]any{int64(4)}),
+	keysToDelete := [][]any{
+		{int64(2)},
+		{int64(4)},
 	}
 
 	affectedRows, err := applier.DeleteKeys(t.Context(), sourceTable, target1Table, keysToDelete, nil)
@@ -508,7 +508,7 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete with empty keys
-	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
+	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, [][]any{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), affectedRows)
 }

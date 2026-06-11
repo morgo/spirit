@@ -13,6 +13,11 @@ func TestDiff(t *testing.T) {
 		source   string
 		target   string
 		expected string // empty string means no diff expected
+		// expectedStatements, when set, asserts the full ordered list of
+		// emitted statements. Use it for diffs that intentionally produce more
+		// than one statement (e.g. option-only index changes split into a
+		// separate DROP and ADD). When set, expected is ignored.
+		expectedStatements []string
 	}{
 		{
 			name:     "NoChanges",
@@ -81,6 +86,75 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` ADD UNIQUE INDEX `idx_email` (`email`)",
 		},
 		{
+			// Adding WITH PARSER to an index with an unchanged column list is
+			// an option-only change. A combined DROP+ADD in a single ALTER is a
+			// MySQL no-op, so the diff must emit two separate statements.
+			name:   "AddFulltextParser",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`) WITH PARSER ngram",
+			},
+		},
+		{
+			name:   "RemoveFulltextParser",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `ft_b`",
+				"ALTER TABLE `t1` ADD FULLTEXT INDEX `ft_b` (`b`)",
+			},
+		},
+		{
+			name:     "FulltextParserNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			expected: "",
+		},
+		{
+			// An index rebuilt for an unrelated reason (here: a column list
+			// change) must preserve WITH PARSER in the re-add.
+			name:     "FulltextRebuildPreservesParser",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, c TEXT, FULLTEXT KEY ft_b (b) WITH PARSER ngram)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b TEXT, c TEXT, FULLTEXT KEY ft_b (b, c) WITH PARSER ngram)",
+			expected: "ALTER TABLE `t1` DROP INDEX `ft_b`, ADD FULLTEXT INDEX `ft_b` (`b`, `c`) WITH PARSER ngram",
+		},
+		{
+			// KEY_BLOCK_SIZE on an unchanged column list is an option-only
+			// change; emit it as two separate statements (see AddFulltextParser).
+			name:   "AddIndexKeyBlockSize",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`) KEY_BLOCK_SIZE=8",
+			},
+		},
+		{
+			name:   "RemoveIndexKeyBlockSize",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			target: "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b))",
+			expectedStatements: []string{
+				"ALTER TABLE `t1` DROP INDEX `idx_b`",
+				"ALTER TABLE `t1` ADD INDEX `idx_b` (`b`)",
+			},
+		},
+		{
+			name:     "IndexKeyBlockSizeNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), KEY idx_b (b) KEY_BLOCK_SIZE=8)",
+			expected: "",
+		},
+		{
+			// An index rebuilt for an unrelated reason (here: a column list
+			// change) must preserve KEY_BLOCK_SIZE in the re-add.
+			name:     "IndexRebuildPreservesKeyBlockSize",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a) KEY_BLOCK_SIZE=8)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, KEY idx_ab (a, b) KEY_BLOCK_SIZE=8)",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_ab`, ADD INDEX `idx_ab` (`a`, `b`) KEY_BLOCK_SIZE=8",
+		},
+		{
 			name:     "ColumnWithDefault",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, status VARCHAR(20))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, status VARCHAR(20) DEFAULT 'active')",
@@ -114,6 +188,21 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` COMMENT='test table'",
 		},
 		{
+			name:     "ChangeTableComment",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) COMMENT='old comment'",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY) COMMENT='new comment'",
+			expected: "ALTER TABLE `t1` COMMENT='new comment'",
+		},
+		{
+			// Removing a table comment must emit an explicit COMMENT='' to
+			// clear it. Previously the difference was detected but no clause
+			// was emitted, so two different schemas diffed as equal.
+			name:     "RemoveTableComment",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY) COMMENT='old comment'",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			expected: "ALTER TABLE `t1` COMMENT=''",
+		},
+		{
 			name:     "EnumColumn",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, status ENUM('active', 'inactive'))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, status ENUM('active', 'inactive', 'pending'))",
@@ -144,10 +233,14 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int(11) NOT NULL COMMENT 'Line1\\nLine2\\rLine3'",
 		},
 		{
-			name:     "ColumnCommentRogueValues2",
-			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
-			target:   `CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(50) DEFAULT "O'Brien")`,
-			expected: "ALTER TABLE `t1` ADD COLUMN `name` varchar(50) NULL DEFAULT 'O\\'\\'Brien'",
+			name:   "ColumnCommentRogueValues2",
+			source: "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target: `CREATE TABLE t1 (id INT PRIMARY KEY, name VARCHAR(50) DEFAULT "O'Brien")`,
+			// The true default is O'Brien (one apostrophe); it is escaped
+			// exactly once on emission. The previous expectation
+			// 'O\'\'Brien' was the double-escaping bug (parse left the
+			// value escaped, then emission escaped it again).
+			expected: "ALTER TABLE `t1` ADD COLUMN `name` varchar(50) NULL DEFAULT 'O\\'Brien'",
 		},
 
 		{
@@ -231,19 +324,19 @@ func TestDiff(t *testing.T) {
 			name:     "VirtualColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, first_name VARCHAR(50), last_name VARCHAR(50), full_name VARCHAR(101) AS (CONCAT(first_name, ' ', last_name)) VIRTUAL)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `full_name` varchar(101) NULL",
+			expected: "ALTER TABLE `t1` ADD COLUMN `full_name` varchar(101) GENERATED ALWAYS AS (CONCAT(`first_name`, ' ', `last_name`)) VIRTUAL NULL",
 		},
 		{
 			name:     "StoredColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2), tax_rate DECIMAL(5,4))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2), tax_rate DECIMAL(5,4), total DECIMAL(10,2) AS (price * (1 + tax_rate)) STORED)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `total` decimal(10,2) NULL",
+			expected: "ALTER TABLE `t1` ADD COLUMN `total` decimal(10,2) GENERATED ALWAYS AS (`price`*(1+`tax_rate`)) STORED NULL",
 		},
 		{
 			name:     "Timestamps1",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, updated_at TIMESTAMP)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `updated_at` timestamp NULL DEFAULT current_timestamp",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `updated_at` timestamp NULL DEFAULT current_timestamp ON UPDATE current_timestamp",
 		},
 		{
 			name:     "Timestamps2",
@@ -929,9 +1022,15 @@ func TestDiff(t *testing.T) {
 			stmts, err := ct1.Diff(ct2, nil)
 			require.NoError(t, err)
 
-			if tt.expected == "" {
+			switch {
+			case len(tt.expectedStatements) > 0:
+				require.Len(t, stmts, len(tt.expectedStatements))
+				for i, want := range tt.expectedStatements {
+					require.Equal(t, want, stmts[i].Statement)
+				}
+			case tt.expected == "":
 				require.Nil(t, stmts, "expected nil for identical tables")
-			} else {
+			default:
 				require.Len(t, stmts, 1)
 				require.Equal(t, tt.expected, stmts[0].Statement)
 			}

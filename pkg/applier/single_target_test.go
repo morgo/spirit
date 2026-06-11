@@ -423,9 +423,9 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete keys 2 and 4
-	keysToDelete := []string{
-		utils.HashKey([]any{int64(2)}),
-		utils.HashKey([]any{int64(4)}),
+	keysToDelete := [][]any{
+		{int64(2)},
+		{int64(4)},
 	}
 
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, keysToDelete, nil)
@@ -466,11 +466,13 @@ func TestSingleTargetApplierDeleteKeys(t *testing.T) {
 }
 
 // TestSingleTargetApplierDeleteKeysSeparatorInValues tests DeleteKeys with
-// string PK values containing the hash-key separator "-#-". Before hash-key
-// components were escaped, a single-column PK value containing "-#-" was
-// split into multiple values, producing DELETE ... WHERE (pk) IN (('a','b'))
-// — MySQL error 1241 "Operand should contain 1 column(s)" — which blocked
-// the flush forever.
+// string PK values containing the hash-key separator "-#-". DeleteKeys now
+// receives the original typed key tuples directly (not a hashed string),
+// so the separator cannot corrupt the DELETE arity — but a single-column
+// PK value containing "-#-" must still delete exactly one row, and a
+// composite PK must delete exactly the intended tuple. (The hash-key
+// escaping that keeps these distinct as *map keys* is covered in
+// pkg/utils.)
 func TestSingleTargetApplierDeleteKeysSeparatorInValues(t *testing.T) {
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_delete_sep_test")
 	testutils.RunSQL(t, "CREATE DATABASE single_delete_sep_test")
@@ -503,9 +505,9 @@ func TestSingleTargetApplierDeleteKeysSeparatorInValues(t *testing.T) {
 	applier, err := NewSingleTargetApplier(tar, NewApplierDefaultConfig())
 	require.NoError(t, err)
 
-	keysToDelete := []string{
-		utils.HashKey([]any{"a-#-b"}),
-		utils.HashKey([]any{"-#-"}),
+	keysToDelete := [][]any{
+		{"a-#-b"},
+		{"-#-"},
 	}
 	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, keysToDelete, nil)
 	require.NoError(t, err)
@@ -530,7 +532,7 @@ func TestSingleTargetApplierDeleteKeysSeparatorInValues(t *testing.T) {
 	require.NoError(t, compositeTable.SetInfo(t.Context()))
 
 	affectedRows, err = applier.DeleteKeys(t.Context(), compositeTable, compositeTable,
-		[]string{utils.HashKey([]any{"a-#-b", "c"})}, nil)
+		[][]any{{"a-#-b", "c"}}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), affectedRows, "only ('a-#-b','c') must be deleted, not ('a','b-#-c')")
 
@@ -574,7 +576,7 @@ func TestSingleTargetApplierDeleteKeysEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete with empty keys
-	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
+	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, [][]any{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), affectedRows)
 }
