@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
@@ -403,4 +404,135 @@ func TestDistributedChecksumPairCancellation(t *testing.T) {
 	err = checker.Run(t.Context())
 	require.Error(t, err, "row-count mismatch from pair-cancellation must be detected")
 	require.ErrorContains(t, err, "checksum mismatch")
+}
+
+// TestDistributedChecksumFlushUnderLock is a regression test for the
+// pre-checksum flush. DistributedChecker.initConnPool acquires one table
+// lock per target and flushes the buffered subscription under those locks.
+// Previously only the FIRST target's lock was passed down and the sharded
+// applier executed every shard's statements through that single lock
+// connection: shard 0 received every shard's rows and shards 1..N-1
+// silently missed their final pre-checksum changes.
+//
+// The test reproduces the scenario deterministically: it buffers binlog
+// changes for both shards, then performs the same flush-under-lock sequence
+// as initConnPool, and asserts each shard's database received exactly its
+// own rows/deletes. It then runs the full distributed checker (which
+// repeats the sequence internally) with FixDifferences=false, so any
+// mis-routed row would fail the checksum.
+func TestDistributedChecksumFlushUnderLock(t *testing.T) {
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS test_pr4_cksum_lock_src`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS test_pr4_cksum_lock_t0`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS test_pr4_cksum_lock_t1`)
+	testutils.RunSQL(t, `CREATE DATABASE test_pr4_cksum_lock_src`)
+	testutils.RunSQL(t, `CREATE DATABASE test_pr4_cksum_lock_t0`)
+	testutils.RunSQL(t, `CREATE DATABASE test_pr4_cksum_lock_t1`)
+
+	testutils.RunSQL(t, `CREATE TABLE test_pr4_cksum_lock_src.t1 (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+	testutils.RunSQL(t, `CREATE TABLE test_pr4_cksum_lock_t0.t1 LIKE test_pr4_cksum_lock_src.t1`)
+	testutils.RunSQL(t, `CREATE TABLE test_pr4_cksum_lock_t1.t1 LIKE test_pr4_cksum_lock_src.t1`)
+
+	// Initial consistent state: source has ids 1-8, sharded even/odd.
+	testutils.RunSQL(t, `INSERT INTO test_pr4_cksum_lock_src.t1 VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four'),(5,'five'),(6,'six'),(7,'seven'),(8,'eight')`)
+	testutils.RunSQL(t, `INSERT INTO test_pr4_cksum_lock_t0.t1 SELECT * FROM test_pr4_cksum_lock_src.t1 WHERE MOD(id, 2) = 0`)
+	testutils.RunSQL(t, `INSERT INTO test_pr4_cksum_lock_t1.t1 SELECT * FROM test_pr4_cksum_lock_src.t1 WHERE MOD(id, 2) = 1`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	srcCfg := cfg.Clone()
+	srcCfg.DBName = "test_pr4_cksum_lock_src"
+	srcDB, err := dbconn.New(srcCfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(srcDB)
+
+	t0Cfg := cfg.Clone()
+	t0Cfg.DBName = "test_pr4_cksum_lock_t0"
+	t0DB, err := dbconn.New(t0Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(t0DB)
+
+	t1Cfg := cfg.Clone()
+	t1Cfg.DBName = "test_pr4_cksum_lock_t1"
+	t1DB, err := dbconn.New(t1Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(t1DB)
+
+	sourceTable := table.NewTableInfo(srcDB, "test_pr4_cksum_lock_src", "t1")
+	require.NoError(t, sourceTable.SetInfo(t.Context()))
+	sourceTable.ShardingColumn = "id"
+	sourceTable.HashFunc = testutils.EvenOddHasher
+
+	targets := []applier.Target{
+		{DB: t0DB, KeyRange: "-80", Config: t0Cfg}, // even ids
+		{DB: t1DB, KeyRange: "80-", Config: t1Cfg}, // odd ids
+	}
+	shardedApplier, err := applier.NewShardedApplier(targets, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	feed := change.NewBinlogClient(srcDB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(sourceTable, table.ChunkerConfig{Logger: slog.Default()})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(sourceTable, sourceTable, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+
+	// Make changes on the source AFTER the feed started, so they sit in
+	// the buffered subscription until the flush under lock:
+	//   - id=9  (odd)  -> must land on shard 1
+	//   - id=10 (even) -> must land on shard 0
+	//   - id=1  (odd)  updated -> must update shard 1
+	//   - id=2  (even) deleted -> must delete from shard 0
+	testutils.RunSQL(t, `INSERT INTO test_pr4_cksum_lock_src.t1 VALUES (9,'nine'),(10,'ten')`)
+	testutils.RunSQL(t, `UPDATE test_pr4_cksum_lock_src.t1 SET name = 'one-updated' WHERE id = 1`)
+	testutils.RunSQL(t, `DELETE FROM test_pr4_cksum_lock_src.t1 WHERE id = 2`)
+
+	// Wait until all 4 changes are buffered.
+	require.Eventually(t, func() bool {
+		return feed.GetDeltaLen() == 4
+	}, 30*time.Second, 50*time.Millisecond, "expected 4 buffered changes")
+
+	// Acquire one lock per target and flush under them — the same sequence
+	// DistributedChecker.initConnPool performs.
+	lock0, err := dbconn.NewTableLock(t.Context(), t0DB, []*table.TableInfo{sourceTable}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	lock1, err := dbconn.NewTableLock(t.Context(), t1DB, []*table.TableInfo{sourceTable}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+
+	require.NoError(t, feed.FlushUnderTableLock(t.Context(), []*dbconn.TableLock{lock0, lock1}))
+	require.True(t, feed.AllChangesFlushed())
+
+	require.NoError(t, lock0.Close(t.Context()))
+	require.NoError(t, lock1.Close(t.Context()))
+
+	// Each shard must have received exactly its own changes.
+	fetchIDs := func(db *sql.DB) []int {
+		rows, err := db.QueryContext(t.Context(), "SELECT id FROM t1 ORDER BY id")
+		require.NoError(t, err)
+		defer utils.CloseAndLog(rows)
+		var ids []int
+		for rows.Next() {
+			var id int
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+	require.Equal(t, []int{4, 6, 8, 10}, fetchIDs(t0DB), "shard 0: id=2 deleted, id=10 inserted, no odd ids")
+	require.Equal(t, []int{1, 3, 5, 7, 9}, fetchIDs(t1DB), "shard 1: id=9 inserted, no even ids")
+	var name string
+	require.NoError(t, t1DB.QueryRowContext(t.Context(), "SELECT name FROM t1 WHERE id = 1").Scan(&name))
+	require.Equal(t, "one-updated", name, "shard 1 should have the updated row image")
+
+	// Finally run the full distributed checker. Its initConnPool repeats
+	// the lock + flush-under-lock sequence through the production code
+	// path; FixDifferences=false means any mis-routed row fails the run.
+	require.NoError(t, chunker.Open())
+	config := NewCheckerDefaultConfig()
+	config.Applier = shardedApplier
+	config.FixDifferences = false
+	checker, err := NewChecker([]*sql.DB{srcDB}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+	require.NoError(t, checker.Run(t.Context()))
 }

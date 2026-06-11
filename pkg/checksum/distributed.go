@@ -394,9 +394,12 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	}()
 
 	// With the lock(s) held, flush all feeds one more time.
-	// We use the first target's lock for flushing (they should all be consistent).
+	// We pass ALL target locks: the applier matches each lock to the target
+	// whose connection it was acquired on, so a sharded applier executes
+	// each shard's statements under that shard's own lock. Passing only a
+	// single lock would route every shard's writes through one server.
 	for _, feed := range c.feeds {
-		if err := feed.FlushUnderTableLock(ctx, targetTableLocks[0]); err != nil {
+		if err := feed.FlushUnderTableLock(ctx, targetTableLocks); err != nil {
 			return fmt.Errorf("failed to flush under table lock: %w", err)
 		}
 	}
