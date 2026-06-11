@@ -560,8 +560,8 @@ func TestMoveWithVarcharPK(t *testing.T) {
 // checkpointAndStop drives a move through setup, the full row copy and a
 // checkpoint dump, then tears everything down without cutover — simulating a
 // move that was interrupted after writing a checkpoint. The checkpoint table
-// is left behind on the source for a subsequent resume. This mirrors the
-// first phase of TestResumeFromCheckpointE2E.
+// is left behind on the first target (targets[0]) for a subsequent resume.
+// This mirrors the first phase of TestResumeFromCheckpointE2E.
 func checkpointAndStop(t *testing.T, move *Move) {
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -589,10 +589,10 @@ func checkpointAndStop(t *testing.T, move *Move) {
 	require.NoError(t, r.copier.Run(ctx))
 	require.NoError(t, r.DumpCheckpoint(ctx))
 
-	// Close everything manually, without cutover. Runner.Close() cancels and
-	// shuts down repl clients/chunkers and closes the targets, so call it
-	// first; it does not close the sources, so close the source DB afterwards.
-	r.cancelFunc()
+	// Close everything manually, without cutover. Runner.Close() cancels the
+	// context (idempotent) and shuts down repl clients/chunkers and closes the
+	// targets, so call it first; it does not close the sources, so close the
+	// source DB afterwards.
 	require.NoError(t, r.Close())
 	require.NoError(t, r.sources[0].db.Close())
 }

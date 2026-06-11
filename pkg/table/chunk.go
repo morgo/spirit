@@ -291,7 +291,7 @@ func WatermarkPerTable(watermark string, tables ...*TableInfo) (map[string]strin
 	// Single-chunker format: it can only be attributed to a table if the
 	// operation covers exactly one.
 	if len(tables) != 1 {
-		return nil, fmt.Errorf("watermark is in single-table format but %d tables were supplied: %s", len(tables), watermark)
+		return nil, fmt.Errorf("watermark is in single-table format but %d tables were supplied: %s", len(tables), truncateForError(watermark))
 	}
 	return map[string]string{
 		tables[0].QualifiedName(): unwrapCompositeWatermark(watermark),
