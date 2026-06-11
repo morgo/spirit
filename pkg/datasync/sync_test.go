@@ -3,6 +3,8 @@ package datasync
 import (
 	"context"
 	"database/sql"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -324,6 +326,38 @@ func TestRunnerStatusTask(t *testing.T) {
 	require.Equal(t, "t1", p.Tables[0].TableName)
 	require.True(t, p.Tables[0].IsComplete)
 	require.Equal(t, uint64(3), p.Tables[0].RowsCopied)
+}
+
+// TestFatalErrorConcurrentWithRunSetup exercises the seam between Run (which
+// assigns cancelFunc under progMu during setup) and the change client's
+// stream goroutine invoking fatalError. Under -race this fails if fatalError
+// reads cancelFunc without taking progMu (matching Cancel()). It also gates
+// the sync.Once semantics: the record-and-cancel side effects happen at most
+// once across repeated invocations.
+func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
+	runner, err := NewRunner(&Sync{})
+	require.NoError(t, err)
+
+	var cancelCalls atomic.Int64
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		// Simulate Run's setup assignment (see Runner.Run).
+		runner.progMu.Lock()
+		runner.cancelFunc = func() { cancelCalls.Add(1) }
+		runner.progMu.Unlock()
+	})
+	wg.Go(func() {
+		require.True(t, runner.fatalError())
+	})
+	wg.Wait()
+
+	// The fatal condition is recorded regardless of which goroutine won.
+	require.Error(t, runner.fatal())
+
+	// Repeated invocations still report "acted upon" but never
+	// double-cancel or re-record (fatalOnce).
+	require.True(t, runner.fatalError())
+	require.LessOrEqual(t, cancelCalls.Load(), int64(1))
 }
 
 // TestSyncResume verifies that the initial copy writes a copier-watermark

@@ -94,9 +94,12 @@ type Runner struct {
 
 	// fatalErr records a fatal source-side event (e.g. DDL on a synced
 	// table) that should surface as the Run error rather than a clean
-	// cancellation. Guarded by fatalMu.
-	fatalMu  sync.Mutex
-	fatalErr error
+	// cancellation. Guarded by fatalMu. fatalOnce makes fatalError's
+	// record-and-cancel side effects idempotent (same pattern as
+	// migration.Runner.fatalOnce).
+	fatalMu   sync.Mutex
+	fatalErr  error
+	fatalOnce sync.Once
 
 	// progMu guards the progress-related fields (copier, copyChunker,
 	// replClient, startTime, cancelFunc) that Run assigns during setup and
@@ -1198,15 +1201,25 @@ func (r *Runner) watchStatus(ctx context.Context) {
 // fatalError is the change client's CancelFunc: it records the fatal
 // condition (e.g. DDL on a synced table) and cancels the run so
 // runContinuous can surface it.
+//
+// fatalError is safe to call concurrently: it is invoked from the change
+// client's stream goroutine, so cancelFunc (written by Run under progMu)
+// must be read under progMu like Cancel() does, and fatalOnce makes the
+// record-and-cancel side effects idempotent.
 func (r *Runner) fatalError() bool {
-	r.fatalMu.Lock()
-	if r.fatalErr == nil {
+	r.fatalOnce.Do(func() {
+		r.fatalMu.Lock()
 		r.fatalErr = errors.New("a DDL change was detected on a synced table; sync cannot continue safely")
-	}
-	r.fatalMu.Unlock()
-	if r.cancelFunc != nil {
-		r.cancelFunc()
-	}
+		r.fatalMu.Unlock()
+		r.progMu.RLock()
+		cancel := r.cancelFunc
+		r.progMu.RUnlock()
+		// cancelFunc can be nil if fatalError fires before Run has set it
+		// (e.g. test paths that bypass Run); nil-check before calling.
+		if cancel != nil {
+			cancel()
+		}
+	})
 	return true
 }
 
