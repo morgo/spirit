@@ -1018,12 +1018,10 @@ func TestCompositeChunkerKeyAboveHighWatermarkMultiColumn(t *testing.T) {
 	require.NoError(t, comp.Close())
 }
 
-// TestCompositeChunkerKeyAboveHighWatermarkSingleColumn verifies that for a
-// SINGLE-column chunk key the boundary value is still considered above the
-// high watermark (unchanged behavior). chunkPtrs[0] is the exclusive upper
-// bound of all dispatched chunks, so a key equal to it will be read by the
-// next chunk's SELECT — discarding the event is safe, and >= discards more
-// events, which is a meaningful optimization.
+// TestCompositeChunkerKeyAboveHighWatermarkSingleColumn verifies the unified
+// strict-greater-than behavior on a single-column chunk key: the exclusive
+// upper bound itself is not "above" the watermark (the event is buffered,
+// which flush-time logic handles), and only strictly greater keys are.
 func TestCompositeChunkerKeyAboveHighWatermarkSingleColumn(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS composite_hwm_singlecol_t1")
 	// Single-column PK that is NOT auto_increment, so NewChunker selects
@@ -1073,10 +1071,10 @@ func TestCompositeChunkerKeyAboveHighWatermarkSingleColumn(t *testing.T) {
 	// prefetch (LIMIT 1 OFFSET 1000) returns id=1001.
 	require.Equal(t, int64(1001), chunk1.UpperBound.Value[0].Val)
 
-	// The boundary value itself is above the high watermark: the upper
-	// bound is exclusive, so id=1001 will be read by the next chunk's
-	// SELECT and the event can safely be discarded.
-	require.True(t, comp.KeyAboveHighWatermark(1001))
+	// The boundary value equals the exclusive upper bound. Under strict
+	// greater-than it is not above the watermark, so the event is buffered
+	// rather than discarded (safe; the row is re-read by the next chunk).
+	require.False(t, comp.KeyAboveHighWatermark(1001))
 	require.True(t, comp.KeyAboveHighWatermark(1002))
 	require.False(t, comp.KeyAboveHighWatermark(1000))
 

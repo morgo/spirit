@@ -495,10 +495,8 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 		}
 	}
 
-	// Check if key is above the current chunkPtr[0]. The comparison is
-	// conditional on key width (see below): strict GreaterThan for
-	// multi-column keys, GreaterThanOrEqual for single-column keys. Both
-	// support all types (numeric, string, temporal).
+	// Check if key is above the current chunkPtr[0] using strict
+	// GreaterThan (see below for why; supports numeric, string, temporal).
 	if len(t.chunkPtrs) == 0 {
 		// chunkPtrs not dispatched yet, key is above checkpointHighPtr.
 		// Same reasoning as the IsNil branch above: returning TRUE here
@@ -509,28 +507,14 @@ func (t *chunkerComposite) KeyAboveHighWatermark(key0 any) bool {
 		return false
 	}
 	// We only see key[0] here, but chunkPtrs is the full tuple upper bound
-	// of all dispatched chunks. How we compare depends on the key width:
-	//
-	// Single-column key: chunkPtrs[0] IS the (exclusive) upper bound, so a
-	// key equal to it will be read by the next chunk's SELECT — discarding
-	// the event is safe, and >= discards more events (a meaningful
-	// optimization for the common case).
-	//
-	// Multi-column key: equality on the first column is ambiguous. With
-	// chunkPtrs = (5, 100), the tuple (5, 50) is BELOW the high watermark
-	// (already dispatched; chunkPtrs tracks dispatched chunks, not copied
-	// ones, which the low watermark tracks) even though key[0] ==
-	// chunkPtrs[0].
-	// Only a STRICTLY greater first column guarantees the full tuple sorts
-	// above every dispatched chunk's upper bound. Per the contract, on
-	// ambiguity we must return FALSE so the event is buffered, not dropped.
-	var above bool
-	var err error
-	if len(t.chunkKeys) > 1 {
-		above, err = keyDatum.GreaterThan(t.chunkPtrs[0])
-	} else {
-		above, err = keyDatum.GreaterThanOrEqual(t.chunkPtrs[0])
-	}
+	// of all dispatched chunks. Only a strictly greater key[0] guarantees
+	// the whole tuple sorts above every dispatched chunk: with chunkPtrs =
+	// (5, 100) the tuple (5, 50) is below the watermark even though key[0]
+	// == chunkPtrs[0], so equality is ambiguous and must buffer (return
+	// FALSE) per the contract. For single-column keys equality could safely
+	// be discarded instead, but buffering it is also safe (flush-time
+	// watermark logic handles it) and not worth a separate branch.
+	above, err := keyDatum.GreaterThan(t.chunkPtrs[0])
 	if err != nil {
 		t.logger.Error("comparing chunkPtrs[0] in KeyAboveHighWatermark", "error", err)
 		return false
