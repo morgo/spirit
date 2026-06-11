@@ -7,12 +7,24 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
+
+// renameRetryWait is the pause between RENAME TABLE attempts while the
+// source table locks are still held. A var (not a const) so tests can
+// shorten it.
+var renameRetryWait = 1 * time.Second
+
+// errRenameRollbackFailed marks a rename failure whose rollback also failed,
+// leaving the sources in a partially-renamed state. Retrying the rename in
+// that state cannot converge, so the retry loop aborts immediately.
+var errRenameRollbackFailed = errors.New("rename rollback failed")
 
 // CutOverSource holds per-source state needed for the cutover.
 type CutOverSource struct {
@@ -26,6 +38,13 @@ type CutOver struct {
 	cutoverFunc func(ctx context.Context) error
 	dbConfig    *dbconn.DBConfig
 	logger      *slog.Logger
+	// cutoverFuncSucceeded tracks whether cutoverFunc has been invoked and
+	// returned nil. The cutover function is a caller-supplied traffic switch
+	// (e.g. a Vitess routing change) and is not assumed to be idempotent:
+	// once it has succeeded it must never be invoked again, and retrying
+	// any later step must not reopen the window where straggler writes to
+	// the (now stale) source could be replayed over newer rows on the target.
+	cutoverFuncSucceeded bool
 }
 
 // NewCutOver creates a new CutOver that handles multiple sources.
@@ -49,6 +68,15 @@ func NewCutOver(sources []CutOverSource, cutoverFunc func(ctx context.Context) e
 			}
 		}
 	}
+	if dbConfig == nil {
+		return nil, errors.New("dbConfig must be non-nil")
+	}
+	// Run executes one attempt per MaxRetries iteration, so a value below 1
+	// would mean the cutover loop never runs and the move would "succeed"
+	// without locking, flushing, switching or renaming anything.
+	if dbConfig.MaxRetries < 1 {
+		return nil, fmt.Errorf("dbConfig.MaxRetries must be at least 1, got %d", dbConfig.MaxRetries)
+	}
 	return &CutOver{
 		sources:     sources,
 		cutoverFunc: cutoverFunc,
@@ -59,7 +87,7 @@ func NewCutOver(sources []CutOverSource, cutoverFunc func(ctx context.Context) e
 
 func (c *CutOver) Run(ctx context.Context) error {
 	var err error
-	for i := range c.dbConfig.MaxRetries {
+	for attempt := range c.dbConfig.MaxRetries {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -70,10 +98,24 @@ func (c *CutOver) Run(ctx context.Context) error {
 			}
 		}
 		c.logger.Warn("Attempting final cut over operation",
-			"attempt", i+1,
+			"attempt", attempt+1,
 			"max-retries", c.dbConfig.MaxRetries)
 		err = c.algorithmCutover(ctx)
 		if err != nil {
+			if c.cutoverFuncSucceeded {
+				// The traffic switch has already succeeded, so traffic may be
+				// on the target. Another attempt would have released the
+				// source table locks in between, reopening the window where
+				// straggler writes to the source could be replayed over newer
+				// rows on the target. The rename has already been retried
+				// while the locks were held (see algorithmCutover), so do not
+				// retry from the top: surface the error instead.
+				c.logger.Error("cutover failed after the cutover function had already succeeded; not retrying",
+					"error", err.Error())
+				return fmt.Errorf("cutover failed after the cutover function succeeded; "+
+					"source tables are unlocked and not fully renamed (the rename may have "+
+					"partially applied), manual intervention required: %w", err)
+			}
 			c.logger.Warn("cutover failed", "error", err.Error())
 			continue
 		}
@@ -118,21 +160,59 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		}
 	}
 
-	// Run the cutover function (Vitess coordination).
-	if c.cutoverFunc != nil {
+	// Run the cutover function (Vitess coordination). It is invoked at most
+	// once per CutOver: the traffic switch is not assumed to be idempotent,
+	// so if a later step fails the retry must never re-run it.
+	if c.cutoverFunc != nil && !c.cutoverFuncSucceeded {
 		c.logger.Info("Running cutover function")
 		if err := c.cutoverFunc(ctx); err != nil {
 			return err
 		}
+		c.cutoverFuncSucceeded = true
 		c.logger.Info("Cutover function complete")
 	}
 
-	// Rename tables on each source, with rollback on partial failure.
+	// Rename the source tables out of the way. Once the cutover function has
+	// succeeded, traffic is on the target and the table locks held above are
+	// the only thing preventing straggler writes (e.g. from a lagging router)
+	// from landing on the source and being replayed over newer target rows.
+	// So the rename is retried HERE, while the locks are still held, rather
+	// than by returning to Run's retry loop (which would release the locks
+	// between attempts and reopen that window).
+	var err error
+	for attempt := 1; attempt <= c.dbConfig.MaxRetries; attempt++ {
+		if attempt > 1 {
+			c.logger.Warn("retrying rename while still holding source table locks",
+				"attempt", attempt,
+				"max-retries", c.dbConfig.MaxRetries)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(renameRetryWait):
+			}
+		}
+		if err = c.renameAllSources(ctx, sourceLocks); err == nil {
+			return nil
+		}
+		if errors.Is(err, errRenameRollbackFailed) {
+			// The sources are partially renamed; retrying cannot converge.
+			return err
+		}
+		c.logger.Warn("rename failed", "error", err.Error())
+	}
+	return fmt.Errorf("rename failed after %d attempts under lock: %w", c.dbConfig.MaxRetries, err)
+}
+
+// renameAllSources renames the tables on every source to their _old names,
+// rolling back the completed renames if a later source fails. A rollback
+// failure is wrapped with errRenameRollbackFailed because the sources are
+// then left partially renamed and a retry of the full rename cannot succeed.
+func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.TableLock) error {
 	var completedRenames []int
 	for i, src := range c.sources {
 		renameFragments := make([]string, 0, len(src.Tables))
 		for _, tbl := range src.Tables {
-			oldQuotedName := fmt.Sprintf("`%s_old`", tbl.TableName)
+			oldQuotedName := fmt.Sprintf("`%s`", check.CutoverOldName(tbl.TableName))
 			renameFragments = append(renameFragments,
 				fmt.Sprintf("%s TO %s", tbl.QuotedTableName, oldQuotedName),
 			)
@@ -145,7 +225,7 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 			for _, j := range completedRenames {
 				undoFragments := make([]string, 0, len(c.sources[j].Tables))
 				for _, tbl := range c.sources[j].Tables {
-					oldQuotedName := fmt.Sprintf("`%s_old`", tbl.TableName)
+					oldQuotedName := fmt.Sprintf("`%s`", check.CutoverOldName(tbl.TableName))
 					undoFragments = append(undoFragments,
 						fmt.Sprintf("%s TO %s", oldQuotedName, tbl.QuotedTableName),
 					)
@@ -157,8 +237,8 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 				}
 			}
 			if len(rollbackErrors) > 0 {
-				return fmt.Errorf("rename failed on source %d and rollback also failed (%s): %w",
-					i, strings.Join(rollbackErrors, "; "), err)
+				return fmt.Errorf("%w: rename failed on source %d and rollback also failed (%s): %w",
+					errRenameRollbackFailed, i, strings.Join(rollbackErrors, "; "), err)
 			}
 			return fmt.Errorf("rename failed on source %d, rolled back %d completed renames: %w",
 				i, len(completedRenames), err)
