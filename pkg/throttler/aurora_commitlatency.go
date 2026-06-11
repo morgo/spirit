@@ -85,6 +85,10 @@ type CommitLatency struct {
 	// avgLatencyUs holds the most recent window-averaged latency in
 	// microseconds, exposed for logging/debugging.
 	avgLatencyUs atomic.Int64
+
+	// stale guards Utilization() against the cached value freezing when
+	// sampling fails persistently. See stale.go.
+	stale staleGuard
 }
 
 var _ GradualThrottler = (*CommitLatency)(nil)
@@ -147,7 +151,20 @@ func (c *CommitLatency) IsThrottled() bool {
 // fraction of the configured threshold. 1.0 means latency equals the threshold
 // (the point at which IsThrottled trips). Returns 0 if the threshold is
 // non-positive (which NewCommitLatencyThrottler already rejects).
+//
+// When sampling has failed for longer than staleSignalThreshold the cached
+// average is no longer trustworthy, so this reports StaleUtilizationHold
+// instead — parking the autoscaler in its dead band rather than letting a
+// frozen value drive scaling. IsThrottled/BlockWait are unaffected.
 func (c *CommitLatency) Utilization() float64 {
+	if stale, entering := c.stale.check(staleSignalThreshold); stale {
+		if entering {
+			c.logger.Warn("commit-latency signal is stale; holding autoscaler utilization steady until sampling recovers",
+				"last_successful_sample_age", c.stale.age(),
+				"hold_utilization", StaleUtilizationHold)
+		}
+		return StaleUtilizationHold
+	}
 	thresholdUs := c.threshold.Microseconds()
 	if thresholdUs <= 0 {
 		return 0
@@ -196,6 +213,13 @@ func (c *CommitLatency) UpdateLag(ctx context.Context) error {
 // applySample updates state from a single observation. Split out so tests can
 // drive the calculation without standing up a real Aurora.
 func (c *CommitLatency) applySample(commits, latency int64) {
+	// Any successfully scanned sample refreshes the signal, even one we end
+	// up discarding below (reset, idle window): the monitor connection is
+	// alive and the next window will produce a usable delta.
+	if c.stale.markFresh() {
+		c.logger.Info("commit-latency sampling recovered; resuming live utilization signal")
+	}
+
 	c.sampleMu.Lock()
 	prevCommits := c.prevCommits
 	prevLatency := c.prevLatency
@@ -215,7 +239,19 @@ func (c *CommitLatency) applySample(commits, latency int64) {
 
 	// Counter resets (server restart, failover) produce a negative delta;
 	// drop the sample rather than report a bogus huge or negative latency.
-	if deltaCommits <= 0 || deltaLatency < 0 {
+	// Carry the previous average and throttle state forward unchanged: the
+	// new baseline is already stored, so the next window computes a real
+	// delta. Storing 0 here would report Utilization()==0 for a full window
+	// and hand the autoscaler a spurious scale-up right after a failover —
+	// the worst possible moment.
+	if deltaCommits < 0 || deltaLatency < 0 {
+		return
+	}
+
+	// Idle window: no new commits means no signal, not zero latency from a
+	// loaded server. Treat the workload as quiet — clear the throttle rather
+	// than carry a stale "throttled" forward.
+	if deltaCommits == 0 {
 		c.isThrottled.Store(false)
 		c.avgLatencyUs.Store(0)
 		return

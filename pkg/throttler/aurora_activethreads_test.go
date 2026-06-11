@@ -69,6 +69,40 @@ func TestActiveThreads_UtilizationZeroVCPUs(t *testing.T) {
 	require.Zero(t, a.Utilization())
 }
 
+func TestActiveThreads_StaleSignalReportsHold(t *testing.T) {
+	a := newTestActiveThreads(t, 8)
+
+	a.applySample(2) // util 0.25
+	require.InDelta(t, 0.25, a.Utilization(), 1e-9)
+
+	// Persistent sampling failure: the cached count freezes at 2 while the
+	// last successful sample ages out. Utilization must hold in the dead
+	// band; the binary hard-stop state is unchanged.
+	ageLastSample(&a.stale, staleSignalThreshold+time.Second)
+	require.InDelta(t, StaleUtilizationHold, a.Utilization(), 1e-9)
+	require.False(t, a.IsThrottled())
+
+	// A fresh sample recovers the live signal.
+	a.applySample(2)
+	require.InDelta(t, 0.25, a.Utilization(), 1e-9)
+}
+
+func TestActiveThreads_StaleSignalKeepsThrottledHardStop(t *testing.T) {
+	a := newTestActiveThreads(t, 8)
+
+	a.applySample(20) // over vCPUs → throttled
+	require.True(t, a.IsThrottled())
+
+	ageLastSample(&a.stale, staleSignalThreshold+time.Second)
+	require.True(t, a.IsThrottled(), "staleness must not clear the hard-stop")
+	require.InDelta(t, StaleUtilizationHold, a.Utilization(), 1e-9)
+}
+
+func TestActiveThreads_NeverSampledIsNotStale(t *testing.T) {
+	a := newTestActiveThreads(t, 8)
+	require.Zero(t, a.Utilization(), "pre-Open must read as idle, not as a stale hold")
+}
+
 func TestActiveThreads_BlockWaitReturnsImmediatelyWhenUnthrottled(t *testing.T) {
 	a := newTestActiveThreads(t, 8)
 	start := time.Now()
