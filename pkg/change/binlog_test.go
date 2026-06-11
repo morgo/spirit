@@ -777,6 +777,79 @@ func TestSetBufferedPosIsMonotonic(t *testing.T) {
 	require.Equal(t, nextFile, client.getBufferedPos())
 }
 
+// gatedSubscription is a Subscription stub whose Flush parks until the test
+// releases it, letting tests interleave two client flush() calls. Each Flush
+// invocation receives its own release channel from gates (in entry order,
+// since gates is unbuffered) and blocks until that channel is closed.
+type gatedSubscription struct {
+	gates chan chan struct{}
+}
+
+func (s *gatedSubscription) HasChanged(key, row []any, deleted bool) {}
+func (s *gatedSubscription) Length() int                             { return 0 }
+func (s *gatedSubscription) Flush(_ context.Context, _ bool, _ []*dbconn.TableLock) (bool, error) {
+	<-<-s.gates
+	return true, nil
+}
+func (s *gatedSubscription) Tables() []*table.TableInfo                           { return nil }
+func (s *gatedSubscription) SetWatermarkOptimization(context.Context, bool) error { return nil }
+func (s *gatedSubscription) Close()                                               {}
+
+// TestFlushedPosIsMonotonicAcrossOverlappingFlushes locks in the invariant
+// that flush() refuses to move flushedPos backwards — the same monotonic
+// guard setBufferedPos has (see TestSetBufferedPosIsMonotonic). flush()
+// snapshots bufferedPos before flushing the subscriptions and publishes the
+// snapshot into flushedPos afterwards, so if two flushes overlap, the
+// later-finishing one can hold the older snapshot. Without the guard that
+// stale snapshot would overwrite a newer flushedPos, silently regressing the
+// checkpoint resume position. Every current caller serializes flushes; this
+// is the regression gate for the invariant itself.
+func TestFlushedPosIsMonotonicAcrossOverlappingFlushes(t *testing.T) {
+	client := &binlogClient{
+		logger: slog.Default(),
+		subs:   newSubscriptionRegistry(),
+	}
+	sub := &gatedSubscription{gates: make(chan chan struct{})}
+	require.True(t, client.subs.Add("test", sub))
+
+	older := mysql.Position{Name: "binlog.000010", Pos: 100}
+	newer := mysql.Position{Name: "binlog.000010", Pos: 200}
+
+	// Flush A snapshots bufferedPos=100, then parks inside the
+	// subscription flush. The unbuffered gates send synchronizes with
+	// Flush entry, so the snapshot is guaranteed taken once it returns.
+	client.setBufferedPos(older)
+	doneA := make(chan error, 1)
+	go func() { doneA <- client.flush(t.Context(), false, nil) }()
+	gateA := make(chan struct{})
+	sub.gates <- gateA
+
+	// More events arrive, then flush B snapshots bufferedPos=200 and
+	// parks too. (Flush A is already past <-s.gates, parked on gateA, so
+	// this send can only be received by flush B.)
+	client.setBufferedPos(newer)
+	doneB := make(chan error, 1)
+	go func() { doneB <- client.flush(t.Context(), false, nil) }()
+	gateB := make(chan struct{})
+	sub.gates <- gateB
+
+	// Flush B (the newer snapshot) finishes first and publishes 200.
+	close(gateB)
+	require.NoError(t, <-doneB)
+	client.mu.Lock()
+	require.Equal(t, newer, client.flushedPos)
+	client.mu.Unlock()
+
+	// Flush A (the stale snapshot) finishes last. Without the monotonic
+	// guard it would store 100 over 200, regressing the resume position.
+	close(gateA)
+	require.NoError(t, <-doneA)
+	client.mu.Lock()
+	require.Equal(t, newer, client.flushedPos,
+		"an overlapping flush holding a stale bufferedPos snapshot must not regress flushedPos")
+	client.mu.Unlock()
+}
+
 // TestShouldSkipReplayedEvent unit-tests the skip decision: an event at or
 // below the live bufferedPos is already buffered/applied and must not be
 // re-delivered, with full (file, pos) ordering across rotations.

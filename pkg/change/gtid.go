@@ -755,7 +755,17 @@ func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.
 	}
 	if allChangesFlushed {
 		c.mu.Lock()
-		c.flushedGTID = newFlushedGTID
+		// Monotonic, mirroring the binlog client's flushedPos guard: if two
+		// flushes were ever to overlap, the later-finishing one could hold
+		// an older (smaller) snapshot of bufferedGTID, and storing it
+		// unconditionally would regress the resume coordinate. bufferedGTID
+		// only ever grows, so any two snapshots are ordered by containment;
+		// skip the store when the current flushed set already contains the
+		// candidate. Every current caller serializes flushes, so this
+		// guards the invariant rather than fixing a live bug.
+		if c.flushedGTID == nil || !c.flushedGTID.Contain(newFlushedGTID) {
+			c.flushedGTID = newFlushedGTID
+		}
 		c.mu.Unlock()
 	}
 	return nil
