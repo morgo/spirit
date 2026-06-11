@@ -58,6 +58,15 @@ func (s *sourceInfo) sourceKey() string {
 	return s.config.Addr + "/" + s.config.DBName
 }
 
+// targetKey returns a stable identifier for a target, used to sort targets
+// deterministically so the checkpoint always lands on the same targets[0]
+// across a stop and a later resume, even if the caller supplies the targets
+// in a different order. The key range is included because two shards may live
+// in the same database on the same host and are only distinguished by range.
+func targetKey(t applier.Target) string {
+	return t.Config.Addr + "/" + t.Config.DBName + "/" + t.KeyRange
+}
+
 type Runner struct {
 	move            *Move
 	sources         []sourceInfo     // one per source database
@@ -318,15 +327,15 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// Read checkpoint from sources[0] by convention.
-	src0 := &r.sources[0]
+	// Read checkpoint from targets[0] by convention.
+	tgt0 := &r.targets[0]
 	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_positions, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
-		src0.config.DBName, checkpointTableName)
+		tgt0.Config.DBName, checkpointTableName)
 	var copierWatermark, binlogPositionsJSON, stmt string
 	var id int
-	err = src0.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt)
+	err = tgt0.DB.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt)
 	if err != nil {
-		return fmt.Errorf("could not read from checkpoint table '%s' on source: %w", checkpointTableName, err)
+		return fmt.Errorf("could not read from checkpoint table '%s' on target: %w", checkpointTableName, err)
 	}
 
 	// Parse per-source positions (opaque strings owned by the source impl),
@@ -366,7 +375,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
-	r.checkpointTable = table.NewTableInfo(src0.db, src0.config.DBName, checkpointTableName)
+	r.checkpointTable = table.NewTableInfo(tgt0.DB, tgt0.Config.DBName, checkpointTableName)
 	r.usedResumeFromCheckpoint = true
 	return nil
 }
@@ -483,7 +492,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		}
 	}
 
-	// Create checkpoint on SOURCE
+	// Create checkpoint on the first target
 	if err := r.createCheckpointTable(ctx); err != nil {
 		return err
 	}
@@ -549,24 +558,25 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	return nil
 }
 
-// createCheckpointTable creates checkpoint table on SOURCE (not target).
-// createCheckpointTable creates checkpoint table on sources[0] by convention.
+// createCheckpointTable creates the checkpoint table on the first target
+// (targets[0]) by convention. Targets are sorted in Run() so targets[0] is
+// stable across a stop and a later resume.
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	src0 := &r.sources[0]
-	if err := dbconn.Exec(ctx, src0.db, "DROP TABLE IF EXISTS %n.%n", src0.config.DBName, checkpointTableName); err != nil {
+	tgt0 := &r.targets[0]
+	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n.%n", tgt0.Config.DBName, checkpointTableName); err != nil {
 		return err
 	}
-	if err := dbconn.Exec(ctx, src0.db, `CREATE TABLE %n.%n (
+	if err := dbconn.Exec(ctx, tgt0.DB, `CREATE TABLE %n.%n (
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
 	binlog_positions TEXT,
 	statement TEXT
 	)`,
-		src0.config.DBName, checkpointTableName); err != nil {
+		tgt0.Config.DBName, checkpointTableName); err != nil {
 		return err
 	}
-	r.checkpointTable = table.NewTableInfo(src0.db, src0.config.DBName, checkpointTableName)
+	r.checkpointTable = table.NewTableInfo(tgt0.DB, tgt0.Config.DBName, checkpointTableName)
 	return nil
 }
 
@@ -610,10 +620,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.sources[i] = sourceInfo{db: db, config: cfg, dsn: dsn}
 	}
 	// Sort sources by sourceKey (addr/dbname) for deterministic ordering.
-	// The checkpoint is always written to sources[0], so the order must be
-	// stable across runs even if the caller constructed SourceDSNs from a map.
-	// Sorting by addr/dbname rather than raw DSN ensures stability across
-	// credential rotations or DSN parameter reordering.
+	// sources[0] is the canonical source we read the table list and SHOW
+	// CREATE TABLE from and the db handle the copier is constructed with, so
+	// its identity must be stable across runs even if the caller constructed
+	// SourceDSNs from a map. Sorting by addr/dbname rather than raw DSN
+	// ensures stability across credential rotations or DSN parameter
+	// reordering. (The checkpoint itself now lives on targets[0].)
 	slices.SortFunc(r.sources, func(a, b sourceInfo) int {
 		return strings.Compare(a.sourceKey(), b.sourceKey())
 	})
@@ -626,7 +638,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	// If targets are already configured (e.g., for resharding), use them.
 	// Otherwise, create a single target from TargetDSN (for simple 1:1 moves).
 	if len(r.move.Targets) > 0 {
-		r.targets = r.move.Targets
+		// Clone so the sort below does not reorder the caller's slice.
+		r.targets = slices.Clone(r.move.Targets)
 		r.logger.Info("Using pre-configured targets", "count", len(r.targets))
 	} else {
 		db, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
@@ -644,6 +657,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		}}
 		r.logger.Info("Created single target from TargetDSN")
 	}
+	// Sort targets by targetKey (addr/dbname/keyrange) for deterministic
+	// ordering. The checkpoint is written to targets[0], so the order must be
+	// stable across runs even if the caller constructed Targets from a map.
+	// The ShardedApplier routes by key range, so slice order is otherwise
+	// irrelevant to which target a row lands on.
+	slices.SortFunc(r.targets, func(a, b applier.Target) int {
+		return strings.Compare(targetKey(a), targetKey(b))
+	})
 	if err := r.setup(ctx); err != nil {
 		return err
 	}
@@ -747,9 +768,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err = cutover.Run(ctx); err != nil {
 		return err
 	}
-	// Delete checkpoint table from sources[0].
-	src0 := &r.sources[0]
-	if err := dbconn.Exec(ctx, src0.db, "DROP TABLE IF EXISTS %n.%n", src0.config.DBName, checkpointTableName); err != nil {
+	// Delete checkpoint table from targets[0].
+	tgt0 := &r.targets[0]
+	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n.%n", tgt0.Config.DBName, checkpointTableName); err != nil {
 		return err
 	}
 	r.logger.Info("Move operation complete.")
@@ -798,8 +819,8 @@ func (r *Runner) fatalError() bool {
 	// If we don't do this, the move will permanently be blocked from proceeding.
 	// Letting it start again is the better choice.
 	// Use a background context since the move context may already be cancelled.
-	if r.checkpointTable != nil && len(r.sources) > 0 {
-		if err := dbconn.Exec(context.Background(), r.sources[0].db, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
+	if r.checkpointTable != nil && len(r.targets) > 0 {
+		if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
 			r.logger.Error("could not remove checkpoint",
 				"error", err,
 			)
@@ -1398,7 +1419,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	r.logger.Info("checkpoint",
 		"low-watermark", copierWatermark,
 		"binlog-positions", string(positionsJSON))
-	err = dbconn.Exec(ctx, r.sources[0].db, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_positions, statement) VALUES (%?, %?, %?, %?)",
+	err = dbconn.Exec(ctx, r.targets[0].DB, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_positions, statement) VALUES (%?, %?, %?, %?)",
 		r.checkpointTable.SchemaName,
 		r.checkpointTable.TableName,
 		copierWatermark,
