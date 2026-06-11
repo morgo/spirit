@@ -3,6 +3,7 @@ package move
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -307,4 +308,131 @@ func TestMoveReservedWordTableName(t *testing.T) {
 		CreateSentinel:  false,
 	}
 	require.NoError(t, move.Run())
+}
+
+// TestPostCopyAnalyzeTargetSchema is a regression test for the bug where
+// postCopyPhase ran ANALYZE against the source schema, silently no-op'ing on a
+// cross-cluster target (here w3c_src -> w3c_dest). It deletes the target's
+// mysql.innodb_table_stats row, runs postCopyPhase, and asserts the row is
+// repopulated; on the unfixed code it never reappears.
+func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	src := cfg.Clone()
+	src.DBName = "w3c_src"
+	dest := cfg.Clone()
+	dest.DBName = "w3c_dest"
+
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	// Source and target schemas have *different* names.
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_src`)
+	testutils.RunSQL(t, `CREATE DATABASE w3c_src`)
+	testutils.RunSQL(t, `CREATE TABLE w3c_src.t1 (id INT NOT NULL PRIMARY KEY auto_increment, val VARBINARY(255))`)
+	testutils.RunSQL(t, `INSERT INTO w3c_src.t1 (val) SELECT RANDOM_BYTES(255) FROM dual`)
+	testutils.RunSQL(t, `INSERT INTO w3c_src.t1 (val) SELECT RANDOM_BYTES(255) FROM w3c_src.t1 a JOIN w3c_src.t1 b LIMIT 1000`)
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_dest`)
+	testutils.RunSQL(t, `CREATE DATABASE w3c_dest`)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_src`)
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_dest`)
+	})
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 5 * time.Second,
+		Threads:         1,
+		WriteThreads:    1,
+	}
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+
+	// Drive the same setup the real Run() does, then run the copier so the
+	// target table exists and is populated, then call postCopyPhase directly.
+	var ctx context.Context
+	ctx, r.cancelFunc = context.WithCancel(t.Context())
+	r.dbConfig = dbconn.NewDBConfig()
+	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
+	require.NoError(t, err)
+	srcConfig, err := mysql.ParseDSN(r.move.SourceDSN)
+	require.NoError(t, err)
+	r.sources = []sourceInfo{{db: srcDB, config: srcConfig, dsn: r.move.SourceDSN}}
+	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
+	require.NoError(t, err)
+	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+	require.NoError(t, err)
+	r.targets = []applier.Target{{
+		KeyRange: "0",
+		DB:       targetDB,
+		Config:   targetConfig,
+	}}
+	require.NoError(t, r.setup(ctx))
+	t.Cleanup(func() {
+		r.cancelFunc()
+		// Runner.Close() closes the target DB and repl clients but not the raw
+		// source DB connection, so close it explicitly to avoid a goroutine leak
+		// (goleak runs in TestMain).
+		require.NoError(t, srcDB.Close())
+		require.NoError(t, r.Close())
+	})
+
+	// Copy the rows so the target table is created and populated.
+	require.NoError(t, r.copier.Run(ctx))
+
+	// Delete the *target* schema's stats row. A correct ANALYZE (run unqualified
+	// on the target's own connection) repopulates it; the buggy ANALYZE (qualified
+	// with the source schema) touched w3c_src.t1 instead and left this missing.
+	testutils.RunSQL(t, `DELETE FROM mysql.innodb_table_stats WHERE database_name = 'w3c_dest' AND table_name = 't1'`)
+	var beforeCount int
+	require.NoError(t, targetDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mysql.innodb_table_stats WHERE database_name = 'w3c_dest' AND table_name = 't1'`).Scan(&beforeCount))
+	require.Equal(t, 0, beforeCount, "precondition: target stats row should be deleted")
+
+	require.NoError(t, r.postCopyPhase(ctx))
+
+	var afterCount int
+	require.NoError(t, targetDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mysql.innodb_table_stats WHERE database_name = 'w3c_dest' AND table_name = 't1'`).Scan(&afterCount))
+	require.Equal(t, 1, afterCount,
+		"postCopyPhase must ANALYZE the TARGET schema (w3c_dest.t1); stats row was not repopulated, so ANALYZE hit the wrong schema")
+}
+
+// TestAnalyzeTableMissingTargetIsError verifies that analyzeTable inspects the
+// ANALYZE TABLE result set and surfaces a missing table as an error, rather
+// than silently returning nil (the failure mode that hid the cross-schema bug
+// on real cross-cluster targets).
+func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_analyze`)
+	testutils.RunSQL(t, `CREATE DATABASE w3c_analyze`)
+	testutils.RunSQL(t, `CREATE TABLE w3c_analyze.present (id INT PRIMARY KEY)`)
+	t.Cleanup(func() { testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3c_analyze`) })
+
+	// analyzeTable addresses the table UNQUALIFIED, so the connection must
+	// default to the target schema (as the real target.DB does) — connect with
+	// w3c_analyze as the default database rather than the usual `test`.
+	dbConfig := dbconn.NewDBConfig()
+	db, err := dbconn.New(testutils.DSNForDatabase("w3c_analyze"), dbConfig)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	// analyzeTable only reads r.logger (for non-error rows), so give it a real
+	// logger so the warning path does not dereference a nil pointer.
+	r := &Runner{logger: slog.Default()}
+
+	// A freshly-created table analyzes cleanly (Msg_type "status").
+	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
+
+	// Re-analyzing succeeds too, even though it may report a non-OK status row
+	// ("Table is already up to date") — only Msg_type="Error" is a failure.
+	require.NoError(t, r.analyzeTable(t.Context(), db, "present"))
+
+	// A missing table must surface as an error (via the Msg_type="Error" row),
+	// not a silent no-op.
+	err = r.analyzeTable(t.Context(), db, "does_not_exist")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ANALYZE TABLE")
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	driver "github.com/pingcap/tidb/pkg/parser/test_driver"
 	"github.com/pingcap/tidb/pkg/parser/types"
 )
 
@@ -31,25 +32,31 @@ type CreateTable struct {
 
 // Column represents a table column definition
 type Column struct {
-	Raw           *ast.ColumnDef    `json:"-"`
-	Name          string            `json:"name"`
-	Type          string            `json:"type"`
-	Length        *int              `json:"length,omitempty"`
-	Precision     *int              `json:"precision,omitempty"`
-	Scale         *int              `json:"scale,omitempty"`
-	Unsigned      *bool             `json:"unsigned,omitempty"`
-	EnumValues    []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
-	SetValues     []string          `json:"set_values,omitempty"`  // Permitted values for SET type
-	Nullable      bool              `json:"nullable"`
-	Default       *string           `json:"default,omitempty"`
-	DefaultIsExpr bool              `json:"default_is_expr,omitempty"` // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
-	AutoInc       bool              `json:"auto_increment"`
-	PrimaryKey    bool              `json:"primary_key"`
-	Unique        bool              `json:"unique"`
-	Comment       *string           `json:"comment,omitempty"`
-	Charset       *string           `json:"charset,omitempty"`
-	Collation     *string           `json:"collation,omitempty"`
-	Options       map[string]string `json:"options,omitempty"`
+	Raw             *ast.ColumnDef    `json:"-"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type"`
+	Length          *int              `json:"length,omitempty"`
+	Precision       *int              `json:"precision,omitempty"`
+	Scale           *int              `json:"scale,omitempty"`
+	Unsigned        *bool             `json:"unsigned,omitempty"`
+	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
+	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
+	Nullable        bool              `json:"nullable"`
+	Default         *string           `json:"default,omitempty"`
+	DefaultIsExpr   bool              `json:"default_is_expr,omitempty"`   // true when default is an expression (needs parens), e.g. DEFAULT (json_object())
+	DefaultIsString bool              `json:"default_is_string,omitempty"` // true when the default is a quoted string literal (so it must be re-quoted on emission, even if it looks like a keyword/number)
+	OnUpdate        *string           `json:"on_update,omitempty"`         // ON UPDATE expression for TIMESTAMP/DATETIME, e.g. "current_timestamp"
+	GeneratedExpr   *string           `json:"generated_expr,omitempty"`    // Expression for GENERATED ALWAYS AS (...) columns
+	GeneratedStored bool              `json:"generated_stored,omitempty"`  // true = STORED, false = VIRTUAL (only meaningful when GeneratedExpr is set)
+	Check           *string           `json:"check,omitempty"`             // Column-level CHECK (...) constraint expression
+	SRID            *uint32           `json:"srid,omitempty"`              // SRID attribute for spatial columns
+	AutoInc         bool              `json:"auto_increment"`
+	PrimaryKey      bool              `json:"primary_key"`
+	Unique          bool              `json:"unique"`
+	Comment         *string           `json:"comment,omitempty"`
+	Charset         *string           `json:"charset,omitempty"`
+	Collation       *string           `json:"collation,omitempty"`
+	Options         map[string]string `json:"options,omitempty"`
 }
 
 // IndexColumn represents a column or expression in an index
@@ -139,6 +146,15 @@ type PartitionValues struct {
 	Type   string `json:"type"`   // "LESS_THAN", "IN", "MAXVALUE"
 	Values []any  `json:"values"` // The actual values
 }
+
+// partitionStringLiteral wraps a partition value that originated from a
+// quoted string literal (e.g. LIST COLUMNS on a VARCHAR column:
+// VALUES IN ('2020', 'asia')). Wrapping it in a distinct type preserves
+// the "this was a string" fact through the []any storage so emission can
+// quote it unconditionally — without it, a numeric-looking string value
+// like '2020' would be rendered bare and rejected by MySQL (error 1654).
+// Numeric/expression partition values remain plain Go strings.
+type partitionStringLiteral string
 
 // SubPartitionOptions represents subpartitioning configuration
 type SubPartitionOptions struct {
@@ -346,6 +362,12 @@ func (ct *CreateTable) parseToStruct() {
 		}
 	}
 
+	// Hoist column-level CHECK constraints into table-level constraints, the
+	// same way MySQL does in SHOW CREATE TABLE. This keeps the parsed form
+	// canonical so a diff against a live (already-hoisted) table converges and
+	// never tries to DROP the live CHECK. See normalizeColumnChecks.
+	ct.normalizeColumnChecks()
+
 	// Auto-generate MySQL default names for unnamed indexes
 	ct.autoNameIndexes()
 
@@ -357,6 +379,94 @@ func (ct *CreateTable) parseToStruct() {
 	// Parse partition options
 	if ct.Raw.Partition != nil {
 		ct.Partition = ct.parsePartitionOptions(ct.Raw.Partition)
+	}
+}
+
+// normalizeColumnChecks hoists column-level CHECK constraints into table-level
+// constraints, mirroring what MySQL does in SHOW CREATE TABLE. Without this,
+// a column-level CHECK lives only in Column.Check while the live table (after
+// the ALTER is applied) reports the same constraint in CreateTable.Constraints.
+// A re-diff would then (a) keep emitting MODIFY COLUMN because Column.Check
+// differs and (b) try to DROP the live CHECK because it is absent from the
+// target's Constraints. Hoisting at parse time keeps the parsed form canonical
+// so the re-diff converges and no constraint is ever dropped.
+//
+// MySQL auto-names unnamed CHECK constraints `<table>_chk_<n>`. We replicate
+// that here: user-named CHECKs keep their name; unnamed ones are numbered in
+// the order they are encountered (existing table-level CHECKs first, then the
+// hoisted column-level CHECKs in column order).
+//
+// Naming caveat: MySQL numbers CHECKs in true declaration order, interleaving
+// column-level and table-level CHECKs by their position in the statement. The
+// TiDB parser does not expose reliable per-node source offsets, so when a table
+// mixes column-level and table-level CHECKs our generated `_chk_<n>` numbers can
+// differ from MySQL's. This is purely cosmetic and never causes a constraint to
+// be dropped or a re-diff to diverge: diffConstraints pairs CHECK constraints by
+// expression when the names differ (see matchedByExpression in diffConstraints),
+// so the round-trip still converges. The common case — a table whose CHECKs are
+// all column-level — numbers identically to MySQL.
+func (ct *CreateTable) normalizeColumnChecks() {
+	// Track names already in use so generated names never collide with a
+	// user-supplied constraint name.
+	usedNames := make(map[string]bool)
+	for i := range ct.Constraints {
+		if ct.Constraints[i].Name != "" {
+			usedNames[ct.Constraints[i].Name] = true
+		}
+	}
+
+	// Append a hoisted table-level CHECK for each column-level CHECK, then
+	// clear the column-level field so it no longer participates in column
+	// equality or column-definition emission.
+	for i := range ct.Columns {
+		col := &ct.Columns[i]
+		if col.Check == nil {
+			continue
+		}
+		// Recover the user-supplied constraint name (if any) from the raw
+		// column option; unnamed ones are auto-numbered below.
+		name := ""
+		if col.Raw != nil {
+			for _, opt := range col.Raw.Options {
+				if opt.Tp == ast.ColumnOptionCheck {
+					name = opt.ConstraintName
+					break
+				}
+			}
+		}
+		expr := *col.Check
+		definition := fmt.Sprintf("CHECK (%s)", expr)
+		ct.Constraints = append(ct.Constraints, Constraint{
+			Name:       name,
+			Type:       "CHECK",
+			Expression: &expr,
+			Definition: &definition,
+		})
+		col.Check = nil
+		if name != "" {
+			usedNames[name] = true
+		}
+	}
+
+	// Number the unnamed CHECK constraints `<table>_chk_<n>`. Resolve indices
+	// (not pointers) after all appends are complete so a slice reallocation
+	// during the append loop above cannot leave us with dangling references.
+	counter := 0
+	for i := range ct.Constraints {
+		c := &ct.Constraints[i]
+		if c.Type != "CHECK" || c.Name != "" {
+			continue
+		}
+		var name string
+		for {
+			counter++
+			name = fmt.Sprintf("%s_chk_%d", ct.TableName, counter)
+			if !usedNames[name] {
+				break
+			}
+		}
+		usedNames[name] = true
+		c.Name = name
 	}
 }
 
@@ -438,6 +548,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 		Options:  make(map[string]string),
 	}
 
+	// Spatial types are parsed as TypeGeometry with a subtype; recover the
+	// specific type name (point, polygon, ...) so it round-trips correctly
+	// when emitting MODIFY/ADD COLUMN.
+	if col.Tp.GetType() == mysql.TypeGeometry {
+		geoType := col.Tp.GetGeometryType()
+		if geoStr := geoType.String(); geoStr != "" {
+			column.Type = geoStr
+		}
+	}
+
 	// Check if this is a binary type (VARBINARY, BLOB, etc.)
 	// The TiDB parser converts binary types to their text equivalents,
 	// so we need to check the binary flag and convert back
@@ -479,12 +599,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	}
 
 	// Extract charset and collation from the type itself
-	// (they may be overridden by column options later)
-	if charset := col.Tp.GetCharset(); charset != "" {
-		column.Charset = &charset
-	}
-	if collation := col.Tp.GetCollate(); collation != "" {
-		column.Collation = &collation
+	// (they may be overridden by column options later).
+	// Spatial types are skipped: the parser assigns them a synthetic
+	// "binary" charset/collation, which is not valid SQL to emit.
+	if col.Tp.GetType() != mysql.TypeGeometry {
+		if charset := col.Tp.GetCharset(); charset != "" {
+			column.Charset = &charset
+		}
+		if collation := col.Tp.GetCollate(); collation != "" {
+			column.Collation = &collation
+		}
 	}
 
 	// Extract ENUM/SET permitted values
@@ -519,36 +643,66 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				// We track this so we can reproduce the correct syntax when generating ALTERs.
 				column.DefaultIsExpr = isExpressionDefault(opt.Expr)
 
-				defaultVal := ct.parseExpression(opt.Expr)
-				if defaultStr, ok := defaultVal.(string); ok && defaultStr != "" {
-					// Remove surrounding quotes if present for string literals
-					if len(defaultStr) >= 2 && defaultStr[0] == '\'' && defaultStr[len(defaultStr)-1] == '\'' {
-						defaultStr = defaultStr[1 : len(defaultStr)-1]
-					}
-
-					column.Default = &defaultStr
+				if literal, isStr := stringLiteralValue(opt.Expr); isStr {
+					// Quoted string literal default. Store the true, raw
+					// (fully-unescaped) value off the AST and remember it
+					// was a string so we re-quote it on emission — even if
+					// the value looks like a keyword (TRUE/NULL) or a
+					// number. Escaping happens exactly once, at emit time.
+					column.Default = &literal
+					column.DefaultIsString = true
 				} else {
-					// For non-string defaults (e.g., numeric, functions), use the raw expression
-					defaultRaw := fmt.Sprintf("%v", defaultVal)
+					// Non-string defaults (numeric, functions, expressions):
+					// keep the Restored text representation.
+					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(opt.Expr))
 					column.Default = &defaultRaw
 				}
 			}
 		case ast.ColumnOptionComment:
 			if opt.Expr != nil {
-				comment := ct.parseExpression(opt.Expr)
-				if commentStr, ok := comment.(string); ok && commentStr != "" {
-					// Remove surrounding quotes if present
-					if len(commentStr) >= 2 && commentStr[0] == '\'' && commentStr[len(commentStr)-1] == '\'' {
-						commentStr = commentStr[1 : len(commentStr)-1]
-					}
-
-					column.Comment = &commentStr
+				// A column comment is always a string literal; read its true
+				// value directly off the AST so quotes/backslashes survive
+				// the round-trip and are escaped exactly once on emission.
+				if literal, isStr := stringLiteralValue(opt.Expr); isStr && literal != "" {
+					column.Comment = &literal
 				}
 			}
 		case ast.ColumnOptionCollate:
 			if opt.StrValue != "" {
 				column.Collation = &opt.StrValue
 			}
+		case ast.ColumnOptionOnUpdate:
+			// ON UPDATE CURRENT_TIMESTAMP[(n)] — only valid for TIMESTAMP/DATETIME.
+			// Reuse parseExpression so the stored form matches DEFAULT handling:
+			// lowercased, with "()" stripped from zero-arg timestamp functions.
+			if opt.Expr != nil {
+				if exprStr, ok := ct.parseExpression(opt.Expr).(string); ok && exprStr != "" {
+					column.OnUpdate = &exprStr
+				}
+			}
+		case ast.ColumnOptionGenerated:
+			// GENERATED ALWAYS AS (expr) [STORED|VIRTUAL]
+			if opt.Expr != nil {
+				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
+					column.GeneratedExpr = &exprStr
+					column.GeneratedStored = opt.Stored
+				}
+			}
+		case ast.ColumnOptionCheck:
+			// Column-level CHECK (expr). Note that MySQL normalizes these to
+			// table-level constraints in SHOW CREATE TABLE output, so this is
+			// only seen when parsing user-written (non-canonical) statements.
+			if opt.Expr != nil {
+				if exprStr, ok := restoreExpressionText(opt.Expr); ok {
+					column.Check = &exprStr
+				}
+			}
+		case ast.ColumnOptionSrid:
+			// SRID n — spatial reference system id for spatial columns.
+			// SHOW CREATE TABLE emits this as /*!80003 SRID n */ which the
+			// parser unwraps as a regular column option.
+			srid := opt.Srid
+			column.SRID = &srid
 		default:
 			// Store unknown options for flexibility
 			column.Options[fmt.Sprintf("option_%d", opt.Tp)] = opt.StrValue
@@ -652,8 +806,14 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 		constr.Type = "CHECK"
 
 		if constraint.Expr != nil {
-			expr := ct.parseExpression(constraint.Expr)
-			if exprStr, ok := expr.(string); ok {
+			// Use restoreExpressionText (not parseExpression) so the stored
+			// expression has any balanced outer parentheses stripped. MySQL's
+			// SHOW CREATE TABLE wraps the CHECK body in an extra set of parens
+			// (e.g. CHECK ((`age` >= 0))) while user-written DDL usually does
+			// not (CHECK (age >= 0)). Normalizing both to the unwrapped form
+			// (`age`>=0) lets the two compare equal so a re-diff converges
+			// instead of emitting a spurious DROP+ADD.
+			if exprStr, ok := restoreExpressionText(constraint.Expr); ok {
 				constr.Expression = &exprStr
 				// Generate definition string
 				definition := fmt.Sprintf("CHECK (%s)", exprStr)
@@ -929,8 +1089,7 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 			Values: make([]any, 0, len(c.Exprs)),
 		}
 		for _, expr := range c.Exprs {
-			val := ct.parseExpression(expr)
-			values.Values = append(values.Values, val)
+			values.Values = append(values.Values, ct.parsePartitionValue(expr))
 		}
 
 		return values
@@ -941,14 +1100,12 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 		}
 		for _, valList := range c.Values {
 			if len(valList) == 1 {
-				val := ct.parseExpression(valList[0])
-				values.Values = append(values.Values, val)
+				values.Values = append(values.Values, ct.parsePartitionValue(valList[0]))
 			} else {
 				// Multiple values in a single clause
 				subValues := make([]any, 0, len(valList))
 				for _, expr := range valList {
-					val := ct.parseExpression(expr)
-					subValues = append(subValues, val)
+					subValues = append(subValues, ct.parsePartitionValue(expr))
 				}
 
 				values.Values = append(values.Values, subValues...)
@@ -965,6 +1122,18 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 	default:
 		return nil
 	}
+}
+
+// parsePartitionValue parses a single partition value expression. String
+// literals (LIST/RANGE COLUMNS on a string column) are wrapped in
+// partitionStringLiteral carrying their true raw value, so emission can
+// quote them unconditionally. Numeric literals and expressions (e.g.
+// YEAR(col)) fall back to the Restored text form as plain strings.
+func (ct *CreateTable) parsePartitionValue(expr ast.ExprNode) any {
+	if literal, isStr := stringLiteralValue(expr); isStr {
+		return partitionStringLiteral(literal)
+	}
+	return ct.parseExpression(expr)
 }
 
 // parseSubPartitionOptions converts subpartition options to SubPartitionOptions
@@ -1039,6 +1208,29 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 	return subDef
 }
 
+// stringLiteralValue returns the true, fully-unescaped value of a quoted
+// string-literal AST node (for example the value behind a single-quoted
+// DEFAULT, or a COMMENT, whose contents include escaped quote or backslash
+// characters) along with true. For any other expression kind it returns an
+// empty string and false.
+//
+// This is the load-bearing fix for the string round-trip bugs: the TiDB
+// parser's Restore re-emits a string literal in its re-escaped, still-quoted
+// form rather than as the raw value, so the previous approach of
+// Restore-then-strip-outer-quotes left the inner escaping in place. Reading
+// the literal's value directly off the AST yields the raw bytes, which we
+// then escape exactly once at emission time via sqlescape (backslash
+// escaping, which MySQL accepts in its default sql_mode). Note MySQL renders
+// a literal quote in SHOW CREATE TABLE as a doubled quote, which the parser
+// also accepts; the doubled and backslash forms are equivalent in the
+// default sql_mode.
+func stringLiteralValue(expr ast.ExprNode) (string, bool) {
+	if v, ok := expr.(*driver.ValueExpr); ok && v.Kind() == driver.KindString {
+		return v.GetString(), true
+	}
+	return "", false
+}
+
 // isExpressionDefault returns true when the default value expression should be
 // wrapped in parentheses in the generated DDL. MySQL requires expression defaults
 // (as opposed to literal defaults) to be enclosed in parens, e.g. DEFAULT (json_object()).
@@ -1062,6 +1254,31 @@ func isExpressionDefault(expr ast.ExprNode) bool {
 	default:
 		return false
 	}
+}
+
+// restoreExpressionText restores an expression AST node to its SQL text,
+// stripping redundant outer parentheses. MySQL's SHOW CREATE TABLE wraps
+// generated-column and CHECK expressions in an extra set of parentheses
+// (e.g. GENERATED ALWAYS AS ((`a` + 1))); stripping them ensures a
+// user-written `AS (a + 1)` compares equal to the canonical form.
+// Unlike parseExpression, the result is NOT lowercased and string literals
+// keep their quotes — these expressions may contain case-sensitive literals.
+func restoreExpressionText(expr ast.ExprNode) (string, bool) {
+	for {
+		paren, ok := expr.(*ast.ParenthesesExpr)
+		if !ok {
+			break
+		}
+		expr = paren.Expr
+	}
+
+	var sb strings.Builder
+	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+	if err := expr.Restore(rCtx); err != nil {
+		return "", false
+	}
+
+	return sb.String(), true
 }
 
 // parseExpression converts an expression to a string representation
@@ -1323,10 +1540,26 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			fmt.Fprintf(&sb, "`%s`", key.Column.Name.String())
-			// Add length if specified
-			if key.Length > 0 {
-				fmt.Fprintf(&sb, "(%d)", key.Length)
+			switch {
+			case key.Column != nil:
+				// Regular column reference
+				fmt.Fprintf(&sb, "`%s`", key.Column.Name.String())
+				// Add length if specified
+				if key.Length > 0 {
+					fmt.Fprintf(&sb, "(%d)", key.Length)
+				}
+			case key.Expr != nil:
+				// Functional (expression) index part, e.g. KEY ((lower(b))).
+				// Column is nil in this case; MySQL requires the expression
+				// to be wrapped in its own parentheses.
+				var exprSb strings.Builder
+				rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &exprSb)
+				if err := key.Expr.Restore(rCtx); err != nil {
+					return "", fmt.Errorf("failed to restore expression for index %q: %w", constraint.Name, err)
+				}
+				fmt.Fprintf(&sb, "(%s)", exprSb.String())
+			default:
+				return "", fmt.Errorf("index %q has a key part with neither a column nor an expression", constraint.Name)
 			}
 		}
 		sb.WriteString(")")
@@ -1343,6 +1576,11 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 			// Add KEY_BLOCK_SIZE
 			if opt.KeyBlockSize > 0 {
 				fmt.Fprintf(&sb, " KEY_BLOCK_SIZE=%d", opt.KeyBlockSize)
+			}
+
+			// Add WITH PARSER (FULLTEXT indexes)
+			if opt.ParserName.L != "" {
+				fmt.Fprintf(&sb, " WITH PARSER %s", opt.ParserName.String())
 			}
 
 			// Add COMMENT

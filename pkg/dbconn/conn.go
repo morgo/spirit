@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -23,9 +24,15 @@ const (
 	requiredTLSConfigName = "required"
 	verifyCATLSConfigName = "verify_ca"
 	verifyIDTLSConfigName = "verify_identity"
-	maxConnLifetime       = time.Minute * 3
 	maxIdleConns          = 10
 )
+
+// maxConnLifetime is the default maximum lifetime for pooled connections.
+// It is a var (not a const) only so tests can shorten it; production code
+// must not modify it. Note that pools holding session-scoped state (such as
+// the metadata lock's GET_LOCK) are deliberately exempted from this limit —
+// see NewMetadataLock.
+var maxConnLifetime = time.Minute * 3
 
 // rdsAddr matches Amazon RDS hostnames with optional :port suffix.
 // It's used to automatically load the Amazon RDS CA and enable TLS.
@@ -307,6 +314,22 @@ func newDSN(dsn string, config *DBConfig) (string, error) {
 	return cfg.FormatDSN(), nil
 }
 
+// isTLSUnsupportedByServer reports whether err indicates that the MySQL server
+// does not support TLS at all — i.e. the server's handshake advertised no
+// CLIENT_SSL capability while the client requested TLS. go-sql-driver returns
+// the sentinel mysql.ErrNoTLS ("TLS requested but server does not support TLS")
+// in exactly this case (see packets.go handleAuthResult / readHandshakePacket).
+//
+// This is the ONLY condition under which PREFERRED mode is allowed to silently
+// downgrade the connection to plaintext. Every other failure — a network
+// timeout, max_connections exhaustion, bad credentials (1045), or a
+// certificate-verification failure (which is how PREFERRED behaves against RDS
+// hosts, where it uses the fully-verifying rds config) — is a genuine error
+// that must propagate, not be papered over with an unencrypted connection.
+func isTLSUnsupportedByServer(err error) bool {
+	return errors.Is(err, mysql.ErrNoTLS)
+}
+
 // New is similar to sql.Open except we take the inputDSN and
 // append additional options to it to standardize the connection.
 // It will also ping the connection to ensure it is valid.
@@ -316,6 +339,15 @@ func New(inputDSN string, config *DBConfig) (db *sql.DB, err error) {
 
 // NewWithConnectionType is like New but includes context about the connection type for better error messages
 func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType string) (db *sql.DB, err error) {
+	// Normalize the TLS mode once, up front, so every comparison and switch
+	// below (and in newDSN) is case-insensitive. The CLI documents --tls-mode
+	// as case-insensitive, so e.g. "preferred" must behave exactly like
+	// "PREFERRED" rather than falling through to a default branch.
+	if config != nil {
+		configNorm := *config
+		configNorm.TLSMode = strings.ToUpper(config.TLSMode)
+		config = &configNorm
+	}
 	dsn, err := newDSN(inputDSN, config)
 	if err != nil {
 		return nil, err
@@ -335,14 +367,30 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		db, err := sql.Open("mysql", dsn)
 		if err == nil {
 			//nolint: noctx // requires too much refactoring
-			if err := db.Ping(); err == nil {
+			if pingErr := db.Ping(); pingErr == nil {
 				// TLS connection successful
 				return db, nil
+			} else {
+				_ = db.Close()
+				// Only fall back to plaintext when the server genuinely does
+				// not support TLS. Any other ping failure (timeout, auth,
+				// max_connections, certificate verification) must propagate —
+				// silently downgrading the whole pool to plaintext on those
+				// would be a security regression and would mask real errors.
+				if !isTLSUnsupportedByServer(pingErr) {
+					return nil, fmt.Errorf("[%s-CONNECTION] ping failed: %w", strings.ToUpper(strings.ReplaceAll(connectionType, " ", "-")), pingErr)
+				}
+				slog.Warn("server does not support TLS; PREFERRED mode is downgrading this connection to plaintext",
+					"connection_type", connectionType)
 			}
-			_ = db.Close()
+		} else {
+			// sql.Open only validates the DSN; a non-nil error here means the
+			// DSN itself is bad, so there is nothing to ping or fall back to.
+			return nil, fmt.Errorf("failed to open %s connection: %w", connectionType, err)
 		}
 
-		// TLS failed, try without TLS by rebuilding the DSN with TLS disabled.
+		// TLS is unsupported by the server, try without TLS by rebuilding the
+		// DSN with TLS disabled.
 		// We must use newDSN (not createFallbackDSN on the raw inputDSN) so that
 		// all critical session variables (sql_mode, time_zone, charset, rejectReadOnly, etc.)
 		// are included in the fallback connection.
@@ -384,7 +432,9 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 // This allows replica connections to inherit TLS settings from the main connection
 // while still respecting explicit TLS configuration in the DSN.
 func EnhanceDSNWithTLS(inputDSN string, config *DBConfig) (string, error) {
-	if config == nil || config.TLSMode == "DISABLED" {
+	// TLSMode is documented as case-insensitive; compare on the upper-cased
+	// value so a lowercase "disabled" is honored here too.
+	if config == nil || strings.ToUpper(config.TLSMode) == "DISABLED" {
 		return inputDSN, nil
 	}
 
@@ -470,13 +520,25 @@ func addTLSParametersToDSN(dsn string, config *DBConfig) (string, error) {
 // GetTLSConfigForBinlog creates a TLS config for binary log connections
 // using the same logic as main database connections
 func GetTLSConfigForBinlog(config *DBConfig, host string) (*tls.Config, error) {
-	if config == nil || config.TLSMode == "DISABLED" {
+	// TLSMode is documented as case-insensitive, so compare on the
+	// upper-cased value. A lowercase "disabled" previously fell through the
+	// exact "DISABLED" check below and into the default branch, which built a
+	// PREFERRED-style TLS config for the binlog connection — that then failed
+	// confusingly against a TLS-less server while the main pool worked.
+	if config == nil || strings.ToUpper(config.TLSMode) == "DISABLED" {
 		return nil, nil
 	}
 
 	var tlsConfig *tls.Config
 
 	switch strings.ToUpper(config.TLSMode) {
+	case "DISABLED":
+		// No TLS for the binlog connection. (Unreachable in practice because
+		// the early return above handles DISABLED, but kept explicit so the
+		// switch covers every documented mode rather than treating DISABLED as
+		// an unknown mode that falls into the PREFERRED-style default.)
+		return nil, nil
+
 	case "PREFERRED":
 		// For PREFERRED mode, we need to setup custom TLS config
 		if err := initCustomTLS(config); err != nil {

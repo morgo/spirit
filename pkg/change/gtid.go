@@ -201,6 +201,31 @@ func (c *gtidClient) getBufferedGTID() mysql.GTIDSet {
 	return c.bufferedGTID.Clone()
 }
 
+// promotePendingGTID moves the pending {SID,GNO} stashed by the most
+// recent GTIDEvent into bufferedGTID and clears the pending state. It is
+// a no-op when there is no pending GTID (e.g. right after a reconnect).
+//
+// This must be called whenever the current transaction's event stream
+// ends, regardless of how it ends: XIDEvent (InnoDB commit), a COMMIT or
+// ROLLBACK QueryEvent (non-transactional engines / mixed-engine
+// rollbacks), or any other QueryEvent, including statements the TiDB
+// parser cannot parse (CREATE TRIGGER, stored procedures, XA, ...).
+// Every GTIDEvent the server streams corresponds to an entry in its
+// gtid_executed, so any path that drops a pending GTID instead of
+// promoting it leaves bufferedGTID permanently behind gtid_executed and
+// wedges BlockWait/Flush forever.
+func (c *gtidClient) promotePendingGTID() {
+	c.mu.Lock()
+	pendingSID := c.pendingSID
+	pendingGNO := c.pendingGNO
+	c.pendingSID = nil
+	c.pendingGNO = 0
+	c.mu.Unlock()
+	if len(pendingSID) > 0 {
+		c.setBufferedGTID(pendingSID, pendingGNO)
+	}
+}
+
 // AllChangesFlushed satisfies Source. True when bufferedGTID and
 // flushedGTID are equal — i.e. every GTID we have observed has had its
 // row events applied to the target.
@@ -486,15 +511,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		case *replication.XIDEvent:
 			// Transaction commit (InnoDB). Promote the pending GTID
 			// into bufferedGTID — only now is it safe to resume past it.
-			c.mu.Lock()
-			pendingSID := c.pendingSID
-			pendingGNO := c.pendingGNO
-			c.pendingSID = nil
-			c.pendingGNO = 0
-			c.mu.Unlock()
-			if len(pendingSID) > 0 {
-				c.setBufferedGTID(pendingSID, pendingGNO)
-			}
+			c.promotePendingGTID()
 		case *replication.RowsEvent:
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing GTID rows event", "error", err)
@@ -503,11 +520,23 @@ func (c *gtidClient) readStream(ctx context.Context) {
 			}
 		case *replication.QueryEvent:
 			// A "BEGIN" QueryEvent inside a transaction is not DDL — skip
-			// it cheaply rather than handing it to the parser. The parser
-			// will also handle COMMIT/ROLLBACK without panicking, but they
-			// are common enough that the early-out is worth it.
+			// it cheaply rather than handing it to the parser. The pending
+			// GTID must stay pending: the transaction's row events have not
+			// been buffered yet.
 			q := strings.TrimSpace(string(event.Query))
-			if strings.EqualFold(q, "BEGIN") || strings.EqualFold(q, "COMMIT") || strings.EqualFold(q, "ROLLBACK") {
+			if strings.EqualFold(q, "BEGIN") {
+				continue
+			}
+			// COMMIT/ROLLBACK QueryEvents end a transaction that involved a
+			// non-transactional engine (these get a QueryEvent terminator
+			// instead of an XIDEvent; a logged ROLLBACK is the mixed-engine
+			// case where the non-transactional writes survived the rollback).
+			// Either way the server has recorded the GTID in gtid_executed
+			// and we have buffered all of the transaction's row events, so
+			// promote — exactly as the XIDEvent path does. Skipping the
+			// promotion here would wedge BlockWait forever.
+			if strings.EqualFold(q, "COMMIT") || strings.EqualFold(q, "ROLLBACK") {
+				c.promotePendingGTID()
 				continue
 			}
 			ddlTables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
@@ -523,6 +552,14 @@ func (c *gtidClient) readStream(ctx context.Context) {
 					"error", err,
 					"schema", string(event.Schema),
 					"gtid", c.getBufferedGTID().String())
+				// The statement was still a complete server transaction with
+				// its own GTID — promote it even though we could not parse
+				// it, otherwise bufferedGTID falls permanently behind
+				// gtid_executed and BlockWait/Flush never complete. Note the
+				// schema filter only applies after parsing, so *any*
+				// unparseable statement on the server (e.g. a stored
+				// procedure deploy in an unrelated schema) takes this path.
+				c.promotePendingGTID()
 				continue
 			}
 			// MySQL emits a synthetic GTID for DDL statements too, but the
@@ -531,15 +568,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 			// set. This is best-effort — if the caller cancels on DDL we
 			// won't actually resume, but the position is consistent for
 			// non-cancelling filters.
-			c.mu.Lock()
-			pendingSID := c.pendingSID
-			pendingGNO := c.pendingGNO
-			c.pendingSID = nil
-			c.pendingGNO = 0
-			c.mu.Unlock()
-			if len(pendingSID) > 0 {
-				c.setBufferedGTID(pendingSID, pendingGNO)
-			}
+			c.promotePendingGTID()
 			for _, ddlTable := range ddlTables {
 				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
@@ -603,7 +632,10 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	tbl := sub.Tables()[0]
 	eventType := parseEventType(ev.Header.EventType)
 
-	if tbl.HasEnumOrSetColumns() {
+	// Decode ENUM/SET integers and re-pad BINARY(N) values before key
+	// extraction and buffering — see the matching block in binlog.go's
+	// processRowsEvent and TableInfo.DecodeBinlogRow.
+	if tbl.NeedsBinlogRowDecoding() {
 		for _, row := range e.Rows {
 			if err := tbl.DecodeBinlogRow(row); err != nil {
 				return fmt.Errorf("decoding binlog row for %s.%s: %w", tbl.SchemaName, tbl.TableName, err)
