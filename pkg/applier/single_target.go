@@ -11,7 +11,6 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
-	"github.com/block/spirit/pkg/utils"
 )
 
 // SingleTargetApplier applies rows to a single target database.
@@ -28,10 +27,22 @@ type SingleTargetApplier struct {
 	chunkletBuffer      chan chunklet
 	chunkletCompletions chan chunkletCompletion
 
-	// Pending work tracking
-	pendingWork  map[int64]*pendingWork
-	pendingMutex sync.Mutex
-	nextWorkID   int64 // Atomic counter for work IDs
+	// Pending work tracking.
+	//
+	// Completion invariant (#765): a pendingWork entry is "claimed" by
+	// deleting it from the map AND incrementing callbacksInFlight in the
+	// same pendingMutex critical section. Exactly one path can claim an
+	// entry — the feedbackCoordinator (error or success path) or Apply's
+	// ctx-cancel cleanup — so the callback is invoked exactly once. The
+	// claimer then invokes the callback without holding the lock (callbacks
+	// may be slow or re-enter the applier) and decrements callbacksInFlight
+	// when it returns. Wait() returns only when len(pendingWork) == 0 AND
+	// callbacksInFlight == 0, so it cannot return before every callback has
+	// finished running.
+	pendingWork       map[int64]*pendingWork
+	pendingMutex      sync.Mutex
+	callbacksInFlight int   // claimed work whose callback has not returned yet; guarded by pendingMutex
+	nextWorkID        int64 // Atomic counter for work IDs
 
 	// Worker management
 	writeWorkersCount    int32
@@ -180,6 +191,12 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	// forever, hanging Wait(). Chunklets already in the buffer may still be
 	// processed; their completions arrive at the coordinator after pendingWork
 	// has been deleted and are dropped (logged as "unknown work").
+	//
+	// The claim (delete + callbacksInFlight increment, see the completion
+	// invariant on pendingWork) is atomic under pendingMutex, so this cleanup
+	// and the feedbackCoordinator can never both invoke the callback: if the
+	// coordinator already claimed the work (e.g. an error completion raced
+	// this cancellation), `exists` is false and we return without invoking.
 	for _, chunkletData := range chunklets {
 		select {
 		case a.chunkletBuffer <- chunkletData:
@@ -188,10 +205,11 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 			pending, exists := a.pendingWork[workID]
 			if exists {
 				delete(a.pendingWork, workID)
+				a.callbacksInFlight++
 			}
 			a.pendingMutex.Unlock()
 			if exists {
-				pending.callback(0, ctx.Err())
+				a.invokeCallback(pending.callback, 0, ctx.Err())
 			}
 			return ctx.Err()
 		}
@@ -200,7 +218,27 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	return nil
 }
 
-// Wait blocks until all pending work is complete and all callbacks have been invoked
+// invokeCallback runs the callback for work the caller has already claimed
+// (deleted from pendingWork and counted in callbacksInFlight while holding
+// pendingMutex), then decrements callbacksInFlight. Must be called WITHOUT
+// pendingMutex held. See the completion invariant on pendingWork.
+func (a *SingleTargetApplier) invokeCallback(callback ApplyCallback, affectedRows int64, err error) {
+	// Decrement in a defer so callbacksInFlight is balanced on every exit path,
+	// including a panicking callback. Without this, a recovered panic upstream
+	// would leave callbacksInFlight stuck above zero and wedge Wait() forever.
+	// The panic still propagates after the deferred decrement runs.
+	defer func() {
+		a.pendingMutex.Lock()
+		a.callbacksInFlight--
+		a.pendingMutex.Unlock()
+	}()
+	callback(affectedRows, err)
+}
+
+// Wait blocks until all pending work is complete and all callbacks have been invoked.
+// Checking callbacksInFlight in addition to len(pendingWork) is what upholds
+// the "all callbacks have been invoked" half of the contract: claimed work has
+// already left the map, but its callback may still be running (#765).
 func (a *SingleTargetApplier) Wait(ctx context.Context) error {
 	// Wait until there's no pending work
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -209,14 +247,15 @@ func (a *SingleTargetApplier) Wait(ctx context.Context) error {
 	for {
 		a.pendingMutex.Lock()
 		pendingCount := len(a.pendingWork)
+		callbacksInFlight := a.callbacksInFlight
 		a.pendingMutex.Unlock()
 
-		if pendingCount == 0 {
+		if pendingCount == 0 && callbacksInFlight == 0 {
 			a.logger.Debug("Wait: all pending work complete")
 			return nil
 		}
 
-		a.logger.Debug("Wait: waiting for pending work", "pendingCount", pendingCount)
+		a.logger.Debug("Wait: waiting for pending work", "pendingCount", pendingCount, "callbacksInFlight", callbacksInFlight)
 
 		// Wait for next tick or context cancellation
 		select {
@@ -310,6 +349,14 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		return 0, nil
 	}
 
+	// Fast path on shutdown: if ctx is already cancelled, fail the chunklet
+	// without building the (potentially large) INSERT statement or burning
+	// retries against a dead context. writeWorker relies on chunklets failing
+	// quickly after cancellation so Stop() can drain the buffer promptly.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
 	// The intersected source and target column lists are parallel — row.values[i]
 	// is a value for source column sourceColumnNames[i], which corresponds to
 	// target column at the same ordinal in targetColumnList. With column renames
@@ -383,18 +430,23 @@ func (a *SingleTargetApplier) feedbackCoordinator() {
 			return
 		}
 
-		// If there was an error, invoke callback immediately.
-		// We invoke the callback *before* removing the work from pendingWork so
-		// that Wait() — which polls len(pendingWork) — cannot return until the
-		// callback has run. Otherwise Wait could see an empty map and return
-		// while a callback is still being invoked on another goroutine.
+		// If there was an error, claim the work and invoke the callback
+		// immediately. The claim (delete + callbacksInFlight increment, see
+		// the completion invariant on pendingWork) is atomic under
+		// pendingMutex so that:
+		//  (a) Apply's ctx-cancel cleanup cannot find the entry and invoke
+		//      the callback a second time. The original #765 fix released
+		//      the lock between invoking the callback and deleting the
+		//      entry, which opened exactly that double-invocation window.
+		//  (b) Wait() — which requires pendingWork empty AND
+		//      callbacksInFlight zero — cannot return until the callback
+		//      has finished running.
 		if completion.err != nil {
 			callback := pending.callback
-			a.pendingMutex.Unlock()
-			callback(0, completion.err)
-			a.pendingMutex.Lock()
 			delete(a.pendingWork, completion.workID)
+			a.callbacksInFlight++
 			a.pendingMutex.Unlock()
+			a.invokeCallback(callback, 0, completion.err)
 			return
 		}
 
@@ -412,14 +464,15 @@ func (a *SingleTargetApplier) feedbackCoordinator() {
 			callback := pending.callback
 			affectedRows := pending.totalAffectedRows
 
-			// Invoke callback *before* removing the work from pendingWork. See
-			// the comment in the error path above — Wait() must not return
-			// until callbacks have finished running.
-			a.pendingMutex.Unlock()
-			callback(affectedRows, nil)
-			a.pendingMutex.Lock()
+			// Claim the work (delete + callbacksInFlight increment) under
+			// the lock, then invoke the callback. See the completion
+			// invariant on pendingWork and the comment in the error path
+			// above — Wait() cannot return until the callback has finished,
+			// and no other path can invoke it again.
 			delete(a.pendingWork, completion.workID)
+			a.callbacksInFlight++
 			a.pendingMutex.Unlock()
+			a.invokeCallback(callback, affectedRows, nil)
 		} else {
 			a.pendingMutex.Unlock()
 		}
@@ -454,10 +507,10 @@ func singleLock(locks []*dbconn.TableLock) (*dbconn.TableLock, error) {
 	}
 }
 
-// DeleteKeys deletes rows by their key values synchronously.
-// The keys are hashed key strings (from utils.HashKey).
+// Each entry in keys is one primary-key tuple of the original (typed)
+// column values, in sourceTable.KeyColumns order.
 // If locks contains a lock, the delete is executed under the table lock.
-func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, locks []*dbconn.TableLock) (int64, error) {
+func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
@@ -469,17 +522,18 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	if targetTable == nil {
 		targetTable = sourceTable
 	}
-	// Convert hashed keys to row value constructor format
-	var pkValues []string
-	for _, key := range keys {
-		pkValues = append(pkValues, utils.UnhashKeyToString(key))
+	// Render the key tuples into the IN(...) element list via table.Datum,
+	// the same type-aware path UpsertRows uses (see deleteKeysInClause).
+	inClause, err := deleteKeysInClause(sourceTable, keys)
+	if err != nil {
+		return 0, err
 	}
 
 	// Build DELETE statement
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
 		targetTable.QuotedTableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
-		strings.Join(pkValues, ","),
+		inClause,
 	)
 
 	a.logger.Debug("executing delete", "keyCount", len(keys), "table", targetTable.TableName)

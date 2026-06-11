@@ -179,6 +179,17 @@ func (c *binlogClient) getBufferedPos() mysql.Position {
 	return c.bufferedPos
 }
 
+// shouldSkipReplayedEvent reports whether a replayed RowsEvent must not be
+// re-delivered. An event whose end position is at or below the live
+// bufferedPos is already represented (applied to the target, or held in the
+// map with its latest image), so re-buffering it could regress a key to a
+// stale image. No replay flag is needed: bufferedPos is monotonic and the
+// live stream always runs ahead of it, so only a replay compares <=. The
+// (file, pos) Compare is rotation-safe.
+func shouldSkipReplayedEvent(eventPos, bufferedPos mysql.Position) bool {
+	return eventPos.Compare(bufferedPos) <= 0
+}
+
 // AllChangesFlushed returns true if all buffered changes across all
 // subscriptions have been flushed to the target tables.
 // Satisfies Source interface.
@@ -380,13 +391,11 @@ func (c *binlogClient) Start(ctx context.Context) error {
 // in the file when serving a mid-position dump, so restarting mid-file
 // would leave the parser unable to decode rows.
 //
-// Re-reading events from position 4 is safe because the applier is
-// idempotent: it uses REPLACE INTO so re-applying any already-applied
-// event simply re-inserts the same row image, and re-applying an
-// out-of-order event transiently sets the destination to that row's
-// older state, which a subsequent binlog event (in this or a later
-// flush) will correct. The eventual-consistency property holds in both
-// map mode and queue mode — see UpsertRows in pkg/applier/single_target.go.
+// Re-reading from position 4 replays events we already processed;
+// readStream skips re-delivering any RowsEvent at or below the live
+// bufferedPos (see shouldSkipReplayedEvent), so the replay cannot regress a
+// key to a stale image. Events above bufferedPos are new and safe to
+// re-buffer because the applier is idempotent (REPLACE INTO).
 func (c *binlogClient) recreateStreamer() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -576,8 +585,15 @@ func (c *binlogClient) readStream(ctx context.Context) {
 			})
 			continue
 		case *replication.RowsEvent:
-			// Rows event, check if there are any active subscriptions
-			// for it, and pass it to the subscription.
+			// Skip events already buffered/applied: a post-recreateStreamer
+			// replay must not re-buffer them and regress a key to a stale
+			// image. See shouldSkipReplayedEvent.
+			eventPos := mysql.Position{Name: currentLogName, Pos: ev.Header.LogPos}
+			if shouldSkipReplayedEvent(eventPos, c.getBufferedPos()) {
+				c.logger.Debug("skipping replayed rows event at or below the buffered position",
+					"event_position", eventPos)
+				continue
+			}
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing binlog rows event", "error", err)
 				c.fatalError()

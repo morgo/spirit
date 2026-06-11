@@ -178,16 +178,41 @@ func newDatumFromMySQL(val string, mysqlTp string) (Datum, error) {
 	return d, nil
 }
 
+// ColumnType is a MySQL column type pre-resolved for datum construction.
+// Resolving it (parsing the type string) is the dominant cost of
+// NewDatumFromValue, so callers that convert many values of the same
+// column type should resolve once with NewColumnType and reuse it via
+// NewDatumFromValueWithType.
+type ColumnType struct {
+	tp    datumTp
+	isBit bool
+}
+
+// NewColumnType resolves a MySQL column type string (e.g. "int",
+// "binary(8)", "bit(8)") into a reusable ColumnType.
+func NewColumnType(mysqlType string) ColumnType {
+	return ColumnType{
+		tp:    mySQLTypeToDatumTp(mysqlType),
+		isBit: isBITType(mysqlType),
+	}
+}
+
 // NewDatumFromValue creates a Datum from a value and MySQL column type.
 // This is useful for converting values from the database driver (which may be []byte, int, string, etc.)
 // into a Datum that can be formatted as SQL.
 func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
+	return NewDatumFromValueWithType(value, NewColumnType(mysqlType))
+}
+
+// NewDatumFromValueWithType is NewDatumFromValue with the column type
+// already resolved (see ColumnType), for hot paths that convert many
+// values of the same column type.
+func NewDatumFromValueWithType(value any, ct ColumnType) (Datum, error) {
 	if value == nil {
-		tp := mySQLTypeToDatumTp(mysqlType)
-		return NewNilDatum(tp), nil
+		return NewNilDatum(ct.tp), nil
 	}
 
-	tp := mySQLTypeToDatumTp(mysqlType)
+	tp := ct.tp
 
 	// BIT(N) is classified as unsignedType, but its wire form depends on
 	// the source: the Go MySQL driver returns []byte (big-endian bit
@@ -195,7 +220,7 @@ func NewDatumFromValue(value any, mysqlType string) (Datum, error) {
 	// here so the generic unsignedType path below sees a numeric value
 	// and doesn't try to ParseUint on raw bit bytes (which would fail on
 	// any byte that isn't an ASCII decimal digit).
-	if b, ok := value.([]byte); ok && isBITType(mysqlType) {
+	if b, ok := value.([]byte); ok && ct.isBit {
 		var u uint64
 		for _, by := range b {
 			u = (u << 8) | uint64(by)

@@ -1,11 +1,13 @@
 package applier
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
@@ -215,6 +217,134 @@ func TestShardedApplierIntegration(t *testing.T) {
 	t.Logf("✓ Shard 1 (target2DB, odd user_ids): %v", shard1UserIDs)
 }
 
+// TestShardedApplierWaitWaitsForCallbacks verifies the Wait() contract:
+// "Wait blocks until all pending work is complete and all callbacks have been
+// invoked" (see the Applier interface). The buffered copier calls Wait() and
+// then reads state that is set *inside* the Apply callback — chunker.Feedback
+// on success, setInvalid(err) on failure — so if Wait() returns while the
+// final callback is still executing, a failed chunk can be misread as a clean
+// copy.
+//
+// The single-target applier was fixed for exactly this in issue #765; this
+// test covers the sharded applier's success and error completion paths. The
+// callback deliberately sleeps before recording completion: if Wait() returns
+// while the callback is still sleeping, the flag is unset and the test fails.
+func TestShardedApplierWaitWaitsForCallbacks(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_waitcb_source")
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_waitcb_target1")
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_waitcb_target2")
+	testutils.RunSQL(t, "CREATE DATABASE sharded_waitcb_source")
+	testutils.RunSQL(t, "CREATE DATABASE sharded_waitcb_target1")
+	testutils.RunSQL(t, "CREATE DATABASE sharded_waitcb_target2")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	source := base.Clone()
+	source.DBName = "sharded_waitcb_source"
+	sourceDB, err := sql.Open("mysql", source.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(sourceDB)
+
+	target1 := base.Clone()
+	target1.DBName = "sharded_waitcb_target1"
+	target1DB, err := sql.Open("mysql", target1.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(target1DB)
+
+	target2 := base.Clone()
+	target2.DBName = "sharded_waitcb_target2"
+	target2DB, err := sql.Open("mysql", target2.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(target2DB)
+
+	createTableSQL := `
+		CREATE TABLE users (
+			id INT PRIMARY KEY,
+			user_id INT NOT NULL,
+			name VARCHAR(100)
+		)
+	`
+	ctx := t.Context()
+	_, err = sourceDB.ExecContext(ctx, createTableSQL)
+	require.NoError(t, err)
+	for _, db := range []*sql.DB{target1DB, target2DB} {
+		_, err = db.ExecContext(ctx, createTableSQL)
+		require.NoError(t, err)
+	}
+
+	sourceTable := table.NewTableInfo(sourceDB, source.DBName, "users")
+	require.NoError(t, sourceTable.SetInfo(ctx))
+	sourceTable.ShardingColumn = "user_id"
+	sourceTable.HashFunc = testutils.EvenOddHasher
+
+	target1Table := table.NewTableInfo(target1DB, target1.DBName, "users")
+	require.NoError(t, target1Table.SetInfo(ctx))
+
+	chunk := &table.Chunk{
+		Table:         sourceTable,
+		NewTable:      target1Table,
+		ColumnMapping: table.NewColumnMapping(sourceTable, target1Table, nil),
+	}
+	// user_id 102 is even -> shard 0 (target1), user_id 101 is odd -> shard 1 (target2)
+	testRows := [][]any{
+		{int64(1), int64(101), "Alice"},
+		{int64(2), int64(102), "Bob"},
+	}
+
+	// applyAndWait runs one Apply through a fresh applier with a slow callback
+	// and reports whether the callback had finished by the time Wait() returned,
+	// along with the error the callback observed.
+	applyAndWait := func(t *testing.T) (callbackFinished bool, callbackErr error) {
+		targets := []Target{
+			{DB: target1DB, KeyRange: "-80"},
+			{DB: target2DB, KeyRange: "80-"},
+		}
+		applier, err := NewShardedApplier(targets, NewApplierDefaultConfig())
+		require.NoError(t, err)
+		require.NoError(t, applier.Start(t.Context()))
+		defer func() {
+			require.NoError(t, applier.Stop())
+		}()
+
+		var finished atomic.Bool
+		var errMu sync.Mutex
+		var cbErr error
+		require.NoError(t, applier.Apply(t.Context(), chunk, testRows, func(_ int64, err error) {
+			errMu.Lock()
+			cbErr = err
+			errMu.Unlock()
+			// Simulate a consumer callback that takes a moment to run (e.g.
+			// chunker.Feedback, or the copier recording a failed chunk via
+			// setInvalid). Wait() must not return until this has completed.
+			time.Sleep(100 * time.Millisecond)
+			finished.Store(true)
+		}))
+		require.NoError(t, applier.Wait(t.Context()))
+		errMu.Lock()
+		defer errMu.Unlock()
+		return finished.Load(), cbErr
+	}
+
+	t.Run("success path", func(t *testing.T) {
+		finished, cbErr := applyAndWait(t)
+		require.True(t, finished, "Wait() returned before the success callback finished executing")
+		require.NoError(t, cbErr)
+	})
+
+	t.Run("error path", func(t *testing.T) {
+		// Drop the table on shard 1 (odd user_ids) so its chunklet fails.
+		// ERROR 1146 (no such table) is fatal — not retried — so the error
+		// completion arrives quickly while the shard 0 chunklet succeeds.
+		_, err := target2DB.ExecContext(t.Context(), "DROP TABLE users")
+		require.NoError(t, err)
+		finished, cbErr := applyAndWait(t)
+		require.True(t, finished, "Wait() returned before the error callback finished executing; "+
+			"a caller doing Wait() then checking error state would observe a clean copy despite a failed chunk")
+		require.Error(t, cbErr, "callback should have received the failed chunklet error")
+	})
+}
+
 // TestShardedApplierDeleteKeys tests the DeleteKeys method broadcasts deletes to all shards
 func TestShardedApplierDeleteKeys(t *testing.T) {
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS sharded_delete_source")
@@ -298,9 +428,9 @@ func TestShardedApplierDeleteKeys(t *testing.T) {
 
 	// Delete keys by PRIMARY KEY (id=2 and id=4)
 	// Note: DeleteKeys broadcasts to ALL shards since we track by PK, not vindex
-	keysToDelete := []string{
-		utils.HashKey([]any{int64(2)}),
-		utils.HashKey([]any{int64(4)}),
+	keysToDelete := [][]any{
+		{int64(2)},
+		{int64(4)},
 	}
 
 	affectedRows, err := applier.DeleteKeys(t.Context(), sourceTable, target1Table, keysToDelete, nil)
@@ -379,7 +509,7 @@ func TestShardedApplierDeleteKeysEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete with empty keys
-	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, []string{}, nil)
+	affectedRows, err := applier.DeleteKeys(t.Context(), targetTable, targetTable, [][]any{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), affectedRows)
 }
@@ -919,9 +1049,9 @@ func TestShardedApplierDeleteKeysUnderLock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete id=2 (lives on shard 0) and id=3 (lives on shard 1).
-	keysToDelete := []string{
-		utils.HashKey([]any{int64(2)}),
-		utils.HashKey([]any{int64(3)}),
+	keysToDelete := [][]any{
+		{int64(2)},
+		{int64(3)},
 	}
 	_, err = applier.DeleteKeys(ctx, sourceTable, target1Table, keysToDelete, []*dbconn.TableLock{lock1, lock2})
 	require.NoError(t, err)
@@ -978,7 +1108,7 @@ func TestShardedApplierUnderLockMissingShardLock(t *testing.T) {
 	_, err = applier.UpsertRows(ctx, table.NewColumnMapping(sourceTable, target1Table, nil), upsertRows, []*dbconn.TableLock{lock1})
 	require.ErrorContains(t, err, "no table lock supplied for shard 1")
 
-	keysToDelete := []string{utils.HashKey([]any{int64(1)})}
+	keysToDelete := [][]any{{int64(1)}}
 	_, err = applier.DeleteKeys(ctx, sourceTable, target1Table, keysToDelete, []*dbconn.TableLock{lock1})
 	require.ErrorContains(t, err, "no table lock supplied for shard 1")
 
@@ -986,4 +1116,44 @@ func TestShardedApplierUnderLockMissingShardLock(t *testing.T) {
 	var count int
 	require.NoError(t, target2DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&count))
 	require.Equal(t, 1, count, "shard 1 should be untouched")
+}
+
+// TestShardedApplierCallbackPanicDecrements verifies that a panicking callback
+// still decrements callbacksInFlight, so a recovered panic upstream cannot wedge
+// Wait() forever. invokeCallback must balance the counter on every exit path,
+// not just normal return.
+func TestShardedApplierCallbackPanicDecrements(t *testing.T) {
+	a := &ShardedApplier{
+		logger:      slog.New(slog.DiscardHandler),
+		pendingWork: make(map[int64]*pendingWork),
+	}
+
+	// Claim a unit of work the way the real claim paths do: increment
+	// callbacksInFlight under pendingMutex before invoking the callback.
+	a.pendingMutex.Lock()
+	a.callbacksInFlight++
+	a.pendingMutex.Unlock()
+
+	panicking := func(affectedRows int64, err error) {
+		panic("callback boom")
+	}
+
+	// invokeCallback must propagate the panic; recover it here the way an
+	// upstream goroutine would.
+	func() {
+		defer func() {
+			require.Equal(t, "callback boom", recover())
+		}()
+		a.invokeCallback(panicking, 0, nil)
+	}()
+
+	// Despite the panic, the deferred decrement must have run, so Wait()
+	// observes a balanced counter and returns promptly.
+	a.pendingMutex.Lock()
+	require.Equal(t, 0, a.callbacksInFlight)
+	a.pendingMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, a.Wait(ctx))
 }

@@ -345,7 +345,7 @@ func (d *delayedCallbackApplier) Apply(ctx context.Context, chunk *table.Chunk, 
 	return d.realApplier.Apply(ctx, chunk, rows, wrappedCallback)
 }
 
-func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, locks []*dbconn.TableLock) (int64, error) {
+func (d *delayedCallbackApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
 	return d.realApplier.DeleteKeys(ctx, sourceTable, targetTable, keys, locks)
 }
 
