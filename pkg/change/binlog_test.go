@@ -777,16 +777,9 @@ func TestSetBufferedPosIsMonotonic(t *testing.T) {
 	require.Equal(t, nextFile, client.getBufferedPos())
 }
 
-// TestShouldSkipReplayedEvent unit-tests the pure skip decision used by
-// readStream during a post-recreateStreamer replay. eventPos is always
-// the event's END position (ev.Header.LogPos); the boundary is the
-// *live* bufferedPos — the high-water mark of everything already
-// processed. An event at or below bufferedPos is already faithfully
-// represented (applied to the target, or held in the buffered map with
-// its latest image), so <= means "must not be re-buffered". Filtering
-// against the live bufferedPos rather than a snapshot of flushedPos is
-// what keeps the filter safe when a periodic flush advances flushedPos
-// mid-replay — see shouldSkipReplayedEvent.
+// TestShouldSkipReplayedEvent unit-tests the skip decision: an event at or
+// below the live bufferedPos is already buffered/applied and must not be
+// re-delivered, with full (file, pos) ordering across rotations.
 func TestShouldSkipReplayedEvent(t *testing.T) {
 	buffered := mysql.Position{Name: "binlog.000010", Pos: 200}
 	tests := []struct {
@@ -889,40 +882,18 @@ func TestShouldSkipReplayedEventWidensWithBufferedPos(t *testing.T) {
 		"once the boundary advances, later live events are delivered")
 }
 
-// TestRecreateStreamerSkipsFlushedReplay locks in the fix for the
-// stale-image replay bug. recreateStreamer restarts the binlog dump at
-// position 4 of the current file; before the fix, readStream
-// re-delivered every replayed RowsEvent to the subscriptions. A
-// replayed event at or below the buffered high-water mark could regress
-// a key in the buffered map to an older row image, a periodic flush
-// running mid-replay would write that stale image to the target below
-// the persisted checkpoint, and a crash before the replay re-read the
-// newer event would make the regression permanent — resume streams only
-// events after the checkpoint, so the newer event is never re-sent.
-//
-// The filter compares each replayed event against the *live* bufferedPos
-// (not a snapshot of flushedPos), so every already-buffered event is
-// protected — both the flushed prefix (<= flushedPos) and the
-// buffered-but-unflushed window (flushedPos, bufferedPos]. The latter is
-// the gap the Copilot review on #919 flagged: a periodic flush can
-// advance flushedPos to bufferedPos mid-replay, and a snapshot of the
-// old flushedPos would leave that window unprotected.
-//
-// The test:
-//  1. Streams an INSERT + UPDATE for the same PK and flushes them, so
-//     the target holds the newest image and flushedPos is past both
-//     events.
-//  2. Writes one more row AFTER the flush and waits for it to buffer, so
-//     it sits in the (flushedPos, bufferedPos] window the snapshot fix
-//     would have missed.
-//  3. Kills the syncer out from under readStream, forcing the
-//     consecutive-error path to call recreateStreamer, which replays
-//     the current binlog file from position 4.
-//  4. Asserts the already-buffered events were NOT re-buffered (neither
-//     the flushed key nor the unflushed one regressed) and the buffered
-//     map still holds the unflushed event's newest image.
-//  5. Kills the syncer again to assert a second recreation also replays
-//     without re-buffering anything.
+// TestRecreateStreamerSkipsFlushedReplay locks in the fix end-to-end by
+// driving the real consecutive-error path that calls recreateStreamer:
+//  1. Stream an INSERT + UPDATE for one PK and flush, so the target holds
+//     the newest image and flushedPos is past both events.
+//  2. Write one more row after the flush and wait for it to buffer, so it
+//     sits in the (flushedPos, bufferedPos] window — buffered but not yet
+//     flushed (the window a flushedPos snapshot would miss).
+//  3. Kill the syncer so readStream's error path recreates the streamer
+//     and replays the current file from position 4.
+//  4. Assert nothing already-buffered was re-buffered (neither key
+//     regressed) and the unflushed key keeps its newest image.
+//  5. Kill the syncer again to assert a second replay re-buffers nothing.
 func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
