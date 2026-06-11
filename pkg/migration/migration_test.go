@@ -98,6 +98,30 @@ func TestE2ENullAlter1Row(t *testing.T) {
 	require.NoError(t, m.Run())
 }
 
+// TestE2EAutoscalingEnabled runs a full migration with the experimental
+// write-thread autoscaler turned on. The local (non-Aurora) target has no
+// GradualThrottler, so this exercises the downgrade path end-to-end: the
+// autoscaler declines to engage (a warning is logged), write threads stay at
+// the starting value, the connection pool is still sized for the ceiling, and
+// the migration completes correctly (goleak in TestMain catches leaks). The
+// engaged path is covered by the autoscaler unit tests.
+func TestE2EAutoscalingEnabled(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "t1autoscale", `CREATE TABLE t1autoscale (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO t1autoscale (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
+	m := NewTestMigration(t, WithTable("t1autoscale"), WithAlter("ENGINE=InnoDB"),
+		WithWriteThreads(2), WithAutoscaling())
+	require.NoError(t, m.Run())
+
+	var count int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1autoscale").Scan(&count))
+	require.Equal(t, 5, count)
+}
+
 func TestE2ENullAlterWithReplicas(t *testing.T) {
 	t.Parallel()
 	replicaDSN := os.Getenv("REPLICA_DSN")

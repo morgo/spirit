@@ -110,6 +110,18 @@ func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int, logger 
 	return auroraVCPUs(ctx, db)
 }
 
+// ResolveMaxWriteThreads resolves the upper bound the write-thread autoscaler
+// may scale to. When autoscaling is disabled the cap equals start, so the
+// thread count cannot move. When enabled the cap is fixed at 2 × start —
+// deliberately not configurable for now, to keep the experimental surface
+// small. See issue #831.
+func ResolveMaxWriteThreads(start int, autoscaleEnabled bool) int {
+	if !autoscaleEnabled {
+		return start
+	}
+	return 2 * start
+}
+
 // activeThreadsPollInterval mirrors commitLatencyPollInterval — we want fast
 // enough to catch sustained CPU pressure without hammering the perf-schema
 // join. Var (not const) so tests can shorten it.
@@ -149,7 +161,7 @@ type ActiveThreads struct {
 	lastActiveThreads atomic.Int64
 }
 
-var _ Throttler = (*ActiveThreads)(nil)
+var _ GradualThrottler = (*ActiveThreads)(nil)
 
 // NewActiveThreadsThrottler returns a Throttler that polls performance_schema
 // to count on-CPU query threads and throttles when that count exceeds the
@@ -203,6 +215,16 @@ func (a *ActiveThreads) Close() error {
 
 func (a *ActiveThreads) IsThrottled() bool {
 	return a.isThrottled.Load()
+}
+
+// Utilization reports the most recent active-CPU-thread count as a fraction of
+// the instance vCPU count. 1.0 means active threads equal vCPUs (the point at
+// which one more thread trips IsThrottled). Returns 0 if vCPUs is not yet known.
+func (a *ActiveThreads) Utilization() float64 {
+	if a.vCPUs <= 0 {
+		return 0
+	}
+	return float64(a.lastActiveThreads.Load()) / float64(a.vCPUs)
 }
 
 // BlockWait blocks until active CPU threads fall to or below vCPUs, or up to

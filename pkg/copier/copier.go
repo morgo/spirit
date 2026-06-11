@@ -57,6 +57,24 @@ type CopierConfig struct {
 	// Applier. NewCopierDefaultConfig leaves this false (buffered), matching the
 	// production default.
 	Unbuffered bool
+	// Autoscale configures experimental dynamic write-thread scaling. When
+	// disabled (the default) the copier behaves exactly as before. See
+	// AutoscaleConfig and issue #831.
+	Autoscale AutoscaleConfig
+}
+
+// AutoscaleConfig controls the experimental write-thread autoscaler driven by
+// throttler utilization. It only applies to the buffered copier whose Applier
+// implements the dynamic-scaling capability (SingleTargetApplier).
+type AutoscaleConfig struct {
+	// Enabled gates the whole feature (the --enable-experimental-autoscaling
+	// flag). Off by default.
+	Enabled bool
+	// StartThreads is the resolved write-thread count the applier was started
+	// at; the controller scales from here.
+	StartThreads int
+	// MaxThreads is the cap the controller may scale up to.
+	MaxThreads int
 }
 
 // NewCopierDefaultConfig returns a default config for the copier. It defaults
@@ -110,5 +128,6 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 		dbConfig:         config.DBConfig,
 		copierEtaHistory: newcopierEtaHistory(),
 		applier:          config.Applier,
+		autoscale:        config.Autoscale,
 	}, nil
 }

@@ -26,25 +26,31 @@ var (
 )
 
 type Migration struct {
-	Host                 string        `name:"host" help:"Hostname" optional:""`
-	Username             string        `name:"username" help:"User" optional:""`
-	Password             *string       `name:"password" help:"Password" optional:""`
-	Database             string        `name:"database" help:"Database" optional:""`
-	ConfFile             string        `name:"conf" help:"MySQL conf file" optional:"" type:"existingfile"`
-	Table                string        `name:"table" help:"Table" optional:""`
-	Alter                string        `name:"alter" help:"The alter statement to run on the table" optional:""`
-	Threads              int           `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
-	WriteThreads         int           `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" optional:"" default:"4"`
-	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
-	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
-	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
-	LockWaitTimeout      time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
-	SkipDropAfterCutover bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
-	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
-	SkipForceKill        bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
-	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
-	Lint                 bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
-	LintOnly             bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
+	Host         string  `name:"host" help:"Hostname" optional:""`
+	Username     string  `name:"username" help:"User" optional:""`
+	Password     *string `name:"password" help:"Password" optional:""`
+	Database     string  `name:"database" help:"Database" optional:""`
+	ConfFile     string  `name:"conf" help:"MySQL conf file" optional:"" type:"existingfile"`
+	Table        string  `name:"table" help:"Table" optional:""`
+	Alter        string  `name:"alter" help:"The alter statement to run on the table" optional:""`
+	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
+	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" optional:"" default:"4"`
+
+	// EnableExperimentalAutoscaling turns on dynamic write-thread scaling driven
+	// by throttler feedback; WriteThreads becomes the starting value and the
+	// cap is fixed at 2x that (deliberately not configurable for now, to keep
+	// the experimental surface small). See issue #831.
+	EnableExperimentalAutoscaling bool          `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
+	TargetChunkTime               time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
+	ReplicaDSN                    string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
+	ReplicaMaxLag                 time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
+	LockWaitTimeout               time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
+	SkipDropAfterCutover          bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
+	DeferCutOver                  bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
+	SkipForceKill                 bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
+	Statement                     string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
+	Lint                          bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
+	LintOnly                      bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
 
 	// TLS Configuration
 	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:""`
