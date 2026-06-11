@@ -298,3 +298,109 @@ func TestDistributedChecksumNtoM(t *testing.T) {
 	// Run the checksum — should pass since the merged source data matches merged target data.
 	require.NoError(t, checker.Run(t.Context()))
 }
+
+// TestDistributedChecksumPairCancellation exercises the BIT_XOR
+// pair-cancellation defense-in-depth gap. The SAME row exists on BOTH source
+// shards (a resharding bug violating shard disjointness) and is MISSING from
+// the target. Because BIT_XOR is pair-cancelling, the duplicated row's CRC
+// cancels to zero on the source side, so the aggregated source checksum
+// matches a target that has ZERO copies of that row. The checksum alone is
+// blind to this; only the summed row counts (src=2, target=0) catch it.
+//
+// With the row-count comparison in place this MUST fail. (On unfixed code —
+// checksum comparison only — it PASSES, which is the bug.)
+//
+// Table names are prefixed w3f per the unique-naming requirement.
+func TestDistributedChecksumPairCancellation(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	// Two source shards and one target. Each source shard holds the SAME
+	// single row (id=1) — the disjointness violation. The target is empty.
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3f_paircancel_src_0`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3f_paircancel_src_1`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS w3f_paircancel_tgt_0`)
+	testutils.RunSQL(t, `CREATE DATABASE w3f_paircancel_src_0`)
+	testutils.RunSQL(t, `CREATE DATABASE w3f_paircancel_src_1`)
+	testutils.RunSQL(t, `CREATE DATABASE w3f_paircancel_tgt_0`)
+	testutils.RunSQL(t, `CREATE TABLE w3f_paircancel_src_0.w3f_t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+	testutils.RunSQL(t, `CREATE TABLE w3f_paircancel_src_1.w3f_t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+	testutils.RunSQL(t, `CREATE TABLE w3f_paircancel_tgt_0.w3f_t1 (id INT PRIMARY KEY, name VARCHAR(255) NOT NULL)`)
+
+	// The identical duplicated row on both source shards. Its CRC cancels in
+	// the source-side BIT_XOR.
+	testutils.RunSQL(t, `INSERT INTO w3f_paircancel_src_0.w3f_t1 VALUES (1, 'dup')`)
+	testutils.RunSQL(t, `INSERT INTO w3f_paircancel_src_1.w3f_t1 VALUES (1, 'dup')`)
+	// Target intentionally left empty (zero copies of id=1).
+
+	// DB connections.
+	src0Cfg := cfg.Clone()
+	src0Cfg.DBName = "w3f_paircancel_src_0"
+	src0DB, err := dbconn.New(src0Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src0DB)
+
+	src1Cfg := cfg.Clone()
+	src1Cfg.DBName = "w3f_paircancel_src_1"
+	src1DB, err := dbconn.New(src1Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src1DB)
+
+	tgt0Cfg := cfg.Clone()
+	tgt0Cfg.DBName = "w3f_paircancel_tgt_0"
+	tgt0DB, err := dbconn.New(tgt0Cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt0DB)
+
+	// TableInfo per source. Sharding column is required by the applier even
+	// though we only ever read here (FixDifferences=false).
+	src0Table := table.NewTableInfo(src0DB, "w3f_paircancel_src_0", "w3f_t1")
+	require.NoError(t, src0Table.SetInfo(t.Context()))
+	src0Table.ShardingColumn = "id"
+	src0Table.HashFunc = testutils.EvenOddHasher
+
+	src1Table := table.NewTableInfo(src1DB, "w3f_paircancel_src_1", "w3f_t1")
+	require.NoError(t, src1Table.SetInfo(t.Context()))
+	src1Table.ShardingColumn = "id"
+	src1Table.HashFunc = testutils.EvenOddHasher
+
+	// Single target covering the full key range.
+	targets := []applier.Target{
+		{DB: tgt0DB, KeyRange: "-", Config: tgt0Cfg},
+	}
+	shardedApplier, err := applier.NewShardedApplier(targets, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	logger := slog.Default()
+	feed0 := change.NewBinlogClient(src0DB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, change.NewClientDefaultConfig())
+	defer feed0.Close()
+	chunker0, err := table.NewChunker(src0Table, table.ChunkerConfig{NewTable: src0Table})
+	require.NoError(t, err)
+	require.NoError(t, feed0.AddSubscription(src0Table, src0Table, chunker0))
+	require.NoError(t, feed0.Start(t.Context()))
+
+	feed1 := change.NewBinlogClient(src1DB, cfg.Addr, cfg.User, cfg.Passwd, shardedApplier, change.NewClientDefaultConfig())
+	defer feed1.Close()
+	chunker1, err := table.NewChunker(src1Table, table.ChunkerConfig{Logger: logger})
+	require.NoError(t, err)
+	require.NoError(t, feed1.AddSubscription(src1Table, src1Table, chunker1))
+	require.NoError(t, feed1.Start(t.Context()))
+	multiChunker := table.NewMultiChunker(chunker0, chunker1)
+	require.NoError(t, multiChunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.Applier = shardedApplier
+	config.FixDifferences = false // we want the mismatch to surface as an error
+
+	checker, err := NewChecker([]*sql.DB{src0DB, src1DB}, multiChunker, []change.Source{feed0, feed1}, config)
+	require.NoError(t, err)
+
+	// The aggregated source CRC cancels to match the empty target (both 0),
+	// but src count=2 and target count=0. The row-count comparison must
+	// catch this and fail. (Pre-fix, the checksum-only comparison passes —
+	// that is the defense-in-depth gap.) With FixDifferences=false the
+	// mismatch surfaces directly as the "checksum mismatch" error.
+	err = checker.Run(t.Context())
+	require.Error(t, err, "row-count mismatch from pair-cancellation must be detected")
+	require.ErrorContains(t, err, "checksum mismatch")
+}

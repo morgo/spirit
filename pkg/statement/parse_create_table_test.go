@@ -1,10 +1,14 @@
 package statement
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/block/spirit/pkg/testutils"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -422,15 +426,17 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 					{
 						Name: "p_north",
 						Values: &PartitionValues{
-							Type:   "IN",
-							Values: []any{"north", "northeast"},
+							Type: "IN",
+							// String-literal partition values are stored as
+							// partitionStringLiteral so emission re-quotes them.
+							Values: []any{partitionStringLiteral("north"), partitionStringLiteral("northeast")},
 						},
 					},
 					{
 						Name: "p_south",
 						Values: &PartitionValues{
 							Type:   "IN",
-							Values: []any{"south"},
+							Values: []any{partitionStringLiteral("south")},
 						},
 					},
 				},
@@ -1498,6 +1504,20 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) USING BTREE COMMENT 'Name index' INVISIBLE",
 		},
 		{
+			name: "Missing FULLTEXT index with parser",
+			sourceCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				bio TEXT,
+				FULLTEXT INDEX ft_bio (bio) WITH PARSER ngram
+			)`,
+			targetCreateTable: `CREATE TABLE users (
+				id INT PRIMARY KEY,
+				bio TEXT
+			)`,
+			tableName:     "users",
+			expectedAlter: "ALTER TABLE `users` ADD FULLTEXT INDEX `ft_bio` (`bio`) WITH PARSER ngram",
+		},
+		{
 			name: "Composite index missing",
 			sourceCreateTable: `CREATE TABLE users (
 				id INT PRIMARY KEY,
@@ -1741,6 +1761,145 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetMissingSecondaryIndexes_FunctionalIndexes covers functional
+// (expression) index parts, where the TiDB AST sets Expr instead of Column
+// on the IndexPartSpecification. Previously this caused a nil-pointer panic.
+func TestGetMissingSecondaryIndexes_FunctionalIndexes(t *testing.T) {
+	testCases := []struct {
+		name              string
+		sourceCreateTable string
+		targetCreateTable string
+		tableName         string
+		expectedAlter     string
+		expectEmpty       bool
+	}{
+		{
+			name: "Functional index missing on target",
+			sourceCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255),
+				KEY fidx ((lower(b)))
+			)`,
+			targetCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255)
+			)`,
+			tableName:     "t1",
+			expectedAlter: "ALTER TABLE `t1` ADD INDEX `fidx` ((LOWER(`b`)))",
+		},
+		{
+			name: "Mixed index with column, expression and prefix parts",
+			sourceCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255),
+				c VARCHAR(255),
+				KEY k (a, (lower(b)), c(10))
+			)`,
+			targetCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255),
+				c VARCHAR(255)
+			)`,
+			tableName:     "t1",
+			expectedAlter: "ALTER TABLE `t1` ADD INDEX `k` (`a`, (LOWER(`b`)), `c`(10))",
+		},
+		{
+			name: "Functional index present on both sides",
+			sourceCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255),
+				KEY fidx ((lower(b)))
+			)`,
+			targetCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255),
+				KEY fidx ((lower(b)))
+			)`,
+			tableName:   "t1",
+			expectEmpty: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := GetMissingSecondaryIndexes(tc.sourceCreateTable, tc.targetCreateTable, tc.tableName)
+			require.NoError(t, err)
+
+			if tc.expectEmpty {
+				require.Empty(t, result, "Expected empty result but got: %s", result)
+			} else {
+				require.Equal(t, tc.expectedAlter, result)
+			}
+		})
+	}
+}
+
+// TestGetMissingSecondaryIndexes_FunctionalIndexesLiveMySQL verifies that the
+// generated ADD INDEX DDL for functional indexes is valid by executing it
+// against a real MySQL server (functional indexes require MySQL 8.0.13+).
+// This mirrors the move runner's restoreSecondaryIndexes path: SHOW CREATE
+// TABLE output is fed into GetMissingSecondaryIndexes and the resulting ALTER
+// is executed on the target.
+func TestGetMissingSecondaryIndexes_FunctionalIndexesLiveMySQL(t *testing.T) {
+	admin, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := admin.ExecContext(context.Background(), "DROP DATABASE IF EXISTS test_w2d")
+		require.NoError(t, err)
+		require.NoError(t, admin.Close())
+	})
+
+	_, err = admin.ExecContext(t.Context(), "DROP DATABASE IF EXISTS test_w2d")
+	require.NoError(t, err)
+	_, err = admin.ExecContext(t.Context(), "CREATE DATABASE test_w2d")
+	require.NoError(t, err)
+
+	db, err := sql.Open("mysql", testutils.DSNForDatabase("test_w2d"))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	// Source table with a functional index and a mixed
+	// (column + expression + prefix) index.
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE src (
+		a INT NOT NULL PRIMARY KEY,
+		b VARCHAR(255),
+		c VARCHAR(255),
+		KEY fidx ((lower(b))),
+		KEY k (a, (lower(b)), c(10))
+	)`)
+	require.NoError(t, err)
+
+	// Target table with the same columns but no secondary indexes,
+	// as created during a move before indexes are restored.
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE dst (
+		a INT NOT NULL PRIMARY KEY,
+		b VARCHAR(255),
+		c VARCHAR(255)
+	)`)
+	require.NoError(t, err)
+
+	showCreate := func(table string) string {
+		var name, createStmt string
+		require.NoError(t, db.QueryRowContext(t.Context(), "SHOW CREATE TABLE `"+table+"`").Scan(&name, &createStmt))
+		return createStmt
+	}
+
+	alterStmt, err := GetMissingSecondaryIndexes(showCreate("src"), showCreate("dst"), "dst")
+	require.NoError(t, err)
+	require.NotEmpty(t, alterStmt)
+
+	// Execute the generated DDL against MySQL to prove it is valid.
+	_, err = db.ExecContext(t.Context(), alterStmt)
+	require.NoError(t, err)
+
+	// After applying, no indexes should be reported missing anymore.
+	alterStmt, err = GetMissingSecondaryIndexes(showCreate("src"), showCreate("dst"), "dst")
+	require.NoError(t, err)
+	require.Empty(t, alterStmt, "expected no missing indexes after applying DDL, got: %s", alterStmt)
 }
 
 func TestGetMissingSecondaryIndexes_ErrorCases(t *testing.T) {

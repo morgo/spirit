@@ -729,6 +729,175 @@ func TestAutoIncCapacity_EmptySlices(t *testing.T) {
 	require.Empty(t, violations)
 }
 
+// Test registration
+
+func TestAutoIncCapacity_Registered(t *testing.T) {
+	l, err := Get("auto_inc_capacity")
+	require.NoError(t, err)
+	require.Equal(t, "auto_inc_capacity", l.Name())
+	require.Contains(t, List(), "auto_inc_capacity")
+}
+
+func TestAutoIncCapacity_RunLinters_ReadmeExample(t *testing.T) {
+	// The README documents this exact example as a violation, and documents
+	// the linter as enabled by default — so RunLinters with an empty config
+	// must report it.
+	stmts, err := statement.New(`CREATE TABLE users (
+		id INT UNSIGNED PRIMARY KEY AUTO_INCREMENT
+	) AUTO_INCREMENT=4000000000`)
+	require.NoError(t, err)
+
+	violations, err := RunLinters(nil, stmts, Config{})
+	require.NoError(t, err)
+
+	filtered := FilterByLinter(violations, "auto_inc_capacity")
+	require.Len(t, filtered, 1)
+	require.Equal(t, SeverityError, filtered[0].Severity)
+	require.Contains(t, filtered[0].Message, "AUTO_INCREMENT")
+
+	// Explicitly enabling it must work too.
+	violations, err = RunLinters(nil, stmts, Config{
+		Enabled: map[string]bool{"auto_inc_capacity": true},
+	})
+	require.NoError(t, err)
+	require.Len(t, FilterByLinter(violations, "auto_inc_capacity"), 1)
+}
+
+// Test overflow-safety of the threshold calculation. maxValue*threshold
+// overflows uint64 for BIGINT (and BIGINT UNSIGNED) capacities, which used to
+// shrink the effective threshold to ~1% and falsely flag near-empty tables.
+
+func TestAutoIncCapacity_BigIntUnsigned_LowValue_NotFlagged(t *testing.T) {
+	// 2*10^17 is ~1.08% of the BIGINT UNSIGNED capacity (2^64-1). The naive
+	// maxValue*85 wraps mod 2^64 and produces an effective threshold of ~1%
+	// of capacity, which falsely flags this value.
+	sql := `CREATE TABLE users (
+		id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255)
+	) AUTO_INCREMENT=200000000000000000`
+
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &AutoIncCapacityLinter{threshold: 85}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	require.Empty(t, violations)
+}
+
+func TestAutoIncCapacity_BigIntUnsigned_HighValue_Flagged(t *testing.T) {
+	// 1.7*10^19 is ~92% of the BIGINT UNSIGNED capacity (2^64-1).
+	sql := `CREATE TABLE users (
+		id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255)
+	) AUTO_INCREMENT=17000000000000000000`
+
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &AutoIncCapacityLinter{threshold: 85}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	require.Len(t, violations, 1)
+	require.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestAutoIncCapacity_BigIntUnsigned_ExactBoundary(t *testing.T) {
+	// floor((2^64-1) * 85 / 100) = 15679732462653118872, so that value
+	// passes and one more fails. Locks in that the 128-bit math is exact.
+	linter := &AutoIncCapacityLinter{threshold: 85}
+
+	ctPass, err := statement.ParseCreateTable(`CREATE TABLE users (
+		id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY
+	) AUTO_INCREMENT=15679732462653118872`)
+	require.NoError(t, err)
+	require.Empty(t, linter.Lint([]*statement.CreateTable{ctPass}, nil))
+
+	ctFail, err := statement.ParseCreateTable(`CREATE TABLE users (
+		id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY
+	) AUTO_INCREMENT=15679732462653118873`)
+	require.NoError(t, err)
+	require.Len(t, linter.Lint([]*statement.CreateTable{ctFail}, nil), 1)
+}
+
+func TestAutoIncCapacity_SignedBigInt_LowValue_NotFlagged(t *testing.T) {
+	// 10^17 is ~1.08% of the signed BIGINT capacity (2^63-1). The naive
+	// maxValue*85 also wraps for signed BIGINT (effective threshold ~1%).
+	sql := `CREATE TABLE users (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255)
+	) AUTO_INCREMENT=100000000000000000`
+
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &AutoIncCapacityLinter{threshold: 85}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	require.Empty(t, violations)
+}
+
+func TestAutoIncCapacity_SignedBigInt_HighValue_Flagged(t *testing.T) {
+	// 8*10^18 is ~86.7% of the signed BIGINT capacity (2^63-1).
+	sql := `CREATE TABLE users (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255)
+	) AUTO_INCREMENT=8000000000000000000`
+
+	ct, err := statement.ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	linter := &AutoIncCapacityLinter{threshold: 85}
+	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+	require.Len(t, violations, 1)
+	require.Contains(t, *violations[0].Suggestion, "UNSIGNED")
+}
+
+func TestAutoIncCapacity_IntUnsigned_ExactBoundary(t *testing.T) {
+	// floor((2^32-1) * 85 / 100) = 3650722200, so that value passes and one
+	// more fails. The overflow-safe math must not move this boundary.
+	linter := &AutoIncCapacityLinter{threshold: 85}
+
+	ctPass, err := statement.ParseCreateTable(`CREATE TABLE users (
+		id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY
+	) AUTO_INCREMENT=3650722200`)
+	require.NoError(t, err)
+	require.Empty(t, linter.Lint([]*statement.CreateTable{ctPass}, nil))
+
+	ctFail, err := statement.ParseCreateTable(`CREATE TABLE users (
+		id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY
+	) AUTO_INCREMENT=3650722201`)
+	require.NoError(t, err)
+	require.Len(t, linter.Lint([]*statement.CreateTable{ctFail}, nil), 1)
+}
+
+// Test unsupported (non-integer) auto-increment column types. FLOAT/DOUBLE
+// AUTO_INCREMENT is legal legacy MySQL; it must produce exactly one
+// unsupported-type warning, not panic (signed used to hit a negative shift)
+// or emit a bogus second capacity violation (unsigned).
+
+func TestAutoIncCapacity_FloatDoubleAutoInc_NoPanic(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"float_signed", `CREATE TABLE t (f FLOAT AUTO_INCREMENT, PRIMARY KEY(f)) AUTO_INCREMENT=10`},
+		{"float_unsigned", `CREATE TABLE t (f FLOAT UNSIGNED AUTO_INCREMENT, PRIMARY KEY(f)) AUTO_INCREMENT=10`},
+		{"double_signed", `CREATE TABLE t (f DOUBLE AUTO_INCREMENT, PRIMARY KEY(f)) AUTO_INCREMENT=10`},
+		{"double_unsigned", `CREATE TABLE t (f DOUBLE UNSIGNED AUTO_INCREMENT, PRIMARY KEY(f)) AUTO_INCREMENT=10`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := statement.ParseCreateTable(tc.sql)
+			require.NoError(t, err)
+
+			linter := &AutoIncCapacityLinter{threshold: 85}
+			violations := linter.Lint([]*statement.CreateTable{ct}, nil)
+
+			require.Len(t, violations, 1)
+			require.Equal(t, SeverityWarning, violations[0].Severity)
+			require.Contains(t, violations[0].Message, "unsupported column type")
+		})
+	}
+}
+
 // Test complex table structures
 
 func TestAutoIncCapacity_ComplexTable_Pass(t *testing.T) {

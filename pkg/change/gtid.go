@@ -632,7 +632,10 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	tbl := sub.Tables()[0]
 	eventType := parseEventType(ev.Header.EventType)
 
-	if tbl.HasEnumOrSetColumns() {
+	// Decode ENUM/SET integers and re-pad BINARY(N) values before key
+	// extraction and buffering — see the matching block in binlog.go's
+	// processRowsEvent and TableInfo.DecodeBinlogRow.
+	if tbl.NeedsBinlogRowDecoding() {
 		for _, row := range e.Rows {
 			if err := tbl.DecodeBinlogRow(row); err != nil {
 				return fmt.Errorf("decoding binlog row for %s.%s: %w", tbl.SchemaName, tbl.TableName, err)
