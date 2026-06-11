@@ -54,37 +54,40 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	// Use the provided config but ensure MaxOpenConnections is 1 for metadata locks
 	dbConfig := *config // Copy the config
 	dbConfig.MaxOpenConnections = 1
+	// newConnection opens the dedicated pool for this lock. GET_LOCK is
+	// session scoped, so the pool must be exempt from the standard
+	// client-side connection max lifetime: database/sql's connection
+	// cleaner proactively closes connections older than ConnMaxLifetime,
+	// which would silently release the lock until the next refresh tick
+	// re-acquired it on a fresh session — a window of up to refreshInterval
+	// during which another spirit instance could acquire the lock and start
+	// a concurrent migration on the same table.
+	//
+	// Setting the client lifetime to 0 only removes *client*-side recycling.
+	// The server still closes an idle session after wait_timeout seconds, so
+	// the connection (and its lock) is kept alive by the refresh ticker,
+	// which re-runs GET_LOCK every refreshInterval as a keepalive. This is
+	// only safe while refreshInterval < the server's wait_timeout; with the
+	// 1-minute refresh that holds for any sane wait_timeout (e.g. the 10
+	// minutes we configure). If the keepalive ever fails, the ticker tears
+	// the connection down and re-establishes it.
+	newConnection := func() (*sql.DB, error) {
+		db, err := New(dsn, &dbConfig)
+		if err != nil {
+			return nil, err
+		}
+		db.SetConnMaxLifetime(0) // see comment above; keepalive is the refresh ticker
+		return db, nil
+	}
 	var err error
-	mdl.db, err = New(dsn, &dbConfig)
+	mdl.db, err = newConnection()
 	if err != nil {
 		return nil, err
 	}
 
-	// Function to acquire all locks
-	getLocks := func() error {
-		// Acquire locks for all tables
-		// https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html#function_get-lock
-		for _, lockName := range mdl.lockNames {
-			var answer int
-			stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
-			if err := mdl.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
-				return fmt.Errorf("could not acquire metadata lock for %s: %w", lockName, err)
-			}
-			if answer == 0 {
-				// 0 means the lock is held by another connection
-				logger.Warn("could not acquire metadata lock, lock is held by another connection", "lock_name", lockName)
-				return fmt.Errorf("could not acquire metadata lock for %s, lock is held by another connection", lockName)
-			} else if answer != 1 {
-				// probably we never get here, but just in case
-				return fmt.Errorf("could not acquire metadata lock %s, GET_LOCK returned: %d", lockName, answer)
-			}
-		}
-		return nil
-	}
-
 	// Acquire all locks or return an error immediately
 	logger.Info("attempting to acquire metadata lock")
-	if err = getLocks(); err != nil {
+	if err = mdl.getLocks(ctx, logger); err != nil {
 		_ = mdl.db.Close() // close if we are not returning an MDL.
 		return nil, err
 	}
@@ -106,16 +109,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				// MySQL has not yet finished tearing down the session, so a
 				// rapid reacquire on a new connection can see the lock as still
 				// held. RELEASE_LOCK on the same session avoids that race.
-				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				for _, lockName := range mdl.lockNames {
-					logger.Info("releasing metadata lock", "lock_name", lockName)
-					var released sql.NullInt64
-					stmt := sqlescape.MustEscapeSQL("SELECT RELEASE_LOCK(%?)", lockName)
-					if err := mdl.db.QueryRowContext(releaseCtx, stmt).Scan(&released); err != nil {
-						logger.Warn("could not release metadata lock", "lock_name", lockName, "error", err)
-					}
-				}
-				releaseCancel()
+				mdl.releaseLocks(logger)
 				// Use select with default to avoid blocking if Close() isn't called
 				select {
 				case mdl.closeCh <- mdl.db.Close():
@@ -125,7 +119,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				}
 				return
 			case <-ticker.C:
-				if err = getLocks(); err != nil {
+				if err = mdl.getLocks(ctx, logger); err != nil {
 					// if we can't refresh the lock, it's okay.
 					// We have other safety mechanisms in place to prevent corruption
 					// for example, we watch the binary log to see metadata changes
@@ -140,14 +134,14 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 					}
 
 					// try to re-establish the connection
-					mdl.db, err = New(dsn, &dbConfig)
+					mdl.db, err = newConnection()
 					if err != nil {
 						logger.Warn("could not re-establish database connection", "error", err)
 						continue
 					}
 
 					// try to acquire the locks again with the new connection
-					if err = getLocks(); err != nil {
+					if err = mdl.getLocks(ctx, logger); err != nil {
 						logger.Warn("could not acquire metadata locks after re-establishing connection", "error", err)
 						continue
 					}
@@ -161,6 +155,55 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	}()
 
 	return mdl, nil
+}
+
+// getLocks acquires (or renews) all locks on the dedicated session.
+// https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html#function_get-lock
+//
+// The refresh ticker calls this every refreshInterval on the same session
+// (the pool has MaxOpenConnections=1). We deliberately re-run GET_LOCK each
+// time rather than just checking the lock: re-acquiring renews/re-asserts
+// the lock, doubles as the keepalive that keeps the session under the
+// server's wait_timeout, and transparently re-acquires on a fresh session
+// if the connection was lost. GET_LOCK is reference counted since MySQL
+// 5.7, so this stacks a reference per tick — that is harmless because
+// Close() releases the lock with a single RELEASE_ALL_LOCKS() (see
+// releaseLocks), which clears every stacked reference at once.
+func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error {
+	for _, lockName := range m.lockNames {
+		var answer int
+		stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
+		if err := m.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
+			return fmt.Errorf("could not acquire metadata lock for %s: %w", lockName, err)
+		}
+		if answer == 0 {
+			// 0 means the lock is held by another connection
+			logger.Warn("could not acquire metadata lock, lock is held by another connection", "lock_name", lockName)
+			return fmt.Errorf("could not acquire metadata lock for %s, lock is held by another connection", lockName)
+		} else if answer != 1 {
+			// probably we never get here, but just in case
+			return fmt.Errorf("could not acquire metadata lock %s, GET_LOCK returned: %d", lockName, answer)
+		}
+	}
+	return nil
+}
+
+// releaseLocks explicitly releases all locks held by the dedicated session.
+// releaseLocks releases every named lock held by this session in a single
+// RELEASE_ALL_LOCKS() call. Because getLocks re-acquires (renews) on every
+// refresh tick, the locks accumulate a reference per tick; RELEASE_ALL_LOCKS
+// drops all of them — across every name and every stacked reference — at
+// once, so the lock is genuinely free when Close() returns. (A single
+// RELEASE_LOCK per name would leave the lock held whenever more than one
+// reference had stacked, which is the steady state here.)
+func (m *MetadataLock) releaseLocks(logger *slog.Logger) {
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer releaseCancel()
+	logger.Info("releasing metadata locks", "lock_names", m.lockNames)
+	var released sql.NullInt64
+	if err := m.db.QueryRowContext(releaseCtx, "SELECT RELEASE_ALL_LOCKS()").Scan(&released); err != nil {
+		logger.Warn("could not release metadata locks", "error", err)
+	}
 }
 
 func (m *MetadataLock) Close() error {

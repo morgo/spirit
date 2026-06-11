@@ -279,6 +279,47 @@ func TestOptimisticDynamicChunking(t *testing.T) {
 	require.Equal(t, "584", chunk.LowerBound.Value[0].String())
 }
 
+// TestOptimisticResumeProgressAccounting is a regression test for block/spirit#950:
+// on resume, rowsCopied was seeded from the absolute chunk pointer rather than
+// its distance from MinValue. For tables whose low keys have been purged
+// (MIN(pk) far above 0) this inflated the reported progress percentage by
+// MIN(pk)/MAX(pk) at the stop/restart boundary -- in production a jump from
+// 2.31% to 53.21%. Progress must be continuous across a resume.
+func TestOptimisticResumeProgressAccounting(t *testing.T) {
+	// Mimic a production table: minimum id ~682M (old rows purged), with an
+	// auto_increment max of ~1341M.
+	t1 := newTableInfo4Test("test", "events")
+	t1.minValue = Datum{Val: int64(682769913), Tp: signedType}
+	t1.maxValue = Datum{Val: int64(1341021280), Tp: signedType}
+	t1.EstimatedRows = 1341021280
+	t1.KeyColumns = []string{"id"}
+	t1.keyColumnsMySQLTp = []string{"bigint"}
+	t1.keyDatums = []datumTp{signedType}
+	t1.KeyIsAutoInc = true
+	t1.Columns = []string{"id", "name"}
+	t1.columnsMySQLTps = make(map[string]string)
+	t1.columnsMySQLTps["id"] = "bigint"
+
+	chunker, err := NewChunker(t1, ChunkerConfig{NewTable: t1, TargetChunkTime: 100 * time.Millisecond})
+	require.NoError(t, err)
+
+	// Resume from the real production watermark (LowerBound id=713192535).
+	watermark := `{"Key":["id"],"ChunkSize":639,"LowerBound":{"Value": ["713192535"],"Inclusive":true},"UpperBound":{"Value": ["713193174"],"Inclusive":false}}`
+	require.NoError(t, chunker.OpenAtWatermark(watermark))
+
+	rowsCopied, _, total := chunker.Progress()
+	// rowsCopied is measured relative to MinValue, matching how a fresh copy
+	// accumulates it -- NOT the absolute resume key (713192535, which produced
+	// the bogus ~53% before the fix).
+	require.Equal(t, uint64(713192535-682769913), rowsCopied)
+	require.Equal(t, uint64(1341021280), total)
+
+	// The reported percentage should be a few percent, nowhere near the ~53%
+	// the bug produced.
+	pct := float64(rowsCopied) / float64(total) * 100
+	require.Less(t, pct, 10.0)
+}
+
 func TestOptimisticPrefetchChunking(t *testing.T) {
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)

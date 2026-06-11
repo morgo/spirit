@@ -39,6 +39,9 @@ var (
 	continuousChecksumMinInterval = 1 * time.Hour
 )
 
+// errNoSuchTable is MySQL error 1146 (ER_NO_SUCH_TABLE).
+const errNoSuchTable = 1146
+
 type Runner struct {
 	migration *Migration
 	db        *sql.DB
@@ -882,19 +885,34 @@ func (r *Runner) fatalError() bool {
 }
 
 func (r *Runner) dropCheckpoint(ctx context.Context) error {
+	if len(r.changes) > 1 {
+		// Multi-table migrations share one checkpoint table name
+		// (checkpointTableName const) across every migration in the schema,
+		// so we must not DROP it: a concurrent multi-table migration may be
+		// checkpointing into it, and its next DumpCheckpoint INSERT would
+		// fail — an error status.WatchTask escalates to a fatal cancel.
+		// Delete only our own rows, keyed by statement (the same key resume
+		// matches on). The table itself is left behind, possibly empty; the
+		// next multi-table migration adopts it via CREATE TABLE IF NOT
+		// EXISTS. Tolerate the table being already gone so this stays as
+		// idempotent as the DROP IF EXISTS it replaces.
+		err := dbconn.Exec(ctx, r.db, "DELETE FROM %n.%n WHERE statement = %?",
+			r.checkpointTable.SchemaName, r.checkpointTable.TableName, r.migration.Statement)
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == errNoSuchTable {
+			return nil
+		}
+		return err
+	}
 	return dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName)
 }
 
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	cpName := r.checkpointTableName()
-	// drop both if we've decided to call this func.
-	if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.changes[0].table.SchemaName, cpName); err != nil {
-		return err
-	}
 	// original_table_name records the full untruncated table name (single-table
 	// migrations only) so resume can detect the rare case where two long table
 	// names truncate to the same checkpoint table name. Empty for multi-table.
-	if err := dbconn.Exec(ctx, r.db, `CREATE TABLE %n.%n (
+	const checkpointTableDDL = `(
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
@@ -902,7 +920,34 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	statement TEXT,
 	original_table_name VARCHAR(64) NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-	)`,
+	)`
+	if len(r.changes) > 1 {
+		// The checkpoint table is shared between multi-table migrations in
+		// the same schema (see dropCheckpoint), so create it idempotently —
+		// a DROP here would destroy a concurrent migration's live checkpoint
+		// rows. We still must clear our *own* stale rows (we only reach this
+		// function when resume was not possible), otherwise a fresh start
+		// could later be mistaken for resumable progress: this run recreates
+		// the _new tables from scratch, so resuming from a leftover watermark
+		// of the same statement would skip rows that no longer exist in them.
+		if err := dbconn.Exec(ctx, r.db, "CREATE TABLE IF NOT EXISTS %n.%n "+checkpointTableDDL,
+			r.changes[0].table.SchemaName, cpName); err != nil {
+			return err
+		}
+		if err := dbconn.Exec(ctx, r.db, "DELETE FROM %n.%n WHERE statement = %?",
+			r.changes[0].table.SchemaName, cpName, r.migration.Statement); err != nil {
+			return fmt.Errorf("could not clear stale rows from shared checkpoint table '%s' (if it was left behind by an incompatible spirit version, drop it manually): %w", cpName, err)
+		}
+		return nil
+	}
+	// Single-table mode: the checkpoint table name is derived from the table
+	// name and same-table concurrency is already excluded by the metadata
+	// lock, so DROP+CREATE is safe here and additionally guarantees the
+	// structure matches the current spirit version.
+	if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.changes[0].table.SchemaName, cpName); err != nil {
+		return err
+	}
+	if err := dbconn.Exec(ctx, r.db, "CREATE TABLE %n.%n "+checkpointTableDDL,
 		r.changes[0].table.SchemaName, cpName); err != nil {
 		return err
 	}
@@ -965,14 +1010,20 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
+// createSentinelTable creates the sentinel table if it does not already
+// exist. The sentinel is shared by every migration in the schema
+// (sentinelTableName is a const), so creation must be idempotent and must
+// never pass through a "table absent" state: a concurrent --defer-cutover
+// migration polls waitOnSentinelTable every sentinelCheckInterval, and a
+// DROP+CREATE pair here opens a window in which that poll observes the
+// sentinel as missing and proceeds to cutover without operator approval.
+// The DROP that used to precede the CREATE was a holdover from when the
+// sentinel was per-table and carried row data (created_at /
+// alter_statement) that needed resetting; the table is now contentless
+// and only its existence matters, so adopting an existing sentinel is
+// equivalent to creating a fresh one.
 func (r *Runner) createSentinelTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, r.db, "DROP TABLE IF EXISTS %n.%n", r.changes[0].table.SchemaName, sentinelTableName); err != nil {
-		return err
-	}
-	if err := dbconn.Exec(ctx, r.db, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.changes[0].table.SchemaName, sentinelTableName); err != nil {
-		return err
-	}
-	return nil
+	return dbconn.Exec(ctx, r.db, "CREATE TABLE IF NOT EXISTS %n.%n (id int NOT NULL PRIMARY KEY)", r.changes[0].table.SchemaName, sentinelTableName)
 }
 
 func (r *Runner) Close() error {
@@ -1047,17 +1098,34 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// we do not support recovery.
 	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		r.changes[0].stmt.Schema, r.checkpointTableName())
+	var queryArgs []any
+	if len(r.changes) > 1 {
+		// The shared multi-table checkpoint table can hold rows from other
+		// concurrently-running multi-table migrations in the same schema.
+		// Filter to our own rows — statement is the key resume matches on —
+		// so another migration's newer row cannot mask ours. Single-table
+		// mode keeps the unfiltered read so a changed alter statement still
+		// surfaces as ErrMismatchedAlter below.
+		query = fmt.Sprintf("SELECT * FROM `%s`.`%s` WHERE statement = ? ORDER BY id DESC LIMIT 1",
+			r.changes[0].stmt.Schema, r.checkpointTableName())
+		queryArgs = append(queryArgs, r.migration.Statement)
+	}
 	var copierWatermark, binlogPosition, statement, checksumWatermark, originalTableName string
 	var id int
 	var createdAtStr string
-	err := r.db.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &checksumWatermark, &binlogPosition, &statement, &originalTableName, &createdAtStr)
+	err := r.db.QueryRowContext(ctx, query, queryArgs...).Scan(&id, &copierWatermark, &checksumWatermark, &binlogPosition, &statement, &originalTableName, &createdAtStr)
 	if err != nil {
-		// Distinguish "checkpoint table exists but has no rows" — a normal
-		// "nothing to resume from" state — from a real read failure
-		// (permission denied, server gone, etc.) so an operator inspecting
-		// the log doesn't mistake an empty checkpoint for a permission
-		// issue.
+		// Distinguish "no checkpoint to resume from" — a normal state — from a
+		// real read failure (permission denied, server gone, etc.) so an
+		// operator inspecting the log doesn't mistake the absence of a
+		// checkpoint for a permission issue. In multi-table mode the read is
+		// filtered by statement, so ErrNoRows means "no checkpoint for this
+		// statement" — the shared table may still hold rows from other
+		// migrations — rather than "the table is empty".
 		if errors.Is(err, sql.ErrNoRows) {
+			if len(r.changes) > 1 {
+				return fmt.Errorf("no checkpoint found for this statement in table '%s', nothing to resume from", r.checkpointTableName())
+			}
 			return fmt.Errorf("checkpoint table '%s' is empty, nothing to resume from", r.checkpointTableName())
 		}
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)

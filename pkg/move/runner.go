@@ -17,6 +17,7 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/statement"
@@ -1023,7 +1024,10 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	r.logger.Info("Running ANALYZE TABLE")
 	for _, target := range r.targets {
 		for _, tbl := range r.sourceTables {
-			if err := dbconn.Exec(ctx, target.DB, "ANALYZE TABLE %n.%n", tbl.SchemaName, tbl.TableName); err != nil {
+			// Unqualified on target.DB: the old code qualified with the source
+			// schema, which doesn't exist on a cross-cluster target (and breaks
+			// through a vtgate). See analyzeTable.
+			if err := r.analyzeTable(ctx, target.DB, tbl.TableName); err != nil {
 				return err
 			}
 		}
@@ -1073,6 +1077,45 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// pass. See pkg/migration/runner.go DumpCheckpoint for the full
 	// rationale.
 	return r.checker.Run(ctx)
+}
+
+// analyzeTable runs ANALYZE TABLE for tableName on db, unqualified: db is
+// already connected to the target schema, and qualifying would be wrong
+// through a Vitess vtgate. It reads the result set rather than using Exec
+// because ANALYZE reports a missing table as a Msg_type="Error" row (not a
+// statement error), which would otherwise be a silent no-op.
+func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, tableName string) error {
+	stmt, err := sqlescape.EscapeSQL("ANALYZE TABLE %n", tableName)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return err
+	}
+	defer utils.CloseAndLog(rows)
+	for rows.Next() {
+		// ANALYZE TABLE returns: Table, Op, Msg_type, Msg_text.
+		var tbl, op, msgType, msgText string
+		if err := rows.Scan(&tbl, &op, &msgType, &msgText); err != nil {
+			return err
+		}
+		// Only Msg_type = "Error" indicates the statistics were not refreshed.
+		// Other rows ("status", "note", "warning") are not failures even when
+		// Msg_text is not "OK" (e.g. "Table is already up to date"); accept
+		// them, logging anything non-OK as a warning for visibility.
+		if strings.EqualFold(msgType, "error") {
+			return fmt.Errorf("ANALYZE TABLE %s failed: %s: %s", tableName, msgType, msgText)
+		}
+		if !strings.EqualFold(msgText, "OK") && r.logger != nil {
+			r.logger.Warn("ANALYZE TABLE reported a non-OK message",
+				"table", tableName,
+				"msg_type", msgType,
+				"msg_text", msgText,
+			)
+		}
+	}
+	return rows.Err()
 }
 
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
