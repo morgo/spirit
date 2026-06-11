@@ -2,6 +2,7 @@ package check
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -129,5 +130,77 @@ func TestTargetStateCheck(t *testing.T) {
 		err := targetStateCheck(t.Context(), r, slog.Default())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "schema does not match")
+	})
+}
+
+// TestTargetStateCheckSchemaTypesAndCollation exercises the strengthened schema
+// comparison: a pre-created target whose columns have the SAME NAMES as the
+// source but a different type, charset, or collation must FAIL pre-flight. The
+// previous behavior compared only ordered column names and would have passed
+// all of these dangerous cases.
+func TestTargetStateCheckSchemaTypesAndCollation(t *testing.T) {
+	srcName, srcDB := createW3DDatabase(t)
+	tgtName, tgtDB := createW3DDatabase(t)
+	targetConfig := &mysql.Config{DBName: tgtName}
+
+	// Source PK is a VARCHAR with a case-sensitive (binary) collation. This is
+	// the dangerous class from the bug report: if the target's PK collation is
+	// case-insensitive, REPLACE/INSERT IGNORE would collapse rows differing only
+	// by case and the mismatch would surface only at (or after) checksum time.
+	_, err := srcDB.ExecContext(t.Context(),
+		fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_bin NOT NULL, name VARCHAR(100), PRIMARY KEY (id))", srcName))
+	require.NoError(t, err)
+	sourceTable := table.NewTableInfo(srcDB, srcName, "t")
+	require.NoError(t, sourceTable.SetInfo(t.Context()))
+
+	newResources := func() Resources {
+		return Resources{
+			Sources:      []SourceResource{{DB: srcDB, Config: &mysql.Config{DBName: srcName}}},
+			Targets:      []applier.Target{{DB: tgtDB, Config: targetConfig}},
+			SourceTables: []*table.TableInfo{sourceTable},
+		}
+	}
+
+	// Test 1: identical schema (same names, same types, same collation) passes.
+	t.Run("identical schema passes", func(t *testing.T) {
+		_, err := tgtDB.ExecContext(t.Context(),
+			fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_bin NOT NULL, name VARCHAR(100), PRIMARY KEY (id))", tgtName))
+		require.NoError(t, err)
+		defer func() { _, _ = tgtDB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.t", tgtName)) }()
+		require.NoError(t, targetStateCheck(t.Context(), newResources(), slog.Default()))
+	})
+
+	// Test 2: same column names but a different PK collation FAILS.
+	// On the unfixed (names-only) comparison this incorrectly PASSED.
+	t.Run("same names different PK collation fails", func(t *testing.T) {
+		_, err := tgtDB.ExecContext(t.Context(),
+			fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL, name VARCHAR(100), PRIMARY KEY (id))", tgtName))
+		require.NoError(t, err)
+		defer func() { _, _ = tgtDB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.t", tgtName)) }()
+
+		// Sanity check: the names-only comparison this replaced would NOT have
+		// caught this. Assert the column-name slices are in fact equal, which is
+		// exactly why the old check passed and the silent corruption slipped
+		// through.
+		targetTable := table.NewTableInfo(tgtDB, tgtName, "t")
+		require.NoError(t, targetTable.SetInfo(t.Context()))
+		require.Equal(t, sourceTable.Columns, targetTable.Columns,
+			"column names are identical; only the strengthened comparison should catch the collation drift")
+
+		err = targetStateCheck(t.Context(), newResources(), slog.Default())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema does not match")
+	})
+
+	// Test 3: same column names but a different column type FAILS.
+	t.Run("same names different type fails", func(t *testing.T) {
+		_, err := tgtDB.ExecContext(t.Context(),
+			fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_bin NOT NULL, name TEXT, PRIMARY KEY (id))", tgtName))
+		require.NoError(t, err)
+		defer func() { _, _ = tgtDB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.t", tgtName)) }()
+		err = targetStateCheck(t.Context(), newResources(), slog.Default())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema does not match")
+		require.Contains(t, err.Error(), "name")
 	})
 }

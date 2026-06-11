@@ -203,7 +203,8 @@ func (r *Runner) getTables(ctx context.Context, src *sourceInfo) ([]*table.Table
 // Secondary indexes will be added later by restoreSecondaryIndexes() before cutover.
 // This function skips tables that already exist (they were validated by checkTargetEmpty).
 func (r *Runner) createTargetTables(ctx context.Context) error {
-	// All sources have identical schemas, so use sources[0] for SHOW CREATE TABLE.
+	// All sources have identical schemas (enforced by the source_schema_consistency
+	// check at ScopePostSetup), so use sources[0] for SHOW CREATE TABLE.
 	for _, t := range r.sourceTables {
 		var createStmt string
 		row := r.sources[0].db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", t.QuotedTableName))
@@ -881,6 +882,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 		SourceTables:   r.sourceTables,
 		CreateSentinel: r.move.CreateSentinel,
 		GTID:           r.move.GTID,
+		MoveEverything: len(r.move.SourceTables) == 0,
 	}, r.logger, scope)
 }
 
@@ -932,7 +934,8 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 	for _, tbl := range r.sourceTables {
 		// Get CREATE TABLE statement from source
 		var sourceCreateStmt string
-		// All sources have identical schemas, so use sources[0].
+		// All sources have identical schemas (enforced by the source_schema_consistency
+		// check at ScopePostSetup), so use sources[0].
 		row := r.sources[0].db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", tbl.QuotedTableName))
 		var tableName string
 		if err := row.Scan(&tableName, &sourceCreateStmt); err != nil {

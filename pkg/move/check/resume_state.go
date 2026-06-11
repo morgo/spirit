@@ -6,9 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
-
-	"github.com/block/spirit/pkg/table"
 )
 
 func init() {
@@ -41,7 +38,7 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	err := src0.DB.QueryRowContext(ctx,
 		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
 		src0.Config.DBName, checkpointTableName).Scan(&checkpointExists)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("checkpoint table '%s.%s' does not exist; cannot resume", src0.Config.DBName, checkpointTableName)
 	}
 	if err != nil {
@@ -59,7 +56,7 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 			err := target.DB.QueryRowContext(ctx,
 				"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
 				target.Config.DBName, sourceTable.TableName).Scan(&tableExists)
-			if err == sql.ErrNoRows {
+			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("table '%s' does not exist on target %d (%s); cannot resume. Target state is incomplete",
 					sourceTable.TableName, i, target.Config.DBName)
 			}
@@ -67,22 +64,35 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 				return fmt.Errorf("failed to check for table '%s' on target %d: %w", sourceTable.TableName, i, err)
 			}
 
-			// Verify schema matches
-			targetTable := table.NewTableInfo(target.DB, target.Config.DBName, sourceTable.TableName)
-			if err := targetTable.SetInfo(ctx); err != nil {
-				return fmt.Errorf("failed to get table info for target %d table '%s': %w", i, sourceTable.TableName, err)
+			// Verify schema matches by comparing the canonicalized CREATE TABLE
+			// of source and target, not just the ordered column names. A
+			// names-only comparison let a target with the same columns but a
+			// different type/charset/collation pass resume validation; on a
+			// resume whose checksum watermark already covers the affected chunk,
+			// that mismatch would never be re-verified. schemaDiff compares
+			// types, charset, collation, indexes and constraints while ignoring
+			// AUTO_INCREMENT counters and other instance-specific noise.
+			sourceCreate, err := showCreateTable(ctx, sourceTable.DB(), sourceTable.SchemaName, sourceTable.TableName)
+			if err != nil {
+				return fmt.Errorf("failed to read source schema for table '%s': %w", sourceTable.TableName, err)
 			}
-
-			if !slices.Equal(sourceTable.Columns, targetTable.Columns) {
-				return fmt.Errorf("table '%s' schema mismatch between source and target %d (%s); cannot resume safely. Schema may have changed since checkpoint was created",
-					sourceTable.TableName, i, target.Config.DBName)
+			targetCreate, err := showCreateTable(ctx, target.DB, target.Config.DBName, sourceTable.TableName)
+			if err != nil {
+				return fmt.Errorf("failed to read target %d schema for table '%s': %w", i, sourceTable.TableName, err)
+			}
+			diff, err := schemaDiff(sourceTable.TableName, sourceCreate, targetCreate)
+			if err != nil {
+				return fmt.Errorf("failed to compare schema for table '%s' on target %d: %w", sourceTable.TableName, i, err)
+			}
+			if diff != "" {
+				return fmt.Errorf("table '%s' schema mismatch between source and target %d (%s); cannot resume safely. Schema may have changed since checkpoint was created. Reconcile the target to the source with: %s",
+					sourceTable.TableName, i, target.Config.DBName, diff)
 			}
 
 			logger.Debug("validated target table for resume",
 				"table", sourceTable.TableName,
 				"target", i,
-				"database", target.Config.DBName,
-				"columns", len(targetTable.Columns))
+				"database", target.Config.DBName)
 		}
 	}
 	return nil

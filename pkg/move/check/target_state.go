@@ -3,9 +3,9 @@ package check
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/table"
@@ -76,7 +76,7 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 	// Use LIMIT 1 instead of COUNT(*) for performance - we only need to know if there's at least one row
 	var hasRows int
 	err := target.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM `%s`.`%s` LIMIT 1", target.Config.DBName, tableName)).Scan(&hasRows)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("failed to check if table '%s' on target %d is empty: %w", tableName, targetIndex, err)
 	}
 	if err == nil {
@@ -85,28 +85,44 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 			tableName, targetIndex, target.Config.DBName)
 	}
 
-	// Check 2: Schema must match source exactly
+	// Check 2: Schema must match source exactly.
 	if sourceTable == nil {
 		// Table exists on target but not in source - this is fine, we'll ignore it
 		return nil
 	}
 
-	// Get target table info and compare columns
-	targetTable := table.NewTableInfo(target.DB, target.Config.DBName, tableName)
-	if err := targetTable.SetInfo(ctx); err != nil {
-		return fmt.Errorf("failed to get table info for target %d table '%s': %w", targetIndex, tableName, err)
+	// Compare the canonicalized CREATE TABLE of source and target rather than
+	// just the ordered column names. Comparing names only (the previous
+	// behavior) let a pre-created target with the same column names but a
+	// different column type, charset, or collation pass pre-flight. The most
+	// dangerous case is a primary-key column whose collation differs (e.g.
+	// source utf8mb4_bin vs target utf8mb4_0900_ai_ci): REPLACE/INSERT IGNORE
+	// would then collapse rows that differ only by case, and the mismatch would
+	// surface only much later at checksum time (or never, on a resume whose
+	// watermark already covers the affected chunk). schemaDiff compares column
+	// types, charset, collation, indexes and constraints while ignoring
+	// instance-specific noise like AUTO_INCREMENT counters.
+	sourceCreate, err := showCreateTable(ctx, sourceTable.DB(), sourceTable.SchemaName, sourceTable.TableName)
+	if err != nil {
+		return fmt.Errorf("failed to read source schema for table '%s': %w", tableName, err)
 	}
-
-	if !slices.Equal(sourceTable.Columns, targetTable.Columns) {
-		return fmt.Errorf("table '%s' exists on target %d (%s) but schema does not match source; column mismatch detected. Please ensure the table schema matches exactly or drop the table",
-			tableName, targetIndex, target.Config.DBName)
+	targetCreate, err := showCreateTable(ctx, target.DB, target.Config.DBName, tableName)
+	if err != nil {
+		return fmt.Errorf("failed to read target %d schema for table '%s': %w", targetIndex, tableName, err)
+	}
+	diff, err := schemaDiff(tableName, sourceCreate, targetCreate)
+	if err != nil {
+		return fmt.Errorf("failed to compare schema for table '%s' on target %d: %w", tableName, targetIndex, err)
+	}
+	if diff != "" {
+		return fmt.Errorf("table '%s' exists on target %d (%s) but schema does not match source; reconcile the target to the source with: %s. Please ensure the table schema matches exactly (including column types, charset and collation) or drop the table",
+			tableName, targetIndex, target.Config.DBName, diff)
 	}
 
 	logger.Info("validated existing target table",
 		"table", tableName,
 		"target", targetIndex,
-		"database", target.Config.DBName,
-		"columns", len(targetTable.Columns))
+		"database", target.Config.DBName)
 
 	return nil
 }
