@@ -407,3 +407,36 @@ func TestNewDatumFromValueBinaryString(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "\"hello\"", d.String())
 }
+
+// TestNewDatumFromValueWithType pins that resolving the column type once
+// (NewColumnType) and reusing it via NewDatumFromValueWithType produces a
+// Datum identical to NewDatumFromValue, across the type classifications
+// and wire forms that matter: numeric, binary (forceHexEncode), text, the
+// BIT []byte decode path, and nil. This is the fast path used by the
+// applier's DELETE builder (block/spirit#948); it must not diverge from
+// the per-value parse it replaces.
+func TestNewDatumFromValueWithType(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   any
+		mysqlTp string
+	}{
+		{"signed int64", int64(42), "int"},
+		{"signed from string", "42", "bigint"},
+		{"binary []byte non-utf8", []byte{0xbb, 0x00, 0x10}, "binary(3)"},
+		{"binary string utf8", "abc", "varbinary(8)"},
+		{"varchar", "hello", "varchar(255)"},
+		{"bit from bytes", []byte{0x01, 0x00}, "bit(16)"},
+		{"nil binary", nil, "binary(8)"},
+		{"nil int", nil, "int"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, errWant := NewDatumFromValue(tc.value, tc.mysqlTp)
+			got, errGot := NewDatumFromValueWithType(tc.value, NewColumnType(tc.mysqlTp))
+			require.Equal(t, errWant, errGot)
+			require.Equal(t, want, got)
+			require.Equal(t, want.String(), got.String())
+		})
+	}
+}

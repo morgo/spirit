@@ -87,6 +87,10 @@ type bufferedChange struct {
 type queuedChange struct {
 	key        string
 	logicalRow applier.LogicalRow
+	// originalKey is the typed PK tuple. Deletes need it to build the
+	// DELETE statement via the applier's type-aware path; upserts use
+	// logicalRow.RowImage instead, but we store it uniformly.
+	originalKey []any
 }
 
 type bufferedMap struct {
@@ -172,9 +176,10 @@ const (
 
 	// queuedChangeOverhead is the fixed per-element cost for an item
 	// in s.queue beyond estimateRowSize's contribution: the key
-	// string header (~16 B) and the LogicalRow struct (~32 B). Slice
-	// amortized-growth overhead is not explicitly accounted for.
-	queuedChangeOverhead = 48
+	// string header (~16 B), the LogicalRow struct (~32 B), and the
+	// originalKey slice header (~24 B). Slice amortized-growth overhead
+	// is not explicitly accounted for.
+	queuedChangeOverhead = 72
 )
 
 // BufferedSubscriptionConfig configures NewBufferedSubscription.
@@ -275,7 +280,7 @@ func sizeOfBufferedChange(hashedKey string, c bufferedChange) int64 {
 }
 
 func sizeOfQueuedChange(c queuedChange) int64 {
-	return queuedChangeOverhead + int64(len(c.key)) + estimateRowSize(c.logicalRow.RowImage)
+	return queuedChangeOverhead + int64(len(c.key)) + estimateRowSize(c.logicalRow.RowImage) + estimateRowSize(c.originalKey)
 }
 
 // Assert that bufferedMap implements subscription
@@ -359,7 +364,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	}
 
 	if s.queueModeActive() {
-		qc := queuedChange{key: hashedKey, logicalRow: logicalRow}
+		qc := queuedChange{key: hashedKey, logicalRow: logicalRow, originalKey: key}
 		s.queue = append(s.queue, qc)
 		s.sizeBytes += sizeOfQueuedChange(qc)
 		s.keysAdded.Add(1)
@@ -427,7 +432,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 // store we are about to abandon. underLock (cutover) implies bypass for the
 // same reason.
 func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock, bypassWatermark bool) (bool, error) {
-	var deleteKeys []string
+	var deleteKeys [][]any
 	var upsertRows []applier.LogicalRow
 	var keysFlushed []string
 	var i int
@@ -451,9 +456,9 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 			continue
 		}
 		i++
-		keysFlushed = append(keysFlushed, key) // we are going to flush this key
+		keysFlushed = append(keysFlushed, key) // we are going to flush this key (hashed map key)
 		if change.logicalRow.IsDeleted {
-			deleteKeys = append(deleteKeys, key)
+			deleteKeys = append(deleteKeys, change.originalKey)
 		} else {
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
@@ -485,8 +490,10 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 }
 
 // flushBatch flushes a batch of deletes and upserts using the applier.
+// deleteKeys holds the typed PK tuples of the rows to delete (one tuple
+// per entry, in KeyColumns order).
 // If lock is non-nil, the operations are executed under the table lock.
-func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys []string, upsertRows []applier.LogicalRow, lock *dbconn.TableLock) error {
+func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsertRows []applier.LogicalRow, lock *dbconn.TableLock) error {
 	if len(deleteKeys) == 0 && len(upsertRows) == 0 {
 		return nil
 	}
@@ -545,7 +552,7 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 		lockToUse = lock
 	}
 
-	var deleteKeys []string
+	var deleteKeys [][]any
 	var upsertRows []applier.LogicalRow
 	flushSegment := func() error {
 		if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
@@ -567,7 +574,7 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 			}
 		}
 		if change.logicalRow.IsDeleted {
-			deleteKeys = append(deleteKeys, change.key)
+			deleteKeys = append(deleteKeys, change.originalKey)
 		} else {
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
