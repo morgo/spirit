@@ -103,10 +103,23 @@ func (m *ColumnMapping) ColumnsSlice() (sourceColumns, targetColumns []string) {
 	return m.sourceColumns, m.targetColumns
 }
 
-// ChecksumExprs returns two comma-separated checksum column expressions for
-// source and target, wrapping each column in IFNULL(), ISNULL() and CAST.
-// The CAST type always comes from the target table's type definition.
-// When there are no renames, both expressions are identical.
+// checksumSeparator is interleaved between every value in the checksum
+// CONCAT() so that content cannot shift across adjacent column boundaries
+// undetected. Without it, the rows ('x0','y') and ('x','0y') concatenate to
+// the same string and produce identical CRC32 values. This is the same reason
+// pt-table-checksum uses CONCAT_WS with a '#' separator. A value containing
+// '#' can still theoretically produce an ambiguous concatenation, but the
+// fixed value/ISNULL-digit/separator structure makes an accidental collision
+// require precisely-placed separator-and-digit patterns inside the diverged
+// data — far weaker than the previous any-boundary-shift collision, and well
+// below the CRC32 collision floor the checksum already accepts.
+const checksumSeparator = ", '#', "
+
+// ChecksumExprs returns two checksum column expressions (argument lists for
+// CONCAT()) for source and target, wrapping each column in IFNULL(), ISNULL()
+// and CAST, with a '#' separator literal between every value (see
+// checksumSeparator). The CAST type always comes from the target table's type
+// definition. When there are no renames, both expressions are identical.
 func (m *ColumnMapping) ChecksumExprs() (source, target string, err error) {
 	sourceExprs := make([]string, len(m.sourceColumns))
 	targetExprs := make([]string, len(m.targetColumns))
@@ -123,10 +136,10 @@ func (m *ColumnMapping) ChecksumExprs() (source, target string, err error) {
 		if err != nil {
 			return "", "", err
 		}
-		sourceExprs[i] = "IFNULL(" + srcCast + ",''), ISNULL(`" + m.sourceColumns[i] + "`)"
-		targetExprs[i] = "IFNULL(" + tgtCast + ",''), ISNULL(`" + m.targetColumns[i] + "`)"
+		sourceExprs[i] = "IFNULL(" + srcCast + ",'')" + checksumSeparator + "ISNULL(`" + m.sourceColumns[i] + "`)"
+		targetExprs[i] = "IFNULL(" + tgtCast + ",'')" + checksumSeparator + "ISNULL(`" + m.targetColumns[i] + "`)"
 	}
-	return strings.Join(sourceExprs, ", "), strings.Join(targetExprs, ", "), nil
+	return strings.Join(sourceExprs, checksumSeparator), strings.Join(targetExprs, checksumSeparator), nil
 }
 
 // SourceColumnIndices returns the indices into sourceTable.NonGeneratedColumns

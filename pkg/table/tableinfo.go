@@ -40,6 +40,7 @@ type TableInfo struct {
 	Indexes                     []string          // all the index names
 	columnsMySQLTps             map[string]string // map from column name to MySQL type
 	enumSetElements             map[int][]string  // parsed ENUM/SET element list, keyed by column ordinal; only present for ENUM/SET columns
+	binaryColumnWidths          map[int]int       // declared width of BINARY(N) columns, keyed by column ordinal; only present for fixed-width BINARY columns
 	KeyColumns                  []string          // the column names of the primaryKey
 	keyColumnsMySQLTp           []string          // the MySQL types of the primaryKey
 	KeyIsAutoInc                bool              // if pk[0] is an auto_increment column
@@ -212,6 +213,7 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 	t.NonGeneratedColumns = []string{}
 	t.columnsMySQLTps = make(map[string]string)
 	t.enumSetElements = nil
+	t.binaryColumnWidths = nil
 	for rows.Next() {
 		var col, tp, expression string
 		if err := rows.Scan(&col, &tp, &expression); err != nil {
@@ -231,6 +233,14 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 				t.enumSetElements = make(map[int][]string)
 			}
 			t.enumSetElements[len(t.Columns)-1] = elements
+		}
+		if isBinaryColumnType(tp) {
+			if width := parseBinaryColumnWidth(tp); width > 0 {
+				if t.binaryColumnWidths == nil {
+					t.binaryColumnWidths = make(map[int]int)
+				}
+				t.binaryColumnWidths[len(t.Columns)-1] = width
+			}
 		}
 	}
 	if rows.Err() != nil {
@@ -499,30 +509,51 @@ func (t *TableInfo) GetColumnMySQLType(col string) (string, bool) {
 }
 
 // HasEnumOrSetColumns reports whether any column on this table is an
-// ENUM or SET. Used to skip the per-row decoding hot path when there's
-// nothing to decode.
+// ENUM or SET.
+//
+// Deprecated: gate DecodeBinlogRow calls on NeedsBinlogRowDecoding
+// instead — DecodeBinlogRow now also re-pads BINARY(N) values, which
+// this predicate does not account for.
 func (t *TableInfo) HasEnumOrSetColumns() bool {
 	return len(t.enumSetElements) > 0
 }
 
-// DecodeBinlogRow converts ENUM and SET values in a binlog row image
-// from their integer wire format (ENUM ordinal / SET bitmask) back to
-// the string form. Mutates the slice in place.
+// NeedsBinlogRowDecoding reports whether DecodeBinlogRow would do any
+// work for this table: it has ENUM/SET columns (ordinal/bitmask
+// decoding) or fixed-width BINARY columns (trailing 0x00 re-padding).
+// Used to skip the per-row decoding hot path when there's nothing to
+// decode.
+func (t *TableInfo) NeedsBinlogRowDecoding() bool {
+	return len(t.enumSetElements) > 0 || len(t.binaryColumnWidths) > 0
+}
+
+// DecodeBinlogRow normalizes a binlog row image in place so the
+// buffered replay path can feed it to the applier as a
+// REPLACE INTO ... VALUES:
 //
-// Why: the go-mysql binlog reader yields ENUM as int64 ordinals and SET
-// as int64 bitmasks. Spirit's buffered replay path takes the row image
-// verbatim and feeds it to the applier as a REPLACE INTO ... VALUES.
-// If the target column has been migrated to a non-ENUM type
-// (e.g. VARCHAR), MySQL inserts those integers as literal values
-// instead of the original strings, corrupting data. Decoding here
-// restores the string form before the applier sees it.
+//   - ENUM and SET values are converted from their integer wire format
+//     (ENUM ordinal / SET bitmask) back to the string form. The
+//     go-mysql binlog reader yields them as int64s; if the target
+//     column has been migrated to a non-ENUM type (e.g. VARCHAR),
+//     MySQL would insert those integers as literal values instead of
+//     the original strings, corrupting data.
+//   - BINARY(N) values are right-padded with 0x00 back to their
+//     declared width. MySQL strips trailing pad bytes from the row
+//     image (Field_string::pack) and expects the reader to re-pad;
+//     without this, values with trailing zeros are replayed short into
+//     targets that don't re-pad server-side (e.g. VARBINARY), and
+//     binary primary-key lookups miss. See pkg/table/binarypad.go and
+//     block/spirit#945.
 //
-// nil values (NULL columns) and rows with no ENUM/SET columns are a
-// no-op. If the table has no ENUM/SET columns at all, callers should
-// gate with HasEnumOrSetColumns and skip the call entirely.
+// nil values (NULL columns) and rows with nothing to decode are a
+// no-op. If the table has no ENUM/SET/BINARY columns at all, callers
+// should gate with NeedsBinlogRowDecoding and skip the call entirely.
 func (t *TableInfo) DecodeBinlogRow(row []any) error {
-	if len(t.enumSetElements) == 0 {
-		return nil
+	for ord, width := range t.binaryColumnWidths {
+		if ord >= len(row) {
+			continue
+		}
+		row[ord] = padBinaryValue(row[ord], width)
 	}
 	for ord, elements := range t.enumSetElements {
 		if ord >= len(row) {

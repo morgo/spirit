@@ -43,19 +43,21 @@ var numericPartitionValueRe = regexp.MustCompile(`^-?(0|[1-9]\d*)(\.\d+)?$`)
 // previous fmt.Sprintf("%v", v) form generated broken SQL when a string
 // partition value contained a single quote.
 //
-// Caveat: parsePartitionClause currently restores every value to a Go
-// string regardless of whether the source SQL had it as a numeric or
-// string literal — so we can't simply quote on (v is string). We use
-// the numericPartitionValueRe heuristic instead: strings that match
-// render unquoted (matching RANGE/LIST partitions on integer
-// expressions like YEAR(...) or hash columns); anything else is
-// treated as a string literal and quote+escaped. The heuristic
-// deliberately excludes ParseFloat-accepting curiosities (NaN, Inf,
-// "1e10") and zero-prefix forms ("01") that would silently change
-// semantics. A real type-aware fix requires preserving the AST literal
-// kind through parsePartitionClause; this is a targeted patch on the
-// SQL-emission side only.
+// A partitionStringLiteral carries the "this was a quoted string literal"
+// fact straight from the parser, so it is always quote+escaped — this is
+// what stops a numeric-looking LIST COLUMNS value like '2020' on a VARCHAR
+// column from being emitted bare and rejected by MySQL (error 1654).
+//
+// For plain Go strings (numeric literals and expressions the parser
+// Restored to text, e.g. YEAR(col)) we fall back to the
+// numericPartitionValueRe heuristic: values that match render unquoted;
+// anything else is quote+escaped. The heuristic deliberately excludes
+// ParseFloat-accepting curiosities (NaN, Inf, "1e10") and zero-prefix
+// forms ("01").
 func formatPartitionValue(v any) string {
+	if sl, ok := v.(partitionStringLiteral); ok {
+		return "'" + sqlescape.EscapeString(string(sl)) + "'"
+	}
 	if s, ok := v.(string); ok {
 		if numericPartitionValueRe.MatchString(s) {
 			return s

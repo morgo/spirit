@@ -716,12 +716,15 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 	tbl := sub.Tables()[0]
 	eventType := parseEventType(ev.Header.EventType)
 
-	// Decode ENUM ordinals / SET bitmasks back to their string form before
-	// we hand the row image to the subscription. The binlog reader yields
-	// them as int64s; if the target column has been migrated to a non-ENUM
-	// type (e.g. VARCHAR) the applier would otherwise insert those integers
-	// as literal values. See TableInfo.DecodeBinlogRow.
-	if tbl.HasEnumOrSetColumns() {
+	// Decode ENUM ordinals / SET bitmasks back to their string form and
+	// re-pad BINARY(N) values (MySQL strips trailing 0x00 from the row
+	// image) before we hand the row image to the subscription. Without
+	// this the applier would insert ENUM/SET integers as literal values
+	// on migrated columns, and replay short BINARY values into targets
+	// that don't re-pad (e.g. VARBINARY). Padding must happen before
+	// PrimaryKeyValues below so binary PK keys match what a SELECT
+	// returns. See TableInfo.DecodeBinlogRow.
+	if tbl.NeedsBinlogRowDecoding() {
 		for _, row := range e.Rows {
 			if err := tbl.DecodeBinlogRow(row); err != nil {
 				return fmt.Errorf("decoding binlog row for %s.%s: %w", tbl.SchemaName, tbl.TableName, err)

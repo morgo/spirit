@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,7 +113,38 @@ func newTestChecker(t *testing.T, chunker table.Chunker, cfg ContinuousCheckerCo
 	require.NoError(t, err)
 
 	attempts := sync.Map{}
-	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, error) {
+	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
+		var n int
+		if v, ok := attempts.Load(chunk); ok {
+			n = v.(int) + 1
+		} else {
+			n = 1
+		}
+		attempts.Store(chunk, n)
+		srcCRC, tgtCRC, count, err := read(ctx, chunk, n)
+		// The legacy 3-value read hook supplies a single row count that
+		// applies to BOTH source and target — these tests exercise CRC-only
+		// divergence with matching counts. Tests that need divergent counts
+		// use newTestCheckerSig below.
+		return srcCRC, tgtCRC, count, count, err
+	}
+	return c
+}
+
+// newTestCheckerSig is like newTestChecker but the read hook returns full
+// signatures (CRC + count) for source and target independently, so tests can
+// exercise row-count divergence with matching CRCs (the defense-in-depth gap
+// this comparison closes).
+func newTestCheckerSig(t *testing.T, chunker table.Chunker, cfg ContinuousCheckerConfig,
+	read func(ctx context.Context, chunk *table.Chunk, attempt int) (srcCRC, tgtCRC int64, srcCount, tgtCount uint64, err error),
+) *ContinuousChecker {
+	t.Helper()
+	srcDB, tgtDB := &sql.DB{}, &sql.DB{}
+	c, err := NewContinuousChecker(srcDB, tgtDB, chunker, nil, cfg)
+	require.NoError(t, err)
+
+	attempts := sync.Map{}
+	c.readChunk = func(ctx context.Context, chunk *table.Chunk) (int64, int64, uint64, uint64, error) {
 		var n int
 		if v, ok := attempts.Load(chunk); ok {
 			n = v.(int) + 1
@@ -342,15 +374,21 @@ func TestQueueCapBackpressure(t *testing.T) {
 	stats := c.Stats()
 	require.GreaterOrEqual(t, stats.WalkerStalls, uint64(1),
 		"expected at least one walker stall while queue was at MaxQueueSize")
-	// Queue can briefly exceed MaxQueueSize: in-flight workers can finish
-	// and the resultCh buffer can hold results that haven't been processed
-	// yet, both of which become retries when the dispatcher next services
-	// the result arm. The overshoot is bounded by inflight + buffered
-	// results = 2*Concurrency in the worst case. The test cares that the
-	// queue stays bounded near MaxQueueSize, not unbounded — anything
-	// dramatically larger would be the symptom of a real back-pressure
-	// failure. See enqueueRetry's doc comment in continuous.go.
-	require.LessOrEqual(t, stats.RetryQueueDepth, cfg.MaxQueueSize+2*cfg.Concurrency,
+	// Queue can briefly exceed MaxQueueSize. Three sources of work have
+	// already passed the back-pressure gate (which only throttles fresh
+	// walker intake) by the time the queue reaches MaxQueueSize, and each
+	// becomes a retry when its result is serviced:
+	//   - in-flight workers              (up to Concurrency)
+	//   - results buffered in resultCh   (up to Concurrency)
+	//   - the single-slot pendingFresh prefetch the dispatcher stages
+	//     one-ahead of itself             (1)
+	// so the worst-case overshoot is 2*Concurrency+1, not 2*Concurrency.
+	// (Concurrency=1 here => bound 7; the +1 slot is what made the old
+	// 2*Concurrency bound flake at depth 7.) The test cares that the queue
+	// stays bounded near MaxQueueSize, not unbounded — anything dramatically
+	// larger would be the symptom of a real back-pressure failure. See
+	// enqueueRetry's doc comment in continuous.go.
+	require.LessOrEqual(t, stats.RetryQueueDepth, cfg.MaxQueueSize+2*cfg.Concurrency+1,
 		"queue depth should stay bounded under back-pressure")
 }
 
@@ -434,8 +472,9 @@ func (r *fakeRecopier) callCount() int {
 
 // TestRecopyOnStableDivergence: a chunk mismatches twice with the source
 // CRC unchanged. With a Recopier configured, the checker calls Recopy
-// instead of returning ErrPermanentDivergence; the pass completes cleanly
-// and the chunk is counted in the recopies bucket.
+// instead of returning ErrPermanentDivergence; the pass completes with
+// the chunk counted in the recopies bucket, and FirstCleanPass fires on
+// the follow-up pass that re-verifies the repaired chunks.
 func TestRecopyOnStableDivergence(t *testing.T) {
 	chunker := newTestChunker(2)
 	// The fake recopier "fixes" the chunk so subsequent reads pass. We
@@ -469,6 +508,128 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 	stats := c.Stats()
 	require.Equal(t, uint64(0), stats.PermanentFailures, "with a Recopier, no permanent failures")
 	require.GreaterOrEqual(t, recopier.callCount(), 2, "both chunks should have been recopied")
+
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestRecopyPassDoesNotFireFirstCleanPass: a chunk stably diverges and is
+// recopied. The pass containing the recopy must NOT fire FirstCleanPass —
+// a recopy is a repair, not a verification (the rewritten rows were never
+// observed equal, and the recopy itself can race the live replication
+// feed). The signal must fire only after the following pass re-reads
+// every chunk clean with zero recopies.
+func TestRecopyPassDoesNotFireFirstCleanPass(t *testing.T) {
+	chunker := newTestChunker(1)
+	var recopied sync.Map
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			recopied.Store(chunk, true)
+			return nil
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	// gate blocks the first post-recopy read (pass 2's fresh read) until
+	// the test has asserted that pass 1 completed without firing the
+	// signal. Without it there would be a race between "pass 1 done" and
+	// "pass 2 instantly completes and legitimately fires".
+	gate := make(chan struct{})
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			if _, ok := recopied.Load(chunk); ok {
+				select {
+				case <-gate:
+				case <-ctx.Done():
+					return 0, 0, 0, ctx.Err()
+				}
+				return 42, 42, 1000, nil // post-recopy reads verify clean
+			}
+			return 100, 99, 1000, nil // stable divergence: src constant, tgt wrong
+		},
+	)
+
+	stop, _ := runUntil(t, c)
+
+	// Wait for pass 1 — the pass containing the recopy — to complete.
+	deadline := time.After(2 * time.Second)
+	for c.Stats().PassesCompleted < 1 {
+		select {
+		case <-deadline:
+			t.Fatalf("pass 1 did not complete in time; stats=%+v", c.Stats())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	require.Equal(t, 1, recopier.callCount(), "chunk should have been recopied in pass 1")
+
+	// Pass 1 contained a recopy, so it must not satisfy the
+	// first-clean-pass criterion. Pass 2's read is parked on the gate, so
+	// this check cannot race a legitimate later signal.
+	select {
+	case <-c.FirstCleanPass():
+		t.Fatal("FirstCleanPass fired in the pass containing the recopy — recopied data was never read-verified")
+	default:
+	}
+
+	// Release pass 2's read: the recopied chunk re-verifies equal, the
+	// pass completes with zero recopies, and the signal fires.
+	close(gate)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire on the follow-up clean pass; stats=%+v", c.Stats())
+	}
+	stats := c.Stats()
+	require.GreaterOrEqual(t, stats.PassesCompleted, uint64(2),
+		"signal requires the follow-up pass, so at least 2 passes must have completed")
+	require.Equal(t, uint64(0), stats.PermanentFailures)
+
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestRecopiedChunkReverifiedBeforeCleanPass: by the time FirstCleanPass
+// fires, the recopied chunk's range must have been re-read and observed
+// equal. The re-read happens on the next pass's fresh walk; the signal
+// cannot fire before that pass completes, so observing the signal
+// guarantees the re-read happened (happens-before via the pass barrier).
+func TestRecopiedChunkReverifiedBeforeCleanPass(t *testing.T) {
+	chunker := newTestChunker(2)
+	divergent := chunker.chunks[0] // only this chunk diverges
+	var recopied sync.Map
+	var readAfterRecopy atomic.Bool
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			recopied.Store(chunk, true)
+			return nil
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			if _, ok := recopied.Load(chunk); ok {
+				readAfterRecopy.Store(true)
+				return 42, 42, 1000, nil // post-recopy read verifies clean
+			}
+			if chunk == divergent {
+				return 100, 99, 1000, nil // stable divergence until recopied
+			}
+			return 42, 42, 1000, nil
+		},
+	)
+
+	stop, _ := runUntil(t, c)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire; stats=%+v calls=%d", c.Stats(), recopier.callCount())
+	}
+	require.Equal(t, 1, recopier.callCount(), "exactly one chunk should have been recopied")
+	require.True(t, readAfterRecopy.Load(),
+		"recopied chunk was never re-read before FirstCleanPass fired")
 
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
@@ -545,6 +706,74 @@ func TestRecopyNotCalledForHotChunk(t *testing.T) {
 	require.Equal(t, uint64(0), c.Stats().PermanentFailures)
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestRecopyOnRowCountMismatch is the continuous-checker analog of the
+// defense-in-depth fix: the source and target CRCs MATCH on every read, but
+// the row counts differ and stay stable. Before the fix this passed silently
+// (CRC equality alone). Now the count divergence is treated like a checksum
+// mismatch: it enqueues a retry, the retry sees stable divergence (source
+// signature unchanged, target signature still wrong), and the configured
+// Recopier is invoked. After recopy the signatures match and the pass
+// completes cleanly.
+func TestRecopyOnRowCountMismatch(t *testing.T) {
+	chunker := newTestChunker(2)
+	var recopied sync.Map // chunk pointer → recopied? (bool)
+	recopier := &fakeRecopier{
+		recopyFn: func(ctx context.Context, chunk *table.Chunk) error {
+			recopied.Store(chunk, true)
+			return nil
+		},
+	}
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+
+	c := newTestCheckerSig(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, uint64, error) {
+			if _, ok := recopied.Load(chunk); ok {
+				// Post-recopy: CRCs AND counts match.
+				return 42, 42, 10, 10, nil
+			}
+			// Pre-recopy: CRCs are IDENTICAL (the checksum-only check would
+			// pass!) but the source has one more row than the target. Stable
+			// across the retry window so it becomes a recopy, not a hot chunk.
+			return 42, 42, 11, 10, nil
+		},
+	)
+
+	stop, _ := runUntil(t, c)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire; stats=%+v calls=%d", c.Stats(), recopier.callCount())
+	}
+	stats := c.Stats()
+	require.Equal(t, uint64(0), stats.PermanentFailures)
+	require.Equal(t, uint64(2), stats.MismatchesDetected, "both chunks mismatch on row count despite equal CRC")
+	require.GreaterOrEqual(t, recopier.callCount(), 2, "both row-count-divergent chunks should have been recopied")
+
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestPermanentDivergenceOnRowCount: with matching CRCs but a stable row-count
+// difference and NO Recopier, the continuous checker must surface
+// ErrPermanentDivergence — the count mismatch is a real divergence, not a
+// silent pass.
+func TestPermanentDivergenceOnRowCount(t *testing.T) {
+	chunker := newTestChunker(1)
+	c := newTestCheckerSig(t, chunker, fastConfig(),
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, uint64, error) {
+			// CRCs always match; source always has one extra row.
+			return 100, 100, 6, 5, nil
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := c.Run(ctx)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrPermanentDivergence), "expected ErrPermanentDivergence, got %v", err)
+	require.Equal(t, uint64(1), c.Stats().PermanentFailures)
 }
 
 // TestMultiplePassesResetCounters: after a clean pass, counters reset for
