@@ -81,6 +81,206 @@ func TestCutOver(t *testing.T) {
 	require.Equal(t, 2, count)
 }
 
+// TestCutoverRenameCompletedDetection unit-tests the renameCompleted helper
+// against real server state: it must detect a committed cutover rename
+// (original exists, _new gone, _old exists — for every table in the config)
+// and must not claim success in any other state.
+func TestCutoverRenameCompletedDetection(t *testing.T) {
+	t.Parallel()
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// NewTestTable registers cleanup for the table and its _new/_old artifacts.
+	testutils.NewTestTable(t, "renamecheck_a", `CREATE TABLE renamecheck_a (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY
+	)`)
+	testutils.NewTestTable(t, "renamecheck_b", `CREATE TABLE renamecheck_b (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _renamecheck_a_new (id int NOT NULL AUTO_INCREMENT PRIMARY KEY)`)
+	testutils.RunSQL(t, `CREATE TABLE _renamecheck_b_new (id int NOT NULL AUTO_INCREMENT PRIMARY KEY)`)
+
+	// renameCompleted only reads db and config, so the CutOver can be
+	// constructed directly without a change feed.
+	cutover := &CutOver{
+		db:     db,
+		logger: slog.Default(),
+		config: []*cutoverConfig{
+			{
+				table:        table.NewTableInfo(db, cfg.DBName, "renamecheck_a"),
+				newTable:     table.NewTableInfo(db, cfg.DBName, "_renamecheck_a_new"),
+				oldTableName: "_renamecheck_a_old",
+			},
+			{
+				table:        table.NewTableInfo(db, cfg.DBName, "renamecheck_b"),
+				newTable:     table.NewTableInfo(db, cfg.DBName, "_renamecheck_b_new"),
+				oldTableName: "_renamecheck_b_old",
+			},
+		},
+	}
+
+	// State 1: nothing renamed yet (_new exists, _old absent) — not completed.
+	completed, err := cutover.renameCompleted(t.Context())
+	require.NoError(t, err)
+	require.False(t, completed, "must not report success before the rename has run")
+
+	// State 2: partial-cutover-shaped state on table a (original renamed away,
+	// _new still present) — not completed. This is the state the test-only
+	// partialRenameForTest seam produces; it must never be mistaken for a
+	// committed cutover.
+	testutils.RunSQL(t, "RENAME TABLE renamecheck_a TO _renamecheck_a_old")
+	completed, err = cutover.renameCompleted(t.Context())
+	require.NoError(t, err)
+	require.False(t, completed, "must not report success for a partial rename state")
+	testutils.RunSQL(t, "RENAME TABLE _renamecheck_a_old TO renamecheck_a") // undo
+
+	// State 3: full cutover rename committed on table a only — not completed,
+	// because every table in the config must show the post-rename signature.
+	testutils.RunSQL(t, "RENAME TABLE renamecheck_a TO _renamecheck_a_old, _renamecheck_a_new TO renamecheck_a")
+	completed, err = cutover.renameCompleted(t.Context())
+	require.NoError(t, err)
+	require.False(t, completed, "must not report success while another table's rename is missing")
+
+	// State 4: full cutover rename committed on both tables — completed.
+	testutils.RunSQL(t, "RENAME TABLE renamecheck_b TO _renamecheck_b_old, _renamecheck_b_new TO renamecheck_b")
+	completed, err = cutover.renameCompleted(t.Context())
+	require.NoError(t, err)
+	require.True(t, completed, "must detect a committed cutover rename")
+}
+
+// TestCutoverConnectionLossAfterRenameCommitted exercises the ambiguous
+// failure path end to end: the server commits the cutover RENAME TABLE but
+// the client sees a connection-loss error instead of the OK packet (injected
+// via the testInjectRenameError seam). Run must detect from server state that
+// the rename was committed and report the cutover as successful instead of
+// retrying into ER_NO_SUCH_TABLE failures.
+func TestCutoverConnectionLossAfterRenameCommitted(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "cutoverconnloss", `CREATE TABLE cutoverconnloss (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _cutoverconnloss_new (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _cutoverconnloss_chkpnt (a int)`) // for binlog advancement
+	// Two rows in the original table so post-cutover state is distinguishable.
+	testutils.RunSQL(t, `INSERT INTO cutoverconnloss VALUES (1, 2), (2, 2)`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, cfg.DBName, "cutoverconnloss")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t1new := table.NewTableInfo(db, cfg.DBName, "_cutoverconnloss_new")
+	logger := slog.Default()
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+
+	cutover, err := NewCutOver(db, []*cutoverConfig{
+		{
+			table:        t1,
+			newTable:     t1new,
+			oldTableName: "_cutoverconnloss_old",
+		},
+	}, feed, dbconn.NewDBConfig(), logger)
+	require.NoError(t, err)
+	// Simulate the server committing the rename while the client's
+	// connection dies before the OK packet is read. mysql.ErrInvalidConn is
+	// exactly what go-sql-driver returns when a connection dies mid-statement.
+	cutover.testInjectRenameError = mysql.ErrInvalidConn
+
+	require.NoError(t, cutover.Run(t.Context()),
+		"a rename committed by the server must be reported as success despite the connection loss")
+
+	// Verify the cutover actually happened exactly once: the original name
+	// now points at the (empty) new table, _old holds the 2 original rows,
+	// and _new is gone.
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cutoverconnloss").Scan(&count))
+	require.Equal(t, 0, count)
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _cutoverconnloss_old").Scan(&count))
+	require.Equal(t, 2, count)
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = '_cutoverconnloss_new'",
+		cfg.DBName).Scan(&count))
+	require.Equal(t, 0, count)
+}
+
+// TestCutoverDeterministicErrorDoesNotVerify is the negative counterpart of
+// TestCutoverConnectionLossAfterRenameCommitted: when an attempt fails with a
+// deterministic (non-connection) error, the state verification must NOT kick
+// in — the server positively reported a failure, so the existing retry
+// behavior is preserved and Run returns an error.
+func TestCutoverDeterministicErrorDoesNotVerify(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "cutoverdeterr", `CREATE TABLE cutoverdeterr (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _cutoverdeterr_new (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	testutils.RunSQL(t, `CREATE TABLE _cutoverdeterr_chkpnt (a int)`) // for binlog advancement
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	config := dbconn.NewDBConfig()
+	config.MaxRetries = 2
+	config.LockWaitTimeout = 1
+
+	db, err := dbconn.New(testutils.DSN(), config)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, cfg.DBName, "cutoverdeterr")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t1new := table.NewTableInfo(db, cfg.DBName, "_cutoverdeterr_new")
+	logger := slog.Default()
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+
+	cutover, err := NewCutOver(db, []*cutoverConfig{
+		{
+			table:        t1,
+			newTable:     t1new,
+			oldTableName: "_cutoverdeterr_old",
+		},
+	}, feed, config, logger)
+	require.NoError(t, err)
+	// A deterministic error: the rename is committed underneath, but the
+	// reported error is not connection-class, so verification must not run
+	// and Run must fail (attempt 2 then fails on the missing _new table).
+	cutover.testInjectRenameError = &mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"}
+
+	err = cutover.Run(t.Context())
+	require.Error(t, err, "a deterministic error must keep the existing retry-then-fail behavior")
+	require.Contains(t, err.Error(), "attempt 1:")
+}
+
 func TestMDLLockFails(t *testing.T) {
 	t.Parallel()
 	testutils.NewTestTable(t, "mdllocks", `CREATE TABLE mdllocks (
