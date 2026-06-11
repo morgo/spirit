@@ -777,6 +777,246 @@ func TestSetBufferedPosIsMonotonic(t *testing.T) {
 	require.Equal(t, nextFile, client.getBufferedPos())
 }
 
+// TestShouldSkipReplayedEvent unit-tests the skip decision: an event at or
+// below the live bufferedPos is already buffered/applied and must not be
+// re-delivered, with full (file, pos) ordering across rotations.
+func TestShouldSkipReplayedEvent(t *testing.T) {
+	buffered := mysql.Position{Name: "binlog.000010", Pos: 200}
+	tests := []struct {
+		name        string
+		eventPos    mysql.Position
+		bufferedPos mysql.Position
+		skip        bool
+	}{
+		{
+			name:        "same file below bufferedPos: already represented, skip",
+			eventPos:    mysql.Position{Name: "binlog.000010", Pos: 100},
+			bufferedPos: buffered,
+			skip:        true,
+		},
+		{
+			name: "same file equal to bufferedPos: event end == high-water " +
+				"mark means it is the last buffered event, skip",
+			eventPos:    mysql.Position{Name: "binlog.000010", Pos: 200},
+			bufferedPos: buffered,
+			skip:        true,
+		},
+		{
+			name: "same file just above bufferedPos: genuinely new event, " +
+				"deliver (this is also why no replay flag is needed — the " +
+				"live stream always runs ahead of bufferedPos)",
+			eventPos:    mysql.Position{Name: "binlog.000010", Pos: 201},
+			bufferedPos: buffered,
+			skip:        false,
+		},
+		{
+			name:        "earlier file: skip regardless of offset",
+			eventPos:    mysql.Position{Name: "binlog.000009", Pos: 999999},
+			bufferedPos: buffered,
+			skip:        true,
+		},
+		{
+			name: "later file: deliver regardless of offset (bufferedPos can " +
+				"sit in an earlier file just after a rotation)",
+			eventPos:    mysql.Position{Name: "binlog.000011", Pos: 4},
+			bufferedPos: buffered,
+			skip:        false,
+		},
+		{
+			name: "numeric suffix ordering, not lexicographic: file .000100 " +
+				"is later than bufferedPos file .000099",
+			eventPos:    mysql.Position{Name: "binlog.000100", Pos: 4},
+			bufferedPos: mysql.Position{Name: "binlog.000099", Pos: 5000},
+			skip:        false,
+		},
+		// The next case captures the regression the live-bufferedPos
+		// comparison fixes (Copilot review on #919): once a concurrent
+		// flush has advanced the high-water boundary, a replayed event that
+		// a snapshot of the old flushedPos would have let through is now
+		// correctly skipped, because the boundary is read live. With
+		// buffered=200 a snapshot-of-old-flushedPos=100 would have delivered
+		// pos 150 (corrupting the map); the live boundary skips it.
+		{
+			name: "event below the live (advanced) bufferedPos is skipped " +
+				"even though it sits above where the replay's old flushedPos was",
+			eventPos:    mysql.Position{Name: "binlog.000010", Pos: 150},
+			bufferedPos: buffered,
+			skip:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.skip, shouldSkipReplayedEvent(tt.eventPos, tt.bufferedPos))
+		})
+	}
+}
+
+// TestShouldSkipReplayedEventWidensWithBufferedPos exercises the core
+// property that motivated switching from a flushedPos snapshot to the
+// live bufferedPos: as the replay catches up and bufferedPos advances
+// (e.g. a concurrent periodic flush, or the replay crossing the old
+// high-water mark), events that were below an earlier boundary stay
+// skipped and the boundary widens to cover newly-buffered positions.
+// This is the unit-level expression of "flushedPos/bufferedPos advances
+// during replay -> later events also skipped".
+func TestShouldSkipReplayedEventWidensWithBufferedPos(t *testing.T) {
+	const file = "binlog.000010"
+	// Replay re-reads E1..E4. At recreate the high-water mark was 400.
+	// The boundary is the live bufferedPos; while it sits at 400, every
+	// replayed event up to 400 is skipped — none can corrupt the map.
+	boundary := mysql.Position{Name: file, Pos: 400}
+	for _, pos := range []uint32{100, 200, 300, 400} {
+		ev := mysql.Position{Name: file, Pos: pos}
+		require.True(t, shouldSkipReplayedEvent(ev, boundary),
+			"replayed event at %d must be skipped while bufferedPos is 400", pos)
+	}
+	// The first genuinely-new event (past the high-water mark) is
+	// delivered; that advances bufferedPos to its end position.
+	newEvent := mysql.Position{Name: file, Pos: 450}
+	require.False(t, shouldSkipReplayedEvent(newEvent, boundary),
+		"an event past the high-water mark must be delivered")
+	boundary = newEvent
+	// A subsequent live event is above the now-advanced boundary, so the
+	// filter is inert for it (delivered).
+	require.False(t, shouldSkipReplayedEvent(mysql.Position{Name: file, Pos: 500}, boundary),
+		"once the boundary advances, later live events are delivered")
+}
+
+// TestRecreateStreamerSkipsFlushedReplay locks in the fix end-to-end by
+// driving the real consecutive-error path that calls recreateStreamer:
+//  1. Stream an INSERT + UPDATE for one PK and flush, so the target holds
+//     the newest image and flushedPos is past both events.
+//  2. Write one more row after the flush and wait for it to buffer, so it
+//     sits in the (flushedPos, bufferedPos] window — buffered but not yet
+//     flushed (the window a flushedPos snapshot would miss).
+//  3. Kill the syncer so readStream's error path recreates the streamer
+//     and replays the current file from position 4.
+//  4. Assert nothing already-buffered was re-buffered (neither key
+//     regressed) and the unflushed key keeps its newest image.
+//  5. Kill the syncer again to assert a second replay re-buffers nothing.
+func TestRecreateStreamerSkipsFlushedReplay(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replayskipt1, replayskipt2")
+	testutils.RunSQL(t, "CREATE TABLE replayskipt1 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE replayskipt2 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "replayskipt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "replayskipt2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// serverPos reads the server's current binlog position WITHOUT
+	// rotating (unlike getCurrentBinlogPosition, which FLUSHes BINARY
+	// LOGS first). Rotation must be avoided in the setup phase so the
+	// flushed events stay inside the file that the recreation replays.
+	serverPos := func() mysql.Position {
+		var name, fake string
+		var pos uint32
+		err := db.QueryRowContext(t.Context(), "SHOW MASTER STATUS").Scan(&name, &pos, &fake, &fake, &fake)
+		if err != nil {
+			// MySQL 8.2+ removed SHOW MASTER STATUS.
+			require.NoError(t, db.QueryRowContext(t.Context(), "SHOW BINARY LOG STATUS").Scan(&name, &pos, &fake, &fake, &fake))
+		}
+		return mysql.Position{Name: name, Pos: pos}
+	}
+	// waitBuffered waits (without rotating) until the reader has
+	// buffered everything the server has written so far.
+	waitBuffered := func() {
+		target := serverPos()
+		require.Eventually(t, func() bool {
+			return client.getBufferedPos().Compare(target) >= 0
+		}, 15*time.Second, 10*time.Millisecond, "reader did not catch up to %v", target)
+	}
+	// killSyncer closes the syncer out from under readStream. GetEvent
+	// then fails until maxConsecutiveErrors accumulate (~500ms), at
+	// which point readStream calls recreateStreamer and the dump
+	// restarts at position 4 of the current file.
+	killSyncer := func() {
+		client.mu.Lock()
+		syncer := client.syncer
+		client.mu.Unlock()
+		require.NotNil(t, syncer)
+		syncer.Close()
+	}
+	// E1: insert the row; E2: update it to its newest image. Both events
+	// land in the binlog file the dump is currently reading.
+	testutils.RunSQL(t, "INSERT INTO replayskipt1 (a, b) VALUES (1, 1)")
+	testutils.RunSQL(t, "UPDATE replayskipt1 SET b = 2 WHERE a = 1")
+	waitBuffered()
+	require.Equal(t, 1, client.GetDeltaLen(), "INSERT+UPDATE on the same PK should dedupe to one buffered change")
+
+	// Flush. The target now holds the newest image and flushedPos is at
+	// or past the end of the UPDATE event. (The low-level flush is used
+	// because the public Flush calls BlockWait, which rotates the binary
+	// log and would move the events out of the replayed file.)
+	require.NoError(t, client.flush(t.Context(), false, nil))
+	require.Equal(t, 0, client.GetDeltaLen())
+	flushedAtRecreate := client.Position()
+	require.NotEmpty(t, flushedAtRecreate)
+	var bVal int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 1").Scan(&bVal))
+	require.Equal(t, 2, bVal)
+
+	// Write one more event after the flush and wait for the reader to
+	// buffer it. It now sits in the (flushedPos, bufferedPos] window —
+	// buffered with its newest image but not yet flushed. This is exactly
+	// the window a snapshot of the old flushedPos would have failed to
+	// protect; the live-bufferedPos filter must keep the replay from
+	// regressing it.
+	testutils.RunSQL(t, "INSERT INTO replayskipt1 (a, b) VALUES (2, 5)")
+	waitBuffered()
+	require.Equal(t, 1, client.GetDeltaLen(),
+		"the post-flush INSERT must be buffered before the recreation")
+
+	client.mu.Lock()
+	flushedBeforeRecreate := client.flushedPos
+	client.mu.Unlock()
+	bufferedBeforeRecreate := client.getBufferedPos()
+	require.Positive(t, bufferedBeforeRecreate.Compare(flushedBeforeRecreate),
+		"the unflushed event must put bufferedPos ahead of flushedPos before recreation")
+
+	killSyncer()
+
+	// BlockWait targets the server's position after rotating the binary
+	// log, and the reader can only reach it by going through the
+	// recreation and replaying the whole current file. Returning without
+	// error therefore means the replay has completed.
+	require.NoError(t, client.BlockWait(t.Context()))
+
+	// Neither already-buffered event may have been regressed by the
+	// replay: key 1 (flushed) must not return to the buffer at all, and
+	// key 2 (buffered-but-unflushed) must keep its newest image rather
+	// than be overwritten by a replayed stale image. Delta stays 1 (just
+	// key 2, still holding b=5).
+	require.Equal(t, 1, client.GetDeltaLen(),
+		"replay must not re-buffer already-buffered events; only the unflushed key 2 remains")
+
+	require.NoError(t, client.flush(t.Context(), false, nil))
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 1").Scan(&bVal))
+	require.Equal(t, 2, bVal, "key 1 must keep its newest image")
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replayskipt2 WHERE a = 2").Scan(&bVal))
+	require.Equal(t, 5, bVal, "the unflushed event must keep its newest image and flush correctly")
+
+	// A second recreation must likewise replay without re-buffering
+	// anything, since nothing unflushed remains.
+	killSyncer()
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 0, client.GetDeltaLen(),
+		"nothing unflushed remains, so the second replay must re-buffer nothing")
+}
+
 // TestMaxRecreateAttemptsError tests that the readStream goroutine sets a stream error
 // and exits cleanly after exhausting the maximum number of streamer recreation attempts.
 func TestMaxRecreateAttemptsError(t *testing.T) {
