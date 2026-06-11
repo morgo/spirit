@@ -272,13 +272,26 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	t.chunkPtr = chunk.LowerBound.Value[0]
 
 	// For the optimistic chunker, we also calculate progress (i.e. rowsCopied)
-	// Based on the progress of copying the auto_increment key.
-	// So we don't have to recover it from the checkpoint, we can just set the value
-	// from the current chunkPtr.
-	t.rowsCopied, err = strconv.ParseUint(t.chunkPtr.String(), 10, 64)
+	// based on the progress of copying the auto_increment key, so we don't have
+	// to recover it from the checkpoint. A fresh copy starts chunkPtr at
+	// MinValue() with rowsCopied at 0 and then advances both together (see
+	// Next() and Feedback()), so rowsCopied is really "distance travelled from
+	// MinValue", not the absolute key. Seed it the same way on resume so the
+	// reported progress percentage stays continuous across a stop/restart.
+	// Seeding from the absolute chunkPtr would inflate progress by
+	// MinValue/MaxValue, which is large for tables whose low keys have been
+	// purged (MIN(pk) far above 0).
+	ptrVal, err := strconv.ParseUint(t.chunkPtr.String(), 10, 64)
 	if err != nil {
 		return fmt.Errorf("failed to parse chunkPtr to uint64: %w", err)
 	}
+	// MinValue() may not be a non-negative integer we can subtract (e.g. a
+	// signed key holding negative values). In that case fall back to the
+	// absolute pointer rather than failing the resume.
+	if minVal, minErr := strconv.ParseUint(t.Ti.MinValue().String(), 10, 64); minErr == nil && ptrVal >= minVal {
+		ptrVal -= minVal
+	}
+	t.rowsCopied = ptrVal
 	return nil
 }
 
