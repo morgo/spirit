@@ -31,10 +31,22 @@ type ShardedApplier struct {
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
 
-	// Pending work tracking (shared across all shards)
-	pendingWork  map[int64]*pendingWork
-	pendingMutex sync.Mutex
-	nextWorkID   int64 // Atomic counter for work IDs
+	// Pending work tracking (shared across all shards).
+	//
+	// Completion invariant (#765): a pendingWork entry is "claimed" by
+	// deleting it from the map AND incrementing callbacksInFlight in the
+	// same pendingMutex critical section. Exactly one path can claim an
+	// entry — the feedbackCoordinator (error or success path) or Apply's
+	// ctx-cancel cleanup — so the callback is invoked exactly once. The
+	// claimer then invokes the callback without holding the lock (callbacks
+	// may be slow or re-enter the applier) and decrements callbacksInFlight
+	// when it returns. Wait() returns only when len(pendingWork) == 0 AND
+	// callbacksInFlight == 0, so it cannot return before every callback has
+	// finished running.
+	pendingWork       map[int64]*pendingWork
+	pendingMutex      sync.Mutex
+	callbacksInFlight int   // claimed work whose callback has not returned yet; guarded by pendingMutex
+	nextWorkID        int64 // Atomic counter for work IDs
 
 	// Context management
 	cancelFunc context.CancelFunc
@@ -290,6 +302,12 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	// forever, hanging Wait(). Chunklets already in shard buffers may still be
 	// processed; their completions arrive at the coordinator after pendingWork
 	// has been deleted and are dropped (logged as "unknown work").
+	//
+	// The claim (delete + callbacksInFlight increment, see the completion
+	// invariant on pendingWork) is atomic under pendingMutex, so this cleanup
+	// and the feedbackCoordinator can never both invoke the callback: if the
+	// coordinator already claimed the work (e.g. an error completion raced
+	// this cancellation), `exists` is false and we return without invoking.
 	for _, chunkletData := range allChunklets {
 		select {
 		case a.shards[chunkletData.shardID].chunkletBuffer <- chunkletData:
@@ -298,10 +316,11 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 			pending, exists := a.pendingWork[workID]
 			if exists {
 				delete(a.pendingWork, workID)
+				a.callbacksInFlight++
 			}
 			a.pendingMutex.Unlock()
 			if exists {
-				pending.callback(0, ctx.Err())
+				a.invokeCallback(pending.callback, 0, ctx.Err())
 			}
 			return ctx.Err()
 		}
@@ -309,7 +328,27 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	return nil
 }
 
-// Wait blocks until all pending work is complete and all callbacks have been invoked
+// invokeCallback runs the callback for work the caller has already claimed
+// (deleted from pendingWork and counted in callbacksInFlight while holding
+// pendingMutex), then decrements callbacksInFlight. Must be called WITHOUT
+// pendingMutex held. See the completion invariant on pendingWork.
+func (a *ShardedApplier) invokeCallback(callback ApplyCallback, affectedRows int64, err error) {
+	// Decrement in a defer so callbacksInFlight is balanced on every exit path,
+	// including a panicking callback. Without this, a recovered panic upstream
+	// would leave callbacksInFlight stuck above zero and wedge Wait() forever.
+	// The panic still propagates after the deferred decrement runs.
+	defer func() {
+		a.pendingMutex.Lock()
+		a.callbacksInFlight--
+		a.pendingMutex.Unlock()
+	}()
+	callback(affectedRows, err)
+}
+
+// Wait blocks until all pending work is complete and all callbacks have been invoked.
+// Checking callbacksInFlight in addition to len(pendingWork) is what upholds
+// the "all callbacks have been invoked" half of the contract: claimed work has
+// already left the map, but its callback may still be running (#765).
 func (a *ShardedApplier) Wait(ctx context.Context) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -317,14 +356,15 @@ func (a *ShardedApplier) Wait(ctx context.Context) error {
 	for {
 		a.pendingMutex.Lock()
 		pendingCount := len(a.pendingWork)
+		callbacksInFlight := a.callbacksInFlight
 		a.pendingMutex.Unlock()
 
-		if pendingCount == 0 {
+		if pendingCount == 0 && callbacksInFlight == 0 {
 			a.logger.Debug("Wait: all pending work complete")
 			return nil
 		}
 
-		a.logger.Debug("Wait: waiting for pending work", "pendingCount", pendingCount)
+		a.logger.Debug("Wait: waiting for pending work", "pendingCount", pendingCount, "callbacksInFlight", callbacksInFlight)
 
 		select {
 		case <-ctx.Done():
@@ -419,6 +459,14 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		return 0, nil
 	}
 
+	// Fast path on shutdown: if ctx is already cancelled, fail the chunklet
+	// without building the (potentially large) INSERT statement or burning
+	// retries against a dead context. writeWorker relies on chunklets failing
+	// quickly after cancellation so Stop() can drain the buffer promptly.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
 	// Create a context with timeout for the entire operation
 	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
 	defer cancel()
@@ -493,13 +541,22 @@ func (a *ShardedApplier) feedbackCoordinator() {
 			return
 		}
 
-		// If there was an error, invoke callback immediately
+		// If there was an error, claim the work and invoke the callback
+		// immediately. The claim (delete + callbacksInFlight increment, see
+		// the completion invariant on pendingWork) is atomic under
+		// pendingMutex so that:
+		//  (a) Apply's ctx-cancel cleanup cannot find the entry and invoke
+		//      the callback a second time.
+		//  (b) Wait() — which requires pendingWork empty AND
+		//      callbacksInFlight zero — cannot return until the callback
+		//      has finished running (#765; the single-target applier was
+		//      fixed first, this mirrors it).
 		if completion.err != nil {
 			callback := pending.callback
-			// Remove the work from pending map before invoking callback
 			delete(a.pendingWork, completion.workID)
+			a.callbacksInFlight++
 			a.pendingMutex.Unlock()
-			callback(0, completion.err)
+			a.invokeCallback(callback, 0, completion.err)
 			return
 		}
 
@@ -514,16 +571,18 @@ func (a *ShardedApplier) feedbackCoordinator() {
 		if pending.completedChunklets == pending.totalChunklets {
 			a.logger.Debug("feedbackCoordinator all chunklets complete, invoking callback", "workID", completion.workID)
 
-			// Invoke the callback
 			callback := pending.callback
 			affectedRows := pending.totalAffectedRows
 
-			// Remove completed work from pending map
+			// Claim the work (delete + callbacksInFlight increment) under
+			// the lock, then invoke the callback. See the completion
+			// invariant on pendingWork and the comment in the error path
+			// above — Wait() cannot return until the callback has finished,
+			// and no other path can invoke it again.
 			delete(a.pendingWork, completion.workID)
+			a.callbacksInFlight++
 			a.pendingMutex.Unlock()
-
-			// Invoke callback outside the lock
-			callback(affectedRows, nil)
+			a.invokeCallback(callback, affectedRows, nil)
 		} else {
 			a.pendingMutex.Unlock()
 		}

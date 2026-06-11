@@ -3,6 +3,7 @@ package applier
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -879,9 +880,15 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
 	}
 
-	// Start applying but cancel immediately
+	// Hold the callback open until Wait() has returned. Wait() counts an
+	// executing callback as pending work (see callbacksInFlight), so this
+	// guarantees Wait(cancelledCtx) observes pending work for the whole
+	// duration of the call and must return ctx.Err(). Without this the test
+	// is racy: the work can complete entirely before Wait's first poll, in
+	// which case Wait correctly returns nil.
+	callbackRelease := make(chan struct{})
 	callback := func(affectedRows int64, err error) {
-		// Callback may or may not be invoked depending on timing
+		<-callbackRelease
 	}
 
 	err = applier.Apply(cancelCtx, chunk, testRows, callback)
@@ -891,8 +898,114 @@ func TestSingleTargetApplierContextCancellation(t *testing.T) {
 
 	// Wait should return context cancelled error
 	err = applier.Wait(cancelCtx)
+	close(callbackRelease)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestSingleTargetApplierCancelCallbackRace stress-tests the interaction
+// between the feedbackCoordinator's error path and Apply's ctx-cancel cleanup.
+// Both paths can invoke the work's callback; the completion invariant (see the
+// pendingWork field docs) requires that exactly one of them claims the work,
+// so the callback runs exactly once.
+//
+// Historically (after the original #765 fix) the coordinator's error path
+// released pendingMutex between invoking the callback and deleting the
+// pendingWork entry. If Apply was concurrently blocked sending chunklets and
+// its ctx was cancelled inside that window, Apply's cleanup found the entry
+// still in the map, deleted it, and invoked the callback a second time. With
+// real callbacks — e.g. the checksum recopier's, which sends to a capacity-1
+// done channel and may return without draining it — the second invocation can
+// block forever on the coordinator goroutine, wedging the whole applier.
+//
+// This test forces the window deterministically: every write fails fast (the
+// target table is dropped; error 1146 is fatal and not retried), and the first
+// callback invocation cancels Apply's context — while Apply is still blocked
+// sending chunklets, because the work splits into more chunklets than the
+// buffer holds — then parks until Apply has returned. Buggy code double-invokes
+// the callback on effectively every iteration; correct code invokes it exactly
+// once.
+func TestSingleTargetApplierCancelCallbackRace(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_cbrace_test")
+	testutils.RunSQL(t, "CREATE DATABASE single_cbrace_test")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	target := base.Clone()
+	target.DBName = "single_cbrace_test"
+	targetDB, err := sql.Open("mysql", target.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+
+	_, err = targetDB.ExecContext(t.Context(), `CREATE TABLE test_table (id INT PRIMARY KEY, value INT)`)
+	require.NoError(t, err)
+
+	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
+	require.NoError(t, targetTable.SetInfo(t.Context()))
+
+	// Drop the table so that every chunklet write fails immediately with a
+	// fatal (non-retried) error, producing error completions while Apply is
+	// still sending chunklets.
+	_, err = targetDB.ExecContext(t.Context(), "DROP TABLE test_table")
+	require.NoError(t, err)
+
+	chunk := &table.Chunk{
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
+	}
+
+	// Enough rows that Apply splits the work into more chunklets than fit in
+	// chunkletBuffer — Apply blocks mid-send, which is the precondition for
+	// its ctx-cancel cleanup path to race the coordinator.
+	rows := make([][]any, (defaultBufferSize+32)*chunkletMaxRows)
+	for i := range rows {
+		rows[i] = []any{int64(i), int64(i)}
+	}
+
+	for iteration := range 10 {
+		ctx, cancel := context.WithCancel(t.Context())
+		cfg := NewApplierDefaultConfig()
+		cfg.Threads = 1 // slow consumption so Apply stays blocked mid-send
+		applier, err := NewSingleTargetApplier(Target{DB: targetDB, Config: target}, cfg)
+		require.NoError(t, err)
+		require.NoError(t, applier.Start(ctx))
+
+		var callbackCount atomic.Int32
+		applyReturned := make(chan struct{})
+		callback := func(_ int64, err error) {
+			if callbackCount.Add(1) == 1 {
+				// First invocation: cancel Apply's ctx while it is still
+				// blocked sending chunklets, then park until Apply has
+				// returned. This holds the completion path open across
+				// Apply's cleanup, maximally exposing any window in which
+				// the work has not yet been claimed.
+				cancel()
+				<-applyReturned
+			}
+		}
+
+		applyErr := make(chan error, 1)
+		go func() {
+			applyErr <- applier.Apply(ctx, chunk, rows, callback)
+		}()
+		err = <-applyErr
+		close(applyReturned)
+		// Apply must have been interrupted by the cancel issued from the
+		// callback (the buffer cannot drain 32+ chunklets of failed writes
+		// before the first error completion is processed).
+		require.ErrorIs(t, err, context.Canceled, "iteration %d", iteration)
+
+		// Stop drains the remaining buffered chunklets (their completions
+		// are dropped as unknown work) and joins the coordinator.
+		require.NoError(t, applier.Stop())
+		require.Equal(t, int32(1), callbackCount.Load(),
+			"iteration %d: callback invoked %d times, want exactly 1 (a second invocation means the "+
+				"coordinator error path and Apply's cancel cleanup both claimed the same work)",
+			iteration, callbackCount.Load())
+		cancel()
+	}
 }
 
 // TestSingleTargetApplierWaitTimeout tests Wait with a timeout context
@@ -1020,4 +1133,44 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
+}
+
+// TestSingleTargetApplierCallbackPanicDecrements verifies that a panicking
+// callback still decrements callbacksInFlight, so a recovered panic upstream
+// cannot wedge Wait() forever. invokeCallback must balance the counter on every
+// exit path, not just normal return.
+func TestSingleTargetApplierCallbackPanicDecrements(t *testing.T) {
+	a := &SingleTargetApplier{
+		logger:      slog.New(slog.DiscardHandler),
+		pendingWork: make(map[int64]*pendingWork),
+	}
+
+	// Claim a unit of work the way the real claim paths do: increment
+	// callbacksInFlight under pendingMutex before invoking the callback.
+	a.pendingMutex.Lock()
+	a.callbacksInFlight++
+	a.pendingMutex.Unlock()
+
+	panicking := func(affectedRows int64, err error) {
+		panic("callback boom")
+	}
+
+	// invokeCallback must propagate the panic; recover it here the way an
+	// upstream goroutine would.
+	func() {
+		defer func() {
+			require.Equal(t, "callback boom", recover())
+		}()
+		a.invokeCallback(panicking, 0, nil)
+	}()
+
+	// Despite the panic, the deferred decrement must have run, so Wait()
+	// observes a balanced counter and returns promptly.
+	a.pendingMutex.Lock()
+	require.Equal(t, 0, a.callbacksInFlight)
+	a.pendingMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, a.Wait(ctx))
 }
