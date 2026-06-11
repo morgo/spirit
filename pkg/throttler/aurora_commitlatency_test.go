@@ -101,6 +101,21 @@ func TestCommitLatency_CounterResetClearsThrottle(t *testing.T) {
 	require.Equal(t, int64(0), c.avgLatencyUs.Load())
 }
 
+func TestCommitLatency_Utilization(t *testing.T) {
+	c := newTestCommitLatency(t, 100*time.Millisecond)
+
+	c.applySample(1_000_000, 2_000_000_000) // baseline, no Δ yet
+	require.Zero(t, c.Utilization())
+
+	// 1000 commits, +50_000_000us latency → 50ms avg → 0.5 of a 100ms threshold.
+	c.applySample(1_001_000, 2_050_000_000)
+	require.InDelta(t, 0.5, c.Utilization(), 1e-9)
+
+	// 1000 commits, +200_000_000us latency → 200ms avg → 2.0 of threshold.
+	c.applySample(1_002_000, 2_250_000_000)
+	require.InDelta(t, 2.0, c.Utilization(), 1e-9)
+}
+
 func TestCommitLatency_BlockWaitReturnsImmediatelyWhenUnthrottled(t *testing.T) {
 	c := newTestCommitLatency(t, 100*time.Millisecond)
 	start := time.Now()

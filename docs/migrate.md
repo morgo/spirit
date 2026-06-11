@@ -19,6 +19,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [conf](#conf)
 - [database](#database)
 - [defer-cutover](#defer-cutover)
+- [enable-experimental-autoscaling](#enable-experimental-autoscaling)
 - [gtid](#gtid)
 - [host](#host)
 - [lint](#lint)
@@ -386,7 +387,7 @@ Internal to Spirit, the database pool size is set to `threads + write-threads + 
 
 You may want to wrap `threads` in automation and set it to a percentage of the cores of your database server. For example, if you have a 32-core machine you may choose to set this to `8`. Approximately 25% is a good starting point, making sure you always leave plenty of free cores for regular database operations. If your migration is IO bound and/or your IO latency is high (such as Aurora) you may even go higher than 25%.
 
-Note that Spirit does not support dynamically adjusting the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values.
+By default Spirit does not dynamically adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values. The experimental [enable-experimental-autoscaling](#enable-experimental-autoscaling) flag opts into dynamic write-thread scaling driven by throttler feedback.
 
 ### write-threads
 
@@ -395,7 +396,24 @@ Note that Spirit does not support dynamically adjusting the number of threads wh
 
 Sets the parallelism of the **replication applier** — the number of concurrent write threads used to apply changes (read from the binlog) to the new table. Copier and checksum parallelism are controlled separately by [threads](#threads).
 
-A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the instance vCPU count (read from `@@innodb_purge_threads`). On non-Aurora targets there is no reliable vCPU signal, so `0` is rejected with an error and you must set an explicit value. Because the default is `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
+A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the instance vCPU count (read from `@@innodb_purge_threads`). On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
+
+### enable-experimental-autoscaling
+
+- Type: Boolean
+- Default value: `false`
+
+**Experimental.** When enabled, Spirit dynamically adjusts the number of replication-applier write threads while the copy is running, based on feedback from the throttlers. Each throttler reports a continuous *utilization* signal (0 = idle, 1.0 = the point at which it would hard-stop the copy); the controller takes the highest signal across all throttlers and steers the write-thread count to keep it in a comfortable band:
+
+- **Below 50% utilization** it adds one thread at a time (cautiously, with a ~15s cooldown between increases).
+- **At or above 90% utilization** it halves the thread count — immediately on the first breach (even mid-cooldown after an increase), then at most once per ~15s so the signal can reflect each cut — backing off before the hard-stop throttle engages.
+- In between it holds steady.
+
+With this flag, [write-threads](#write-threads) becomes the *starting* value; the upper bound is fixed at **twice the starting value** and the lower bound is always 1. The connection pool is pre-sized for the maximum so scaled-up threads never starve on connections.
+
+The signal comes from the Aurora throttlers — active-threads and commit-latency (see [max-commit-latency](#max-commit-latency)) — which are auto-enabled on Aurora. Replica lag ([replica-dsn](#replica-dsn)) deliberately contributes **no** continuous signal: lag is a budget, not a load gauge, and steering on it would park replicas well behind. Replicas remain protected by the hard-stop throttle only. If no continuous signal is available at all (for example a non-Aurora target), autoscaling does not engage: a warning is logged and write threads stay fixed at the starting value.
+
+This flag only applies to the default buffered copier; with [unbuffered](#unbuffered) it is ignored (with a warning). Autoscaling is not yet supported by `spirit move`.
 
 ### tls-ca
 

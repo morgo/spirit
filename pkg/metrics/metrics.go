@@ -20,6 +20,11 @@ const (
 	ChunkProcessingTimeMetricName    = "chunk_processing_time"
 	ChunkLogicalRowsCountMetricName  = "chunk_num_logical_rows"
 	ChunkAffectedRowsCountMetricName = "chunk_num_affected_rows"
+	// WriteThreadsMetricName reports the live write-thread (apply-worker) count
+	// chosen by the autoscaler. ThrottlerUtilizationMetricName reports the
+	// continuous load signal (0..>1) the autoscaler controls on.
+	WriteThreadsMetricName         = "write_threads"
+	ThrottlerUtilizationMetricName = "throttler_utilization"
 )
 
 // Metrics are collection of MetricValues.
