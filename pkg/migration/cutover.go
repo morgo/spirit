@@ -187,7 +187,7 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	// (issue #746, fixed in chunker_optimistic.go / chunker_composite.go).
 	// Now that the source of the divergence is gone, a single
 	// FlushUnderTableLock is sufficient.
-	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
+	if err := c.feed.FlushUnderTableLock(ctx, []*dbconn.TableLock{tableLock}); err != nil {
 		return err
 	}
 	if !c.feed.AllChangesFlushed() {

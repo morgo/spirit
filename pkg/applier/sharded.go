@@ -623,10 +623,41 @@ func (a *ShardedApplier) feedbackCoordinator() {
 	a.logger.Debug("feedbackCoordinator merged completions channel closed, exiting")
 }
 
+// resolveShardLocks maps each shard to the table lock that was acquired on
+// that shard's own database connection. A LOCK TABLES ... WRITE held on a
+// shard blocks writes from every other connection, so each shard's
+// statements MUST execute on the transaction holding that shard's lock —
+// executing them on another shard's lock connection would silently write
+// the rows to the wrong server.
+//
+// Returns nil if no locks were supplied (callers then use the regular
+// per-shard write connections). If locks were supplied but any shard has
+// no matching lock, an error is returned before anything is executed.
+func (a *ShardedApplier) resolveShardLocks(locks []*dbconn.TableLock) (map[int]*dbconn.TableLock, error) {
+	if len(locks) == 0 {
+		return nil, nil
+	}
+	shardLocks := make(map[int]*dbconn.TableLock, len(a.shards))
+	for _, shard := range a.shards {
+		for _, lock := range locks {
+			if lock != nil && lock.DB() == shard.writeDB {
+				shardLocks[shard.shardID] = lock
+				break
+			}
+		}
+		if shardLocks[shard.shardID] == nil {
+			return nil, fmt.Errorf("no table lock supplied for shard %d: writing under lock requires one lock per shard, acquired on that shard's connection", shard.shardID)
+		}
+	}
+	return shardLocks, nil
+}
+
 // DeleteKeys deletes rows by their key values synchronously, broadcasting to all shards.
 // Each entry in keys is one primary-key tuple of the original (typed)
 // column values, in sourceTable.KeyColumns order.
-// If lock is non-nil, operations are executed under table locks (one per shard).
+// If locks is non-empty, each shard's delete is executed under the table lock
+// that was acquired on that shard's own connection (one lock per shard,
+// matched via resolveShardLocks).
 //
 // Note: we only track modifications by PRIMARY KEY, not by shard key (aka primary vindex).
 // For this reason we can't extract the vindex value, and must instead broadcast
@@ -636,9 +667,15 @@ func (a *ShardedApplier) feedbackCoordinator() {
 // Note: the sharded applier does not allow any transformations!
 // The targetTable argument is intentionally ignored.
 // This also means that table names between source and target must be the same.
-func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.TableInfo, keys [][]any, lock *dbconn.TableLock) (int64, error) {
+func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
+	}
+	// Resolve which lock belongs to which shard before executing anything,
+	// so a missing lock fails loudly instead of partially applying.
+	shardLocks, err := a.resolveShardLocks(locks)
+	if err != nil {
+		return 0, err
 	}
 	// Create a context with timeout for the entire operation
 	// This prevents hanging indefinitely if shards are unresponsive
@@ -672,9 +709,11 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 		go func(shard *shardTarget) {
 			var affected int64
 			var err error
-			// Execute under lock if provided
-			if lock != nil {
-				if err = lock.ExecUnderLock(ctx, deleteStmt); err != nil {
+			// Execute under this shard's own lock if locks were provided.
+			// The lock transaction is the only connection allowed to write
+			// to this shard's table while LOCK TABLES is held.
+			if shardLocks != nil {
+				if err = shardLocks[shard.shardID].ExecUnderLock(ctx, deleteStmt); err != nil {
 					err = fmt.Errorf("failed to execute delete under lock on shard %d: %w", shard.shardID, err)
 				} else {
 					// We can't know the actual affected rows when using lock, so estimate
@@ -717,7 +756,9 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 // `rows` argument (via the unique-key conflict resolution) and those
 // rows are re-inserted by their own events in subsequent batches.
 //
-// If lock is non-nil, operations are executed under table locks (one per shard).
+// If locks is non-empty, each shard's upsert is executed under the table lock
+// that was acquired on that shard's own connection (one lock per shard,
+// matched via resolveShardLocks).
 //
 // Note: we only track modifications by PRIMARY KEY, not be shard key (aka primary vindex).
 // For this reason we could get in trouble if there was a PK update that mutated the vindex column.
@@ -733,9 +774,16 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 // Note: the sharded applier does not allow any transformations!
 // The targetTable argument is intentionally ignored.
 // This also means that table names between source and target must be the same.
-func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error) {
+func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
+	}
+
+	// Resolve which lock belongs to which shard before executing anything,
+	// so a missing lock fails loudly instead of partially applying.
+	shardLocks, err := a.resolveShardLocks(locks)
+	if err != nil {
+		return 0, err
 	}
 
 	// Create a context with timeout for the entire operation
@@ -857,9 +905,11 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 			var affected int64
 			var err error
 
-			// Execute under lock if provided
-			if lock != nil {
-				if err = lock.ExecUnderLock(ctx, upsertStmt); err != nil {
+			// Execute under this shard's own lock if locks were provided.
+			// The lock transaction is the only connection allowed to write
+			// to this shard's table while LOCK TABLES is held.
+			if shardLocks != nil {
+				if err = shardLocks[sid].ExecUnderLock(ctx, upsertStmt); err != nil {
 					err = fmt.Errorf("failed to execute upsert under lock on shard %d: %w", sid, err)
 				} else {
 					affected = int64(len(valuesClauses))

@@ -348,7 +348,7 @@ func (c *SingleChecker) initConnPool(ctx context.Context) error {
 	}
 	defer utils.CloseAndLogWithContext(ctx, tableLock)
 	// We only have a reader, so flush the read connection.
-	if err := c.feed.FlushUnderTableLock(ctx, tableLock); err != nil {
+	if err := c.feed.FlushUnderTableLock(ctx, []*dbconn.TableLock{tableLock}); err != nil {
 		return err
 	}
 
