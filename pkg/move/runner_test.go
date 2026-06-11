@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -561,7 +564,9 @@ func TestMoveWithVarcharPK(t *testing.T) {
 // checkpoint dump, then tears everything down without cutover — simulating a
 // move that was interrupted after writing a checkpoint. The checkpoint table
 // is left behind on the first target (targets[0]) for a subsequent resume.
-// This mirrors the first phase of TestResumeFromCheckpointE2E.
+// This mirrors the first phase of TestResumeFromCheckpointE2E. It supports
+// both single-source moves (SourceDSN) and multi-source moves (SourceDSNs),
+// mirroring how Runner.Run builds and sorts the source list.
 func checkpointAndStop(t *testing.T, move *Move) {
 	r, err := NewRunner(move)
 	require.NoError(t, err)
@@ -569,11 +574,23 @@ func checkpointAndStop(t *testing.T, move *Move) {
 	var ctx context.Context
 	ctx, r.cancelFunc = context.WithCancel(t.Context())
 	r.dbConfig = dbconn.NewDBConfig()
-	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
-	require.NoError(t, err)
-	srcConfig, err := mysql.ParseDSN(r.move.SourceDSN)
-	require.NoError(t, err)
-	r.sources = []sourceInfo{{db: srcDB, config: srcConfig, dsn: r.move.SourceDSN}}
+	sourceDSNs := move.SourceDSNs
+	if len(sourceDSNs) == 0 {
+		sourceDSNs = []string{move.SourceDSN}
+	}
+	r.sources = make([]sourceInfo, len(sourceDSNs))
+	for i, dsn := range sourceDSNs {
+		srcDB, err := dbconn.New(dsn, r.dbConfig)
+		require.NoError(t, err)
+		srcConfig, err := mysql.ParseDSN(dsn)
+		require.NoError(t, err)
+		r.sources[i] = sourceInfo{db: srcDB, config: srcConfig, dsn: dsn}
+	}
+	// Sort sources by sourceKey like Runner.Run does, so the checkpoint's
+	// per-source binlog positions are keyed consistently with a later resume.
+	slices.SortFunc(r.sources, func(a, b sourceInfo) int {
+		return strings.Compare(a.sourceKey(), b.sourceKey())
+	})
 	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
 	require.NoError(t, err)
 	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
@@ -592,9 +609,11 @@ func checkpointAndStop(t *testing.T, move *Move) {
 	// Close everything manually, without cutover. Runner.Close() cancels the
 	// context (idempotent) and shuts down repl clients/chunkers and closes the
 	// targets, so call it first; it does not close the sources, so close the
-	// source DB afterwards.
+	// source DBs afterwards.
 	require.NoError(t, r.Close())
-	require.NoError(t, r.sources[0].db.Close())
+	for i := range r.sources {
+		require.NoError(t, r.sources[i].db.Close())
+	}
 }
 
 // TestResumeFromCheckpointMultiTableE2E covers resume-from-checkpoint for a
@@ -729,6 +748,256 @@ func TestResumeFromCheckpointCompositePKE2E(t *testing.T) {
 		"SELECT COUNT(*) FROM "+dstDB+".t1").Scan(&dstCount))
 	require.Equal(t, srcCount, dstCount)
 	require.Positive(t, dstCount)
+}
+
+// seedUsersRange inserts rows with ids start, start+2, ..., up to max into
+// dbName.users in a single multi-row INSERT. The stride of 2 lets two sources
+// hold interleaved (odd/even) key ranges of the same logical table.
+func seedUsersRange(t *testing.T, dbName string, start, maxID int) {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO users (id, name) VALUES ")
+	for i := start; i <= maxID; i += 2 {
+		if i > start {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, "(%d,'user_%d')", i, i)
+	}
+	testutils.RunSQLInDatabase(t, dbName, sb.String())
+}
+
+// watermarkChunkJSON returns a raw chunk-JSON watermark for an integer `id`
+// PK with the given bounds — the format the optimistic chunker persists and
+// accepts in OpenAtWatermark.
+func watermarkChunkJSON(lower, upper int) string {
+	return fmt.Sprintf(`{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["%d"],"Inclusive":true},"UpperBound":{"Value":["%d"],"Inclusive":false}}`, lower, upper)
+}
+
+// TestMultiSourceResumeFromCheckpointE2E covers resume-from-checkpoint for a
+// multi-source (N:1) move where both sources share the same table name and
+// their primary keys interleave in the target table. On resume,
+// deleteAboveWatermark runs every (source, table) pair's DELETE against every
+// target, so one source's DELETE can remove the other source's already-copied
+// rows below its own watermark; the full initial checksum pass must repair
+// them before cutover (the persisted-checksum-watermark half of that bug is
+// pinned by TestMultiSourceResumeDiscardsChecksumWatermark). This test
+// asserts the end state: after a stop + resume, every row from both sources
+// is present on the target.
+func TestMultiSourceResumeFromCheckpointE2E(t *testing.T) {
+	srcAName, srcADB := testutils.CreateUniqueTestDatabase(t)
+	srcBName, srcBDB := testutils.CreateUniqueTestDatabase(t)
+	tgtName, tgtDB := testutils.CreateUniqueTestDatabase(t)
+
+	for _, dbName := range []string{srcAName, srcBName} {
+		testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (
+			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL
+		)`)
+	}
+	// Interleaved keys: source A holds odd ids, source B holds even ids.
+	// Seed enough rows that both (source, table) chunkers have a ready
+	// watermark when the checkpoint is dumped.
+	seedUsersRange(t, srcAName, 1, 2399) // 1200 odd rows
+	seedUsersRange(t, srcBName, 2, 2400) // 1200 even rows
+
+	move := &Move{
+		SourceDSNs:      []string{testutils.DSNForDatabase(srcAName), testutils.DSNForDatabase(srcBName)},
+		TargetDSN:       testutils.DSNForDatabase(tgtName),
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+		SourceTables:    []string{"users"},
+	}
+	checkpointAndStop(t, move)
+
+	// Write to both sources after the "crash" so the resumed copy has new
+	// work to pick up from each source.
+	seedUsersRange(t, srcAName, 2401, 2409)
+	seedUsersRange(t, srcBName, 2402, 2410)
+
+	// Resume.
+	move.TargetChunkTime = 5 * time.Second
+	move.Threads = 4
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	require.NoError(t, r.Run(t.Context()))
+	require.True(t, r.usedResumeFromCheckpoint, "the move must resume from the checkpoint, not start over")
+	require.NoError(t, r.Close())
+
+	// After cutover the source tables are renamed users_old on each source.
+	// Every row from both sources must be present on the target.
+	var srcACount, srcBCount, tgtOdd, tgtEven int
+	require.NoError(t, srcADB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users_old").Scan(&srcACount))
+	require.NoError(t, srcBDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users_old").Scan(&srcBCount))
+	require.NoError(t, tgtDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users WHERE id % 2 = 1").Scan(&tgtOdd))
+	require.NoError(t, tgtDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users WHERE id % 2 = 0").Scan(&tgtEven))
+	require.Positive(t, srcACount)
+	require.Positive(t, srcBCount)
+	require.Equal(t, srcACount, tgtOdd, "all of source A's (odd) rows must be on the target")
+	require.Equal(t, srcBCount, tgtEven, "all of source B's (even) rows must be on the target")
+}
+
+// TestMultiSourceResumeDiscardsChecksumWatermark reproduces the multi-source
+// resume data-loss hole end-to-end and pins the fix: a persisted (non-empty)
+// checksum watermark must be DISCARDED when resuming a move with more than
+// one source.
+//
+// The hole: on resume, deleteAboveWatermark runs each (source, table) pair's
+// "DELETE ... WHERE id > <that source's watermark upper bound>" on every
+// target. Same-named tables from different sources interleave in the target
+// table, so the source with the LOWER watermark deletes the other source's
+// rows between the two watermarks — rows the other source's chunker (which
+// resumes from its own, higher watermark) never recopies. Only a checksum
+// pass that runs from the very beginning detects and repairs the hole; a
+// checksum resumed at a persisted watermark skips exactly that range and the
+// move cuts over with rows silently missing.
+//
+// The test crafts the checkpoint row into the worst case: skewed copier
+// watermarks (source A resumes at id 100 / deletes above 151, source B
+// resumes at id 31 / deletes above 51) and a checksum watermark above every
+// row — exactly what a checkpoint dumped during the sentinel wait persists
+// after a clean initial checksum pass. Without the fix the move completes
+// with source A's odd ids 53..99 missing from the target; with the fix the
+// watermark is discarded, the full checksum pass repairs the hole, and every
+// row is present.
+func TestMultiSourceResumeDiscardsChecksumWatermark(t *testing.T) {
+	srcAName, _ := testutils.CreateUniqueTestDatabase(t)
+	srcBName, _ := testutils.CreateUniqueTestDatabase(t)
+	tgtName, tgtDB := testutils.CreateUniqueTestDatabase(t)
+
+	for _, dbName := range []string{srcAName, srcBName} {
+		testutils.RunSQLInDatabase(t, dbName, `CREATE TABLE users (
+			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			name VARCHAR(255) NOT NULL
+		)`)
+	}
+	// Interleaved keys: source A holds odd ids 1..199, source B holds even
+	// ids 2..200 (100 rows each — small on purpose; the hole is crafted via
+	// the checkpoint watermarks below, not via timing).
+	seedUsersRange(t, srcAName, 1, 199)
+	seedUsersRange(t, srcBName, 2, 200)
+
+	move := &Move{
+		SourceDSNs:      []string{testutils.DSNForDatabase(srcAName), testutils.DSNForDatabase(srcBName)},
+		TargetDSN:       testutils.DSNForDatabase(tgtName),
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+		SourceTables:    []string{"users"},
+	}
+	checkpointAndStop(t, move)
+
+	// Craft the checkpoint row (binlog positions are kept from the real
+	// dump). The watermark maps are keyed by TableInfo.QualifiedName(),
+	// which is host.schema.table in the move path.
+	srcACfg, err := mysql.ParseDSN(testutils.DSNForDatabase(srcAName))
+	require.NoError(t, err)
+	srcBCfg, err := mysql.ParseDSN(testutils.DSNForDatabase(srcBName))
+	require.NoError(t, err)
+	qnA := srcACfg.Addr + "." + srcAName + ".users"
+	qnB := srcBCfg.Addr + "." + srcBName + ".users"
+	copierWM, err := json.Marshal(map[string]string{
+		qnA: watermarkChunkJSON(100, 151),
+		qnB: watermarkChunkJSON(31, 51),
+	})
+	require.NoError(t, err)
+	// A checksum watermark above every row (max id is 200): a resumed
+	// checksum opened at this watermark would verify nothing at all.
+	checksumWM, err := json.Marshal(map[string]string{
+		qnA: watermarkChunkJSON(290, 300),
+		qnB: watermarkChunkJSON(290, 300),
+	})
+	require.NoError(t, err)
+	res, err := tgtDB.ExecContext(t.Context(),
+		"UPDATE _spirit_checkpoint SET copier_watermark = ?, checksum_watermark = ?",
+		string(copierWM), string(checksumWM))
+	require.NoError(t, err)
+	rowsAffected, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rowsAffected, "exactly one checkpoint row should have been crafted")
+
+	// Resume.
+	move.Threads = 4
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	require.NoError(t, r.Run(t.Context()))
+	require.True(t, r.usedResumeFromCheckpoint, "the move must resume from the checkpoint, not start over")
+	require.Empty(t, r.checksumWatermark,
+		"a multi-source resume must discard the persisted checksum watermark and run a full checksum pass")
+	require.NoError(t, r.Close())
+
+	// All 200 rows must be present. Without the fix, source A's odd ids
+	// 53..99 (24 rows) are deleted by source B's DELETE and never restored.
+	var tgtOdd, tgtEven int
+	require.NoError(t, tgtDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users WHERE id % 2 = 1").Scan(&tgtOdd))
+	require.NoError(t, tgtDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users WHERE id % 2 = 0").Scan(&tgtEven))
+	require.Equal(t, 100, tgtOdd, "all of source A's odd rows must be on the target after resume")
+	require.Equal(t, 100, tgtEven, "all of source B's even rows must be on the target after resume")
+}
+
+// TestSingleSourceResumeKeepsChecksumWatermark pins the other half of the
+// multi-source discard fix: a SINGLE-source resume must keep the persisted
+// checksum watermark. Resuming the checksum mid-way is safe there because
+// deletes are per-table and each table's delete range (above its watermark
+// upper bound) is a subset of the range its own chunker recopies (from the
+// watermark lower bound) — no other source's DELETE can remove rows below
+// this source's watermark.
+func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
+	srcName, srcDB := testutils.CreateUniqueTestDatabase(t)
+	tgtName, tgtDB := testutils.CreateUniqueTestDatabase(t)
+
+	testutils.RunSQLInDatabase(t, srcName, `CREATE TABLE users (
+		id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL
+	)`)
+	// Seed enough rows that the copier watermark is ready when the
+	// checkpoint is dumped (the optimistic chunker needs a few chunks).
+	seedUsersRange(t, srcName, 1, 2399) // 1200 rows
+
+	move := &Move{
+		SourceDSN:       testutils.DSNForDatabase(srcName),
+		TargetDSN:       testutils.DSNForDatabase(tgtName),
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+	}
+	checkpointAndStop(t, move)
+
+	// Craft a non-empty checksum watermark, simulating a crash during the
+	// sentinel wait after a clean initial checksum pass. With a single
+	// (source, table) pair the checksum chunker is the optimistic chunker
+	// itself, so the watermark is raw chunk JSON, not the multi-chunker map.
+	craftedChecksumWM := watermarkChunkJSON(1, 51)
+	res, err := tgtDB.ExecContext(t.Context(),
+		"UPDATE _spirit_checkpoint SET checksum_watermark = ?", craftedChecksumWM)
+	require.NoError(t, err)
+	rowsAffected, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rowsAffected, "exactly one checkpoint row should have been crafted")
+
+	// Resume.
+	move.TargetChunkTime = 5 * time.Second
+	move.Threads = 4
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	require.NoError(t, r.Run(t.Context()))
+	require.True(t, r.usedResumeFromCheckpoint, "the move must resume from the checkpoint, not start over")
+	require.Equal(t, craftedChecksumWM, r.checksumWatermark,
+		"a single-source resume must preserve the persisted checksum watermark (resume-at-watermark optimization)")
+	require.NoError(t, r.Close())
+
+	var srcCount, tgtCount int
+	require.NoError(t, srcDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users_old").Scan(&srcCount))
+	require.NoError(t, tgtDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM users").Scan(&tgtCount))
+	require.Positive(t, srcCount)
+	require.Equal(t, srcCount, tgtCount)
 }
 
 // TestDeleteAboveWatermarkFormats exercises deleteAboveWatermark directly
