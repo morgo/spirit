@@ -44,14 +44,23 @@ type SingleTargetApplier struct {
 	callbacksInFlight int   // claimed work whose callback has not returned yet; guarded by pendingMutex
 	nextWorkID        int64 // Atomic counter for work IDs
 
-	// Worker management
-	writeWorkersCount    int32
-	writeWorkersFinished int32
-	workerIDCounter      int32
+	// Worker management. writeWorkersCount is the initial worker count, set at
+	// construction from ApplierConfig.Threads; the *live* count can change at
+	// runtime via SetWriteWorkers (driven by the copier's autoscaler). The
+	// fields below workerIDCounter are all guarded by scaleMu.
+	writeWorkersCount int32        // initial worker count (start value)
+	workerIDCounter   atomic.Int32 // monotonic worker id, for debug logging only
+
+	scaleMu       sync.Mutex      // guards the worker pool: workerCtx, workerQuits, scalingClosed, and spawn/park
+	workerCtx     context.Context // ctx the workers run under; set in Start
+	workerQuits   []chan struct{} // one quit channel per live worker — closing one parks (exits) that worker
+	activeWorkers atomic.Int32    // current live worker count
+	scalingClosed bool            // set true when Stop begins, to block new spawns
+	workersWg     sync.WaitGroup  // tracks write workers only
 
 	// Context management
 	cancelFunc context.CancelFunc
-	wg         sync.WaitGroup
+	wg         sync.WaitGroup // tracks the feedbackCoordinator goroutine only
 
 	// State management to make Start/Stop idempotent
 	started bool
@@ -104,8 +113,9 @@ func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApp
 // Lifecycle: callers MUST call Stop() to terminate the write workers and
 // feedbackCoordinator. Cancelling the ctx passed here does NOT by itself
 // shut down the goroutine pipeline — it only aborts in-flight writes.
-// Workers exit when chunkletBuffer is closed (by Stop), and the coordinator
-// exits when chunkletCompletions is closed (by the last worker's defer).
+// Workers exit when chunkletBuffer is closed (by Stop) or when their quit
+// channel is closed (by SetWriteWorkers scaling down), and the coordinator
+// exits when chunkletCompletions is closed (by Stop, after all workers exit).
 // Failing to call Stop() will leak goroutines.
 func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.Lock()
@@ -122,8 +132,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 		a.logger.Info("restarting SingleTargetApplier after previous stop")
 		a.chunkletBuffer = make(chan chunklet, defaultBufferSize)
 		a.chunkletCompletions = make(chan chunkletCompletion, defaultBufferSize)
-		a.writeWorkersFinished = 0
-		a.workerIDCounter = 0
+		a.workerIDCounter.Store(0)
 		a.stopped = false
 	}
 
@@ -133,15 +142,24 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.started = true
 	a.logger.Info("starting SingleTargetApplier", "writeWorkers", a.writeWorkersCount)
 
-	// Start write workers
-	for range a.writeWorkersCount {
-		a.wg.Add(1)
-		go a.writeWorker(workerCtx)
-	}
+	// Reset the worker pool bookkeeping and record the context workers run
+	// under, so SetWriteWorkers can spawn more later.
+	a.scaleMu.Lock()
+	a.workerCtx = workerCtx
+	a.workerQuits = nil
+	a.activeWorkers.Store(0)
+	a.scalingClosed = false
+	a.scaleMu.Unlock()
 
-	// Start feedback coordinator
+	// Start feedback coordinator before workers so completions are always
+	// drained.
 	a.wg.Add(1)
 	go a.feedbackCoordinator()
+
+	// Spawn the initial worker pool. SetWriteWorkers only takes scaleMu, so
+	// calling it while holding the main lock is safe (no lock nesting on the
+	// same mutex).
+	a.SetWriteWorkers(int(a.writeWorkersCount))
 
 	return nil
 }
@@ -288,9 +306,6 @@ func (a *SingleTargetApplier) Stop() error {
 		a.cancelFunc()
 	}
 
-	// Close the chunklet buffer to signal no more work
-	close(a.chunkletBuffer)
-
 	// Mark as stopped before releasing lock
 	a.stopped = true
 	a.started = false
@@ -298,49 +313,118 @@ func (a *SingleTargetApplier) Stop() error {
 	// Release the lock before waiting for workers to finish
 	a.Unlock()
 
-	// Wait for all workers to finish
+	// Close scaling first and wait out any in-flight SetWriteWorkers, so no new
+	// worker is spawned (no workersWg.Add) after we begin shutdown. Acquiring
+	// scaleMu guarantees any concurrent scale call has finished its Adds before
+	// we Wait below.
+	a.scaleMu.Lock()
+	a.scalingClosed = true
+	a.scaleMu.Unlock()
+
+	// Close the chunklet buffer to signal no more work. Workers blocked in their
+	// select see the closed buffer (ok == false) and return; workers mid-write
+	// finish, send their completion, then return.
+	close(a.chunkletBuffer)
+
+	// Wait for all write workers to exit, THEN close the completions channel.
+	// This is now the sole owner of that close — decoupled from worker count,
+	// which is what lets the count move at runtime. The coordinator drains any
+	// remaining completions and exits when the channel closes.
+	a.workersWg.Wait()
+	close(a.chunkletCompletions)
 	a.wg.Wait()
 
 	a.logger.Info("SingleTargetApplier stopped")
 	return nil
 }
 
-// writeWorker processes chunklets from the buffer
-func (a *SingleTargetApplier) writeWorker(ctx context.Context) {
-	defer a.wg.Done()
-	workerID := atomic.AddInt32(&a.workerIDCounter, 1)
+// SetWriteWorkers reconciles the live write-worker count to n, spawning new
+// workers or parking existing ones as needed. It is idempotent and safe to call
+// repeatedly from the autoscaler. n is clamped to a minimum of 1 so the applier
+// always makes some progress. Calls after Stop() begins are no-ops.
+//
+// Parking is cooperative: closing a worker's quit channel makes it exit the next
+// time it returns to its select (after finishing any chunklet currently in
+// flight), so no completion is ever lost.
+func (a *SingleTargetApplier) SetWriteWorkers(n int) {
+	if n < 1 {
+		n = 1
+	}
+	a.scaleMu.Lock()
+	defer a.scaleMu.Unlock()
 
-	defer func() {
-		finishedCount := atomic.AddInt32(&a.writeWorkersFinished, 1)
-		a.logger.Debug("writeWorker finished", "workerID", workerID, "finishedCount", finishedCount, "totalWorkers", a.writeWorkersCount)
+	// No-op before Start has recorded the worker context (the exported API may
+	// be called too early) or once Stop has begun shutting down. In both states
+	// we must not spawn workers: a nil workerCtx would panic the worker on its
+	// first writeChunklet (ctx.Err()), and post-shutdown spawns would race the
+	// workersWg.Wait() in Stop.
+	if a.workerCtx == nil || a.scalingClosed {
+		return
+	}
 
-		// If all write workers are finished, close the completions channel
-		if finishedCount == a.writeWorkersCount {
-			a.logger.Debug("writeWorker all write workers finished, closing completions channel", "workerID", workerID)
-			close(a.chunkletCompletions)
+	cur := len(a.workerQuits)
+	switch {
+	case n > cur:
+		for range n - cur {
+			quit := make(chan struct{})
+			a.workerQuits = append(a.workerQuits, quit)
+			a.activeWorkers.Add(1)
+			a.workersWg.Add(1)
+			go a.writeWorker(a.workerCtx, quit)
 		}
-	}()
+		a.logger.Info("scaled write workers up", "from", cur, "to", n)
+	case n < cur:
+		// Park the most-recently-added workers by closing their quit channels.
+		for i := cur - 1; i >= n; i-- {
+			close(a.workerQuits[i])
+		}
+		a.workerQuits = a.workerQuits[:n]
+		a.logger.Info("scaled write workers down", "from", cur, "to", n)
+	}
+}
 
-	// Drain chunkletBuffer until it is closed by Stop(). We deliberately do not
-	// select on ctx.Done() here: every chunklet that made it into the buffer was
-	// already registered in pendingWork by Apply(), so it MUST produce a
-	// completion or Wait() will hang. If ctx is cancelled, writeChunklet returns
-	// quickly with ctx.Err() and we forward that as an error completion — the
-	// feedbackCoordinator then invokes the callback with the error and clears
-	// pendingWork. Stop() is the canonical shutdown path: it cancels ctx (so
-	// in-flight writes abort) and closes chunkletBuffer (so workers exit).
-	for chunkletData := range a.chunkletBuffer {
-		a.logger.Debug("writeWorker processing chunklet", "workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
+// ActiveWriteWorkers returns the current number of live write workers.
+func (a *SingleTargetApplier) ActiveWriteWorkers() int {
+	return int(a.activeWorkers.Load())
+}
 
-		affectedRows, err := a.writeChunklet(ctx, chunkletData)
+// writeWorker processes chunklets from the buffer until either its quit channel
+// is closed (scale-down) or the buffer is closed by Stop().
+func (a *SingleTargetApplier) writeWorker(ctx context.Context, quit <-chan struct{}) {
+	defer a.workersWg.Done()
+	defer a.activeWorkers.Add(-1)
+	workerID := a.workerIDCounter.Add(1)
 
-		a.chunkletCompletions <- chunkletCompletion{
-			workID:       chunkletData.workID,
-			affectedRows: affectedRows,
-			err:          err,
+	// Every chunklet that made it into the buffer was already registered in
+	// pendingWork by Apply(), so it MUST produce a completion or Wait() will
+	// hang. If ctx is cancelled, writeChunklet returns quickly with ctx.Err()
+	// and we forward that as an error completion — the feedbackCoordinator then
+	// invokes the callback with the error and clears pendingWork. Stop() is the
+	// canonical shutdown path: it cancels ctx (so in-flight writes abort) and
+	// closes chunkletBuffer (so workers exit). The quit channel is the
+	// scale-down path: a parked worker stops pulling new chunklets but any
+	// chunklet already in flight still completes.
+	for {
+		select {
+		case <-quit:
+			a.logger.Debug("writeWorker parked (scale-down), exiting", "workerID", workerID)
+			return
+		case chunkletData, ok := <-a.chunkletBuffer:
+			if !ok {
+				a.logger.Debug("writeWorker channel closed, exiting", "workerID", workerID)
+				return
+			}
+			a.logger.Debug("writeWorker processing chunklet", "workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
+
+			affectedRows, err := a.writeChunklet(ctx, chunkletData)
+
+			a.chunkletCompletions <- chunkletCompletion{
+				workID:       chunkletData.workID,
+				affectedRows: affectedRows,
+				err:          err,
+			}
 		}
 	}
-	a.logger.Debug("writeWorker channel closed, exiting", "workerID", workerID)
 }
 
 // writeChunklet writes a single chunklet (up to chunkletMaxRows or chunkletMaxSize)
