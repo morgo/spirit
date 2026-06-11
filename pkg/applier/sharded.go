@@ -14,7 +14,6 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
-	"github.com/block/spirit/pkg/utils"
 )
 
 // ShardedApplier applies rows to multiple target databases based on a Vitess-style vindex.
@@ -566,7 +565,8 @@ func (a *ShardedApplier) feedbackCoordinator() {
 }
 
 // DeleteKeys deletes rows by their key values synchronously, broadcasting to all shards.
-// The keys are hashed key strings (from utils.HashKey).
+// Each entry in keys is one primary-key tuple of the original (typed)
+// column values, in sourceTable.KeyColumns order.
 // If lock is non-nil, operations are executed under table locks (one per shard).
 //
 // Note: we only track modifications by PRIMARY KEY, not by shard key (aka primary vindex).
@@ -577,7 +577,7 @@ func (a *ShardedApplier) feedbackCoordinator() {
 // Note: the sharded applier does not allow any transformations!
 // The targetTable argument is intentionally ignored.
 // This also means that table names between source and target must be the same.
-func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error) {
+func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.TableInfo, keys [][]any, lock *dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
@@ -586,10 +586,11 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 	ctx, cancel := context.WithTimeout(ctx, chunkTaskTimeout)
 	defer cancel()
 
-	// Convert hashed keys to row value constructor format
-	var pkValues []string
-	for _, key := range keys {
-		pkValues = append(pkValues, utils.UnhashKeyToString(key))
+	// Render the key tuples into the IN(...) element list via table.Datum,
+	// the same type-aware path UpsertRows uses (see deleteKeysInClause).
+	inClause, err := deleteKeysInClause(sourceTable, keys)
+	if err != nil {
+		return 0, err
 	}
 
 	// Build DELETE statement
@@ -598,7 +599,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
 		sourceTable.QuotedTableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
-		strings.Join(pkValues, ","),
+		inClause,
 	)
 
 	// Execute deletes on all shards in parallel (broadcast)
