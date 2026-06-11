@@ -59,15 +59,27 @@ type Applier interface {
 
 	// DeleteKeys deletes rows by their key values synchronously. Each entry
 	// in keys is one key tuple of the original (typed) column values, in
-	// sourceTable.KeyColumns order. If lock is non-nil, the delete runs
-	// under the table lock. Returns the number of rows affected.
-	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, lock *dbconn.TableLock) (int64, error)
-
-	// UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
-	// The rows are LogicalRow structs containing the row images.
-	// If lock is non-nil, the upsert is executed under the table lock.
+	// sourceTable.KeyColumns order.
+	// An empty locks slice means no under-lock flush: the delete runs on the
+	// regular write connection(s). When locks is non-empty, the delete is
+	// executed under the supplied table lock(s):
+	//   - Single-target implementations accept zero or one lock. Zero means no
+	//     under-lock flush; more than one lock is a caller bug and is an error.
+	//   - Multi-target (sharded) implementations expect one lock per target,
+	//     each acquired on that target's own connection, and execute each
+	//     target's statements under that target's lock (matched by connection
+	//     identity). A missing lock for any shard is an error.
 	// Returns the number of rows affected and any error.
-	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error)
+	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error)
+
+	// UpsertRows performs an upsert (REPLACE INTO ... VALUES) synchronously.
+	// The rows are LogicalRow structs containing the row images.
+	// An empty locks slice means no under-lock flush; when locks is non-empty
+	// the upsert is executed under the supplied table lock(s). See DeleteKeys
+	// for the per-implementation lock contract (single-target accepts zero or
+	// one lock; sharded expects one lock per shard).
+	// Returns the number of rows affected and any error.
+	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error)
 
 	// Wait blocks until all pending work is complete and all callbacks have been invoked
 	Wait(ctx context.Context) error

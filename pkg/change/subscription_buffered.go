@@ -397,14 +397,14 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 // map/queue has entries when Flush runs. Both branches are still
 // iterated defensively in case anything ever leaves the inactive store
 // non-empty.
-func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) (allChangesFlushed bool, err error) {
+func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) (allChangesFlushed bool, err error) {
 	s.Lock()
 	defer s.Unlock()
 
 	allChangesFlushed = true
 
 	if len(s.changes) > 0 {
-		mapAllFlushed, err := s.flushMapLocked(ctx, underLock, lock, false)
+		mapAllFlushed, err := s.flushMapLocked(ctx, underLock, locks, false)
 		if err != nil {
 			return false, err
 		}
@@ -414,7 +414,7 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 	}
 
 	if len(s.queue) > 0 {
-		if err := s.flushQueueLocked(ctx, underLock, lock); err != nil {
+		if err := s.flushQueueLocked(ctx, underLock, locks); err != nil {
 			return false, err
 		}
 	}
@@ -431,16 +431,16 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, lock *dbconn.Ta
 // filter would skip keys above the low watermark and leave them behind in the
 // store we are about to abandon. underLock (cutover) implies bypass for the
 // same reason.
-func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock, bypassWatermark bool) (bool, error) {
+func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, locks []*dbconn.TableLock, bypassWatermark bool) (bool, error) {
 	var deleteKeys [][]any
 	var upsertRows []applier.LogicalRow
 	var keysFlushed []string
 	var i int
 	allChangesFlushed := true
 
-	var lockToUse *dbconn.TableLock
+	var locksToUse []*dbconn.TableLock
 	if underLock {
-		lockToUse = lock
+		locksToUse = locks
 	}
 	applyWatermarkFilter := !underLock && !bypassWatermark && s.watermarkOptimizationEnabled()
 
@@ -463,7 +463,7 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
 		if (i % DefaultBatchSize) == 0 {
-			if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
+			if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
 				return false, err
 			}
 			deleteKeys = nil
@@ -471,7 +471,7 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 		}
 	}
 
-	if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
+	if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
 		return false, err
 	}
 
@@ -492,8 +492,10 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, lock *
 // flushBatch flushes a batch of deletes and upserts using the applier.
 // deleteKeys holds the typed PK tuples of the rows to delete (one tuple
 // per entry, in KeyColumns order).
-// If lock is non-nil, the operations are executed under the table lock.
-func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsertRows []applier.LogicalRow, lock *dbconn.TableLock) error {
+// If locks is non-empty, the operations are executed under the table
+// lock(s) — one lock per target server, matched to its target by the
+// applier (see applier.Applier.DeleteKeys for the contract).
+func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsertRows []applier.LogicalRow, locks []*dbconn.TableLock) error {
 	if len(deleteKeys) == 0 && len(upsertRows) == 0 {
 		return nil
 	}
@@ -502,7 +504,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsert
 
 	// Execute deletes
 	if len(deleteKeys) > 0 {
-		affectedRows, err := s.applier.DeleteKeys(ctx, s.table, s.newTable, deleteKeys, lock)
+		affectedRows, err := s.applier.DeleteKeys(ctx, s.table, s.newTable, deleteKeys, locks)
 		if err != nil {
 			return fmt.Errorf("failed to delete keys: %w", err)
 		}
@@ -511,7 +513,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsert
 
 	// Execute upserts
 	if len(upsertRows) > 0 {
-		affectedRows, err := s.applier.UpsertRows(ctx, s.chunker.ColumnMapping(), upsertRows, lock)
+		affectedRows, err := s.applier.UpsertRows(ctx, s.chunker.ColumnMapping(), upsertRows, locks)
 		if err != nil {
 			return fmt.Errorf("failed to upsert rows: %w", err)
 		}
@@ -520,7 +522,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsert
 
 	s.logger.Debug("flushBatch executed",
 		"table", s.table.TableName,
-		"underLock", lock != nil,
+		"underLock", len(locks) > 0,
 		"deleteKeyCount", len(deleteKeys),
 		"deleteAffectedRows", deleteAffected,
 		"upsertRowCount", len(upsertRows),
@@ -543,19 +545,19 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsert
 // consecutive same-type operations into one applier call, e.g.
 // UPSERT<1>, UPSERT<2>, DELETE<3>, UPSERT<4> becomes
 // UpsertRows([1,2]); DeleteKeys([3]); UpsertRows([4]).
-func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock *dbconn.TableLock) error {
+func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, locks []*dbconn.TableLock) error {
 	if len(s.queue) == 0 {
 		return nil
 	}
-	var lockToUse *dbconn.TableLock
+	var locksToUse []*dbconn.TableLock
 	if underLock {
-		lockToUse = lock
+		locksToUse = locks
 	}
 
 	var deleteKeys [][]any
 	var upsertRows []applier.LogicalRow
 	flushSegment := func() error {
-		if err := s.flushBatch(ctx, deleteKeys, upsertRows, lockToUse); err != nil {
+		if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
 			return err
 		}
 		deleteKeys = nil

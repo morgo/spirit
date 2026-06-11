@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -910,6 +911,211 @@ func TestShardedApplierUpsertRowsEmpty(t *testing.T) {
 	affectedRows, err := applier.UpsertRows(t.Context(), table.NewColumnMapping(targetTable, targetTable, nil), []LogicalRow{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), affectedRows)
+}
+
+// setupShardedUnderLockTest creates a source database and two shard databases
+// (prefixed with the given name), a `users` table in each, TableInfos with the
+// even/odd test vindex, and a ShardedApplier over the two shards.
+// Shard 0 (KeyRange "-80") receives even user_ids, shard 1 ("80-") odd user_ids.
+func setupShardedUnderLockTest(t *testing.T, prefix string) (sourceTable, target1Table *table.TableInfo, target1DB, target2DB *sql.DB, applier *ShardedApplier) {
+	t.Helper()
+	sourceName := prefix + "_source"
+	target1Name := prefix + "_target1"
+	target2Name := prefix + "_target2"
+	for _, name := range []string{sourceName, target1Name, target2Name} {
+		testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+name)
+		testutils.RunSQL(t, "CREATE DATABASE "+name)
+	}
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	openDB := func(dbName string) *sql.DB {
+		cfg := base.Clone()
+		cfg.DBName = dbName
+		db, err := sql.Open("mysql", cfg.FormatDSN())
+		require.NoError(t, err)
+		t.Cleanup(func() { utils.CloseAndLog(db) })
+		return db
+	}
+	sourceDB := openDB(sourceName)
+	target1DB = openDB(target1Name)
+	target2DB = openDB(target2Name)
+
+	createTableSQL := `
+		CREATE TABLE users (
+			id INT PRIMARY KEY,
+			user_id INT NOT NULL,
+			name VARCHAR(100)
+		)
+	`
+	ctx := t.Context()
+	for _, db := range []*sql.DB{sourceDB, target1DB, target2DB} {
+		_, err = db.ExecContext(ctx, createTableSQL)
+		require.NoError(t, err)
+	}
+
+	sourceTable = table.NewTableInfo(sourceDB, sourceName, "users")
+	require.NoError(t, sourceTable.SetInfo(ctx))
+	sourceTable.ShardingColumn = "user_id"
+	sourceTable.HashFunc = testutils.EvenOddHasher
+
+	target1Table = table.NewTableInfo(target1DB, target1Name, "users")
+	require.NoError(t, target1Table.SetInfo(ctx))
+
+	targets := []Target{
+		{DB: target1DB, KeyRange: "-80"}, // Even user_ids
+		{DB: target2DB, KeyRange: "80-"}, // Odd user_ids
+	}
+	applier, err = NewShardedApplier(targets, NewApplierDefaultConfig())
+	require.NoError(t, err)
+	return sourceTable, target1Table, target1DB, target2DB, applier
+}
+
+// TestShardedApplierUpsertRowsUnderLock is a regression test: when table
+// locks are supplied (one per shard), each shard's REPLACE must execute on
+// the transaction holding THAT shard's lock. Previously every shard's
+// statement was executed through the single supplied lock connection, so
+// all rows were written to one server and the other shards received
+// nothing.
+func TestShardedApplierUpsertRowsUnderLock(t *testing.T) {
+	sourceTable, target1Table, target1DB, target2DB, applier := setupShardedUnderLockTest(t, "test_pr4_lock_upsert")
+	ctx := t.Context()
+
+	// Acquire one table lock per shard, on that shard's own connection.
+	// This mirrors what checksum.DistributedChecker.initConnPool does.
+	lock1, err := dbconn.NewTableLock(ctx, target1DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	lock2, err := dbconn.NewTableLock(ctx, target2DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+
+	upsertRows := []LogicalRow{
+		{RowImage: []any{int64(1), int64(101), "Alice"}},   // odd -> shard 1
+		{RowImage: []any{int64(2), int64(102), "Bob"}},     // even -> shard 0
+		{RowImage: []any{int64(3), int64(103), "Charlie"}}, // odd -> shard 1
+		{RowImage: []any{int64(4), int64(104), "Diana"}},   // even -> shard 0
+	}
+
+	// Pass the locks deliberately out of shard order: the applier must
+	// match each lock to its shard by the connection it was acquired on,
+	// not by position.
+	locks := []*dbconn.TableLock{lock2, lock1}
+	affectedRows, err := applier.UpsertRows(ctx, table.NewColumnMapping(sourceTable, target1Table, nil), upsertRows, locks)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), affectedRows)
+
+	// Release the locks so we can read from other connections.
+	require.NoError(t, lock1.Close(ctx))
+	require.NoError(t, lock2.Close(ctx))
+
+	// Each shard must contain exactly its own rows. Before the fix,
+	// shard 0 (the lock connection) received all 4 rows and shard 1 none.
+	fetchUserIDs := func(db *sql.DB) []int64 {
+		rows, err := db.QueryContext(ctx, "SELECT user_id FROM users ORDER BY user_id")
+		require.NoError(t, err)
+		defer utils.CloseAndLog(rows)
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+	require.Equal(t, []int64{102, 104}, fetchUserIDs(target1DB), "shard 0 should have exactly the even user_ids")
+	require.Equal(t, []int64{101, 103}, fetchUserIDs(target2DB), "shard 1 should have exactly the odd user_ids")
+}
+
+// TestShardedApplierDeleteKeysUnderLock is a regression test: DeleteKeys
+// broadcasts to all shards, and when table locks are supplied each shard's
+// DELETE must execute on the transaction holding THAT shard's lock.
+// Previously the DELETE was executed once per shard through the single
+// supplied lock connection, so only one server saw the deletes (N times)
+// and the other shards kept their rows.
+func TestShardedApplierDeleteKeysUnderLock(t *testing.T) {
+	sourceTable, target1Table, target1DB, target2DB, applier := setupShardedUnderLockTest(t, "test_pr4_lock_delete")
+	ctx := t.Context()
+
+	// Seed each shard with the row that lives there.
+	_, err := target1DB.ExecContext(ctx, "INSERT INTO users VALUES (2, 102, 'Bob'), (4, 104, 'Diana')")
+	require.NoError(t, err)
+	_, err = target2DB.ExecContext(ctx, "INSERT INTO users VALUES (1, 101, 'Alice'), (3, 103, 'Charlie')")
+	require.NoError(t, err)
+
+	lock1, err := dbconn.NewTableLock(ctx, target1DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	lock2, err := dbconn.NewTableLock(ctx, target2DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+
+	// Delete id=2 (lives on shard 0) and id=3 (lives on shard 1).
+	keysToDelete := [][]any{
+		{int64(2)},
+		{int64(3)},
+	}
+	_, err = applier.DeleteKeys(ctx, sourceTable, target1Table, keysToDelete, []*dbconn.TableLock{lock1, lock2})
+	require.NoError(t, err)
+
+	require.NoError(t, lock1.Close(ctx))
+	require.NoError(t, lock2.Close(ctx))
+
+	// Before the fix only the lock connection's shard saw the delete;
+	// the other shard silently kept its row.
+	var shard0IDs, shard1IDs []int64
+	fetchIDs := func(db *sql.DB) []int64 {
+		rows, err := db.QueryContext(ctx, "SELECT id FROM users ORDER BY id")
+		require.NoError(t, err)
+		defer utils.CloseAndLog(rows)
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+	shard0IDs = fetchIDs(target1DB)
+	shard1IDs = fetchIDs(target2DB)
+	require.Equal(t, []int64{4}, shard0IDs, "id=2 should be deleted from shard 0")
+	require.Equal(t, []int64{1}, shard1IDs, "id=3 should be deleted from shard 1")
+}
+
+// TestShardedApplierUnderLockMissingShardLock verifies the applier fails
+// loudly (before executing anything) when locks are supplied but a shard
+// has no lock acquired on its own connection. Executing a shard's
+// statements through another shard's lock connection would silently write
+// to the wrong server.
+func TestShardedApplierUnderLockMissingShardLock(t *testing.T) {
+	sourceTable, target1Table, target1DB, target2DB, applier := setupShardedUnderLockTest(t, "test_pr4_lock_missing")
+	ctx := t.Context()
+
+	// Seed shard 1 so we can verify nothing was deleted from it.
+	_, err := target2DB.ExecContext(ctx, "INSERT INTO users VALUES (1, 101, 'Alice')")
+	require.NoError(t, err)
+
+	// Only lock shard 0. The applier must refuse to run rather than
+	// execute shard 1's statements through shard 0's lock connection.
+	lock1, err := dbconn.NewTableLock(ctx, target1DB, []*table.TableInfo{target1Table}, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, lock1.Close(ctx))
+	}()
+
+	upsertRows := []LogicalRow{
+		{RowImage: []any{int64(2), int64(102), "Bob"}}, // even -> shard 0
+	}
+	_, err = applier.UpsertRows(ctx, table.NewColumnMapping(sourceTable, target1Table, nil), upsertRows, []*dbconn.TableLock{lock1})
+	require.ErrorContains(t, err, "no table lock supplied for shard 1")
+
+	keysToDelete := [][]any{{int64(1)}}
+	_, err = applier.DeleteKeys(ctx, sourceTable, target1Table, keysToDelete, []*dbconn.TableLock{lock1})
+	require.ErrorContains(t, err, "no table lock supplied for shard 1")
+
+	// Nothing should have been written or deleted anywhere.
+	var count int
+	require.NoError(t, target2DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&count))
+	require.Equal(t, 1, count, "shard 1 should be untouched")
 }
 
 // TestShardedApplierCallbackPanicDecrements verifies that a panicking callback

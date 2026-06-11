@@ -302,7 +302,7 @@ func TestBufferedMapFlushUnderLockBypassesWatermark(t *testing.T) {
 	// Flush with underLock=true
 	// This is the critical test: ALL changes should be flushed, including keys 1, 3, 4 which are below watermark
 	// The key assertion is that sub.Length() becomes 0, meaning all changes were flushed
-	allFlushed, err = sub.Flush(t.Context(), true, lock)
+	allFlushed, err = sub.Flush(t.Context(), true, []*dbconn.TableLock{lock})
 
 	// THE KEY ASSERTION: With the fix, allFlushed should be true and sub.Length() should be 0
 	// With the bug (before the fix), allFlushed would be false and sub.Length() would be 3
@@ -1157,7 +1157,7 @@ func TestBufferedMapQueueFlushUnderLock(t *testing.T) {
 		[]*table.TableInfo{srcTable, dstTable}, dbconn.NewDBConfig(), slog.Default())
 	require.NoError(t, err)
 
-	allFlushed, err := sub.Flush(t.Context(), true, lock)
+	allFlushed, err := sub.Flush(t.Context(), true, []*dbconn.TableLock{lock})
 	require.NoError(t, err)
 	require.True(t, allFlushed)
 	require.NoError(t, lock.Close(t.Context()))

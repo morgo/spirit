@@ -12,6 +12,7 @@ import (
 )
 
 type TableLock struct {
+	db      *sql.DB // the connection pool the lock was acquired on
 	tables  []*table.TableInfo
 	lockTxn *sql.Tx
 	logger  *slog.Logger
@@ -91,10 +92,20 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 	// it's a critical function.
 	logger.Warn("table lock(s) acquired")
 	return &TableLock{
+		db:      db,
 		tables:  tables,
 		lockTxn: lockTxn,
 		logger:  logger,
 	}, nil
+}
+
+// DB returns the database connection pool this lock was acquired on.
+// Because LOCK TABLES ... WRITE blocks writes from every other connection,
+// any write to a locked table must go through this lock's own transaction.
+// Callers holding locks on multiple servers (e.g. one per shard) use this
+// to match each lock to the target it belongs to.
+func (s *TableLock) DB() *sql.DB {
+	return s.db
 }
 
 // ExecUnderLock executes a set of statements under a table lock.
