@@ -502,3 +502,168 @@ func fetchJSONColumnCRC(t *testing.T, col string, tbl *table.TableInfo) int64 {
 		col, col, tbl.QuotedTableName)).Scan(&ck))
 	return ck
 }
+
+// TestBufferedBinaryTrailingZerosToVarbinary is the regression test for
+// block/spirit#945 (the gh-ost #909 analog): MySQL strips trailing 0x00
+// pad bytes from BINARY(N) values in the binlog row image
+// (Field_string::pack) and expects the reader to re-pad to the declared
+// width. go-mysql returns the stripped value as-is, so without
+// DecodeBinlogRow's re-padding the buffered replay writes short values
+// into any target column that does not itself re-pad server-side.
+//
+// The destination column here is VARBINARY — the case where the
+// truncation is visible. (With a BINARY(N) destination MySQL re-pads on
+// INSERT, masking the bug; that shape is covered by datatypeCases.)
+func TestBufferedBinaryTrailingZerosToVarbinary(t *testing.T) {
+	srcDDL := `CREATE TABLE subscription_test (
+		id INT NOT NULL AUTO_INCREMENT,
+		touched INT NOT NULL DEFAULT 0,
+		val BINARY(8) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	dstDDL := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL AUTO_INCREMENT,
+		touched INT NOT NULL DEFAULT 0,
+		val VARBINARY(16) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, srcDDL, dstDDL)
+	db, client := startBufferedSubscriptionFor(t, srcTable, dstTable)
+
+	// Phase 1: INSERT values whose row images are stripped to different
+	// lengths: 4 bytes + 4 trailing zeros, all zeros (stripped to
+	// nothing), interior zeros with a non-zero tail (not stripped), and
+	// no zeros at all.
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (val) VALUES
+		(X'aabbccdd00000000'),
+		(X'0000000000000000'),
+		(X'1122003300440055'),
+		(X'ffffffffffffffff')`, srcTable.QuotedTableName))
+	flushAndSync(t, db, client, srcTable, dstTable)
+
+	// Every destination row must hold the full 8-byte width. The <=>
+	// comparison in flushAndSync already proves equality; this assertion
+	// states the original failure mode explicitly.
+	var shortRows int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE OCTET_LENGTH(val) <> 8", dstTable.QuotedTableName)).Scan(&shortRows))
+	require.Zero(t, shortRows, "BINARY(8) values must replay into VARBINARY at their full 8-byte width")
+
+	// Phase 2: UPDATE an unrelated column so the full AFTER image drags
+	// the trailing-zero values back through the applier.
+	testutils.RunSQL(t, fmt.Sprintf("UPDATE %s SET touched = touched + 1", srcTable.QuotedTableName))
+	flushAndSync(t, db, client, srcTable, dstTable)
+
+	// Phase 3: DELETE a row.
+	testutils.RunSQL(t, fmt.Sprintf("DELETE FROM %s ORDER BY id LIMIT 1", srcTable.QuotedTableName))
+	flushAndSync(t, db, client, srcTable, dstTable)
+}
+
+// TestBufferedBinaryPKTrailingZeros covers the primary-key side of
+// block/spirit#945: when a BINARY(N) column is part of the PRIMARY KEY,
+// a stripped row image also strips the replication key. A DELETE built
+// from the stripped key (e.g. WHERE pk IN ('a')) never matches the
+// full-width row in the destination — binary comparison does not pad —
+// so deletes silently miss and the destination diverges.
+func TestBufferedBinaryPKTrailingZeros(t *testing.T) {
+	srcDDL := `CREATE TABLE subscription_test (
+		pk BINARY(8) NOT NULL,
+		val INT NOT NULL,
+		PRIMARY KEY (pk)
+	)`
+	dstDDL := `CREATE TABLE _subscription_test_new (
+		pk BINARY(8) NOT NULL,
+		val INT NOT NULL,
+		PRIMARY KEY (pk)
+	)`
+	srcTable, dstTable := setupTestTables(t, srcDDL, dstDDL)
+	db, client := startBufferedSubscriptionFor(t, srcTable, dstTable)
+
+	// Key bytes are ASCII + trailing NULs: NUL is valid UTF-8, so the
+	// quoted key literal that DeleteKeys builds stays inside what the
+	// unsafe-warning check allows. Keys containing non-UTF8 bytes like
+	// 0xBB are covered separately by TestBufferedBinaryPKNonUTF8 (the
+	// block/spirit#948 fix), which is independent of the row-image
+	// padding under test here.
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES
+		(X'6100000000000000', 1),
+		(X'6200000000000000', 2),
+		(X'6364656600000000', 3)`, srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+
+	// UPDATE one row, DELETE another — both replicate by key.
+	testutils.RunSQL(t, fmt.Sprintf("UPDATE %s SET val = 10 WHERE pk = X'6100000000000000'", srcTable.QuotedTableName))
+	testutils.RunSQL(t, fmt.Sprintf("DELETE FROM %s WHERE pk = X'6200000000000000'", srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+
+	var srcCount, dstCount int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", srcTable.QuotedTableName)).Scan(&srcCount))
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&dstCount))
+	require.Equal(t, 2, srcCount)
+	require.Equal(t, srcCount, dstCount, "DELETE by a trailing-zero BINARY PK must replicate (stripped keys never match)")
+
+	var diff int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT COUNT(*) FROM %s s LEFT JOIN %s d ON s.pk = d.pk WHERE d.pk IS NULL OR NOT (s.val <=> d.val)",
+		srcTable.QuotedTableName, dstTable.QuotedTableName)).Scan(&diff))
+	require.Zero(t, diff, "destination rows must match source by full-width binary PK")
+}
+
+// TestBufferedBinaryPKNonUTF8 pins block/spirit#948: a BINARY(N) primary
+// key whose bytes are not valid UTF-8 (e.g. 0xBB) must replicate through
+// the buffered DELETE / PK-changing UPDATE paths. The fix renders DELETE
+// key tuples through table.Datum (hex-encoding binary), the same way the
+// upsert path does; the previous reverse-the-hash path quoted every
+// component as a '...' string literal, so a non-UTF8 key tripped MySQL's
+// "Invalid utf8mb4 character string" warning, which dbconn escalates to
+// an error and aborts the flush. This is independent of the #945
+// trailing-zero stripping covered by TestBufferedBinaryPKTrailingZeros.
+func TestBufferedBinaryPKNonUTF8(t *testing.T) {
+	srcDDL := `CREATE TABLE subscription_test (
+		pk BINARY(8) NOT NULL,
+		val INT NOT NULL,
+		PRIMARY KEY (pk)
+	)`
+	dstDDL := `CREATE TABLE _subscription_test_new (
+		pk BINARY(8) NOT NULL,
+		val INT NOT NULL,
+		PRIMARY KEY (pk)
+	)`
+	srcTable, dstTable := setupTestTables(t, srcDDL, dstDDL)
+	db, client := startBufferedSubscriptionFor(t, srcTable, dstTable)
+
+	// 0xBB is not valid UTF-8. The third row is full-width (no trailing
+	// 0x00 to strip) so the failure is purely about quoting, not padding.
+	testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES
+		(X'bb00000000000000', 1),
+		(X'cc00000000000000', 2),
+		(X'bbccddeeff112233', 3)`, srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+
+	// DELETE one row by its non-UTF8 key.
+	testutils.RunSQL(t, fmt.Sprintf("DELETE FROM %s WHERE pk = X'cc00000000000000'", srcTable.QuotedTableName))
+	// PK-changing UPDATE: emits a DELETE for the old (non-UTF8) PK plus an
+	// INSERT for the new one — exercises the delete-of-old-PK path too.
+	testutils.RunSQL(t, fmt.Sprintf("UPDATE %s SET pk = X'aa00000000000000' WHERE pk = X'bb00000000000000'", srcTable.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+
+	var srcCount, dstCount int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", srcTable.QuotedTableName)).Scan(&srcCount))
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable.QuotedTableName)).Scan(&dstCount))
+	require.Equal(t, 2, srcCount)
+	require.Equal(t, srcCount, dstCount, "DELETE/UPDATE by a non-UTF8 BINARY PK must replicate")
+
+	var diff int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT COUNT(*) FROM %s s LEFT JOIN %s d ON s.pk = d.pk WHERE d.pk IS NULL OR NOT (s.val <=> d.val)",
+		srcTable.QuotedTableName, dstTable.QuotedTableName)).Scan(&diff))
+	require.Zero(t, diff, "destination rows must match source by non-UTF8 binary PK")
+}

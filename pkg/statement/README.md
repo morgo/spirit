@@ -237,6 +237,11 @@ type Column struct {
     SetValues  []string          // For SET('x','y'), SetValues = ["x", "y"]
     Nullable   bool
     Default    *string
+    OnUpdate   *string           // ON UPDATE CURRENT_TIMESTAMP[(n)] for TIMESTAMP/DATETIME
+    GeneratedExpr   *string      // Expression for GENERATED ALWAYS AS (...) columns
+    GeneratedStored bool         // true = STORED, false = VIRTUAL
+    Check      *string           // Column-level CHECK (...) expression
+    SRID       *uint32           // SRID attribute for spatial columns
     AutoInc    bool
     PrimaryKey bool              // Column-level PRIMARY KEY
     Unique     bool              // Column-level UNIQUE

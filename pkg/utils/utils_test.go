@@ -12,21 +12,11 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-func TestHashAndUnhashKey(t *testing.T) {
+func TestHashKey(t *testing.T) {
 	// This func helps put composite keys in a map.
-	key := []any{"1234", "ACDC", "12"}
-	hashed := HashKey(key)
-	require.Equal(t, "1234-#-ACDC-#-12", hashed)
-	unhashed := UnhashKeyToString(hashed)
-	// unhashed returns as a string, not the original any
-	require.Equal(t, "('1234','ACDC','12')", unhashed)
-
+	require.Equal(t, "1234-#-ACDC-#-12", HashKey([]any{"1234", "ACDC", "12"}))
 	// This also works on single keys.
-	key = []any{"1234"}
-	hashed = HashKey(key)
-	require.Equal(t, "1234", hashed)
-	unhashed = UnhashKeyToString(hashed)
-	require.Equal(t, "'1234'", unhashed)
+	require.Equal(t, "1234", HashKey([]any{"1234"}))
 }
 
 // TestHashKeySeparatorCollision pins the fix for hash-key collisions:
@@ -48,34 +38,41 @@ func TestHashKeySeparatorCollision(t *testing.T) {
 		HashKey([]any{"a", `\b`}))
 }
 
-// TestHashKeyRoundTrip verifies that UnhashKeyToString recovers the exact
-// original values (correctly SQL-quoted) for components containing the
-// separator, escape characters, and edge-case values.
-func TestHashKeyRoundTrip(t *testing.T) {
-	tests := []struct {
-		name string
-		key  []any
-		want string
-	}{
-		{"plain single", []any{"hello"}, "'hello'"},
-		{"plain composite", []any{"a", "b"}, "('a','b')"},
-		{"separator in single key", []any{"a-#-b"}, "'a-#-b'"},
-		{"separator in composite components", []any{"a-#-b", "c"}, "('a-#-b','c')"},
-		{"separator in second component", []any{"a", "b-#-c"}, "('a','b-#-c')"},
-		{"bare hash", []any{"a#b", "c#"}, "('a#b','c#')"},
-		{"backslash", []any{`a\b`, `c\`}, `('a\\b','c\\')`}, // sqlescape doubles backslashes for SQL
-		{"backslash before hash", []any{`a\#b`}, `'a\\#b'`},
-		{"only separator", []any{"-#-"}, "'-#-'"},
-		{"empty single", []any{""}, "''"},
-		{"empty components", []any{"", ""}, "('','')"},
-		{"empty first component", []any{"", "a"}, "('','a')"},
-		{"trailing dash boundary", []any{"a-", "-b"}, "('a-','-b')"},
-		{"non-string types", []any{int64(42), "x"}, "('42','x')"},
+// TestHashKeyInjective verifies that HashKey produces a distinct map key
+// for components containing the separator, escape characters, binary
+// bytes, and edge-case values. Injectivity is the only property the
+// buffered map relies on — two different key tuples must never hash to
+// the same string (which would let one row's change silently overwrite
+// another's). The hash is never reversed back into SQL, so round-tripping
+// no longer matters; the applier builds DELETE literals from the original
+// typed values instead (see block/spirit#948).
+func TestHashKeyInjective(t *testing.T) {
+	keys := [][]any{
+		{"hello"},
+		{"a", "b"},
+		{"a-#-b"},
+		{"a-#-b", "c"},
+		{"a", "b-#-c"},
+		{"a#b", "c#"},
+		{`a\b`, `c\`},
+		{`a\#b`},
+		{"-#-"},
+		{""},
+		{"", ""},
+		{"", "a"},
+		{"a-", "-b"},
+		{int64(42), "x"},
+		// Binary / non-UTF8 key components must hash distinctly too.
+		{"\xbb\x00\x00\x00\x00\x00\x00\x00"},
+		{"\xbb\x00", "abc"},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, UnhashKeyToString(HashKey(tc.key)))
-		})
+	seen := make(map[string][]any, len(keys))
+	for _, k := range keys {
+		h := HashKey(k)
+		if prev, ok := seen[h]; ok {
+			t.Errorf("hash collision: %#v and %#v both hash to %q", prev, k, h)
+		}
+		seen[h] = k
 	}
 }
 

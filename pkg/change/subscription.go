@@ -27,7 +27,11 @@ import (
 type Subscription interface {
 	HasChanged(key, row []any, deleted bool)
 	Length() int
-	Flush(ctx context.Context, underLock bool, lock *dbconn.TableLock) (allChangesFlushed bool, err error)
+	// Flush writes the pending changes to the target(s) via the applier.
+	// When underLock is true, locks carries the table locks the caller is
+	// holding — one per target server — and the applier executes each
+	// target's statements under that target's own lock.
+	Flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) (allChangesFlushed bool, err error)
 	Tables() []*table.TableInfo // returns the tables related to the subscription in currentTable, newTable order
 
 	// SetWatermarkOptimization toggles both high and low watermark

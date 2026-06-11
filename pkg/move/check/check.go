@@ -41,6 +41,13 @@ type Resources struct {
 	// source. The configuration check uses this to additionally validate
 	// gtid_mode and enforce_gtid_consistency on every source.
 	GTID bool
+	// MoveEverything is true when no explicit table list was supplied (i.e.
+	// move.SourceTables is empty), so every table in each source database is
+	// being moved. The source_schema_consistency check uses this to decide
+	// whether to also require an identical table *set* across all sources: when
+	// moving everything, an extra/missing table on one shard is a drift error;
+	// when only a named subset is moved, tables outside that subset are ignored.
+	MoveEverything bool
 }
 
 type check struct {

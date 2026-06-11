@@ -2,6 +2,7 @@ package check
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -239,5 +240,77 @@ func TestResumeStateCheck(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "does not exist on target 1")
 		require.Contains(t, err.Error(), "cannot resume")
+	})
+}
+
+// TestResumeStateCheckSchemaTypesAndCollation exercises the strengthened resume
+// schema comparison: a target whose columns share the source's names but differ
+// in type or collation must FAIL resume validation. On the unfixed (names-only)
+// comparison these passed, which is especially dangerous on resume — a checksum
+// watermark already covering the affected chunk means the mismatch would never
+// be re-verified.
+func TestResumeStateCheckSchemaTypesAndCollation(t *testing.T) {
+	srcName, srcDB := createW3DDatabase(t)
+	tgtName, tgtDB := createW3DDatabase(t)
+	sourceConfig := &mysql.Config{DBName: srcName}
+	targetConfig := &mysql.Config{DBName: tgtName}
+
+	_, err := srcDB.ExecContext(t.Context(),
+		fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_bin NOT NULL, name VARCHAR(100), PRIMARY KEY (id))", srcName))
+	require.NoError(t, err)
+	// Checkpoint table must exist on the first target (targets[0]) for resume
+	// validation to proceed.
+	_, err = tgtDB.ExecContext(t.Context(), fmt.Sprintf(`CREATE TABLE %s._spirit_checkpoint (
+		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT)`, tgtName))
+	require.NoError(t, err)
+
+	sourceTable := table.NewTableInfo(srcDB, srcName, "t")
+	require.NoError(t, sourceTable.SetInfo(t.Context()))
+
+	newResources := func() Resources {
+		return Resources{
+			Sources:      []SourceResource{{DB: srcDB, Config: sourceConfig}},
+			Targets:      []applier.Target{{DB: tgtDB, Config: targetConfig}},
+			SourceTables: []*table.TableInfo{sourceTable},
+		}
+	}
+
+	// Test 1: identical target schema passes resume validation.
+	t.Run("identical schema passes", func(t *testing.T) {
+		_, err := tgtDB.ExecContext(t.Context(),
+			fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_bin NOT NULL, name VARCHAR(100), PRIMARY KEY (id))", tgtName))
+		require.NoError(t, err)
+		defer func() { _, _ = tgtDB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.t", tgtName)) }()
+		require.NoError(t, resumeStateCheck(t.Context(), newResources(), slog.Default()))
+	})
+
+	// Test 2: same names, different PK collation FAILS (passed on unfixed code).
+	t.Run("same names different PK collation fails", func(t *testing.T) {
+		_, err := tgtDB.ExecContext(t.Context(),
+			fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_0900_ai_ci NOT NULL, name VARCHAR(100), PRIMARY KEY (id))", tgtName))
+		require.NoError(t, err)
+		defer func() { _, _ = tgtDB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.t", tgtName)) }()
+
+		// The old names-only comparison would pass: confirm the names match.
+		targetTable := table.NewTableInfo(tgtDB, tgtName, "t")
+		require.NoError(t, targetTable.SetInfo(t.Context()))
+		require.Equal(t, sourceTable.Columns, targetTable.Columns)
+
+		err = resumeStateCheck(t.Context(), newResources(), slog.Default())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema mismatch")
+		require.Contains(t, err.Error(), "cannot resume safely")
+	})
+
+	// Test 3: same names, different type FAILS.
+	t.Run("same names different type fails", func(t *testing.T) {
+		_, err := tgtDB.ExecContext(t.Context(),
+			fmt.Sprintf("CREATE TABLE %s.t (id VARCHAR(64) COLLATE utf8mb4_bin NOT NULL, name TEXT, PRIMARY KEY (id))", tgtName))
+		require.NoError(t, err)
+		defer func() { _, _ = tgtDB.ExecContext(t.Context(), fmt.Sprintf("DROP TABLE %s.t", tgtName)) }()
+		err = resumeStateCheck(t.Context(), newResources(), slog.Default())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema mismatch")
 	})
 }
