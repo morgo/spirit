@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -56,17 +57,29 @@ type Applier interface {
 	// For the subscription: callback will update binlog coordinates
 	Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback ApplyCallback) error
 
-	// DeleteKeys deletes rows by their key values synchronously.
-	// The keys are hashed key strings (from utils.HashKey).
-	// If lock is non-nil, the delete is executed under the table lock.
+	// DeleteKeys deletes rows by their key values synchronously. Each entry
+	// in keys is one key tuple of the original (typed) column values, in
+	// sourceTable.KeyColumns order.
+	// An empty locks slice means no under-lock flush: the delete runs on the
+	// regular write connection(s). When locks is non-empty, the delete is
+	// executed under the supplied table lock(s):
+	//   - Single-target implementations accept zero or one lock. Zero means no
+	//     under-lock flush; more than one lock is a caller bug and is an error.
+	//   - Multi-target (sharded) implementations expect one lock per target,
+	//     each acquired on that target's own connection, and execute each
+	//     target's statements under that target's lock (matched by connection
+	//     identity). A missing lock for any shard is an error.
 	// Returns the number of rows affected and any error.
-	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys []string, lock *dbconn.TableLock) (int64, error)
+	DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error)
 
-	// UpsertRows performs an upsert (INSERT ... ON DUPLICATE KEY UPDATE) synchronously.
+	// UpsertRows performs an upsert (REPLACE INTO ... VALUES) synchronously.
 	// The rows are LogicalRow structs containing the row images.
-	// If lock is non-nil, the upsert is executed under the table lock.
+	// An empty locks slice means no under-lock flush; when locks is non-empty
+	// the upsert is executed under the supplied table lock(s). See DeleteKeys
+	// for the per-implementation lock contract (single-target accepts zero or
+	// one lock; sharded expects one lock per shard).
 	// Returns the number of rows affected and any error.
-	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, lock *dbconn.TableLock) (int64, error)
+	UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error)
 
 	// Wait blocks until all pending work is complete and all callbacks have been invoked
 	Wait(ctx context.Context) error
@@ -88,6 +101,46 @@ type Applier interface {
 type LogicalRow struct {
 	IsDeleted bool
 	RowImage  []any
+}
+
+// deleteKeysInClause renders key value tuples into the element list of a
+// `(keycols) IN (...)` clause. Values go through table.Datum so binary
+// keys are hex-encoded; a quoted non-UTF-8 literal would trip MySQL's
+// utf8mb4 warning (block/spirit#948). Single-column keys render as a bare
+// literal, composite keys as a parenthesized tuple.
+func deleteKeysInClause(sourceTable *table.TableInfo, keys [][]any) (string, error) {
+	// Resolve each key column's type once, not per key: parsing the type
+	// string is the dominant cost of building a Datum.
+	colTypes := make([]table.ColumnType, len(sourceTable.KeyColumns))
+	for j, colName := range sourceTable.KeyColumns {
+		typeStr, ok := sourceTable.GetColumnMySQLType(colName)
+		if !ok {
+			return "", fmt.Errorf("key column %s not found in table %s", colName, sourceTable.TableName)
+		}
+		colTypes[j] = table.NewColumnType(typeStr)
+	}
+
+	pkValues := make([]string, 0, len(keys))
+	for _, keyTuple := range keys {
+		if len(keyTuple) != len(colTypes) {
+			return "", fmt.Errorf("delete key has %d component(s) but table %s has %d key column(s)",
+				len(keyTuple), sourceTable.TableName, len(colTypes))
+		}
+		parts := make([]string, len(keyTuple))
+		for j := range keyTuple {
+			datum, err := table.NewDatumFromValueWithType(keyTuple[j], colTypes[j])
+			if err != nil {
+				return "", fmt.Errorf("failed to convert delete key value for column %s: %w", sourceTable.KeyColumns[j], err)
+			}
+			parts[j] = datum.String()
+		}
+		if len(parts) == 1 {
+			pkValues = append(pkValues, parts[0])
+		} else {
+			pkValues = append(pkValues, "("+strings.Join(parts, ",")+")")
+		}
+	}
+	return strings.Join(pkValues, ","), nil
 }
 
 type ApplierConfig struct {

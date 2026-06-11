@@ -773,8 +773,126 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 
 	var tableCount int
 	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
-		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
 		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'`, m.changes[0].oldTableName())).Scan(&tableCount))
 	require.Equal(t, 0, tableCount)
 	require.NoError(t, m.Close())
+}
+
+// TestSentinelCreateNeverObservedAbsent verifies that createSentinelTable is
+// idempotent and never passes through a "sentinel missing" state. The
+// sentinel table is shared by every migration in the schema, and a migration
+// blocked in --defer-cutover polls waitOnSentinelTable for its disappearance:
+// when creating the sentinel for a second migration dropped it first (the
+// old DROP+CREATE implementation), a concurrently polling migration could
+// observe the gap and proceed to cutover without operator approval.
+func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
+	t.Parallel()
+
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	tableName := "sentinel_create_race"
+	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+		`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
+
+	// Build a minimal runner: createSentinelTable and sentinelTableExists
+	// only need r.db and r.changes[0].table.
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB", WithDBName(dbName))
+	var err error
+	m.db, err = dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	m.changes[0].table = table.NewTableInfo(m.db, dbName, tableName)
+	defer func() {
+		require.NoError(t, m.Close())
+	}()
+
+	// Migration A creates the sentinel...
+	require.NoError(t, m.createSentinelTable(t.Context()))
+	// ...and creating it again when it already exists must succeed without
+	// dropping it first (idempotent create).
+	require.NoError(t, m.createSentinelTable(t.Context()))
+
+	// Start a poller that mimics waitOnSentinelTable's existence probe, but
+	// much tighter than the production 1s interval so it lands inside any
+	// drop/create window with high probability.
+	pollCtx, cancelPoll := context.WithCancel(t.Context())
+	defer cancelPoll()
+	var observedAbsent atomic.Bool
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for pollCtx.Err() == nil {
+			exists, err := m.sentinelTableExists(pollCtx)
+			if err != nil {
+				return // context cancelled; test is over
+			}
+			if !exists {
+				observedAbsent.Store(true)
+				return
+			}
+		}
+	})
+
+	// Concurrently, migration B (re)creates the sentinel many times — as a
+	// stream of fresh --defer-cutover migrations starting would.
+	for range 50 {
+		require.NoError(t, m.createSentinelTable(t.Context()))
+	}
+	cancelPoll()
+	wg.Wait()
+	require.False(t, observedAbsent.Load(),
+		"a waitOnSentinelTable-style poll observed the sentinel as missing while createSentinelTable was running; a deferred cutover would have proceeded without operator approval")
+}
+
+// TestDeferCutOverTwoMigrationsSharedSentinel runs two concurrent
+// --defer-cutover migrations on different tables in the same schema. The
+// second migration starting fresh (re)creates the shared sentinel table
+// during its setup; the first migration must keep waiting — its deferred
+// cutover must not be released by the second migration's setup. Dropping the
+// sentinel once then releases both.
+func TestDeferCutOverTwoMigrationsSharedSentinel(t *testing.T) {
+	t.Parallel()
+
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	for _, tbl := range []string{"defer_shared_a", "defer_shared_b"} {
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tbl))
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			"INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tbl))
+	}
+
+	mA := NewTestRunner(t, "defer_shared_a", "ENGINE=InnoDB",
+		WithDBName(dbName),
+		WithDeferCutOver(),
+		WithRespectSentinel())
+	cA := make(chan error)
+	go func() {
+		cA <- mA.Run(t.Context())
+	}()
+	waitForStatus(t, mA, status.WaitingOnSentinelTable)
+
+	// Migration B starts fresh in the same schema while A is blocked on the
+	// sentinel, and re-creates the shared sentinel during its setup.
+	mB := NewTestRunner(t, "defer_shared_b", "ENGINE=InnoDB",
+		WithDBName(dbName),
+		WithDeferCutOver(),
+		WithRespectSentinel())
+	cB := make(chan error)
+	go func() {
+		cB <- mB.Run(t.Context())
+	}()
+	waitForStatus(t, mB, status.WaitingOnSentinelTable)
+
+	// Give A several sentinel poll intervals to (incorrectly) notice any
+	// sentinel gap left by B's setup. It must still be waiting: the operator
+	// has not approved either cutover yet.
+	time.Sleep(3 * sentinelCheckInterval)
+	require.Equal(t, status.WaitingOnSentinelTable, mA.status.Get(),
+		"migration A was released from its deferred cutover by migration B starting; the operator never dropped the sentinel")
+
+	// Operator approves: drop the shared sentinel once; both migrations
+	// proceed to cutover.
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+	require.NoError(t, <-cA)
+	require.NoError(t, <-cB)
+	require.NoError(t, mA.Close())
+	require.NoError(t, mB.Close())
 }

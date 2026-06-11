@@ -41,9 +41,13 @@ func mkIniFile(t *testing.T, content string) string {
 }
 
 // waitForStatus polls until the runner reaches the target status or times out.
+// The timeout is generous because the runner must finish the copy and
+// checksum phases before it reaches the later states (e.g.
+// WaitingOnSentinelTable); under CI load those phases can starve and a
+// tighter budget produces spurious timeouts (see issue #946).
 func waitForStatus(t *testing.T, m *Runner, target status.State) {
 	t.Helper()
-	timeout := time.After(30 * time.Second)
+	timeout := time.After(60 * time.Second)
 	for m.status.Get() < target {
 		select {
 		case <-timeout:

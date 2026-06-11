@@ -854,7 +854,9 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	require.NotNil(t, chunk1)
 
 	// After dispatching first chunk:
-	// - Keys at or above chunkPtr[0] should be above high watermark
+	// - Keys strictly above chunkPtr[0] should be above high watermark
+	// - Keys at chunkPtr[0] are ambiguous for this multi-column (a,b,c) key
+	//   and must NOT be above (the tuple could be below the dispatched bound)
 	// - Keys below watermark should return false until feedback is given
 	// First chunk has no LowerBound, use UpperBound instead
 	require.Nil(t, chunk1.LowerBound)
@@ -870,8 +872,11 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	// Key below the lowest 'a' value should not be above watermark
 	require.False(t, comp.KeyAboveHighWatermark(0))
 
-	// Key at or above chunkPtr should be above high watermark
-	require.True(t, comp.KeyAboveHighWatermark(val1))
+	// The PK here is (a,b,c) — multi-column — so a key EQUAL to chunkPtr[0]
+	// is ambiguous: the full tuple (val1, b, c) may be below the dispatched
+	// upper bound. It must NOT be reported above the high watermark.
+	require.False(t, comp.KeyAboveHighWatermark(val1))
+	// Strictly above chunkPtr[0] is unambiguous: above the high watermark.
 	require.True(t, comp.KeyAboveHighWatermark(val1+1))
 
 	// Nothing is below low watermark yet (no feedback given)
@@ -929,6 +934,149 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	require.False(t, comp.KeyAboveHighWatermark(100))
 	require.True(t, comp.KeyBelowLowWatermark(1))
 	require.True(t, comp.KeyBelowLowWatermark(100))
+
+	require.NoError(t, comp.Close())
+}
+
+// TestCompositeChunkerKeyAboveHighWatermarkMultiColumn is a regression test:
+// KeyAboveHighWatermark only sees key[0], so for a multi-column chunk key,
+// equality on the first column is ambiguous. With chunkPtrs = (5, 101), the
+// tuple (5, 50) is BELOW the watermark (already dispatched/copied), yet the
+// old `key[0] >= chunkPtrs[0]` comparison returned TRUE and the consumer
+// permanently discarded the event — silent data loss for every write to a
+// hot first-column value (e.g. one tenant of a PRIMARY KEY(tenant_id, id)
+// table) while the chunker sat inside that range. Only a STRICTLY greater
+// first column guarantees the full tuple is above every dispatched bound.
+func TestCompositeChunkerKeyAboveHighWatermarkMultiColumn(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS composite_hwm_multicol_t1")
+	testutils.RunSQL(t, `CREATE TABLE composite_hwm_multicol_t1 (
+		a int NOT NULL,
+		b int NOT NULL,
+		PRIMARY KEY (a, b)
+	)`)
+	// Seed so the first chunk's upper bound lands mid-way through a=5:
+	// rows (1,1)..(1,900), (5,1)..(5,200), (9,1)..(9,200).
+	// With StartingChunkSize=1000, the first chunk's prefetch
+	// (LIMIT 1 OFFSET 1000) returns the 1001st row = (5, 101),
+	// so chunkPtrs becomes the known tuple (5, 101).
+	testutils.RunSQL(t, `INSERT INTO composite_hwm_multicol_t1 (a, b)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 900
+		)
+		SELECT 1, n FROM seq`)
+	testutils.RunSQL(t, `INSERT INTO composite_hwm_multicol_t1 (a, b)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 200
+		)
+		SELECT 5, n FROM seq`)
+	testutils.RunSQL(t, `INSERT INTO composite_hwm_multicol_t1 (a, b)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 200
+		)
+		SELECT 9, n FROM seq`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	tbl := NewTableInfo(db, "test", "composite_hwm_multicol_t1")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
+	require.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+	require.NoError(t, comp.Open())
+
+	chunk1, err := comp.Next()
+	require.NoError(t, err)
+	require.NotNil(t, chunk1.UpperBound)
+	// Sanity-check the dispatched high watermark is the tuple we expect.
+	require.Equal(t, int64(5), chunk1.UpperBound.Value[0].Val)
+	require.Equal(t, int64(101), chunk1.UpperBound.Value[1].Val)
+
+	// The bug: 5 >= 5 returned TRUE, so events for tuples like (5, 50) —
+	// below the dispatched bound (5, 101) — were permanently discarded.
+	// Equal first column is ambiguous; the event must be buffered.
+	require.False(t, comp.KeyAboveHighWatermark(5))
+	// Strictly above on the first column is unambiguous: every tuple
+	// (6, x) sorts above (5, 101). Safe to discard.
+	require.True(t, comp.KeyAboveHighWatermark(6))
+	require.True(t, comp.KeyAboveHighWatermark(9))
+	// Strictly below remains below.
+	require.False(t, comp.KeyAboveHighWatermark(4))
+
+	require.NoError(t, comp.Close())
+}
+
+// TestCompositeChunkerKeyAboveHighWatermarkSingleColumn verifies the unified
+// strict-greater-than behavior on a single-column chunk key: the exclusive
+// upper bound itself is not "above" the watermark (the event is buffered,
+// which flush-time logic handles), and only strictly greater keys are.
+func TestCompositeChunkerKeyAboveHighWatermarkSingleColumn(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS composite_hwm_singlecol_t1")
+	// Single-column PK that is NOT auto_increment, so NewChunker selects
+	// the composite chunker.
+	testutils.RunSQL(t, `CREATE TABLE composite_hwm_singlecol_t1 (
+		id int NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+	// Generate in batches to avoid the CTE recursion depth limit (1000).
+	testutils.RunSQL(t, `INSERT INTO composite_hwm_singlecol_t1 (id)
+		WITH RECURSIVE seq AS (
+			SELECT 1 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 1000
+		)
+		SELECT n FROM seq`)
+	testutils.RunSQL(t, `INSERT INTO composite_hwm_singlecol_t1 (id)
+		WITH RECURSIVE seq AS (
+			SELECT 1001 AS n
+			UNION ALL
+			SELECT n + 1 FROM seq WHERE n < 1500
+		)
+		SELECT n FROM seq`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	tbl := NewTableInfo(db, "test", "composite_hwm_singlecol_t1")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
+	require.NoError(t, err)
+	require.IsType(t, &chunkerComposite{}, chunker)
+	comp := chunker.(*chunkerComposite)
+	require.NoError(t, comp.Open())
+	require.Len(t, comp.chunkKeys, 1)
+
+	chunk1, err := comp.Next()
+	require.NoError(t, err)
+	require.NotNil(t, chunk1.UpperBound)
+	// With StartingChunkSize=1000 and ids 1..1500, the first chunk's
+	// prefetch (LIMIT 1 OFFSET 1000) returns id=1001.
+	require.Equal(t, int64(1001), chunk1.UpperBound.Value[0].Val)
+
+	// The boundary value equals the exclusive upper bound. Under strict
+	// greater-than it is not above the watermark, so the event is buffered
+	// rather than discarded (safe; the row is re-read by the next chunk).
+	require.False(t, comp.KeyAboveHighWatermark(1001))
+	require.True(t, comp.KeyAboveHighWatermark(1002))
+	require.False(t, comp.KeyAboveHighWatermark(1000))
 
 	require.NoError(t, comp.Close())
 }
