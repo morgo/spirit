@@ -458,3 +458,46 @@ func TestFromWatermark(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, checker.Run(t.Context()))
 }
+
+// TestColumnBoundaryShift is a regression test for the missing inter-column
+// separator in the checksum expression. Without a separator, CONCAT() lets
+// content shift across adjacent column boundaries undetected: the rows
+// ('x0', 'y') and ('x', '0y') concatenate to the same string ("x00y0",
+// including the ISNULL digits) and therefore the same CRC32. The checksum
+// must report these rows as different.
+func TestColumnBoundaryShift(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS colshift_t1, _colshift_t1_new, _colshift_t1_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE colshift_t1 (id INT NOT NULL, a VARCHAR(255), b VARCHAR(255), PRIMARY KEY (id))")
+	testutils.RunSQL(t, "CREATE TABLE _colshift_t1_new (id INT NOT NULL, a VARCHAR(255), b VARCHAR(255), PRIMARY KEY (id))")
+	testutils.RunSQL(t, "CREATE TABLE _colshift_t1_chkpnt (a INT)") // for binlog advancement
+	// The trailing '0' of column a has migrated to the front of column b
+	// in the target table. The data is different, so the checksum must fail.
+	testutils.RunSQL(t, "INSERT INTO colshift_t1 VALUES (1, 'x0', 'y')")
+	testutils.RunSQL(t, "INSERT INTO _colshift_t1_new VALUES (1, 'x', '0y')")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "colshift_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_colshift_t1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	require.NoError(t, err)
+	singleChecker, ok := checker.(*SingleChecker)
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	err = singleChecker.runChecksum(t.Context())
+	require.ErrorContains(t, err, "checksum mismatch")
+}

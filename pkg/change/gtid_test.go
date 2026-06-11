@@ -1,6 +1,8 @@
 package change
 
 import (
+	"fmt"
+	"log/slog"
 	"testing"
 
 	"github.com/block/spirit/pkg/applier"
@@ -8,7 +10,9 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	mysql2 "github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,6 +92,165 @@ func TestGTIDStartFromMalformedPosition(t *testing.T) {
 	err = client.StartFromPosition(t.Context(), "binlog.000123:4567")
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrPositionNotFound)
+}
+
+// TestGTIDClientUnparseableDDL is a regression test: a QueryEvent the
+// TiDB parser cannot parse (CREATE TRIGGER, stored procedure bodies,
+// certain ALTER USER variants, XA statements, ...) must still promote
+// the transaction's pending GTID into bufferedGTID. Every QueryEvent on
+// the entire server flows through the parser — the schema filter only
+// applies after parsing — so before the fix a single unparseable
+// statement in a *completely unrelated schema* left bufferedGTID
+// permanently behind gtid_executed: BlockWait timed out forever, Flush
+// looped indefinitely, and a GTID-mode migration was wedged until
+// cancelled.
+func TestGTIDClientUnparseableDDL(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidunparset1, gtidunparset2")
+	testutils.RunSQL(t, "CREATE TABLE gtidunparset1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidunparset2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	// A separate schema, to prove the unparseable statement does not even
+	// need to be near the migrated table: the parse happens before any
+	// schema filtering.
+	otherSchema, _ := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, otherSchema, "CREATE TABLE unrelated (a INT NOT NULL PRIMARY KEY)")
+
+	t1 := table.NewTableInfo(db, "test", "gtidunparset1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidunparset2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// CREATE TRIGGER is binlogged as a QueryEvent that the TiDB parser
+	// rejects (it is also recorded with a DEFINER clause, which fails the
+	// parse on its own). The statement is its own server transaction with
+	// its own GTID, terminated without an XIDEvent.
+	testutils.RunSQLInDatabase(t, otherSchema,
+		"CREATE TRIGGER gtidunparse_trg BEFORE INSERT ON unrelated FOR EACH ROW SET @gtid_unparse_test = 1")
+
+	// A normal tracked-table write after the unparseable event.
+	testutils.RunSQL(t, "INSERT INTO gtidunparset1 (a, b, c) VALUES (1, 2, 3)")
+
+	// Before the fix this times out after DefaultTimeout (30s): the
+	// trigger's GTID is in the server's gtid_executed but never enters
+	// bufferedGTID, so the buffered set can never contain the target.
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 1, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+
+	var count int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM gtidunparset2").Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+// TestGTIDClientNonXIDCommit is a regression test for the other dropped
+// promotion path: a transaction on a non-transactional engine (MyISAM)
+// is terminated by a `COMMIT` QueryEvent instead of an XIDEvent. The
+// COMMIT/ROLLBACK early-out used to `continue` without promoting the
+// pending GTID, leaving bufferedGTID permanently behind gtid_executed.
+func TestGTIDClientNonXIDCommit(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	var support string
+	err = db.QueryRowContext(t.Context(), "SELECT SUPPORT FROM information_schema.ENGINES WHERE ENGINE='MyISAM'").Scan(&support)
+	if err != nil || (support != "YES" && support != "DEFAULT") {
+		t.Skipf("MyISAM engine not available (support=%q, err=%v); skipping the end-to-end COMMIT/ROLLBACK QueryEvent regression coverage. The promotePendingGTID helper's semantics are still unit-tested separately by TestGTIDPromotePendingGTID, but that test does not exercise the readStream wiring this test covers", support, err)
+	}
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidmyisamt1, gtidmyisamt2, gtidmyisamt3")
+	testutils.RunSQL(t, "CREATE TABLE gtidmyisamt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidmyisamt2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	// An untracked non-transactional table: writes to it produce
+	// GTIDEvent, BEGIN, rows, then a `COMMIT` QueryEvent — no XIDEvent.
+	testutils.RunSQL(t, "CREATE TABLE gtidmyisamt3 (a INT NOT NULL PRIMARY KEY) ENGINE=MyISAM")
+	t.Cleanup(func() {
+		testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidmyisamt3")
+	})
+
+	t1 := table.NewTableInfo(db, "test", "gtidmyisamt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidmyisamt2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	testutils.RunSQL(t, "INSERT INTO gtidmyisamt3 (a) VALUES (1)")
+	testutils.RunSQL(t, "INSERT INTO gtidmyisamt1 (a, b, c) VALUES (1, 2, 3)")
+
+	// Before the fix this times out: the MyISAM transaction's GTID is in
+	// gtid_executed but its `COMMIT` QueryEvent never promoted it.
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 1, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+
+	var count int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM gtidmyisamt2").Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+// TestGTIDPromotePendingGTID unit-tests the promotion helper directly
+// (no MySQL required beyond package setup). This documents the ROLLBACK
+// design decision: any GTID the server streams — even for a transaction
+// terminated by ROLLBACK (the mixed-engine case, where the
+// non-transactional writes survive) — is part of the server's
+// gtid_executed, so it must be promoted into bufferedGTID once the
+// transaction's event stream ends. Not promoting can never be correct:
+// the only effect is that bufferedGTID falls permanently behind
+// gtid_executed and BlockWait stalls.
+func TestGTIDPromotePendingGTID(t *testing.T) {
+	const sid = "11111111-2222-3333-4444-555555555555"
+	gset, err := mysql.ParseMysqlGTIDSet(sid + ":1-5")
+	require.NoError(t, err)
+	c := &gtidClient{
+		logger:       slog.Default(),
+		bufferedGTID: gset,
+	}
+
+	// No pending GTID: promotion is a no-op (e.g. right after a stream
+	// reconnect, where recreateStreamer cleared the pending state).
+	c.promotePendingGTID()
+	require.Equal(t, sid+":1-5", c.bufferedGTID.String())
+
+	u := uuid.MustParse(sid)
+	c.pendingSID = u[:]
+	c.pendingGNO = 6
+	c.promotePendingGTID()
+
+	target, err := mysql.ParseMysqlGTIDSet(fmt.Sprintf("%s:1-6", sid))
+	require.NoError(t, err)
+	require.True(t, c.bufferedGTID.Contain(target), "promoted GTID must enter the buffered set, got %s", c.bufferedGTID.String())
+	require.Nil(t, c.pendingSID, "pending SID must be cleared after promotion")
+	require.Zero(t, c.pendingGNO, "pending GNO must be cleared after promotion")
+
+	// Promoting again is idempotent-by-vacancy: the pending state was
+	// consumed, so nothing changes.
+	c.promotePendingGTID()
+	require.Equal(t, sid+":1-6", c.bufferedGTID.String())
 }
 
 // TestGTIDRoundtripPosition verifies that the opaque Position string
