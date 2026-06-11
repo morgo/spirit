@@ -65,12 +65,7 @@ func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 	// Diff(got -> want): the returned clauses are the ALTER that would morph the
 	// validated schema ("got") into the reference schema ("want"). If nil, the
 	// two schemas are equivalent under the canonicalization rules above.
-	//
-	// CreateTable.Diff is known to panic on some edge cases (formatting
-	// differences between SHOW CREATE TABLE output variants). A panic here would
-	// crash the move pre-flight checks, so guard the call and turn any panic into
-	// a normal error.
-	stmts, err := safeDiff(got, want)
+	stmts, err := got.Diff(want, statement.NewDiffOptions())
 	if err != nil {
 		return "", fmt.Errorf("failed to diff CREATE TABLE statements: %w", err)
 	}
@@ -93,16 +88,4 @@ func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 		return "", err
 	}
 	return prefix + strings.Join(clauses, ", "), nil
-}
-
-// safeDiff runs CreateTable.Diff but converts a panic into an error so a
-// malformed/edge-case schema can never crash the move pre-flight checks.
-func safeDiff(got, want *statement.CreateTable) (stmts []*statement.AbstractStatement, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			stmts = nil
-			err = fmt.Errorf("panic diffing CREATE TABLE statements: %v", r)
-		}
-	}()
-	return got.Diff(want, statement.NewDiffOptions())
 }
