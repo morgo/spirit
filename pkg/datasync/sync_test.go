@@ -639,3 +639,41 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
 	require.Equal(t, 2, n)
 }
+
+// TestSyncValidate covers the Kong Validate() hook: explicitly-negative
+// numeric/duration flags are rejected at parse time, while zero values
+// (meaning "use the default", filled in by NewRunner) pass. Mirrors
+// migration.Migration.Validate.
+func TestSyncValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		s       Sync
+		wantErr string
+	}{
+		{name: "zero values are valid"},
+		{name: "typical values are valid", s: Sync{
+			Threads:         4,
+			WriteThreads:    4,
+			TargetChunkTime: 5 * time.Second,
+			FlushInterval:   30 * time.Second,
+		}},
+		{name: "negative threads", s: Sync{Threads: -5},
+			wantErr: "--threads must be non-negative, got -5"},
+		{name: "negative write-threads", s: Sync{WriteThreads: -1},
+			wantErr: "--write-threads must be non-negative, got -1"},
+		{name: "negative target-chunk-time", s: Sync{TargetChunkTime: -time.Second},
+			wantErr: "--target-chunk-time must be non-negative, got -1s"},
+		{name: "negative flush-interval", s: Sync{FlushInterval: -time.Minute},
+			wantErr: "--flush-interval must be non-negative, got -1m0s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.s.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+		})
+	}
+}

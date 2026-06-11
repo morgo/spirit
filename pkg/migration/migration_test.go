@@ -879,3 +879,48 @@ func TestE2EGTIDChangeSource(t *testing.T) {
 	m := NewTestMigration(t, WithTable("t1e2egtid"), WithAlter("ENGINE=InnoDB"), WithGTID(true))
 	require.NoError(t, m.Run())
 }
+
+// TestMigrationValidate covers the Kong Validate() hook: invalid flag
+// combinations and explicitly-negative numeric/duration flags are rejected,
+// while zero values (meaning "use the default") pass.
+func TestMigrationValidate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		m       Migration
+		wantErr string
+	}{
+		{name: "zero values are valid"},
+		{name: "typical values are valid", m: Migration{
+			Threads:          4,
+			WriteThreads:     4,
+			TargetChunkTime:  500 * time.Millisecond,
+			ReplicaMaxLag:    120 * time.Second,
+			CheckpointMaxAge: 168 * time.Hour,
+			Lint:             true,
+		}},
+		{name: "lint and lint-only together", m: Migration{Lint: true, LintOnly: true},
+			wantErr: "--lint and --lint-only cannot be used together"},
+		{name: "negative threads", m: Migration{Threads: -5},
+			wantErr: "--threads must be non-negative, got -5"},
+		{name: "negative write-threads", m: Migration{WriteThreads: -1},
+			wantErr: "--write-threads must be non-negative, got -1"},
+		{name: "negative target-chunk-time", m: Migration{TargetChunkTime: -time.Second},
+			wantErr: "--target-chunk-time must be non-negative, got -1s"},
+		{name: "negative replica-max-lag", m: Migration{ReplicaMaxLag: -time.Minute},
+			wantErr: "--replica-max-lag must be non-negative, got -1m0s"},
+		{name: "negative checkpoint-max-age", m: Migration{CheckpointMaxAge: -time.Hour},
+			wantErr: "--checkpoint-max-age must be non-negative, got -1h0m0s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.m.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+		})
+	}
+}
