@@ -7,57 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestExtractStmt(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []statement
-		expected []string
-	}{
-		{
-			name:     "empty input",
-			input:    []statement{},
-			expected: nil,
-		},
-		{
-			name: "single statement",
-			input: []statement{
-				{numKeys: 1, stmt: "DELETE FROM table WHERE id = 1"},
-			},
-			expected: []string{"DELETE FROM table WHERE id = 1"},
-		},
-		{
-			name: "multiple statements",
-			input: []statement{
-				{numKeys: 2, stmt: "DELETE FROM table WHERE id IN (1,2)"},
-				{numKeys: 1, stmt: "INSERT INTO table VALUES (3)"},
-			},
-			expected: []string{
-				"DELETE FROM table WHERE id IN (1,2)",
-				"INSERT INTO table VALUES (3)",
-			},
-		},
-		{
-			name: "skip empty statements",
-			input: []statement{
-				{numKeys: 1, stmt: "DELETE FROM table WHERE id = 1"},
-				{numKeys: 0, stmt: ""},
-				{numKeys: 1, stmt: "INSERT INTO table VALUES (2)"},
-			},
-			expected: []string{
-				"DELETE FROM table WHERE id = 1",
-				"INSERT INTO table VALUES (2)",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractStmt(tt.input)
-			require.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestEncodeSchemaTable(t *testing.T) {
 	tests := []struct {
 		name     string
