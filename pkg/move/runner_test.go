@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -1108,4 +1110,137 @@ func varcharPKWriteOne(ctx context.Context, db *sql.DB, srcDB string) error {
 		}
 	}
 	return nil
+}
+
+// TestResumeFromCheckpointTooOld verifies that resume refuses a checkpoint
+// whose created_at exceeds CheckpointMaxAge. Unlike the migrate equivalent
+// (TestResumeFromCheckpointTooOld in pkg/migration), the move cannot fall
+// back to a fresh copy — the target tables already contain rows, which is
+// the very reason setup() chose the resume path — so the move must fail
+// loudly with status.ErrCheckpointTooOld and leave the next step to the
+// operator (raise --checkpoint-max-age, or wipe the targets and restart).
+func TestResumeFromCheckpointTooOld(t *testing.T) {
+	srcDB := "source_chkpt_age"
+	dstDB := "dest_chkpt_age"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	// Enough rows for several chunks so the copier watermark is ready when
+	// checkpointAndStop dumps the checkpoint. Same shape/size as
+	// TestResumeFromCheckpointMultiTableE2E's t1 (~1010 rows).
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARBINARY(64))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64)")
+	for range 3 { // 1 -> 2 -> 10 -> 1010 rows
+		testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64) FROM "+srcDB+".t1 a JOIN "+srcDB+".t1 b JOIN "+srcDB+".t1 c LIMIT 5000")
+	}
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+	}
+	checkpointAndStop(t, move)
+
+	// Backdate the checkpoint's created_at to simulate a checkpoint older
+	// than the 7-day default (8 days ago).
+	testutils.RunSQL(t, "UPDATE "+dstDB+"."+checkpointTableName+" SET created_at = DATE_SUB(NOW(), INTERVAL 8 DAY)")
+
+	// Resume must refuse with the sentinel error and not touch the targets.
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	err = r.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorIs(t, err, status.ErrCheckpointTooOld)
+	require.ErrorContains(t, err, "wipe the target tables")
+	require.False(t, r.usedResumeFromCheckpoint)
+	require.NoError(t, r.Close())
+}
+
+// TestResumeFromCheckpointNotTooOld verifies that a fresh checkpoint (well
+// within CheckpointMaxAge) still resumes — i.e. the new age check does not
+// reject valid checkpoints. The resume itself is the same path covered by
+// TestResumeFromCheckpointMultiTableE2E; this variant exists to bracket the
+// age check from both sides.
+func TestResumeFromCheckpointNotTooOld(t *testing.T) {
+	srcDB := "source_chkpt_fresh"
+	dstDB := "dest_chkpt_fresh"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARBINARY(64))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64)")
+	for range 3 { // 1 -> 2 -> 10 -> 1010 rows
+		testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64) FROM "+srcDB+".t1 a JOIN "+srcDB+".t1 b JOIN "+srcDB+".t1 c LIMIT 5000")
+	}
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+	}
+	checkpointAndStop(t, move)
+
+	// Do NOT backdate the checkpoint — it was just created, so it's fresh.
+	move.TargetChunkTime = 5 * time.Second
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	require.NoError(t, r.Run(t.Context()))
+	require.True(t, r.usedResumeFromCheckpoint, "a fresh checkpoint must still resume")
+	require.NoError(t, r.Close())
+}
+
+// TestCreateSentinelTableIdempotent verifies that createSentinelTable
+// adopts an existing sentinel rather than DROP+CREATE-ing it. The sentinel
+// name is shared with concurrent spirit processes polling it every
+// sentinelCheckInterval, so a DROP+CREATE pair opens a window in which a
+// concurrent --defer-cutover migration observes the sentinel as missing and
+// cuts over without operator approval. We prove no DROP happens by seeding
+// a marker row and asserting it survives both calls.
+func TestCreateSentinelTableIdempotent(t *testing.T) {
+	srcDB := "source_sentinel_idem"
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+
+	db, err := dbconn.New(testutils.DSNForDatabase(srcDB), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	cfg, err := mysql.ParseDSN(testutils.DSNForDatabase(srcDB))
+	require.NoError(t, err)
+
+	r := &Runner{
+		logger:  slog.Default(),
+		sources: []sourceInfo{{db: db, config: cfg}},
+	}
+
+	// Pre-create the sentinel with a marker row, as if another spirit
+	// process (or an earlier run) had already created it.
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+"."+sentinelTableName+" (id int NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+"."+sentinelTableName+" VALUES (1)")
+
+	// Both calls must succeed and adopt the existing table.
+	require.NoError(t, r.createSentinelTable(t.Context()))
+	require.NoError(t, r.createSentinelTable(t.Context()))
+
+	exists, err := r.sentinelTableExists(t.Context())
+	require.NoError(t, err)
+	require.True(t, exists, "sentinel must exist after createSentinelTable")
+
+	var markerCount int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+srcDB+"."+sentinelTableName).Scan(&markerCount))
+	require.Equal(t, 1, markerCount, "the pre-existing sentinel must be adopted, not dropped and recreated")
 }
