@@ -206,8 +206,8 @@ func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	// @@innodb_purge_threads exists on stock MySQL too (it just isn't pinned
-	// to the vCPU count there). The query and positive-value check should
+	// @@innodb_buffer_pool_instances exists on stock MySQL too (it just isn't
+	// pinned to the vCPU count there). The query and positive-value check should
 	// still succeed — this guards the shared helper used by both the
 	// active-threads throttler and write-thread auto-sizing.
 	vCPUs, err := auroraVCPUs(t.Context(), db)

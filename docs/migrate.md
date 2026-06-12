@@ -396,7 +396,7 @@ By default Spirit does not dynamically adjust the number of threads while runnin
 
 Sets the parallelism of the **replication applier** — the number of concurrent write threads used to apply changes (read from the binlog) to the new table. Copier and checksum parallelism are controlled separately by [threads](#threads).
 
-A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the instance vCPU count (read from `@@innodb_purge_threads`). On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
+A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the instance vCPU count (read from `@@innodb_buffer_pool_instances`). On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
 
 ### enable-experimental-autoscaling
 

@@ -27,7 +27,7 @@ import (
 //
 // Also different from previous tools use of "threads running" is that we compare
 // the threads to the instance vCPU count, which we can deterministically get on
-// Aurora via @@innodb_purge_threads.
+// Aurora via @@innodb_buffer_pool_instances.
 //
 // This is called *aurora* active threads, but the only thing aurora specific is that
 // the vCPU count is retrievable from a variable. I've tried on MySQL to find a consistent
@@ -39,19 +39,30 @@ const (
 	// where events_waits_current has no row for a thread (e.g., wait
 	// consumer disabled) — that thread is then counted as on-CPU, which is
 	// the safe-conservative behavior.
+	//
+	// The sampling connection excludes itself (CONNECTION_ID()) — without
+	// this the monitor's own query always counts as one active thread,
+	// which on small instances (vCPUs=2) eats half the headroom and can
+	// throttle a migration with no other activity on the server.
 	activeThreadsQuery = `SELECT
 		GREATEST(COUNT(*) - COALESCE(SUM(CASE WHEN ewc.EVENT_NAME = 'wait/io/redo_log_flush' AND ewc.END_EVENT_ID IS NULL THEN 1 ELSE 0 END), 0), 0) AS active_cpu_threads
 	FROM performance_schema.threads pps
 	LEFT JOIN performance_schema.events_waits_current ewc ON pps.THREAD_ID = ewc.THREAD_ID
 	WHERE pps.PROCESSLIST_ID IS NOT NULL
+	  AND pps.PROCESSLIST_ID <> CONNECTION_ID()
 	  AND pps.PROCESSLIST_COMMAND = 'Query'`
 
-	// auroraVCPUsQuery reads the vCPU count from @@innodb_purge_threads.
-	// Aurora pins this to the instance vCPU count (see issue #831). On RDS
-	// MySQL the var also exists but its value tracks Aurora-style sizing
-	// only on Aurora — we gate the throttler on IsAurora, so this query is
+	// auroraVCPUsQuery reads the vCPU count from @@innodb_buffer_pool_instances,
+	// which Aurora pins to the instance vCPU count (see issue #831).
+	//
+	// Do NOT use @@innodb_purge_threads for this: Aurora sizes it by a
+	// stepped formula, not the vCPU count (r7g family: large=1, xlarge=1,
+	// 2xlarge=3, 4xlarge=3, 8xlarge=6, 16xlarge=12), so it badly
+	// under-reads CPU capacity at every size. On community MySQL
+	// innodb_buffer_pool_instances is sized by buffer pool size / CPU
+	// hints instead — we gate the throttler on IsAurora, so this query is
 	// only ever issued there.
-	auroraVCPUsQuery = `SELECT @@innodb_purge_threads`
+	auroraVCPUsQuery = `SELECT @@innodb_buffer_pool_instances`
 )
 
 // DefaultWriteThreads is the fallback apply (write) thread count used when
@@ -62,17 +73,17 @@ const (
 // as not requesting it at all.
 const DefaultWriteThreads = 4
 
-// auroraVCPUs reads the instance vCPU count from @@innodb_purge_threads, which
-// Aurora pins to the vCPU count (issue #831). It returns an error if the value
-// is non-positive. This is only meaningful on Aurora — callers should gate on
-// IsAurora first.
+// auroraVCPUs reads the instance vCPU count from @@innodb_buffer_pool_instances,
+// which Aurora pins to the vCPU count (issue #831). It returns an error if the
+// value is non-positive. This is only meaningful on Aurora — callers should gate
+// on IsAurora first.
 func auroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 	var vCPUs int
 	if err := db.QueryRowContext(ctx, auroraVCPUsQuery).Scan(&vCPUs); err != nil {
-		return 0, fmt.Errorf("reading @@innodb_purge_threads for vCPU count: %w", err)
+		return 0, fmt.Errorf("reading @@innodb_buffer_pool_instances for vCPU count: %w", err)
 	}
 	if vCPUs <= 0 {
-		return 0, fmt.Errorf("@@innodb_purge_threads returned non-positive value %d", vCPUs)
+		return 0, fmt.Errorf("@@innodb_buffer_pool_instances returned non-positive value %d", vCPUs)
 	}
 	return vCPUs, nil
 }
@@ -80,8 +91,9 @@ func auroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 // ResolveWriteThreads resolves the number of apply (write) threads to use
 // against a target. A positive requested value is returned unchanged. Zero
 // means "auto-size": on Aurora it resolves to the instance vCPU count
-// (@@innodb_purge_threads); on non-Aurora there is no reliable vCPU signal to
-// size from, so it falls back to DefaultWriteThreads (logging that it did so).
+// (@@innodb_buffer_pool_instances); on non-Aurora there is no reliable vCPU
+// signal to size from, so it falls back to DefaultWriteThreads (logging that it
+// did so).
 // A negative value is rejected.
 func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int, logger *slog.Logger) (int, error) {
 	if requested < 0 {
@@ -144,7 +156,7 @@ func CanReadActiveThreads(ctx context.Context, db *sql.DB) error {
 
 // ActiveThreads throttles when the count of query-running threads (excluding
 // those waiting on the redo log) exceeds the instance vCPU count. Aurora-
-// only — depends on @@innodb_purge_threads matching vCPUs.
+// only — depends on @@innodb_buffer_pool_instances matching vCPUs.
 type ActiveThreads struct {
 	db     *sql.DB
 	logger *slog.Logger
