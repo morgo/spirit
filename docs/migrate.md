@@ -413,6 +413,8 @@ With this flag, [write-threads](#write-threads) becomes the *starting* value; th
 
 The signal comes from the Aurora throttlers — active-threads and commit-latency (see [max-commit-latency](#max-commit-latency)) — which are auto-enabled on Aurora. Replica lag ([replica-dsn](#replica-dsn)) deliberately contributes **no** continuous signal: lag is a budget, not a load gauge, and steering on it would park replicas well behind. Replicas remain protected by the hard-stop throttle only. If no continuous signal is available at all (for example a non-Aurora target), autoscaling does not engage: a warning is logged and write threads stay fixed at the starting value.
 
+If a signal stops updating mid-migration (for example the monitoring connection is partitioned, or grants are revoked), the controller does not keep scaling on the frozen value: after ~15 seconds without a successful sample the signal reports a neutral utilization inside the hold band, freezing the write-thread count in place (a warning is logged). Scaling resumes automatically when sampling recovers.
+
 This flag only applies to the default buffered copier; with [unbuffered](#unbuffered) it is ignored (with a warning). Autoscaling is not yet supported by `spirit move`.
 
 ### tls-ca
