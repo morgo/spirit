@@ -414,7 +414,7 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 	migration := &Migration{
 		Host:               "cli-host:3306",
 		Username:           "cli-user",
-		Password:           mkPtr("cli-password"),
+		Password:           new("cli-password"),
 		Database:           "cli-db",
 		Table:              "testtable",
 		Alter:              "ENGINE=InnoDB",
@@ -436,7 +436,7 @@ func TestMigrationParamsCLIUsed(t *testing.T) {
 func TestMigrationParamsEmptyPasswordUsedIfProvided(t *testing.T) {
 	t.Parallel()
 	migration := &Migration{
-		Password: mkPtr(""),
+		Password: new(""),
 		Table:    "test_table",
 		Alter:    "ENGINE=INNODB",
 	}
@@ -457,7 +457,7 @@ func TestMigrationParamsIniFileInvalidFile(t *testing.T) {
 	migration := &Migration{
 		Host:     "localhost:3306",
 		Username: "defaultuser",
-		Password: mkPtr("defaultpass"),
+		Password: new("defaultpass"),
 		Database: "testdb",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -484,7 +484,7 @@ tls-ca = /path/from/file
 	migration := &Migration{
 		Host:               "cli-host:1234",
 		Username:           "cli-user",
-		Password:           mkPtr("cli-password"),
+		Password:           new("cli-password"),
 		Database:           "cli-db",
 		Table:              "testtable",
 		Alter:              "ENGINE=InnoDB",
@@ -570,7 +570,7 @@ user = fileuser
 
 	migration := &Migration{
 		Host:     "cli-host:3306",
-		Password: mkPtr("cli-pass"),
+		Password: new("cli-pass"),
 		Database: "cli-db",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -650,7 +650,7 @@ password =
 
 	migration := &Migration{
 		Host:     "cli-host:3306",
-		Password: mkPtr("cli-password"),
+		Password: new("cli-password"),
 		Username: "cli-user",
 		Database: "cli-db",
 		Table:    "testtable",
@@ -679,7 +679,7 @@ port=1234
 	migration := &Migration{
 		Host:     "cli-host",
 		Username: "cli-user",
-		Password: mkPtr("cli-password"),
+		Password: new("cli-password"),
 		Database: "cli-db",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -707,7 +707,7 @@ func TestMigrationParamsIniFileEmptyClientSection(t *testing.T) {
 	migration := &Migration{
 		Host:     "cli-host:3306",
 		Username: "cli-user",
-		Password: mkPtr("cli-password"),
+		Password: new("cli-password"),
 		Database: "cli-db",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -737,7 +737,7 @@ password = mysqlpass
 	migration := &Migration{
 		Host:     "cli-host:3306",
 		Username: "cli-user",
-		Password: mkPtr("cli-password"),
+		Password: new("cli-password"),
 		Database: "cli-db",
 		Table:    "testtable",
 		Alter:    "ENGINE=InnoDB",
@@ -832,7 +832,7 @@ func TestDefaultPort(t *testing.T) {
 	m, err := NewRunner(&Migration{
 		Host:     "localhost",
 		Username: "root",
-		Password: mkPtr("mypassword"),
+		Password: new("mypassword"),
 		Database: "test",
 		Threads:  2,
 		Table:    "t1",

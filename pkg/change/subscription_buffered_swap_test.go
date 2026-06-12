@@ -82,7 +82,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	// For each bucket i: PK = 2i+1 holds slot_id='S<i>'; PK = 2i+2 holds NULL.
 	const buckets = 50
 	seed := make([]string, 0, buckets*2)
-	for i := 0; i < buckets; i++ {
+	for i := range buckets {
 		seed = append(seed,
 			fmt.Sprintf("(%d, 'S%d')", 2*i+1, i),
 			fmt.Sprintf("(%d, NULL)", 2*i+2),
@@ -112,7 +112,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	//   UPDATE id=passive SET slot_id='S<i>';
 	// We bypass the binlog reader and call HasChanged with the
 	// post-transaction row image for each row.
-	for i := 0; i < buckets; i++ {
+	for i := range buckets {
 		activePK := 2*i + 1
 		passivePK := 2*i + 2
 		sub.HasChanged([]any{activePK}, []any{activePK, nil}, false)
@@ -130,7 +130,7 @@ func TestBufferedMapSwapPairFlushesViaReplace(t *testing.T) {
 	sub.Unlock()
 
 	// End-state assertion: bucket-for-bucket the destination reflects the swap.
-	for i := 0; i < buckets; i++ {
+	for i := range buckets {
 		activePK := 2*i + 1
 		passivePK := 2*i + 2
 		var was, now sql.NullString
@@ -186,7 +186,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 
 	const buckets = 50
 	var seed []string
-	for i := 0; i < buckets; i++ {
+	for i := range buckets {
 		seed = append(seed,
 			fmt.Sprintf("(%d, 'S%d')", 2*i+1, i),
 			fmt.Sprintf("(%d, NULL)", 2*i+2),
@@ -209,7 +209,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	// Run swap transactions on source: deactivate-then-activate inside
 	// a single transaction. Legal in source; binlog records two UPDATE
 	// events per bucket.
-	for i := 0; i < buckets; i++ {
+	for i := range buckets {
 		activePK := 2*i + 1
 		passivePK := 2*i + 2
 		slot := fmt.Sprintf("S%d", i)
@@ -227,7 +227,7 @@ func TestSwapPairEndToEndViaReplace(t *testing.T) {
 	require.NoError(t, client.Flush(t.Context()))
 
 	// End-state assertion: dst matches src bucket-for-bucket.
-	for i := 0; i < buckets; i++ {
+	for i := range buckets {
 		activePK := 2*i + 1
 		passivePK := 2*i + 2
 		var srcActive, dstActive sql.NullString

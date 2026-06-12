@@ -305,7 +305,7 @@ func testRenameColumnLargerDataset(t *testing.T, enableBuffered bool) {
 
 	// Insert enough rows to get multiple chunks
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (old_name, value) VALUES ('row', 1)", tableName))
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (old_name, value) SELECT old_name, value FROM %s", tableName, tableName))
 	}
 	// Should have 16 rows now
@@ -529,7 +529,7 @@ func testRenameColumnForceCopyPath(t *testing.T, enableBuffered bool) {
 
 	// Insert enough rows to exercise chunking
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (old_name, value) VALUES ('row1', 10)", tableName))
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf("INSERT INTO %s (old_name, value) SELECT CONCAT(old_name,'x'), value+1 FROM %s", tableName, tableName))
 	}
 	// Should have 32 rows

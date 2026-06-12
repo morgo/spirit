@@ -2,7 +2,8 @@ package statement
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/table"
@@ -36,11 +37,7 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 	}
 
 	// Collect sorted table names for deterministic output.
-	desiredNames := make([]string, 0, len(desiredMap))
-	for name := range desiredMap {
-		desiredNames = append(desiredNames, name)
-	}
-	sort.Strings(desiredNames)
+	desiredNames := slices.Sorted(maps.Keys(desiredMap))
 
 	var creates []*AbstractStatement
 	var alters []*AbstractStatement
@@ -75,7 +72,7 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 			dropNames = append(dropNames, name)
 		}
 	}
-	sort.Strings(dropNames)
+	slices.Sort(dropNames)
 
 	for _, name := range dropNames {
 		stmts, err := New(fmt.Sprintf("DROP TABLE `%s`", name))

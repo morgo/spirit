@@ -41,8 +41,8 @@ type SingleTargetApplier struct {
 	// finished running.
 	pendingWork       map[int64]*pendingWork
 	pendingMutex      sync.Mutex
-	callbacksInFlight int   // claimed work whose callback has not returned yet; guarded by pendingMutex
-	nextWorkID        int64 // Atomic counter for work IDs
+	callbacksInFlight int          // claimed work whose callback has not returned yet; guarded by pendingMutex
+	nextWorkID        atomic.Int64 // Atomic counter for work IDs
 
 	// Worker management. writeWorkersCount is the initial worker count, set at
 	// construction from ApplierConfig.Threads; the *live* count can change at
@@ -173,7 +173,7 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	}
 
 	// Assign a work ID for tracking
-	workID := atomic.AddInt64(&a.nextWorkID, 1)
+	workID := a.nextWorkID.Add(1)
 
 	// Convert rows to rowData format
 	rowDataList := make([]rowData, len(rows))

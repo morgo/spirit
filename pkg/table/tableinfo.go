@@ -344,10 +344,8 @@ func (t *TableInfo) PrimaryKeyIsMemoryComparable() error {
 	// fails or produces wrong bounds. Until the min/max read path knows
 	// how to decode BIT bytes, reject BIT PKs upfront with the same error
 	// they returned before BIT got its own datumTp.
-	for _, mysqlTp := range t.keyColumnsMySQLTp {
-		if isBITType(mysqlTp) {
-			return ErrUnsupportedPKType
-		}
+	if slices.ContainsFunc(t.keyColumnsMySQLTp, isBITType) {
+		return ErrUnsupportedPKType
 	}
 	return nil
 }

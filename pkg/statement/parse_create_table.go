@@ -1415,11 +1415,6 @@ func (constraints Constraints) ByName(name string) *Constraint {
 	return ByName(constraints, name)
 }
 
-// Helper function to create string pointer
-func stringPtr(s string) *string {
-	return &s
-}
-
 // RemoveSecondaryIndexes takes a CREATE TABLE statement and returns a modified version
 // without secondary indexes (regular INDEX only). PRIMARY KEY, UNIQUE, and FULLTEXT
 // indexes are preserved.

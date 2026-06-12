@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
@@ -183,10 +183,9 @@ func printDiff(changes []*statement.AbstractStatement) {
 	}
 
 	// Sort changes by table name for consistent output
-	sorted := make([]*statement.AbstractStatement, len(changes))
-	copy(sorted, changes)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Table < sorted[j].Table
+	sorted := slices.Clone(changes)
+	slices.SortFunc(sorted, func(a, b *statement.AbstractStatement) int {
+		return strings.Compare(a.Table, b.Table)
 	})
 
 	for _, ch := range sorted {

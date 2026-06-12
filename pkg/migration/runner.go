@@ -938,8 +938,7 @@ func (r *Runner) dropCheckpoint(ctx context.Context) error {
 		// idempotent as the DROP IF EXISTS it replaces.
 		err := dbconn.Exec(ctx, r.db, "DELETE FROM %n.%n WHERE statement = %?",
 			r.checkpointTable.SchemaName, r.checkpointTable.TableName, r.migration.Statement)
-		var mysqlErr *mysql.MySQLError
-		if errors.As(err, &mysqlErr) && mysqlErr.Number == errNoSuchTable {
+		if mysqlErr, ok := errors.AsType[*mysql.MySQLError](err); ok && mysqlErr.Number == errNoSuchTable {
 			return nil
 		}
 		return err

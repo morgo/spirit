@@ -105,7 +105,7 @@ func TestViolation_String(t *testing.T) {
 				Linter:     linter,
 				Severity:   SeverityInfo,
 				Message:    "Test message",
-				Suggestion: stringPtr("Try this fix"),
+				Suggestion: new("Try this fix"),
 			},
 			expected: "[INFO] test_linter: Test message Suggestion: Try this fix",
 		},
@@ -118,7 +118,7 @@ func TestViolation_String(t *testing.T) {
 				Location: &Location{
 					Table: "users",
 				},
-				Suggestion: stringPtr("Try this fix"),
+				Suggestion: new("Try this fix"),
 			},
 			expected: "[WARNING] test_linter: Test message (Table: users) Suggestion: Try this fix",
 		},
@@ -149,7 +149,7 @@ func TestLocation_String(t *testing.T) {
 			name: "Table and column",
 			location: Location{
 				Table:  "users",
-				Column: stringPtr("email"),
+				Column: new("email"),
 			},
 			expected: "Table: users, Column: email",
 		},
@@ -157,7 +157,7 @@ func TestLocation_String(t *testing.T) {
 			name: "Table and index",
 			location: Location{
 				Table: "users",
-				Index: stringPtr("idx_email"),
+				Index: new("idx_email"),
 			},
 			expected: "Table: users, Index: idx_email",
 		},
@@ -165,7 +165,7 @@ func TestLocation_String(t *testing.T) {
 			name: "Table and constraint",
 			location: Location{
 				Table:      "users",
-				Constraint: stringPtr("fk_user_id"),
+				Constraint: new("fk_user_id"),
 			},
 			expected: "Table: users, Constraint: fk_user_id",
 		},
@@ -173,9 +173,9 @@ func TestLocation_String(t *testing.T) {
 			name: "All fields",
 			location: Location{
 				Table:      "users",
-				Column:     stringPtr("email"),
-				Index:      stringPtr("idx_email"),
-				Constraint: stringPtr("fk_user_id"),
+				Column:     new("email"),
+				Index:      new("idx_email"),
+				Constraint: new("fk_user_id"),
 			},
 			expected: "Table: users, Column: email, Index: idx_email, Constraint: fk_user_id",
 		},
@@ -313,9 +313,4 @@ func TestViolation_StructInitialization(t *testing.T) {
 		}
 		require.Equal(t, SeverityError, v.Severity)
 	})
-}
-
-// Helper function to create string pointers
-func stringPtr(s string) *string {
-	return &s
 }

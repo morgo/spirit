@@ -330,7 +330,7 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 	// identifiers are case-insensitive in MySQL, so PK columns that differ
 	// only in case (e.g. `PRIMARY KEY (id)` vs `PRIMARY KEY (ID)`) are the
 	// same key.
-	if equalFoldStrings(sourcePKColumns, targetPKColumns) {
+	if slices.EqualFunc(sourcePKColumns, targetPKColumns, strings.EqualFold) {
 		return "", "", false, ""
 	}
 
@@ -449,7 +449,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	// Only handle inline PK <-> table-level PK transitions if the PK columns actually changed.
 	// If the columns are the same, the representations are semantically equivalent.
 	// Compare case-insensitively, matching MySQL's column-name semantics.
-	pkColumnsEqual := equalFoldStrings(sourcePKColumns, targetPKColumns)
+	pkColumnsEqual := slices.EqualFunc(sourcePKColumns, targetPKColumns, strings.EqualFold)
 
 	if sourceHasInlinePK && targetPKIndex != nil && !pkColumnsEqual {
 		// Inline PK -> table-level PK with different columns: drop the inline PK
@@ -981,7 +981,7 @@ func indexesEqual(a, b *Index) bool {
 		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
 			return false
 		}
-	} else if !equalFoldStrings(a.Columns, b.Columns) {
+	} else if !slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold) {
 		return false
 	}
 	if !ptrEqual(a.Invisible, b.Invisible) {
@@ -1016,7 +1016,7 @@ func indexesEqualIgnoreVisibility(a, b *Index) bool {
 		if !indexColumnListsEqual(a.ColumnList, b.ColumnList) {
 			return false
 		}
-	} else if !equalFoldStrings(a.Columns, b.Columns) {
+	} else if !slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold) {
 		return false
 	}
 	// Skip Invisible comparison
@@ -1047,7 +1047,7 @@ func indexColumnListIdentical(a, b *Index) bool {
 	if len(a.ColumnList) > 0 && len(b.ColumnList) > 0 {
 		return indexColumnListsEqual(a.ColumnList, b.ColumnList)
 	}
-	return equalFoldStrings(a.Columns, b.Columns)
+	return slices.EqualFunc(a.Columns, b.Columns, strings.EqualFold)
 }
 
 // indexNeedsSeparateRebuild reports whether a changed index must be emitted as

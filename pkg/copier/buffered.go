@@ -33,7 +33,7 @@ type buffered struct {
 	applier          applier.Applier
 	chunker          table.Chunker
 	concurrency      int
-	rowsPerSecond    uint64
+	rowsPerSecond    atomic.Uint64
 	isInvalid        atomic.Bool
 	errMu            sync.Mutex // guards firstErr
 	firstErr         error      // first error that invalidated the copy (any goroutine)
@@ -339,7 +339,7 @@ func (c *buffered) GetETA() string {
 	c.Lock()
 	defer c.Unlock()
 	copiedRows, totalRows, pct := c.getCopyStats()
-	rowsPerSecond := atomic.LoadUint64(&c.rowsPerSecond)
+	rowsPerSecond := c.rowsPerSecond.Load()
 	if pct > 99.99 {
 		return "DUE"
 	}
@@ -378,7 +378,7 @@ func (c *buffered) estimateRowsPerSecondLoop(ctx context.Context) {
 			rowsPerInterval := float64(newRowsCount - prevRowsCount)
 			intervalsDivisor := float64(copyEstimateInterval / time.Second) // should be something like 10 for 10 seconds
 			rowsPerSecond := uint64(rowsPerInterval / intervalsDivisor)
-			atomic.StoreUint64(&c.rowsPerSecond, rowsPerSecond)
+			c.rowsPerSecond.Store(rowsPerSecond)
 			prevRowsCount = newRowsCount
 		}
 	}

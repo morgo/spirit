@@ -53,13 +53,11 @@ func TestFatalErrorConcurrentRace(t *testing.T) {
 	const goroutines = 32
 	start := make(chan struct{})
 	var done sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		done.Add(1)
-		go func() {
-			defer done.Done()
+	for range goroutines {
+		done.Go(func() {
 			<-start
 			r.fatalError()
-		}()
+		})
 	}
 	close(start)
 	done.Wait()

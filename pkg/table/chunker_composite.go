@@ -37,7 +37,7 @@ type chunkerComposite struct {
 	// For the composite chunker, we use the actual copied
 	// rows as returned from Feedback()
 	rowsCopied   uint64
-	chunksCopied uint64
+	chunksCopied atomic.Uint64
 
 	logger *slog.Logger
 }
@@ -325,7 +325,7 @@ func (t *chunkerComposite) Reset() error {
 
 	// Reset progress tracking
 	atomic.StoreUint64(&t.rowsCopied, 0)
-	atomic.StoreUint64(&t.chunksCopied, 0)
+	t.chunksCopied.Store(0)
 
 	return nil
 }
@@ -341,7 +341,7 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 
 	// Update progress tracking - add the actual rows processed
 	atomic.AddUint64(&t.rowsCopied, actualRows)
-	atomic.AddUint64(&t.chunksCopied, 1)
+	t.chunksCopied.Add(1)
 
 	// Check if the feedback is based on an earlier chunker size.
 	// if it is, it is misleading to incorporate feedback now.
@@ -443,7 +443,7 @@ func (t *chunkerComposite) IsRead() bool {
 // the actualRows copied (from feedback) over the estimated
 // rows (from table statistics)
 func (t *chunkerComposite) Progress() (uint64, uint64, uint64) {
-	return atomic.LoadUint64(&t.rowsCopied), atomic.LoadUint64(&t.chunksCopied), atomic.LoadUint64(&t.Ti.EstimatedRows)
+	return atomic.LoadUint64(&t.rowsCopied), t.chunksCopied.Load(), atomic.LoadUint64(&t.Ti.EstimatedRows)
 }
 
 // KeyAboveHighWatermark checks if a key is above the high watermark (chunkPtr).

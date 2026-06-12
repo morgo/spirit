@@ -366,7 +366,7 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 			);`,
 			expected: &PartitionOptions{
 				Type:       "RANGE",
-				Expression: stringPtr("YEAR(`sale_date`)"),
+				Expression: new("YEAR(`sale_date`)"),
 				Partitions: 2,
 				Definitions: []PartitionDefinition{
 					{
@@ -393,7 +393,7 @@ func TestSchemaAnalyzer_PartitionSupport(t *testing.T) {
 			) PARTITION BY HASH(id) PARTITIONS 4;`,
 			expected: &PartitionOptions{
 				Type:       "HASH",
-				Expression: stringPtr("`id`"),
+				Expression: new("`id`"),
 				Partitions: 4,
 			},
 		},
@@ -2164,14 +2164,14 @@ func TestBinaryTypeWithLength(t *testing.T) {
 			sql:            "CREATE TABLE test (data VARBINARY(255));",
 			columnName:     "data",
 			expectedType:   "varbinary",
-			expectedLength: intPtr(255),
+			expectedLength: new(255),
 		},
 		{
 			name:           "BINARY with length",
 			sql:            "CREATE TABLE test (data BINARY(16));",
 			columnName:     "data",
 			expectedType:   "binary",
-			expectedLength: intPtr(16),
+			expectedLength: new(16),
 		},
 		{
 			name:           "BLOB without length",
@@ -2216,7 +2216,7 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			name:              "VARCHAR with CHARACTER SET",
 			sql:               "CREATE TABLE test (name VARCHAR(100) CHARACTER SET utf8mb4);",
 			columnName:        "name",
-			expectedCharset:   stringPtr("utf8mb4"),
+			expectedCharset:   new("utf8mb4"),
 			expectedCollation: nil,
 		},
 		{
@@ -2224,20 +2224,20 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			sql:               "CREATE TABLE test (code CHAR(10) COLLATE utf8mb4_bin);",
 			columnName:        "code",
 			expectedCharset:   nil,
-			expectedCollation: stringPtr("utf8mb4_bin"),
+			expectedCollation: new("utf8mb4_bin"),
 		},
 		{
 			name:              "VARCHAR with both CHARACTER SET and COLLATE",
 			sql:               "CREATE TABLE test (name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci);",
 			columnName:        "name",
-			expectedCharset:   stringPtr("utf8mb4"),
-			expectedCollation: stringPtr("utf8mb4_unicode_ci"),
+			expectedCharset:   new("utf8mb4"),
+			expectedCollation: new("utf8mb4_unicode_ci"),
 		},
 		{
 			name:              "TEXT with CHARACTER SET",
 			sql:               "CREATE TABLE test (description TEXT CHARACTER SET utf8);",
 			columnName:        "description",
-			expectedCharset:   stringPtr("utf8"),
+			expectedCharset:   new("utf8"),
 			expectedCollation: nil,
 		},
 		{
@@ -2251,7 +2251,7 @@ func TestCharsetCollationExtraction(t *testing.T) {
 			name:              "Multiple columns with different charsets",
 			sql:               "CREATE TABLE test (name1 VARCHAR(100) CHARACTER SET utf8, name2 VARCHAR(100) CHARACTER SET latin1);",
 			columnName:        "name1",
-			expectedCharset:   stringPtr("utf8"),
+			expectedCharset:   new("utf8"),
 			expectedCollation: nil,
 		},
 	}
@@ -2474,11 +2474,6 @@ func TestBinaryTypeJSONSerialization(t *testing.T) {
 	contentCol := deserializedColumns[2]
 	require.Equal(t, "content", contentCol.Name)
 	require.Equal(t, "blob", contentCol.Type)
-}
-
-// Helper function to create int pointer
-func intPtr(i int) *int {
-	return &i
 }
 
 // TestSpatialIndexParsing verifies that CREATE TABLE with SPATIAL INDEX parses

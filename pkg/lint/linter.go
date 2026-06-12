@@ -55,7 +55,3 @@ func ConfigBool(value string, key string) (bool, error) {
 
 	return false, fmt.Errorf("invalid value for %s: %s (expected 'true' or 'false')", key, value)
 }
-
-func strPtr(s string) *string {
-	return &s
-}

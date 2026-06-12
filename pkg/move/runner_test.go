@@ -366,9 +366,7 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-ctx.Done():
@@ -377,7 +375,7 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 				_, _ = minimalDB.ExecContext(ctx, `UPDATE source_minrbr.t1 SET val = val + 1 WHERE id = ?`, (i%32)+1)
 			}
 		}
-	}()
+	})
 
 	move := &Move{
 		SourceDSN:       sourceDSN,

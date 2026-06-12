@@ -33,7 +33,7 @@ type testChunker struct {
 
 func newTestChunker(n int) *testChunker {
 	chunks := make([]*table.Chunk, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		chunks[i] = newTestChunk(uint64(i*1000), uint64((i+1)*1000))
 	}
 	return &testChunker{chunks: chunks}
@@ -409,7 +409,7 @@ func TestFirstCleanPassMonotonic(t *testing.T) {
 		t.Fatal("FirstCleanPass did not fire")
 	}
 	// Channel must remain closed for the lifetime of the checker.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		select {
 		case _, ok := <-c.FirstCleanPass():
 			require.False(t, ok, "FirstCleanPass channel re-opened — signal not monotonic")

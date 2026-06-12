@@ -169,8 +169,8 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 // missing-table errors). Used to tailor the active-threads probe-failure
 // log message.
 func isPrivilegeDeniedError(err error) bool {
-	var me *mysql.MySQLError
-	if !errors.As(err, &me) {
+	me, ok := errors.AsType[*mysql.MySQLError](err)
+	if !ok {
 		return false
 	}
 	switch me.Number {

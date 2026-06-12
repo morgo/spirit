@@ -340,7 +340,7 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	numBatches := 10
 	rowsPerBatch := 100
 	var wg sync.WaitGroup
-	var totalCallbacks int32
+	var totalCallbacks atomic.Int32
 
 	for batch := range numBatches {
 		wg.Add(1)
@@ -361,7 +361,7 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 			}
 
 			callback := func(affectedRows int64, err error) {
-				atomic.AddInt32(&totalCallbacks, 1)
+				totalCallbacks.Add(1)
 				require.NoError(t, err)
 				require.Equal(t, int64(rowsPerBatch), affectedRows)
 			}
@@ -378,7 +378,7 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all callbacks were invoked
-	require.Equal(t, int32(numBatches), atomic.LoadInt32(&totalCallbacks))
+	require.Equal(t, int32(numBatches), totalCallbacks.Load())
 
 	// Verify total count
 	var count int

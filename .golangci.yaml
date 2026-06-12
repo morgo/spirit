@@ -8,6 +8,7 @@ linters:
     - unused          # unused code
     - gocritic        # opinionated but catches real bugs
     - errorlint       # proper error wrapping/comparison
+    - modernize       # prefer modern language/stdlib idioms (slices, maps, min/max, new(expr), ...)
     - noctx           # requests without context (we sometimes nolint these)
     - bodyclose       # recommended, but probably not applicable
     - exhaustive      # missing switch cases (we already suppress some)

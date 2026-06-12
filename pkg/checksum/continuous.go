@@ -608,10 +608,7 @@ func (c *ContinuousChecker) runOnePass(ctx context.Context, workCh chan<- *workI
 		if emit == nil {
 			if front := queue.Front(); front != nil {
 				e := front.Value.(*retryEntry)
-				wait := time.Until(e.notBefore)
-				if wait < 0 {
-					wait = 0
-				}
+				wait := max(time.Until(e.notBefore), 0)
 				dueTimer = time.NewTimer(wait)
 				dueCh = dueTimer.C
 			}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn"
@@ -190,12 +191,7 @@ func activateAllRolesOnLogin(ctx context.Context, db *sql.DB, logger *slog.Logge
 
 // hasRole returns true if the given role name is present in the list of granted roles.
 func hasRole(grantedRoles []string, roleName string) bool {
-	for _, r := range grantedRoles {
-		if r == roleName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(grantedRoles, roleName)
 }
 
 // stringContainsAll returns true if `s` contains all non empty given `substrings`

@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -437,12 +438,6 @@ func TestDatetimeIndexPositionLinter_Registered(t *testing.T) {
 	resetForTest(t)
 	Register(&DatetimeIndexPositionLinter{})
 
-	found := false
-	for _, name := range List() {
-		if name == "datetime_index_position" {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(List(), "datetime_index_position")
 	require.True(t, found, "datetime_index_position linter should be registered")
 }

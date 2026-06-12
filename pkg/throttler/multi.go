@@ -3,6 +3,7 @@ package throttler
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 )
 
@@ -66,8 +67,8 @@ func (m *multiThrottler) Open(ctx context.Context) error {
 	for _, t := range m.throttlers {
 		if err := t.Open(ctx); err != nil {
 			// Close any already-opened throttlers to avoid resource leaks.
-			for i := len(opened) - 1; i >= 0; i-- {
-				_ = opened[i].Close()
+			for _, o := range slices.Backward(opened) {
+				_ = o.Close()
 			}
 			return err
 		}
