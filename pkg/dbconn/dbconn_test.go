@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"testing"
@@ -153,6 +154,31 @@ func TestCanRetryError(t *testing.T) {
 	require.False(t, canRetryError(errors.New("not a mysql error")))
 	require.False(t, canRetryError(&mysql.MySQLError{Number: 1064})) // syntax error
 	require.False(t, canRetryError(&mysql.MySQLError{Number: 1062})) // duplicate key
+}
+
+func TestIsConnectionLossError(t *testing.T) {
+	// Connection-loss errors: the client cannot know whether the statement
+	// it sent was executed by the server.
+	require.True(t, IsConnectionLossError(driver.ErrBadConn))
+	require.True(t, IsConnectionLossError(mysql.ErrInvalidConn))
+	require.True(t, IsConnectionLossError(io.EOF))
+	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2003})) // CR_CONN_HOST_ERROR relayed by a proxy
+	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2013})) // CR_SERVER_LOST relayed by a proxy
+
+	// Wrapped variants must also be detected.
+	require.True(t, IsConnectionLossError(fmt.Errorf("rename failed: %w", driver.ErrBadConn)))
+	require.True(t, IsConnectionLossError(fmt.Errorf("rename failed: %w", mysql.ErrInvalidConn)))
+	require.True(t, IsConnectionLossError(fmt.Errorf("rename failed: %w", io.EOF)))
+
+	// Deterministic SQL errors are not connection loss: the server has
+	// positively reported that the statement failed.
+	require.False(t, IsConnectionLossError(nil))
+	require.False(t, IsConnectionLossError(errors.New("not a mysql error")))
+	require.False(t, IsConnectionLossError(&mysql.MySQLError{Number: 1205})) // lock wait timeout
+	require.False(t, IsConnectionLossError(&mysql.MySQLError{Number: 1213})) // deadlock
+	require.False(t, IsConnectionLossError(&mysql.MySQLError{Number: 1146})) // no such table
+	require.False(t, IsConnectionLossError(context.DeadlineExceeded))
+	require.False(t, IsConnectionLossError(context.Canceled))
 }
 
 // testRetryableTrxSurvivesKill blocks an UPDATE behind a row lock, kills it
