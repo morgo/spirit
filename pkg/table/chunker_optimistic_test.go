@@ -187,6 +187,87 @@ func TestLowWatermark(t *testing.T) {
 	require.Empty(t, chunker.lowerBoundWatermarkMap)
 }
 
+// TestOptimisticChunkerKeyBelowLowWatermarkInflightFinalChunk is a regression
+// test: KeyBelowLowWatermark used to return true for ALL keys as soon as the
+// final chunk had been dispatched via Next(), even though earlier chunks could
+// still be in flight (dispatched but not yet committed and fed back). With the
+// buffered copier, dispatch and commit are decoupled, so a binlog DELETE for a
+// key inside an in-flight chunk could flush to the target as a no-op before
+// the chunk's INSERT landed, resurrecting a stale copy of the row. The
+// shortcut must only fire once every dispatched chunk has been returned via
+// Feedback().
+func TestOptimisticChunkerKeyBelowLowWatermarkInflightFinalChunk(t *testing.T) {
+	t1 := newTableInfo4Test("test", "t1")
+	t1.minValue = Datum{Val: int64(1), Tp: signedType}
+	t1.maxValue = Datum{Val: int64(4000), Tp: signedType}
+	t1.EstimatedRows = 4000
+	t1.KeyColumns = []string{"id"}
+	t1.keyColumnsMySQLTp = []string{"bigint"}
+	t1.keyDatums = []datumTp{signedType}
+	t1.KeyIsAutoInc = true
+	t1.Columns = []string{"id", "name"}
+	// Prevent Next() from synchronously refreshing statistics (which needs a
+	// real DB connection) when it reaches the end of the table.
+	t1.statisticsLastUpdated = time.Now()
+
+	chunker := &chunkerOptimistic{
+		Ti:                t1,
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: ChunkerDefaultTarget},
+		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
+		logger:            slog.Default(),
+	}
+	chunker.SetDynamicChunking(false)
+	require.NoError(t, chunker.Open())
+
+	// Dispatch every chunk up front, simulating parallel read workers that
+	// race ahead of the async write workers.
+	chunk0, err := chunker.Next() // `id` < 1
+	require.NoError(t, err)
+	chunk1, err := chunker.Next() // [1, 1001)
+	require.NoError(t, err)
+	chunk2, err := chunker.Next() // [1001, 2001)
+	require.NoError(t, err)
+	chunk3, err := chunker.Next() // [2001, 3001) — held in flight below
+	require.NoError(t, err)
+	require.Equal(t, "`id` >= 2001 AND `id` < 3001", chunk3.String())
+	chunk4, err := chunker.Next() // [3001, 4001) — held in flight below
+	require.NoError(t, err)
+	finalChunk, err := chunker.Next() // `id` >= 4001 (final, open-ended)
+	require.NoError(t, err)
+	require.Nil(t, finalChunk.UpperBound)
+	require.True(t, chunker.IsRead()) // the final chunk has been dispatched
+
+	// Commit chunk0..chunk2: the contiguous low watermark advances to 2001.
+	chunker.Feedback(chunk0, time.Second, 1)
+	chunker.Feedback(chunk1, time.Second, 1000)
+	chunker.Feedback(chunk2, time.Second, 1000)
+
+	// The final chunk has been dispatched, but chunk3, chunk4 and the final
+	// chunk itself are still in flight. Keys inside the in-flight ranges
+	// must NOT be reported below the low watermark — the old shortcut
+	// returned true for them as soon as finalChunkSent was set.
+	require.False(t, chunker.KeyBelowLowWatermark(2500), "key inside in-flight chunk3 must not be below the low watermark")
+	require.False(t, chunker.KeyBelowLowWatermark(3500), "key inside in-flight chunk4 must not be below the low watermark")
+	// Keys in the contiguously-committed range still flush normally.
+	require.True(t, chunker.KeyBelowLowWatermark(1500))
+
+	// Committing the final chunk doesn't change anything while chunk3 and
+	// chunk4 remain in flight.
+	chunker.Feedback(finalChunk, time.Second, 1)
+	require.False(t, chunker.KeyBelowLowWatermark(2500))
+
+	// Commit chunk4 out of order: chunk3 is still in flight.
+	chunker.Feedback(chunk4, time.Second, 1000)
+	require.False(t, chunker.KeyBelowLowWatermark(2500))
+
+	// Commit chunk3: every dispatched chunk has now been fed back, so the
+	// post-copy steady state applies — everything is below.
+	chunker.Feedback(chunk3, time.Second, 1000)
+	require.True(t, chunker.KeyBelowLowWatermark(2500))
+	require.True(t, chunker.KeyBelowLowWatermark(3500))
+	require.True(t, chunker.KeyBelowLowWatermark(999999))
+}
+
 func TestOptimisticDynamicChunking(t *testing.T) {
 	t1 := newTableInfo4Test("test", "t1")
 	t1.minValue = Datum{Val: int64(1), Tp: signedType}

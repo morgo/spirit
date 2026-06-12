@@ -73,6 +73,26 @@ type Runner struct {
 
 	chunkerMu sync.RWMutex // protects copyChunker and checksumChunker from concurrent access
 
+	// continuousChecker is the sentinel-wait re-verification checker built
+	// by runContinuousChecksum. It is deliberately separate from r.checker
+	// (fresh chunker, not wired into resume), but DumpCheckpoint must
+	// consult it: once it has repaired any chunk, the initial checksum's
+	// watermark no longer proves the table clean, so persisting it would
+	// let a resumed run skip re-verifying the repaired range. Written once
+	// by the continuous-checksum goroutine and read by the checkpoint
+	// dumper goroutine — both under checkpointMu.
+	continuousChecker checksum.Checker
+
+	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
+	// watermark-condition evaluation + INSERT) against the sentinel-abort
+	// path that blanks the persisted checksum_watermark
+	// (invalidateChecksumWatermark). Without it, a periodic dump that
+	// evaluated its conditions just before the continuous checker recorded
+	// a difference could INSERT a stale-watermark row *after* the abort
+	// path's UPDATE, resurrecting the watermark on the latest row — the
+	// row resume reads. It also guards continuousChecker (see above).
+	checkpointMu sync.Mutex
+
 	// Track some key statistics.
 	startTime             time.Time
 	sentinelWaitStartTime time.Time
@@ -1344,6 +1364,12 @@ func (r *Runner) addsUniqueIndex() bool {
 // would always restart at the copier, but it can now also resume at
 // the checksum phase.
 func (r *Runner) DumpCheckpoint(ctx context.Context) error {
+	// Serialize the whole dump (condition evaluation + INSERT) against
+	// invalidateChecksumWatermark, so the sentinel-abort path can never be
+	// overtaken by an in-flight dump that read its conditions before the
+	// continuous checker recorded a difference. See checkpointMu.
+	r.checkpointMu.Lock()
+	defer r.checkpointMu.Unlock()
 	// Check if replication client and copier are initialized (nil if called before setup completes).
 	// We hold chunkerMu to synchronize with initChunkers(), which
 	// may be assigning r.copyChunker concurrently during setup.
@@ -1387,13 +1413,24 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// resumed run to re-verify the table from the start of the checksum
 	// phase. That is the only safe recovery from a not-yet-completed
 	// repair.
+	//
+	// The same invariant applies to the sentinel-wait continuous checker
+	// (a separate object from r.checker — see continuousChecker): once it
+	// has repaired any chunk, the watermark we would persist here is the
+	// end-of-initial-checksum watermark, and resuming from it would let
+	// the operator's re-run "pass" by verifying only the trailing chunks —
+	// silently neutralizing the deliberate abort that the continuous
+	// checksum triggers on divergence. So the watermark is persisted only
+	// while BOTH checkers are clean (or the continuous one doesn't exist
+	// yet).
 	var checksumWatermark string
 	if r.status.Get() >= status.Checksum {
 		wm, wmErr := checksumChunker.GetLowWatermark()
 		if wmErr != nil {
 			return status.ErrWatermarkNotReady
 		}
-		if r.checker != nil && r.checker.DifferencesFound() == 0 {
+		if r.checker != nil && r.checker.DifferencesFound() == 0 &&
+			(r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0) {
 			checksumWatermark = wm
 		}
 	}
@@ -1527,11 +1564,30 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 	defer func() {
 		cancelContinuous()
 		<-continuousDone
-		if retErr != nil {
-			return
-		}
-		if continuousErr != nil && ctx.Err() == nil {
+		if retErr == nil && continuousErr != nil && ctx.Err() == nil {
 			retErr = fmt.Errorf("continuous checksum failed: %w", continuousErr)
+		}
+		// If the continuous checker repaired any chunk, this run is about
+		// to abort (with MaxRetries=1, checker.Run errors whenever
+		// DifferencesFound > 0, and runContinuousChecksum propagates it).
+		// The periodic dumper stops persisting a checksum_watermark the
+		// instant the difference is recorded, but a dump whose conditions
+		// were read just before that instant can still land a stale
+		// watermark row afterwards. Rewrite the persisted rows here —
+		// strictly after any such in-flight INSERT, via checkpointMu — so
+		// the on-disk state after the abort forces full checksum
+		// re-verification on resume. The continuous goroutine has exited
+		// (see <-continuousDone above), so the counter we read is final.
+		// WithoutCancel: this cleanup must run even when the parent ctx
+		// was already cancelled.
+		if err := r.invalidateChecksumWatermark(context.WithoutCancel(ctx)); err != nil {
+			r.logger.Error("failed to clear persisted checksum watermark after continuous checksum divergence", "error", err)
+			// Join rather than suppress, even when the continuous-checksum
+			// abort already set retErr: a failed invalidation means a stale
+			// checksum_watermark may remain on disk, letting a resume skip
+			// the full re-verification this abort exists to force. The
+			// operator must see both failures.
+			retErr = errors.Join(retErr, fmt.Errorf("failed to clear persisted checksum watermark: %w", err))
 		}
 	}()
 
@@ -1580,6 +1636,32 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 	}
 }
 
+// invalidateChecksumWatermark blanks the checksum_watermark on this
+// migration's persisted checkpoint rows if (and only if) the sentinel-wait
+// continuous checker recorded any repaired chunks. Called from the
+// sentinel-abort path: the periodic dumper already refuses to persist a
+// watermark once the difference counter is non-zero, but the difference can
+// be recorded between a dump's condition read and its INSERT — this UPDATE,
+// serialized against the dumper via checkpointMu, runs strictly after any
+// such in-flight INSERT and guarantees resume re-verifies from the start of
+// the checksum phase. Scoped by statement because in multi-table mode the
+// checkpoint table is shared with other concurrently-running migrations in
+// the same schema (resume filters on statement the same way).
+func (r *Runner) invalidateChecksumWatermark(ctx context.Context) error {
+	r.checkpointMu.Lock()
+	defer r.checkpointMu.Unlock()
+	if r.continuousChecker == nil || r.continuousChecker.DifferencesFound() == 0 {
+		return nil
+	}
+	r.logger.Warn("continuous checksum found differences; clearing persisted checksum watermark so the next run re-verifies from the start of the checksum phase")
+	return dbconn.Exec(ctx, r.db, "UPDATE %n.%n SET checksum_watermark = %? WHERE statement = %?",
+		r.checkpointTable.SchemaName,
+		r.checkpointTable.TableName,
+		"",
+		r.migration.Statement,
+	)
+}
+
 // runContinuousChecksum loops calling a fresh checker over the source/new
 // tables for as long as ctx is alive. It is the "continuous" half of the
 // two-checksum model (see docs/migrate.md) and is only called while the
@@ -1620,6 +1702,15 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create continuous checker: %w", err)
 	}
+	// Publish the checker so DumpCheckpoint (on the WatchTask goroutine)
+	// can consult its DifferencesFound() when deciding whether the
+	// persisted checksum_watermark is still trustworthy. Published before
+	// the first pass starts, so there is no window where a difference
+	// could be recorded while the dumper still believes the table clean —
+	// the checker increments its counter atomically *before* repairing.
+	r.checkpointMu.Lock()
+	r.continuousChecker = checker
+	r.checkpointMu.Unlock()
 
 	iteration := 0
 	var lastDuration time.Duration // zero before the first iteration → full interval wait
