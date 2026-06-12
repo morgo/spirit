@@ -159,6 +159,10 @@ type ActiveThreads struct {
 
 	// lastActiveThreads holds the most recent observation for logging.
 	lastActiveThreads atomic.Int64
+
+	// stale guards Utilization() against the cached value freezing when
+	// sampling fails persistently. See stale.go.
+	stale staleGuard
 }
 
 var _ GradualThrottler = (*ActiveThreads)(nil)
@@ -220,7 +224,20 @@ func (a *ActiveThreads) IsThrottled() bool {
 // Utilization reports the most recent active-CPU-thread count as a fraction of
 // the instance vCPU count. 1.0 means active threads equal vCPUs (the point at
 // which one more thread trips IsThrottled). Returns 0 if vCPUs is not yet known.
+//
+// When sampling has failed for longer than staleSignalThreshold the cached
+// count is no longer trustworthy, so this reports StaleUtilizationHold
+// instead — parking the autoscaler in its dead band rather than letting a
+// frozen value drive scaling. IsThrottled/BlockWait are unaffected.
 func (a *ActiveThreads) Utilization() float64 {
+	if stale, entering := a.stale.check(staleSignalThreshold); stale {
+		if entering {
+			a.logger.Warn("active-threads signal is stale; holding autoscaler utilization steady until sampling recovers",
+				"last_successful_sample_age", a.stale.age(),
+				"hold_utilization", StaleUtilizationHold)
+		}
+		return StaleUtilizationHold
+	}
 	if a.vCPUs <= 0 {
 		return 0
 	}
@@ -262,7 +279,15 @@ func (a *ActiveThreads) UpdateLag(ctx context.Context) error {
 
 // applySample updates state from a single observation. Split out so tests can
 // drive the calculation without a real Aurora.
+//
+// Unlike the commit-latency throttler there is no counter-reset case to
+// handle here: the active-thread count is an instantaneous gauge (the query
+// clamps at >= 0), not a delta of cumulative counters, so a failover cannot
+// produce a bogus value — only an error, which the staleness guard covers.
 func (a *ActiveThreads) applySample(active int64) {
+	if a.stale.markFresh() {
+		a.logger.Info("active-threads sampling recovered; resuming live utilization signal")
+	}
 	a.lastActiveThreads.Store(active)
 	throttled := active > a.vCPUs
 	prev := a.isThrottled.Swap(throttled)
