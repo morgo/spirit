@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -83,25 +84,25 @@ func NewDBConfig() *DBConfig {
 	}
 }
 
-// canRetryError looks at the MySQL error and decides if it is considered
-// a permanent failure or not. For simplicity a "retryable" error means
-// rollback the transaction and start the transaction again.
-// This is because it gets complicated in cases where the statement could
-// succeed but then there is a deadlock later on.
-func canRetryError(err error) bool {
-	// Connection-level failures never surface as a *mysql.MySQLError:
-	// go-sql-driver returns driver.ErrBadConn when it is safe to retry on a
-	// new connection (nothing was written yet), and mysql.ErrInvalidConn when
-	// the connection died mid-statement (e.g. a network blip, the connection
-	// was killed, or an Aurora failover with RejectReadOnly enabled — the
-	// driver converts read-only errors 1290/1792/1836 into driver.ErrBadConn
-	// and discards the connection). Retrying is safe because each retry starts
-	// a fresh transaction — database/sql hands BeginTx a new connection if the
-	// old one is dead. Note this function does not itself enforce idempotency;
-	// callers are responsible for routing only idempotent statements through
-	// RetryableTransaction. Spirit's own callers do so (INSERT IGNORE /
-	// REPLACE / DELETE by PK), but the function does not verify it.
-	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) {
+// IsConnectionLossError reports whether err indicates that the connection to
+// MySQL failed or was lost, meaning the client cannot know whether the last
+// statement it sent was executed by the server. Connection-level failures
+// never surface as a *mysql.MySQLError: go-sql-driver returns
+// driver.ErrBadConn when the failure was detected before anything was
+// written, and mysql.ErrInvalidConn when the connection died mid-statement —
+// possibly *after* the server executed the statement but before the client
+// read the result. Raw io.EOF is included for paths that surface the
+// TCP-level error directly, and the client-library codes CR_CONN_HOST_ERROR
+// (2003) / CR_SERVER_LOST (2013) are included because proxies (e.g. ProxySQL,
+// RDS Proxy) can relay them inside real server error packets.
+//
+// In contrast to deterministic SQL errors (lock wait timeout, deadlock, ...),
+// where the server has positively reported that the statement did NOT take
+// effect, these errors are ambiguous. Callers retrying a non-idempotent
+// statement (e.g. the cutover RENAME TABLE) must verify server-side state
+// before deciding whether the statement was applied.
+func IsConnectionLossError(err error) bool {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, io.EOF) {
 		return true
 	}
 	var val *mysql.MySQLError
@@ -109,9 +110,39 @@ func canRetryError(err error) bool {
 		return false
 	}
 	switch val.Number {
-	case errLockWaitTimeout, errDeadlock, errCannotConnect,
-		errConnLost, errReadOnly, errReadOnlyTransaction, errReadOnlyMode,
-		errQueryInterrupted:
+	case errCannotConnect, errConnLost:
+		return true
+	default:
+		return false
+	}
+}
+
+// canRetryError looks at the MySQL error and decides if it is considered
+// a permanent failure or not. For simplicity a "retryable" error means
+// rollback the transaction and start the transaction again.
+// This is because it gets complicated in cases where the statement could
+// succeed but then there is a deadlock later on.
+func canRetryError(err error) bool {
+	// Connection-loss errors (driver.ErrBadConn, mysql.ErrInvalidConn, ...)
+	// are retryable: a network blip, a killed connection, or an Aurora
+	// failover with RejectReadOnly enabled (the driver converts read-only
+	// errors 1290/1792/1836 into driver.ErrBadConn and discards the
+	// connection) all qualify. Retrying is safe because each retry starts
+	// a fresh transaction — database/sql hands BeginTx a new connection if the
+	// old one is dead. Note this function does not itself enforce idempotency;
+	// callers are responsible for routing only idempotent statements through
+	// RetryableTransaction. Spirit's own callers do so (INSERT IGNORE /
+	// REPLACE / DELETE by PK), but the function does not verify it.
+	if IsConnectionLossError(err) {
+		return true
+	}
+	var val *mysql.MySQLError
+	if !errors.As(err, &val) {
+		return false
+	}
+	switch val.Number {
+	case errLockWaitTimeout, errDeadlock, errReadOnly,
+		errReadOnlyTransaction, errReadOnlyMode, errQueryInterrupted:
 		return true
 	default:
 		return false
