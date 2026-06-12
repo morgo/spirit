@@ -1582,9 +1582,12 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 		// was already cancelled.
 		if err := r.invalidateChecksumWatermark(context.WithoutCancel(ctx)); err != nil {
 			r.logger.Error("failed to clear persisted checksum watermark after continuous checksum divergence", "error", err)
-			if retErr == nil {
-				retErr = fmt.Errorf("failed to clear persisted checksum watermark: %w", err)
-			}
+			// Join rather than suppress, even when the continuous-checksum
+			// abort already set retErr: a failed invalidation means a stale
+			// checksum_watermark may remain on disk, letting a resume skip
+			// the full re-verification this abort exists to force. The
+			// operator must see both failures.
+			retErr = errors.Join(retErr, fmt.Errorf("failed to clear persisted checksum watermark: %w", err))
 		}
 	}()
 
