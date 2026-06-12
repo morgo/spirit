@@ -135,24 +135,7 @@ func TestChecksumErrorPreservesCheckpoint(t *testing.T) {
 func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 	t.Parallel()
 	r := setupRunnerForChecksumTest(t, "chkpt_invariant")
-
-	// Seed the table with enough rows that the chunker can carve out
-	// multiple chunks. The composite chunker won't report a low-watermark
-	// until at least one fully-processed chunk has had Feedback, which in
-	// practice requires more than one chunk on the runway.
-	seedRows(t, r.db, r.migration.Table, 4096)
-	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
-	require.NoError(t, r.initChunkers())
-	require.NoError(t, r.copyChunker.Open())
-	require.NoError(t, r.checksumChunker.Open())
-	disableDynamicChunking(t, r.copyChunker)
-	disableDynamicChunking(t, r.checksumChunker)
-	require.NoError(t, r.setupCopierCheckerAndReplClient(t.Context()))
-	require.NoError(t, r.replClient.Start(t.Context()))
-	t.Cleanup(func() { r.replClient.Close() })
-
-	advanceUntilWatermark(t, r.copyChunker)
-	advanceUntilWatermark(t, r.checksumChunker)
+	advanceRunnerToChecksumWatermarks(t, r)
 
 	// Swap in a mock checker whose DifferencesFound() we control. The
 	// invariant only looks at this value (and the chunker's watermark);
@@ -176,6 +159,199 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 	require.NotEmpty(t, copierWM)
 	require.NotEmpty(t, checksumWM,
 		"checksum_watermark must be persisted again once DifferencesFound clears")
+}
+
+// TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences pins the
+// sentinel-wait half of the invariant: the continuous checker is a separate
+// object from r.checker, so DumpCheckpoint must consult it too. Once it has
+// repaired any chunk, checkpoints must stop carrying a checksum_watermark —
+// even though the initial checker is still clean — or the operator's re-run
+// would resume the checksum at the end-of-initial-pass watermark and never
+// re-verify the repaired range.
+func TestDumpCheckpointSuppressesWatermarkWithContinuousDifferences(t *testing.T) {
+	t.Parallel()
+	r := setupRunnerForChecksumTest(t, "chkpt_cont_invariant")
+	advanceRunnerToChecksumWatermarks(t, r)
+
+	// The initial checksum completed clean; the runner is now blocked in
+	// the sentinel wait (which is >= Checksum, so watermarks are dumped).
+	r.checker = &mockChecker{}
+	r.status.Set(status.WaitingOnSentinelTable)
+
+	// --- Case 1: no continuous checker yet (just entered the wait). ---
+	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	copierWM, checksumWM := latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, copierWM, "copier_watermark should always be persisted")
+	require.NotEmpty(t, checksumWM,
+		"checksum_watermark must be persisted while no continuous checker exists")
+
+	// --- Case 2: continuous checker exists and is clean. ---
+	cont := &mockChecker{}
+	r.continuousChecker = cont
+	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	_, checksumWM = latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM,
+		"checksum_watermark must be persisted while the continuous checker is clean")
+
+	// --- Case 3: continuous checker has repaired a chunk. ---
+	cont.differencesFound.Store(1)
+	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	copierWM, checksumWM = latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, copierWM)
+	require.Empty(t, checksumWM,
+		"checksum_watermark must be empty once the continuous checker found differences, even with a clean initial checker")
+}
+
+// TestInvalidateChecksumWatermarkAfterContinuousDivergence pins the
+// race-closing half of the sentinel-wait fix: a checkpoint row that was
+// persisted WITH a watermark before the continuous checker recorded its
+// difference must be blanked by invalidateChecksumWatermark on the abort
+// path, because resume reads the latest row.
+func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
+	t.Parallel()
+	r := setupRunnerForChecksumTest(t, "chkpt_cont_invalidate")
+	advanceRunnerToChecksumWatermarks(t, r)
+
+	r.checker = &mockChecker{}
+	r.status.Set(status.WaitingOnSentinelTable)
+
+	// Persist a checkpoint while everything is believed clean — this is the
+	// "last periodic dump before the difference was recorded" row that the
+	// abort path must neutralize.
+	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	_, checksumWM := latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM)
+
+	// No continuous checker, or a clean one: invalidate must be a no-op.
+	require.NoError(t, r.invalidateChecksumWatermark(t.Context()))
+	_, checksumWM = latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM,
+		"invalidate must not touch the watermark when no continuous checker exists")
+	cont := &mockChecker{}
+	r.continuousChecker = cont
+	require.NoError(t, r.invalidateChecksumWatermark(t.Context()))
+	_, checksumWM = latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, checksumWM,
+		"invalidate must not touch the watermark while the continuous checker is clean")
+
+	// Continuous checker found (and repaired) a difference: the
+	// already-persisted watermark row must be rewritten to empty.
+	cont.differencesFound.Store(1)
+	require.NoError(t, r.invalidateChecksumWatermark(t.Context()))
+	copierWM, checksumWM := latestCheckpointWatermarks(t, r)
+	require.NotEmpty(t, copierWM, "copier_watermark must survive invalidation")
+	require.Empty(t, checksumWM,
+		"the previously-persisted checksum_watermark must be blanked after continuous divergence")
+	var stale int
+	require.NoError(t, r.db.QueryRowContext(t.Context(),
+		fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s` WHERE checksum_watermark <> ''",
+			r.checkpointTable.SchemaName, r.checkpointTable.TableName)).Scan(&stale))
+	require.Zero(t, stale, "no checkpoint row may carry a checksum_watermark after invalidation")
+}
+
+// TestContinuousChecksumDivergenceClearsCheckpointWatermark is the E2E
+// version: a defer-cutover migration reaches the sentinel wait, a row in the
+// _new table is corrupted externally, the continuous checksum detects and
+// repairs it and deliberately aborts the run — and the final on-disk
+// checkpoint state must carry NO checksum_watermark anywhere, so the
+// operator's re-run re-verifies the whole table instead of silently
+// resuming past the repaired chunk.
+//
+// Not parallel: it shortens the package-global continuousChecksumMinInterval
+// so the first continuous pass starts promptly.
+func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
+	origInterval := continuousChecksumMinInterval
+	continuousChecksumMinInterval = 2 * time.Second
+	t.Cleanup(func() { continuousChecksumMinInterval = origInterval })
+
+	tableName := "cont_chk_clear"
+	tt := testutils.NewTestTable(t, tableName, `CREATE TABLE cont_chk_clear (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		val VARCHAR(64) NOT NULL
+	)`)
+	tt.SeedRows(t, "INSERT INTO cont_chk_clear (val) SELECT 'a'", 1000)
+
+	m := NewTestRunner(t, tableName, "ENGINE=InnoDB",
+		WithThreads(1),
+		WithDeferCutOver(),
+		WithRespectSentinel())
+	defer utils.CloseAndLog(m)
+
+	var runErr error
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		runErr = m.Run(t.Context())
+	}()
+
+	waitForStatus(t, m, status.WaitingOnSentinelTable)
+
+	// The test-suite checkpoint dumper runs every 100ms (see TestMain).
+	// Wait until a checkpoint row carrying the end-of-initial-checksum
+	// watermark is on disk: that is exactly the stale row the fix must
+	// neutralize.
+	checkpointTable := utils.CheckpointTableName(tableName)
+	require.Eventually(t, func() bool {
+		var checksumWM string
+		err := tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
+			"SELECT checksum_watermark FROM `%s` ORDER BY id DESC LIMIT 1", checkpointTable)).Scan(&checksumWM)
+		return err == nil && checksumWM != ""
+	}, 30*time.Second, 50*time.Millisecond,
+		"expected a checkpoint row with a checksum_watermark during the sentinel wait")
+
+	// Corrupt a row in the new table behind spirit's back. The continuous
+	// checksum (first pass starts after the shortened min-interval) detects
+	// the divergence, repairs it, and aborts the run rather than allowing
+	// cutover.
+	testutils.RunSQL(t, fmt.Sprintf("UPDATE `%s` SET val = 'corrupted' WHERE id = 1", utils.NewTableName(tableName)))
+
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("timed out waiting for the continuous checksum to abort the migration")
+	}
+	require.Error(t, runErr)
+	require.ErrorContains(t, runErr, "continuous checksum")
+
+	// The deliberate abort must leave a checkpoint (resume is allowed) ...
+	require.True(t, checkpointTableExists(t, m),
+		"checkpoint must be preserved so the operator can re-run")
+	var copierWM string
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT copier_watermark FROM `%s` ORDER BY id DESC LIMIT 1", checkpointTable)).Scan(&copierWM))
+	require.NotEmpty(t, copierWM, "copier_watermark must survive the abort")
+
+	// ... but no row anywhere may still carry a checksum_watermark: both the
+	// rows dumped after the difference was recorded (suppression) and the
+	// rows dumped before it (abort-path UPDATE) must be blank.
+	var stale int
+	require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s` WHERE checksum_watermark <> ''", checkpointTable)).Scan(&stale))
+	require.Zero(t, stale,
+		"no checkpoint row may carry a checksum_watermark after the continuous-checksum abort")
+}
+
+// advanceRunnerToChecksumWatermarks seeds the runner's table and brings both
+// the copy and checksum chunkers to a state where they report low-watermarks,
+// so DumpCheckpoint will persist them. The seed needs enough rows that the
+// chunker can carve out multiple chunks: the composite chunker won't report a
+// low-watermark until at least one fully-processed chunk has had Feedback,
+// which in practice requires more than one chunk on the runway.
+func advanceRunnerToChecksumWatermarks(t *testing.T, r *Runner) {
+	t.Helper()
+	seedRows(t, r.db, r.migration.Table, 4096)
+	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
+	require.NoError(t, r.initChunkers())
+	require.NoError(t, r.copyChunker.Open())
+	require.NoError(t, r.checksumChunker.Open())
+	disableDynamicChunking(t, r.copyChunker)
+	disableDynamicChunking(t, r.checksumChunker)
+	require.NoError(t, r.setupCopierCheckerAndReplClient(t.Context()))
+	require.NoError(t, r.replClient.Start(t.Context()))
+	t.Cleanup(func() { r.replClient.Close() })
+
+	advanceUntilWatermark(t, r.copyChunker)
+	advanceUntilWatermark(t, r.checksumChunker)
 }
 
 // seedRows populates the named table by doubling until it has at least
