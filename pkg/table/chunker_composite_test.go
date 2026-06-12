@@ -938,6 +938,96 @@ func TestCompositeChunkerWatermarkOptimizations(t *testing.T) {
 	require.NoError(t, comp.Close())
 }
 
+// TestCompositeChunkerKeyBelowLowWatermarkInflightFinalChunk is a regression
+// test: KeyBelowLowWatermark used to return true for ALL keys as soon as the
+// final chunk had been dispatched via Next(), even though earlier chunks could
+// still be in flight (dispatched but not yet committed and fed back). With the
+// buffered copier, dispatch and commit are decoupled, so a binlog DELETE for a
+// key inside an in-flight chunk could flush to the target as a no-op before
+// the chunk's INSERT landed, resurrecting a stale copy of the row. The
+// shortcut must only fire once every dispatched chunk has been returned via
+// Feedback(). See also the optimistic chunker variant in
+// chunker_optimistic_test.go.
+func TestCompositeChunkerKeyBelowLowWatermarkInflightFinalChunk(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS composite_inflight_t1")
+	testutils.RunSQL(t, `CREATE TABLE composite_inflight_t1 (
+		a int NOT NULL,
+		b int NOT NULL,
+		PRIMARY KEY (a)
+	)`)
+	// Non-auto-inc PK so NewChunker selects the composite chunker.
+	// Seed 3000 rows with a=1..3000 (split into 3 inserts to stay below
+	// the default cte_max_recursion_depth of 1000).
+	for i := range 3 {
+		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO composite_inflight_t1 (a, b)
+			WITH RECURSIVE seq AS (
+				SELECT 1 AS n UNION ALL SELECT n + 1 FROM seq WHERE n < 1000
+			)
+			SELECT n + %d, 1 FROM seq`, i*1000))
+	}
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	tbl := NewTableInfo(db, "test", "composite_inflight_t1")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	chunker, err := NewChunker(tbl, ChunkerConfig{})
+	require.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+	comp.SetDynamicChunking(false)
+	require.NoError(t, comp.Open())
+
+	// With 3000 rows and StartingChunkSize=1000 we get three chunks:
+	// c1 = (-inf, 1001), c2 = [1001, ~2002), c3 = [~2002, +inf) (final).
+	c1, err := comp.Next()
+	require.NoError(t, err)
+	require.NotNil(t, c1.UpperBound)
+	c2, err := comp.Next()
+	require.NoError(t, err)
+	require.NotNil(t, c2.UpperBound)
+	c3, err := comp.Next()
+	require.NoError(t, err)
+	require.Nil(t, c3.UpperBound)  // final chunk is open-ended
+	require.True(t, comp.IsRead()) // the final chunk has been dispatched
+
+	// Commit only c1: the contiguous low watermark advances to c1's upper
+	// bound (1001).
+	comp.Feedback(c1, 100*time.Millisecond, 1000)
+
+	// The final chunk has been dispatched, but c2 and c3 are still in
+	// flight. A key inside c2's range must NOT be reported below the low
+	// watermark — the old shortcut returned true for it as soon as
+	// finalChunkSent was set.
+	require.False(t, comp.KeyBelowLowWatermark(1500), "key inside in-flight c2 must not be below the low watermark")
+	// Keys in the contiguously-committed range still flush normally.
+	require.True(t, comp.KeyBelowLowWatermark(500))
+
+	// Committing the final chunk doesn't change anything while c2 remains
+	// in flight.
+	comp.Feedback(c3, 100*time.Millisecond, 1000)
+	require.False(t, comp.KeyBelowLowWatermark(1500))
+
+	// Commit c2: every dispatched chunk has now been fed back, so the
+	// post-copy steady state applies — everything is below.
+	comp.Feedback(c2, 100*time.Millisecond, 1000)
+	require.True(t, comp.KeyBelowLowWatermark(1500))
+	require.True(t, comp.KeyBelowLowWatermark(2500))
+	require.True(t, comp.KeyBelowLowWatermark(999999))
+
+	// Reset() clears the in-flight bookkeeping along with the rest of the
+	// chunker state.
+	require.NoError(t, comp.Reset())
+	require.False(t, comp.KeyBelowLowWatermark(500))
+
+	require.NoError(t, comp.Close())
+}
+
 // TestCompositeChunkerKeyAboveHighWatermarkMultiColumn is a regression test:
 // KeyAboveHighWatermark only sees key[0], so for a multi-column chunk key,
 // equality on the first column is ambiguous. With chunkPtrs = (5, 101), the
