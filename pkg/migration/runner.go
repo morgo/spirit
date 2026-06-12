@@ -503,10 +503,25 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Finalize the pool now that WriteThreads is known: threads + write-threads
-	// + 1 (see the MaxOpenConnections doc in Run). This is a no-op unless
-	// WriteThreads was auto-sized up from 0; the pool only ever grows.
-	if poolSize := r.migration.Threads + r.migration.WriteThreads + 1; poolSize > r.dbConfig.MaxOpenConnections {
+	// Autoscaling drives the buffered copier's applier worker pool; the legacy
+	// unbuffered copier has no such pool, so the combination downgrades to a
+	// fixed thread count with a warning rather than silently doing nothing.
+	autoscale := r.migration.EnableExperimentalAutoscaling
+	if autoscale && r.migration.Unbuffered {
+		r.logger.Warn("--enable-experimental-autoscaling has no effect with --unbuffered; write threads stay fixed",
+			"write_threads", r.migration.WriteThreads)
+		autoscale = false
+	}
+	// Resolve the autoscaler's upper bound. When autoscaling is disabled this
+	// equals WriteThreads (no movement); when enabled it's fixed at 2x the
+	// start value.
+	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale)
+	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
+	// known: threads + maxWrite + 1 (see the MaxOpenConnections doc in Run).
+	// Sizing for maxWrite ensures a scaled-up applier never starves on
+	// connections. This is a no-op unless WriteThreads was auto-sized up from 0
+	// or autoscaling raised the ceiling; the pool only ever grows.
+	if poolSize := r.migration.Threads + maxWrite + 1; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		r.db.SetMaxOpenConns(poolSize)
 	}
@@ -546,6 +561,11 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		DBConfig:        r.dbConfig,
 		Applier:         appl,
 		Unbuffered:      r.migration.Unbuffered,
+		Autoscale: copier.AutoscaleConfig{
+			Enabled:      autoscale,
+			StartThreads: r.migration.WriteThreads,
+			MaxThreads:   maxWrite,
+		},
 	})
 	if err != nil {
 		return err

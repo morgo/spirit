@@ -3,13 +3,18 @@ package move
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -550,6 +555,267 @@ func TestMoveWithVarcharPK(t *testing.T) {
 
 	require.Equal(t, sourceCount, targetCount,
 		"source/target row counts must match after move with VARCHAR PK")
+}
+
+// checkpointAndStop drives a move through setup, the full row copy and a
+// checkpoint dump, then tears everything down without cutover — simulating a
+// move that was interrupted after writing a checkpoint. The checkpoint table
+// is left behind on the first target (targets[0]) for a subsequent resume.
+// This mirrors the first phase of TestResumeFromCheckpointE2E.
+func checkpointAndStop(t *testing.T, move *Move) {
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+
+	var ctx context.Context
+	ctx, r.cancelFunc = context.WithCancel(t.Context())
+	r.dbConfig = dbconn.NewDBConfig()
+	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
+	require.NoError(t, err)
+	srcConfig, err := mysql.ParseDSN(r.move.SourceDSN)
+	require.NoError(t, err)
+	r.sources = []sourceInfo{{db: srcDB, config: srcConfig, dsn: r.move.SourceDSN}}
+	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
+	require.NoError(t, err)
+	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+	require.NoError(t, err)
+	r.targets = []applier.Target{{
+		KeyRange: "0",
+		DB:       targetDB,
+		Config:   targetConfig,
+	}}
+	require.NoError(t, r.setup(ctx))
+
+	// Copy all rows, then write a checkpoint.
+	require.NoError(t, r.copier.Run(ctx))
+	require.NoError(t, r.DumpCheckpoint(ctx))
+
+	// Close everything manually, without cutover. Runner.Close() cancels the
+	// context (idempotent) and shuts down repl clients/chunkers and closes the
+	// targets, so call it first; it does not close the sources, so close the
+	// source DB afterwards.
+	require.NoError(t, r.Close())
+	require.NoError(t, r.sources[0].db.Close())
+}
+
+// TestResumeFromCheckpointMultiTableE2E covers resume-from-checkpoint for a
+// move with more than one table (the default TestBasicMove shape). With two
+// or more (source, table) chunkers, the checkpoint's copier watermark is the
+// multi-chunker's JSON map keyed by table.QualifiedName(), not raw chunk
+// JSON. Before the fix, deleteAboveWatermark fed the whole map to
+// WatermarkAboveClause, which decoded it as a zero-value chunk and produced
+// "DELETE FROM t WHERE ()" — MySQL syntax error 1064 — so every resume
+// attempt failed with "resume validation passed but checkpoint resume
+// failed" and the move could never recover from its checkpoint.
+func TestResumeFromCheckpointMultiTableE2E(t *testing.T) {
+	srcDB := "source_resume_multi"
+	dstDB := "dest_resume_multi"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	// t1: auto-increment PK with enough rows for several chunks, so its
+	// per-table watermark is present in the checkpoint map.
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARBINARY(64))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64)")
+	for range 3 { // 1 -> 2 -> 10 -> 1010 rows
+		testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64) FROM "+srcDB+".t1 a JOIN "+srcDB+".t1 b JOIN "+srcDB+".t1 c LIMIT 5000")
+	}
+	// t2: tiny non-auto-inc PK table (composite chunker) that fits in a
+	// single chunk, so its watermark is never ready and it has NO entry in
+	// the checkpoint map. On resume it must be wiped from the target and
+	// recopied from scratch (multiChunker.OpenAtWatermark calls Open()).
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t2 (id VARCHAR(36) NOT NULL PRIMARY KEY, val VARCHAR(255))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t2 VALUES ('a','1'), ('b','2'), ('c','3'), ('d','4'), ('e','5')")
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+	}
+	checkpointAndStop(t, move)
+
+	// Write to the source after the "crash" so the resumed copy has new
+	// work to pick up in both tables.
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64) FROM "+srcDB+".t1 LIMIT 500")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t2 VALUES ('f','6'), ('g','7')")
+
+	// Resume. Before the fix this failed with:
+	//   resume validation passed but checkpoint resume failed: ... Error 1064
+	move.TargetChunkTime = 5 * time.Second
+	move.Threads = 4
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	require.NoError(t, r.Run(t.Context()))
+	require.True(t, r.usedResumeFromCheckpoint, "the move must resume from the checkpoint, not start over")
+	require.NoError(t, r.Close())
+
+	// After cutover the source tables are renamed *_old. The target must
+	// contain every row.
+	db, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var srcCount, dstCount int
+	for _, tbl := range []string{"t1", "t2"} {
+		require.NoError(t, db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM "+srcDB+"."+tbl+"_old").Scan(&srcCount))
+		require.NoError(t, db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM "+dstDB+"."+tbl).Scan(&dstCount))
+		require.Equal(t, srcCount, dstCount, "row count mismatch for table %s", tbl)
+		require.Positive(t, dstCount)
+	}
+}
+
+// TestResumeFromCheckpointCompositePKE2E covers resume-from-checkpoint for a
+// single-table move whose PK is not auto-increment (here: VARCHAR), which
+// selects the composite chunker. The composite chunker's watermark is an
+// envelope {"ChunkJSON": "...", "RowsCopied": N}, not raw chunk JSON. Before
+// the fix, deleteAboveWatermark fed the envelope to WatermarkAboveClause,
+// which decoded it as a zero-value chunk and produced "DELETE FROM t WHERE
+// ()" (MySQL error 1064) on every resume attempt.
+func TestResumeFromCheckpointCompositePKE2E(t *testing.T) {
+	srcDB := "source_resume_comp"
+	dstDB := "dest_resume_comp"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	// The composite chunker's watermark only becomes ready after the second
+	// bounded chunk, so seed comfortably more than two chunks' worth of
+	// rows (chunks start at 1000 rows).
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id VARCHAR(36) NOT NULL PRIMARY KEY, val VARBINARY(64))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 SELECT UUID(), RANDOM_BYTES(64)")
+	for range 4 { // 1 -> 2 -> 10 -> 1010 -> 6010 rows
+		testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 SELECT UUID(), RANDOM_BYTES(64) FROM "+srcDB+".t1 a JOIN "+srcDB+".t1 b JOIN "+srcDB+".t1 c LIMIT 5000")
+	}
+
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         1,
+		WriteThreads:    1,
+	}
+	checkpointAndStop(t, move)
+
+	// Write to the source after the "crash".
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 SELECT UUID(), RANDOM_BYTES(64) FROM "+srcDB+".t1 LIMIT 100")
+
+	// Resume. Before the fix this failed with error 1064.
+	move.TargetChunkTime = 5 * time.Second
+	move.Threads = 4
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+	require.NoError(t, r.Run(t.Context()))
+	require.True(t, r.usedResumeFromCheckpoint, "the move must resume from the checkpoint, not start over")
+	require.NoError(t, r.Close())
+
+	db, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	var srcCount, dstCount int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+srcDB+".t1_old").Scan(&srcCount))
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+dstDB+".t1").Scan(&dstCount))
+	require.Equal(t, srcCount, dstCount)
+	require.Positive(t, dstCount)
+}
+
+// TestDeleteAboveWatermarkFormats exercises deleteAboveWatermark directly
+// against real target tables, with each watermark format a checkpoint can
+// contain: the multi-chunker map (including a table with no entry), the
+// composite chunker envelope, and the raw single-chunk JSON written by
+// checkpoints from before this change (resume compatibility).
+func TestDeleteAboveWatermarkFormats(t *testing.T) {
+	srcDB := "source_delwm"
+	dstDB := "dest_delwm"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	// Schemas exist on both sides; rows only matter on the target, which is
+	// what deleteAboveWatermark prunes.
+	for _, db := range []string{srcDB, dstDB} {
+		testutils.RunSQL(t, "CREATE TABLE "+db+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARCHAR(64))")
+		testutils.RunSQL(t, "CREATE TABLE "+db+".t2 (id VARCHAR(36) NOT NULL PRIMARY KEY, val VARCHAR(64))")
+	}
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, val) VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e'),(6,'f'),(7,'g'),(8,'h'),(9,'i'),(10,'j')")
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t2 (id, val) VALUES ('a','1'),('b','2'),('c','3'),('d','4'),('m','5'),('z','6')")
+
+	ctx := t.Context()
+	dbConfig := dbconn.NewDBConfig()
+	srcConn, err := dbconn.New(sourceDSN, dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(srcConn)
+	srcCfg, err := mysql.ParseDSN(sourceDSN)
+	require.NoError(t, err)
+	dstConn, err := dbconn.New(targetDSN, dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dstConn)
+	dstCfg, err := mysql.ParseDSN(targetDSN)
+	require.NoError(t, err)
+
+	t1 := table.NewTableInfo(srcConn, srcDB, "t1")
+	t1.Host = srcCfg.Addr // matches what Runner.getTables sets
+	require.NoError(t, t1.SetInfo(ctx))
+	t2 := table.NewTableInfo(srcConn, srcDB, "t2")
+	t2.Host = srcCfg.Addr
+	require.NoError(t, t2.SetInfo(ctx))
+
+	newRunner := func(tables ...*table.TableInfo) *Runner {
+		r, err := NewRunner(&Move{})
+		require.NoError(t, err)
+		r.sources = []sourceInfo{{db: srcConn, config: srcCfg, dsn: sourceDSN, tables: tables}}
+		r.sourceTables = tables
+		r.targets = []applier.Target{{KeyRange: "0", DB: dstConn, Config: dstCfg}}
+		return r
+	}
+
+	rawChunkUpper5 := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["1"],"Inclusive":true},"UpperBound":{"Value":["5"],"Inclusive":false}}`
+
+	// Multi-chunker map format: t1 has a watermark with upper bound id=5;
+	// t2 has no entry (its chunker wasn't ready at checkpoint time). Rows
+	// above id=5 must be deleted from t1; t2 must be emptied entirely
+	// because it restarts from scratch on resume.
+	multiWatermark, err := json.Marshal(map[string]string{t1.QualifiedName(): rawChunkUpper5})
+	require.NoError(t, err)
+	require.NoError(t, newRunner(t1, t2).deleteAboveWatermark(ctx, string(multiWatermark)))
+
+	var count int
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, 5, count, "t1 must keep only ids 1..5")
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t2").Scan(&count))
+	require.Zero(t, count, "t2 has no watermark and must be emptied")
+
+	// Composite chunker envelope format (single-table move): the ChunkJSON
+	// inside the envelope carries the bound. Rows above id='m' must go.
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t2 (id, val) VALUES ('a','1'),('b','2'),('m','5'),('p','6'),('z','7')")
+	envelope := `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"a\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"m\"],\"Inclusive\":false}}","RowsCopied":3}`
+	require.NoError(t, newRunner(t2).deleteAboveWatermark(ctx, envelope))
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t2").Scan(&count))
+	require.Equal(t, 3, count, "t2 must keep only ids <= 'm'")
+
+	// Raw single-chunk format (single-table auto-inc move): compatibility
+	// with checkpoints written by the optimistic chunker.
+	testutils.RunSQL(t, "DELETE FROM "+dstDB+".t1")
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, val) VALUES (1,'a'),(4,'b'),(5,'c'),(6,'d'),(9,'e')")
+	require.NoError(t, newRunner(t1).deleteAboveWatermark(ctx, rawChunkUpper5))
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, 3, count, "t1 must keep only ids 1, 4, 5")
 }
 
 func varcharPKWriteOne(ctx context.Context, db *sql.DB, srcDB string) error {
