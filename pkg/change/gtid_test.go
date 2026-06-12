@@ -253,6 +253,64 @@ func TestGTIDPromotePendingGTID(t *testing.T) {
 	require.Equal(t, sid+":1-6", c.bufferedGTID.String())
 }
 
+// TestFlushedGTIDIsMonotonicAcrossOverlappingFlushes is the GTID twin of
+// TestFlushedPosIsMonotonicAcrossOverlappingFlushes: flush() snapshots
+// bufferedGTID before flushing the subscriptions and publishes the snapshot
+// into flushedGTID afterwards, so if two flushes overlap, the
+// later-finishing one can hold the older (smaller) snapshot. Without the
+// containment guard that stale snapshot would overwrite a newer flushedGTID,
+// silently regressing the checkpoint resume coordinate.
+func TestFlushedGTIDIsMonotonicAcrossOverlappingFlushes(t *testing.T) {
+	const sid = "11111111-2222-3333-4444-555555555555"
+	older, err := mysql.ParseMysqlGTIDSet(sid + ":1-100")
+	require.NoError(t, err)
+	newer, err := mysql.ParseMysqlGTIDSet(sid + ":1-200")
+	require.NoError(t, err)
+
+	client := &gtidClient{
+		logger:       slog.Default(),
+		subs:         newSubscriptionRegistry(),
+		bufferedGTID: older,
+	}
+	sub := &gatedSubscription{gates: make(chan chan struct{})}
+	require.True(t, client.subs.Add("test", sub))
+
+	// Flush A snapshots bufferedGTID=1-100, then parks inside the
+	// subscription flush (the unbuffered gates send synchronizes with
+	// Flush entry, so the snapshot is guaranteed taken once it returns).
+	doneA := make(chan error, 1)
+	go func() { doneA <- client.flush(t.Context(), false, nil) }()
+	gateA := make(chan struct{})
+	sub.gates <- gateA
+
+	// More transactions arrive, then flush B snapshots bufferedGTID=1-200
+	// and parks too. (Flush A is already past <-s.gates, parked on gateA,
+	// so this send can only be received by flush B.)
+	client.mu.Lock()
+	client.bufferedGTID = newer
+	client.mu.Unlock()
+	doneB := make(chan error, 1)
+	go func() { doneB <- client.flush(t.Context(), false, nil) }()
+	gateB := make(chan struct{})
+	sub.gates <- gateB
+
+	// Flush B (the newer snapshot) finishes first and publishes 1-200.
+	close(gateB)
+	require.NoError(t, <-doneB)
+	client.mu.Lock()
+	require.Equal(t, sid+":1-200", client.flushedGTID.String())
+	client.mu.Unlock()
+
+	// Flush A (the stale snapshot) finishes last. Without the guard it
+	// would store 1-100 over 1-200, regressing the resume coordinate.
+	close(gateA)
+	require.NoError(t, <-doneA)
+	client.mu.Lock()
+	require.Equal(t, sid+":1-200", client.flushedGTID.String(),
+		"an overlapping flush holding a stale bufferedGTID snapshot must not regress flushedGTID")
+	client.mu.Unlock()
+}
+
 // TestGTIDRoundtripPosition verifies that the opaque Position string
 // emitted after Start parses back into a GTIDSet (i.e. format round-trips).
 func TestGTIDRoundtripPosition(t *testing.T) {

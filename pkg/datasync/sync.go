@@ -24,6 +24,7 @@ package datasync
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -98,6 +99,26 @@ type Sync struct {
 	// it does not exist). Sync writes to exactly one logical target — there
 	// is no N:M fan-out.
 	Target *applier.Target `kong:"-"`
+}
+
+// Validate is called by Kong after parsing to check for invalid flag values.
+// Zero values mean "use the default" (NewRunner fills them in), so they are
+// not rejected here; only explicitly-negative or otherwise invalid values
+// are caught. Mirrors migration.Migration.Validate.
+func (s *Sync) Validate() error {
+	if s.Threads < 0 {
+		return fmt.Errorf("--threads must be non-negative, got %d", s.Threads)
+	}
+	if s.WriteThreads < 0 {
+		return fmt.Errorf("--write-threads must be non-negative, got %d", s.WriteThreads)
+	}
+	if s.TargetChunkTime < 0 {
+		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", s.TargetChunkTime)
+	}
+	if s.FlushInterval < 0 {
+		return fmt.Errorf("--flush-interval must be non-negative, got %s", s.FlushInterval)
+	}
+	return nil
 }
 
 // Run is the kong CLI entry point. It runs the sync until the process

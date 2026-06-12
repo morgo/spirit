@@ -2,6 +2,7 @@ package move
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
@@ -41,6 +42,23 @@ type Move struct {
 
 	ShardingProvider table.ShardingMetadataProvider `kong:"-"`
 	Targets          []applier.Target               `kong:"-"`
+}
+
+// Validate is called by Kong after parsing to check for invalid flag values.
+// Zero values mean "use the default" (WriteThreads==0 is documented as
+// auto-size), so they are not rejected here; only explicitly-negative or
+// otherwise invalid values are caught. Mirrors migration.Migration.Validate.
+func (m *Move) Validate() error {
+	if m.Threads < 0 {
+		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
+	}
+	if m.WriteThreads < 0 {
+		return fmt.Errorf("--write-threads must be non-negative, got %d", m.WriteThreads)
+	}
+	if m.TargetChunkTime < 0 {
+		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)
+	}
+	return nil
 }
 
 func (m *Move) Run() error {

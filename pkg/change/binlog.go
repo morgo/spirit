@@ -889,7 +889,14 @@ func (c *binlogClient) flush(ctx context.Context, underLock bool, locks []*dbcon
 	// it reduces contention between the copier and the repl applier.
 	if allChangesFlushed {
 		c.mu.Lock()
-		c.flushedPos = newFlushedPos
+		// Monotonic, mirroring setBufferedPos: if two flushes were ever to
+		// overlap, the later-finishing one could hold an older snapshot of
+		// bufferedPos, and storing it unconditionally would regress the
+		// resume position. Every current caller serializes flushes, so this
+		// guards the invariant rather than fixing a live bug.
+		if newFlushedPos.Compare(c.flushedPos) > 0 {
+			c.flushedPos = newFlushedPos
+		}
 		c.mu.Unlock()
 	}
 	return nil

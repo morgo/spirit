@@ -3,6 +3,8 @@ package datasync
 import (
 	"context"
 	"database/sql"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -326,6 +328,38 @@ func TestRunnerStatusTask(t *testing.T) {
 	require.Equal(t, uint64(3), p.Tables[0].RowsCopied)
 }
 
+// TestFatalErrorConcurrentWithRunSetup exercises the seam between Run (which
+// assigns cancelFunc under progMu during setup) and the change client's
+// stream goroutine invoking fatalError. Under -race this fails if fatalError
+// reads cancelFunc without taking progMu (matching Cancel()). It also gates
+// the sync.Once semantics: the record-and-cancel side effects happen at most
+// once across repeated invocations.
+func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
+	runner, err := NewRunner(&Sync{})
+	require.NoError(t, err)
+
+	var cancelCalls atomic.Int64
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		// Simulate Run's setup assignment (see Runner.Run).
+		runner.progMu.Lock()
+		runner.cancelFunc = func() { cancelCalls.Add(1) }
+		runner.progMu.Unlock()
+	})
+	wg.Go(func() {
+		require.True(t, runner.fatalError())
+	})
+	wg.Wait()
+
+	// The fatal condition is recorded regardless of which goroutine won.
+	require.Error(t, runner.fatal())
+
+	// Repeated invocations still report "acted upon" but never
+	// double-cancel or re-record (fatalOnce).
+	require.True(t, runner.fatalError())
+	require.LessOrEqual(t, cancelCalls.Load(), int64(1))
+}
+
 // TestSyncResume verifies that the initial copy writes a copier-watermark
 // checkpoint and that a second run against the same (non-empty) target detects
 // it and resumes — opening the chunker at the saved watermark instead of
@@ -604,4 +638,42 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 	var n int
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
 	require.Equal(t, 2, n)
+}
+
+// TestSyncValidate covers the Kong Validate() hook: explicitly-negative
+// numeric/duration flags are rejected at parse time, while zero values
+// (meaning "use the default", filled in by NewRunner) pass. Mirrors
+// migration.Migration.Validate.
+func TestSyncValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		s       Sync
+		wantErr string
+	}{
+		{name: "zero values are valid"},
+		{name: "typical values are valid", s: Sync{
+			Threads:         4,
+			WriteThreads:    4,
+			TargetChunkTime: 5 * time.Second,
+			FlushInterval:   30 * time.Second,
+		}},
+		{name: "negative threads", s: Sync{Threads: -5},
+			wantErr: "--threads must be non-negative, got -5"},
+		{name: "negative write-threads", s: Sync{WriteThreads: -1},
+			wantErr: "--write-threads must be non-negative, got -1"},
+		{name: "negative target-chunk-time", s: Sync{TargetChunkTime: -time.Second},
+			wantErr: "--target-chunk-time must be non-negative, got -1s"},
+		{name: "negative flush-interval", s: Sync{FlushInterval: -time.Minute},
+			wantErr: "--flush-interval must be non-negative, got -1m0s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.s.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+		})
+	}
 }
