@@ -186,16 +186,6 @@ func WithReplicaMaxLag(d time.Duration) RunnerOption {
 	}
 }
 
-// WithConfFile creates a temporary INI config file with the given content
-// and sets it on the migration. The file is automatically cleaned up via t.TempDir().
-func WithConfFile(t *testing.T, content string) RunnerOption {
-	t.Helper()
-	path := mkIniFile(t, content)
-	return func(m *Migration) {
-		m.ConfFile = path
-	}
-}
-
 // WithSkipDropAfterCutover keeps the old table after cutover.
 func WithSkipDropAfterCutover() RunnerOption {
 	return func(m *Migration) {

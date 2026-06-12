@@ -12,21 +12,6 @@ import (
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
-type statement struct {
-	numKeys int
-	stmt    string
-}
-
-func extractStmt(stmts []statement) []string {
-	var trimmed []string
-	for _, stmt := range stmts {
-		if stmt.stmt != "" {
-			trimmed = append(trimmed, stmt.stmt)
-		}
-	}
-	return trimmed
-}
-
 func encodeSchemaTable(schema, table string) string {
 	return schema + "." + table
 }

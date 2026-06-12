@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -557,36 +556,6 @@ func TestCertificateAuthorityPrecedence(t *testing.T) {
 			require.Contains(t, result, tt.expectedTLSType, tt.description)
 		})
 	}
-}
-
-// MockDB simulates database connection behavior for testing
-type MockDB struct {
-	shouldFailPing  bool
-	pingCallCount   int
-	closeCallCount  int
-	maxOpenConns    int
-	connMaxLifetime time.Duration
-}
-
-func (m *MockDB) Ping() error {
-	m.pingCallCount++
-	if m.shouldFailPing {
-		return errors.New("mock ping failure")
-	}
-	return nil
-}
-
-func (m *MockDB) Close() error {
-	m.closeCallCount++
-	return nil
-}
-
-func (m *MockDB) SetMaxOpenConns(n int) {
-	m.maxOpenConns = n
-}
-
-func (m *MockDB) SetConnMaxLifetime(d time.Duration) {
-	m.connMaxLifetime = d
 }
 
 func TestPREFERREDModeFallbackBehavior(t *testing.T) {
