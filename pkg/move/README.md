@@ -34,9 +34,9 @@ However, this optimization is not always safe:
 
 ### Checkpoint and Resume
 
-Move operations write periodic checkpoints to a `_spirit_checkpoint` table *on the source*. If a move is interrupted, the runner detects the existing checkpoint during setup and resumes from the last recorded binlog position rather than starting over. DDL changes on source tables during a move invalidate the checkpoint to prevent resuming into an inconsistent state.
+Move operations write periodic checkpoints to a `_spirit_checkpoint` table *on the first target*. If a move is interrupted, the runner detects the existing checkpoint during setup and resumes from the last recorded binlog position rather than starting over. DDL changes on source tables during a move invalidate the checkpoint to prevent resuming into an inconsistent state.
 
-Checkpoints are stored on the source because reshard operations use a 1:N topology; storing checkpoints on N targets would add significant complexity.
+The checkpoint records progress *into the targets* (the copier watermark, and the rows `deleteAboveWatermark` prunes on resume), so it lives alongside the data it describes. With N sources and M targets, both slices are sorted deterministically and the checkpoint always lands on the first target (`targets[0]`), so a resume looks in the same place regardless of the order the caller supplied sources or targets. (Earlier 1:N reshard versions stored the checkpoint on the single source; that convention is no longer used.)
 
 ### Sentinel Table
 

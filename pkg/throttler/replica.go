@@ -87,6 +87,14 @@ func (l *Replica) IsThrottled() bool {
 	return atomic.LoadInt64(&l.currentLagInMs) >= l.lagTolerance.Milliseconds()
 }
 
+// Replica deliberately does NOT implement GradualThrottler: replication lag
+// is an SLO-style budget, not a load gauge — normalizing it against the
+// tolerance (typically 120s) would make the autoscaler treat half the lag
+// budget as headroom and park replicas a minute behind. It is also coarse and
+// bistable (near 0 when healthy, climbing without bound when not). Replica
+// protection stays binary: IsThrottled/BlockWait hard-stop the copy at the
+// tolerance.
+
 // BlockWait blocks until the lag is within the tolerance, or up to 60s
 // to allow some progress to be made. It respects context cancellation.
 func (l *Replica) BlockWait(ctx context.Context) {

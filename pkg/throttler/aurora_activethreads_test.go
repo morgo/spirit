@@ -52,6 +52,23 @@ func TestActiveThreads_RecoversBelowVCPUs(t *testing.T) {
 	require.False(t, a.IsThrottled())
 }
 
+func TestActiveThreads_Utilization(t *testing.T) {
+	a := newTestActiveThreads(t, 8)
+	a.applySample(4)
+	require.InDelta(t, 0.5, a.Utilization(), 1e-9)
+	a.applySample(8) // exactly at vCPUs => 1.0
+	require.InDelta(t, 1.0, a.Utilization(), 1e-9)
+	a.applySample(12) // oversubscribed => >1.0
+	require.InDelta(t, 1.5, a.Utilization(), 1e-9)
+}
+
+func TestActiveThreads_UtilizationZeroVCPUs(t *testing.T) {
+	// vCPUs unknown (Open not yet called) must not divide by zero.
+	a := newTestActiveThreads(t, 0)
+	a.applySample(4)
+	require.Zero(t, a.Utilization())
+}
+
 func TestActiveThreads_BlockWaitReturnsImmediatelyWhenUnthrottled(t *testing.T) {
 	a := newTestActiveThreads(t, 8)
 	start := time.Now()
@@ -139,6 +156,15 @@ func TestResolveWriteThreads_NonAuroraUsesDefault_LocalMySQL(t *testing.T) {
 	n, err := ResolveWriteThreads(t.Context(), db, 0, discardLogger())
 	require.NoError(t, err)
 	require.Equal(t, DefaultWriteThreads, n)
+}
+
+func TestResolveMaxWriteThreads(t *testing.T) {
+	// Disabled: cap equals start so the count cannot move.
+	require.Equal(t, 4, ResolveMaxWriteThreads(4, false))
+
+	// Enabled: the cap is fixed at 2x the start value (not configurable).
+	require.Equal(t, 8, ResolveMaxWriteThreads(4, true))
+	require.Equal(t, 10, ResolveMaxWriteThreads(5, true))
 }
 
 func TestAuroraVCPUs_LocalMySQL(t *testing.T) {

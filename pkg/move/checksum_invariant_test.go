@@ -33,7 +33,7 @@ func (m *mockChecker) ExecTime() time.Duration       { return 0 }
 func (m *mockChecker) DifferencesFound() uint64      { return m.differencesFound.Load() }
 
 // setupRunnerForChecksumTest builds a move.Runner up to the point where the
-// checkpoint table exists on the source, the copier has produced a watermark,
+// checkpoint table exists on the first target, the copier has produced a watermark,
 // and the checksum chunker is open with a watermark too. r.checker is the
 // caller's responsibility to set — tests swap in a mockChecker.
 //
@@ -210,7 +210,7 @@ func TestDumpCheckpointSuppressesWatermarkWithDifferences(t *testing.T) {
 func checkpointTableExists(t *testing.T, r *Runner) bool {
 	t.Helper()
 	var n int
-	err := r.sources[0].db.QueryRowContext(t.Context(),
+	err := r.targets[0].DB.QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
 		r.checkpointTable.SchemaName, r.checkpointTable.TableName).Scan(&n)
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func checkpointTableExists(t *testing.T, r *Runner) bool {
 func latestCheckpointWatermarks(t *testing.T, r *Runner) (string, string) {
 	t.Helper()
 	var copierWM, checksumWM sql.NullString
-	err := r.sources[0].db.QueryRowContext(t.Context(),
+	err := r.targets[0].DB.QueryRowContext(t.Context(),
 		fmt.Sprintf("SELECT copier_watermark, checksum_watermark FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 			r.checkpointTable.SchemaName, r.checkpointTable.TableName)).Scan(&copierWM, &checksumWM)
 	require.NoError(t, err)

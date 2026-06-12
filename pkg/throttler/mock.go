@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// Mock is an always-throttled test throttler. It is deliberately binary (no
+// GradualThrottler): tests that exercise the autoscaler's continuous signal
+// use their own GradualThrottler stub instead.
 type Mock struct {
 }
 

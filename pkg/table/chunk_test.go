@@ -181,4 +181,103 @@ func TestWatermarkAboveClause(t *testing.T) {
 	// Invalid JSON
 	_, err = WatermarkAboveClause(ti, "not-json")
 	require.Error(t, err)
+
+	// Foreign formats must fail loudly rather than decode into a zero-value
+	// chunk that renders as "DELETE ... WHERE ()" (issue: resume broken for
+	// multi-table and composite-PK moves).
+	// Multi-chunker map format:
+	_, err = WatermarkAboveClause(ti, `{"localhost:3306.test.t1":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}"}`)
+	require.Error(t, err)
+	// Composite chunker envelope format:
+	_, err = WatermarkAboveClause(ti, `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}","RowsCopied":50}`)
+	require.Error(t, err)
+	// Empty object:
+	_, err = WatermarkAboveClause(ti, `{}`)
+	require.Error(t, err)
+}
+
+func TestNewChunkFromJSONValidation(t *testing.T) {
+	ti := NewTableInfo(nil, "test", "t1")
+	ti.KeyColumns = []string{"id"}
+	ti.columnsMySQLTps = map[string]string{"id": "bigint"}
+
+	// A valid watermark chunk parses.
+	chunk, err := newChunkFromJSON(ti, `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, chunk.Key)
+
+	// No Key columns: foreign/corrupt format, not a chunk.
+	_, err = newChunkFromJSON(ti, `{}`)
+	require.ErrorContains(t, err, "no Key columns")
+	_, err = newChunkFromJSON(ti, `{"ChunkJSON":"{}","RowsCopied":5}`)
+	require.ErrorContains(t, err, "no Key columns")
+	_, err = newChunkFromJSON(ti, `{"test.t1":"{}"}`)
+	require.ErrorContains(t, err, "no Key columns")
+
+	// Key present but boundary values missing or mismatched.
+	_, err = newChunkFromJSON(ti, `{"Key":["id"],"ChunkSize":1000}`)
+	require.ErrorContains(t, err, "boundary values do not match")
+	_, err = newChunkFromJSON(ti, `{"Key":["id"],"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":[],"Inclusive":false}}`)
+	require.ErrorContains(t, err, "boundary values do not match")
+	_, err = newChunkFromJSON(ti, `{"Key":["a","b"],"LowerBound":{"Value":["1","2"],"Inclusive":true},"UpperBound":{"Value":["3"],"Inclusive":false}}`)
+	require.ErrorContains(t, err, "boundary values do not match")
+}
+
+func TestWatermarkPerTable(t *testing.T) {
+	t1 := NewTableInfo(nil, "test", "t1")
+	t2 := NewTableInfo(nil, "test", "t2")
+	t1.Host = "localhost:3306"
+	t2.Host = "localhost:3306"
+
+	rawChunk := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`
+	compositeEnvelope := `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}","RowsCopied":50}`
+
+	// Optimistic chunker raw chunk format (single table).
+	wms, err := WatermarkPerTable(rawChunk, t1)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"localhost:3306.test.t1": rawChunk}, wms)
+
+	// Composite chunker envelope format (single table): unwraps ChunkJSON.
+	wms, err = WatermarkPerTable(compositeEnvelope, t1)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"localhost:3306.test.t1": rawChunk}, wms)
+
+	// Multi-chunker map format, with one raw-chunk child and one
+	// composite-envelope child: both values unwrap to raw chunk JSON.
+	multi, err := json.Marshal(map[string]string{
+		t1.QualifiedName(): rawChunk,
+		t2.QualifiedName(): compositeEnvelope,
+	})
+	require.NoError(t, err)
+	wms, err = WatermarkPerTable(string(multi), t1, t2)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{
+		"localhost:3306.test.t1": rawChunk,
+		"localhost:3306.test.t2": rawChunk,
+	}, wms)
+
+	// Multi-chunker map with a missing table: the entry is absent from the
+	// result (the table restarts from scratch on resume).
+	multi, err = json.Marshal(map[string]string{
+		t1.QualifiedName(): rawChunk,
+	})
+	require.NoError(t, err)
+	wms, err = WatermarkPerTable(string(multi), t1, t2)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"localhost:3306.test.t1": rawChunk}, wms)
+	require.NotContains(t, wms, t2.QualifiedName())
+
+	// Empty multi-chunker map: no table had a ready watermark.
+	wms, err = WatermarkPerTable(`{}`, t1, t2)
+	require.NoError(t, err)
+	require.Empty(t, wms)
+
+	// Single-table formats cannot be attributed when more than one table
+	// was supplied: that's a corrupt or mismatched checkpoint.
+	_, err = WatermarkPerTable(rawChunk, t1, t2)
+	require.ErrorContains(t, err, "single-table format")
+	_, err = WatermarkPerTable(compositeEnvelope, t1, t2)
+	require.ErrorContains(t, err, "single-table format")
+	_, err = WatermarkPerTable("not-json", t1, t2)
+	require.Error(t, err)
 }
