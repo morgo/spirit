@@ -35,6 +35,10 @@ func showCreateTable(ctx context.Context, db *sql.DB, schema, table string) (str
 // and diffing the structured form via statement.CreateTable.Diff. This canonical
 // comparison:
 //   - ignores AUTO_INCREMENT counter values (instance-specific noise),
+//   - ignores the column-level AUTO_INCREMENT attribute: an unsharded source
+//     legitimately differs from a sharded target that drops AUTO_INCREMENT in
+//     favor of a Vitess sequence; the difference does not affect copy
+//     correctness, so it must not block a move into a pre-created target,
 //   - ignores ENGINE and ROW_FORMAT cosmetic defaults,
 //   - DOES compare column types, nullability, defaults, and per-column /
 //     per-table CHARACTER SET and COLLATE,
@@ -65,7 +69,13 @@ func schemaDiff(table, wantCreate, gotCreate string) (string, error) {
 	// Diff(got -> want): the returned clauses are the ALTER that would morph the
 	// validated schema ("got") into the reference schema ("want"). If nil, the
 	// two schemas are equivalent under the canonicalization rules above.
-	stmts, err := got.Diff(want, statement.NewDiffOptions())
+	// IgnoreColumnAutoIncrement: a sharded target legitimately drops the
+	// column-level AUTO_INCREMENT flag (IDs come from a Vitess sequence), and
+	// that difference is not a copy-correctness concern — so it must not block
+	// the move (see the doc comment above).
+	diffOpts := statement.NewDiffOptions()
+	diffOpts.IgnoreColumnAutoIncrement = true
+	stmts, err := got.Diff(want, diffOpts)
 	if err != nil {
 		return "", fmt.Errorf("failed to diff CREATE TABLE statements: %w", err)
 	}

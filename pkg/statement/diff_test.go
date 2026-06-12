@@ -1112,6 +1112,43 @@ func TestDiff_DiffOptions(t *testing.T) {
 			expected: "ALTER TABLE `t1` AUTO_INCREMENT=100",
 		},
 
+		// IgnoreColumnAutoIncrement controls the column-level AUTO_INCREMENT
+		// flag, which is distinct from the AUTO_INCREMENT=N table-option
+		// counter (IgnoreAutoIncrement). By default a column gaining or losing
+		// AUTO_INCREMENT is a real change; the move-tables target-state check
+		// sets IgnoreColumnAutoIncrement so an unsharded source can move into a
+		// sharded target that drops AUTO_INCREMENT in favor of a Vitess sequence.
+		{
+			name:     "DefaultDetectsColumnAutoIncrement",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT)",
+			opts:     nil, // nil uses NewDiffOptions(): IgnoreColumnAutoIncrement=false
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int(11) NOT NULL AUTO_INCREMENT",
+		},
+		{
+			name:     "IgnoreColumnAutoIncrement_TargetAdds",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT)",
+			opts:     &DiffOptions{IgnoreColumnAutoIncrement: true},
+			expected: "",
+		},
+		{
+			// The move-tables scenario: the source carries AUTO_INCREMENT, the
+			// sharded target dropped it because IDs come from a Vitess sequence.
+			name:     "IgnoreColumnAutoIncrement_SourceDrops",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			opts:     &DiffOptions{IgnoreColumnAutoIncrement: true},
+			expected: "",
+		},
+		{
+			name:     "IgnoreColumnAutoIncrement_StillDetectsColumnChanges",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT, b INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100))",
+			opts:     &DiffOptions{IgnoreColumnAutoIncrement: true},
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` varchar(100) NULL",
+		},
+
 		// IgnoreCharsetCollation
 		{
 			name:     "IgnoreCharsetCollation_Charset",
@@ -1256,6 +1293,7 @@ func TestDiff_ChangePartitionType(t *testing.T) {
 func TestNewDiffOptions(t *testing.T) {
 	opts := NewDiffOptions()
 	require.True(t, opts.IgnoreAutoIncrement, "IgnoreAutoIncrement should default to true")
+	require.False(t, opts.IgnoreColumnAutoIncrement, "IgnoreColumnAutoIncrement should default to false")
 	require.True(t, opts.IgnoreEngine, "IgnoreEngine should default to true")
 	require.False(t, opts.IgnoreCharsetCollation, "IgnoreCharsetCollation should default to false")
 	require.False(t, opts.IgnorePartitioning, "IgnorePartitioning should default to false")
