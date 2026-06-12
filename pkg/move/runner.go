@@ -413,6 +413,27 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		)
 	}
 
+	// With multiple sources, a persisted checksum watermark cannot be trusted.
+	// deleteAboveWatermark (below) runs every (source, table) DELETE against
+	// every target, and same-named tables from different sources interleave in
+	// the target tables — so one source's DELETE also removes OTHER sources'
+	// rows below their own watermarks. Those rows are not recopied (each
+	// source's chunker resumes from its own watermark); only a checksum pass
+	// that runs from the very beginning detects and repairs the hole. Resuming
+	// the checksum at a watermark would skip re-verifying exactly the range
+	// where the hole sits, so discard it and force a full pass.
+	//
+	// With a single source the watermark is kept: deletes are per-table, and
+	// each table's delete range (above its watermark upper bound) is a subset
+	// of its recopy range (from the watermark lower bound), so nothing below
+	// the checksum watermark can have been deleted without being recopied.
+	if len(r.sources) > 1 && r.checksumWatermark != "" {
+		r.logger.Info("discarding persisted checksum watermark: multi-source resume requires a full checksum pass",
+			"reason", "deleteAboveWatermark may remove rows below other sources' watermarks; only a from-scratch checksum re-verifies and repairs them",
+			"sources", len(r.sources))
+		r.checksumWatermark = ""
+	}
+
 	// Parse per-source positions (opaque strings owned by the source impl),
 	// keyed by sourceKey (addr/dbname).
 	var positions map[string]string
@@ -1745,9 +1766,12 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 		// With multiple sources, tables with the same name from different
 		// sources interleave in the same target table, so each source's
 		// DELETE may also remove another source's rows below that source's
-		// own watermark. That direction is safe: deleting too much can only
-		// cause missing rows, which the initial checksum (FixDifferences)
-		// detects and repairs before cutover. Deleting too little would
+		// own watermark. Those rows are NOT recopied (each source's chunker
+		// resumes from its own watermark), so this is only safe because the
+		// initial checksum (FixDifferences) then runs a FULL pass that
+		// detects and repairs the missing rows before cutover — enforced by
+		// resumeFromCheckpoint discarding any persisted checksum watermark
+		// when there is more than one source. Deleting too little would
 		// leave phantom rows, which is the race this function exists to
 		// prevent.
 		for i, target := range r.targets {
