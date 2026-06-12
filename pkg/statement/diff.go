@@ -13,9 +13,21 @@ import (
 
 // DiffOptions controls the behavior of the Diff operation.
 type DiffOptions struct {
-	// IgnoreAutoIncrement skips diffing the AUTO_INCREMENT table option.
+	// IgnoreAutoIncrement skips diffing the AUTO_INCREMENT table option
+	// (the table-level next-value counter, e.g. `AUTO_INCREMENT=100`).
 	// Default: true (via NewDiffOptions).
 	IgnoreAutoIncrement bool
+
+	// IgnoreColumnAutoIncrement skips diffing the column-level AUTO_INCREMENT
+	// attribute (whether a column carries the AUTO_INCREMENT flag). This is
+	// distinct from IgnoreAutoIncrement, which only covers the table-option
+	// counter. Default: false (via NewDiffOptions) — for general schema diffing
+	// a column gaining or losing AUTO_INCREMENT is a real change. It is enabled
+	// by consumers like the move-tables target-state check, where an unsharded
+	// source legitimately differs from a sharded target that drops
+	// AUTO_INCREMENT in favor of a Vitess sequence: the difference does not
+	// affect copy correctness and must not block the move.
+	IgnoreColumnAutoIncrement bool
 
 	// IgnoreEngine skips diffing the ENGINE table option.
 	// Default: true (via NewDiffOptions).
@@ -40,11 +52,12 @@ type DiffOptions struct {
 // By default, AUTO_INCREMENT, ENGINE, and ROW_FORMAT differences are ignored.
 func NewDiffOptions() *DiffOptions {
 	return &DiffOptions{
-		IgnoreAutoIncrement:    true,
-		IgnoreEngine:           true,
-		IgnoreCharsetCollation: false,
-		IgnorePartitioning:     false,
-		IgnoreRowFormat:        true,
+		IgnoreAutoIncrement:       true,
+		IgnoreColumnAutoIncrement: false,
+		IgnoreEngine:              true,
+		IgnoreCharsetCollation:    false,
+		IgnorePartitioning:        false,
+		IgnoreRowFormat:           true,
 	}
 }
 
@@ -65,7 +78,7 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 	var alterClauses []string
 
 	// 1. Diff columns (DROP, ADD, MODIFY)
-	columnClauses := ct.diffColumns(target)
+	columnClauses := ct.diffColumns(target, opts)
 	alterClauses = append(alterClauses, columnClauses...)
 
 	// 2. Diff indexes (DROP, ADD). Option-only index changes (same column
@@ -147,7 +160,7 @@ func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement
 }
 
 // diffColumns compares columns and returns ALTER clauses for differences
-func (ct *CreateTable) diffColumns(target *CreateTable) []string {
+func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []string {
 	var clauses []string
 
 	// Build maps for easier lookup. Keys are lowercased so identifier
@@ -206,7 +219,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			// Skip modification if only PRIMARY KEY changed (already handled in diffIndexes)
 			// When PRIMARY KEY is dropped, nullability change is implicit, so skip it
 			pkOnlyChange := sourceCol.PrimaryKey != targetCol.PrimaryKey &&
-				columnsEqualIgnorePK(sourceCol, &targetCol)
+				columnsEqualIgnorePK(sourceCol, &targetCol, opts)
 
 			// Also check if only nullability changed due to PK drop
 			// (PK columns are NOT NULL, dropping PK makes them NULL)
@@ -222,7 +235,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable) []string {
 			// look up with the same normalization to avoid missing a
 			// position-only change when the target's spelling is in mixed
 			// or upper case.
-			needsModify := (!ct.columnsEqualWithContext(sourceCol, &targetCol, target) && !pkOnlyChange && !pkDroppedNullabilityChange) ||
+			needsModify := (!ct.columnsEqualWithContext(sourceCol, &targetCol, target, opts) && !pkOnlyChange && !pkDroppedNullabilityChange) ||
 				needsExplicitPosition[strings.ToLower(targetCol.Name)]
 
 			if needsModify {
@@ -753,7 +766,7 @@ func (to *TableOptions) getAutoIncrement() *string {
 // columnsEqualWithContext checks if two columns are equal, considering table context for charset/collation
 // If a column's charset is nil, it inherits from the table. If it's explicitly set to the same as the table,
 // it's considered equal to nil (no explicit charset needed).
-func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable) bool {
+func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable, opts *DiffOptions) bool {
 	// Column names are case-insensitive in MySQL, so `id` and `ID` refer
 	// to the same column.
 	if !strings.EqualFold(a.Name, b.Name) {
@@ -811,7 +824,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.DefaultIsString != b.DefaultIsString && !isNumericColumnType(a.Type) {
 		return false
 	}
-	if a.AutoInc != b.AutoInc {
+	if !opts.IgnoreColumnAutoIncrement && a.AutoInc != b.AutoInc {
 		return false
 	}
 	if a.PrimaryKey != b.PrimaryKey {
@@ -868,7 +881,7 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 }
 
 // columnsEqualIgnorePK checks if two columns are equal, ignoring the PrimaryKey attribute
-func columnsEqualIgnorePK(a, b *Column) bool {
+func columnsEqualIgnorePK(a, b *Column, opts *DiffOptions) bool {
 	// Column names are case-insensitive in MySQL.
 	if !strings.EqualFold(a.Name, b.Name) {
 		return false
@@ -920,7 +933,7 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if a.DefaultIsString != b.DefaultIsString && !isNumericColumnType(a.Type) {
 		return false
 	}
-	if a.AutoInc != b.AutoInc {
+	if !opts.IgnoreColumnAutoIncrement && a.AutoInc != b.AutoInc {
 		return false
 	}
 	// Skip PrimaryKey comparison
