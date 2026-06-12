@@ -18,6 +18,7 @@ type Move struct {
 	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" default:"4"`
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
+	CheckpointMaxAge      time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 
 	// GTID switches the change source from binlog file+position to MySQL GTIDs.
 	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and
