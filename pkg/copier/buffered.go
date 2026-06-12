@@ -43,6 +43,7 @@ type buffered struct {
 	logger           *slog.Logger
 	metricsSink      metrics.Sink
 	copierEtaHistory *copierEtaHistory
+	autoscale        AutoscaleConfig
 }
 
 // Assert that buffered implements the Copier interface
@@ -126,6 +127,15 @@ func (c *buffered) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start applier: %w", err)
 	}
 
+	// Experimental: start the write-thread autoscaler. It runs for the lifetime
+	// of the copy and stops when ctx is cancelled (deferred above). It only
+	// engages when the applier supports dynamic scaling (SingleTargetApplier)
+	// AND the throttler provides a continuous load signal (GradualThrottler);
+	// otherwise the pool stays fixed.
+	if as := c.autoscalerIfEnabled(); as != nil {
+		go as.run(ctx)
+	}
+
 	// Start read workers
 	g, errGrpCtx := errgroup.WithContext(ctx)
 	c.logger.Info("starting read workers", "count", c.concurrency)
@@ -161,6 +171,34 @@ func (c *buffered) Run(ctx context.Context) error {
 		err = c.getFirstErr()
 	}
 	return err
+}
+
+// autoscalerIfEnabled returns the experimental write-thread autoscaler to run
+// for this copy, or nil when it should not engage: autoscaling disabled, an
+// applier without dynamic scaling (ShardedApplier), or a throttler without a
+// continuous load signal. Only GradualThrottler implementations (the Aurora
+// throttlers, or a multi-throttler containing one) provide that signal —
+// binary throttlers like replica lag protect via the hard-stop only, and
+// scaling blind against them would just ramp to the maximum unguided.
+func (c *buffered) autoscalerIfEnabled() *autoScaler {
+	if !c.autoscale.Enabled {
+		return nil
+	}
+	scaler, ok := c.applier.(writeScaler)
+	if !ok {
+		c.logger.Info("autoscaling enabled but this applier does not support dynamic write threads; running with a fixed pool")
+		return nil
+	}
+	gradual, ok := c.throttler.(throttler.GradualThrottler)
+	if !ok {
+		c.logger.Warn("autoscaling enabled but no continuous load signal is available (requires an Aurora target); write threads stay fixed at the starting value",
+			"write_threads", c.autoscale.StartThreads)
+		return nil
+	}
+	c.logger.Info("starting experimental write-thread autoscaler",
+		"start", c.autoscale.StartThreads, "max", c.autoscale.MaxThreads,
+		"low_watermark", acLowWatermark, "high_watermark", acHighWatermark)
+	return newAutoScaler(gradual, scaler, c.autoscale.StartThreads, c.autoscale.MaxThreads, c.logger, c.metricsSink)
 }
 
 // readWorker reads chunks and sends them to the applier

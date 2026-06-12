@@ -15,18 +15,50 @@ type multiThrottler struct {
 
 var _ Throttler = &multiThrottler{}
 
+// gradualMultiThrottler is the multiThrottler variant returned when at least
+// one child implements GradualThrottler, so that asserting GradualThrottler on
+// the composite reflects whether a continuous signal actually exists inside.
+type gradualMultiThrottler struct {
+	*multiThrottler
+}
+
+var _ GradualThrottler = &gradualMultiThrottler{}
+
+// Utilization returns the maximum utilization across the gradual children —
+// the most-loaded signal is the bottleneck and governs scaling decisions.
+// Binary-only children (e.g. replica lag) contribute nothing here; they
+// protect via the IsThrottled/BlockWait hard-stop.
+func (g *gradualMultiThrottler) Utilization() float64 {
+	var maxUtil float64
+	for _, t := range g.throttlers {
+		if gt, ok := t.(GradualThrottler); ok {
+			if u := gt.Utilization(); u > maxUtil {
+				maxUtil = u
+			}
+		}
+	}
+	return maxUtil
+}
+
 // NewMultiThrottler creates a throttler that wraps multiple child throttlers.
-// If zero throttlers are provided, it returns a Noop. If one is provided,
-// it is returned directly without wrapping.
+// If zero throttlers are provided, it returns a Noop. If one is provided, it
+// is returned directly without wrapping. With more than one, the returned
+// composite implements GradualThrottler if and only if at least one child
+// does.
 func NewMultiThrottler(throttlers ...Throttler) Throttler {
 	switch len(throttlers) {
 	case 0:
 		return &Noop{}
 	case 1:
 		return throttlers[0]
-	default:
-		return &multiThrottler{throttlers: throttlers}
 	}
+	mt := &multiThrottler{throttlers: throttlers}
+	for _, t := range throttlers {
+		if _, ok := t.(GradualThrottler); ok {
+			return &gradualMultiThrottler{multiThrottler: mt}
+		}
+	}
+	return mt
 }
 
 func (m *multiThrottler) Open(ctx context.Context) error {
