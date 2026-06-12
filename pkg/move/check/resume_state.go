@@ -14,7 +14,7 @@ func init() {
 
 // resumeStateCheck validates that the state is compatible with resuming from a checkpoint.
 // This check runs at ScopeResume and verifies:
-// 1. Checkpoint table exists on source
+// 1. Checkpoint table exists on the first target
 // 2. Target tables exist with matching schema to source
 // 3. All source tables have corresponding target tables
 //
@@ -25,28 +25,29 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	if len(r.SourceTables) == 0 {
 		return errors.New("no source tables available for resume validation")
 	}
-	if len(r.Sources) == 0 {
-		return errors.New("no sources configured")
+	if len(r.Targets) == 0 {
+		return errors.New("no targets configured")
 	}
-	// Check 1: Verify checkpoint table exists on sources[0] (by convention).
-	src0 := r.Sources[0]
-	if src0.DB == nil || src0.Config == nil {
-		return errors.New("source[0] database connection or config is not initialized")
+	// Check 1: Verify checkpoint table exists on targets[0] (by convention).
+	// The runner sorts targets so targets[0] is stable across runs.
+	tgt0 := r.Targets[0]
+	if tgt0.DB == nil || tgt0.Config == nil {
+		return errors.New("target[0] database connection or config is not initialized")
 	}
 	checkpointTableName := "_spirit_checkpoint"
 	var checkpointExists int
-	err := src0.DB.QueryRowContext(ctx,
+	err := tgt0.DB.QueryRowContext(ctx,
 		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-		src0.Config.DBName, checkpointTableName).Scan(&checkpointExists)
+		tgt0.Config.DBName, checkpointTableName).Scan(&checkpointExists)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("checkpoint table '%s.%s' does not exist; cannot resume", src0.Config.DBName, checkpointTableName)
+		return fmt.Errorf("checkpoint table '%s.%s' does not exist; cannot resume", tgt0.Config.DBName, checkpointTableName)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to check for checkpoint table: %w", err)
 	}
 
 	logger.Info("checkpoint table exists, validating target tables for resume",
-		"checkpoint_table", fmt.Sprintf("%s.%s", src0.Config.DBName, checkpointTableName))
+		"checkpoint_table", fmt.Sprintf("%s.%s", tgt0.Config.DBName, checkpointTableName))
 
 	// Check 2: Verify all source tables have corresponding target tables with matching schema
 	for _, sourceTable := range r.SourceTables {

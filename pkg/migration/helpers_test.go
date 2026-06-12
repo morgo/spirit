@@ -75,6 +75,14 @@ func WithWriteThreads(n int) RunnerOption {
 	}
 }
 
+// WithAutoscaling enables the experimental write-thread autoscaler.
+// WriteThreads acts as the starting value; the cap is fixed at 2x that.
+func WithAutoscaling() RunnerOption {
+	return func(m *Migration) {
+		m.EnableExperimentalAutoscaling = true
+	}
+}
+
 // WithTable sets the table name for the migration.
 func WithTable(name string) RunnerOption {
 	return func(m *Migration) {

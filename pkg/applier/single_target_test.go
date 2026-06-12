@@ -1136,6 +1136,89 @@ func TestSingleTargetApplierStartClose(t *testing.T) {
 	require.Equal(t, 2, count)
 }
 
+// TestSingleTargetApplierDynamicScaling exercises SetWriteWorkers: the live
+// worker count moves up and down at runtime, data is applied correctly under
+// both, the count clamps at a minimum of 1, and shutdown stays clean (goleak in
+// TestMain catches any leaked worker).
+func TestSingleTargetApplierDynamicScaling(t *testing.T) {
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_scaling_test")
+	testutils.RunSQL(t, "CREATE DATABASE single_scaling_test")
+
+	base, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	target := base.Clone()
+	target.DBName = "single_scaling_test"
+	// The pool must cover the peak worker count we scale to.
+	target.Params = map[string]string{}
+	targetDB, err := sql.Open("mysql", target.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	targetDB.SetMaxOpenConns(10)
+
+	_, err = targetDB.ExecContext(t.Context(), `CREATE TABLE test_table (id INT PRIMARY KEY, val INT)`)
+	require.NoError(t, err)
+
+	targetTable := table.NewTableInfo(targetDB, target.DBName, "test_table")
+	require.NoError(t, targetTable.SetInfo(t.Context()))
+
+	tar := Target{DB: targetDB, Config: target, KeyRange: "0"}
+	cfg := NewApplierDefaultConfig()
+	cfg.Threads = 2 // start value
+	appl, err := NewSingleTargetApplier(tar, cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, appl.Start(t.Context()))
+	defer func() { require.NoError(t, appl.Stop()) }()
+
+	// Initial pool matches the start value (spawn increments synchronously).
+	require.Equal(t, 2, appl.ActiveWriteWorkers())
+
+	chunk := &table.Chunk{
+		Table:         targetTable,
+		NewTable:      targetTable,
+		ColumnMapping: table.NewColumnMapping(targetTable, targetTable, nil),
+	}
+
+	// applyN applies rows [start, start+n) and waits for them to land.
+	applyN := func(start, n int) {
+		rows := make([][]any, n)
+		for i := range n {
+			rows[i] = []any{int64(start + i), int64(start + i)}
+		}
+		var cbErr error
+		var done atomic.Bool
+		require.NoError(t, appl.Apply(t.Context(), chunk, rows, func(_ int64, err error) {
+			cbErr = err
+			done.Store(true)
+		}))
+		require.NoError(t, appl.Wait(t.Context()))
+		require.True(t, done.Load())
+		require.NoError(t, cbErr)
+	}
+
+	// Scale up, then apply work under the larger pool.
+	appl.SetWriteWorkers(6)
+	require.Equal(t, 6, appl.ActiveWriteWorkers())
+	applyN(0, 1500) // > chunkletMaxRows so it splits across workers
+
+	// Scale down. Parked workers exit asynchronously (after finishing any
+	// in-flight chunklet), so the count converges rather than dropping instantly.
+	appl.SetWriteWorkers(1)
+	require.Eventually(t, func() bool {
+		return appl.ActiveWriteWorkers() == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	applyN(1500, 500)
+
+	// Clamp: requesting < 1 holds at 1.
+	appl.SetWriteWorkers(0)
+	require.Equal(t, 1, appl.ActiveWriteWorkers())
+
+	// All rows from both batches must be present.
+	var count int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM test_table").Scan(&count))
+	require.Equal(t, 2000, count)
+}
+
 // TestSingleTargetApplierUnderLock verifies the under-lock write path:
 // with one lock the statements execute on the lock's own transaction, and
 // supplying more than one lock is rejected (the single-target applier
@@ -1239,4 +1322,16 @@ func TestSingleTargetApplierCallbackPanicDecrements(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, a.Wait(ctx))
+}
+
+// TestSingleTargetApplierSetWriteWorkersBeforeStart verifies the exported
+// SetWriteWorkers is a safe no-op when called before Start(): workerCtx is
+// still nil, so spawning a worker would panic on its first writeChunklet
+// (ctx.Err()). It must spawn nothing rather than panic.
+func TestSingleTargetApplierSetWriteWorkersBeforeStart(t *testing.T) {
+	a := &SingleTargetApplier{
+		logger: slog.New(slog.DiscardHandler),
+	}
+	require.NotPanics(t, func() { a.SetWriteWorkers(4) })
+	require.Equal(t, 0, a.ActiveWriteWorkers(), "no workers should be spawned before Start")
 }
