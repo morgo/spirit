@@ -82,7 +82,9 @@ func runFlushUnderTableLockErrorBranches(t *testing.T, useGTID bool, srcName, ds
 	t.Cleanup(func() { utils.CloseAndLog(lockDB) })
 	lock, err := dbconn.NewTableLock(t.Context(), lockDB, []*table.TableInfo{t1}, dbconn.NewDBConfig(), slog.Default())
 	require.NoError(t, err)
-	t.Cleanup(func() { utils.CloseAndLogWithContext(t.Context(), lock) })
+	// defer, not t.Cleanup: t.Context() is canceled before Cleanup callbacks
+	// run, which would fail the UNLOCK and leave the lock held into teardown.
+	defer utils.CloseAndLogWithContext(t.Context(), lock)
 
 	err = client.FlushUnderTableLock(t.Context(), []*dbconn.TableLock{lock})
 	require.Error(t, err)
