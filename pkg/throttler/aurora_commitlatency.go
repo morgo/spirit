@@ -87,7 +87,7 @@ type CommitLatency struct {
 	avgLatencyUs atomic.Int64
 }
 
-var _ Throttler = (*CommitLatency)(nil)
+var _ GradualThrottler = (*CommitLatency)(nil)
 
 // NewCommitLatencyThrottler returns a Throttler that polls Aurora's commit
 // counters and throttles when window-averaged commit latency >= threshold.
@@ -141,6 +141,18 @@ func (c *CommitLatency) Close() error {
 
 func (c *CommitLatency) IsThrottled() bool {
 	return c.isThrottled.Load()
+}
+
+// Utilization reports the most recent window-averaged commit latency as a
+// fraction of the configured threshold. 1.0 means latency equals the threshold
+// (the point at which IsThrottled trips). Returns 0 if the threshold is
+// non-positive (which NewCommitLatencyThrottler already rejects).
+func (c *CommitLatency) Utilization() float64 {
+	thresholdUs := c.threshold.Microseconds()
+	if thresholdUs <= 0 {
+		return 0
+	}
+	return float64(c.avgLatencyUs.Load()) / float64(thresholdUs)
 }
 
 // BlockWait blocks until commit latency falls below the threshold, or up to
