@@ -3,6 +3,7 @@ package throttler
 import (
 	"context"
 	"errors"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,7 +27,8 @@ func TestNewMultiThrottler_Multiple(t *testing.T) {
 	require.IsType(t, &multiThrottler{}, throttler)
 }
 
-// testThrottler is a configurable throttler for testing.
+// testThrottler is a configurable binary throttler for testing. It does NOT
+// implement GradualThrottler — see gradualTestThrottler for that.
 type testThrottler struct {
 	throttled    atomic.Bool
 	openErr      error
@@ -65,6 +67,23 @@ func (t *testThrottler) BlockWait(ctx context.Context) {
 
 func (t *testThrottler) UpdateLag(_ context.Context) error {
 	return t.updateLagErr
+}
+
+// gradualTestThrottler extends testThrottler with a scripted continuous
+// signal, making it a GradualThrottler.
+type gradualTestThrottler struct {
+	testThrottler
+	util atomic.Uint64 // float64 bits, set via setUtilization
+}
+
+var _ GradualThrottler = &gradualTestThrottler{}
+
+func (t *gradualTestThrottler) setUtilization(u float64) {
+	t.util.Store(math.Float64bits(u))
+}
+
+func (t *gradualTestThrottler) Utilization() float64 {
+	return math.Float64frombits(t.util.Load())
 }
 
 func TestMultiThrottler_Open(t *testing.T) {
@@ -154,6 +173,38 @@ func TestMultiThrottler_IsThrottled_AllThrottled(t *testing.T) {
 	t2.throttled.Store(true)
 	multi := NewMultiThrottler(t1, t2)
 
+	require.True(t, multi.IsThrottled())
+}
+
+func TestMultiThrottler_GradualOnlyWhenAChildIs(t *testing.T) {
+	// All-binary children: the composite must NOT advertise a continuous
+	// signal it doesn't have — the autoscaler gates on this assertion.
+	binary := NewMultiThrottler(&testThrottler{}, &testThrottler{})
+	_, ok := binary.(GradualThrottler)
+	require.False(t, ok, "all-binary multi must not implement GradualThrottler")
+
+	// One gradual child is enough to make the composite gradual.
+	mixed := NewMultiThrottler(&testThrottler{}, &gradualTestThrottler{})
+	_, ok = mixed.(GradualThrottler)
+	require.True(t, ok, "multi with a gradual child must implement GradualThrottler")
+}
+
+func TestMultiThrottler_Utilization_ReturnsMaxOfGradualChildren(t *testing.T) {
+	t1 := &gradualTestThrottler{}
+	t1.setUtilization(0.3)
+	t2 := &gradualTestThrottler{}
+	t2.setUtilization(0.8)
+	// A binary child (e.g. replica lag) contributes nothing to the signal,
+	// even while throttled — it protects via the hard-stop only.
+	t3 := &testThrottler{}
+	t3.throttled.Store(true)
+	multi := NewMultiThrottler(t1, t2, t3)
+
+	gradual, ok := multi.(GradualThrottler)
+	require.True(t, ok)
+	// The most-loaded gradual child governs.
+	require.InDelta(t, 0.8, gradual.Utilization(), 1e-9)
+	// The binary child still drives the hard-stop.
 	require.True(t, multi.IsThrottled())
 }
 

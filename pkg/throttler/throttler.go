@@ -16,6 +16,24 @@ type Throttler interface {
 	UpdateLag(ctx context.Context) error
 }
 
+// GradualThrottler is an optional extension implemented by throttlers whose
+// underlying signal is continuous, not just a binary stop/go. The write-thread
+// autoscaler type-asserts for it and only engages when it is present.
+//
+// The Aurora throttlers (ActiveThreads, CommitLatency) implement it. The
+// replica-lag throttler deliberately does not: lag is an SLO-style budget,
+// not a load gauge — normalizing it would make the autoscaler treat half the
+// lag budget as headroom and park replicas a minute behind. Signals like that
+// stay binary, protecting via the IsThrottled/BlockWait hard-stop only.
+type GradualThrottler interface {
+	Throttler
+	// Utilization reports current load relative to this throttler's throttle
+	// point: 0 = idle, 1.0 = exactly where IsThrottled() flips true, >1.0 =
+	// over. It is the smooth, continuous signal the autoscaler controls on;
+	// IsThrottled() remains the binary hard-stop.
+	Utilization() float64
+}
+
 // NewReplicationThrottler returns a Throttler for MySQL 8.0+ replicas.
 // It uses performance_schema to monitor replication lag.
 func NewReplicationThrottler(replica *sql.DB, lagTolerance time.Duration, logger *slog.Logger) (Throttler, error) {

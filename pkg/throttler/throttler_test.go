@@ -55,6 +55,20 @@ func TestNoopThrottler(t *testing.T) {
 	require.NoError(t, throttler.Close())
 }
 
+// TestGradualThrottlerImplementations locks in which throttlers provide the
+// continuous utilization signal the autoscaler controls on. The Aurora
+// throttlers implement GradualThrottler (asserted at compile time in their
+// files); everything else is deliberately binary — in particular Replica,
+// because lag is an SLO-style budget, not a load gauge, and steering on it
+// would park replicas well behind. Binary throttlers protect via the
+// IsThrottled/BlockWait hard-stop only.
+func TestGradualThrottlerImplementations(t *testing.T) {
+	for _, tc := range []Throttler{&Replica{}, &Noop{}, &Mock{}} {
+		_, ok := tc.(GradualThrottler)
+		require.False(t, ok, "%T must stay binary (no GradualThrottler)", tc)
+	}
+}
+
 func TestMockThrottler(t *testing.T) {
 	throttler := &Mock{}
 

@@ -241,10 +241,12 @@ func TestNtoMShardedMove(t *testing.T) {
 	require.Equal(t, 0, evenCount, "target 1 should have no even IDs")
 }
 
-// TestNtoMShardedMoveCheckpointDeterminism verifies that sources[0] is stable
-// regardless of the order in which SourceDSNs are provided. This matters because
-// the checkpoint is always written to sources[0], and the upstream caller may
-// construct the DSN slice from a map with non-deterministic iteration order.
+// TestNtoMShardedMoveCheckpointDeterminism verifies that both sources[0] and
+// targets[0] are stable regardless of the order in which SourceDSNs and Targets
+// are provided. This matters because the checkpoint is always written to
+// targets[0], and the upstream caller may construct either slice from a map
+// with non-deterministic iteration order. sources[0] determinism is also
+// asserted: it remains the canonical source for schema/SHOW CREATE/copier.
 func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	src0Name, _ := testutils.CreateUniqueTestDatabase(t)
 	src1Name, _ := testutils.CreateUniqueTestDatabase(t)
@@ -300,16 +302,26 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	tgt1Config, err := mysql.ParseDSN(testutils.DSNForDatabase(tgt1Name))
 	require.NoError(t, err)
 
+	// Determine the expected checkpoint target (smallest targetKey), then pass
+	// the Targets slice in the reverse of sorted order so the runner's sort has
+	// to reorder it. The checkpoint always lands on targets[0].
+	tgt0Target := applier.Target{KeyRange: "-80", DB: tgt0DB, Config: tgt0Config}
+	tgt1Target := applier.Target{KeyRange: "80-", DB: tgt1DB, Config: tgt1Config}
+	expectedCheckpointKey := targetKey(tgt0Target)
+	reversedTargets := []applier.Target{tgt0Target, tgt1Target}
+	if targetKey(tgt1Target) < targetKey(tgt0Target) {
+		expectedCheckpointKey = targetKey(tgt1Target)
+	} else {
+		reversedTargets = []applier.Target{tgt1Target, tgt0Target}
+	}
+
 	move := &Move{
 		SourceDSNs:      reversedDSNs,
 		TargetChunkTime: 100 * time.Millisecond,
 		Threads:         2,
 		WriteThreads:    2,
-		Targets: []applier.Target{
-			{KeyRange: "-80", DB: tgt0DB, Config: tgt0Config},
-			{KeyRange: "80-", DB: tgt1DB, Config: tgt1Config},
-		},
-		SourceTables: []string{"users"},
+		Targets:         reversedTargets,
+		SourceTables:    []string{"users"},
 		ShardingProvider: &testShardingProvider{
 			shardingColumn: "id",
 			hashFunc:       testutils.EvenOddHasher,
@@ -320,11 +332,12 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 	require.NoError(t, err)
 
 	// Use the cutover callback to verify sources[0] has the smallest sourceKey
-	// (addr/dbname). The checkpoint is always written to sources[0], so this
-	// ordering must be deterministic regardless of input order.
-	var actualFirstDSN string
+	// (addr/dbname) and targets[0] (the checkpoint home) has the smallest
+	// targetKey. Both orderings must be deterministic regardless of input order.
+	var actualFirstDSN, actualCheckpointKey string
 	runner.SetCutover(func(_ context.Context) error {
 		actualFirstDSN = runner.sources[0].dsn
+		actualCheckpointKey = targetKey(runner.targets[0])
 		return nil
 	})
 
@@ -334,6 +347,8 @@ func TestNtoMShardedMoveCheckpointDeterminism(t *testing.T) {
 
 	require.Equal(t, expectedFirstDSN, actualFirstDSN,
 		"sources[0] should have the smallest sourceKey (addr/dbname), even when SourceDSNs is provided in reverse order")
+	require.Equal(t, expectedCheckpointKey, actualCheckpointKey,
+		"targets[0] (the checkpoint home) should have the smallest targetKey, even when Targets is provided in reverse order")
 }
 
 // testShardingProvider is a simple implementation of ShardingMetadataProvider for testing.
