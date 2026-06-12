@@ -117,6 +117,15 @@ type Runner struct {
 	cancelFunc context.CancelFunc
 	dbConfig   *dbconn.DBConfig
 
+	// fatalOnce makes fatalError idempotent. Move wires N repl clients
+	// (one per source) to the same fatalError callback, so a concurrent
+	// burst of fatal events is realistic and without Once could
+	// double-drop the checkpoint and double-cancel the context. The
+	// individual operations underneath are idempotent, but routing
+	// everything through Once keeps the side-effect set small enough to
+	// reason about and avoids racing with Close() teardown.
+	fatalOnce sync.Once
+
 	// watchTaskWait blocks until the WatchTask goroutines have exited.
 	// Set in startBackgroundRoutines and invoked from Close() so that
 	// late status/checkpoint goroutine activity cannot race with teardown.
@@ -126,6 +135,16 @@ type Runner struct {
 var _ status.Task = (*Runner)(nil)
 
 func NewRunner(m *Move) (*Runner, error) {
+	// Normalize CheckpointMaxAge here rather than in a Validate hook:
+	// orchestration callers construct Move programmatically (bypassing the
+	// Kong default of 168h), so a zero value means "use the default". This
+	// mirrors Migration.normalizeOptions in pkg/migration.
+	if m.CheckpointMaxAge < 0 {
+		return nil, fmt.Errorf("checkpoint-max-age must be non-negative, got %s", m.CheckpointMaxAge)
+	}
+	if m.CheckpointMaxAge == 0 {
+		m.CheckpointMaxAge = 7 * 24 * time.Hour // 7 days, same as migrate
+	}
 	r := &Runner{
 		move:   m,
 		logger: slog.Default(),
@@ -145,9 +164,14 @@ func (r *Runner) Close() error {
 	if r.watchTaskWait != nil {
 		r.watchTaskWait()
 	}
+	// Run every cleanup step unconditionally and collect errors with
+	// errors.Join. Previously the first failing step short-circuited the
+	// rest, leaking the remaining repl clients' binlog reader goroutines
+	// and the target DB handles.
+	var errs []error
 	if r.copyChunker != nil {
 		if err := r.copyChunker.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	for i := range r.sources {
@@ -156,11 +180,14 @@ func (r *Runner) Close() error {
 		}
 	}
 	for _, target := range r.targets {
+		if target.DB == nil {
+			continue
+		}
 		if err := target.DB.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // getTables connects to a source DB and fetches the list of tables.
@@ -351,14 +378,39 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	// Read checkpoint from targets[0] by convention.
+	// A checkpoint table without the created_at column was written by an
+	// older spirit version; the read fails and the move aborts (we do not
+	// support cross-version resume).
 	tgt0 := &r.targets[0]
-	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_positions, statement FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
+	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_positions, statement, created_at FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
 		tgt0.Config.DBName, checkpointTableName)
-	var copierWatermark, binlogPositionsJSON, stmt string
+	var copierWatermark, binlogPositionsJSON, stmt, createdAtStr string
 	var id int
-	err = tgt0.DB.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt)
+	err = tgt0.DB.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt, &createdAtStr)
 	if err != nil {
 		return fmt.Errorf("could not read from checkpoint table '%s' on target: %w", checkpointTableName, err)
+	}
+
+	// Check if the checkpoint is too old to safely resume — replaying many
+	// days of binary logs can be slower than re-copying, and the binlogs may
+	// have been purged anyway. This must happen before any destructive step
+	// (deleteAboveWatermark below modifies the targets). Unlike migrate,
+	// move cannot silently fall back to a fresh copy: the target tables are
+	// non-empty (that is exactly why setup() chose the resume path), so we
+	// fail loudly and leave the decision to the operator.
+	// The connection uses time_zone="+00:00", so timestamps are in UTC.
+	createdAt, parseErr := time.Parse(time.DateTime, createdAtStr)
+	if parseErr != nil {
+		return fmt.Errorf("could not parse checkpoint created_at timestamp: %w", parseErr)
+	}
+	checkpointAge := time.Since(createdAt)
+	if checkpointAge >= r.move.CheckpointMaxAge {
+		return fmt.Errorf("%w: checkpoint is %s old (max allowed: %s). To proceed, either re-run with a larger --checkpoint-max-age, or wipe the target tables (including '%s') and restart the move from scratch",
+			status.ErrCheckpointTooOld,
+			checkpointAge.Round(time.Second),
+			r.move.CheckpointMaxAge,
+			checkpointTableName,
+		)
 	}
 
 	// Parse per-source positions (opaque strings owned by the source impl),
@@ -594,7 +646,8 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 	copier_watermark TEXT,
 	checksum_watermark TEXT,
 	binlog_positions TEXT,
-	statement TEXT
+	statement TEXT,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`,
 		tgt0.Config.DBName, checkpointTableName); err != nil {
 		return err
@@ -833,23 +886,38 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // when the error should be treated as fatal (and replication should be
 // terminated and cleaned up), and false when the error should not be treated
 // as fatal (in which case the client may continue without logging the DDL).
+//
+// fatalError is safe to call concurrently — every source's repl client is
+// wired to this same callback, so a burst of fatal events from multiple
+// binlog goroutines is realistic. fatalOnce makes the invalidate-and-cancel
+// side effects idempotent and prevents racing with Close() teardown of
+// r.checkpointTable / r.targets / r.cancelFunc.
 func (r *Runner) fatalError() bool {
 	if r.status.Get() >= status.CutOver {
 		return false
 	}
-	r.status.Set(status.ErrCleanup)
-	// Invalidate the checkpoint, so we don't try to resume.
-	// If we don't do this, the move will permanently be blocked from proceeding.
-	// Letting it start again is the better choice.
-	// Use a background context since the move context may already be cancelled.
-	if r.checkpointTable != nil && len(r.targets) > 0 {
-		if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
-			r.logger.Error("could not remove checkpoint",
-				"error", err,
-			)
+	r.fatalOnce.Do(func() {
+		r.status.Set(status.ErrCleanup)
+		// Invalidate the checkpoint, so we don't try to resume.
+		// If we don't do this, the move will permanently be blocked from proceeding.
+		// Letting it start again is the better choice.
+		// Use a background context since the move context may already be
+		// cancelled. checkpointTable can still be nil if fatalError fires
+		// during early setup, before createCheckpointTable runs — skip the
+		// drop in that case.
+		if r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
+			if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
+				r.logger.Error("could not remove checkpoint",
+					"error", err,
+				)
+			}
 		}
-	}
-	r.cancelFunc() // cancel the move context
+		// cancelFunc can be nil during early setup or in test paths that
+		// bypass Run; nil-check before calling.
+		if r.cancelFunc != nil {
+			r.cancelFunc() // cancel the move context
+		}
+	})
 	return true
 }
 
@@ -1194,15 +1262,18 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
-// createSentinelTable creates sentinel table on SOURCE (not target).
+// createSentinelTable creates the sentinel table on SOURCE (not target) if
+// it does not already exist. The sentinel name (_spirit_sentinel) is shared
+// with every other spirit process in the schema — including --defer-cutover
+// migrations — so creation must be idempotent and must never pass through a
+// "table absent" state: a concurrent process polls its sentinel wait every
+// sentinelCheckInterval, and a DROP+CREATE pair here opens a window in which
+// that poll observes the sentinel as missing and proceeds to cutover without
+// operator approval. The table is contentless and only its existence
+// matters, so adopting an existing sentinel is equivalent to creating a
+// fresh one.
 func (r *Runner) createSentinelTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, r.sources[0].db, "DROP TABLE IF EXISTS %n.%n", r.sources[0].config.DBName, sentinelTableName); err != nil {
-		return err
-	}
-	if err := dbconn.Exec(ctx, r.sources[0].db, "CREATE TABLE %n.%n (id int NOT NULL PRIMARY KEY)", r.sources[0].config.DBName, sentinelTableName); err != nil {
-		return err
-	}
-	return nil
+	return dbconn.Exec(ctx, r.sources[0].db, "CREATE TABLE IF NOT EXISTS %n.%n (id int NOT NULL PRIMARY KEY)", r.sources[0].config.DBName, sentinelTableName)
 }
 
 // sentinelTableExists checks if sentinel table exists on SOURCE (not target).

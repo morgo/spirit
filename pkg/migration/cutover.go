@@ -37,6 +37,11 @@ type CutOver struct {
 	config   []*cutoverConfig
 	dbConfig *dbconn.DBConfig
 	logger   *slog.Logger
+	// testInjectRenameError is a test-only seam: when non-nil it is returned
+	// in place of a successful rename's nil result, simulating a connection
+	// that died after the server committed the RENAME TABLE but before the
+	// client read the OK packet.
+	testInjectRenameError error
 }
 
 type cutoverConfig struct {
@@ -87,6 +92,13 @@ func (c *CutOver) Run(ctx context.Context) error {
 	// than just whatever happened on the last try.
 	var attemptErrs []error
 	backoff := cutoverInitialBackoff
+	// renameMayHaveCommitted is set when an attempt fails with a
+	// connection-loss error. RENAME TABLE is atomic server-side, but if the
+	// connection dies after the server commits the rename and before the
+	// client reads the OK packet, the client observes a connection error for
+	// a rename that actually succeeded. Once set, every subsequent decision
+	// point first verifies the server state instead of blindly retrying.
+	renameMayHaveCommitted := false
 	for i := range max(1, c.dbConfig.MaxRetries) {
 		if ctx.Err() != nil {
 			return errors.Join(append(attemptErrs, ctx.Err())...)
@@ -107,6 +119,14 @@ func (c *CutOver) Run(ctx context.Context) error {
 			if backoff > cutoverMaxBackoff {
 				backoff = cutoverMaxBackoff
 			}
+		}
+		// If a previous attempt failed ambiguously, re-check the server state
+		// before doing anything else — in particular before feed.Flush below,
+		// which would otherwise fail with ER_NO_SUCH_TABLE applying buffered
+		// changes to the renamed-away _new table and abort the whole retry
+		// loop ("cutover failed" after a cutover that actually succeeded).
+		if renameMayHaveCommitted && c.confirmRenameCompleted(ctx) {
+			return nil
 		}
 		// Try and catch up before we attempt the cutover.
 		// since we will need to catch up again with the lock held
@@ -130,6 +150,20 @@ func (c *CutOver) Run(ctx context.Context) error {
 		}
 		if err != nil {
 			attemptErrs = append(attemptErrs, fmt.Errorf("attempt %d: %w", i+1, err))
+			if dbconn.IsConnectionLossError(err) {
+				// Ambiguous failure: the connection died, so the client
+				// cannot know whether the server committed the rename before
+				// the OK packet was lost. Verify the actual server state on a
+				// fresh connection before treating this as a failure.
+				// Deterministic SQL errors (lock wait timeout, deadlock, ...)
+				// deliberately skip this: for those the server positively
+				// reported the statement failed, so the normal retry path is
+				// correct.
+				renameMayHaveCommitted = true
+				if c.confirmRenameCompleted(ctx) {
+					return nil
+				}
+			}
 			c.logger.Warn("cutover failed",
 				"error", err.Error(),
 				"next_backoff", backoff,
@@ -139,8 +173,78 @@ func (c *CutOver) Run(ctx context.Context) error {
 		c.logger.Warn("final cut over operation complete")
 		return nil
 	}
+	// Retries are exhausted. If any attempt failed ambiguously, give the
+	// state check one final chance before declaring failure: the server may
+	// have committed the rename only after the last in-loop verification ran
+	// (e.g. the dying rename was still waiting on metadata locks).
+	if renameMayHaveCommitted && c.confirmRenameCompleted(ctx) {
+		return nil
+	}
 	c.logger.Error("cutover failed, and retries exhausted")
 	return errors.Join(attemptErrs...)
+}
+
+// confirmRenameCompleted wraps renameCompleted with logging for use in the
+// retry loop after an ambiguous connection-loss failure. It returns true only
+// if the server-side state proves the cutover rename was committed.
+func (c *CutOver) confirmRenameCompleted(ctx context.Context) bool {
+	completed, err := c.renameCompleted(ctx)
+	if err != nil {
+		c.logger.Warn("could not verify whether the cutover rename was committed after a connection failure; continuing to retry",
+			"error", err.Error())
+		return false
+	}
+	if !completed {
+		return false
+	}
+	c.logger.Warn("cutover rename was committed by the server even though the client connection failed; treating cutover as successful")
+	return true
+}
+
+// renameCompleted reports whether the cutover RENAME TABLE has been committed
+// on the server, by inspecting information_schema on a fresh connection from
+// the pool. It is used when a cutover attempt fails with a connection-loss
+// error and the outcome of the rename is therefore unknown to the client.
+//
+// The signature checked is, for every table in the cutover:
+//   - `<table>` exists, and
+//   - `_<table>_new` is gone, and
+//   - `_<table>_old` exists.
+//
+// This combination is unambiguous evidence that the rename committed:
+// `_<table>_old` is dropped immediately before the cutover starts (see
+// (*Runner).run) and the cutover's atomic RENAME TABLE is the only statement
+// spirit issues that re-creates it, while that same statement is the only
+// thing that removes `_<table>_new`. We deliberately do not compare
+// `<table>`'s schema against the expected post-ALTER schema: for
+// idempotent-shaped ALTERs (e.g. ENGINE=InnoDB, MODIFY to the same type) the
+// pre- and post-cutover schemas are identical, so a schema comparison cannot
+// distinguish the two states, whereas table existence can. Concurrent
+// operators renaming or dropping tables out from under a running migration
+// are not a supported scenario.
+func (c *CutOver) renameCompleted(ctx context.Context) (bool, error) {
+	for _, cfg := range c.config {
+		// The RENAME TABLE statement uses schema-unqualified names, resolved
+		// against the connection's default database — the schema the
+		// migration runs in (cfg.table.SchemaName). A single query keeps the
+		// three existence checks in one consistent snapshot.
+		var origExists, newExists, oldExists bool
+		err := c.db.QueryRowContext(ctx, `SELECT
+			COUNT(CASE WHEN table_name = ? THEN 1 END) > 0,
+			COUNT(CASE WHEN table_name = ? THEN 1 END) > 0,
+			COUNT(CASE WHEN table_name = ? THEN 1 END) > 0
+			FROM information_schema.tables WHERE table_schema = ?`,
+			cfg.table.TableName, cfg.newTable.TableName, cfg.oldTableName,
+			cfg.table.SchemaName,
+		).Scan(&origExists, &newExists, &oldExists)
+		if err != nil {
+			return false, err
+		}
+		if !origExists || newExists || !oldExists {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // algorithmRenameUnderLock is the preferred cutover algorithm.
@@ -195,7 +299,15 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	}
 
 	renameStatement := "RENAME TABLE " + strings.Join(renameFragments, ", ")
-	return tableLock.ExecUnderLock(ctx, renameStatement)
+	if err := tableLock.ExecUnderLock(ctx, renameStatement); err != nil {
+		return err
+	}
+	if c.testInjectRenameError != nil {
+		// Test-only seam: the rename was committed by the server, but we
+		// pretend the client never read the OK packet.
+		return c.testInjectRenameError
+	}
+	return nil
 }
 
 // partialRenameForTest performs a partial cutover (only renames original table to _old)
