@@ -98,6 +98,32 @@ func getPreviousColumn(columns []Column, name string) string {
 	return ""
 }
 
+// numericColumnTypes are the column types whose DEFAULT value is a number.
+// MySQL's SHOW CREATE TABLE always renders a numeric default in quoted form
+// (e.g. `bigint DEFAULT '0'`, `tinyint(1) DEFAULT '1'`) regardless of whether
+// the user wrote it quoted or bare, so for these types the quotedness of the
+// default carries no meaning — `DEFAULT 0` and `DEFAULT '0'` are the same
+// default. Type names come from the parser's canonical form (types.TypeStr),
+// so only those spellings appear here.
+var numericColumnTypes = map[string]bool{
+	"tinyint":   true,
+	"smallint":  true,
+	"mediumint": true,
+	"int":       true,
+	"bigint":    true,
+	"decimal":   true,
+	"float":     true,
+	"double":    true,
+	"year":      true,
+}
+
+// isNumericColumnType reports whether a column type holds a numeric default,
+// for which a quoted (`'0'`) and bare (`0`) default of the same value are
+// equivalent. See numericColumnTypes.
+func isNumericColumnType(typeName string) bool {
+	return numericColumnTypes[strings.ToLower(typeName)]
+}
+
 // needsQuotes decides whether a column DEFAULT value needs to be wrapped
 // in single quotes when emitted. SQL functions / boolean / NULL
 // literals and parseable numerics are emitted bare; everything else is

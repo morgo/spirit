@@ -239,6 +239,51 @@ func TestRoundTrip_StringNullDefaultProducesDiff(t *testing.T) {
 	require.Equal(t, "NULL", stored)
 }
 
+// TestRoundTrip_NumericDefaultConverges verifies that a numeric column whose
+// default is written bare in the desired DDL (DEFAULT 0) converges against the
+// table MySQL actually creates, whose SHOW CREATE TABLE renders the default
+// quoted (DEFAULT '0'). Without treating the two forms as equal, every diff
+// would emit a phantom MODIFY COLUMN that never converges.
+func TestRoundTrip_NumericDefaultConverges(t *testing.T) {
+	db := openScratch(t)
+
+	cases := []struct {
+		name      string
+		targetSQL string
+	}{
+		{
+			name:      "bigint",
+			targetSQL: "CREATE TABLE rt (id BIGINT UNSIGNED NOT NULL, amount BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (id))",
+		},
+		{
+			name:      "int_nonzero",
+			targetSQL: "CREATE TABLE rt (id INT PRIMARY KEY, n INT NOT NULL DEFAULT 42)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS rt")
+			require.NoError(t, err)
+			_, err = db.ExecContext(t.Context(), tc.targetSQL)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				_, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS rt")
+			})
+
+			// MySQL renders the numeric default quoted; the desired DDL has it
+			// bare. Diffing the live table against the desired DDL must converge.
+			live, err := ParseCreateTable(showCreate(t, db, "rt"))
+			require.NoError(t, err)
+			target, err := ParseCreateTable(tc.targetSQL)
+			require.NoError(t, err)
+
+			stmts, err := live.Diff(target, nil)
+			require.NoError(t, err)
+			require.Nil(t, stmts, "bare and quoted numeric defaults must converge; got: %+v", stmts)
+		})
+	}
+}
+
 // TestRoundTrip_PartitionStringValuesWithQuotes verifies that LIST COLUMNS
 // partition values on a string column round-trip, including a value that
 // looks numeric ('2020') and one whose value contains an apostrophe (o'hare,
