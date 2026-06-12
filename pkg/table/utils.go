@@ -1,9 +1,10 @@
 package table
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -12,8 +13,8 @@ import (
 // This is the same as a p90 if there are 10 values, but if
 // there were 100 values it would technically be a p99 etc.
 func LazyFindP90(a []time.Duration) time.Duration {
-	sort.Slice(a, func(i, j int) bool {
-		return a[i] > a[j]
+	slices.SortFunc(a, func(x, y time.Duration) int {
+		return cmp.Compare(y, x) // descending
 	})
 	return a[len(a)/10]
 }

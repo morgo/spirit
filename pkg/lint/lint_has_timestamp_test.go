@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -749,13 +750,7 @@ func TestHasTimestampLinter_Registered(t *testing.T) {
 	Register(&HasTimestampLinter{})
 
 	names := List()
-	found := false
-	for _, name := range names {
-		if name == "has_timestamp" {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(names, "has_timestamp")
 	require.True(t, found, "has_timestamp linter should be registered")
 }
 

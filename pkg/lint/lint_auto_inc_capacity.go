@@ -146,7 +146,7 @@ func (l *AutoIncCapacityLinter) Lint(existingTables []*statement.CreateTable, ch
 						Column: &col.Name,
 					},
 					Message:    fmt.Sprintf("AUTO_INCREMENT value %d is above %d%% of the capacity (%d) of the auto-inc column's %s data type", autoInc, l.threshold, maxValue, col.Type),
-					Suggestion: strPtr(strings.Join(suggestions, ". ")),
+					Suggestion: new(strings.Join(suggestions, ". ")),
 				})
 			}
 		}

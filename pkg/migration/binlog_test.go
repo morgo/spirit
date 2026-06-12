@@ -476,15 +476,15 @@ func TestE2EBinlogSubscribingCompositeKeyBinary(t *testing.T) {
 	// Insert test data with binary values
 	// We'll use hex values to make byte comparison clear
 	// Insert 1200 rows across different byte ranges
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		// Low bytes: 0x41 (A), 0x42 (B), 0x43 (C)...
 		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et_binary VALUES (0x41%04d, %d, 'data')`, i, i))
 	}
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		// Mid bytes: 0x50 (P), 0x51 (Q), 0x52 (R)...
 		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et_binary VALUES (0x50%04d, %d, 'data')`, i, i+400))
 	}
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		// High bytes: 0x61 (a), 0x62 (b), 0x63 (c)...
 		testutils.RunSQL(t, fmt.Sprintf(`INSERT INTO e2et_binary VALUES (0x61%04d, %d, 'data')`, i, i+800))
 	}

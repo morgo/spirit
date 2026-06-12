@@ -683,9 +683,7 @@ func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 
 	// Continuously write using the minimal-RBR session during the copy phase.
 	var writerWg sync.WaitGroup
-	writerWg.Add(1)
-	go func() {
-		defer writerWg.Done()
+	writerWg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-ctx.Done():
@@ -694,7 +692,7 @@ func TestBufferedMigrationFailsGracefullyWithMinimalRBR(t *testing.T) {
 				_, _ = minimalDB.ExecContext(ctx, `UPDATE minrbr_buffered SET val = val + 1 WHERE id = ?`, (i%100)+1)
 			}
 		}
-	}()
+	})
 
 	<-migrationDone
 	cancel()
@@ -1016,7 +1014,7 @@ func TestBinaryToVarbinaryConcurrentDML(t *testing.T) {
 				return
 			}
 		}
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			if ctx.Err() != nil {
 				return
 			}
@@ -1205,7 +1203,7 @@ func runBitDMLTest(t *testing.T, tableName, colName, colDef string, values []uin
 		// UPDATE the marker rows mid-migration. Each update produces a
 		// binlog row image carrying the BIT value as int64; the applier
 		// REPLACEs the corresponding row in the shadow table.
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			if ctx.Err() != nil {
 				return
 			}

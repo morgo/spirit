@@ -45,8 +45,8 @@ type ShardedApplier struct {
 	// finished running.
 	pendingWork       map[int64]*pendingWork
 	pendingMutex      sync.Mutex
-	callbacksInFlight int   // claimed work whose callback has not returned yet; guarded by pendingMutex
-	nextWorkID        int64 // Atomic counter for work IDs
+	callbacksInFlight int          // claimed work whose callback has not returned yet; guarded by pendingMutex
+	nextWorkID        atomic.Int64 // Atomic counter for work IDs
 
 	// Context management
 	cancelFunc context.CancelFunc
@@ -232,7 +232,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	a.logger.Info("Found sharding column", "shardingColumn", shardingColumn, "ordinal", shardingOrdinal)
 
 	// Assign a work ID for tracking
-	workID := atomic.AddInt64(&a.nextWorkID, 1)
+	workID := a.nextWorkID.Add(1)
 
 	// Group rows by shard
 	shardRows := make([][]rowData, len(a.shards))

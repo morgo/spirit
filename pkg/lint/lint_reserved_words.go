@@ -110,7 +110,7 @@ func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, chan
 					Table: ct.TableName,
 				},
 				Message:    fmt.Sprintf("Table name %q is a MySQL reserved word", ct.TableName),
-				Suggestion: strPtr(fmt.Sprintf("Use backticks when referencing this table: `%s` or choose a different name", ct.TableName)),
+				Suggestion: new(fmt.Sprintf("Use backticks when referencing this table: `%s` or choose a different name", ct.TableName)),
 			})
 		}
 
@@ -125,7 +125,7 @@ func (l *ReservedWordsLinter) Lint(existingTables []*statement.CreateTable, chan
 						Column: &colName,
 					},
 					Message:    fmt.Sprintf("Column name %q is a MySQL reserved word", column.Name),
-					Suggestion: strPtr(fmt.Sprintf("Use backticks when referencing this column: `%s` or choose a different name", column.Name)),
+					Suggestion: new(fmt.Sprintf("Use backticks when referencing this column: `%s` or choose a different name", column.Name)),
 				})
 			}
 		}

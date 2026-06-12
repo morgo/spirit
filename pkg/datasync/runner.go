@@ -748,8 +748,7 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 		}
 		if err != nil {
 			// A missing target table is expected on a fresh sync.
-			var myErr *mysql.MySQLError
-			if errors.As(err, &myErr) && myErr.Number == errNoSuchTable {
+			if myErr, ok := errors.AsType[*mysql.MySQLError](err); ok && myErr.Number == errNoSuchTable {
 				continue
 			}
 			return fmt.Errorf("failed to check whether target table %q is empty: %w", t.TableName, err)

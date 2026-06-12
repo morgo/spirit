@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -105,8 +105,8 @@ func IsConnectionLossError(err error) bool {
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, io.EOF) {
 		return true
 	}
-	var val *mysql.MySQLError
-	if !errors.As(err, &val) {
+	val, ok := errors.AsType[*mysql.MySQLError](err)
+	if !ok {
 		return false
 	}
 	switch val.Number {
@@ -136,8 +136,8 @@ func canRetryError(err error) bool {
 	if IsConnectionLossError(err) {
 		return true
 	}
-	var val *mysql.MySQLError
-	if !errors.As(err, &val) {
+	val, ok := errors.AsType[*mysql.MySQLError](err)
+	if !ok {
 		return false
 	}
 	switch val.Number {
@@ -259,7 +259,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 
 // backoff sleeps a few milliseconds before retrying.
 func backoff(i int) {
-	randFactor := i * rand.Intn(10) * int(time.Millisecond)
+	randFactor := i * rand.IntN(10) * int(time.Millisecond)
 	time.Sleep(time.Duration(randFactor))
 }
 

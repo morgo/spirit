@@ -2,6 +2,7 @@ package lint
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -113,7 +114,7 @@ func (l *PrimaryKeyLinter) checkTable(ct *statement.CreateTable, severity Severi
 			Location:   &Location{Table: tableName},
 			Message:    "No primary key defined",
 			Severity:   severity,
-			Suggestion: strPtr("Every table should have an explicit primary key"),
+			Suggestion: new("Every table should have an explicit primary key"),
 		})
 		return violations
 	}
@@ -167,7 +168,7 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 						Table:  tableName,
 						Column: &column.Name,
 					},
-					Suggestion: strPtr(fmt.Sprintf("Consider using BIGINT UNSIGNED for column '%s' to avoid negative values and increase range", column.Name)),
+					Suggestion: new(fmt.Sprintf("Consider using BIGINT UNSIGNED for column '%s' to avoid negative values and increase range", column.Name)),
 				}
 			}
 
@@ -188,11 +189,7 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 	}
 
 	// Any other type is an error
-	keys := make([]string, 0, len(l.allowedTypes))
-	for k := range l.allowedTypes {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(l.allowedTypes))
 
 	return &Violation{
 		Linter:   l,
@@ -202,7 +199,7 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 			Table:  tableName,
 			Column: &column.Name,
 		},
-		Suggestion: strPtr(fmt.Sprintf("Change column %q to a supported column type (%s)", column.Name, strings.Join(keys, ","))),
+		Suggestion: new(fmt.Sprintf("Change column %q to a supported column type (%s)", column.Name, strings.Join(keys, ","))),
 		Context: map[string]any{
 			"current_type": column.Type,
 		},

@@ -17,7 +17,7 @@ var (
 type Replica struct {
 	replica        *sql.DB
 	lagTolerance   time.Duration
-	currentLagInMs int64
+	currentLagInMs atomic.Int64
 	logger         *slog.Logger
 	isClosed       atomic.Bool
 }
@@ -84,7 +84,7 @@ func (l *Replica) Close() error {
 }
 
 func (l *Replica) IsThrottled() bool {
-	return atomic.LoadInt64(&l.currentLagInMs) >= l.lagTolerance.Milliseconds()
+	return l.currentLagInMs.Load() >= l.lagTolerance.Milliseconds()
 }
 
 // Replica deliberately does NOT implement GradualThrottler: replication lag
@@ -102,7 +102,7 @@ func (l *Replica) BlockWait(ctx context.Context) {
 	defer timer.Stop()
 
 	for range 60 {
-		if atomic.LoadInt64(&l.currentLagInMs) < l.lagTolerance.Milliseconds() {
+		if l.currentLagInMs.Load() < l.lagTolerance.Milliseconds() {
 			return
 		}
 
@@ -114,7 +114,7 @@ func (l *Replica) BlockWait(ctx context.Context) {
 			// Continue checking
 		}
 	}
-	l.logger.Warn("lag monitor timed out", "lag_ms", atomic.LoadInt64(&l.currentLagInMs), "tolerance", l.lagTolerance)
+	l.logger.Warn("lag monitor timed out", "lag_ms", l.currentLagInMs.Load(), "tolerance", l.lagTolerance)
 }
 
 // UpdateLag is a MySQL 8.0+ implementation of lag that is a better approximation than "seconds_behind_source".
@@ -124,10 +124,10 @@ func (l *Replica) UpdateLag(ctx context.Context) error {
 	if err := l.replica.QueryRowContext(ctx, MySQL8LagQuery).Scan(&newLagValue); err != nil {
 		return errors.New("could not check replication lag, check that this is a MySQL 8.0 replica, and that performance_schema is enabled")
 	}
-	atomic.StoreInt64(&l.currentLagInMs, newLagValue)
+	l.currentLagInMs.Store(newLagValue)
 	if l.IsThrottled() {
 		l.logger.Warn("replication delayed, throttling in progress",
-			"lag_ms", atomic.LoadInt64(&l.currentLagInMs),
+			"lag_ms", l.currentLagInMs.Load(),
 			"tolerance", l.lagTolerance)
 	}
 	return nil

@@ -2,7 +2,8 @@ package lint
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
@@ -108,7 +109,7 @@ func (l *TypePedanticLinter) Configure(config map[string]string) error {
 
 func tpParseIgnoreList(value string) map[string]struct{} {
 	out := make(map[string]struct{})
-	for _, c := range strings.Split(value, ",") {
+	for c := range strings.SplitSeq(value, ",") {
 		c = strings.ToLower(strings.TrimSpace(c))
 		if c != "" {
 			out[c] = struct{}{}
@@ -212,11 +213,7 @@ func (l *TypePedanticLinter) lintSameName(tables []*statement.CreateTable) []Vio
 		}
 	}
 
-	names := make([]string, 0, len(byName))
-	for name := range byName {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(byName))
 
 	var violations []Violation
 	for _, name := range names {
@@ -254,7 +251,7 @@ func (l *TypePedanticLinter) lintSameName(tables []*statement.CreateTable) []Vio
 						r.col.Name, r.table.TableName, r.typ, len(majorityTables), majority, example,
 					),
 					Location:   &Location{Table: r.table.TableName, Column: &colName},
-					Suggestion: strPtr(fmt.Sprintf("Align %s.%s to type %q for consistency", r.table.TableName, r.col.Name, majority)),
+					Suggestion: new(fmt.Sprintf("Align %s.%s to type %q for consistency", r.table.TableName, r.col.Name, majority)),
 					Context: map[string]any{
 						"current_type":  r.typ,
 						"expected_type": majority,
@@ -265,11 +262,7 @@ func (l *TypePedanticLinter) lintSameName(tables []*statement.CreateTable) []Vio
 		} else {
 			// Tied top counts — no canonical "right" type. Report every occurrence
 			// as inconsistent, listing the conflicting types so the user can decide.
-			distinct := make([]string, 0, len(typeCounts))
-			for tp := range typeCounts {
-				distinct = append(distinct, tp)
-			}
-			sort.Strings(distinct)
+			distinct := slices.Sorted(maps.Keys(typeCounts))
 			for _, r := range refs {
 				colName := r.col.Name
 				violations = append(violations, Violation{
@@ -280,7 +273,7 @@ func (l *TypePedanticLinter) lintSameName(tables []*statement.CreateTable) []Vio
 						r.col.Name, r.table.TableName, r.typ, strings.Join(distinct, ", "),
 					),
 					Location:   &Location{Table: r.table.TableName, Column: &colName},
-					Suggestion: strPtr(fmt.Sprintf("Pick one canonical type for column %q across all tables; the larger/safer type is usually right", r.col.Name)),
+					Suggestion: new(fmt.Sprintf("Pick one canonical type for column %q across all tables; the larger/safer type is usually right", r.col.Name)),
 					Context: map[string]any{
 						"current_type":      r.typ,
 						"conflicting_types": distinct,
@@ -331,7 +324,7 @@ func (l *TypePedanticLinter) lintInferredFK(tables []*statement.CreateTable, tab
 					c.Name, t.TableName, colType, target.TableName, idType,
 				),
 				Location: &Location{Table: t.TableName, Column: &colName},
-				Suggestion: strPtr(fmt.Sprintf(
+				Suggestion: new(fmt.Sprintf(
 					"Align types: %s.%s (%s) and %s.id (%s) should match — grow the smaller side rather than shrink the larger",
 					t.TableName, c.Name, colType, target.TableName, idType,
 				)),
@@ -412,11 +405,7 @@ func tpPickMajority(counts map[string]int) (string, bool) {
 	if len(counts) == 0 {
 		return "", false
 	}
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(counts))
 
 	var first string
 	firstCount, secondCount := -1, -1
@@ -438,17 +427,7 @@ func tpPickMajority(counts map[string]int) (string, bool) {
 }
 
 func tpDedupeStrings(ss []string) []string {
-	seen := make(map[string]struct{}, len(ss))
-	out := make([]string, 0, len(ss))
-	for _, s := range ss {
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Compact(slices.Sorted(slices.Values(ss)))
 }
 
 func tpFirstN(s []string, n int) []string {

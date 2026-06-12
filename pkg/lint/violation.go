@@ -1,8 +1,9 @@
 package lint
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 )
 
 // Severity represents the severity level of a linting violation
@@ -103,24 +104,23 @@ func (l *Location) String() string {
 // sortViolations returns a sorted copy of violations: by table name, then
 // severity (errors first), then linter name.
 func sortViolations(violations []Violation) []Violation {
-	sorted := make([]Violation, len(violations))
-	copy(sorted, violations)
+	sorted := slices.Clone(violations)
 
-	sort.Slice(sorted, func(i, j int) bool {
-		ti, tj := "", ""
-		if sorted[i].Location != nil {
-			ti = sorted[i].Location.Table
+	slices.SortFunc(sorted, func(a, b Violation) int {
+		ta, tb := "", ""
+		if a.Location != nil {
+			ta = a.Location.Table
 		}
-		if sorted[j].Location != nil {
-			tj = sorted[j].Location.Table
+		if b.Location != nil {
+			tb = b.Location.Table
 		}
-		if ti != tj {
-			return ti < tj
+		if c := cmp.Compare(ta, tb); c != 0 {
+			return c
 		}
-		if sorted[i].Severity != sorted[j].Severity {
-			return sorted[i].Severity > sorted[j].Severity // errors first
+		if c := cmp.Compare(b.Severity, a.Severity); c != 0 { // errors first
+			return c
 		}
-		return sorted[i].Linter.Name() < sorted[j].Linter.Name()
+		return cmp.Compare(a.Linter.Name(), b.Linter.Name())
 	})
 	return sorted
 }

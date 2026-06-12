@@ -24,7 +24,7 @@ type Unbuffered struct {
 	db               *sql.DB
 	chunker          table.Chunker
 	concurrency      int
-	rowsPerSecond    uint64
+	rowsPerSecond    atomic.Uint64
 	isInvalid        bool
 	startTime        time.Time
 	throttler        throttler.Throttler
@@ -175,7 +175,7 @@ func (c *Unbuffered) GetETA() string {
 	c.Lock()
 	defer c.Unlock()
 	copiedRows, totalRows, pct := c.getCopyStats()
-	rowsPerSecond := atomic.LoadUint64(&c.rowsPerSecond)
+	rowsPerSecond := c.rowsPerSecond.Load()
 	if pct > 99.99 {
 		return "DUE"
 	}
@@ -214,7 +214,7 @@ func (c *Unbuffered) estimateRowsPerSecondLoop(ctx context.Context) {
 			rowsPerInterval := float64(newRowsCount - prevRowsCount)
 			intervalsDivisor := float64(copyEstimateInterval / time.Second) // should be something like 10 for 10 seconds
 			rowsPerSecond := uint64(rowsPerInterval / intervalsDivisor)
-			atomic.StoreUint64(&c.rowsPerSecond, rowsPerSecond)
+			c.rowsPerSecond.Store(rowsPerSecond)
 			prevRowsCount = newRowsCount
 		}
 	}

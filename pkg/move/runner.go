@@ -1041,7 +1041,6 @@ func (r *Runner) restoreSecondaryIndexes(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for host, targetIndices := range hostGroups {
 		// Shadow loop variables to avoid closure capture issues.
-		host, targetIndices := host, targetIndices //nolint: copyloopvar, modernize
 		g.Go(func() error {
 			return r.restoreIndexesForTargets(gctx, host, targetIndices)
 		})

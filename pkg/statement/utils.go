@@ -98,22 +98,6 @@ func getPreviousColumn(columns []Column, name string) string {
 	return ""
 }
 
-// equalFoldStrings reports whether two string slices are equal under
-// case-insensitive comparison, element-by-element. Used for comparing
-// lists of identifiers (column names, index column references) where
-// MySQL treats case differences as semantically identical.
-func equalFoldStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !strings.EqualFold(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
 // needsQuotes decides whether a column DEFAULT value needs to be wrapped
 // in single quotes when emitted. SQL functions / boolean / NULL
 // literals and parseable numerics are emitted bare; everything else is

@@ -136,7 +136,7 @@ func decodeSetBitmask(bitmask int64, elements []string) (string, error) {
 	bits := uint64(bitmask)
 	maxBits := len(elements)
 	var parts []string
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		if bits&(uint64(1)<<i) == 0 {
 			continue
 		}

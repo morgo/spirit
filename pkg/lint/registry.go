@@ -2,7 +2,8 @@ package lint
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -75,14 +76,7 @@ func List() []string {
 	lock.RLock()
 	defer lock.RUnlock()
 
-	names := make([]string, 0, len(linters))
-	for name := range linters {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return names
+	return slices.Sorted(maps.Keys(linters))
 }
 
 // Get returns a linter by name.

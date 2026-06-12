@@ -1,7 +1,8 @@
 package lint
 
 import (
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
@@ -61,11 +62,8 @@ func PostState(existing []*statement.CreateTable, changes []*statement.AbstractS
 		byName[newKey] = result
 	}
 
-	out := make([]*statement.CreateTable, 0, len(byName))
-	for _, t := range byName {
-		out = append(out, t)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].TableName < out[j].TableName })
+	out := slices.Collect(maps.Values(byName))
+	slices.SortFunc(out, func(a, b *statement.CreateTable) int { return strings.Compare(a.TableName, b.TableName) })
 	return out
 }
 

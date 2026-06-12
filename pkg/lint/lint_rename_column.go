@@ -60,11 +60,11 @@ func (l *RenameColumnLinter) Lint(_ []*statement.CreateTable, changes []*stateme
 					Linter: l,
 					Location: &Location{
 						Table:  change.Table,
-						Column: strPtr(oldName),
+						Column: new(oldName),
 					},
 					Message:    fmt.Sprintf("Column rename detected in table %q: %q to %q. Renaming a column cannot be done atomically across application pods, and ORMs that generate column names at compile time (e.g. jOOQ) will break until code is recompiled", change.Table, oldName, newName),
 					Severity:   SeverityError,
-					Suggestion: strPtr("Use ADD COLUMN + DROP COLUMN instead of RENAME COLUMN. This is the only safe approach"),
+					Suggestion: new("Use ADD COLUMN + DROP COLUMN instead of RENAME COLUMN. This is the only safe approach"),
 				})
 			case ast.AlterTableChangeColumn:
 				// ALTER TABLE t1 CHANGE COLUMN old_name new_name <type>
@@ -77,11 +77,11 @@ func (l *RenameColumnLinter) Lint(_ []*statement.CreateTable, changes []*stateme
 							Linter: l,
 							Location: &Location{
 								Table:  change.Table,
-								Column: strPtr(oldName),
+								Column: new(oldName),
 							},
 							Message:    fmt.Sprintf("Column rename detected in table %q: %q to %q via CHANGE COLUMN. Renaming a column cannot be done atomically across application pods, and ORMs that generate column names at compile time (e.g. jOOQ) will break until code is recompiled", change.Table, oldName, newName),
 							Severity:   SeverityError,
-							Suggestion: strPtr("Use ADD COLUMN + DROP COLUMN instead of RENAME COLUMN. This is the only safe approach"),
+							Suggestion: new("Use ADD COLUMN + DROP COLUMN instead of RENAME COLUMN. This is the only safe approach"),
 						})
 					}
 				}
