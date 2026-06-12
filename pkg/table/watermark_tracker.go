@@ -19,6 +19,38 @@ type watermarkTracker struct {
 	watermark              *Chunk
 	lowerBoundWatermarkMap map[string]*Chunk
 	checkpointHighPtr      Datum
+
+	// inflightChunks counts chunks that have been dispatched via Next()
+	// but not yet returned via Feedback(). Dispatch and commit are
+	// decoupled (e.g. the buffered copier queues chunklets that async
+	// write workers commit later), so "the final chunk has been
+	// dispatched" does NOT imply "everything has been copied". Only when
+	// the final chunk has been dispatched AND inflightChunks is zero has
+	// every dispatched chunk been committed and fed back.
+	inflightChunks uint64
+}
+
+// chunkDispatched records that Next() handed out a chunk.
+// Caller must hold the chunker's mutex.
+func (w *watermarkTracker) chunkDispatched() {
+	w.inflightChunks++
+}
+
+// chunkFedBack records that a previously-dispatched chunk completed and
+// was returned via Feedback(). Guarded against underflow in case a
+// caller feeds back a chunk that was never dispatched (some tests do).
+// Caller must hold the chunker's mutex.
+func (w *watermarkTracker) chunkFedBack() {
+	if w.inflightChunks > 0 {
+		w.inflightChunks--
+	}
+}
+
+// allDispatchedChunksFedBack reports whether every chunk handed out by
+// Next() has been returned via Feedback(). Caller must hold the
+// chunker's mutex.
+func (w *watermarkTracker) allDispatchedChunksFedBack() bool {
+	return w.inflightChunks == 0
 }
 
 // isSpecialRestoredChunk reports whether `chunk` is the first chunk
