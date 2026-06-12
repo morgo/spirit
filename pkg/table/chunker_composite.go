@@ -63,9 +63,22 @@ func (t *chunkerComposite) additionalConditionsSQL(whereSent bool) string {
 // boundary of this chunk. This method is slower, but works better when the
 // table can not predictably be chunked by just dividing the range between min and max values.
 // as with auto_increment PRIMARY KEYs. This is the same method used by gh-ost.
+// It wraps next() so that every successfully dispatched chunk is counted as
+// in-flight until the consumer returns it via Feedback() (see
+// watermarkTracker.inflightChunks).
 func (t *chunkerComposite) Next() (*Chunk, error) {
 	t.Lock()
 	defer t.Unlock()
+	chunk, err := t.next()
+	if err != nil {
+		return nil, err
+	}
+	t.chunkDispatched()
+	return chunk, nil
+}
+
+// next computes the next chunk. Caller must hold t.Mutex.
+func (t *chunkerComposite) next() (*Chunk, error) {
 	if t.finalChunkSent {
 		return nil, ErrTableIsRead
 	}
@@ -300,6 +313,7 @@ func (t *chunkerComposite) Reset() error {
 	t.chunkSize = StartingChunkSize
 	t.watermark = nil
 	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
+	t.inflightChunks = 0
 	t.chunkTimingInfo = []time.Duration{}
 
 	// Reset progress tracking
@@ -315,6 +329,7 @@ func (t *chunkerComposite) Reset() error {
 func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows uint64) {
 	t.Lock()
 	defer t.Unlock()
+	t.chunkFedBack()
 	t.bumpWatermark(chunk, t.logger)
 
 	// Update progress tracking - add the actual rows processed
@@ -400,6 +415,7 @@ func (t *chunkerComposite) open() (err error) {
 	}
 	t.finalChunkSent = false
 	t.chunkSize = StartingChunkSize
+	t.inflightChunks = 0
 	t.checkpointHighPtr = Datum{} // reset checkpoint high pointer
 
 	// Initialize progress tracking
@@ -534,8 +550,22 @@ func (t *chunkerComposite) KeyBelowLowWatermark(key0 any) bool {
 	t.Lock()
 	defer t.Unlock()
 
-	// If we've sent the final chunk, everything is below
-	if t.finalChunkSent {
+	// Once the final chunk has been dispatched AND every dispatched chunk
+	// has been returned via Feedback(), the entire key space has been
+	// copied and committed, so everything is below the low watermark.
+	//
+	// finalChunkSent alone is NOT sufficient: dispatch (Next) and commit
+	// (Feedback) are decoupled — with the buffered copier a chunk's writes
+	// can still be in flight when another worker draws the final chunk.
+	// Returning true for a key inside such an in-flight chunk would let a
+	// binlog DELETE for that key flush to the target as a no-op before the
+	// chunk's INSERT lands, resurrecting a stale copy of the row. While
+	// chunks remain in flight we fall through to the watermark comparison
+	// below, which only admits keys below the contiguously-committed range.
+	// A false return merely defers the key to a later flush; the cutover
+	// flush bypasses this filter entirely (see
+	// change.bufferedMap.flushMapLocked).
+	if t.finalChunkSent && t.allDispatchedChunksFedBack() {
 		return true
 	}
 
