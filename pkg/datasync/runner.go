@@ -1199,8 +1199,12 @@ func (r *Runner) watchStatus(ctx context.Context) {
 }
 
 // fatalError is the change client's CancelFunc: it records the fatal
-// condition (e.g. DDL on a synced table) and cancels the run so
-// runContinuous can surface it.
+// condition and cancels the run so runContinuous can surface it. Per the
+// CancelFunc contract (change.ClientConfig), it fires for DDL detected on a
+// synced table AND for fatal stream errors (minimal RBR detection, exhausted
+// streamer recreation attempts) — the callback carries no cause, so the
+// recorded error stays cause-neutral and points at the change client's logs,
+// which name the actual trigger.
 //
 // fatalError is safe to call concurrently: it is invoked from the change
 // client's stream goroutine, so cancelFunc (written by Run under progMu)
@@ -1209,7 +1213,7 @@ func (r *Runner) watchStatus(ctx context.Context) {
 func (r *Runner) fatalError() bool {
 	r.fatalOnce.Do(func() {
 		r.fatalMu.Lock()
-		r.fatalErr = errors.New("a DDL change was detected on a synced table; sync cannot continue safely")
+		r.fatalErr = errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause")
 		r.fatalMu.Unlock()
 		r.progMu.RLock()
 		cancel := r.cancelFunc
