@@ -802,10 +802,13 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if !columnExtendedAttributesEqual(a, b) {
 		return false
 	}
-	// A quoted string literal default ('TRUE') is a different value than the
-	// same text as a keyword/number default (TRUE), even when the stored
-	// strings match — so quotedness is part of column identity.
-	if a.DefaultIsString != b.DefaultIsString {
+	// On a string column a quoted string literal default ('TRUE') is a
+	// different value than the same text as a keyword/number default (TRUE),
+	// so quotedness is part of column identity. On a numeric column it is not:
+	// MySQL always renders the default quoted, so `DEFAULT 0` (bare) and
+	// `DEFAULT '0'` (the SHOW CREATE TABLE form) are the same default and must
+	// compare equal — the value itself is already compared above.
+	if a.DefaultIsString != b.DefaultIsString && !isNumericColumnType(a.Type) {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {
@@ -911,7 +914,10 @@ func columnsEqualIgnorePK(a, b *Column) bool {
 	if !columnExtendedAttributesEqual(a, b) {
 		return false
 	}
-	if a.DefaultIsString != b.DefaultIsString {
+	// Numeric defaults are always rendered quoted by MySQL, so quotedness is
+	// not meaningful for them; for string columns it is. See the equivalent
+	// guard in columnsEqualWithContext.
+	if a.DefaultIsString != b.DefaultIsString && !isNumericColumnType(a.Type) {
 		return false
 	}
 	if a.AutoInc != b.AutoInc {

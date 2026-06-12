@@ -1038,6 +1038,76 @@ func TestDiff(t *testing.T) {
 	}
 }
 
+// TestDiff_NumericDefaultQuoting verifies that on a numeric column a bare
+// default (DEFAULT 0, as a user typically writes it) and a quoted default
+// (DEFAULT '0', the form MySQL's SHOW CREATE TABLE always renders) are treated
+// as the same default, so a diff between the two converges to no change. The
+// quotedness still matters on string columns, where 'NULL' is a real default
+// distinct from no default — that case must still produce a change.
+func TestDiff_NumericDefaultQuoting(t *testing.T) {
+	tests := []struct {
+		name        string
+		source      string
+		target      string
+		expectEmpty bool
+	}{
+		{
+			name:        "bigint_quoted_source_bare_target",
+			source:      "CREATE TABLE t1 (id BIGINT UNSIGNED NOT NULL, amount BIGINT NOT NULL DEFAULT '0', PRIMARY KEY (id))",
+			target:      "CREATE TABLE t1 (id BIGINT UNSIGNED NOT NULL, amount BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (id))",
+			expectEmpty: true,
+		},
+		{
+			name:        "bigint_bare_source_quoted_target",
+			source:      "CREATE TABLE t1 (id BIGINT UNSIGNED NOT NULL, amount BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (id))",
+			target:      "CREATE TABLE t1 (id BIGINT UNSIGNED NOT NULL, amount BIGINT NOT NULL DEFAULT '0', PRIMARY KEY (id))",
+			expectEmpty: true,
+		},
+		{
+			name:        "int_quoted_vs_bare",
+			source:      "CREATE TABLE t1 (id INT PRIMARY KEY, n INT NOT NULL DEFAULT '42')",
+			target:      "CREATE TABLE t1 (id INT PRIMARY KEY, n INT NOT NULL DEFAULT 42)",
+			expectEmpty: true,
+		},
+		{
+			name:        "decimal_quoted_vs_bare_same_value",
+			source:      "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2) NOT NULL DEFAULT '0.00')",
+			target:      "CREATE TABLE t1 (id INT PRIMARY KEY, price DECIMAL(10,2) NOT NULL DEFAULT 0.00)",
+			expectEmpty: true,
+		},
+		{
+			name:        "numeric_value_change_still_diffs",
+			source:      "CREATE TABLE t1 (id INT PRIMARY KEY, n INT NOT NULL DEFAULT '0')",
+			target:      "CREATE TABLE t1 (id INT PRIMARY KEY, n INT NOT NULL DEFAULT 5)",
+			expectEmpty: false,
+		},
+		{
+			name:        "string_literal_null_default_still_diffs",
+			source:      "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(20))",
+			target:      "CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(20) DEFAULT 'NULL')",
+			expectEmpty: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source, err := ParseCreateTable(tt.source)
+			require.NoError(t, err)
+			target, err := ParseCreateTable(tt.target)
+			require.NoError(t, err)
+
+			stmts, err := source.Diff(target, nil)
+			require.NoError(t, err)
+
+			if tt.expectEmpty {
+				require.Nil(t, stmts, "numeric default quoting must not produce a diff")
+			} else {
+				require.Len(t, stmts, 1)
+			}
+		})
+	}
+}
+
 func TestDiff_DifferentTableNames(t *testing.T) {
 	ct1, err := ParseCreateTable("CREATE TABLE t1 (id INT PRIMARY KEY)")
 	require.NoError(t, err)
