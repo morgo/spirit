@@ -87,18 +87,43 @@ func TestCommitLatency_NoNewCommitsClearsThrottle(t *testing.T) {
 	require.False(t, c.IsThrottled())
 }
 
-func TestCommitLatency_CounterResetClearsThrottle(t *testing.T) {
+func TestCommitLatency_CounterResetRetainsPreviousSignal(t *testing.T) {
 	c := newTestCommitLatency(t, 100*time.Millisecond)
 
 	c.applySample(1_000_000, 2_000_000_000)
-	c.applySample(1_000_100, 2_020_000_000) // throttled
+	c.applySample(1_000_100, 2_020_000_000) // 200ms avg → throttled
 	require.True(t, c.IsThrottled())
+	require.Equal(t, int64(200_000), c.avgLatencyUs.Load())
 
-	// Server restart / failover: counters go backwards. Don't report a
-	// nonsense huge negative latency — just drop the sample.
+	// Server restart / failover: counters go backwards. The sample is
+	// dropped, but the previous average and throttle state carry forward —
+	// storing 0 would report Utilization()==0 for a full window and hand
+	// the autoscaler a spurious scale-up right after the failover.
 	c.applySample(50, 1_000)
+	require.True(t, c.IsThrottled(), "reset window must not clear the previous throttle state")
+	require.Equal(t, int64(200_000), c.avgLatencyUs.Load(), "reset window must retain the previous average")
+	require.InDelta(t, 2.0, c.Utilization(), 1e-9)
+
+	// The reset sample established a new baseline, so the next window
+	// computes a real delta: 1000 commits at 5ms avg → recovered.
+	c.applySample(1_050, 5_001_000)
 	require.False(t, c.IsThrottled())
-	require.Equal(t, int64(0), c.avgLatencyUs.Load())
+	require.Equal(t, int64(5_000), c.avgLatencyUs.Load())
+}
+
+func TestCommitLatency_LatencyCounterResetRetainsPreviousSignal(t *testing.T) {
+	c := newTestCommitLatency(t, 100*time.Millisecond)
+
+	c.applySample(1_000_000, 2_000_000_000)
+	c.applySample(1_001_000, 2_002_000_000) // 2ms avg, not throttled
+	require.Equal(t, int64(2_000), c.avgLatencyUs.Load())
+
+	// Latency counter reset while the commit counter happens to still be
+	// ahead (partial reset): negative latency delta must also be treated
+	// as a reset, not as zero latency.
+	c.applySample(1_002_000, 1_000)
+	require.Equal(t, int64(2_000), c.avgLatencyUs.Load(), "negative latency delta must retain the previous average")
+	require.False(t, c.IsThrottled())
 }
 
 func TestCommitLatency_Utilization(t *testing.T) {
@@ -114,6 +139,55 @@ func TestCommitLatency_Utilization(t *testing.T) {
 	// 1000 commits, +200_000_000us latency → 200ms avg → 2.0 of threshold.
 	c.applySample(1_002_000, 2_250_000_000)
 	require.InDelta(t, 2.0, c.Utilization(), 1e-9)
+}
+
+// ageLastSample backdates a stale guard's last successful sample so tests can
+// simulate a sampling outage without sleeping through the real threshold.
+func ageLastSample(g *staleGuard, by time.Duration) {
+	g.lastSampleAt.Store(time.Now().Add(-by).UnixNano())
+}
+
+func TestCommitLatency_StaleSignalReportsHold(t *testing.T) {
+	c := newTestCommitLatency(t, 100*time.Millisecond)
+
+	c.applySample(1_000_000, 2_000_000_000)
+	c.applySample(1_001_000, 2_020_000_000) // 20ms avg → util 0.2
+	require.InDelta(t, 0.2, c.Utilization(), 1e-9)
+
+	// Simulate persistent sampling failure: the last successful sample ages
+	// past the threshold while the cached value stays frozen at 0.2. The
+	// autoscaler must see the hold value, not the frozen one — otherwise it
+	// would ramp +1 thread per cooldown to the cap on a dead signal.
+	ageLastSample(&c.stale, staleSignalThreshold+time.Second)
+	require.InDelta(t, StaleUtilizationHold, c.Utilization(), 1e-9)
+	// The binary hard-stop semantics are unchanged by staleness.
+	require.False(t, c.IsThrottled())
+
+	// A fresh sample recovers the live signal: another 20ms-avg window.
+	c.applySample(1_002_000, 2_040_000_000)
+	require.InDelta(t, 0.2, c.Utilization(), 1e-9)
+}
+
+func TestCommitLatency_StaleSignalKeepsThrottledHardStop(t *testing.T) {
+	c := newTestCommitLatency(t, 100*time.Millisecond)
+
+	c.applySample(1_000_000, 2_000_000_000)
+	c.applySample(1_000_100, 2_020_000_000) // 200ms avg → throttled, util 2.0
+	require.True(t, c.IsThrottled())
+
+	// Staleness only affects Utilization(): the frozen IsThrottled state
+	// stays exactly as it was (BlockWait semantics unchanged), while the
+	// utilization parks in the dead band.
+	ageLastSample(&c.stale, staleSignalThreshold+time.Second)
+	require.True(t, c.IsThrottled())
+	require.InDelta(t, StaleUtilizationHold, c.Utilization(), 1e-9)
+}
+
+func TestCommitLatency_NeverSampledIsNotStale(t *testing.T) {
+	// Pre-Open there is no sample at all; that must read as "not yet
+	// running" (utilization 0), not as a stale signal holding at 0.7.
+	c := newTestCommitLatency(t, 100*time.Millisecond)
+	require.Zero(t, c.Utilization())
 }
 
 func TestCommitLatency_BlockWaitReturnsImmediatelyWhenUnthrottled(t *testing.T) {

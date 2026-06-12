@@ -15,10 +15,6 @@ import (
 // halvings then wait out the cooldown so the signal can catch up). See
 // issue #831.
 const (
-	// acTick is how often the controller re-evaluates. Aligned with the
-	// throttler poll interval (5s) — sampling faster than the signal updates
-	// just adds noise.
-	acTick = 5 * time.Second
 	// acLowWatermark: below this utilization there is headroom on every signal,
 	// so we may add a thread (subject to cooldown). acHighWatermark: at or above
 	// this we back off immediately. The band between them is the dead-zone where
@@ -32,6 +28,12 @@ const (
 	// first. Increases and decreases hold independent cooldowns — see tick().
 	acCooldownTicks = 2
 )
+
+// acTick is how often the controller re-evaluates. Aligned with the
+// throttler poll interval (5s) — sampling faster than the signal updates
+// just adds noise. Var (not const) so tests can shorten it; production
+// never mutates it.
+var acTick = 5 * time.Second
 
 // writeScaler is the optional capability the autoscaler drives. The
 // SingleTargetApplier implements it; the ShardedApplier does not (yet), so the
