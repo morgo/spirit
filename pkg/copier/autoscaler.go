@@ -17,18 +17,18 @@ import (
 // Two properties of the utilization signal dictate this shape (issue #831;
 // observed in staging):
 //
-//   - It is largely self-induced. On a quiet server the active-thread count
+//   - It is largely self-induced. On a quiet server the running-thread count
 //     is mostly our own write workers, so the controller's output feeds its
 //     own input. Classic AIMD halving — built for congestion signals
 //     dominated by other parties' traffic — overshoots badly here: each
 //     halving cuts the signal roughly in half too, and the controller
 //     sawtooths between the watermark and half of it indefinitely.
-//   - The marginal utilization of one more thread is unpredictable. Write
-//     workers spend a workload-dependent fraction of their time parked on
-//     redo-log waits, which the active-threads signal deliberately excludes,
-//     so a thread's on-CPU duty cycle — and therefore the effect of adding
-//     or removing one — can't be computed ahead. Small steps with a pause to
-//     observe are the only reliable way to converge.
+//   - It is a noisy instantaneous gauge. Threads_running blips on brief
+//     latch/lock waits and on spirit's own housekeeping (checkpoints, GTID
+//     flushes, status queries), so a single sample is a poor estimate of
+//     sustained load. The throttler smooths it with an EWMA, and small,
+//     cooldown-spaced steps let the controller track the trend instead of
+//     chasing the noise.
 //
 // Zones, evaluated each tick against the (smoothed) utilization:
 //
@@ -37,12 +37,13 @@ import (
 //	[acHighWatermark, acPanicThreshold)    shed one thread (cooldown-gated)
 //	util >= acPanicThreshold               halve (first breach immediate)
 //
-// Because increases stop the moment util reaches the low watermark, the
-// self-induced steady state parks just above it: acLowWatermark is the
-// effective setpoint, and the band up to acHighWatermark is hysteresis
-// headroom for noise and for the production workload. Parking around 40-50%
-// of vCPUs is deliberately conservative — the primary OLTP workload gets the
-// remaining capacity, and leaving copy throughput on the table is fine.
+// The band has hysteresis, so the resting point depends on which side it is
+// approached from. The auto-sized start (the vCPU count) sits above the band,
+// so on an idle server the controller sheds down and parks just under
+// acHighWatermark — the first edge it meets — and holds there; it does not
+// continue down to acLowWatermark (that is the floor it would climb up to had
+// it started below the band). Parking near 70% of vCPUs leaves headroom for
+// the primary OLTP workload, and leaving copy throughput on the table is fine.
 // Responsiveness to genuine overload is not traded away: that is the
 // BlockWait hard-stop's job, which none of this touches.
 const (
@@ -56,7 +57,7 @@ const (
 	// vault across the band and ping-pong with the -1 path.
 	acHighWatermark = 0.7
 	// acPanicThreshold is where back-off turns multiplicative. 1.0 is where
-	// the raw active-threads signal trips the BlockWait hard-stop: the copy
+	// the raw Threads_running signal trips the BlockWait hard-stop: the copy
 	// is pausing anyway, and halving sheds enough pressure that the resume is
 	// gentle. This compares the gradual utilization, NOT IsThrottled() — on a
 	// multi-throttler that would include binary children like replica lag,

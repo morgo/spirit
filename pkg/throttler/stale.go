@@ -25,9 +25,9 @@ import (
 const (
 	// staleSignalThreshold is how old the last successful sample may be
 	// before Utilization() stops trusting the cached value. Three poll
-	// intervals (commitLatencyPollInterval and activeThreadsPollInterval are
+	// intervals (commitLatencyPollInterval and threadsRunningPollInterval are
 	// both 5s): one or two failed or slow polls — a brief failover blip, one
-	// stalled perf-schema query — don't flap the guard, but the signal is
+	// stalled status query — don't flap the guard, but the signal is
 	// declared stale before the autoscaler can take more than one blind step,
 	// since its increases are spaced (acCooldownTicks+1)*acTick = 15s apart.
 	staleSignalThreshold = 15 * time.Second
@@ -42,7 +42,7 @@ const (
 )
 
 // staleGuard tracks the freshness of a polled signal. It is embedded by the
-// gradual throttlers (CommitLatency, ActiveThreads): applySample marks the
+// gradual throttlers (CommitLatency, ThreadsRunning): applySample marks the
 // signal fresh, Utilization checks it. All methods are safe for concurrent
 // use.
 type staleGuard struct {
