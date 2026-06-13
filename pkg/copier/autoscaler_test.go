@@ -78,9 +78,30 @@ func TestAutoScaler_IncreasesBelowLowWatermarkAfterCooldown(t *testing.T) {
 	require.Equal(t, 4, as.current)
 }
 
-func TestAutoScaler_DecreasesImmediatelyAtHighWatermark(t *testing.T) {
+func TestAutoScaler_ShedsOneAtHighWatermark(t *testing.T) {
+	// Soft overload (at/above high, below panic) is an additive -1, the
+	// mirror image of the increase path — NOT a halving. Halving on a signal
+	// our own workers largely produce is the sawtooth from issue #831.
 	as, fs, ut := newTestScaler(8, 16)
-	ut.setUtil(0.95) // at/above high watermark
+	ut.setUtil(0.8)
+
+	as.tick(t.Context())
+	require.Equal(t, 7, as.current, "first breach sheds one immediately")
+	require.Equal(t, 7, fs.n)
+
+	// Consecutive sheds are cooldown-spaced so the signal can catch up.
+	as.tick(t.Context())
+	require.Equal(t, 7, as.current, "should hold during cooldown tick 1")
+	as.tick(t.Context())
+	require.Equal(t, 7, as.current, "should hold during cooldown tick 2")
+
+	as.tick(t.Context())
+	require.Equal(t, 6, as.current, "cooldown elapsed, shed another")
+}
+
+func TestAutoScaler_HalvesAtPanicThreshold(t *testing.T) {
+	as, fs, ut := newTestScaler(8, 16)
+	ut.setUtil(1.2) // at/above panic: the hard-stop zone
 
 	as.tick(t.Context())
 	require.Equal(t, 4, as.current, "8 should halve to 4 immediately")
@@ -100,20 +121,31 @@ func TestAutoScaler_DecreasesImmediatelyAtHighWatermark(t *testing.T) {
 
 func TestAutoScaler_DecreaseNotBlockedByIncreaseCooldown(t *testing.T) {
 	// An increase's cooldown must not delay a backoff: if the increase tipped
-	// the server over the high watermark, the very next tick halves.
+	// the server over the high watermark, the very next tick sheds — and over
+	// the panic threshold, halves.
 	as, _, ut := newTestScaler(4, 8)
 	ut.setUtil(0.2)
 	as.tick(t.Context())
 	require.Equal(t, 5, as.current, "increase under low watermark")
 
-	ut.setUtil(0.95)
+	ut.setUtil(0.8)
+	as.tick(t.Context())
+	require.Equal(t, 4, as.current, "shed one immediately despite increase cooldown")
+
+	ut.setUtil(0.2)
+	as.tick(t.Context()) // hold: up cooldown from the shed
+	as.tick(t.Context()) // hold
+	as.tick(t.Context())
+	require.Equal(t, 5, as.current, "increase again after cooldown")
+
+	ut.setUtil(1.2)
 	as.tick(t.Context())
 	require.Equal(t, 3, as.current, "halve immediately despite increase cooldown: ceil(5/2)=3")
 }
 
 func TestAutoScaler_HoldsInDeadBand(t *testing.T) {
 	as, _, ut := newTestScaler(4, 16)
-	ut.setUtil(0.7) // between low (0.5) and high (0.9)
+	ut.setUtil(0.55) // between low (0.4) and high (0.7)
 
 	for range 5 {
 		as.tick(t.Context())
@@ -149,11 +181,11 @@ func TestAutoScaler_MaxFlooredAtStart(t *testing.T) {
 	require.Equal(t, 6, as.max)
 }
 
-// TestAutoScaler_DeadBandBoundaries pins the documented [low, high) edge
-// semantics of the dead band: tick() uses `util < low` for increases and
-// `util >= high` for decreases, so exactly-low must HOLD and exactly-high
-// must HALVE. The epsilon cases guard against either comparison being
-// accidentally flipped to <= / >.
+// TestAutoScaler_DeadBandBoundaries pins the documented zone-edge semantics:
+// tick() uses `util < low` for increases, `util >= high` for the additive
+// shed, and `util >= panic` for the halve — so exactly-low must HOLD,
+// exactly-high must SHED ONE, and exactly-panic must HALVE. The epsilon cases
+// guard against any comparison being accidentally flipped to <= / >.
 func TestAutoScaler_DeadBandBoundaries(t *testing.T) {
 	const eps = 1e-9
 	tests := []struct {
@@ -164,7 +196,9 @@ func TestAutoScaler_DeadBandBoundaries(t *testing.T) {
 		{"just below low increases", acLowWatermark - eps, 5},
 		{"exactly low holds", acLowWatermark, 4},
 		{"just below high holds", acHighWatermark - eps, 4},
-		{"exactly high halves", acHighWatermark, 2},
+		{"exactly high sheds one", acHighWatermark, 3},
+		{"just below panic sheds one", acPanicThreshold - eps, 3},
+		{"exactly panic halves", acPanicThreshold, 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,6 +228,37 @@ func TestAutoScaler_StaleHoldValueParksInDeadBand(t *testing.T) {
 		as.tick(t.Context())
 	}
 	require.Equal(t, 4, as.current, "stale hold utilization must freeze the thread count")
+}
+
+// TestAutoScaler_ConvergesOnSelfInducedSignal replays the failure mode seen
+// in staging (issue #831): on an otherwise idle server the utilization signal
+// is produced almost entirely by the controller's own write threads, plus
+// sampling noise from housekeeping queries and worker duty-cycle flicker. The
+// old halve-at-the-watermark controller sawtoothed on this loop indefinitely
+// (ramp to the watermark, halve, ramp again). The reworked controller must
+// converge into the dead band and then hold the thread count steady despite
+// the noise.
+func TestAutoScaler_ConvergesOnSelfInducedSignal(t *testing.T) {
+	const vCPUs = 8.0
+	as, _, ut := newTestScaler(2, 16)
+
+	noise := []float64{-0.1, 0.1, 0.05, -0.05}
+	last, stableFor := 0, 0
+	for i := range 200 {
+		// Self-induced load: each write thread contributes ~one active thread
+		// (worst-case duty cycle), plus alternating sampling noise.
+		ut.setUtil(float64(as.current)/vCPUs + noise[i%len(noise)])
+		as.tick(t.Context())
+		if as.current == last {
+			stableFor++
+		} else {
+			last, stableFor = as.current, 0
+		}
+	}
+	require.GreaterOrEqual(t, stableFor, 150,
+		"controller must converge once and then hold steady on a self-induced signal")
+	require.Equal(t, 4, as.current,
+		"steady state parks just above the low watermark: 4 threads / 8 vCPUs = 0.5")
 }
 
 func TestCeilDiv(t *testing.T) {
@@ -257,8 +322,8 @@ func (g *gatedUtilThrottler) BlockWait(ctx context.Context) {
 // copy of a real table through a real SingleTargetApplier, with the
 // autoscaler goroutine (run/tick on a ticker) driving SetWriteWorkers from a
 // test-controlled utilization signal. It asserts the live worker pool grows
-// under low utilization, halves at the high watermark, and that the copy then
-// completes correctly. goleak in TestMain verifies nothing leaks.
+// under low utilization, halves at the panic threshold, and that the copy
+// then completes correctly. goleak in TestMain verifies nothing leaks.
 func TestAutoScalerIntegrationEngaged(t *testing.T) {
 	// Shorten the control-loop tick (production default 5s) so scaling
 	// happens in milliseconds. Copier tests do not run in parallel, so
@@ -322,17 +387,17 @@ func TestAutoScalerIntegrationEngaged(t *testing.T) {
 		10*time.Second, 5*time.Millisecond,
 		"autoscaler should grow the live worker pool to the cap under low utilization")
 
-	// Phase 2: utilization at/above the high watermark → multiplicative
+	// Phase 2: utilization at/above the panic threshold → multiplicative
 	// backoff. Parked workers exit asynchronously, so wait for convergence.
 	// (Sustained overload may halve again, cooldown-spaced, hence <=.)
-	gated.setUtil(0.95)
+	gated.setUtil(1.2)
 	require.Eventually(t, func() bool { return app.ActiveWriteWorkers() <= maxThreads/2 },
 		10*time.Second, 5*time.Millisecond,
-		"autoscaler should halve the live worker pool at the high watermark")
+		"autoscaler should halve the live worker pool at the panic threshold")
 
 	// Park the signal in the dead band and release the gate: the copy now
 	// proceeds to completion with the scaled-down pool.
-	gated.setUtil(0.7)
+	gated.setUtil(0.55)
 	close(gated.gate)
 	select {
 	case err := <-copyDone:

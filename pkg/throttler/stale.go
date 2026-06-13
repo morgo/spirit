@@ -34,11 +34,11 @@ const (
 
 	// StaleUtilizationHold is the utilization reported while the signal is
 	// stale. It must sit inside the autoscaler's dead band [low, high) —
-	// currently [0.5, 0.9) — so a stale signal holds the write-thread count
-	// steady rather than ramping it or shrinking it. 0.7 is the midpoint,
+	// currently [0.4, 0.7) — so a stale signal holds the write-thread count
+	// steady rather than ramping it or shrinking it. 0.55 is the midpoint,
 	// keeping maximum distance from both watermarks if they ever move.
 	// Exported so the autoscaler tests can pin this invariant.
-	StaleUtilizationHold = 0.7
+	StaleUtilizationHold = 0.55
 )
 
 // staleGuard tracks the freshness of a polled signal. It is embedded by the
@@ -56,6 +56,16 @@ type staleGuard struct {
 func (s *staleGuard) markFresh() (recovered bool) {
 	s.lastSampleAt.Store(time.Now().UnixNano())
 	return s.warned.Swap(false)
+}
+
+// gapExceeds reports whether the time since the last successful sample is at
+// least threshold. False if no sample has ever been recorded. Unlike check()
+// it has no warn-once side effects — samplers call it on arrival of a fresh
+// sample to decide whether derived state (e.g. an EWMA) spans a dead gap and
+// must be rebuilt rather than extended.
+func (s *staleGuard) gapExceeds(threshold time.Duration) bool {
+	last := s.lastSampleAt.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) >= threshold
 }
 
 // check reports whether the signal is stale (no successful sample within

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -73,11 +74,11 @@ const (
 // as not requesting it at all.
 const DefaultWriteThreads = 4
 
-// auroraVCPUs reads the instance vCPU count from @@innodb_buffer_pool_instances,
+// AuroraVCPUs reads the instance vCPU count from @@innodb_buffer_pool_instances,
 // which Aurora pins to the vCPU count (issue #831). It returns an error if the
 // value is non-positive. This is only meaningful on Aurora — callers should gate
 // on IsAurora first.
-func auroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
+func AuroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 	var vCPUs int
 	if err := db.QueryRowContext(ctx, auroraVCPUsQuery).Scan(&vCPUs); err != nil {
 		return 0, fmt.Errorf("reading @@innodb_buffer_pool_instances for vCPU count: %w", err)
@@ -119,16 +120,34 @@ func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int, logger 
 			"write_threads", DefaultWriteThreads)
 		return DefaultWriteThreads, nil
 	}
-	return auroraVCPUs(ctx, db)
+	return AuroraVCPUs(ctx, db)
 }
+
+// MinAutoscaleVCPUs is the smallest instance size (in vCPUs) on which the
+// write-thread autoscaler is allowed to engage. Below this the utilization
+// signal is too coarse to control on: one thread is half or a third of the
+// whole scale, so there is no dead band wide enough to rest in and the
+// controller can only oscillate. Observed in staging on r6g.large (2 vCPUs):
+// the thread count ping-ponged 1↔2 indefinitely (issue #831). At 4+ vCPUs the
+// worst-case per-thread utilization step (0.25) fits inside the autoscaler's
+// dead band.
+const MinAutoscaleVCPUs = 4
 
 // ResolveMaxWriteThreads resolves the upper bound the write-thread autoscaler
 // may scale to. When autoscaling is disabled the cap equals start, so the
 // thread count cannot move. When enabled the cap is fixed at 2 × start —
 // deliberately not configurable for now, to keep the experimental surface
 // small. See issue #831.
-func ResolveMaxWriteThreads(start int, autoscaleEnabled bool) int {
-	if !autoscaleEnabled {
+//
+// Scaling above the starting value additionally requires the commit-latency
+// throttler to be enabled. The active-threads signal deliberately ignores
+// threads parked on redo-log waits — that is what makes oversubscribing the
+// log safe to attempt — so commit latency is the only signal that notices
+// when the extra threads saturate it. Without that backstop the cap stays at
+// start: the autoscaler may still shed threads under CPU pressure, but never
+// adds any.
+func ResolveMaxWriteThreads(start int, autoscaleEnabled, commitLatencyEnabled bool) int {
+	if !autoscaleEnabled || !commitLatencyEnabled {
 		return start
 	}
 	return 2 * start
@@ -138,6 +157,22 @@ func ResolveMaxWriteThreads(start int, autoscaleEnabled bool) int {
 // enough to catch sustained CPU pressure without hammering the perf-schema
 // join. Var (not const) so tests can shorten it.
 var activeThreadsPollInterval = 5 * time.Second
+
+// activeThreadsEWMAAlpha is the smoothing factor for the exponentially
+// weighted moving average that Utilization() reports. The raw active-thread
+// count is an instantaneous gauge with high variance: each write worker
+// flickers between on-CPU and redo-log waits (which the query excludes), and
+// spirit's own housekeeping (checkpoints, GTID flushes, status queries)
+// surfaces as one-sample spikes. The autoscaler must control on the sustained
+// average, not the variance — the commit-latency sibling signal is already
+// window-averaged for the same reason. 0.3 gives a time constant of ~3
+// samples (~15s at the 5s poll), matching the autoscaler's cooldown spacing
+// so the controller never acts twice on effectively the same information.
+//
+// Only Utilization() is smoothed. IsThrottled/BlockWait stay on the raw
+// sample: the hard-stop protects the production workload and must react
+// within one poll.
+const activeThreadsEWMAAlpha = 0.3
 
 // CanReadActiveThreads probes whether the current user can run the active-
 // threads query. Returns nil when the query runs cleanly, a wrapped error
@@ -169,8 +204,16 @@ type ActiveThreads struct {
 	isThrottled atomic.Bool
 	isClosed    atomic.Bool
 
-	// lastActiveThreads holds the most recent observation for logging.
+	// lastActiveThreads holds the most recent observation for logging and the
+	// raw hard-stop comparison.
 	lastActiveThreads atomic.Int64
+
+	// smoothedBits holds math.Float64bits of the EWMA of active threads that
+	// Utilization() reports (see activeThreadsEWMAAlpha). ewmaSeeded records
+	// whether smoothedBits holds a real value yet — 0.0 is a valid average,
+	// so a sentinel won't do.
+	smoothedBits atomic.Uint64
+	ewmaSeeded   atomic.Bool
 
 	// stale guards Utilization() against the cached value freezing when
 	// sampling fails persistently. See stale.go.
@@ -193,7 +236,7 @@ func NewActiveThreadsThrottler(db *sql.DB, logger *slog.Logger) (*ActiveThreads,
 }
 
 func (a *ActiveThreads) Open(ctx context.Context) error {
-	vCPUs, err := auroraVCPUs(ctx, a.db)
+	vCPUs, err := AuroraVCPUs(ctx, a.db)
 	if err != nil {
 		return err
 	}
@@ -233,12 +276,16 @@ func (a *ActiveThreads) IsThrottled() bool {
 	return a.isThrottled.Load()
 }
 
-// Utilization reports the most recent active-CPU-thread count as a fraction of
-// the instance vCPU count. 1.0 means active threads equal vCPUs (the point at
-// which one more thread trips IsThrottled). Returns 0 if vCPUs is not yet known.
+// Utilization reports the smoothed (EWMA) active-CPU-thread count as a
+// fraction of the instance vCPU count. 1.0 means the sustained average equals
+// vCPUs — around where the raw signal trips IsThrottled. Returns 0 if vCPUs
+// is not yet known. The smoothing exists for the autoscaler, this method's
+// only consumer: it must see sustained load, not single-sample spikes (see
+// activeThreadsEWMAAlpha). The binary hard-stop deliberately does not share
+// it.
 //
 // When sampling has failed for longer than staleSignalThreshold the cached
-// count is no longer trustworthy, so this reports StaleUtilizationHold
+// average is no longer trustworthy, so this reports StaleUtilizationHold
 // instead — parking the autoscaler in its dead band rather than letting a
 // frozen value drive scaling. IsThrottled/BlockWait are unaffected.
 func (a *ActiveThreads) Utilization() float64 {
@@ -253,7 +300,7 @@ func (a *ActiveThreads) Utilization() float64 {
 	if a.vCPUs <= 0 {
 		return 0
 	}
-	return float64(a.lastActiveThreads.Load()) / float64(a.vCPUs)
+	return math.Float64frombits(a.smoothedBits.Load()) / float64(a.vCPUs)
 }
 
 // BlockWait blocks until active CPU threads fall to or below vCPUs, or up to
@@ -297,10 +344,25 @@ func (a *ActiveThreads) UpdateLag(ctx context.Context) error {
 // clamps at >= 0), not a delta of cumulative counters, so a failover cannot
 // produce a bogus value — only an error, which the staleness guard covers.
 func (a *ActiveThreads) applySample(active int64) {
+	// Capture whether this sample arrives after a stale gap before marking it
+	// fresh: the EWMA must be reseeded then, not extended — blending a live
+	// sample into pre-outage history would report a fiction made of dead data.
+	staleGap := a.stale.gapExceeds(staleSignalThreshold)
 	if a.stale.markFresh() {
 		a.logger.Info("active-threads sampling recovered; resuming live utilization signal")
 	}
 	a.lastActiveThreads.Store(active)
+
+	if sample := float64(active); !a.ewmaSeeded.Load() || staleGap {
+		a.smoothedBits.Store(math.Float64bits(sample))
+		a.ewmaSeeded.Store(true)
+	} else {
+		prev := math.Float64frombits(a.smoothedBits.Load())
+		a.smoothedBits.Store(math.Float64bits(prev + activeThreadsEWMAAlpha*(sample-prev)))
+	}
+
+	// The hard-stop compares the raw sample, not the EWMA: it protects the
+	// production workload and must engage within one poll of a load spike.
 	throttled := active > a.vCPUs
 	prev := a.isThrottled.Swap(throttled)
 	if throttled && !prev {

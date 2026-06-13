@@ -532,10 +532,40 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 			"write_threads", r.migration.WriteThreads)
 		autoscale = false
 	}
+	// Two further autoscale gates apply only on Aurora, the one place the
+	// autoscaler can actually engage (it requires a continuous signal, which
+	// only the Aurora throttlers provide). An IsAurora probe failure is
+	// benign here, matching AuroraSetup.Build: without Aurora the autoscaler
+	// stays dormant regardless, and the copier logs its own downgrade.
+	commitLatencyEnabled := r.migration.MaxCommitLatency > 0
+	if autoscale {
+		if isAurora, err := throttler.IsAurora(ctx, r.db); err == nil && isAurora {
+			// On instances below MinAutoscaleVCPUs the utilization signal is
+			// too coarse to control on — one thread is half or more of the
+			// dead band — so the controller could only oscillate; run a
+			// fixed pool instead.
+			vCPUs, err := throttler.AuroraVCPUs(ctx, r.db)
+			if err != nil {
+				return err
+			}
+			if vCPUs < throttler.MinAutoscaleVCPUs {
+				r.logger.Warn("autoscaling disabled: instance is too small for the utilization signal to guide scaling; write threads stay fixed",
+					"vcpus", vCPUs, "min_vcpus", throttler.MinAutoscaleVCPUs,
+					"write_threads", r.migration.WriteThreads)
+				autoscale = false
+			}
+			if autoscale && !commitLatencyEnabled {
+				r.logger.Warn("autoscaling with max-commit-latency=0: no signal would catch redo-log oversubscription, so write threads may scale down but not above the starting value",
+					"write_threads", r.migration.WriteThreads)
+			}
+		}
+	}
 	// Resolve the autoscaler's upper bound. When autoscaling is disabled this
 	// equals WriteThreads (no movement); when enabled it's fixed at 2x the
-	// start value.
-	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale)
+	// start value — but scaling above the start additionally requires the
+	// commit-latency throttler as the IO backstop for redo-log
+	// oversubscription (see ResolveMaxWriteThreads).
+	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale, commitLatencyEnabled)
 	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
 	// known: threads + maxWrite + 1 (see the MaxOpenConnections doc in Run).
 	// Sizing for maxWrite ensures a scaled-up applier never starves on

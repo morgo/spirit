@@ -54,12 +54,37 @@ func TestActiveThreads_RecoversBelowVCPUs(t *testing.T) {
 
 func TestActiveThreads_Utilization(t *testing.T) {
 	a := newTestActiveThreads(t, 8)
+	// The first sample seeds the EWMA directly.
 	a.applySample(4)
 	require.InDelta(t, 0.5, a.Utilization(), 1e-9)
-	a.applySample(8) // exactly at vCPUs => 1.0
-	require.InDelta(t, 1.0, a.Utilization(), 1e-9)
-	a.applySample(12) // oversubscribed => >1.0
-	require.InDelta(t, 1.5, a.Utilization(), 1e-9)
+	// Subsequent samples blend at activeThreadsEWMAAlpha:
+	// 4 + 0.3*(8-4) = 5.2 active → 0.65.
+	a.applySample(8)
+	require.InDelta(t, 5.2/8, a.Utilization(), 1e-9)
+	// 5.2 + 0.3*(12-5.2) = 7.24 active → 0.905.
+	a.applySample(12)
+	require.InDelta(t, 7.24/8, a.Utilization(), 1e-9)
+	// A sustained level converges the average onto it: utilization can
+	// exceed 1.0 (oversubscribed) once the load is persistent, not noise.
+	for range 50 {
+		a.applySample(12)
+	}
+	require.InDelta(t, 1.5, a.Utilization(), 1e-6)
+}
+
+func TestActiveThreads_HardStopIsRawWhileUtilizationIsSmoothed(t *testing.T) {
+	// A single spike must trip the binary hard-stop within one sample — it
+	// protects the production workload — while the autoscaler's utilization
+	// view absorbs it, so one noisy reading cannot trigger scaling.
+	a := newTestActiveThreads(t, 8)
+	a.applySample(2) // seed: util 0.25
+	a.applySample(20)
+	require.True(t, a.IsThrottled(), "hard-stop must react to the raw sample")
+	// EWMA: 2 + 0.3*(20-2) = 7.4 active → util 0.925.
+	require.InDelta(t, 7.4/8, a.Utilization(), 1e-9)
+	// The spike clearing releases the hard-stop just as quickly.
+	a.applySample(1)
+	require.False(t, a.IsThrottled())
 }
 
 func TestActiveThreads_UtilizationZeroVCPUs(t *testing.T) {
@@ -85,6 +110,19 @@ func TestActiveThreads_StaleSignalReportsHold(t *testing.T) {
 	// A fresh sample recovers the live signal.
 	a.applySample(2)
 	require.InDelta(t, 0.25, a.Utilization(), 1e-9)
+}
+
+func TestActiveThreads_EWMAReseedsAfterStaleGap(t *testing.T) {
+	a := newTestActiveThreads(t, 8)
+	a.applySample(2) // seed: util 0.25
+
+	// Samples stop arriving for longer than the staleness threshold. The
+	// first sample after the gap must reseed the average, not blend into
+	// pre-outage history — a blend would report 2 + 0.3*(6-2) = 3.2 (0.4), a
+	// fiction made of dead data.
+	ageLastSample(&a.stale, staleSignalThreshold+time.Second)
+	a.applySample(6)
+	require.InDelta(t, 0.75, a.Utilization(), 1e-9)
 }
 
 func TestActiveThreads_StaleSignalKeepsThrottledHardStop(t *testing.T) {
@@ -194,11 +232,17 @@ func TestResolveWriteThreads_NonAuroraUsesDefault_LocalMySQL(t *testing.T) {
 
 func TestResolveMaxWriteThreads(t *testing.T) {
 	// Disabled: cap equals start so the count cannot move.
-	require.Equal(t, 4, ResolveMaxWriteThreads(4, false))
+	require.Equal(t, 4, ResolveMaxWriteThreads(4, false, true))
 
-	// Enabled: the cap is fixed at 2x the start value (not configurable).
-	require.Equal(t, 8, ResolveMaxWriteThreads(4, true))
-	require.Equal(t, 10, ResolveMaxWriteThreads(5, true))
+	// Enabled with the commit-latency backstop: the cap is fixed at 2x the
+	// start value (not configurable).
+	require.Equal(t, 8, ResolveMaxWriteThreads(4, true, true))
+	require.Equal(t, 10, ResolveMaxWriteThreads(5, true, true))
+
+	// Enabled without commit-latency: nothing would catch redo-log
+	// oversubscription, so the cap stays at start — the autoscaler may shed
+	// threads but never adds any.
+	require.Equal(t, 4, ResolveMaxWriteThreads(4, true, false))
 }
 
 func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
@@ -210,7 +254,7 @@ func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
 	// pinned to the vCPU count there). The query and positive-value check should
 	// still succeed — this guards the shared helper used by both the
 	// active-threads throttler and write-thread auto-sizing.
-	vCPUs, err := auroraVCPUs(t.Context(), db)
+	vCPUs, err := AuroraVCPUs(t.Context(), db)
 	require.NoError(t, err)
 	require.Positive(t, vCPUs)
 }
