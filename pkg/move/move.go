@@ -20,10 +20,10 @@ type Move struct {
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 	CheckpointMaxAge      time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
 
-	// GTID switches the change source from binlog file+position to MySQL GTIDs.
+	// EnableExperimentalGTID switches the change source from binlog file+position to MySQL GTIDs.
 	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and
 	// enforce_gtid_consistency=ON on every source.
-	GTID bool `name:"gtid" help:"EXPERIMENTAL: use GTID-based change source instead of binlog file+position" default:"false"`
+	EnableExperimentalGTID bool `name:"enable-experimental-gtid" help:"EXPERIMENTAL: use GTID-based change source instead of binlog file+position" default:"false"`
 
 	// SourceTables optionally specifies a list of tables to move.
 	// If empty, all tables in the source database will be moved.
