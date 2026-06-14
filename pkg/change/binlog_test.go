@@ -263,11 +263,23 @@ func TestReplClientOpts(t *testing.T) {
 	// Flush. We could use client.Flush() but for testing purposes lets use
 	// PeriodicFlush()
 	client.StartPeriodicFlush(t.Context(), 1*time.Second)
-	time.Sleep(2 * time.Second)
+	// Wait for the periodic flush to drain the buffered deletes rather than
+	// relying on a fixed sleep. Under CI load the ~50k-key chunked flush can
+	// outlive a hardcoded wait, and StopPeriodicFlush would then cancel the
+	// in-flight batch mid-DELETE — which is discarded, since delta-map entries
+	// are only removed once the batch succeeds, leaving GetDeltaLen at the full
+	// count. See https://github.com/block/spirit/issues/963.
+	require.Eventually(t, func() bool {
+		return client.GetDeltaLen() == 0
+	}, 30*time.Second, 50*time.Millisecond, "periodic flush did not drain the buffered deletes")
 	client.StopPeriodicFlush()
-	require.Equal(t, 0, db.Stats().InUse) // all connections are returned
 
 	require.Equal(t, 0, client.GetDeltaLen())
+	// All connections should be returned to the pool. Use Eventually to
+	// tolerate go-sql-driver's asynchronous post-flush connection reclaim.
+	require.Eventually(t, func() bool {
+		return db.Stats().InUse == 0
+	}, 5*time.Second, 50*time.Millisecond, "connections were not returned to the pool")
 
 	// The binlog position should have changed.
 	require.NotEqual(t, startingPos, client.Position())
