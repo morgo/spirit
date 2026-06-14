@@ -58,6 +58,26 @@ func TestStaleGuard_RecoveryReportedOnce(t *testing.T) {
 	require.False(t, stale)
 }
 
+func TestStaleGuard_GapExceeds(t *testing.T) {
+	var g staleGuard
+
+	// Never sampled: there is no gap to measure (Open fails if the first
+	// sample fails, so "no sample yet" means not-yet-open, not a dead signal).
+	require.False(t, g.gapExceeds(time.Second))
+
+	g.markFresh()
+	require.False(t, g.gapExceeds(time.Second), "fresh sample, no gap")
+
+	ageLastSample(&g, 2*time.Second)
+	require.True(t, g.gapExceeds(time.Second))
+
+	// Unlike check(), gapExceeds has no warn-once state: it never reports
+	// entering and must not interfere with check()'s rate limiting.
+	stale, entering := g.check(time.Second)
+	require.True(t, stale)
+	require.True(t, entering, "gapExceeds must not consume check()'s entering transition")
+}
+
 func TestStaleGuard_NewStalePeriodWarnsAgain(t *testing.T) {
 	var g staleGuard
 	g.markFresh()
