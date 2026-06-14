@@ -484,7 +484,7 @@ func (r *Runner) runChecks(ctx context.Context, scope check.ScopeFlag) error {
 			TLSMode:              r.migration.TLSMode,
 			TLSCertificatePath:   r.migration.TLSCertificatePath,
 			SkipDropAfterCutover: r.migration.SkipDropAfterCutover,
-			GTID:                 r.migration.GTID,
+			GTID:                 r.migration.EnableExperimentalGTID,
 		}, r.logger, scope); err != nil {
 			return err
 		}
@@ -618,7 +618,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	replConfig.Logger = r.logger
 	replConfig.CancelFunc = r.fatalError
 	replConfig.DBConfig = r.dbConfig
-	if r.migration.GTID {
+	if r.migration.EnableExperimentalGTID {
 		r.logger.Info("EXPERIMENTAL: using GTID-based change source")
 		r.replClient = change.NewGTIDClient(r.db, r.migration.Host, r.migration.Username, *r.migration.Password, appl, replConfig)
 	} else {

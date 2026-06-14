@@ -118,7 +118,7 @@ func WithBuffered(b bool) RunnerOption {
 // WithGTID enables the experimental GTID-based change source.
 func WithGTID(b bool) RunnerOption {
 	return func(m *Migration) {
-		m.GTID = b
+		m.EnableExperimentalGTID = b
 	}
 }
 

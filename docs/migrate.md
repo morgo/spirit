@@ -20,7 +20,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [database](#database)
 - [defer-cutover](#defer-cutover)
 - [enable-experimental-autoscaling](#enable-experimental-autoscaling)
-- [gtid](#gtid)
+- [enable-experimental-gtid](#enable-experimental-gtid)
 - [host](#host)
 - [lint](#lint)
 - [lint-only](#lint-only)
@@ -163,13 +163,13 @@ The continuous checksum runs single-threaded today (see [block/spirit#831](https
 
 Each continuous-checksum pass runs once with no internal retry (the loop itself is the retry mechanism). If a pass detects a difference, the affected chunk is recopied via `FixDifferences` and the migration is aborted with a "checksum found differences" error. The fix is durable on disk, so the operator can re-run the migration and it will resume from the checkpoint and succeed if the drift has been addressed. The intent is "fail loud, investigate" — since the initial checksum already passed, any difference detected during the sentinel wait is unexpected.
 
-### gtid
+### enable-experimental-gtid
 
 - Type: Boolean
 - Default value: `false`
 
 > **⚠️ Experimental.** The GTID change source is new and the on-wire / on-disk
-> coordinate format may change between releases. Do not mix `--gtid` and non-GTID
+> coordinate format may change between releases. Do not mix `--enable-experimental-gtid` and non-GTID
 > runs against the same checkpoint — the persisted resume coordinate is not
 > interchangeable between the two paths.
 
@@ -204,7 +204,7 @@ would need to re-apply). In that case Spirit surfaces
 migration from scratch.
 
 ```bash
-spirit migrate --gtid \
+spirit migrate --enable-experimental-gtid \
        --host mydb:3306 --database mydb --table users \
        --alter "ADD COLUMN email VARCHAR(255)"
 ```
