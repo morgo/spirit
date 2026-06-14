@@ -407,7 +407,7 @@ A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the ins
 
 - **Below 40% utilization** it adds one thread at a time (cautiously, with a ~15s cooldown between increases).
 - **At or above 70% utilization** it sheds one thread at a time (immediately on the first breach, then at most once per ~15s so the signal can reflect each cut).
-- **At or above 100% utilization** — where the hard-stop throttle is engaging anyway — it halves the thread count instead, so the copy resumes gently once the overload clears.
+- **At or above 100% utilization** — the smoothed signal has reached the vCPU count, at or beyond where the raw per-sample hard-stop throttle trips — it halves the thread count instead, so the copy resumes gently once the overload clears.
 - In between it holds steady.
 
 The band has hysteresis, so where it settles depends on which side it approaches from. The auto-sized starting point (the instance vCPU count) sits *above* the band, so on an otherwise idle server the controller sheds downward and parks just under the **70%** watermark — the first band edge it reaches — and holds there. It does not continue down to the 40% floor; that lower watermark is only the level it would climb *up* to had it started below the band. The remaining headroom is reserved for the primary workload, and responsiveness to genuine overload comes from the hard-stop throttle, not from thread scaling — so on a fully idle instance some capacity is deliberately left unused. The threads-running utilization signal is smoothed (an exponentially weighted moving average over ~3 samples) so one-off spikes — a checkpoint write, a brief flurry of OLTP — do not trigger scaling; the binary hard-stop throttle always acts on the raw per-sample value.

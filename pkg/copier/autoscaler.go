@@ -56,10 +56,13 @@ const (
 	// where the runner disables autoscaling entirely) — otherwise one +1 can
 	// vault across the band and ping-pong with the -1 path.
 	acHighWatermark = 0.7
-	// acPanicThreshold is where back-off turns multiplicative. 1.0 is where
-	// the raw Threads_running signal trips the BlockWait hard-stop: the copy
-	// is pausing anyway, and halving sheds enough pressure that the resume is
-	// gentle. This compares the gradual utilization, NOT IsThrottled() — on a
+	// acPanicThreshold is where back-off turns multiplicative. At 1.0 the
+	// smoothed signal has reached vCPUs — sustained load at or past the point
+	// where the raw per-sample hard-stop trips (it fires on running > vCPUs).
+	// By the time the average climbs here the hard-stop has typically been
+	// firing on the raw samples, so the copy is already being paused; halving
+	// sheds enough that the resume is gentle. This compares the gradual
+	// (smoothed) utilization, NOT IsThrottled() — on a
 	// multi-throttler that would include binary children like replica lag,
 	// and halving on those is unguided (they already pause the copy, which
 	// makes the worker count moot while tripped).
