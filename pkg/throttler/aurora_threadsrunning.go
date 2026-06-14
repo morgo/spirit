@@ -23,22 +23,26 @@ import (
 // History (issue #831): this began as an "active CPU threads" signal that
 // joined performance_schema.threads to events_waits_current to subtract
 // threads parked on redo-log flush, on the theory that those are blocked on IO
-// and not consuming CPU, so the redo log could be safely oversubscribed. In
-// staging that subtraction proved to be a no-op — the event name never matched
-// on Aurora (the instrument may not even be enabled), so the metric was only
-// ever "count of Query-state threads" in a more expensive, higher-privilege
-// costume. We dropped the join: Threads_running from global_status is the same
-// number, cheaper to read, and needs no grant beyond the global_status access
-// that IsAurora and the commit-latency throttler already require. So this
-// throttler no longer needs SELECT on performance_schema.threads /
-// events_waits_current, and is always available once Aurora is detected.
+// and not consuming CPU, so the redo log could be safely oversubscribed. That
+// refinement can genuinely help when commit latency is very high — many
+// threads stalled on the log while CPU sits idle — but in staging the
+// subtraction never fired (the event name didn't match on Aurora, and the
+// instrument may not even be enabled), so it was carrying cost and an extra
+// grant requirement without delivering the benefit. To start with we use the
+// simpler, more conservative approach: count all running threads via
+// Threads_running from global_status. It needs no grant beyond the
+// global_status access that IsAurora and the commit-latency throttler already
+// require — so this throttler no longer needs SELECT on
+// performance_schema.threads / events_waits_current, and is always available
+// once Aurora is detected. Reviving the redo-aware variant later (with a
+// verified event name) remains an option if commit-bound workloads call for
+// it.
 //
-// The tradeoff is deliberate: because redo-log waiters now count as load, the
-// signal will not let the autoscaler oversubscribe the redo log on a
-// commit-bound workload — those waiters read as busy and cap concurrency near
-// vCPUs. The commit-latency throttler, reading the same global_status, remains
-// the signal that watches storage saturation directly, so that case is not
-// left unguarded.
+// Counting all running threads means redo-log waiters now read as load, so the
+// signal caps concurrency near vCPUs rather than oversubscribing the log on a
+// commit-bound workload. The commit-latency throttler, reading the same
+// global_status, watches storage saturation directly, so that case is still
+// covered.
 const (
 	// threadsRunningQuery reads the Threads_running status variable: the count
 	// of non-sleeping threads. It comes from performance_schema.global_status
