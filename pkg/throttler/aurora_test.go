@@ -45,10 +45,10 @@ func TestAuroraSetup_NonAuroraReturnsEmpty(t *testing.T) {
 func TestAuroraSetup_NonAuroraSkipsMonitorEvenWithZeroThreshold(t *testing.T) {
 	// Regression for PR #880: CommitLatencyThreshold=0 used to short-
 	// circuit Build before probing IsAurora, which silently disabled the
-	// active-threads throttler too. The two gates are now independent,
-	// so Build must still probe IsAurora when threshold is 0 — but on a
-	// non-Aurora source it still ends up with no throttlers and must not
-	// open a monitor pool.
+	// threads-running throttler too. The gates are now independent, so Build
+	// must still probe IsAurora when threshold is 0 — but on a non-Aurora
+	// source it still ends up with no throttlers and must not open a monitor
+	// pool.
 	db, err := sql.Open("mysql", testutils.DSN())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)

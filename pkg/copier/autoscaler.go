@@ -9,19 +9,64 @@ import (
 	"github.com/block/spirit/pkg/throttler"
 )
 
-// AIMD (additive-increase / multiplicative-decrease) tunables. The shape is
-// "cautious up, fast down": we add one thread at a time and only after a
-// cooldown, but halve as soon as load approaches the hard-stop (further
-// halvings then wait out the cooldown so the signal can catch up). See
-// issue #831.
+// Control-loop tunables. The shape is "gentle in the normal regime, abrupt
+// only in emergencies": ±1 thread at a time, cooldown-gated, with a
+// multiplicative halving reserved for utilization at/above the point where
+// the hard-stop engages anyway.
+//
+// Two properties of the utilization signal dictate this shape (issue #831;
+// observed in staging):
+//
+//   - It is largely self-induced. On a quiet server the running-thread count
+//     is mostly our own write workers, so the controller's output feeds its
+//     own input. Classic AIMD halving — built for congestion signals
+//     dominated by other parties' traffic — overshoots badly here: each
+//     halving cuts the signal roughly in half too, and the controller
+//     sawtooths between the watermark and half of it indefinitely.
+//   - It is a noisy instantaneous gauge. Threads_running blips on brief
+//     latch/lock waits and on spirit's own housekeeping (checkpoints, GTID
+//     flushes, status queries), so a single sample is a poor estimate of
+//     sustained load. The throttler smooths it with an EWMA, and small,
+//     cooldown-spaced steps let the controller track the trend instead of
+//     chasing the noise.
+//
+// Zones, evaluated each tick against the (smoothed) utilization:
+//
+//	util < acLowWatermark                  add one thread (cooldown-gated)
+//	[acLowWatermark, acHighWatermark)      hold
+//	[acHighWatermark, acPanicThreshold)    shed one thread (cooldown-gated)
+//	util >= acPanicThreshold               halve (first breach immediate)
+//
+// The band has hysteresis, so the resting point depends on which side it is
+// approached from. The auto-sized start (the vCPU count) sits above the band,
+// so on an idle server the controller sheds down and parks just under
+// acHighWatermark — the first edge it meets — and holds there; it does not
+// continue down to acLowWatermark (that is the floor it would climb up to had
+// it started below the band). Parking near 70% of vCPUs leaves headroom for
+// the primary OLTP workload, and leaving copy throughput on the table is fine.
+// Responsiveness to genuine overload is not traded away: that is the
+// BlockWait hard-stop's job, which none of this touches.
 const (
-	// acLowWatermark: below this utilization there is headroom on every signal,
-	// so we may add a thread (subject to cooldown). acHighWatermark: at or above
-	// this we back off immediately. The band between them is the dead-zone where
-	// we hold steady. High is below 1.0 so we ease off *before* tripping the
-	// hard-stop BlockWait rather than relying on it.
-	acLowWatermark  = 0.5
-	acHighWatermark = 0.9
+	// acLowWatermark is the effective setpoint: below it there is headroom,
+	// so we may add a thread (subject to cooldown).
+	acLowWatermark = 0.4
+	// acHighWatermark starts the additive back-off. The dead band between the
+	// watermarks must be wider than the utilization step of a single thread
+	// (at most 1/vCPUs, and >= 0.25 only when vCPUs < MinAutoscaleVCPUs,
+	// where the runner disables autoscaling entirely) — otherwise one +1 can
+	// vault across the band and ping-pong with the -1 path.
+	acHighWatermark = 0.7
+	// acPanicThreshold is where back-off turns multiplicative. At 1.0 the
+	// smoothed signal has reached vCPUs — sustained load at or past the point
+	// where the raw per-sample hard-stop trips (it fires on running > vCPUs).
+	// By the time the average climbs here the hard-stop has typically been
+	// firing on the raw samples, so the copy is already being paused; halving
+	// sheds enough that the resume is gentle. This compares the gradual
+	// (smoothed) utilization, NOT IsThrottled() — on a
+	// multi-throttler that would include binary children like replica lag,
+	// and halving on those is unguided (they already pause the copy, which
+	// makes the worker count moot while tripped).
+	acPanicThreshold = 1.0
 	// acCooldownTicks is how many ticks a direction holds after a change before
 	// it may fire again: a change at tick T allows the next at tick T+3, i.e.
 	// 15s apart at acTick, giving the change time to register in the signal
@@ -42,17 +87,19 @@ type writeScaler interface {
 	SetWriteWorkers(n int)
 }
 
-// autoScaler runs an AIMD control loop that adjusts the applier's live
-// write-worker count based on the throttler's continuous utilization signal.
-// It never touches the binary BlockWait() hard-stop, which remains the safety
-// net underneath — the controller's goal is to keep utilization parked in the
-// [low, high) dead-band so the hard-stop is rarely hit.
+// autoScaler runs a control loop that adjusts the applier's live write-worker
+// count based on the throttler's continuous utilization signal: additive ±1
+// steps in the normal regime, halving only at the panic threshold (see the
+// zone table above). It never touches the binary BlockWait() hard-stop, which
+// remains the safety net underneath — the controller's goal is to keep
+// utilization parked in the [low, high) dead-band so the hard-stop is rarely
+// hit.
 type autoScaler struct {
-	throttler throttler.GradualThrottler
-	scaler    writeScaler
-	min, max  int
-	current   int
-	low, high float64
+	throttler          throttler.GradualThrottler
+	scaler             writeScaler
+	min, max           int
+	current            int
+	low, high, panicAt float64
 	// upCooldown gates increases; downCooldown gates decreases. They are
 	// separate so a fresh overload can halve immediately even right after an
 	// increase (which likely caused it), while consecutive halvings are still
@@ -79,6 +126,7 @@ func newAutoScaler(t throttler.GradualThrottler, s writeScaler, start, maxThread
 		current:     start,
 		low:         acLowWatermark,
 		high:        acHighWatermark,
+		panicAt:     acPanicThreshold,
 		logger:      logger,
 		metricsSink: sink,
 	}
@@ -105,16 +153,29 @@ func (a *autoScaler) tick(ctx context.Context) {
 
 	acted := false
 	switch {
-	case util >= a.high:
-		// Multiplicative backoff, at most once per cooldown window. The first
-		// breach halves immediately — it is never delayed by an increase's
-		// cooldown, since the increase likely caused the overload. Consecutive
-		// halvings wait out the window: the signal updates on the same ~5s
-		// cadence we tick on, so reacting to every tick would halve repeatedly
-		// on one stale window. If load keeps climbing in the meantime, the
-		// BlockWait hard-stop at 1.0 remains the emergency brake.
+	case util >= a.panicAt:
+		// Panic: multiplicative backoff, at most once per cooldown window.
+		// The first breach halves immediately — it is never delayed by an
+		// increase's cooldown, since the increase likely caused the overload.
+		// Consecutive halvings wait out the window: the signal updates on the
+		// same ~5s cadence we tick on, so reacting to every tick would halve
+		// repeatedly on one stale window. The BlockWait hard-stop engages in
+		// this zone too, so the copy is already paused — the halve is about
+		// resuming gently, not about stopping the bleeding.
 		if a.downCooldown == 0 {
 			a.set(ceilDiv(a.current, 2))
+			a.downCooldown = acCooldownTicks
+			a.upCooldown = acCooldownTicks
+			acted = true
+		}
+	case util >= a.high:
+		// Soft overload: additive decrease, the mirror image of the increase
+		// path. Like the panic path it is gated only by the down cooldown, so
+		// the first shed is never delayed by a recent increase's cooldown.
+		// Shedding one thread at a time avoids the halve-and-reclimb sawtooth
+		// on a signal our own workers largely produce.
+		if a.downCooldown == 0 {
+			a.set(a.current - 1)
 			a.downCooldown = acCooldownTicks
 			a.upCooldown = acCooldownTicks
 			acted = true
