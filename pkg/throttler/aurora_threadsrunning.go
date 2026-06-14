@@ -23,26 +23,31 @@ import (
 // History (issue #831): this began as an "active CPU threads" signal that
 // joined performance_schema.threads to events_waits_current to subtract
 // threads parked on redo-log flush, on the theory that those are blocked on IO
-// and not consuming CPU, so the redo log could be safely oversubscribed. That
-// refinement can genuinely help when commit latency is very high — many
-// threads stalled on the log while CPU sits idle — but in staging the
-// subtraction never fired (the event name didn't match on Aurora, and the
-// instrument may not even be enabled), so it was carrying cost and an extra
-// grant requirement without delivering the benefit. To start with we use the
-// simpler, more conservative approach: count all running threads via
-// Threads_running from global_status. It needs no grant beyond the
-// global_status access that IsAurora and the commit-latency throttler already
-// require — so this throttler no longer needs SELECT on
-// performance_schema.threads / events_waits_current, and is always available
-// once Aurora is detected. Reviving the redo-aware variant later (with a
-// verified event name) remains an option if commit-bound workloads call for
-// it.
+// (not consuming CPU) so the redo log can be safely oversubscribed. On Aurora
+// that worked — staging A/B confirmed it. The wait event matches on Aurora
+// (it does not exist on community MySQL, but this throttler only runs on
+// Aurora), and excluding redo-waiters let the autoscaler keep more in-flight
+// committers, which Aurora group-commits for higher throughput: on an
+// r6g.4xlarge the redo-aware signal settled at ~12 workers / ~25m where the
+// count-everything signal below settles at ~8 workers / ~30m, at
+// correspondingly higher CPU.
 //
-// Counting all running threads means redo-log waiters now read as load, so the
-// signal caps concurrency near vCPUs rather than oversubscribing the log on a
-// commit-bound workload. The commit-latency throttler, reading the same
-// global_status, watches storage saturation directly, so that case is still
-// covered.
+// We are nonetheless launching with the simpler, more conservative signal:
+// count ALL running threads via the Threads_running status variable from
+// global_status. It favors the project's primary goal — leave CPU headroom for
+// the production workload — over squeezing out the last of the copy throughput;
+// counting redo-waiters as load caps concurrency near vCPUs rather than
+// oversubscribing the log. It is also cheaper and needs no grant beyond the
+// global_status access that IsAurora and the commit-latency throttler already
+// require, so this throttler drops SELECT on performance_schema.threads /
+// events_waits_current and is always available once Aurora is detected.
+// Reviving the redo-aware variant — gated behind the verified Aurora wait-event
+// name — is a clean follow-up if a workload ever needs the throughput more than
+// the headroom.
+//
+// The commit-latency throttler, reading the same global_status, watches storage
+// saturation directly, so the redo log is not left entirely unguarded by
+// counting all threads here.
 const (
 	// threadsRunningQuery reads the Threads_running status variable: the count
 	// of non-sleeping threads. It comes from performance_schema.global_status
