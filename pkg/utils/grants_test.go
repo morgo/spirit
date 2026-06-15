@@ -38,6 +38,20 @@ func TestDBLevelGrantCoversSchema(t *testing.T) {
 			want:   false,
 		},
 		{
+			// CREATE VIEW / ALTER ROUTINE must not satisfy the CREATE / ALTER
+			// requirements via substring matching: base CREATE and ALTER are absent.
+			name:   "substring privilege names are not false positives",
+			grant:  "GRANT CREATE VIEW,ALTER ROUTINE,DELETE,DROP,INDEX,INSERT,LOCK TABLES,SELECT,TRIGGER,UPDATE ON `strata_%`.* TO `cdb-test_ddl`@`%`",
+			schema: schema,
+			want:   false,
+		},
+		{
+			name:   "privilege list with spaces after commas",
+			grant:  "GRANT ALTER, CREATE, DELETE, DROP, INDEX, INSERT, LOCK TABLES, SELECT, TRIGGER, UPDATE ON `strata_%`.* TO `cdb-test_ddl`@`%`",
+			schema: schema,
+			want:   true,
+		},
+		{
 			name:   "exact schema name",
 			grant:  "GRANT " + allPrivs + " ON `" + schema + "`.* TO `cdb-test_ddl`@`%`",
 			schema: schema,

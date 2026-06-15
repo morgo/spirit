@@ -37,15 +37,29 @@ func DBLevelGrantCoversSchema(grant, schemaName string) bool {
 	if !MySQLLikeMatch(dbPattern, schemaName) {
 		return false
 	}
-	if strings.Contains(privs, "ALL PRIVILEGES") {
+	granted := splitPrivileges(privs)
+	if granted["ALL PRIVILEGES"] {
 		return true
 	}
 	for _, p := range migrationDBPrivileges {
-		if !strings.Contains(privs, p) {
+		if !granted[p] {
 			return false
 		}
 	}
 	return true
+}
+
+// splitPrivileges parses the privilege list from a GRANT statement into a set
+// of individual privilege names. Database-level grants never carry column-level
+// privilege lists, so a plain comma split is sufficient. Matching exact names
+// (rather than substrings) avoids false positives where one privilege name
+// contains another, e.g. CREATE inside CREATE VIEW or ALTER inside ALTER ROUTINE.
+func splitPrivileges(privs string) map[string]bool {
+	set := make(map[string]bool)
+	for p := range strings.SplitSeq(privs, ",") {
+		set[strings.TrimSpace(p)] = true
+	}
+	return set
 }
 
 // MySQLLikeMatch reports whether name matches the given MySQL LIKE-style
