@@ -82,18 +82,13 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 		if strings.Contains(grant, `RELOAD`) && strings.Contains(grant, ` ON *.*`) {
 			foundReload = true
 		}
-		if schemaName != "" {
-			if strings.Contains(grant, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.*", schemaName)) {
-				foundDBAll = true
-			}
-			if strings.Contains(grant, fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.*", strings.ReplaceAll(schemaName, "_", "\\_"))) {
-				foundDBAll = true
-			}
-			if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, fmt.Sprintf(" ON `%s`.*", schemaName)) {
-				foundDBAll = true
-			}
-		}
 		if stringContainsAll(grant, `ALTER`, `CREATE`, `DELETE`, `DROP`, `INDEX`, `INSERT`, `LOCK TABLES`, `SELECT`, `TRIGGER`, `UPDATE`, ` ON *.*`) {
+			foundDBAll = true
+		}
+		// A database-level grant covers the schema if its database-name pattern
+		// matches (including MySQL wildcards such as `strata_%`) and it confers
+		// either ALL PRIVILEGES or the full set spirit requires.
+		if schemaName != "" && utils.DBLevelGrantCoversSchema(grant, schemaName) {
 			foundDBAll = true
 		}
 		if strings.Contains(grant, `CONNECTION_ADMIN`) && strings.Contains(grant, ` ON *.*`) {
