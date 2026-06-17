@@ -168,6 +168,43 @@ func TestPlanChanges_StructuredViolations(t *testing.T) {
 	require.Empty(t, change.Errors())
 }
 
+func TestPlanChanges_DropColumnsHaveColumnDetails(t *testing.T) {
+	current := []table.TableSchema{
+		{Name: "users", Schema: `CREATE TABLE users (
+			id BIGINT PRIMARY KEY,
+			email VARCHAR(255),
+			phone VARCHAR(255)
+		)`},
+	}
+	desired := []table.TableSchema{
+		{Name: "users", Schema: `CREATE TABLE users (
+			id BIGINT PRIMARY KEY
+		)`},
+	}
+
+	plan, err := PlanChanges(current, desired, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, plan.Changes, 1)
+	require.True(t, plan.HasErrors())
+
+	change := plan.Changes[0]
+	require.Equal(t, "users", change.TableName)
+	require.Len(t, change.Errors(), 2)
+
+	columnMessages := map[string]string{}
+	for _, violation := range change.Errors() {
+		require.Equal(t, "unsafe", violation.Linter.Name())
+		require.NotNil(t, violation.Location)
+		require.Equal(t, "users", violation.Location.Table)
+		require.NotNil(t, violation.Location.Column)
+		columnMessages[*violation.Location.Column] = violation.Message
+	}
+	require.Equal(t, map[string]string{
+		"email": "Unsafe operation detected: DROP COLUMN `email`",
+		"phone": "Unsafe operation detected: DROP COLUMN `phone`",
+	}, columnMessages)
+}
+
 func TestPlanChanges_WithLintConfig(t *testing.T) {
 	// Disable the has_foreign_key linter — FK warnings should not appear.
 	current := []table.TableSchema{
