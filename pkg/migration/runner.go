@@ -151,6 +151,27 @@ func NewRunner(m *Migration) (*Runner, error) {
 	return runner, nil
 }
 
+// controlPlaneConns is the connection headroom the main pool reserves above
+// the copy hot path (Threads read workers + WriteThreads applier workers) for
+// the periodic control-plane queries that also run on r.db:
+//
+//   - +1 checkpoint INSERT          (every CheckpointDumpInterval)
+//   - +1 replication-flush poll     (every DefaultFlushInterval, reads gtid_executed)
+//   - +len(changes) table-stats     (AutoUpdateStatistics runs one goroutine per change table)
+//
+// A single fixed spare (the historical "+1") could not cover these once the
+// copier + applier saturated the budget: a saturated pool left checkpoint, the
+// flush poll, and the stats updater serializing behind one connection — adding
+// latency to checkpoints and stretching flush durations. The squeeze is worst
+// on non-autoscaling instances, where maxWrite == WriteThreads leaves no
+// incidental slack (an autoscaling pool sized for 2× WriteThreads happens to
+// carry spare connections while the applier runs near its start size).
+// Throttler polls are NOT counted here — they run on the dedicated monitorDB
+// pool (see the monitorDB field).
+func (r *Runner) controlPlaneConns() int {
+	return len(r.changes) + 2
+}
+
 func (r *Runner) SetMetricsSink(sink metrics.Sink) {
 	r.metricsSink = sink
 }
@@ -198,13 +219,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Size the connection pool the same way for both the buffered and
 	// unbuffered paths:
 	//
-	//	pool = threads + write-threads + 1
+	//	pool = threads + write-threads + controlPlaneConns()
 	//
-	//	- threads        copier + checksum read concurrency
-	//	- write-threads  replication-applier write concurrency
-	//	- +1             headroom for control-plane queries (feedback,
-	//	                 checkpoints) so they don't wait behind a fully
-	//	                 saturated copier + applier
+	//	- threads             copier + checksum read concurrency
+	//	- write-threads       replication-applier write concurrency
+	//	- controlPlaneConns() headroom for the periodic control-plane queries
+	//	                      that also run on the main pool (checkpoint,
+	//	                      replication-flush poll, per-table stats), so they
+	//	                      don't serialize behind a single spare connection
+	//	                      once the copier + applier saturate the budget.
 	//
 	// WriteThreads may still be 0 here — that's the "auto-size on Aurora"
 	// sentinel, which can only be resolved once we have a connection to probe
@@ -212,7 +235,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// setupCopierCheckerAndReplClient grows it to the final size after
 	// resolving WriteThreads. The pool only ever grows (via SetMaxOpenConns);
 	// later phases (checksum, cutover) ratchet it further but never shrink it.
-	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + 1
+	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns()
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", maskPasswordInDSN(r.dsn()), err)
@@ -558,11 +581,11 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// start value.
 	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale)
 	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
-	// known: threads + maxWrite + 1 (see the MaxOpenConnections doc in Run).
-	// Sizing for maxWrite ensures a scaled-up applier never starves on
-	// connections. This is a no-op unless WriteThreads was auto-sized up from 0
+	// known: threads + maxWrite + controlPlaneConns() (see the MaxOpenConnections
+	// doc in Run). Sizing for maxWrite ensures a scaled-up applier never starves
+	// on connections. This is a no-op unless WriteThreads was auto-sized up from 0
 	// or autoscaling raised the ceiling; the pool only ever grows.
-	if poolSize := r.migration.Threads + maxWrite + 1; poolSize > r.dbConfig.MaxOpenConnections {
+	if poolSize := r.migration.Threads + maxWrite + r.controlPlaneConns(); poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		r.db.SetMaxOpenConns(poolSize)
 	}
