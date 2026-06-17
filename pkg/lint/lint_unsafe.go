@@ -2,6 +2,7 @@ package lint
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -71,7 +72,9 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 		case *ast.AlterTableStmt:
 			for _, spec := range node.Specs {
 				switch spec.Tp { //nolint: exhaustive
-				case ast.AlterTableDropColumn, ast.AlterTableDropPrimaryKey, ast.AlterTableDropPartition, ast.AlterTableDiscardPartitionTablespace,
+				case ast.AlterTableDropColumn:
+					violations = append(violations, unsafeDropColumnViolation(l, change.Table, spec))
+				case ast.AlterTableDropPrimaryKey, ast.AlterTableDropPartition, ast.AlterTableDiscardPartitionTablespace,
 					ast.AlterTableDiscardTablespace, ast.AlterTableCoalescePartitions:
 					violations = append(violations, Violation{
 						Linter:   l,
@@ -125,4 +128,25 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 		}
 	}
 	return violations
+}
+
+func unsafeDropColumnViolation(l *UnsafeLinter, tableName string, spec *ast.AlterTableSpec) Violation {
+	location := &Location{Table: tableName}
+	message := "Unsafe operation detected: DROP COLUMN"
+	if spec.OldColumnName != nil {
+		columnName := spec.OldColumnName.Name.O
+		location.Column = &columnName
+		message += " " + quoteUnsafeIdentifier(columnName)
+	}
+
+	return Violation{
+		Linter:   l,
+		Location: location,
+		Message:  message,
+		Severity: SeverityError,
+	}
+}
+
+func quoteUnsafeIdentifier(identifier string) string {
+	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }
