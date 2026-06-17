@@ -55,11 +55,13 @@ const (
 	// needs no privilege beyond what those already require — there is no
 	// separate grant probe.
 	//
-	// No self-exclusion: the monitor's own polling query counts itself as one
-	// running thread (and the commit-latency poller may add another). On the
-	// 4+ vCPU instances where the autoscaler engages, ±1–2 is in the noise and
-	// the EWMA smooths it, so we accept the small over-count rather than carry
-	// machinery to subtract it.
+	// Self-counting: the monitor's own polling query counts itself as one
+	// running thread (and the commit-latency poller / GTID-changeset flush may
+	// add another). The EWMA Utilization() signal absorbs this small over-count
+	// and the autoscaler only engages at 4+ vCPUs where ±1–2 is in the noise,
+	// so Utilization carries no correction. The binary hard-stop, however, has
+	// no averaging to lean on and must work down to the smallest instances, so
+	// it compensates explicitly — see selfMonitoringHeadroom.
 	threadsRunningQuery = `SELECT CAST(VARIABLE_VALUE AS UNSIGNED)
 	FROM performance_schema.global_status
 	WHERE VARIABLE_NAME = 'Threads_running'`
@@ -176,9 +178,32 @@ var threadsRunningPollInterval = 5 * time.Second
 // within one poll.
 const threadsRunningEWMAAlpha = 0.3
 
+// selfMonitoringHeadroom is added to the vCPU count to form the hard-stop
+// threshold, so the throttle fires on the production workload saturating the
+// box — not on spirit's own baseline.
+//
+// Threads_running is a whole-server gauge, so it includes spirit's own
+// monitoring connections: this throttler's polling query is itself a running
+// thread at the instant it samples (see threadsRunningQuery), and the
+// commit-latency poller and periodic GTID-changeset flush share the monitor
+// pool. That self-count is ~1–2 threads and does not grow with the instance.
+//
+// On 4+ vCPU instances that over-count is in the noise. On small instances it
+// is the entire margin: at vCPUs=2 spirit's own polling alone holds
+// Threads_running at or above a bare vCPU threshold, so the copy throttles
+// against itself with zero production load and creeps forward only via
+// BlockWait's 60s timeout (the "threads-running throttler timed out" warning).
+// This fixed headroom lets the copy run when only spirit is busy while still
+// backing off once the production workload piles real work onto the box. The
+// copy's own read/apply threads are deliberately NOT excluded — those are
+// genuine CPU load that should count toward saturation; only spirit's
+// (instance-size-independent) monitoring footprint is.
+const selfMonitoringHeadroom = 2
+
 // ThreadsRunning throttles when the server's Threads_running count exceeds the
-// instance vCPU count. Aurora-only — depends on @@innodb_buffer_pool_instances
-// matching vCPUs.
+// instance vCPU count plus a small headroom for spirit's own monitoring
+// connections (see selfMonitoringHeadroom). Aurora-only — depends on
+// @@innodb_buffer_pool_instances matching vCPUs.
 type ThreadsRunning struct {
 	db     *sql.DB
 	logger *slog.Logger
@@ -263,9 +288,10 @@ func (a *ThreadsRunning) IsThrottled() bool {
 }
 
 // Utilization reports the smoothed (EWMA) Threads_running count as a fraction
-// of the instance vCPU count. 1.0 means the sustained average equals vCPUs —
-// around where the raw signal trips IsThrottled. Returns 0 if vCPUs is not yet
-// known. The smoothing exists for the autoscaler, this method's only consumer:
+// of the instance vCPU count. 1.0 means the sustained average equals vCPUs;
+// the raw hard-stop trips a little above this, at vCPUs + selfMonitoringHeadroom.
+// Returns 0 if vCPUs is not yet known. The smoothing exists for the autoscaler,
+// this method's only consumer:
 // it must see sustained load, not single-sample spikes (see
 // threadsRunningEWMAAlpha). The binary hard-stop deliberately does not share
 // it.
@@ -289,9 +315,17 @@ func (a *ThreadsRunning) Utilization() float64 {
 	return math.Float64frombits(a.smoothedBits.Load()) / float64(a.vCPUs)
 }
 
-// BlockWait blocks until Threads_running falls to or below vCPUs, or up to
-// 60s. Matches the commit-latency throttler's loop shape so the multi-
-// throttler waits uniformly across signals.
+// throttleThreshold is the Threads_running level the hard-stop trips above: the
+// instance vCPU count plus headroom for spirit's own monitoring connections
+// (see selfMonitoringHeadroom). Single source of truth for applySample's
+// comparison and the log lines, so they can never drift apart.
+func (a *ThreadsRunning) throttleThreshold() int64 {
+	return a.vCPUs + selfMonitoringHeadroom
+}
+
+// BlockWait blocks until Threads_running falls to or below the throttle
+// threshold (vCPUs + headroom), or up to 60s. Matches the commit-latency
+// throttler's loop shape so the multi-throttler waits uniformly across signals.
 func (a *ThreadsRunning) BlockWait(ctx context.Context) {
 	timer := time.NewTimer(blockWaitInterval)
 	defer timer.Stop()
@@ -309,7 +343,8 @@ func (a *ThreadsRunning) BlockWait(ctx context.Context) {
 	}
 	a.logger.Warn("threads-running throttler timed out",
 		"threads_running", a.lastThreadsRunning.Load(),
-		"vCPUs", a.vCPUs)
+		"vCPUs", a.vCPUs,
+		"throttle_threshold", a.throttleThreshold())
 }
 
 // UpdateLag samples Threads_running and updates throttled state.
@@ -347,13 +382,15 @@ func (a *ThreadsRunning) applySample(running int64) {
 		a.smoothedBits.Store(math.Float64bits(prev + threadsRunningEWMAAlpha*(sample-prev)))
 	}
 
-	// The hard-stop compares the raw sample, not the EWMA: it protects the
+	// The hard-stop compares the raw sample (against vCPUs plus headroom for
+	// spirit's own monitoring threads), not the EWMA: it protects the
 	// production workload and must engage within one poll of a load spike.
-	throttled := running > a.vCPUs
+	throttled := running > a.throttleThreshold()
 	prev := a.isThrottled.Swap(throttled)
 	if throttled && !prev {
-		a.logger.Warn("Threads_running exceeds vCPUs, throttling",
+		a.logger.Warn("Threads_running exceeds throttle threshold, throttling",
 			"threads_running", running,
-			"vCPUs", a.vCPUs)
+			"vCPUs", a.vCPUs,
+			"throttle_threshold", a.throttleThreshold())
 	}
 }

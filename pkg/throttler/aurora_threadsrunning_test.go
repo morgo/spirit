@@ -29,19 +29,38 @@ func TestThreadsRunning_BelowVCPUs(t *testing.T) {
 	require.Equal(t, int64(4), a.lastThreadsRunning.Load())
 }
 
-func TestThreadsRunning_AtVCPUsIsNotThrottled(t *testing.T) {
-	// Threshold is strictly greater than vCPUs — sitting exactly at vCPUs is
-	// not over-subscribed, so we should not throttle.
+func TestThreadsRunning_AtThresholdIsNotThrottled(t *testing.T) {
+	// The hard-stop trips strictly above vCPUs + selfMonitoringHeadroom, so
+	// sitting exactly at the threshold (here 8+2=10) is not over-subscribed and
+	// must not throttle. The headroom absorbs spirit's own monitoring threads.
 	a := newTestThreadsRunning(t, 8)
-	a.applySample(8)
+	a.applySample(a.vCPUs + selfMonitoringHeadroom)
 	require.False(t, a.IsThrottled())
 }
 
-func TestThreadsRunning_AboveVCPUsThrottles(t *testing.T) {
+func TestThreadsRunning_AboveThresholdThrottles(t *testing.T) {
 	a := newTestThreadsRunning(t, 8)
-	a.applySample(9)
+	sample := a.vCPUs + selfMonitoringHeadroom + 1 // one over the threshold
+	a.applySample(sample)
 	require.True(t, a.IsThrottled())
-	require.Equal(t, int64(9), a.lastThreadsRunning.Load())
+	require.Equal(t, sample, a.lastThreadsRunning.Load())
+}
+
+func TestThreadsRunning_HeadroomSparesSmallInstance(t *testing.T) {
+	// Regression for the "threads-running throttler timed out" flood on small
+	// Aurora instances: at vCPUs=2 spirit's own monitoring footprint pushes
+	// Threads_running to ~3-4 with zero production load. The headroom must keep
+	// those samples from tripping the hard-stop (else the copy throttles against
+	// itself and only advances via BlockWait's 60s timeout), while genuine
+	// production load on top still throttles.
+	a := newTestThreadsRunning(t, 2) // threshold = 2 + 2 = 4
+	for _, spiritOnly := range []int64{2, 3, 4} {
+		a.applySample(spiritOnly)
+		require.Falsef(t, a.IsThrottled(),
+			"Threads_running=%d (spirit's own baseline) must not throttle on a 2-vCPU box", spiritOnly)
+	}
+	a.applySample(5) // production work piled on top of spirit's baseline
+	require.True(t, a.IsThrottled(), "real load above the threshold must still throttle")
 }
 
 func TestThreadsRunning_RecoversBelowVCPUs(t *testing.T) {
