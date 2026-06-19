@@ -192,7 +192,7 @@ const threadsRunningEWMAAlpha = 0.3
 // is the entire margin: at vCPUs=2 spirit's own polling alone holds
 // Threads_running at or above a bare vCPU threshold, so the copy throttles
 // against itself with zero production load and creeps forward only via
-// BlockWait's 60s timeout (the "threads-running throttler timed out" warning).
+// BlockWait's 60s backoff (the "allowing one copy loop to make progress" log).
 // This fixed headroom lets the copy run when only spirit is busy while still
 // backing off once the production workload piles real work onto the box. The
 // copy's own read/apply threads are deliberately NOT excluded — those are
@@ -341,7 +341,7 @@ func (a *ThreadsRunning) BlockWait(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
-	a.logger.Warn("threads-running throttler timed out",
+	a.logger.Info("threads-running stayed above threshold for the full backoff; allowing one copy loop to make progress before throttling again",
 		"threads_running", a.lastThreadsRunning.Load(),
 		"vCPUs", a.vCPUs,
 		"throttle_threshold", a.throttleThreshold())

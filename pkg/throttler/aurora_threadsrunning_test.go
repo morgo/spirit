@@ -47,11 +47,11 @@ func TestThreadsRunning_AboveThresholdThrottles(t *testing.T) {
 }
 
 func TestThreadsRunning_HeadroomSparesSmallInstance(t *testing.T) {
-	// Regression for the "threads-running throttler timed out" flood on small
+	// Regression for the "allowing one copy loop to make progress" flood on small
 	// Aurora instances: at vCPUs=2 spirit's own monitoring footprint pushes
 	// Threads_running to ~3-4 with zero production load. The headroom must keep
 	// those samples from tripping the hard-stop (else the copy throttles against
-	// itself and only advances via BlockWait's 60s timeout), while genuine
+	// itself and only advances via BlockWait's 60s backoff), while genuine
 	// production load on top still throttles.
 	a := newTestThreadsRunning(t, 2) // threshold = 2 + 2 = 4
 	for _, spiritOnly := range []int64{2, 3, 4} {

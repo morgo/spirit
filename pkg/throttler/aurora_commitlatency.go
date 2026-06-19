@@ -190,7 +190,7 @@ func (c *CommitLatency) BlockWait(ctx context.Context) {
 			// Continue checking
 		}
 	}
-	c.logger.Warn("commit-latency throttler timed out",
+	c.logger.Info("commit latency stayed above threshold for the full backoff; allowing one copy loop to make progress before throttling again",
 		"avg_commit_latency", time.Duration(c.avgLatencyUs.Load())*time.Microsecond,
 		"threshold", c.threshold)
 }
