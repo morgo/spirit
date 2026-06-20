@@ -172,7 +172,7 @@ func (r *MySQLRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	r.logger.Info("continuous checksum: chunk recopied",
 		"chunk", chunk.String(),
 		"row_count", len(rowData),
-		"elapsed", time.Since(start).Round(time.Millisecond),
+		"elapsed", time.Since(start).Round(time.Millisecond).String(),
 	)
 	return nil
 }

@@ -387,7 +387,7 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
-	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second))
+	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
 
 	// A real checksum failure outranks a clean nil — surface it.
 	if checksumErr != nil && !errors.Is(checksumErr, context.Canceled) {
@@ -484,7 +484,7 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
-	r.logger.Info("Sync stopped", "total_time", time.Since(r.startTime).Round(time.Second))
+	r.logger.Info("Sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
 	// A real checksum failure outranks a clean nil — surface it so the
 	// caller (and exit code) reflect the underlying problem rather than
 	// just "ctx cancelled."
@@ -1265,14 +1265,14 @@ func (r *Runner) watchStatus(ctx context.Context) {
 					"progress", r.copier.GetProgress(),
 					"eta", r.copier.GetETA(),
 					"pending-changes", pending,
-					"elapsed", time.Since(r.startTime).Round(time.Second),
+					"elapsed", time.Since(r.startTime).Round(time.Second).String(),
 				)
 			case r.replClient != nil:
 				r.logger.Info("sync status",
 					"phase", "continuous",
 					"pending-changes", pending,
 					"position", r.replClient.Position(),
-					"elapsed", time.Since(r.startTime).Round(time.Second),
+					"elapsed", time.Since(r.startTime).Round(time.Second).String(),
 				)
 			}
 		}

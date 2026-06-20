@@ -114,7 +114,7 @@ func (l *Replica) BlockWait(ctx context.Context) {
 			// Continue checking
 		}
 	}
-	l.logger.Warn("lag monitor timed out", "lag_ms", l.currentLagInMs.Load(), "tolerance", l.lagTolerance)
+	l.logger.Warn("lag monitor timed out", "lag_ms", l.currentLagInMs.Load(), "tolerance", l.lagTolerance.String())
 }
 
 // UpdateLag is a MySQL 8.0+ implementation of lag that is a better approximation than "seconds_behind_source".
@@ -128,7 +128,7 @@ func (l *Replica) UpdateLag(ctx context.Context) error {
 	if l.IsThrottled() {
 		l.logger.Warn("replication delayed, throttling in progress",
 			"lag_ms", l.currentLagInMs.Load(),
-			"tolerance", l.lagTolerance)
+			"tolerance", l.lagTolerance.String())
 	}
 	return nil
 }

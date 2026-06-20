@@ -415,9 +415,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		"instant-ddl", r.usedInstantDDL,
 		"inplace-ddl", r.usedInplaceDDL,
 		"total-chunks", copiedChunks,
-		"copy-rows-time", r.copyDuration.Round(time.Second),
-		"checksum-time", r.checker.ExecTime().Round(time.Second),
-		"total-time", time.Since(r.startTime).Round(time.Second),
+		"copy-rows-time", r.copyDuration.Round(time.Second).String(),
+		"checksum-time", r.checker.ExecTime().Round(time.Second).String(),
+		"total-time", time.Since(r.startTime).Round(time.Second).String(),
 		"conns-in-use", r.db.Stats().InUse,
 	)
 	// cleanup all the tables
@@ -1582,7 +1582,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 
 	r.logger.Warn("cutover deferred while sentinel table exists; will wait",
 		"sentinel-table", sentinelTableName,
-		"wait-limit", sentinelWaitLimit,
+		"wait-limit", sentinelWaitLimit.String(),
 	)
 
 	// Spawn the continuous checksum. It uses its own checker + chunker and is
@@ -1766,7 +1766,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		// Without flushing here, binlog deltas accumulate during the wait
 		// and have to be drained under the cutover's table lock.
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
-			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
+			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second).String())
 			r.replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 			timer := time.NewTimer(remaining)
 			select {
@@ -1809,7 +1809,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		lastDuration = time.Since(iterationStart)
 		r.logger.Info("continuous checksum iteration complete",
 			"iteration", iteration,
-			"duration", lastDuration.Round(time.Second),
+			"duration", lastDuration.Round(time.Second).String(),
 		)
 	}
 }

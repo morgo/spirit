@@ -456,7 +456,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 				}
 
 				if currentTime.Sub(lastErrorTime) < backoffDuration {
-					c.logger.Info("Backing off before recreating streamer", "duration", backoffDuration)
+					c.logger.Info("Backing off before recreating streamer", "duration", backoffDuration.String())
 					backoffTimer := time.NewTimer(backoffDuration)
 					select {
 					case <-ctx.Done():
@@ -836,7 +836,7 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 			if err := c.flush(ctx, false, nil); err != nil {
 				c.logger.Error("error flushing GTID changeset", "error", err)
 			}
-			c.logger.Info("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop))
+			c.logger.Info("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop).String())
 		}
 	}
 }

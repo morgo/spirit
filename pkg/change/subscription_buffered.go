@@ -345,7 +345,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		}
 		s.logger.Info("subscription unparked from soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
-			"parked_duration", time.Since(parkStart),
+			"parked_duration", time.Since(parkStart).String(),
 			"size_bytes", s.sizeBytes,
 			"closed", s.closed,
 		)
@@ -527,7 +527,7 @@ func (s *bufferedMap) flushBatch(ctx context.Context, deleteKeys [][]any, upsert
 		"deleteAffectedRows", deleteAffected,
 		"upsertRowCount", len(upsertRows),
 		"upsertAffectedRows", upsertAffected,
-		"duration", time.Since(startTime),
+		"duration", time.Since(startTime).String(),
 	)
 
 	return nil
@@ -678,7 +678,7 @@ func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool
 	// Drain succeeded (or no drain needed) — safe to flip the flag now.
 	s.watermarkOptimization = enabled
 
-	s.logger.Info("watermark optimization toggled",
+	s.logger.Debug("watermark optimization toggled",
 		"table", s.table.TableName,
 		"enabled", enabled,
 		"keys_added", s.keysAdded.Swap(0),
