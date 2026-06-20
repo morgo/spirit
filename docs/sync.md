@@ -64,6 +64,7 @@ source privileges depend on the change feed:
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
+- [defer-secondary-indexes](#defer-secondary-indexes)
 - [copy-only](#copy-only)
 - [force](#force)
 - [gtid](#gtid)
@@ -114,6 +115,28 @@ How many concurrent write threads to use on the target.
 
 How often buffered changes are applied to the target during continuous sync —
 the replication-latency vs. batching trade-off.
+
+### defer-secondary-indexes
+
+- Type: Boolean
+- Default value: `false`
+
+When set to `true`, the target tables are created **without their regular
+secondary indexes**, and the indexes are added back in a single `ALTER` per
+table once the initial copy has completed (before the continuous phase begins,
+or before the post-copy checksum in `--copy-only` mode). Bulk-loading an
+index-free table is faster and lighter on temporary space; only regular
+secondary indexes are deferred — `PRIMARY`, `UNIQUE`, `FULLTEXT` and `SPATIAL`
+indexes are kept on the initial `CREATE`. This mirrors
+[`move --defer-secondary-indexes`](move.md#defer-secondary-indexes).
+
+Use it only when the target is **not yet serving reads**: the tables briefly
+lack their secondary indexes during the copy, so queries against the target in
+that window would do full scans (and optimizer statistics are not yet
+representative). Adding the indexes also needs enough temporary space on the
+target to build them. The restore is resume-safe and idempotent — a re-run
+(even without the flag) detects any indexes still missing on the target and
+adds them, so an interrupted run finishes the job on the next start.
 
 ### copy-only
 
