@@ -253,7 +253,16 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		capturedStartTime := chunkStartTime
 		callback := func(affectedRows int64, err error) {
 			if err != nil {
-				c.logger.Error("applier callback received error", "chunk", capturedChunk.String(), "error", err)
+				// A context cancellation (Ctrl+C / graceful shutdown) tears down
+				// in-flight chunklets deliberately — it is not a copy failure, so
+				// log it quietly rather than alarming the user with an ERROR. We
+				// still setInvalid to unwind Run; higher layers filter context
+				// cancellation when deciding the command's exit status.
+				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+					c.logger.Debug("applier callback cancelled", "chunk", capturedChunk.String(), "error", err)
+				} else {
+					c.logger.Error("applier callback received error", "chunk", capturedChunk.String(), "error", err)
+				}
 				c.setInvalid(err)
 				return
 			}
