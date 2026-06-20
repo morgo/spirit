@@ -191,8 +191,8 @@ func (c *CommitLatency) BlockWait(ctx context.Context) {
 		}
 	}
 	c.logger.Info("commit latency stayed above threshold for the full backoff; allowing one copy loop to make progress before throttling again",
-		"avg_commit_latency", time.Duration(c.avgLatencyUs.Load())*time.Microsecond,
-		"threshold", c.threshold)
+		"avg_commit_latency", (time.Duration(c.avgLatencyUs.Load()) * time.Microsecond).String(),
+		"threshold", c.threshold.String())
 }
 
 // UpdateLag samples the Aurora commit counters and updates the throttled
@@ -265,8 +265,8 @@ func (c *CommitLatency) applySample(commits, latency int64) {
 	prev := c.isThrottled.Swap(throttled)
 	if throttled && !prev {
 		c.logger.Warn("commit latency exceeds threshold, throttling",
-			"avg_commit_latency", avg,
-			"threshold", c.threshold,
+			"avg_commit_latency", avg.String(),
+			"threshold", c.threshold.String(),
 			"delta_commits", deltaCommits)
 	}
 }

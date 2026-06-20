@@ -515,7 +515,7 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 			"under_5_attempts", c.passedUnder5AttemptsThisPass.Load(),
 			"under_10_attempts", c.passedUnder10AttemptsThisPass.Load(),
 			"recopies", c.recopiesThisPass.Load(),
-			"duration", time.Since(passStart).Round(time.Millisecond),
+			"duration", time.Since(passStart).Round(time.Millisecond).String(),
 		)
 	}
 }

@@ -140,7 +140,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.cancelFunc = cancelFunc
 
 	a.started = true
-	a.logger.Info("starting SingleTargetApplier", "writeWorkers", a.writeWorkersCount)
+	a.logger.Debug("starting SingleTargetApplier", "writeWorkers", a.writeWorkersCount)
 
 	// Reset the worker pool bookkeeping and record the context workers run
 	// under, so SetWriteWorkers can spawn more later.
@@ -299,7 +299,7 @@ func (a *SingleTargetApplier) Stop() error {
 		return nil
 	}
 
-	a.logger.Info("stopping SingleTargetApplier")
+	a.logger.Debug("stopping SingleTargetApplier")
 
 	// Cancel the context to signal workers to stop
 	if a.cancelFunc != nil {
@@ -334,7 +334,7 @@ func (a *SingleTargetApplier) Stop() error {
 	close(a.chunkletCompletions)
 	a.wg.Wait()
 
-	a.logger.Info("SingleTargetApplier stopped")
+	a.logger.Debug("SingleTargetApplier stopped")
 	return nil
 }
 

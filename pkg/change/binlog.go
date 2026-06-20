@@ -522,7 +522,7 @@ func (c *binlogClient) readStream(ctx context.Context) {
 
 				// Apply exponential backoff
 				if currentTime.Sub(lastErrorTime) < backoffDuration {
-					c.logger.Info("Backing off before recreating streamer", "duration", backoffDuration)
+					c.logger.Info("Backing off before recreating streamer", "duration", backoffDuration.String())
 					backoffTimer := time.NewTimer(backoffDuration)
 					select {
 					case <-ctx.Done():
@@ -994,7 +994,7 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 			if err := c.flush(ctx, false, nil); err != nil {
 				c.logger.Error("error flushing binary log", "error", err)
 			}
-			c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop))
+			c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop).String())
 		}
 	}
 }

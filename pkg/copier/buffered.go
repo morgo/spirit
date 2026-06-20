@@ -138,7 +138,7 @@ func (c *buffered) Run(ctx context.Context) error {
 
 	// Start read workers
 	g, errGrpCtx := errgroup.WithContext(ctx)
-	c.logger.Info("starting read workers", "count", c.concurrency)
+	c.logger.Debug("starting read workers", "count", c.concurrency)
 	for range c.concurrency {
 		g.Go(func() error {
 			return c.readWorker(errGrpCtx)
@@ -260,7 +260,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 			c.logger.Debug("applier callback invoked",
 				"table", capturedChunk.Table.TableName, "chunk", capturedChunk.String(),
-				"affected_rows", affectedRows, "duration", time.Since(capturedStartTime))
+				"affected_rows", affectedRows, "duration", time.Since(capturedStartTime).String())
 
 			// Calculate total time from read start to callback completion (read + write)
 			totalTime := time.Since(capturedStartTime)
@@ -283,7 +283,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		}
 	}
 
-	c.logger.Info("readWorker exiting main loop")
+	c.logger.Debug("readWorker exiting main loop")
 	return nil
 }
 
