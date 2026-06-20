@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
+	"github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,6 +122,53 @@ func TestKillLongRunningTransactions(t *testing.T) {
 		err = tx.Rollback()
 		require.Error(t, err, "expected rollback to fail because transaction was killed")
 	}
+}
+
+// TestCheckForceKillPrivileges verifies the preflight privilege probe used by
+// the move and migration checks: it must error when the connection lacks SELECT
+// on performance_schema.* and succeed once it is granted. Because the probe
+// selects zero rows it never emits "found locking transaction" log lines during
+// preflight. A root connection is required to create the restricted user and
+// grant privileges (the default test user lacks GRANT OPTION).
+func TestCheckForceKillPrivileges(t *testing.T) {
+	config, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	config.User = "root" // needs grant privilege
+	rootDB, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s", config.User, config.Passwd, config.Addr, config.DBName))
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rootDB)
+
+	_, err = rootDB.ExecContext(t.Context(), "DROP USER IF EXISTS testforcekillprobeuser")
+	require.NoError(t, err)
+	_, err = rootDB.ExecContext(t.Context(), "CREATE USER testforcekillprobeuser")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = rootDB.ExecContext(t.Context(), "DROP USER IF EXISTS testforcekillprobeuser")
+	})
+	// Grant SELECT on the test schema only, so the user can connect but cannot
+	// read performance_schema.
+	_, err = rootDB.ExecContext(t.Context(), "GRANT SELECT ON test.* TO testforcekillprobeuser")
+	require.NoError(t, err)
+
+	connect := func() *sql.DB {
+		db, err := sql.Open("mysql", fmt.Sprintf("testforcekillprobeuser:@tcp(%s)/%s", config.Addr, config.DBName))
+		require.NoError(t, err)
+		return db
+	}
+
+	lowPrivDB := connect()
+	require.Error(t, CheckForceKillPrivileges(t.Context(), lowPrivDB),
+		"probe must fail without SELECT on performance_schema.*")
+	require.NoError(t, lowPrivDB.Close())
+
+	_, err = rootDB.ExecContext(t.Context(), "GRANT SELECT ON `performance_schema`.* TO testforcekillprobeuser")
+	require.NoError(t, err)
+
+	// Reconnect so the new grant is picked up.
+	grantedDB := connect()
+	defer utils.CloseAndLog(grantedDB)
+	require.NoError(t, CheckForceKillPrivileges(t.Context(), grantedDB),
+		"probe must succeed once SELECT on performance_schema.* is granted")
 }
 
 func TestForceKillGracePeriod(t *testing.T) {

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn"
-	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
 
@@ -94,11 +93,11 @@ func privilegesCheck(ctx context.Context, r Resources, logger *slog.Logger) erro
 
 	if r.ForceKill {
 		var errs []error
-		// Parsing performance_schema grants seems really hard, so we just try to execute the queries and see if they succeed.
-		if _, err := dbconn.GetTableLocks(ctx, r.DB, []*table.TableInfo{r.Table}, logger, nil); err != nil {
-			errs = append(errs, err)
-		}
-		if _, err := dbconn.GetLockingTransactions(ctx, r.DB, []*table.TableInfo{r.Table}, nil, logger, nil); err != nil {
+		// Parsing performance_schema grants seems really hard, so we just probe
+		// the tables the force-kill queries read and see if it succeeds. This is
+		// a privilege probe only: it selects zero rows and logs nothing. The
+		// actual lock detection (which does log) runs during cutover.
+		if err := dbconn.CheckForceKillPrivileges(ctx, r.DB); err != nil {
 			errs = append(errs, err)
 		}
 		if !skipRolePrivilegeCheck {

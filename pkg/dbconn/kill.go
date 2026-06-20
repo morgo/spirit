@@ -95,6 +95,19 @@ WHERE t.processlist_id IS NOT NULL
 	queryTableClause = " AND (ml.object_schema, ml.object_name) IN (%s) "
 	rdsKillStatement = "CALL mysql.rds_kill(%d)" // not needed in MySQL 8.0 with the CONNECTION_ADMIN privilege
 	killStatement    = "KILL %d"
+
+	// forceKillPrivilegeProbe verifies the connection can read every
+	// performance_schema / information_schema table the force-kill queries
+	// (TableLockQuery and LongRunningEventQuery) depend on. It selects zero rows
+	// (LIMIT 0) so it neither scans nor logs, but MySQL still enforces
+	// table-level SELECT privileges at prepare time, so a missing grant surfaces
+	// as an error.
+	forceKillPrivilegeProbe = `SELECT 1
+FROM performance_schema.metadata_locks ml
+    JOIN performance_schema.threads t ON ml.owner_thread_id = t.thread_id
+    LEFT JOIN performance_schema.events_transactions_current etc ON etc.thread_id = ml.owner_thread_id
+    LEFT JOIN information_schema.innodb_trx trx ON t.processlist_id = trx.trx_mysql_thread_id
+LIMIT 0`
 )
 
 type LockDetail struct {
@@ -165,15 +178,20 @@ func GetLockingTransactions(ctx context.Context, db *sql.DB, tables []*table.Tab
 	query := LongRunningEventQuery
 
 	params := []any{}
-	if len(ignorePIDs) > 0 {
-		// If there are PIDs to ignore, we need to add them to the query
-		inList, inParams := sliceToInList(ignorePIDs)
-		if len(inList) > 0 {
-			inList = ", " + inList // Add a comma for formatting
-		}
-		query += fmt.Sprintf(processIDClause, inList)
-		params = append(params, inParams...)
+	// Always exclude our own connection (CONNECTION_ID()). Reading the
+	// performance_schema tables in this query causes the running connection to
+	// hold SHARED_READ metadata locks on them; without this exclusion the query
+	// observes its own locks and reports them as locking transactions. This is
+	// especially visible in the privileges preflight probe, where the table
+	// filter below is empty (SourceTables aren't populated yet) and the query
+	// would otherwise return every granted table lock on the server, including
+	// its own. Any caller-supplied PIDs are appended to the same NOT IN list.
+	inList, inParams := sliceToInList(ignorePIDs)
+	if len(inList) > 0 {
+		inList = ", " + inList // Add a comma for formatting
 	}
+	query += fmt.Sprintf(processIDClause, inList)
+	params = append(params, inParams...)
 	if len(tables) > 0 {
 		inList, inParams := tablesToInList(tables, logger)
 		query += fmt.Sprintf(queryTableClause, inList)
@@ -253,15 +271,15 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 	defer tx.Rollback() //nolint:errcheck
 	query := TableLockQuery
 	params := make([]any, 0, len(tables)*2)
-	if len(ignorePIDs) > 0 {
-		// If there are PIDs to ignore, we need to add them to the query
-		inList, inParams := sliceToInList(ignorePIDs)
-		if len(inList) > 0 {
-			inList = ", " + inList // Add a comma for formatting
-		}
-		query += fmt.Sprintf(processIDClause, inList)
-		params = append(params, inParams...)
+	// Always exclude our own connection (CONNECTION_ID()); see the matching
+	// note in GetLockingTransactions. Any caller-supplied PIDs are appended to
+	// the same NOT IN list.
+	inList, inParams := sliceToInList(ignorePIDs)
+	if len(inList) > 0 {
+		inList = ", " + inList // Add a comma for formatting
 	}
+	query += fmt.Sprintf(processIDClause, inList)
+	params = append(params, inParams...)
 	if len(tables) > 0 {
 		if len(tables) > 0 {
 			inList, inParams := tablesToInList(tables, logger)
@@ -304,6 +322,23 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 	}
 
 	return locks, nil
+}
+
+// CheckForceKillPrivileges verifies that the connection can read the
+// performance_schema and information_schema tables required by the force-kill
+// queries used during cutover (see GetTableLocks and GetLockingTransactions).
+// It returns an error when any of those tables is inaccessible — for example,
+// when the user lacks SELECT on performance_schema.*.
+//
+// It is intended for preflight privilege checks: the probe selects zero rows
+// and logs nothing, so unlike GetTableLocks / GetLockingTransactions it neither
+// scans server-wide locks nor emits "found locking transaction" log lines.
+func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, forceKillPrivilegeProbe)
+	if err != nil {
+		return err
+	}
+	return rows.Close()
 }
 
 // KillTransaction kills the MySQL session identified by pid (as observed
