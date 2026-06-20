@@ -640,9 +640,10 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 	require.Equal(t, 2, n)
 }
 
-// secondaryIndexNames returns the non-PRIMARY index names on a table, sorted
-// for stable comparison. Used to assert which secondary indexes are present on
-// the target during the defer-secondary-indexes tests.
+// secondaryIndexNames returns the non-PRIMARY index names on a table, in no
+// particular order. Used to assert which secondary indexes are present on the
+// target during the defer-secondary-indexes tests; callers compare with
+// require.ElementsMatch, which is order-independent.
 func secondaryIndexNames(t *testing.T, db *sql.DB, schema, table string) []string {
 	t.Helper()
 	rows, err := db.QueryContext(context.Background(),

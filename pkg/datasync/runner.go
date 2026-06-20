@@ -865,8 +865,9 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName 
 }
 
 // createTargetTables creates each source table on the target using the
-// source's SHOW CREATE TABLE. Tables that already exist are skipped (they
-// were validated as empty + schema-compatible by the target_state check).
+// source's SHOW CREATE TABLE. Tables that already exist are skipped: on a
+// fresh sync checkTargetEmpty has confirmed they are empty, and on a resume
+// they were created by a previous run.
 //
 // When DeferSecondaryIndexes is set, the regular secondary indexes are
 // stripped from the CREATE so the bulk copy loads an index-free table; they
