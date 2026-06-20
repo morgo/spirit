@@ -193,7 +193,7 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 
 	// Start a single feedback coordinator for all shards
 	a.wg.Add(1)
-	go a.feedbackCoordinator()
+	go a.feedbackCoordinator(workerCtx)
 
 	return nil
 }
@@ -522,8 +522,10 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	return result, nil
 }
 
-// feedbackCoordinator tracks chunklet completions from all shards and invokes callbacks when work is done
-func (a *ShardedApplier) feedbackCoordinator() {
+// feedbackCoordinator tracks chunklet completions from all shards and invokes callbacks when work is done.
+// ctx is the worker context; once it is cancelled, completions for already-cleaned-up
+// work are an expected part of shutdown rather than a bug (see Apply's ctx-cancel cleanup).
+func (a *ShardedApplier) feedbackCoordinator(ctx context.Context) {
 	defer a.wg.Done()
 	a.logger.Debug("feedbackCoordinator started")
 
@@ -537,7 +539,15 @@ func (a *ShardedApplier) feedbackCoordinator() {
 		pending, exists := a.pendingWork[completion.workID]
 		if !exists {
 			a.pendingMutex.Unlock()
-			a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
+			// On shutdown, Apply's ctx-cancel cleanup deletes pendingWork while
+			// chunklets are still in flight; their completions then arrive here
+			// for work that no longer exists. That is expected teardown, not a
+			// bug, so log it quietly. Outside cancellation it is a real anomaly.
+			if ctx.Err() != nil || errors.Is(completion.err, context.Canceled) {
+				a.logger.Debug("feedbackCoordinator received completion for unknown work during shutdown", "workID", completion.workID)
+			} else {
+				a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
+			}
 			return
 		}
 
