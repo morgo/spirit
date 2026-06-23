@@ -16,6 +16,7 @@ import (
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
@@ -305,6 +306,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	// The initial copy is done. Restore any secondary indexes deferred during
+	// table creation now, before the target is consumed (continuous sync) or
+	// the post-copy checksum walks it (copy-only). Always called — it is a
+	// no-op when nothing was deferred and resume-safe; see
+	// restoreSecondaryIndexes.
+	r.status.Set(status.RestoreSecondaryIndexes)
+	if err := r.restoreSecondaryIndexes(ctx); err != nil {
+		return fmt.Errorf("failed to restore secondary indexes: %w", err)
+	}
+
 	// Copy-only past this point: no change capture is configured, but the
 	// post-copy continuous checksum is independent of replication and still
 	// has a job — verify the copy and, if a Recopier is configured, lazily
@@ -376,7 +387,7 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
-	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second))
+	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
 
 	// A real checksum failure outranks a clean nil — surface it.
 	if checksumErr != nil && !errors.Is(checksumErr, context.Canceled) {
@@ -473,7 +484,7 @@ func (r *Runner) runContinuous(ctx context.Context) error {
 	if err := r.dumpCheckpoint(cpCtx); err != nil {
 		r.logger.Warn("Final checkpoint write failed", "error", err)
 	}
-	r.logger.Info("Sync stopped", "total_time", time.Since(r.startTime).Round(time.Second))
+	r.logger.Info("Sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
 	// A real checksum failure outranks a clean nil — surface it so the
 	// caller (and exit code) reflect the underlying problem rather than
 	// just "ctx cancelled."
@@ -854,8 +865,14 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName 
 }
 
 // createTargetTables creates each source table on the target using the
-// source's SHOW CREATE TABLE. Tables that already exist are skipped (they
-// were validated as empty + schema-compatible by the target_state check).
+// source's SHOW CREATE TABLE. Tables that already exist are skipped: on a
+// fresh sync checkTargetEmpty has confirmed they are empty, and on a resume
+// they were created by a previous run.
+//
+// When DeferSecondaryIndexes is set, the regular secondary indexes are
+// stripped from the CREATE so the bulk copy loads an index-free table; they
+// are rebuilt by restoreSecondaryIndexes after the copy. See that function for
+// the resume-safety rationale.
 //
 // This is MySQL→MySQL schema replication; a future heterogeneous target
 // (e.g. Postgres) would translate or pre-create the schema instead.
@@ -897,6 +914,18 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 		if err := row.Scan(&name, &createStmt); err != nil {
 			return fmt.Errorf("failed to read CREATE TABLE for source %s: %w", t.TableName, err)
 		}
+		// When deferring secondary indexes, create the table without its regular
+		// secondary indexes; they are added back by restoreSecondaryIndexes once
+		// the initial copy has completed. We don't track which indexes were
+		// stripped — restore re-derives them from the source schema. UNIQUE,
+		// FULLTEXT and SPATIAL indexes are preserved on the CREATE.
+		if r.sync.DeferSecondaryIndexes {
+			var err error
+			createStmt, err = statement.RemoveSecondaryIndexes(createStmt)
+			if err != nil {
+				return fmt.Errorf("failed to remove secondary indexes from CREATE TABLE for %s: %w", t.TableName, err)
+			}
+		}
 		var exists int
 		err := conn.QueryRowContext(ctx,
 			"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
@@ -912,8 +941,61 @@ func (r *Runner) createTargetTables(ctx context.Context) error {
 		if _, err := conn.ExecContext(ctx, createStmt); err != nil {
 			return fmt.Errorf("failed to create table %s on target: %w", t.TableName, err)
 		}
-		r.logger.Info("created table on target", "table", t.TableName, "database", r.target.Config.DBName)
+		r.logger.Info("created table on target", "table", t.TableName, "database", r.target.Config.DBName,
+			"deferred_indexes", r.sync.DeferSecondaryIndexes)
 	}
+	return nil
+}
+
+// restoreSecondaryIndexes adds any secondary indexes that exist on a source
+// table but are missing on its target — the indexes deferred by
+// createTargetTables when DeferSecondaryIndexes is set. It is always called
+// once the initial copy completes, regardless of the flag, so that:
+//   - a deferred run that crashed part-way through this restore resumes and
+//     finishes the remaining indexes (each ALTER re-derives what is still
+//     missing, so it is idempotent), and
+//   - a run resumed *without* the flag (the checkpoint doesn't record whether
+//     deferral happened) still ends up fully indexed.
+//
+// When nothing is missing — the common case for a non-deferred sync, and for
+// every continuous-sync restart after the indexes are already in place — it is
+// a cheap SHOW CREATE TABLE comparison per table and a no-op.
+//
+// The ALTERs run while the periodic flush keeps applying changes (continuous
+// mode): adding a regular secondary index is an online (INPLACE) DDL in
+// InnoDB, so concurrent INSERT/UPDATE/DELETE from the applier is safe.
+func (r *Runner) restoreSecondaryIndexes(ctx context.Context) error {
+	r.logger.Info("checking for deferred secondary indexes to restore")
+	for _, tbl := range r.sourceTables {
+		var name, sourceCreateStmt string
+		row := r.source.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+tbl.QuotedTableName)
+		if err := row.Scan(&name, &sourceCreateStmt); err != nil {
+			return fmt.Errorf("failed to read CREATE TABLE for source %s: %w", tbl.TableName, err)
+		}
+		var targetName, targetCreateStmt string
+		targetRow := r.target.DB.QueryRowContext(ctx, "SHOW CREATE TABLE "+tbl.QuotedTableName)
+		if err := targetRow.Scan(&targetName, &targetCreateStmt); err != nil {
+			return fmt.Errorf("failed to read CREATE TABLE for target %s: %w", tbl.TableName, err)
+		}
+
+		// Compare and build a single ALTER for all missing indexes. We re-derive
+		// what is missing per table so a resumed restore picks up where it left
+		// off rather than re-adding indexes that are already present.
+		alterStmt, err := statement.GetMissingSecondaryIndexes(sourceCreateStmt, targetCreateStmt, tbl.TableName)
+		if err != nil {
+			return fmt.Errorf("failed to compare indexes for table %s: %w", tbl.TableName, err)
+		}
+		if alterStmt == "" {
+			r.logger.Debug("no missing secondary indexes", "table", tbl.TableName, "database", r.target.Config.DBName)
+			continue
+		}
+		r.logger.Info("restoring deferred secondary indexes",
+			"table", tbl.TableName, "database", r.target.Config.DBName, "stmt", alterStmt)
+		if _, err := r.target.DB.ExecContext(ctx, alterStmt); err != nil {
+			return fmt.Errorf("failed to restore secondary indexes on table %s: %w", tbl.TableName, err)
+		}
+	}
+	r.logger.Info("completed restoring secondary indexes")
 	return nil
 }
 
@@ -1183,14 +1265,14 @@ func (r *Runner) watchStatus(ctx context.Context) {
 					"progress", r.copier.GetProgress(),
 					"eta", r.copier.GetETA(),
 					"pending-changes", pending,
-					"elapsed", time.Since(r.startTime).Round(time.Second),
+					"elapsed", time.Since(r.startTime).Round(time.Second).String(),
 				)
 			case r.replClient != nil:
 				r.logger.Info("sync status",
 					"phase", "continuous",
 					"pending-changes", pending,
 					"position", r.replClient.Position(),
-					"elapsed", time.Since(r.startTime).Round(time.Second),
+					"elapsed", time.Since(r.startTime).Round(time.Second).String(),
 				)
 			}
 		}

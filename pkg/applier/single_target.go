@@ -2,6 +2,7 @@ package applier
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -140,7 +141,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	a.cancelFunc = cancelFunc
 
 	a.started = true
-	a.logger.Info("starting SingleTargetApplier", "writeWorkers", a.writeWorkersCount)
+	a.logger.Debug("starting SingleTargetApplier", "writeWorkers", a.writeWorkersCount)
 
 	// Reset the worker pool bookkeeping and record the context workers run
 	// under, so SetWriteWorkers can spawn more later.
@@ -154,7 +155,7 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	// Start feedback coordinator before workers so completions are always
 	// drained.
 	a.wg.Add(1)
-	go a.feedbackCoordinator()
+	go a.feedbackCoordinator(workerCtx)
 
 	// Spawn the initial worker pool. SetWriteWorkers only takes scaleMu, so
 	// calling it while holding the main lock is safe (no lock nesting on the
@@ -299,7 +300,7 @@ func (a *SingleTargetApplier) Stop() error {
 		return nil
 	}
 
-	a.logger.Info("stopping SingleTargetApplier")
+	a.logger.Debug("stopping SingleTargetApplier")
 
 	// Cancel the context to signal workers to stop
 	if a.cancelFunc != nil {
@@ -334,7 +335,7 @@ func (a *SingleTargetApplier) Stop() error {
 	close(a.chunkletCompletions)
 	a.wg.Wait()
 
-	a.logger.Info("SingleTargetApplier stopped")
+	a.logger.Debug("SingleTargetApplier stopped")
 	return nil
 }
 
@@ -496,8 +497,10 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	return result, nil
 }
 
-// feedbackCoordinator tracks chunklet completions and invokes callbacks when work is done
-func (a *SingleTargetApplier) feedbackCoordinator() {
+// feedbackCoordinator tracks chunklet completions and invokes callbacks when work is done.
+// ctx is the worker context; once it is cancelled, completions for already-cleaned-up
+// work are an expected part of shutdown rather than a bug (see Apply's ctx-cancel cleanup).
+func (a *SingleTargetApplier) feedbackCoordinator(ctx context.Context) {
 	defer a.wg.Done()
 	a.logger.Debug("feedbackCoordinator started")
 
@@ -510,7 +513,15 @@ func (a *SingleTargetApplier) feedbackCoordinator() {
 		pending, exists := a.pendingWork[completion.workID]
 		if !exists {
 			a.pendingMutex.Unlock()
-			a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
+			// On shutdown, Apply's ctx-cancel cleanup deletes pendingWork while
+			// chunklets are still in flight; their completions then arrive here
+			// for work that no longer exists. That is expected teardown, not a
+			// bug, so log it quietly. Outside cancellation it is a real anomaly.
+			if ctx.Err() != nil || errors.Is(completion.err, context.Canceled) {
+				a.logger.Debug("feedbackCoordinator received completion for unknown work during shutdown", "workID", completion.workID)
+			} else {
+				a.logger.Error("feedbackCoordinator received completion for unknown work", "workID", completion.workID)
+			}
 			return
 		}
 

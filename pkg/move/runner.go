@@ -480,14 +480,14 @@ func (r *Runner) setup(ctx context.Context) error {
 	var err error
 
 	// Run preflight checks on the source database
-	r.logger.Info("Running preflight checks")
+	r.logger.Debug("Running preflight checks")
 	if err := r.runChecks(ctx, check.ScopePreflight); err != nil {
 		return err
 	}
 
 	// Fetch the canonical table list from sources[0].
 	// All sources have identical schemas (validated by source_schema_consistency check).
-	r.logger.Info("Fetching source table list")
+	r.logger.Debug("Fetching source table list")
 	if r.sourceTables, err = r.getTables(ctx, &r.sources[0]); err != nil {
 		return err
 	}
@@ -529,14 +529,14 @@ func (r *Runner) setup(ctx context.Context) error {
 	}
 
 	// Create a single applier instance shared by all repl clients and the copier.
-	r.logger.Info("Creating shared applier")
+	r.logger.Debug("Creating shared applier")
 	r.applier, err = r.createApplier()
 	if err != nil {
 		return err
 	}
 
 	// Create one repl client per source, all sharing the same applier.
-	r.logger.Info("Setting up repl clients", "sourceCount", len(r.sources))
+	r.logger.Debug("Setting up repl clients", "sourceCount", len(r.sources))
 	if r.move.EnableExperimentalGTID {
 		r.logger.Info("EXPERIMENTAL: using GTID-based change source")
 	}
@@ -752,7 +752,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			DB:       db,
 			Config:   targetConfig,
 		}}
-		r.logger.Info("Created single target from TargetDSN")
+		r.logger.Debug("Created single target from TargetDSN")
 	}
 	// Sort targets by targetKey (addr/dbname/keyrange) for deterministic
 	// ordering. The checkpoint is written to targets[0], so the order must be
@@ -830,7 +830,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	r.logger.Info("All tables copied successfully.")
+	r.logger.Info("All tables copied successfully")
 
 	// Post-copy phase: drain the binlog, restore secondary indexes,
 	// ANALYZE TABLE, run the initial checksum. While the sentinel blocks
@@ -1265,9 +1265,9 @@ func (r *Runner) Progress() status.Progress {
 		r.logger.Info("migration status",
 			"state", r.status.Get().String(),
 			"sentinel-table", fmt.Sprintf("%s.%s", r.sources[0].config.DBName, sentinelTableName),
-			"total-time", time.Since(r.startTime).Round(time.Second),
-			"sentinel-wait-time", time.Since(r.sentinelWaitStartTime).Round(time.Second),
-			"sentinel-max-wait-time", sentinelWaitLimit,
+			"total-time", time.Since(r.startTime).Round(time.Second).String(),
+			"sentinel-wait-time", time.Since(r.sentinelWaitStartTime).Round(time.Second).String(),
+			"sentinel-max-wait-time", sentinelWaitLimit.String(),
 		)
 	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.getDeltaLenAll())
@@ -1327,7 +1327,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
 
 	r.logger.Warn("cutover deferred while sentinel table exists; will wait",
 		"sentinel-table", sentinelTableName,
-		"wait-limit", sentinelWaitLimit)
+		"wait-limit", sentinelWaitLimit.String())
 
 	// Spawn the continuous checksum. It uses its own checker + chunker and is
 	// not wired into the checkpoint — so a crash during sentinel wait does
@@ -1507,7 +1507,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		// accumulate during the wait and have to be drained under the
 		// cutover's table lock.
 		if remaining := continuousChecksumMinInterval - lastDuration; remaining > 0 {
-			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second))
+			r.logger.Info("continuous checksum waiting before next iteration", "wait", remaining.Round(time.Second).String())
 			for i := range r.sources {
 				r.sources[i].replClient.StartPeriodicFlush(ctx, change.DefaultFlushInterval)
 			}
@@ -1557,7 +1557,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		lastDuration = time.Since(iterationStart)
 		r.logger.Info("continuous checksum iteration complete",
 			"iteration", iteration,
-			"duration", lastDuration.Round(time.Second),
+			"duration", lastDuration.Round(time.Second).String(),
 		)
 	}
 }
@@ -1677,7 +1677,7 @@ func (r *Runner) createApplier() (applier.Applier, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SingleTargetApplier: %w", err)
 		}
-		r.logger.Info("Created SingleTargetApplier")
+		r.logger.Debug("Created SingleTargetApplier")
 		return appl, nil
 	}
 

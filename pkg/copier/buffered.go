@@ -138,7 +138,7 @@ func (c *buffered) Run(ctx context.Context) error {
 
 	// Start read workers
 	g, errGrpCtx := errgroup.WithContext(ctx)
-	c.logger.Info("starting read workers", "count", c.concurrency)
+	c.logger.Debug("starting read workers", "count", c.concurrency)
 	for range c.concurrency {
 		g.Go(func() error {
 			return c.readWorker(errGrpCtx)
@@ -253,14 +253,23 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		capturedStartTime := chunkStartTime
 		callback := func(affectedRows int64, err error) {
 			if err != nil {
-				c.logger.Error("applier callback received error", "chunk", capturedChunk.String(), "error", err)
+				// A context cancellation (Ctrl+C / graceful shutdown) tears down
+				// in-flight chunklets deliberately — it is not a copy failure, so
+				// log it quietly rather than alarming the user with an ERROR. We
+				// still setInvalid to unwind Run; higher layers filter context
+				// cancellation when deciding the command's exit status.
+				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+					c.logger.Debug("applier callback cancelled", "chunk", capturedChunk.String(), "error", err)
+				} else {
+					c.logger.Error("applier callback received error", "chunk", capturedChunk.String(), "error", err)
+				}
 				c.setInvalid(err)
 				return
 			}
 
 			c.logger.Debug("applier callback invoked",
 				"table", capturedChunk.Table.TableName, "chunk", capturedChunk.String(),
-				"affected_rows", affectedRows, "duration", time.Since(capturedStartTime))
+				"affected_rows", affectedRows, "duration", time.Since(capturedStartTime).String())
 
 			// Calculate total time from read start to callback completion (read + write)
 			totalTime := time.Since(capturedStartTime)
@@ -283,7 +292,7 @@ func (c *buffered) readWorker(ctx context.Context) error {
 		}
 	}
 
-	c.logger.Info("readWorker exiting main loop")
+	c.logger.Debug("readWorker exiting main loop")
 	return nil
 }
 

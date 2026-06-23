@@ -66,8 +66,11 @@ func TestUnsafeLinter_AlterTableDropColumn(t *testing.T) {
 	require.Equal(t, "unsafe", violations[0].Linter.Name())
 	require.Equal(t, SeverityError, violations[0].Severity)
 	require.Contains(t, violations[0].Message, "Unsafe operation")
+	require.Equal(t, "Unsafe operation detected: DROP COLUMN `email`", violations[0].Message)
 	t.Log(violations[0].Message)
 	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "email", *violations[0].Location.Column)
 }
 
 func TestUnsafeLinter_AlterTableDropPrimaryKey(t *testing.T) {
@@ -313,6 +316,9 @@ func TestUnsafeLinter_AlterTableMultipleSpecs(t *testing.T) {
 	require.Equal(t, "unsafe", violations[0].Linter.Name())
 	require.Equal(t, SeverityError, violations[0].Severity)
 	require.Equal(t, "users", violations[0].Location.Table)
+	require.NotNil(t, violations[0].Location.Column)
+	require.Equal(t, "phone", *violations[0].Location.Column)
+	require.Equal(t, "Unsafe operation detected: DROP COLUMN `phone`", violations[0].Message)
 }
 
 func TestUnsafeLinter_AlterTableMultipleUnsafeSpecs(t *testing.T) {
@@ -333,6 +339,16 @@ func TestUnsafeLinter_AlterTableMultipleUnsafeSpecs(t *testing.T) {
 		require.Equal(t, SeverityError, v.Severity)
 		require.Equal(t, "users", v.Location.Table)
 	}
+
+	columnMessages := map[string]string{}
+	for _, v := range violations {
+		require.NotNil(t, v.Location.Column)
+		columnMessages[*v.Location.Column] = v.Message
+	}
+	require.Equal(t, map[string]string{
+		"email": "Unsafe operation detected: DROP COLUMN `email`",
+		"phone": "Unsafe operation detected: DROP COLUMN `phone`",
+	}, columnMessages)
 }
 
 func TestUnsafeLinter_EmptyInput(t *testing.T) {

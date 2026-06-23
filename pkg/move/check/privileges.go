@@ -122,11 +122,10 @@ func checkSourcePrivileges(ctx context.Context, src SourceResource, r Resources,
 	var errs []error
 
 	// Verify SELECT access on performance_schema.*, which is required for the
-	// queries used by force-kill during cutover.
-	if _, err := dbconn.GetTableLocks(ctx, src.DB, r.SourceTables, logger, nil); err != nil {
-		errs = append(errs, err)
-	}
-	if _, err := dbconn.GetLockingTransactions(ctx, src.DB, r.SourceTables, nil, logger, nil); err != nil {
+	// queries used by force-kill during cutover. This is a privilege probe only:
+	// it selects zero rows and logs nothing. The actual lock detection (which
+	// does log) runs during cutover, not preflight.
+	if err := dbconn.CheckForceKillPrivileges(ctx, src.DB); err != nil {
 		errs = append(errs, err)
 	}
 	if !skipRolePrivilegeCheck {

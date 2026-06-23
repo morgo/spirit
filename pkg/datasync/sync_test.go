@@ -640,6 +640,181 @@ func TestSyncCreateTableLegacyDefault(t *testing.T) {
 	require.Equal(t, 2, n)
 }
 
+// secondaryIndexNames returns the non-PRIMARY index names on a table, in no
+// particular order. Used to assert which secondary indexes are present on the
+// target during the defer-secondary-indexes tests; callers compare with
+// require.ElementsMatch, which is order-independent.
+func secondaryIndexNames(t *testing.T, db *sql.DB, schema, table string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY'`, schema, table)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(rows)
+	var names []string
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		names = append(names, name)
+	}
+	require.NoError(t, rows.Err())
+	return names
+}
+
+// TestSyncDeferSecondaryIndexesCreateAndRestore exercises the deferral
+// mechanism directly: createTargetTables with DeferSecondaryIndexes set must
+// create the table without its regular secondary indexes (keeping PRIMARY and
+// UNIQUE), and restoreSecondaryIndexes must add the deferred indexes back. A
+// second restore must be an idempotent no-op (the resume-safety property).
+func TestSyncDeferSecondaryIndexesCreateAndRestore(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_deferidx_unit_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_deferidx_unit_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_deferidx_unit_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_deferidx_unit_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_deferidx_unit_src.t1 (
+		id INT PRIMARY KEY,
+		u VARCHAR(36) NOT NULL,
+		a INT,
+		b INT,
+		UNIQUE KEY uq_u (u),
+		KEY idx_a (a),
+		KEY idx_b (b)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO sync_deferidx_unit_src.t1 VALUES (1,'one',10,100),(2,'two',20,200)`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_deferidx_unit_dest`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_deferidx_unit_dest`)
+
+	s := &Sync{
+		SourceDSN:             src.FormatDSN(),
+		TargetDSN:             dest.FormatDSN(),
+		DeferSecondaryIndexes: true,
+	}
+	runner, err := NewRunner(s)
+	require.NoError(t, err)
+
+	// Wire up the source + target connections the way Run() does, but without
+	// driving the full copy pipeline — we call createTargetTables /
+	// restoreSecondaryIndexes directly.
+	sourceDB, err := sql.Open("mysql", s.SourceDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(sourceDB)
+	runner.source = sourceInfo{db: sourceDB, config: src, dsn: s.SourceDSN}
+	targetDB, err := sql.Open("mysql", s.TargetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	runner.target = applier.Target{KeyRange: "0", DB: targetDB, Config: dest}
+
+	ctx := context.Background()
+	tables, err := runner.getTables(ctx)
+	require.NoError(t, err)
+	runner.sourceTables = tables
+
+	// Deferred create keeps PRIMARY + UNIQUE but strips the regular indexes.
+	require.NoError(t, runner.createTargetTables(ctx))
+	require.ElementsMatch(t, []string{"uq_u"},
+		secondaryIndexNames(t, targetDB, dest.DBName, "t1"),
+		"regular secondary indexes should be deferred; UNIQUE kept")
+
+	// Restore adds the deferred regular indexes back.
+	require.NoError(t, runner.restoreSecondaryIndexes(ctx))
+	require.ElementsMatch(t, []string{"uq_u", "idx_a", "idx_b"},
+		secondaryIndexNames(t, targetDB, dest.DBName, "t1"),
+		"all secondary indexes should be present after restore")
+
+	// Restore is idempotent: a second pass finds nothing missing and no-ops.
+	require.NoError(t, runner.restoreSecondaryIndexes(ctx))
+	require.ElementsMatch(t, []string{"uq_u", "idx_a", "idx_b"},
+		secondaryIndexNames(t, targetDB, dest.DBName, "t1"))
+}
+
+// TestSyncDeferSecondaryIndexesE2E drives a full continuous sync with
+// --defer-secondary-indexes through Run(): the initial copy loads index-free
+// tables, the deferred indexes are restored before the continuous phase, and
+// streamed changes still replicate against the now-indexed target.
+func TestSyncDeferSecondaryIndexesE2E(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_deferidx_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_deferidx_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_deferidx_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_deferidx_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_deferidx_src.t1 (
+		id INT PRIMARY KEY,
+		u VARCHAR(36) NOT NULL,
+		a INT,
+		b INT,
+		UNIQUE KEY uq_u (u),
+		KEY idx_a (a),
+		KEY idx_b (b)
+	)`)
+	testutils.RunSQL(t, `INSERT INTO sync_deferidx_src.t1 VALUES (1,'one',10,100),(2,'two',20,200),(3,'three',30,300)`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_deferidx_dest`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_deferidx_dest`)
+
+	tgt, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	countRows := func() int {
+		var n int
+		if err := tgt.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM t1`).Scan(&n); err != nil {
+			return -1
+		}
+		return n
+	}
+
+	s := &Sync{
+		SourceDSN:             sourceDSN,
+		TargetDSN:             targetDSN,
+		TargetChunkTime:       100 * time.Millisecond,
+		Threads:               2,
+		WriteThreads:          2,
+		FlushInterval:         100 * time.Millisecond,
+		DeferSecondaryIndexes: true,
+	}
+	runner, err := NewRunner(s)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	// Initial copy lands all three rows.
+	require.Eventually(t, func() bool { return countRows() == 3 },
+		30*time.Second, 100*time.Millisecond, "initial copy should replicate 3 rows")
+
+	// The deferred secondary indexes are restored before the continuous phase.
+	require.Eventually(t, func() bool {
+		got := secondaryIndexNames(t, tgt, dest.DBName, "t1")
+		return len(got) == 3
+	}, 30*time.Second, 100*time.Millisecond, "deferred indexes should be restored")
+	require.ElementsMatch(t, []string{"uq_u", "idx_a", "idx_b"},
+		secondaryIndexNames(t, tgt, dest.DBName, "t1"))
+
+	// Continuous replication still works against the now-indexed target.
+	testutils.RunSQL(t, `INSERT INTO sync_deferidx_src.t1 VALUES (4,'four',40,400)`)
+	require.Eventually(t, func() bool { return countRows() == 4 },
+		30*time.Second, 100*time.Millisecond, "continuous sync should replicate the INSERT")
+
+	cancel()
+	select {
+	case runErr := <-done:
+		require.NoError(t, runErr)
+	case <-time.After(60 * time.Second):
+		t.Fatal("sync did not stop within 60s of cancellation")
+	}
+	require.NoError(t, runner.Close())
+}
+
 // TestSyncValidate covers the Kong Validate() hook: explicitly-negative
 // numeric/duration flags are rejected at parse time, while zero values
 // (meaning "use the default", filled in by NewRunner) pass. Mirrors

@@ -73,7 +73,7 @@ func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	}
 	c.logger.Debug("CopyChunk completed",
 		"table", chunk.Table.TableName, "chunk", chunk.String(),
-		"affected_rows", affectedRows, "duration", time.Since(startTime))
+		"affected_rows", affectedRows, "duration", time.Since(startTime).String())
 	// Send feedback which can be used by the chunker
 	// and infoschema to create a low watermark.
 	chunkProcessingTime := time.Since(startTime)

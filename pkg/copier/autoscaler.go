@@ -57,11 +57,11 @@ const (
 	// vault across the band and ping-pong with the -1 path.
 	acHighWatermark = 0.7
 	// acPanicThreshold is where back-off turns multiplicative. At 1.0 the
-	// smoothed signal has reached vCPUs — sustained load at or past the point
-	// where the raw per-sample hard-stop trips (it fires on running > vCPUs).
-	// By the time the average climbs here the hard-stop has typically been
-	// firing on the raw samples, so the copy is already being paused; halving
-	// sheds enough that the resume is gentle. This compares the gradual
+	// smoothed signal has reached vCPUs — sustained load just below the point
+	// where the raw per-sample hard-stop trips (it fires on running > vCPUs +
+	// selfMonitoringHeadroom). By the time the average climbs here the hard-stop
+	// is typically firing on the raw samples, so the copy is already being
+	// paused; halving sheds enough that the resume is gentle. This compares the gradual
 	// (smoothed) utilization, NOT IsThrottled() — on a
 	// multi-throttler that would include binary children like replica lag,
 	// and halving on those is unguided (they already pause the copy, which
