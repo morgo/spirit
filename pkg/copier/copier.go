@@ -38,8 +38,10 @@ func etaEstimate(copiedRows, totalRows uint64, pct float64, rowsPerSecond uint64
 	if rowsPerSecond == 0 || time.Since(startTime) < copyETAInitialWaitTime {
 		return 0, status.ETAMeasuring
 	}
-	// "remainingRows" might be the actual rows or the logical rows since
-	// getCopyStats() and rowsPerSecond change estimation method when the PK is auto-inc.
+	// Divide the remaining rows by how many rows we copied in the last interval
+	// per second. "remainingRows" might be the actual rows or the logical rows
+	// since getCopyStats() and rowsPerSecond change estimation method when the PK
+	// is auto-inc.
 	remainingRows := totalRows - copiedRows
 	remainingSeconds := math.Floor(float64(remainingRows) / float64(rowsPerSecond))
 	return time.Duration(remainingSeconds * float64(time.Second)), status.ETAReady
