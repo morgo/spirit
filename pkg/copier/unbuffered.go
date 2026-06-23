@@ -191,15 +191,12 @@ func (c *Unbuffered) GetETA() string {
 	return estimate.String()
 }
 
-func (c *Unbuffered) GetETAState() (status.ETAState, int64) {
+func (c *Unbuffered) GetETAState() (status.ETAState, time.Duration) {
 	c.Lock()
 	defer c.Unlock()
 	copiedRows, totalRows, pct := c.getCopyStats()
 	estimate, st := etaEstimate(copiedRows, totalRows, pct, c.rowsPerSecond.Load(), c.startTime)
-	if st != status.ETAReady {
-		return st, 0
-	}
-	return st, int64(estimate.Seconds())
+	return st, estimate
 }
 
 func (c *Unbuffered) estimateRowsPerSecondLoop(ctx context.Context) {

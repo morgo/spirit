@@ -1015,7 +1015,7 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 
 func (r *Runner) Progress() status.Progress {
 	var summary string
-	var etaSeconds int64
+	var eta time.Duration
 	var etaState status.ETAState
 	switch r.status.Get() { //nolint: exhaustive
 	case status.CopyRows:
@@ -1024,7 +1024,7 @@ func (r *Runner) Progress() status.Progress {
 			r.status.Get().String(),
 			r.copier.GetETA(),
 		)
-		etaState, etaSeconds = r.copier.GetETAState()
+		etaState, eta = r.copier.GetETAState()
 	case status.WaitingOnSentinelTable:
 		summary = "Waiting on Sentinel Table"
 	case status.ApplyChangeset, status.PostChecksum:
@@ -1068,7 +1068,7 @@ func (r *Runner) Progress() status.Progress {
 	return status.Progress{
 		CurrentState: r.status.Get(),
 		Summary:      summary,
-		ETASeconds:   etaSeconds,
+		ETA:          eta,
 		ETAState:     etaState,
 		Tables:       tables,
 	}

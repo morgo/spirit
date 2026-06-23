@@ -54,11 +54,11 @@ type Copier interface {
 	Run(ctx context.Context) error
 	GetETA() string
 	// GetETAState returns whether a copy ETA is available and, when it is
-	// (status.ETAReady), the estimated remaining seconds (0 otherwise). It is the
-	// structured counterpart of GetETA, returning the state and seconds together
+	// (status.ETAReady), the estimated remaining time (0 otherwise). It is the
+	// structured counterpart of GetETA, returning the state and duration together
 	// so callers see a consistent pair and can distinguish "still measuring" from
 	// a real estimate or a near-complete copy.
-	GetETAState() (status.ETAState, int64)
+	GetETAState() (status.ETAState, time.Duration)
 	GetChunker() table.Chunker
 	SetThrottler(throttler throttler.Throttler)
 	GetThrottler() throttler.Throttler
