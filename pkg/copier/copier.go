@@ -55,12 +55,12 @@ func etaEstimate(copiedRows, totalRows uint64, pct float64, rowsPerSecond uint64
 type Copier interface {
 	Run(ctx context.Context) error
 	GetETA() string
-	// GetETAState returns whether a copy ETA is available and, when it is
-	// (status.ETAReady), the estimated remaining time (0 otherwise). It is the
-	// structured counterpart of GetETA, returning the state and duration together
-	// so callers see a consistent pair and can distinguish "still measuring" from
-	// a real estimate or a near-complete copy.
-	GetETAState() (status.ETAState, time.Duration)
+	// GetETAState returns the structured copy ETA: its availability (so callers
+	// can distinguish "still measuring" from a real estimate or a near-complete
+	// copy) and, when available, the estimated remaining time. It is the
+	// structured counterpart of GetETA, computed in a single read so the state
+	// and duration are always consistent.
+	GetETAState() status.ETA
 	GetChunker() table.Chunker
 	SetThrottler(throttler throttler.Throttler)
 	GetThrottler() throttler.Throttler

@@ -12,31 +12,34 @@ type ETAState string
 
 const (
 	// ETANone means there is no copy ETA because the migration is not in the
-	// row-copy phase. ETA is 0.
+	// row-copy phase. Duration is 0.
 	ETANone ETAState = ""
 	// ETAMeasuring means a copy is in progress but no copy rate has been measured
-	// yet, so no estimate is available (Summary shows "ETA TBD"). ETA is 0.
+	// yet, so no estimate is available (Summary shows "ETA TBD"). Duration is 0.
 	ETAMeasuring ETAState = "measuring"
-	// ETAReady means ETA holds a current remaining-time estimate.
+	// ETAReady means Duration holds a current remaining-time estimate.
 	ETAReady ETAState = "ready"
 	// ETADue means the copy is essentially complete (Summary shows "ETA DUE").
-	// ETA is 0.
+	// Duration is 0.
 	ETADue ETAState = "due"
 )
+
+// ETA is the structured form of the ETA embedded in Summary. State reports
+// whether Duration is available yet — e.g. ETAMeasuring during the initial
+// window before a copy rate is known — so callers can show "calculating" rather
+// than a misleading 0. Duration is the estimated remaining row-copy time, valid
+// only when State is ETAReady and 0 otherwise.
+type ETA struct {
+	State    ETAState
+	Duration time.Duration
+}
 
 type Progress struct {
 	CurrentState State  // current state, i.e. CopyRows
 	Summary      string // text based representation, i.e. "12.5% copyRows ETA 1h 30m"
 
-	// ETA is the estimated remaining row-copy time. It is meaningful only when
-	// ETAState is ETAReady, and 0 in every other state. It is the structured form
-	// of the ETA embedded in Summary.
-	ETA time.Duration
-
-	// ETAState reports whether ETA is available yet — e.g. ETAMeasuring during the
-	// initial window before a copy rate is known — so callers can show
-	// "calculating" rather than a misleading 0.
-	ETAState ETAState
+	// ETA is the structured remaining row-copy estimate and its availability.
+	ETA ETA
 
 	// Tables contains per-table progress for multi-table migrations.
 	// For single-table migrations, this will have one entry.
