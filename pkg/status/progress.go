@@ -3,9 +3,38 @@ package status
 // Progress is returned as a struct because we may add more to it later.
 // It is designed for wrappers (like a GUI) to be able to summarize the
 // current status without parsing log output.
+// ETAState describes the availability of the row-copy ETA estimate, so callers
+// can distinguish "still measuring" from a real estimate without parsing the
+// Summary string. It mirrors the cases GetETA renders as text.
+type ETAState string
+
+const (
+	// ETANone means there is no copy ETA because the migration is not in the
+	// row-copy phase. ETASeconds is 0.
+	ETANone ETAState = ""
+	// ETAMeasuring means a copy is in progress but no copy rate has been measured
+	// yet, so no estimate is available (Summary shows "ETA TBD"). ETASeconds is 0.
+	ETAMeasuring ETAState = "measuring"
+	// ETAReady means ETASeconds holds a current remaining-time estimate.
+	ETAReady ETAState = "ready"
+	// ETADue means the copy is essentially complete (Summary shows "ETA DUE").
+	// ETASeconds is 0.
+	ETADue ETAState = "due"
+)
+
 type Progress struct {
 	CurrentState State  // current state, i.e. CopyRows
 	Summary      string // text based representation, i.e. "12.5% copyRows ETA 1h 30m"
+
+	// ETASeconds is the estimated remaining row-copy time in seconds. It is
+	// meaningful only when ETAState is ETAReady, and 0 in every other state. It is
+	// the structured form of the ETA embedded in Summary.
+	ETASeconds int64
+
+	// ETAState reports whether ETASeconds is available yet — e.g. ETAMeasuring
+	// during the initial window before a copy rate is known — so callers can show
+	// "calculating" rather than a misleading 0.
+	ETAState ETAState
 
 	// Tables contains per-table progress for multi-table migrations.
 	// For single-table migrations, this will have one entry.

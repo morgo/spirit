@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"golang.org/x/sync/errgroup"
@@ -175,25 +175,31 @@ func (c *Unbuffered) GetETA() string {
 	c.Lock()
 	defer c.Unlock()
 	copiedRows, totalRows, pct := c.getCopyStats()
-	rowsPerSecond := c.rowsPerSecond.Load()
-	if pct > 99.99 {
+	estimate, st := etaEstimate(copiedRows, totalRows, pct, c.rowsPerSecond.Load(), c.startTime)
+	switch st {
+	case status.ETADue:
 		return "DUE"
-	}
-	if rowsPerSecond == 0 || time.Since(c.startTime) < copyETAInitialWaitTime {
+	case status.ETAMeasuring:
 		return "TBD"
+	case status.ETAReady, status.ETANone:
+		// A ready estimate is formatted below; ETANone cannot occur during copy.
 	}
-	// divide the remaining rows by how many rows we copied in the last interval per second
-	// "remainingRows" might be the actual rows or the logical rows since
-	// c.getCopyStats() and rowsPerSecond change estimation method when the PK is auto-inc.
-	remainingRows := totalRows - copiedRows
-	remainingSeconds := math.Floor(float64(remainingRows) / float64(rowsPerSecond))
-
-	estimate := time.Duration(remainingSeconds * float64(time.Second))
 	comparison := c.copierEtaHistory.addCurrentEstimateAndCompare(estimate)
 	if comparison != "" {
 		return fmt.Sprintf("%s (%s)", estimate.String(), comparison)
 	}
 	return estimate.String()
+}
+
+func (c *Unbuffered) GetETAState() (status.ETAState, int64) {
+	c.Lock()
+	defer c.Unlock()
+	copiedRows, totalRows, pct := c.getCopyStats()
+	estimate, st := etaEstimate(copiedRows, totalRows, pct, c.rowsPerSecond.Load(), c.startTime)
+	if st != status.ETAReady {
+		return st, 0
+	}
+	return st, int64(estimate.Seconds())
 }
 
 func (c *Unbuffered) estimateRowsPerSecondLoop(ctx context.Context) {
