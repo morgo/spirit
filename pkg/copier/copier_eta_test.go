@@ -12,7 +12,7 @@ import (
 // measured and while the copy is still meaningfully in flight; the not-ready
 // cases are distinguished as ETAMeasuring (no rate yet) vs ETADue (near done),
 // which the GUI/summary callers turn into "TBD"/"DUE"/0.
-func TestEtaEstimate(t *testing.T) {
+func TestETAEstimate(t *testing.T) {
 	measured := time.Now().Add(-2 * copyETAInitialWaitTime)
 
 	tests := []struct {
