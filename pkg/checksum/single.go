@@ -16,6 +16,7 @@ import (
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
@@ -104,15 +105,11 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	return nil
 }
 
-// GetProgress returns the progress of the checker
-// this is really just a proxy to the chunker progress.
-func (c *SingleChecker) GetProgress() string {
+// GetProgress returns rows verified so far and the total to verify, proxied
+// from the chunker.
+func (c *SingleChecker) GetProgress() status.ChecksumProgress {
 	rowsProcessed, _, totalRows := c.chunker.Progress()
-	pct := float64(0)
-	if totalRows > 0 {
-		pct = float64(rowsProcessed) / float64(totalRows) * 100
-	}
-	return fmt.Sprintf("%d/%d %.2f%%", rowsProcessed, totalRows, pct)
+	return status.ChecksumProgress{RowsChecked: rowsProcessed, RowsTotal: totalRows}
 }
 
 // inspectDifferences looks at the chunk and tries to find differences.

@@ -11,6 +11,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -93,7 +94,9 @@ func compareChunk(srcCRC, tgtCRC int64, srcCount, tgtCount uint64) chunkMismatch
 type Checker interface {
 	// Run performs the checksum operation.
 	Run(ctx context.Context) error
-	GetProgress() string
+	// GetProgress returns the structured checksum progress — rows verified so far
+	// and the total to verify. Call String() on the result for the display form.
+	GetProgress() status.ChecksumProgress
 	StartTime() time.Time
 	ExecTime() time.Duration
 	// DifferencesFound returns the number of chunks where a source/target

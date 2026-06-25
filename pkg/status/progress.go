@@ -1,6 +1,9 @@
 package status
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Progress is returned as a struct because we may add more to it later.
 // It is designed for wrappers (like a GUI) to be able to summarize the
@@ -41,9 +44,32 @@ type Progress struct {
 	// ETA is the structured remaining row-copy estimate and its availability.
 	ETA ETA
 
+	// Checksum is the structured progress of the post-copy checksum phase,
+	// populated while CurrentState is Checksum and zero otherwise. It is the
+	// structured form of the checksum progress embedded in Summary.
+	Checksum ChecksumProgress
+
 	// Tables contains per-table progress for multi-table migrations.
 	// For single-table migrations, this will have one entry.
 	Tables []TableProgress
+}
+
+// ChecksumProgress tracks progress of the checksum phase, where Spirit verifies
+// the copied data against the source before cutover. RowsChecked and RowsTotal
+// are 0 outside the checksum phase.
+type ChecksumProgress struct {
+	RowsChecked uint64 // rows verified so far
+	RowsTotal   uint64 // total rows to verify
+}
+
+// String renders the checksum progress for the human-readable summary line,
+// e.g. "71436/221193 32.30%".
+func (c ChecksumProgress) String() string {
+	pct := float64(0)
+	if c.RowsTotal > 0 {
+		pct = float64(c.RowsChecked) / float64(c.RowsTotal) * 100
+	}
+	return fmt.Sprintf("%d/%d %.2f%%", c.RowsChecked, c.RowsTotal, pct)
 }
 
 // TableProgress tracks progress for a single table in the migration.
