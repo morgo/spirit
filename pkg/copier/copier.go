@@ -8,11 +8,13 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 )
@@ -22,6 +24,29 @@ const (
 	copyETAInitialWaitTime = 1 * time.Minute  // how long to wait before first estimating copy speed (to allow for fast start)
 )
 
+// etaEstimate returns the estimated remaining copy time and the state of that
+// estimate. The duration is meaningful only when the state is status.ETAReady.
+// No estimate is available before a copy rate has been measured (the first
+// copyETAInitialWaitTime, or while no rows have been timed; status.ETAMeasuring)
+// or once the copy is essentially complete (pct > 99.99; status.ETADue) — the
+// callers present each case (GetETA renders "TBD"/"DUE", GetETAState returns the
+// state and 0 seconds).
+func etaEstimate(copiedRows, totalRows uint64, pct float64, rowsPerSecond uint64, startTime time.Time) (time.Duration, status.ETAState) {
+	if pct > 99.99 {
+		return 0, status.ETADue
+	}
+	if rowsPerSecond == 0 || time.Since(startTime) < copyETAInitialWaitTime {
+		return 0, status.ETAMeasuring
+	}
+	// Divide the remaining rows by how many rows we copied in the last interval
+	// per second. "remainingRows" might be the actual rows or the logical rows
+	// since getCopyStats() and rowsPerSecond change estimation method when the PK
+	// is auto-inc.
+	remainingRows := totalRows - copiedRows
+	remainingSeconds := math.Floor(float64(remainingRows) / float64(rowsPerSecond))
+	return time.Duration(remainingSeconds * float64(time.Second)), status.ETAReady
+}
+
 // Copier is the interface which copiers use. Currently we only have
 // one implementation, which we call unbuffered because it uses
 // INSERT .. SELECT without any intermediate buffering in spirit.
@@ -30,6 +55,12 @@ const (
 type Copier interface {
 	Run(ctx context.Context) error
 	GetETA() string
+	// GetETAState returns the structured copy ETA: its availability (so callers
+	// can distinguish "still measuring" from a real estimate or a near-complete
+	// copy) and, when available, the estimated remaining time. It is the
+	// structured counterpart of GetETA, computed in a single read so the state
+	// and duration are always consistent.
+	GetETAState() status.ETA
 	GetChunker() table.Chunker
 	SetThrottler(throttler throttler.Throttler)
 	GetThrottler() throttler.Throttler
