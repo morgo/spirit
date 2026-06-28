@@ -489,7 +489,7 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert
-	result, err := dbconn.RetryableTransaction(ctx, a.target.DB, true, a.dbConfig, query)
+	result, err := dbconn.RetryableTransaction(ctx, a.target.DB, dbconn.IgnoreDupKeyWarnings, a.dbConfig, query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute chunklet insert: %w", err)
 	}
@@ -643,7 +643,7 @@ func (a *SingleTargetApplier) DeleteKeys(ctx context.Context, sourceTable, targe
 	}
 
 	// Execute as a retryable transaction
-	affectedRows, err := dbconn.RetryableTransaction(ctx, a.target.DB, false, a.dbConfig, deleteStmt)
+	affectedRows, err := dbconn.RetryableTransaction(ctx, a.target.DB, dbconn.ErrorOnDupKey, a.dbConfig, deleteStmt)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute delete: %w", err)
 	}
@@ -763,7 +763,7 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 	}
 
 	// Execute as a retryable transaction
-	affectedRows, err := dbconn.RetryableTransaction(ctx, a.target.DB, false, a.dbConfig, upsertStmt)
+	affectedRows, err := dbconn.RetryableTransaction(ctx, a.target.DB, dbconn.ErrorOnDupKey, a.dbConfig, upsertStmt)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute upsert: %w", err)
 	}

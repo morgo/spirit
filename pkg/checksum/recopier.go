@@ -100,7 +100,7 @@ func (r *MySQLRecopier) Recopy(ctx context.Context, chunk *table.Chunk) error {
 	// NewTable holds the target-side table info; for sync (same logical
 	// table on both sides) NewTable.QuotedTableName == Table.QuotedTableName.
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s", chunk.NewTable.QuotedTableName, chunk.String())
-	if _, err := dbconn.RetryableTransaction(fixCtx, r.targetDB, false, r.dbConfig, deleteStmt); err != nil {
+	if _, err := dbconn.RetryableTransaction(fixCtx, r.targetDB, dbconn.ErrorOnDupKey, r.dbConfig, deleteStmt); err != nil {
 		return fmt.Errorf("delete target chunk range: %w", err)
 	}
 

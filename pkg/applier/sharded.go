@@ -514,7 +514,7 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert on this shard's database
-	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, true, shard.dbConfig, query)
+	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, dbconn.IgnoreDupKeyWarnings, shard.dbConfig, query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute chunklet insert on shard %d: %w", shard.shardID, err)
 	}
@@ -731,7 +731,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 				}
 			} else {
 				// Execute as a retryable transaction
-				affected, err = dbconn.RetryableTransaction(ctx, shard.writeDB, false, shard.dbConfig, deleteStmt)
+				affected, err = dbconn.RetryableTransaction(ctx, shard.writeDB, dbconn.ErrorOnDupKey, shard.dbConfig, deleteStmt)
 				if err != nil {
 					err = fmt.Errorf("failed to execute delete on shard %d: %w", shard.shardID, err)
 				}
@@ -926,7 +926,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 				}
 			} else {
 				// Execute as a retryable transaction
-				affected, err = dbconn.RetryableTransaction(ctx, a.shards[sid].writeDB, false, a.shards[sid].dbConfig, upsertStmt)
+				affected, err = dbconn.RetryableTransaction(ctx, a.shards[sid].writeDB, dbconn.ErrorOnDupKey, a.shards[sid].dbConfig, upsertStmt)
 				if err != nil {
 					err = fmt.Errorf("failed to execute upsert on shard %d: %w", sid, err)
 				}

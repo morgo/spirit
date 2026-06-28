@@ -77,18 +77,18 @@ func TestRetryableTrx(t *testing.T) {
 		"", // test empty
 		"INSERT INTO test.dbexec (id, colb) VALUES (2, 2)",
 	}
-	_, err = RetryableTransaction(t.Context(), db, true, NewDBConfig(), stmts...)
+	_, err = RetryableTransaction(t.Context(), db, IgnoreDupKeyWarnings, NewDBConfig(), stmts...)
 	require.NoError(t, err)
 
-	_, err = RetryableTransaction(t.Context(), db, true, NewDBConfig(), "INSERT INTO test.dbexec (id, colb) VALUES (2, 2)") // duplicate
+	_, err = RetryableTransaction(t.Context(), db, IgnoreDupKeyWarnings, NewDBConfig(), "INSERT INTO test.dbexec (id, colb) VALUES (2, 2)") // duplicate
 	require.Error(t, err)
 
-	// duplicate, but creates a warning. Ignore duplicate warnings set to true.
-	_, err = RetryableTransaction(t.Context(), db, true, NewDBConfig(), "INSERT IGNORE INTO test.dbexec (id, colb) VALUES (2, 2)")
+	// duplicate, but creates a warning; IgnoreDupKeyWarnings tolerates the dup-key warning.
+	_, err = RetryableTransaction(t.Context(), db, IgnoreDupKeyWarnings, NewDBConfig(), "INSERT IGNORE INTO test.dbexec (id, colb) VALUES (2, 2)")
 	require.NoError(t, err)
 
 	// duplicate, but warning not ignored
-	_, err = RetryableTransaction(t.Context(), db, false, NewDBConfig(), "INSERT IGNORE INTO test.dbexec (id, colb) VALUES (2, 2)")
+	_, err = RetryableTransaction(t.Context(), db, ErrorOnDupKey, NewDBConfig(), "INSERT IGNORE INTO test.dbexec (id, colb) VALUES (2, 2)")
 	require.Error(t, err)
 
 	// start a transaction, acquire a lock for long enough that the first attempt times out
@@ -107,7 +107,7 @@ func TestRetryableTrx(t *testing.T) {
 		err2 := trx.Rollback()
 		require.NoError(t, err2)
 	}()
-	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 1")
+	_, err = RetryableTransaction(t.Context(), db, ErrorOnDupKey, config, "UPDATE test.dbexec SET colb=123 WHERE id = 1")
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -122,7 +122,7 @@ func TestRetryableTrx(t *testing.T) {
 	require.NoError(t, err)
 	_, err = trx.ExecContext(t.Context(), "SELECT * FROM test.dbexec WHERE id = 2 FOR UPDATE")
 	require.NoError(t, err)
-	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 2") // this will fail, since it times out and exhausts retries.
+	_, err = RetryableTransaction(t.Context(), db, ErrorOnDupKey, config, "UPDATE test.dbexec SET colb=123 WHERE id = 2") // this will fail, since it times out and exhausts retries.
 	require.Error(t, err)
 	err = trx.Rollback() // now we can rollback.
 	require.NoError(t, err)
@@ -233,7 +233,7 @@ func testRetryableTrxSurvivesKill(t *testing.T, tableName, killStmtFmt string) {
 
 	// The first attempt is killed mid-statement. RetryableTransaction must
 	// classify the failure as retryable and succeed on a later attempt.
-	_, err = RetryableTransaction(t.Context(), db, false, config, updateStmt)
+	_, err = RetryableTransaction(t.Context(), db, ErrorOnDupKey, config, updateStmt)
 	<-killDone
 	require.NoError(t, err)
 
