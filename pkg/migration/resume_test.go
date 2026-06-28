@@ -60,11 +60,10 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	c := make(chan error, 1)
 	go func() {
-		defer close(done)
-		err := m.Run(ctx)
-		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		c <- m.Run(ctx)
 	}()
 
 	waitForCheckpoint(t, m)
@@ -73,7 +72,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 	// no in-flight goroutine can trip fatalError → dropCheckpoint), then Close
 	// to tear down the remaining resources.
 	cancel()
-	<-done
+	require.Error(t, <-c) // it gets interrupted as soon as there is a checkpoint saved.
 	require.NoError(t, m.Close())
 
 	// Insert some more dummy data
@@ -333,14 +332,14 @@ func TestCheckpointRestoreBinaryPK(t *testing.T) {
 		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	c := make(chan error, 1)
 	go func() {
-		defer close(done)
-		require.Error(t, m.Run(ctx)) // interrupted once a checkpoint is saved.
+		c <- m.Run(ctx)
 	}()
 	waitForCheckpoint(t, m)
 	cancel()
-	<-done
+	require.Error(t, <-c) // interrupted once a checkpoint is saved.
 	require.NoError(t, m.Close())
 
 	// Resume with a fresh runner and confirm it picked up from the checkpoint.
@@ -377,11 +376,10 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	// we then manually start the first bits of checksum, and then close()
 	// We should be able to resume from the checkpoint into the checksum state.
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	c := make(chan error, 1)
 	go func() {
-		defer close(done)
-		err := r.Run(ctx)
-		require.Error(t, err) // context cancelled
+		c <- r.Run(ctx)
 	}()
 	for r.status.Get() < status.WaitingOnSentinelTable {
 		// Wait for the sentinel table.
@@ -392,8 +390,8 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	require.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
 	// Cancel + wait for Run to fully return before Close. See
 	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
-	cancel() // unblocks the goroutine that was waiting on sentinel.
-	<-done
+	cancel()              // unblocks the goroutine that was waiting on sentinel.
+	require.Error(t, <-c) // context cancelled
 	require.NoError(t, r.Close())
 
 	// drop the sentinel table.
@@ -430,14 +428,14 @@ func TestCheckpointDifferentRestoreOptions(t *testing.T) {
 		WithTargetChunkTime(100*time.Millisecond),
 		WithTestThrottler())
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	c := make(chan error, 1)
 	go func() {
-		defer close(done)
-		require.Error(t, m.Run(ctx)) // interrupted once a checkpoint is saved.
+		c <- m.Run(ctx)
 	}()
 	waitForCheckpoint(t, m)
 	cancel()
-	<-done
+	require.Error(t, <-c) // interrupted once a checkpoint is saved.
 	require.NoError(t, m.Close())
 
 	// A second migration with a DIFFERENT ALTER must refuse to resume from
@@ -487,11 +485,10 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	c := make(chan error, 1)
 	go func() {
-		defer close(done)
-		err := m.Run(ctx)
-		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		c <- m.Run(ctx)
 	}()
 
 	waitForCheckpoint(t, m)
@@ -499,7 +496,7 @@ func TestResumeFromCheckpointE2E(t *testing.T) {
 	// Cancel + wait for Run to fully return before Close. See
 	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
-	<-done
+	require.Error(t, <-c) // it gets interrupted as soon as there is a checkpoint saved.
 	require.NoError(t, m.Close())
 
 	// Insert some more dummy data
@@ -546,11 +543,10 @@ FROM compositevarcharpk a WHERE version='1'`)
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	c := make(chan error, 1)
 	go func() {
-		defer close(done)
-		err := m.Run(ctx)
-		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		c <- m.Run(ctx)
 	}()
 
 	waitForCheckpoint(t, m)
@@ -558,7 +554,7 @@ FROM compositevarcharpk a WHERE version='1'`)
 	// Cancel + wait for Run to fully return before Close. See
 	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
-	<-done
+	require.Error(t, <-c) // it gets interrupted as soon as there is a checkpoint saved.
 	require.NoError(t, m.Close())
 
 	m2 := NewTestRunner(t, "compositevarcharpk", "ENGINE=InnoDB", WithThreads(2))
@@ -616,6 +612,7 @@ func TestResumeFromCheckpointPhantom(t *testing.T) {
 	})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	// Do the initial setup.
 	m.db, err = dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
@@ -761,11 +758,10 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 		WithRespectSentinel())
 
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
+	defer cancel()
+	runErr := make(chan error, 1)
 	go func() {
-		defer close(done)
-		err := runner.Run(ctx)
-		require.Error(t, err) // it gets interrupted as soon as there is a checkpoint saved.
+		runErr <- runner.Run(ctx)
 	}()
 
 	waitForCheckpoint(t, runner)
@@ -779,7 +775,7 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 	// Cancel + wait for Run to fully return before Close. See
 	// TestChangeIntToBigIntPKResumeFromChkPt for the rationale.
 	cancel()
-	<-done
+	require.Error(t, <-runErr) // it gets interrupted as soon as there is a checkpoint saved.
 	require.NoError(t, runner.Close())
 
 	// Manually create the sentinel table.
@@ -841,6 +837,7 @@ func TestResumeFromCheckpointCleanupOnFailure(t *testing.T) {
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -894,6 +891,7 @@ func TestResumeFromCheckpointTooOld(t *testing.T) {
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -932,6 +930,7 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -971,6 +970,7 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 		WithTestThrottler())
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1040,6 +1040,7 @@ func TestCheckpointSharedMultiTableLifecycle(t *testing.T) {
 	require.Len(t, mA.changes, 2) // sanity: multi-table mode, shared checkpoint table
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
