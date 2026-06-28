@@ -2,7 +2,6 @@ package lint
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/statement"
@@ -788,10 +787,10 @@ func TestHasTimestampLinter_MessageFormat(t *testing.T) {
 
 	require.Len(t, violations, 1)
 	msg := violations[0].Message
-	require.True(t, strings.Contains(msg, "my_ts"), "message should contain column name")
-	require.True(t, strings.Contains(msg, "TIMESTAMP"), "message should contain TIMESTAMP")
-	require.True(t, strings.Contains(msg, "2038-01-19"), "message should contain overflow date")
-	require.True(t, strings.Contains(msg, "DATETIME"), "message should suggest DATETIME")
+	require.Contains(t, msg, "my_ts", "message should contain column name")
+	require.Contains(t, msg, "TIMESTAMP", "message should contain TIMESTAMP")
+	require.Contains(t, msg, "2038-01-19", "message should contain overflow date")
+	require.Contains(t, msg, "DATETIME", "message should suggest DATETIME")
 }
 
 func TestHasTimestampLinter_ViolationString(t *testing.T) {

@@ -658,6 +658,9 @@ func runCutoverAtomicityTest(t *testing.T, tableName, schemaTmpl string, buffere
 				t.Logf("MISSING in %s: id=%d x_token=%s version=%d created_at=%s updated_at=%s",
 					newTable, id, xtoken, version, createdAt, updatedAt)
 			}
+			if err := missingRows.Err(); err != nil {
+				t.Logf("iterating missing rows: %v", err)
+			}
 		}
 		divergedRows, _ := tt.DB.QueryContext(t.Context(),
 			fmt.Sprintf(`SELECT o.id, o.version AS old_v, n.version AS new_v, o.updated_at AS old_u, n.updated_at AS new_u
@@ -672,6 +675,9 @@ func runCutoverAtomicityTest(t *testing.T, tableName, schemaTmpl string, buffere
 				_ = divergedRows.Scan(&id, &oldV, &newV, &oldU, &newU)
 				t.Logf("DIVERGED: id=%d old.version=%d new.version=%d old.updated_at=%s new.updated_at=%s",
 					id, oldV, newV, oldU, newU)
+			}
+			if err := divergedRows.Err(); err != nil {
+				t.Logf("iterating diverged rows: %v", err)
 			}
 		}
 	}
@@ -752,7 +758,7 @@ func doOneMigrationWriteLoop(ctx context.Context, db *sql.DB, tableName string) 
 func TestSkipDropAfterCutoverLongTableName(t *testing.T) {
 	t.Parallel()
 	tableName := "tbl_" + strings.Repeat("a", 60)
-	require.Equal(t, 64, len(tableName))
+	require.Len(t, tableName, 64)
 
 	tt := testutils.NewTestTable(t, tableName, fmt.Sprintf(`CREATE TABLE %s (
 		pk int UNSIGNED NOT NULL AUTO_INCREMENT,

@@ -85,7 +85,7 @@ func TestDecodeEnumOrdinal(t *testing.T) {
 	// 0 is MySQL's "invalid value" sentinel; preserved as empty string.
 	got, err = decodeEnumOrdinal(0, elements)
 	require.NoError(t, err)
-	require.Equal(t, "", got)
+	require.Empty(t, got)
 
 	_, err = decodeEnumOrdinal(4, elements)
 	require.Error(t, err)
@@ -98,7 +98,7 @@ func TestDecodeSetBitmask(t *testing.T) {
 
 	got, err := decodeSetBitmask(0, elements)
 	require.NoError(t, err)
-	require.Equal(t, "", got)
+	require.Empty(t, got)
 
 	got, err = decodeSetBitmask(1, elements) // read
 	require.NoError(t, err)

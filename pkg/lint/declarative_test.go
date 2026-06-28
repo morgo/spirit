@@ -54,7 +54,7 @@ func TestPlanChanges_AddColumn(t *testing.T) {
 	require.Contains(t, plan.Changes[0].Statement, "ALTER TABLE")
 	require.Equal(t, "t1", plan.Changes[0].TableName)
 	// Statement should be semicolon-terminated
-	require.True(t, plan.Changes[0].Statement[len(plan.Changes[0].Statement)-1] == ';')
+	require.Equal(t, byte(';'), plan.Changes[0].Statement[len(plan.Changes[0].Statement)-1])
 }
 
 func TestPlanChanges_NewTable(t *testing.T) {
@@ -367,6 +367,6 @@ func TestTerminatedStmt(t *testing.T) {
 	require.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1"))
 	require.Equal(t, "SELECT 1;", terminatedStmt("SELECT 1;"))
 	require.Equal(t, "SELECT 1;", terminatedStmt("  SELECT 1  "))
-	require.Equal(t, "", terminatedStmt(""))
-	require.Equal(t, "", terminatedStmt("   "))
+	require.Empty(t, terminatedStmt(""))
+	require.Empty(t, terminatedStmt("   "))
 }

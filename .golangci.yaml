@@ -12,6 +12,8 @@ linters:
     - noctx           # requests without context (we sometimes nolint these)
     - bodyclose       # recommended, but probably not applicable
     - exhaustive      # missing switch cases (we already suppress some)
+    - rowserrcheck    # check rows.Err() after iterating
+    - testifylint     # idiomatic testify assertions
 formatters:
   enable:
     - gofmt

@@ -111,6 +111,7 @@ func TestAutoIncrementEmptyTable(t *testing.T) {
 		require.NoError(t, err)
 		insertedIDs = append(insertedIDs, id)
 	}
+	require.NoError(t, rows.Err())
 
 	expectedIDs := []int64{2979716, 2979717, 2979718}
 	require.Equal(t, expectedIDs, insertedIDs, "Inserted IDs should start from 2979716, not 1")
@@ -169,18 +170,26 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, rowCount, "Table should have 3 rows")
 
-	// Verify existing IDs
-	var existingIDs []int64
-	rows, err := testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
-	require.NoError(t, err)
-	for rows.Next() {
-		var id int64
-		require.NoError(t, rows.Scan(&id))
-		existingIDs = append(existingIDs, id)
+	// collectIDs reads all id values in order. Each call scopes its own rows
+	// and checks rows.Err() after iterating (satisfies rowserrcheck); the
+	// per-call deferred Close is correct regardless.
+	collectIDs := func() []int64 {
+		rows, err := testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
+		require.NoError(t, err)
+		defer rows.Close() //nolint:errcheck // test cleanup
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
 	}
-	_ = rows.Close()
+
+	// Verify existing IDs
 	expectedExistingIDs := []int64{2979716, 2979717, 2979718}
-	require.Equal(t, expectedExistingIDs, existingIDs)
+	require.Equal(t, expectedExistingIDs, collectIDs())
 
 	// Run migration
 	r := NewTestRunner(t, tableName, "ADD COLUMN test_col VARCHAR(255), ADD UNIQUE INDEX uk_test_col (test_col)")
@@ -190,34 +199,17 @@ func TestAutoIncrementWithRows(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify existing rows are preserved
-	var migratedIDs []int64
-	rows, err = testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
-	require.NoError(t, err)
-	for rows.Next() {
-		var id int64
-		require.NoError(t, rows.Scan(&id))
-		migratedIDs = append(migratedIDs, id)
-	}
-	_ = rows.Close()
-	require.Equal(t, expectedExistingIDs, migratedIDs, "Existing IDs should be preserved")
+	require.Equal(t, expectedExistingIDs, collectIDs(), "Existing IDs should be preserved")
 
 	// Insert new rows after migration
 	testutils.RunSQL(t, fmt.Sprintf(`
-		INSERT INTO %s (name) VALUES 
+		INSERT INTO %s (name) VALUES
 		('user4'),
 		('user5'),
 		('user6')`, tableName))
 
 	// Verify all IDs (existing + new)
-	var allIDs []int64
-	rows, err = testDB.QueryContext(t.Context(), fmt.Sprintf("SELECT id FROM %s ORDER BY id", tableName))
-	require.NoError(t, err)
-	for rows.Next() {
-		var id int64
-		require.NoError(t, rows.Scan(&id))
-		allIDs = append(allIDs, id)
-	}
-	_ = rows.Close()
+	allIDs := collectIDs()
 
 	expectedAllIDs := []int64{2979716, 2979717, 2979718, 2979719, 2979720, 2979721}
 	require.Equal(t, expectedAllIDs, allIDs, "New IDs should continue from 2979719")
@@ -273,6 +265,7 @@ func TestModifyAddAutoIncrementPreservesZeroPK(t *testing.T) {
 		require.NoError(t, rows.Scan(&id))
 		ids = append(ids, id)
 	}
+	require.NoError(t, rows.Err())
 	require.Equal(t, []int64{0, 1, 2}, ids, "row with gid=0 must survive the MODIFY ... AUTO_INCREMENT migration")
 }
 
@@ -342,7 +335,7 @@ func TestOldTableNameTruncation(t *testing.T) {
 			require.LessOrEqual(t, len(result), tt.expectMaxLen,
 				"oldTableName() result %q (len=%d) exceeds max length %d",
 				result, len(result), tt.expectMaxLen)
-			require.Greater(t, len(result), 0, "oldTableName() should not be empty")
+			require.NotEmpty(t, result, "oldTableName() should not be empty")
 
 			if tt.skipDropAfterCutover {
 				// Should contain the timestamp

@@ -146,11 +146,11 @@ func TestHelperFunctions(t *testing.T) {
 			{Name: "created_at"},
 		}
 
-		require.Equal(t, "", getPreviousColumn(columns, "id"))
+		require.Empty(t, getPreviousColumn(columns, "id"))
 		require.Equal(t, "id", getPreviousColumn(columns, "name"))
 		require.Equal(t, "name", getPreviousColumn(columns, "email"))
 		require.Equal(t, "email", getPreviousColumn(columns, "created_at"))
-		require.Equal(t, "", getPreviousColumn(columns, "nonexistent"))
+		require.Empty(t, getPreviousColumn(columns, "nonexistent"))
 	})
 
 	t.Run("getPrimaryKeyIndex", func(t *testing.T) {

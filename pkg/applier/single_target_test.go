@@ -342,6 +342,15 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	var wg sync.WaitGroup
 	var totalCallbacks atomic.Int32
 
+	// require.* must not run in a non-test goroutine (testifylint go-require):
+	// a failed require calls runtime.Goexit, which only unwinds that goroutine.
+	// Each goroutine and callback sends its result over a channel and the
+	// assertions run in the main test goroutine after wg.Wait(). The channels
+	// are buffered larger than any possible number of sends so neither the
+	// Apply goroutines nor the applier's callback goroutines can block.
+	applyErrs := make(chan error, 2*numBatches)
+	callbackRows := make(chan int64, numBatches*rowsPerBatch)
+
 	for batch := range numBatches {
 		wg.Add(1)
 		go func(batchNum int) {
@@ -362,12 +371,14 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 
 			callback := func(affectedRows int64, err error) {
 				totalCallbacks.Add(1)
-				require.NoError(t, err)
-				require.Equal(t, int64(rowsPerBatch), affectedRows)
+				if err != nil {
+					applyErrs <- err
+					return
+				}
+				callbackRows <- affectedRows
 			}
 
-			err := applier.Apply(t.Context(), chunk, testRows, callback)
-			require.NoError(t, err)
+			applyErrs <- applier.Apply(t.Context(), chunk, testRows, callback)
 		}(batch)
 	}
 
@@ -376,9 +387,19 @@ func TestSingleTargetApplierConcurrentApplies(t *testing.T) {
 	// Wait for all work to complete
 	err = applier.Wait(t.Context())
 	require.NoError(t, err)
+	close(applyErrs)
+	close(callbackRows)
 
 	// Verify all callbacks were invoked
 	require.Equal(t, int32(numBatches), totalCallbacks.Load())
+
+	// All Apply calls and callbacks must have succeeded.
+	for applyErr := range applyErrs {
+		require.NoError(t, applyErr)
+	}
+	for affectedRows := range callbackRows {
+		require.Equal(t, int64(rowsPerBatch), affectedRows)
+	}
 
 	// Verify total count
 	var count int

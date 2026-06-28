@@ -531,3 +531,33 @@ func TestQualifiedName(t *testing.T) {
 	ti4 := &TableInfo{SchemaName: "db2", TableName: "t1"}
 	require.NotEqual(t, ti3.QualifiedName(), ti4.QualifiedName())
 }
+
+// TestPrimaryKeyValuesNonSliceRow covers the checked type-assertion error path
+// in PrimaryKeyValues: a row image that is not a []any must produce a clean
+// error rather than panic. No DB is needed; the column/key metadata is set by
+// hand.
+func TestPrimaryKeyValuesNonSliceRow(t *testing.T) {
+	ti := &TableInfo{
+		SchemaName: "test",
+		TableName:  "t1",
+		Columns:    []string{"id", "name"},
+		KeyColumns: []string{"id"},
+	}
+
+	// A non-[]any row must return an error, not panic.
+	_, err := ti.PrimaryKeyValues("not-a-slice")
+	require.ErrorContains(t, err, "expected []any row")
+
+	_, err = ti.PrimaryKeyValues(42)
+	require.ErrorContains(t, err, "expected []any row")
+
+	// A []any shorter than the table's column count must return an error, not
+	// panic with index-out-of-range.
+	_, err = ti.PrimaryKeyValues([]any{int64(7)})
+	require.ErrorContains(t, err, "fewer than")
+
+	// Sanity: a well-formed []any row extracts the PK value.
+	pk, err := ti.PrimaryKeyValues([]any{int64(7), "alice"})
+	require.NoError(t, err)
+	require.Equal(t, []any{int64(7)}, pk)
+}

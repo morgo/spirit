@@ -422,7 +422,7 @@ func TestYieldTimeout(t *testing.T) {
 
 	// Verify that at least one yield actually occurred.
 	singleChecker := checker.(*SingleChecker)
-	require.Greater(t, singleChecker.yieldsPerformed.Load(), uint64(0), "expected at least one yield to occur")
+	require.Positive(t, singleChecker.yieldsPerformed.Load(), "expected at least one yield to occur")
 	t.Logf("yields performed: %d", singleChecker.yieldsPerformed.Load())
 }
 
