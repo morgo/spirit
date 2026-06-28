@@ -148,6 +148,16 @@ type ContinuousCheckerConfig struct {
 	// MySQLRecopier.
 	Recopier Recopier
 
+	// MinPassInterval is the minimum wall-clock time between the start of one
+	// pass and the start of the next, measured from the previous pass's start
+	// (a pass that already ran longer than MinPassInterval incurs no extra
+	// wait). The very first pass always runs immediately. Zero means passes
+	// run back-to-back, which is convenient for tests but heavy in production:
+	// the migration and datasync runners both pass continuousChecksumMinInterval
+	// (1h) so a small table whose pass finishes in seconds does not re-scan
+	// continuously. The wait honours context cancellation.
+	MinPassInterval time.Duration
+
 	Logger *slog.Logger
 }
 
@@ -461,8 +471,23 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		workerWG.Wait()
 	}()
 
+	var lastPassStart time.Time
 	for passNum := uint64(1); ; passNum++ {
 		if passNum > 1 {
+			// Pace passes: wait until MinPassInterval has elapsed since the
+			// previous pass STARTED (a pass that already ran longer incurs no
+			// extra wait). The first pass is never delayed. 0 = back-to-back.
+			if wait := c.cfg.MinPassInterval - time.Since(lastPassStart); wait > 0 {
+				c.cfg.Logger.Debug("continuous checksum waiting before next pass",
+					"pass_number", passNum, "wait", wait.Round(time.Second).String())
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
 			if err := c.chunker.Reset(); err != nil {
 				return fmt.Errorf("reset chunker for pass %d: %w", passNum, err)
 			}
@@ -482,6 +507,7 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		// most operators want.
 		c.cfg.Logger.Debug("continuous checksum pass starting", "pass_number", passNum)
 		passStart := time.Now()
+		lastPassStart = passStart
 
 		if err := c.runOnePass(ctx, workCh, resultCh); err != nil {
 			return err
@@ -1034,6 +1060,19 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 		PermanentFailures:             c.permanentFailures.Load(),
 		FirstCleanPassAt:              firstAt,
 	}
+}
+
+// DifferencesFound returns the lifetime number of chunks that mismatched on
+// their initial (fresh-walk) read — i.e. Stats().MismatchesDetected. It exists
+// so a ContinuousChecker can be consumed through the same minimal "has this
+// checker observed any divergence?" view the migration runner uses to gate
+// checkpoint-watermark persistence (DumpCheckpoint / invalidateChecksumWatermark),
+// matching the Checker.DifferencesFound semantics of the SingleChecker /
+// DistributedChecker. A transient mismatch that later reconciles on retry still
+// counts here, so the gate stays conservative: any hint of divergence blanks the
+// persisted watermark and forces re-verification on resume.
+func (c *ContinuousChecker) DifferencesFound() uint64 {
+	return c.mismatchesDetected.Load()
 }
 
 // FirstCleanPass returns a channel that is closed the first time a pass

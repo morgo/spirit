@@ -251,18 +251,23 @@ func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
 
 // TestContinuousChecksumDivergenceClearsCheckpointWatermark is the E2E
 // version: a defer-cutover migration reaches the sentinel wait, a row in the
-// _new table is corrupted externally, the continuous checksum detects and
-// repairs it and deliberately aborts the run — and the final on-disk
+// _new table is corrupted externally, the continuous checksum detects the
+// divergence and deliberately aborts the run — and the final on-disk
 // checkpoint state must carry NO checksum_watermark anywhere, so the
 // operator's re-run re-verifies the whole table instead of silently
-// resuming past the repaired chunk.
+// resuming past the diverged chunk. (The ContinuousChecker is configured
+// without a Recopier, so a confirmed divergence surfaces as
+// ErrPermanentDivergence and aborts rather than self-healing.)
 //
-// Not parallel: it shortens the package-global continuousChecksumMinInterval
-// so the first continuous pass starts promptly.
+// Not parallel: it shortens the package-global continuous-checksum pacing and
+// retry delay so the divergence is detected and confirmed promptly.
 func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 	origInterval := continuousChecksumMinInterval
 	continuousChecksumMinInterval = 2 * time.Second
 	t.Cleanup(func() { continuousChecksumMinInterval = origInterval })
+	origRetry := continuousChecksumRetryDelay
+	continuousChecksumRetryDelay = 1 * time.Second
+	t.Cleanup(func() { continuousChecksumRetryDelay = origRetry })
 
 	tableName := "cont_chk_clear"
 	tt := testutils.NewTestTable(t, tableName, `CREATE TABLE cont_chk_clear (
@@ -299,10 +304,10 @@ func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 	}, 30*time.Second, 50*time.Millisecond,
 		"expected a checkpoint row with a checksum_watermark during the sentinel wait")
 
-	// Corrupt a row in the new table behind spirit's back. The continuous
-	// checksum (first pass starts after the shortened min-interval) detects
-	// the divergence, repairs it, and aborts the run rather than allowing
-	// cutover.
+	// Corrupt a row in the new table behind spirit's back. A subsequent
+	// continuous-checksum pass detects the divergence, confirms it on retry
+	// (source unchanged, target still wrong), and aborts the run rather than
+	// allowing cutover.
 	testutils.RunSQL(t, fmt.Sprintf("UPDATE `%s` SET val = 'corrupted' WHERE id = 1", utils.NewTableName(tableName)))
 
 	select {
