@@ -705,7 +705,10 @@ func (r *Runner) newMigration(ctx context.Context) error {
 		return err
 	}
 	if r.migration.DeferCutOver {
-		if err := r.createSentinelTable(ctx); err != nil {
+		// Idempotent (CREATE IF NOT EXISTS): the sentinel is shared by every
+		// migration in the schema and must never pass through a "table absent"
+		// state that a concurrent deferred cutover's poll could observe.
+		if err := sentinel.Create(ctx, r.db); err != nil {
 			return err
 		}
 	}
@@ -1113,22 +1116,6 @@ func (r *Runner) Progress() status.Progress {
 		Checksum:     checksum,
 		Tables:       tables,
 	}
-}
-
-// createSentinelTable creates the sentinel table if it does not already
-// exist. The sentinel is shared by every migration in the schema
-// (sentinelTableName is a const), so creation must be idempotent and must
-// never pass through a "table absent" state: a concurrent --defer-cutover
-// migration polls waitOnSentinelTable every sentinelCheckInterval, and a
-// DROP+CREATE pair here opens a window in which that poll observes the
-// sentinel as missing and proceeds to cutover without operator approval.
-// The DROP that used to precede the CREATE was a holdover from when the
-// sentinel was per-table and carried row data (created_at /
-// alter_statement) that needed resetting; the table is now contentless
-// and only its existence matters, so adopting an existing sentinel is
-// equivalent to creating a fresh one.
-func (r *Runner) createSentinelTable(ctx context.Context) error {
-	return sentinel.Create(ctx, r.db, r.changes[0].table.SchemaName)
 }
 
 func (r *Runner) Close() error {
@@ -1576,10 +1563,6 @@ func (r *Runner) Status() string {
 	return ""
 }
 
-func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
-	return sentinel.Exists(ctx, r.db, r.changes[0].table.SchemaName)
-}
-
 // Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
 // While we wait, run a "continuous checksum" loop in the background as a
 // best-effort consistency re-check. The continuous checksum is purely
@@ -1596,7 +1579,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	// so they are injected into the shared sentinel.Wait orchestration as
 	// callbacks rather than reimplemented here. See pkg/sentinel.
 	return sentinel.Wait(ctx, sentinel.WaitConfig{
-		Exists:              r.sentinelTableExists,
+		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
 		RunChecksum:         r.runContinuousChecksum,
 		InvalidateWatermark: r.invalidateChecksumWatermark,
 		Logger:              r.logger,

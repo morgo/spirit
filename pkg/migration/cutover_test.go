@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -1000,8 +1001,8 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
 		`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
 
-	// Build a minimal runner: createSentinelTable and sentinelTableExists
-	// only need r.db and r.changes[0].table.
+	// Build a minimal runner: sentinel.Create / sentinel.Exists only need a
+	// *sql.DB whose current schema is dbName (they use DATABASE()).
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB", WithDBName(dbName))
 	var err error
 	m.db, err = dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
@@ -1012,10 +1013,10 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	}()
 
 	// Migration A creates the sentinel...
-	require.NoError(t, m.createSentinelTable(t.Context()))
+	require.NoError(t, sentinel.Create(t.Context(), m.db))
 	// ...and creating it again when it already exists must succeed without
 	// dropping it first (idempotent create).
-	require.NoError(t, m.createSentinelTable(t.Context()))
+	require.NoError(t, sentinel.Create(t.Context(), m.db))
 
 	// Start a poller that mimics waitOnSentinelTable's existence probe, but
 	// much tighter than the production 1s interval so it lands inside any
@@ -1026,7 +1027,7 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for pollCtx.Err() == nil {
-			exists, err := m.sentinelTableExists(pollCtx)
+			exists, err := sentinel.Exists(pollCtx, m.db)
 			if err != nil {
 				return // context cancelled; test is over
 			}
@@ -1040,7 +1041,7 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	// Concurrently, migration B (re)creates the sentinel many times — as a
 	// stream of fresh --defer-cutover migrations starting would.
 	for range 50 {
-		require.NoError(t, m.createSentinelTable(t.Context()))
+		require.NoError(t, sentinel.Create(t.Context(), m.db))
 	}
 	cancelPoll()
 	wg.Wait()

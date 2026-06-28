@@ -28,19 +28,24 @@ import (
 // which table to drop to release a deferred cutover.
 const TableName = "_spirit_sentinel"
 
-// Create creates the sentinel table in schemaName on db if it does not already
-// exist. Creation must be idempotent: the name is a constant, a resumed
-// migration recreates it, and TestSentinelCreateNeverObservedAbsent relies on
-// CREATE IF NOT EXISTS so a concurrent existence probe never sees it missing.
-func Create(ctx context.Context, db *sql.DB, schemaName string) error {
-	return dbconn.Exec(ctx, db, "CREATE TABLE IF NOT EXISTS %n.%n (id int NOT NULL PRIMARY KEY)", schemaName, TableName)
+// Create creates the sentinel table in db's currently-selected schema if it
+// does not already exist. The schema is taken from the connection (the table
+// name is unqualified) rather than passed in, so this works under Vitess where
+// a fixed schema name isn't meaningful — point db at the right keyspace/schema.
+// Creation must be idempotent: the name is a constant, a resumed migration
+// recreates it, and TestSentinelCreateNeverObservedAbsent relies on CREATE IF
+// NOT EXISTS so a concurrent existence probe never sees it missing.
+func Create(ctx context.Context, db *sql.DB) error {
+	return dbconn.Exec(ctx, db, "CREATE TABLE IF NOT EXISTS %n (id int NOT NULL PRIMARY KEY)", TableName)
 }
 
-// Exists reports whether the sentinel table is present in schemaName on db.
-func Exists(ctx context.Context, db *sql.DB, schemaName string) (bool, error) {
-	const q = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
+// Exists reports whether the sentinel table is present in db's currently-selected
+// schema (DATABASE()), so it tracks Create's unqualified target rather than a
+// passed-in schema name.
+func Exists(ctx context.Context, db *sql.DB) (bool, error) {
+	const q = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?"
 	var count int
-	if err := db.QueryRowContext(ctx, q, schemaName, TableName).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, q, TableName).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil

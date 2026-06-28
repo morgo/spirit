@@ -582,9 +582,11 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		return err
 	}
 
-	// Create sentinel on SOURCE
+	// Create sentinel on SOURCE. Idempotent (CREATE IF NOT EXISTS): the
+	// sentinel is shared with every spirit process in the schema and must
+	// never pass through a "table absent" state a concurrent poll could see.
 	if r.move.CreateSentinel {
-		if err := r.createSentinelTable(ctx); err != nil {
+		if err := sentinel.Create(ctx, r.sources[0].db); err != nil {
 			return err
 		}
 	}
@@ -1283,25 +1285,6 @@ func (r *Runner) Progress() status.Progress {
 	}
 }
 
-// createSentinelTable creates the sentinel table on SOURCE (not target) if
-// it does not already exist. The sentinel name (_spirit_sentinel) is shared
-// with every other spirit process in the schema — including --defer-cutover
-// migrations — so creation must be idempotent and must never pass through a
-// "table absent" state: a concurrent process polls its sentinel wait every
-// sentinelCheckInterval, and a DROP+CREATE pair here opens a window in which
-// that poll observes the sentinel as missing and proceeds to cutover without
-// operator approval. The table is contentless and only its existence
-// matters, so adopting an existing sentinel is equivalent to creating a
-// fresh one.
-func (r *Runner) createSentinelTable(ctx context.Context) error {
-	return sentinel.Create(ctx, r.sources[0].db, r.sources[0].config.DBName)
-}
-
-// sentinelTableExists checks if sentinel table exists on SOURCE (not target).
-func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
-	return sentinel.Exists(ctx, r.sources[0].db, r.sources[0].config.DBName)
-}
-
 // Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
 // While we wait, run a "continuous checksum" loop in the background as a
 // best-effort consistency re-check. The continuous checksum is purely
@@ -1319,7 +1302,7 @@ func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
 	// are injected into the shared sentinel.Wait orchestration as callbacks
 	// rather than reimplemented here. See pkg/sentinel.
 	return sentinel.Wait(ctx, sentinel.WaitConfig{
-		Exists:              r.sentinelTableExists,
+		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.sources[0].db) },
 		RunChecksum:         r.runContinuousChecksum,
 		InvalidateWatermark: r.invalidateChecksumWatermark,
 		Logger:              r.logger,
