@@ -283,10 +283,10 @@ func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) er
 	// against a hung transaction.
 	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
 	defer fixCancel()
-	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, false, c.dbConfig, deleteStmt); err != nil {
+	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, dbconn.ErrorOnDupKey, c.dbConfig, deleteStmt); err != nil {
 		return fmt.Errorf("failed to delete existing rows: %w", err)
 	}
-	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, false, c.dbConfig, replaceStmt); err != nil {
+	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, dbconn.ErrorOnDupKey, c.dbConfig, replaceStmt); err != nil {
 		return fmt.Errorf("failed to replace chunk data: %w", err)
 	}
 	return nil

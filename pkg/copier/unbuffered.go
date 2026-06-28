@@ -68,7 +68,7 @@ func (c *Unbuffered) CopyChunk(ctx context.Context, chunk *table.Chunk) error {
 	c.logger.Debug("running chunk", "chunk", chunk.String(), "query", query)
 	var affectedRows int64
 	var err error
-	if affectedRows, err = dbconn.RetryableTransaction(ctx, c.db, true, c.dbConfig, query); err != nil {
+	if affectedRows, err = dbconn.RetryableTransaction(ctx, c.db, dbconn.IgnoreDupKeyWarnings, c.dbConfig, query); err != nil {
 		return err
 	}
 	c.logger.Debug("CopyChunk completed",

@@ -196,7 +196,7 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	targets := c.applier.GetTargets()
 	for i, target := range targets {
 		c.logger.Debug("deleting chunk range from target", "targetID", i, "chunk", chunk.String(), "table", chunk.Table.TableName)
-		_, err := dbconn.RetryableTransaction(fixCtx, target.DB, false, c.dbConfig, deleteStmt)
+		_, err := dbconn.RetryableTransaction(fixCtx, target.DB, dbconn.ErrorOnDupKey, c.dbConfig, deleteStmt)
 		if err != nil {
 			return fmt.Errorf("failed to delete chunk from target %d: %w", i, err)
 		}

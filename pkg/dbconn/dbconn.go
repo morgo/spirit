@@ -149,9 +149,29 @@ func canRetryError(err error) bool {
 	}
 }
 
+// DupKeyHandling selects how RetryableTransaction treats duplicate-key (1062)
+// warnings. Copy / INSERT IGNORE paths legitimately expect dup-key warnings
+// (e.g. resume re-inserts); checksum-fix DELETE/REPLACE/UPSERT paths do not and
+// want them surfaced. Using a named int enum (rather than a bool) keeps call
+// sites self-documenting and stops a bare positional bool (true/false) from
+// compiling.
+type DupKeyHandling int
+
+const (
+	// ErrorOnDupKey surfaces duplicate-key warnings as errors.
+	ErrorOnDupKey DupKeyHandling = iota
+	// IgnoreDupKeyWarnings tolerates duplicate-key warnings.
+	IgnoreDupKeyWarnings
+)
+
 // RetryableTransaction retries all statements in a transaction, retrying if a statement
 // errors, or there is a deadlock. It will retry up to maxRetries times.
-func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings bool, config *DBConfig, stmts ...string) (int64, error) {
+func RetryableTransaction(ctx context.Context, db *sql.DB, dupKeyHandling DupKeyHandling, config *DBConfig, stmts ...string) (int64, error) {
+	switch dupKeyHandling {
+	case ErrorOnDupKey, IgnoreDupKeyWarnings:
+	default:
+		return 0, fmt.Errorf("RetryableTransaction: invalid DupKeyHandling value %d", dupKeyHandling)
+	}
 	var (
 		err          error
 		trx          *sql.Tx
@@ -207,7 +227,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, ignoreDupKeyWarnings 
 					// because a historical value like 0000-00-00 00:00:00
 					// might exist in the table and needs to be copied.
 					switch {
-					case code == errFoundDuppKey && ignoreDupKeyWarnings:
+					case code == errFoundDuppKey && dupKeyHandling == IgnoreDupKeyWarnings:
 						continue // ignore duplicate key warnings
 					case code == errCapacityExceeded:
 						// "Memory capacity of 8388608 bytes for 'range_optimizer_max_mem_size' exceeded.
