@@ -1194,6 +1194,13 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 		Logger:          r.logger,
 		Applier:         r.applier,
 		FixDifferences:  true,
+		// Migration exposes this as the --checksum-yield-timeout flag
+		// (default 24h); move intentionally has no equivalent knob
+		// ("decisions, not options"), so pin the package default here.
+		// Setting it explicitly keeps move consistent with migration's
+		// effective behaviour and decouples it from the checksum package's
+		// internal zero-value fallback.
+		YieldTimeout: checksum.DefaultYieldTimeout,
 	})
 	if err != nil {
 		return err
@@ -1480,6 +1487,14 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		// loop itself supplies the retry, so we don't nest a second
 		// retry loop inside each iteration.
 		MaxRetries: 1,
+		// A single continuous pass over a large table can run for hours
+		// during the sentinel wait (capped by sentinelWaitLimit). Pin the
+		// package default yield timeout so a long pass periodically
+		// releases its REPEATABLE READ transaction and curbs InnoDB HLL
+		// growth on the source — matching migration's continuous checker,
+		// which derives the same value from --checksum-yield-timeout.
+		// Move has no equivalent flag by design ("decisions, not options").
+		YieldTimeout: checksum.DefaultYieldTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create continuous checker: %w", err)
