@@ -1334,22 +1334,28 @@ func (r *Runner) Close() error {
 		r.replClient.StopPeriodicFlush()
 		r.replClient.Close()
 	}
+	// Run every cleanup step unconditionally and collect errors with
+	// errors.Join. Previously the first failing step short-circuited the
+	// rest, leaking the remaining DB pools (the target and source handles).
+	// The individual close calls are independent enough that running them
+	// all does no harm.
+	var errs []error
 	if r.copyChunker != nil {
 		if err := r.copyChunker.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	if r.ownsTarget && r.target.DB != nil {
 		if err := r.target.DB.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	if r.source.db != nil {
 		if err := r.source.db.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // --- progress-field setters (guard the fields the status.Task accessors read) ---

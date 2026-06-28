@@ -31,7 +31,7 @@ func TestTrxPool(t *testing.T) {
 		"INSERT INTO test.trxpool (id, colb) VALUES (1, 1)",
 		"INSERT INTO test.trxpool (id, colb) VALUES (2, 2)",
 	}
-	_, err = RetryableTransaction(t.Context(), db, true, config, stmts...)
+	_, err = RetryableTransaction(t.Context(), db, IgnoreDupKeyWarnings, config, stmts...)
 	require.NoError(t, err)
 
 	// Test that the transaction pool is working.
@@ -40,7 +40,7 @@ func TestTrxPool(t *testing.T) {
 
 	// The pool is all repeatable-read transactions, so if I insert new rows
 	// They can't be visible.
-	_, err = RetryableTransaction(t.Context(), db, true, config, "INSERT INTO test.trxpool (id, colb) VALUES (3, 3)")
+	_, err = RetryableTransaction(t.Context(), db, IgnoreDupKeyWarnings, config, "INSERT INTO test.trxpool (id, colb) VALUES (3, 3)")
 	require.NoError(t, err)
 
 	trx1, err := pool.Get()
