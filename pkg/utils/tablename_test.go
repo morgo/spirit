@@ -22,6 +22,12 @@ func TestAuxTableName(t *testing.T) {
 	require.True(t, strings.HasPrefix(got, "_"))
 	require.True(t, strings.HasSuffix(got, "_chkpnt"))
 
+	// Determinism: AuxTableName is documented as deterministic, so the same
+	// input must always yield the same output. Compare a stored result against a
+	// fresh call (not two identical call expressions, which testifylint flags as
+	// a useless assertion).
+	require.Equal(t, got, AuxTableName(name57, "_chkpnt"))
+
 	// 64-char input with each suffix still fits within 64.
 	name64 := strings.Repeat("b", MaxTableNameLength)
 	for _, suffix := range []string{"_chkpnt", "_new", "_old", "_old_20260101_000000"} {
@@ -32,9 +38,6 @@ func TestAuxTableName(t *testing.T) {
 		require.True(t, strings.HasPrefix(out, "_"))
 		require.True(t, strings.HasSuffix(out, suffix))
 	}
-
-	// Determinism: same input → same output.
-	require.Equal(t, AuxTableName(name64, "_chkpnt"), AuxTableName(name64, "_chkpnt"))
 
 	// Defensive cap: even an abusively long suffix must not produce a
 	// result longer than MaxTableNameLength.

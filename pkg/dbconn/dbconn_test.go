@@ -102,13 +102,18 @@ func TestRetryableTrx(t *testing.T) {
 	require.NoError(t, err)
 	_, err = trx.ExecContext(t.Context(), "SELECT * FROM test.dbexec WHERE id = 1 FOR UPDATE")
 	require.NoError(t, err)
+	// require.* must run on the test goroutine (testifylint go-require): the
+	// rollback releases the FOR UPDATE lock so RetryableTransaction's retry
+	// succeeds, so do it concurrently and check its error back on the main
+	// goroutine.
+	rollbackErr := make(chan error, 1)
 	go func() {
 		time.Sleep(2 * time.Second)
-		err2 := trx.Rollback()
-		require.NoError(t, err2)
+		rollbackErr <- trx.Rollback()
 	}()
 	_, err = RetryableTransaction(t.Context(), db, false, config, "UPDATE test.dbexec SET colb=123 WHERE id = 1")
 	require.NoError(t, err)
+	require.NoError(t, <-rollbackErr)
 	require.NoError(t, db.Close())
 
 	// Same again, but make the retry unsuccessful

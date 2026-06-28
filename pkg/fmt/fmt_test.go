@@ -172,7 +172,7 @@ func TestCanonicalize_Boolean(t *testing.T) {
 	// Table name should be preserved.
 	require.Contains(t, canonical, "`bool_test`")
 	// Should end with newline.
-	require.True(t, canonical[len(canonical)-1] == '\n')
+	require.Equal(t, byte('\n'), canonical[len(canonical)-1])
 }
 
 func TestCanonicalize_NoChange(t *testing.T) {

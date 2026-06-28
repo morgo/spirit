@@ -1397,6 +1397,7 @@ func TestCompositeChunkerCollationDifference(t *testing.T) {
 		require.NoError(t, rows.Scan(&name))
 		mysqlOrder = append(mysqlOrder, name)
 	}
+	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
 
 	// MySQL collation order (case-insensitive): KEY/Key/key variants grouped together

@@ -236,6 +236,9 @@ func dumpDatatypeMismatch(t *testing.T, db *sql.DB, src, dst *table.TableInfo) {
 		}
 		t.Logf("  mismatch id=%d  src=0x%s  dst=0x%s", id, srcHex.String, dstHex.String)
 	}
+	if err := rows.Err(); err != nil {
+		t.Logf("iterating mismatch detail: %v", err)
+	}
 }
 
 // startBufferedSubscriptionFor wires a binlog client with a single-target

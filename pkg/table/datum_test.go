@@ -440,3 +440,34 @@ func TestNewDatumFromValueWithType(t *testing.T) {
 		})
 	}
 }
+
+// TestDatumCompareTypeMismatch covers the checked type-assertion error paths in
+// (Datum).compare: a Datum whose Tp claims signed/unsigned but whose Val holds
+// the wrong concrete type must yield a clean error rather than panic. This can
+// only happen for a hand-built Datum (NewDatum always normalizes Val), but the
+// comparison wrappers are reachable from the chunker so the error path matters.
+func TestDatumCompareTypeMismatch(t *testing.T) {
+	// signedType but Val is a string, not int64.
+	badSigned := Datum{Val: "not-an-int", Tp: signedType}
+	goodSigned := Datum{Val: int64(1), Tp: signedType}
+
+	_, err := badSigned.GreaterThan(goodSigned)
+	require.ErrorContains(t, err, "expected int64")
+	// Mismatch on the second operand is detected too.
+	_, err = goodSigned.LessThan(badSigned)
+	require.ErrorContains(t, err, "expected int64")
+
+	// unsignedType but Val is a string, not uint64.
+	badUnsigned := Datum{Val: "not-a-uint", Tp: unsignedType}
+	goodUnsigned := Datum{Val: uint64(1), Tp: unsignedType}
+
+	_, err = badUnsigned.GreaterThanOrEqual(goodUnsigned)
+	require.ErrorContains(t, err, "expected uint64")
+	_, err = goodUnsigned.LessThanOrEqual(badUnsigned)
+	require.ErrorContains(t, err, "expected uint64")
+
+	// Sanity: well-formed datums of the same type still compare without error.
+	gt, err := goodSigned.GreaterThan(Datum{Val: int64(0), Tp: signedType})
+	require.NoError(t, err)
+	require.True(t, gt)
+}

@@ -411,7 +411,14 @@ func (d Datum) compare(d2 Datum) (int, error) {
 	}
 	switch d.Tp {
 	case signedType:
-		a, b := d.Val.(int64), d2.Val.(int64)
+		a, ok := d.Val.(int64)
+		if !ok {
+			return 0, fmt.Errorf("datum compare: expected int64, got %T", d.Val)
+		}
+		b, ok := d2.Val.(int64)
+		if !ok {
+			return 0, fmt.Errorf("datum compare: expected int64, got %T", d2.Val)
+		}
 		switch {
 		case a < b:
 			return -1, nil
@@ -421,7 +428,14 @@ func (d Datum) compare(d2 Datum) (int, error) {
 			return 0, nil
 		}
 	case unsignedType:
-		a, b := d.Val.(uint64), d2.Val.(uint64)
+		a, ok := d.Val.(uint64)
+		if !ok {
+			return 0, fmt.Errorf("datum compare: expected uint64, got %T", d.Val)
+		}
+		b, ok := d2.Val.(uint64)
+		if !ok {
+			return 0, fmt.Errorf("datum compare: expected uint64, got %T", d2.Val)
+		}
 		switch {
 		case a < b:
 			return -1, nil

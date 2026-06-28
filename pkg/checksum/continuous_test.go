@@ -337,7 +337,7 @@ func TestPermanentDivergence(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrPermanentDivergence), "expected ErrPermanentDivergence, got %v", err)
+	require.ErrorIs(t, err, ErrPermanentDivergence, "expected ErrPermanentDivergence, got %v", err)
 	stats := c.Stats()
 	require.Equal(t, uint64(1), stats.PermanentFailures)
 	require.Equal(t, uint64(0), stats.PassesCompleted, "no pass should have completed")
@@ -369,7 +369,7 @@ func TestQueueCapBackpressure(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx)
 	// Clean back-pressure now: ctx cancellation is the only exit.
-	require.True(t, errors.Is(err, context.DeadlineExceeded),
+	require.ErrorIs(t, err, context.DeadlineExceeded,
 		"expected context.DeadlineExceeded, got %v", err)
 	stats := c.Stats()
 	require.GreaterOrEqual(t, stats.WalkerStalls, uint64(1),
@@ -435,7 +435,7 @@ func TestReadError(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, readErr), "expected wrapped read error, got %v", err)
+	require.ErrorIs(t, err, readErr, "expected wrapped read error, got %v", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +658,7 @@ func TestRecopyFailurePropagates(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, recopyErr), "expected wrapped recopy error, got %v", err)
+	require.ErrorIs(t, err, recopyErr, "expected wrapped recopy error, got %v", err)
 	// PermanentFailures must NOT be bumped — the recopy attempt is the
 	// alternative to permanent failure, not an additional outcome.
 	require.Equal(t, uint64(0), c.Stats().PermanentFailures)
@@ -772,7 +772,7 @@ func TestPermanentDivergenceOnRowCount(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrPermanentDivergence), "expected ErrPermanentDivergence, got %v", err)
+	require.ErrorIs(t, err, ErrPermanentDivergence, "expected ErrPermanentDivergence, got %v", err)
 	require.Equal(t, uint64(1), c.Stats().PermanentFailures)
 }
 

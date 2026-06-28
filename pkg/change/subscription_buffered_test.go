@@ -1296,7 +1296,7 @@ func TestBufferedMapSizeAccounting(t *testing.T) {
 	sub.HasChanged([]any{int32(1)}, []any{int32(1), "hello"}, false)
 	require.Len(t, sub.changes, 1)
 	afterFirst := sub.sizeBytes
-	require.Greater(t, afterFirst, int64(0))
+	require.Positive(t, afterFirst)
 
 	// Overwrite with a different image: should rebalance, not double-count.
 	sub.HasChanged([]any{int32(1)}, []any{int32(1), "longer-string-than-the-first-image"}, false)
@@ -1307,7 +1307,7 @@ func TestBufferedMapSizeAccounting(t *testing.T) {
 	// Insert a second key.
 	sub.HasChanged([]any{int32(2)}, []any{int32(2), "world"}, false)
 	require.Len(t, sub.changes, 2)
-	require.Greater(t, sub.sizeBytes, int64(0))
+	require.Positive(t, sub.sizeBytes)
 
 	// Drain like a flush would: sizeBytes must return to zero.
 	drainBareBufferedMap(sub)
@@ -1353,7 +1353,7 @@ func TestBufferedMapSoftLimitBackpressure(t *testing.T) {
 		"parking should be counted")
 	sub.Lock()
 	require.Len(t, sub.changes, 1)
-	require.Greater(t, sub.sizeBytes, int64(0))
+	require.Positive(t, sub.sizeBytes)
 	sub.Unlock()
 }
 
@@ -1429,7 +1429,7 @@ func TestBufferedMapRealFlushWakesParked(t *testing.T) {
 	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcTable.QuotedTableName))
 	require.NoError(t, client.BlockWait(t.Context()))
 	sub.Lock()
-	require.Greater(t, sub.sizeBytes, int64(0), "seed change must be accounted")
+	require.Positive(t, sub.sizeBytes, "seed change must be accounted")
 	sub.softLimitBytes = 1
 	sub.Unlock()
 
@@ -1470,7 +1470,7 @@ func TestBufferedMapRealFlushWakesParked(t *testing.T) {
 	sub.Lock()
 	_, present := sub.changes[utils.HashKey([]any{int32(2)})]
 	require.True(t, present, "post-flush row must be admitted after wake")
-	require.Greater(t, sub.sizeBytes, int64(0))
+	require.Positive(t, sub.sizeBytes)
 	sub.Unlock()
 }
 
@@ -1495,7 +1495,7 @@ func TestBufferedMapQueueModeBackpressure(t *testing.T) {
 	sub.Lock()
 	require.Empty(t, sub.changes, "queue-mode events must not enter the map")
 	require.Len(t, sub.queue, 1)
-	require.Greater(t, sub.sizeBytes, int64(0), "queue-mode HasChanged must account bytes")
+	require.Positive(t, sub.sizeBytes, "queue-mode HasChanged must account bytes")
 	// Push the buffer over the soft limit.
 	sub.sizeBytes = 2048
 	sub.Unlock()
@@ -1532,7 +1532,7 @@ func TestBufferedMapQueueModeBackpressure(t *testing.T) {
 	require.Equal(t, int64(1), sub.timesParked.Load())
 	sub.Lock()
 	require.Len(t, sub.queue, 1, "post-wake row must land in the queue")
-	require.Greater(t, sub.sizeBytes, int64(0), "post-wake bytes must be accounted in queue mode")
+	require.Positive(t, sub.sizeBytes, "post-wake bytes must be accounted in queue mode")
 	sub.Unlock()
 }
 

@@ -333,12 +333,23 @@ func GetTableLocks(ctx context.Context, db *sql.DB, tables []*table.TableInfo, l
 // It is intended for preflight privilege checks: the probe selects zero rows
 // and logs nothing, so unlike GetTableLocks / GetLockingTransactions it neither
 // scans server-wide locks nor emits "found locking transaction" log lines.
-func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) error {
+func CheckForceKillPrivileges(ctx context.Context, db *sql.DB) (err error) {
 	rows, err := db.QueryContext(ctx, forceKillPrivilegeProbe)
 	if err != nil {
 		return err
 	}
-	return rows.Close()
+	defer func() {
+		// database/sql can surface errors on Close that rows.Err() does not
+		// reflect, so don't discard it — but don't let it mask an earlier error.
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	// Drain the (zero-row) result set so any driver-side error surfaces during
+	// iteration before we check rows.Err().
+	for rows.Next() {
+	}
+	return rows.Err()
 }
 
 // KillTransaction kills the MySQL session identified by pid (as observed

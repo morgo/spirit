@@ -110,14 +110,21 @@ func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 // For minimal row image, you need to send the before image to extract the PK.
 // This is because in the after image, the PK might be nil.
 func (t *TableInfo) PrimaryKeyValues(row any) ([]any, error) {
+	vals, ok := row.([]any)
+	if !ok {
+		return nil, fmt.Errorf("PrimaryKeyValues: expected []any row, got %T", row)
+	}
+	if len(vals) < len(t.Columns) {
+		return nil, fmt.Errorf("PrimaryKeyValues: row has %d values, fewer than the %d table columns", len(vals), len(t.Columns))
+	}
 	var pkCols []any
 	for _, pCol := range t.KeyColumns {
 		for i, col := range t.Columns {
 			if col == pCol {
-				if row.([]any)[i] == nil {
+				if vals[i] == nil {
 					return nil, errors.New("primary key column is NULL, possibly a bug sending after-image instead of before")
 				}
-				pkCols = append(pkCols, row.([]any)[i])
+				pkCols = append(pkCols, vals[i])
 			}
 		}
 	}

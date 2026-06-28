@@ -428,6 +428,11 @@ func testRenameColumnWithNullableColumns(t *testing.T, enableBuffered bool) {
 			require.NoError(t, rows.Scan(&val))
 			require.NotNil(t, val)
 			require.Equal(t, "has_val", *val)
+
+			// No third row; the final Next()==false also surfaces any iteration
+			// error that only appears at EOF, before we check rows.Err().
+			require.False(t, rows.Next())
+			require.NoError(t, rows.Err())
 		},
 	)
 }
