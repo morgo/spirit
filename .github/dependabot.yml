@@ -5,6 +5,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      # Wait 7 days after a release before opening an update PR, giving a
+      # compromised or broken version time to be caught and yanked before
+      # automation pulls it in.
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       # Batch minor/patch bumps into a single PR to reduce noise. Major bumps
@@ -21,6 +26,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       actions-minor-patch:
