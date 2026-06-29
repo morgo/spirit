@@ -606,14 +606,9 @@ func TestRecopyPassDoesNotFireFirstCleanPass(t *testing.T) {
 	stop, _ := runUntil(t, c)
 
 	// Wait for pass 1 — the pass containing the recopy — to complete.
-	deadline := time.After(2 * time.Second)
-	for c.Stats().PassesCompleted < 1 {
-		select {
-		case <-deadline:
-			t.Fatalf("pass 1 did not complete in time; stats=%+v", c.Stats())
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
+	require.Eventually(t, func() bool {
+		return c.Stats().PassesCompleted >= 1
+	}, 2*time.Second, 5*time.Millisecond, "pass 1 did not complete in time; stats=%+v", c.Stats())
 	require.Equal(t, 1, recopier.callCount(), "chunk should have been recopied in pass 1")
 
 	// Pass 1 contained a recopy, so it must not satisfy the
@@ -842,14 +837,9 @@ func TestMultiplePassesResetCounters(t *testing.T) {
 	stop, _ := runUntil(t, c)
 
 	// Wait for at least 2 passes
-	deadline := time.After(3 * time.Second)
-	for c.Stats().PassesCompleted < 2 {
-		select {
-		case <-deadline:
-			t.Fatalf("did not reach 2 passes in time; stats=%+v", c.Stats())
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+	require.Eventually(t, func() bool {
+		return c.Stats().PassesCompleted >= 2
+	}, 3*time.Second, 10*time.Millisecond, "did not reach 2 passes in time; stats=%+v", c.Stats())
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
 
