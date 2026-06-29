@@ -289,8 +289,22 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Take a single metadata lock for all tables to prevent concurrent DDL.
 	// This uses a single DB connection instead of one per table.
 	// We release the lock when this function finishes executing.
-	lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), tables, r.dbConfig, r.logger)
+	//
+	// A multi-table migration additionally takes a schema-scoped lock. (len > 1
+	// always means several *distinct* tables — spirit rejects multiple
+	// statements against the same table, see #487.) Such migrations all share
+	// one _spirit_checkpoint/_spirit_sentinel per schema, so only one may run
+	// per schema at a time. Single-table migrations skip it and may run
+	// concurrently (serialized per-table by the table locks above).
+	var mdlOpts []func(*dbconn.MetadataLock)
+	if len(r.changes) > 1 {
+		mdlOpts = append(mdlOpts, dbconn.WithMultiTableSchemaLock(r.changes[0].table.SchemaName))
+	}
+	lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), tables, r.dbConfig, r.logger, mdlOpts...)
 	if err != nil {
+		if len(r.changes) > 1 {
+			return fmt.Errorf("could not start atomic multi-table migration (another one may already be running in schema %q, or one of its tables is busy): %w", r.changes[0].table.SchemaName, err)
+		}
 		return err
 	}
 
