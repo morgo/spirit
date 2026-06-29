@@ -1651,10 +1651,25 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	defer r.replClient.StopPeriodicFlush()
 
 	runErr := checker.Run(ctx)
-	// A clean cancellation — the sentinel was dropped while a pass was in
-	// flight — is not a failure: ContinuousChecker.Run returns ctx.Err() on
-	// cancel, whereas a confirmed divergence surfaces as a non-Canceled
-	// ErrPermanentDivergence that we propagate to abort the cutover.
+	// Suppress a clean cancellation (the sentinel was dropped, or the parent ctx
+	// was cancelled, while a pass was in flight): ContinuousChecker.Run returns
+	// ctx.Err() on cancel.
+	//
+	// We deliberately do NOT also gate this on DifferencesFound()==0 (as move's
+	// older distributed-checker loop does), for two reasons:
+	//  1. By the time runErr is context.Canceled, a *confirmed* divergence has
+	//     provably not happened: Run returns ErrPermanentDivergence (a
+	//     non-Canceled error, handled below) the instant it confirms a stable
+	//     divergence, so a real problem aborts the cutover before we reach here.
+	//  2. ContinuousChecker.DifferencesFound() is a LIFETIME count of
+	//     first-attempt mismatches, which by design include the transient
+	//     replication lag the retry loop reconciles. Under writes during the
+	//     wait it is routinely >0, so gating on it would abort the cutover on
+	//     nearly every sentinel-drop.
+	// Whether a *confirmed* divergence aborts or self-heals is governed by the
+	// Recopier: migration configures none, so a stable divergence becomes
+	// ErrPermanentDivergence and aborts here; datasync configures a MySQLRecopier
+	// and heals instead. That is the replication-backed vs. copy-only policy knob.
 	if ctx.Err() != nil && errors.Is(runErr, context.Canceled) {
 		return nil
 	}
