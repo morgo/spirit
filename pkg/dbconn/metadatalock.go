@@ -223,6 +223,36 @@ func (m *MetadataLock) CloseDBConnection(logger *slog.Logger) error {
 	return nil
 }
 
+// WithMultiTableSchemaLock adds a schema-scoped lock to the MetadataLock so that
+// only one atomic multi-table migration runs per schema at a time. Multi-table
+// migrations all coordinate through a single shared _spirit_checkpoint (and
+// _spirit_sentinel), so they must not overlap; a second one fails to acquire
+// this lock and aborts. Single-table migrations do not use it — they are
+// serialized per-table by the table locks and may run concurrently.
+//
+// Applied as an option so the lock name is prepended before the per-table
+// names; it is held and released on the same dedicated session as the rest.
+func WithMultiTableSchemaLock(schemaName string) func(*MetadataLock) {
+	return func(m *MetadataLock) {
+		m.lockNames = append(m.lockNames, computeMultiTableLockName(schemaName))
+	}
+}
+
+// computeMultiTableLockName returns the schema-scoped GET_LOCK name that
+// serializes atomic multi-table migrations within a schema. It can't collide
+// with a per-table lock from computeLockName: the hash input carries a salt no
+// table name contains, so the same schema's table locks hash differently.
+func computeMultiTableLockName(schemaName string) string {
+	schemaNamePart := schemaName
+	if len(schemaNamePart) > 20 {
+		schemaNamePart = schemaNamePart[:20]
+	}
+	hash := sha1.New()
+	hash.Write([]byte(schemaName + "\x00spirit-atomic-multi-table"))
+	hashPart := hex.EncodeToString(hash.Sum(nil))[:8]
+	return fmt.Sprintf("%s.atomic-multi-table-%s", schemaNamePart, hashPart)
+}
+
 func computeLockName(table *table.TableInfo) string {
 	schemaNamePart := table.SchemaName
 	if len(schemaNamePart) > 20 {
