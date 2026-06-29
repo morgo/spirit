@@ -412,7 +412,7 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 func (r *Runner) runContinuous(ctx context.Context) error {
 	// status moves off CopyRows so the status goroutine logs the continuous
 	// phase. The checkpoint table and the periodic checkpoint loop were already
-	// set up before the copy (createCheckpointTable in startFresh/startResume,
+	// set up before the copy (checkpointTbl().Create in startFresh/startResume,
 	// the loop in startBackgroundRoutines), so a restart at any point — copy or
 	// continuous — resumes from the last checkpoint.
 	r.status.Set(status.ApplyChangeset)
@@ -1484,7 +1484,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	if chunker == nil {
 		return nil // copy pipeline not built yet; nothing to checkpoint
 	}
-	// Idempotent: createCheckpointTable uses CREATE TABLE IF NOT EXISTS, so
+	// Idempotent: Persistent-mode Create uses CREATE TABLE IF NOT EXISTS, so
 	// this is safe even in the brief window before startFresh/startResume has
 	// created the table.
 	err := r.checkpointTbl().Create(ctx)
