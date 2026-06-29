@@ -19,6 +19,11 @@ type Move struct {
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the source database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 	CheckpointMaxAge      time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
+	// Force makes the runner wipe the target tables and start the copy fresh when
+	// it cannot resume from a checkpoint (e.g. the checkpoint is from an
+	// incompatible spirit version, or the target is in a state resume can't
+	// validate). Without it, an unresumable non-empty target is a hard error.
+	Force bool `name:"force" help:"When the target cannot resume from a checkpoint, wipe the target tables and start the copy fresh instead of failing." default:"false"`
 
 	// EnableExperimentalGTID switches the change source from binlog file+position to MySQL GTIDs.
 	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and

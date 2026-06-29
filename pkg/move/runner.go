@@ -552,21 +552,65 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// Run post-setup checks
 	if err = r.runChecks(ctx, check.ScopePostSetup); err != nil {
-		// The checks returned an error, which could just mean that tables exist
-		// on the target. So we can switch tactics and check if these artifacts
-		// pass the tests to resume from checkpoint instead.
-		if resumeErr := r.runChecks(ctx, check.ScopeResume); resumeErr != nil {
-			return fmt.Errorf("target state is invalid for both new copy and resume: new_copy_error=%w, resume_error=%w", err, resumeErr)
+		// New-copy checks failed — usually because tables already exist on the
+		// target. Resume if we can; otherwise --force wipes the target and starts
+		// fresh, and without it this is a hard error.
+		resumable, probeErr := r.canResumeFromCheckpoint(ctx)
+		if probeErr != nil {
+			return probeErr // the probe itself failed transiently — don't wipe on a blip
 		}
-		// We pass the pre-check for resume, so attempt it
-		if err := r.resumeFromCheckpoint(ctx); err != nil {
-			return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", err)
+		if resumable {
+			if resumeErr := r.resumeFromCheckpoint(ctx); resumeErr != nil {
+				return fmt.Errorf("resume validation passed but checkpoint resume failed: %w", resumeErr)
+			}
+			r.logger.Info("Successfully resumed move from existing checkpoint")
+			return nil
 		}
-		r.logger.Info("Successfully resumed move from existing checkpoint")
-		return nil
+		if !r.move.Force {
+			return fmt.Errorf("target state is invalid for both new copy and resume (re-run with --force to wipe the target and start fresh): %w", err)
+		}
+		r.logger.Warn("force set and the target cannot resume; wiping target tables and starting fresh")
+		if werr := r.wipeTargets(ctx); werr != nil {
+			return fmt.Errorf("force: failed to wipe target before a fresh copy: %w", werr)
+		}
+		return r.newCopy(ctx)
 	}
 	// The post-setup checks returned no errors so we can proceed with new copy
 	return r.newCopy(ctx)
+}
+
+// canResumeFromCheckpoint reports whether the move can resume from the target's
+// existing checkpoint: the resume pre-checks pass and the checkpoint is readable
+// with this version's schema. A non-nil error means the probe itself failed
+// transiently (don't act on it). (false, nil) means "not resumable" — the caller
+// decides whether that is fatal or, under --force, a cue to wipe and start fresh.
+func (r *Runner) canResumeFromCheckpoint(ctx context.Context) (bool, error) {
+	if err := r.runChecks(ctx, check.ScopeResume); err != nil {
+		r.logger.Info("resume pre-checks failed", "reason", err)
+		return false, nil
+	}
+	if _, err := r.checkpointTbl().ReadLatest(ctx); err != nil {
+		// No usable checkpoint (missing row, or a layout this version can't read).
+		if errors.Is(err, checkpoint.ErrNotFound) || checkpoint.IsIncompatible(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("could not read checkpoint to decide resume: %w", err)
+	}
+	return true, nil
+}
+
+// wipeTargets drops the move's target tables (on every target) and the
+// checkpoint table, so a fresh copy can proceed. Used by --force when the target
+// cannot resume. The source — including any sentinel — is left untouched.
+func (r *Runner) wipeTargets(ctx context.Context) error {
+	for i := range r.targets {
+		for _, t := range r.sourceTables {
+			if err := dbconn.Exec(ctx, r.targets[i].DB, "DROP TABLE IF EXISTS %n", t.TableName); err != nil {
+				return fmt.Errorf("drop target table %q on target %d: %w", t.TableName, i, err)
+			}
+		}
+	}
+	return r.checkpointTbl().Drop(ctx) // Transient → DROP TABLE IF EXISTS
 }
 
 func (r *Runner) newCopy(ctx context.Context) error {
