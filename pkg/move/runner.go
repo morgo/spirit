@@ -21,6 +21,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/move/check"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -31,15 +32,16 @@ import (
 )
 
 var (
-	sentinelCheckInterval   = 1 * time.Second
 	tableStatUpdateInterval = 5 * time.Minute
-	sentinelWaitLimit       = 48 * time.Hour
-	sentinelTableName       = "_spirit_sentinel" // this is now a const.
 	checkpointTableName     = "_spirit_checkpoint"
+	// Sentinel-wait timing lives in pkg/sentinel (sentinel.WaitLimit /
+	// sentinel.CheckInterval / sentinel.TableName) so it is shared with migrate.
+	//
 	// continuousChecksumMinInterval is the minimum amount of time between
 	// continuous-checksum iterations during the sentinel wait. Without it,
 	// small tables would re-acquire the table lock back-to-back since each
-	// pass finishes in seconds.
+	// pass finishes in seconds. (Move still drives its own checksum loop; this
+	// stays local until move adopts checksum.ContinuousChecker.)
 	continuousChecksumMinInterval = 1 * time.Hour
 )
 
@@ -213,7 +215,7 @@ func (r *Runner) getTables(ctx context.Context, src *sourceInfo) ([]*table.Table
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, err
 		}
-		if tableName == checkpointTableName || tableName == sentinelTableName {
+		if tableName == checkpointTableName || tableName == sentinel.TableName {
 			continue // Skip if the table name is the checkpoint or sentinel table
 		}
 
@@ -581,9 +583,11 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		return err
 	}
 
-	// Create sentinel on SOURCE
+	// Create sentinel on SOURCE. Idempotent (CREATE IF NOT EXISTS): the
+	// sentinel is shared with every spirit process in the schema and must
+	// never pass through a "table absent" state a concurrent poll could see.
 	if r.move.CreateSentinel {
-		if err := r.createSentinelTable(ctx); err != nil {
+		if err := sentinel.Create(ctx, r.sources[0].db); err != nil {
 			return err
 		}
 	}
@@ -843,7 +847,17 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.sentinelWaitStartTime = time.Now()
 	r.status.Set(status.WaitingOnSentinelTable)
-	if err := r.waitOnSentinelTable(ctx); err != nil {
+	// Block on the sentinel via the shared sentinel.Wait (poll/timeout timing
+	// lives in the sentinel package). The continuous-checksum lifecycle and
+	// watermark invalidation are move-specific (multi-source feeds;
+	// invalidateChecksumWatermark blanks the whole per-move checkpoint table),
+	// so they are injected as callbacks. See pkg/sentinel.
+	if err := sentinel.Wait(ctx, sentinel.WaitConfig{
+		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.sources[0].db) },
+		RunChecksum:         r.runContinuousChecksum,
+		InvalidateWatermark: r.invalidateChecksumWatermark,
+		Logger:              r.logger,
+	}); err != nil {
 		return err
 	}
 
@@ -964,7 +978,7 @@ func (r *Runner) Status() string {
 			r.status.Get().String(),
 			time.Since(r.startTime).Round(time.Second),
 			time.Since(r.sentinelWaitStartTime).Round(time.Second),
-			sentinelWaitLimit,
+			sentinel.WaitLimit,
 		)
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
@@ -1264,10 +1278,10 @@ func (r *Runner) Progress() status.Progress {
 	case status.WaitingOnSentinelTable:
 		r.logger.Info("migration status",
 			"state", r.status.Get().String(),
-			"sentinel-table", fmt.Sprintf("%s.%s", r.sources[0].config.DBName, sentinelTableName),
+			"sentinel-table", fmt.Sprintf("%s.%s", r.sources[0].config.DBName, sentinel.TableName),
 			"total-time", time.Since(r.startTime).Round(time.Second).String(),
 			"sentinel-wait-time", time.Since(r.sentinelWaitStartTime).Round(time.Second).String(),
-			"sentinel-max-wait-time", sentinelWaitLimit.String(),
+			"sentinel-max-wait-time", sentinel.WaitLimit.String(),
 		)
 	case status.ApplyChangeset, status.PostChecksum:
 		summary = fmt.Sprintf("Applying Changeset Deltas=%v", r.getDeltaLenAll())
@@ -1279,142 +1293,6 @@ func (r *Runner) Progress() status.Progress {
 	return status.Progress{
 		CurrentState: r.status.Get(),
 		Summary:      summary,
-	}
-}
-
-// createSentinelTable creates the sentinel table on SOURCE (not target) if
-// it does not already exist. The sentinel name (_spirit_sentinel) is shared
-// with every other spirit process in the schema — including --defer-cutover
-// migrations — so creation must be idempotent and must never pass through a
-// "table absent" state: a concurrent process polls its sentinel wait every
-// sentinelCheckInterval, and a DROP+CREATE pair here opens a window in which
-// that poll observes the sentinel as missing and proceeds to cutover without
-// operator approval. The table is contentless and only its existence
-// matters, so adopting an existing sentinel is equivalent to creating a
-// fresh one.
-func (r *Runner) createSentinelTable(ctx context.Context) error {
-	return dbconn.Exec(ctx, r.sources[0].db, "CREATE TABLE IF NOT EXISTS %n.%n (id int NOT NULL PRIMARY KEY)", r.sources[0].config.DBName, sentinelTableName)
-}
-
-// sentinelTableExists checks if sentinel table exists on SOURCE (not target).
-func (r *Runner) sentinelTableExists(ctx context.Context) (bool, error) {
-	sql := "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
-	var sentinelTableExists int
-	err := r.sources[0].db.QueryRowContext(ctx, sql, r.sources[0].config.DBName, sentinelTableName).Scan(&sentinelTableExists)
-	if err != nil {
-		return false, err
-	}
-	return sentinelTableExists > 0, nil
-}
-
-// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
-// While we wait, run a "continuous checksum" loop in the background as a
-// best-effort consistency re-check. The continuous checksum is purely
-// opportunistic — the initial checksum (already run in postCopyPhase) is
-// the correctness gate. The continuous loop is cancelled when the sentinel
-// drops; any in-flight chunk recopy runs under context.WithoutCancel up to
-// fixChunkTimeout so the DELETE-from-targets + re-apply-from-sources pair
-// stays atomic, then the goroutine exits. A real "checksum found
-// differences" surfaced from that in-flight repair is promoted into retErr
-// and aborts cutover.
-func (r *Runner) waitOnSentinelTable(ctx context.Context) (retErr error) {
-	if sentinelExists, err := r.sentinelTableExists(ctx); err != nil {
-		return err
-	} else if !sentinelExists {
-		// Sentinel table does not exist, we can proceed with cutover
-		return nil
-	}
-
-	r.logger.Warn("cutover deferred while sentinel table exists; will wait",
-		"sentinel-table", sentinelTableName,
-		"wait-limit", sentinelWaitLimit.String())
-
-	// Spawn the continuous checksum. It uses its own checker + chunker and is
-	// not wired into the checkpoint — so a crash during sentinel wait does
-	// not add mandatory checksum time on resume. The checker manages its own
-	// periodic-flush lifecycle per iteration; runContinuousChecksum drives
-	// flushes during the inter-iteration wait so binlog deltas don't pile up
-	// between passes.
-	continuousCtx, cancelContinuous := context.WithCancel(ctx)
-	continuousDone := make(chan struct{})
-	var continuousErr error
-	go func() {
-		defer close(continuousDone)
-		continuousErr = r.runContinuousChecksum(continuousCtx)
-	}()
-
-	// runContinuousChecksum already filters harmless sentinel cancellations
-	// to nil, so any non-nil continuousErr is one it intentionally chose to
-	// propagate — surface it as retErr whenever the parent ctx itself has
-	// not been cancelled (parent cancellation is its own error path).
-	defer func() {
-		cancelContinuous()
-		<-continuousDone
-		if retErr == nil && continuousErr != nil && ctx.Err() == nil {
-			retErr = fmt.Errorf("continuous checksum failed: %w", continuousErr)
-		}
-		// If the continuous checker repaired any chunk, this run is about
-		// to abort (with MaxRetries=1, checker.Run errors whenever
-		// DifferencesFound > 0, and runContinuousChecksum propagates it).
-		// The periodic dumper stops persisting a checksum_watermark the
-		// instant the difference is recorded, but a dump whose conditions
-		// were read just before that instant can still land a stale
-		// watermark row afterwards. Rewrite the persisted rows here —
-		// strictly after any such in-flight INSERT, via checkpointMu — so
-		// the on-disk state after the abort forces full checksum
-		// re-verification on resume. The continuous goroutine has exited
-		// (see <-continuousDone above), so the counter we read is final.
-		// WithoutCancel: this cleanup must run even when the parent ctx
-		// was already cancelled.
-		if err := r.invalidateChecksumWatermark(context.WithoutCancel(ctx)); err != nil {
-			r.logger.Error("failed to clear persisted checksum watermark after continuous checksum divergence", "error", err)
-			// Join rather than suppress, even when the continuous-checksum
-			// abort already set retErr: a failed invalidation means a stale
-			// checksum_watermark may remain on disk, letting a resume skip
-			// the full re-verification this abort exists to force. The
-			// operator must see both failures.
-			retErr = errors.Join(retErr, fmt.Errorf("failed to clear persisted checksum watermark: %w", err))
-		}
-	}()
-
-	timer := time.NewTimer(sentinelWaitLimit)
-	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
-
-	ticker := time.NewTicker(sentinelCheckInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case t := <-ticker.C:
-			sentinelExists, err := r.sentinelTableExists(ctx)
-			if err != nil {
-				return err
-			}
-			if !sentinelExists {
-				// Sentinel table has been dropped, we can proceed with cutover.
-				// The defer above still observes continuousErr — if a continuous
-				// pass was mid-recopy and surfaces a real drift error, that
-				// overrides this nil return.
-				r.logger.Info("sentinel table dropped", "time", t)
-				return nil
-			}
-		case <-timer.C:
-			return errors.New("timed out waiting for sentinel table to be dropped")
-		case <-continuousDone:
-			// Continuous goroutine exited before the sentinel was dropped.
-			// If our parent ctx is cancelled, the goroutine just propagated
-			// that cancellation — surface the parent's error directly.
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			// A non-nil error means continuous detected a real failure.
-			// Return it as a regular move failure — do NOT invalidate the
-			// checkpoint, so the operator can re-run and resume from the
-			// existing one.
-			if continuousErr != nil {
-				return fmt.Errorf("continuous checksum failed: %w", continuousErr)
-			}
-			return errors.New("continuous checksum exited unexpectedly")
-		}
 	}
 }
 

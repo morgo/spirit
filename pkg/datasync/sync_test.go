@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -21,6 +22,9 @@ func TestMain(m *testing.M) {
 	// Tick the status logger fast. Continuous-replication latency is set
 	// per-test via Sync.FlushInterval.
 	status.StatusInterval = 100 * time.Millisecond
+	// Run continuous-checksum passes back-to-back in tests so FirstCleanPass /
+	// convergence assertions don't wait on the 1h production pacing.
+	checksum.ContinuousMinPassInterval = 0
 	goleak.VerifyTestMain(m)
 }
 
