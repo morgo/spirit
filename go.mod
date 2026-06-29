@@ -3,7 +3,7 @@ module github.com/block/spirit
 go 1.26.1
 
 require (
-	github.com/alecthomas/kong v0.7.1
+	github.com/alecthomas/kong v1.15.0
 	github.com/go-ini/ini v1.67.0
 	github.com/go-mysql-org/go-mysql v1.15.1-0.20260526024741-088eb1fbf0ea
 	github.com/go-sql-driver/mysql v1.10.0

@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -46,6 +47,29 @@ func waitForStatus(t *testing.T, m *Runner, target status.State) {
 		return m.status.Get() >= target
 	}, 60*time.Second, 10*time.Millisecond,
 		"timeout waiting for status >= %s, last status: %s", target, m.status.Get())
+}
+
+// waitForCopyRows blocks until the runner reaches the CopyRows state (returning
+// true) or ctx is done (returning false). It is for the load-generating
+// goroutines in concurrent-DML tests: they begin writing once the copy phase is
+// live, but must unblock promptly if the migration ends before then — several
+// of these tests deliberately drive the migration to an early failure, so the
+// copy phase may never begin. It avoids testify so it is safe to call off the
+// test goroutine (require would call runtime.Goexit — testifylint go-require);
+// callers should return when it reports false.
+func waitForCopyRows(ctx context.Context, m *Runner) bool {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if m.status.Get() >= status.CopyRows {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 // RunnerOption is a functional option for configuring a test Runner.
