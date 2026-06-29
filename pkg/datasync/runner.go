@@ -388,6 +388,12 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 	}
 	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
 
+	// A recorded fatal (e.g. a checkpoint-write failure that status.WatchTask
+	// cancelled us for) must surface rather than be masked by the clean
+	// ctx-cancel return below.
+	if ferr := r.fatal(); ferr != nil {
+		return ferr
+	}
 	// A real checksum failure outranks a clean nil — surface it.
 	if checksumErr != nil && !errors.Is(checksumErr, context.Canceled) {
 		return fmt.Errorf("continuous checksum failed: %w", checksumErr)
@@ -1239,20 +1245,29 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // must be read under progMu like Cancel() does, and fatalOnce makes the
 // record-and-cancel side effects idempotent.
 func (r *Runner) fatalError() bool {
+	r.recordFatal(errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause"))
+	return true
+}
+
+// recordFatal records the first fatal error and cancels the run; later calls
+// are no-ops, so the first cause wins. Safe for concurrent use. It is how an
+// out-of-band failure (the change source's CancelFunc, or a checkpoint write
+// that status.WatchTask is about to cancel us for) makes Run return the cause
+// instead of a bare ctx-cancel that the shutdown paths map to nil.
+func (r *Runner) recordFatal(err error) {
 	r.fatalOnce.Do(func() {
 		r.fatalMu.Lock()
-		r.fatalErr = errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause")
+		r.fatalErr = err
 		r.fatalMu.Unlock()
 		r.progMu.RLock()
 		cancel := r.cancelFunc
 		r.progMu.RUnlock()
-		// cancelFunc can be nil if fatalError fires before Run has set it
-		// (e.g. test paths that bypass Run); nil-check before calling.
+		// cancelFunc can be nil if this fires before Run has set it (e.g. test
+		// paths that bypass Run); nil-check before calling.
 		if cancel != nil {
 			cancel()
 		}
 	})
-	return true
 }
 
 func (r *Runner) fatal() error {
@@ -1447,10 +1462,19 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// Idempotent: createCheckpointTable uses CREATE TABLE IF NOT EXISTS, so
 	// this is safe even in the brief window before startFresh/startResume has
 	// created the table.
-	if err := r.createCheckpointTable(ctx); err != nil {
-		return err
+	err := r.createCheckpointTable(ctx)
+	if err == nil {
+		err = r.dumpCheckpoint(ctx)
 	}
-	return r.dumpCheckpoint(ctx)
+	// status.WatchTask treats a non-nil return here as fatal and cancels the
+	// run. Record it as a fatal error so Run surfaces the checkpoint failure
+	// instead of letting the resulting ctx-cancel look like a clean shutdown
+	// (which the sync paths otherwise map to a nil / exit-0 return). A
+	// context.Canceled here is the shutdown itself, not a checkpoint fault.
+	if err != nil && !errors.Is(err, context.Canceled) {
+		r.recordFatal(fmt.Errorf("checkpoint write failed: %w", err))
+	}
+	return err
 }
 
 // Cancel stops the sync by cancelling the Run context. Safe to call before
