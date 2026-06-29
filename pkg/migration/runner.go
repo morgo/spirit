@@ -636,7 +636,9 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 	if len(r.changes) > 1 {
 		mode = checkpoint.Shared // multi-table migrations share one table per schema
 	}
-	return checkpoint.NewTable(r.db, r.changes[0].table.SchemaName, r.checkpointTableName(), mode)
+	// r.db's selected schema is the migrated schema (same connection sentinel
+	// uses), so the checkpoint table lands there — no schema is threaded in.
+	return checkpoint.NewTable(r.db, r.checkpointTableName(), mode)
 }
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {

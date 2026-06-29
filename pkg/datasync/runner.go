@@ -30,24 +30,8 @@ import (
 // because the source may be read-only (e.g. a Vitess/PlanetScale replica).
 const syncCheckpointTableName = "_spirit_sync_checkpoint"
 
-// errNoSuchTable is MySQL's ER_NO_SUCH_TABLE (1146); errBadFieldError is
-// ER_BAD_FIELD_ERROR (1054), returned when a column is missing — what a
-// checkpoint table written by an incompatible spirit version looks like.
-const (
-	errNoSuchTable   = 1146
-	errBadFieldError = 1054
-)
-
-// isIncompatibleCheckpoint reports whether err means the checkpoint table can't
-// be read with this spirit version's schema — a missing column (an older/newer
-// layout) or the table having vanished. Such a checkpoint is unusable for
-// resume, but it is distinct from a transient failure (permission, server
-// gone): those must propagate so a blip is never mistaken for "no checkpoint"
-// and used to justify dropping the target under --force.
-func isIncompatibleCheckpoint(err error) bool {
-	myErr, ok := errors.AsType[*mysql.MySQLError](err)
-	return ok && (myErr.Number == errNoSuchTable || myErr.Number == errBadFieldError)
-}
+// errNoSuchTable is MySQL's ER_NO_SUCH_TABLE (1146).
+const errNoSuchTable = 1146
 
 // shutdownFlushTimeout bounds the best-effort final flush on a clean shutdown,
 // and shutdownCheckpointTimeout bounds the final checkpoint write (kept
@@ -842,7 +826,7 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 	// has the database selected when it's dropped. A resumable run is left
 	// intact and resumes as normal.
 	if r.sync.Force {
-		resumable, rerr := r.hasResumableCheckpoint(ctx, adminDB, cfg.DBName)
+		resumable, rerr := r.forceTargetResumable(ctx, adminDB, cfg)
 		if rerr != nil {
 			return rerr
 		}
@@ -862,15 +846,36 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 	return nil
 }
 
-// hasResumableCheckpoint reports whether the target database holds a sync
-// checkpoint that can be resumed from (a row carrying a copier watermark). It
-// runs on the passed connection (typically the no-database admin connection),
-// using fully-qualified names so it works without a selected database — and so
-// it can be called before r.target.DB is opened.
-func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName string) (bool, error) {
-	// Runs on the passed (no-database admin) connection, before r.target.DB is
-	// opened, so it builds its own handle rather than using checkpointTbl().
-	tbl := checkpoint.NewTable(db, dbName, syncCheckpointTableName, checkpoint.Persistent)
+// forceTargetResumable reports whether the target holds a resumable checkpoint,
+// for the --force decision. The checkpoint package keys on the connection's
+// selected schema, but --force runs on a no-database admin connection before
+// r.target.DB is opened — so this confirms the database exists (via the admin
+// connection) and then opens a short-lived connection *to* that schema to
+// inspect the checkpoint. A missing database is trivially not resumable.
+func (r *Runner) forceTargetResumable(ctx context.Context, adminDB *sql.DB, cfg *mysql.Config) (bool, error) {
+	var present int
+	err := adminDB.QueryRowContext(ctx,
+		"SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?", cfg.DBName).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil // no target database yet → nothing to resume
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to check for target database: %w", err)
+	}
+	schemaDB, err := dbconn.New(cfg.FormatDSN(), r.targetDBConfig)
+	if err != nil {
+		return false, fmt.Errorf("failed to connect to target database to check for a checkpoint: %w", err)
+	}
+	defer utils.CloseAndLog(schemaDB)
+	return r.hasResumableCheckpoint(ctx, schemaDB)
+}
+
+// hasResumableCheckpoint reports whether db's selected schema holds a sync
+// checkpoint that can be resumed from (a row carrying a copier watermark). db
+// must be connected to the target schema (the checkpoint package keys on
+// DATABASE()).
+func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB) (bool, error) {
+	tbl := checkpoint.NewTable(db, syncCheckpointTableName, checkpoint.Persistent)
 	exists, err := tbl.Exists(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to check for checkpoint table: %w", err)
@@ -883,7 +888,7 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName 
 	// mean "nothing resumable here" — so --force is free to drop and start
 	// fresh. A transient read error still propagates: we must not nuke a target
 	// just because the checkpoint was briefly unreadable.
-	if errors.Is(err, checkpoint.ErrNotFound) || isIncompatibleCheckpoint(err) {
+	if errors.Is(err, checkpoint.ErrNotFound) || checkpoint.IsIncompatible(err) {
 		return false, nil
 	}
 	if err != nil {
@@ -1161,7 +1166,7 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 // the resume signal (see readCheckpoint), so Create never drops or clears it.
 // It always lives on the target because the source may be read-only.
 func (r *Runner) checkpointTbl() *checkpoint.Table {
-	return checkpoint.NewTable(r.target.DB, r.target.Config.DBName, syncCheckpointTableName, checkpoint.Persistent)
+	return checkpoint.NewTable(r.target.DB, syncCheckpointTableName, checkpoint.Persistent)
 }
 
 // createCheckpointTable creates the checkpoint table on the target (always
@@ -1231,7 +1236,7 @@ func (r *Runner) readCheckpoint(ctx context.Context) (watermark, pos string, ok 
 	if errors.Is(e, checkpoint.ErrNotFound) {
 		return "", "", true, nil // table exists but no row written yet → resume, re-copy from scratch
 	}
-	if isIncompatibleCheckpoint(e) {
+	if checkpoint.IsIncompatible(e) {
 		// The target carries a checkpoint table from an incompatible spirit
 		// version. We can't resume from it, and we can't silently re-copy onto
 		// a non-empty target, so fail with an actionable message rather than a

@@ -24,8 +24,23 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// erNoSuchTable is MySQL error 1146 (ER_NO_SUCH_TABLE).
-const erNoSuchTable = 1146
+// erNoSuchTable is MySQL error 1146 (ER_NO_SUCH_TABLE); erBadFieldError is 1054
+// (ER_BAD_FIELD_ERROR), returned when a column is missing.
+const (
+	erNoSuchTable   = 1146
+	erBadFieldError = 1054
+)
+
+// IsIncompatible reports whether err means the checkpoint table can't be read
+// with this spirit version's schema — a missing column (ER_BAD_FIELD_ERROR,
+// what a table written by an incompatible version looks like) or the table
+// having vanished (ER_NO_SUCH_TABLE). Callers use it to tell an unusable
+// checkpoint (recover / start fresh) apart from a transient read failure
+// (permission, server gone), which must not be mistaken for "no checkpoint".
+func IsIncompatible(err error) bool {
+	myErr, ok := errors.AsType[*mysql.MySQLError](err)
+	return ok && (myErr.Number == erNoSuchTable || myErr.Number == erBadFieldError)
+}
 
 // ErrNotFound is returned by ReadLatest when there is no checkpoint row to
 // resume from (the table is empty, or — in shared mode — holds no row for the
@@ -84,26 +99,22 @@ const (
 	Persistent
 )
 
-// Table manages a checkpoint table on db at schema.name. mode selects its
+// Table manages a checkpoint table named name on db. Operations are unqualified
+// and run against db's currently-selected schema (DATABASE()), so callers point
+// the connection at the right schema rather than passing one — this is what lets
+// it work under Vitess, and it matches pkg/sentinel. mode selects its
 // create / clear / read behaviour; see Mode.
 type Table struct {
-	db     *sql.DB
-	schema string
-	name   string
-	mode   Mode
+	db   *sql.DB
+	name string
+	mode Mode
 }
 
-// NewTable returns a handle to the checkpoint table schema.name on db, with the
-// lifecycle selected by mode.
-func NewTable(db *sql.DB, schema, name string, mode Mode) *Table {
-	return &Table{db: db, schema: schema, name: name, mode: mode}
+// NewTable returns a handle to the checkpoint table name on db (in db's selected
+// schema), with the lifecycle selected by mode.
+func NewTable(db *sql.DB, name string, mode Mode) *Table {
+	return &Table{db: db, name: name, mode: mode}
 }
-
-// SchemaName returns the table's schema.
-func (t *Table) SchemaName() string { return t.schema }
-
-// Name returns the table's name.
-func (t *Table) Name() string { return t.name }
 
 // tableDDL is the column list for CREATE TABLE. The schema is the union of what
 // the runners need; move and datasync leave statement and original_table_name
@@ -134,20 +145,20 @@ const tableDDL = `(
 func (t *Table) Create(ctx context.Context, statement string) error {
 	switch t.mode {
 	case Owned:
-		if err := dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n.%n", t.schema, t.name); err != nil {
+		if err := dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n", t.name); err != nil {
 			return err
 		}
-		return dbconn.Exec(ctx, t.db, "CREATE TABLE %n.%n "+tableDDL, t.schema, t.name)
+		return dbconn.Exec(ctx, t.db, "CREATE TABLE %n "+tableDDL, t.name)
 	case Shared:
-		if err := dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n.%n "+tableDDL, t.schema, t.name); err != nil {
+		if err := dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n "+tableDDL, t.name); err != nil {
 			return err
 		}
-		if err := dbconn.Exec(ctx, t.db, "DELETE FROM %n.%n WHERE statement = %?", t.schema, t.name, statement); err != nil {
+		if err := dbconn.Exec(ctx, t.db, "DELETE FROM %n WHERE statement = %?", t.name, statement); err != nil {
 			return fmt.Errorf("could not clear stale rows from shared checkpoint table %q (if it was left behind by an incompatible spirit version, drop it manually): %w", t.name, err)
 		}
 		return nil
 	case Persistent:
-		return dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n.%n "+tableDDL, t.schema, t.name)
+		return dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n "+tableDDL, t.name)
 	default:
 		return fmt.Errorf("checkpoint: unknown table mode %d", t.mode)
 	}
@@ -158,13 +169,13 @@ func (t *Table) Create(ctx context.Context, statement string) error {
 // gone), so a concurrent migration's rows in the shared table survive.
 func (t *Table) Drop(ctx context.Context, statement string) error {
 	if t.mode == Shared {
-		err := dbconn.Exec(ctx, t.db, "DELETE FROM %n.%n WHERE statement = %?", t.schema, t.name, statement)
+		err := dbconn.Exec(ctx, t.db, "DELETE FROM %n WHERE statement = %?", t.name, statement)
 		if mysqlErr, ok := errors.AsType[*mysql.MySQLError](err); ok && mysqlErr.Number == erNoSuchTable {
 			return nil
 		}
 		return err
 	}
-	return dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n.%n", t.schema, t.name)
+	return dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n", t.name)
 }
 
 // Write records a checkpoint row.
@@ -181,14 +192,14 @@ func (t *Table) Drop(ctx context.Context, statement string) error {
 func (t *Table) Write(ctx context.Context, rec Record) error {
 	if t.mode == Shared {
 		return dbconn.Exec(ctx, t.db,
-			"INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (%?, %?, %?, %?, %?)",
-			t.schema, t.name,
+			"INSERT INTO %n (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (%?, %?, %?, %?, %?)",
+			t.name,
 			rec.CopierWatermark, rec.ChecksumWatermark, rec.Position, rec.Statement, rec.OriginalTableName,
 		)
 	}
 	return dbconn.Exec(ctx, t.db,
-		"REPLACE INTO %n.%n (id, copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (1, %?, %?, %?, %?, %?)",
-		t.schema, t.name,
+		"REPLACE INTO %n (id, copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (1, %?, %?, %?, %?, %?)",
+		t.name,
 		rec.CopierWatermark, rec.ChecksumWatermark, rec.Position, rec.Statement, rec.OriginalTableName,
 	)
 }
@@ -202,8 +213,8 @@ func (t *Table) Write(ctx context.Context, rec Record) error {
 // error, so resume fails safely rather than silently misreading.
 func (t *Table) ReadLatest(ctx context.Context, statement string) (Record, error) {
 	query := fmt.Sprintf(
-		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, created_at FROM `%s`.`%s`",
-		t.schema, t.name)
+		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, created_at FROM `%s`",
+		t.name)
 	var args []any
 	if t.mode == Shared {
 		query += " WHERE statement = ?"
@@ -229,16 +240,17 @@ func (t *Table) ReadLatest(ctx context.Context, statement string) (Record, error
 	return rec, nil
 }
 
-// Exists reports whether the checkpoint table exists. datasync uses this as its
-// resume signal: the table is created before any rows are copied, so its
-// presence means a prior run already owns the target — even one that died
-// before writing its first checkpoint row. Uses information_schema, so it works
-// on a connection with no database selected (datasync's pre-open admin check).
+// Exists reports whether the checkpoint table exists in db's selected schema
+// (DATABASE()). datasync uses this as its resume signal: the table is created
+// before any rows are copied, so its presence means a prior run already owns
+// the target — even one that died before writing its first checkpoint row.
+// Because it keys on DATABASE(), the connection must have the target schema
+// selected (it cannot be a no-database admin connection).
 func (t *Table) Exists(ctx context.Context) (bool, error) {
 	var one int
 	err := t.db.QueryRowContext(ctx,
-		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-		t.schema, t.name).Scan(&one)
+		"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		t.name).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

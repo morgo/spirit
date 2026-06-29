@@ -33,7 +33,7 @@ func countRows(t *testing.T, db *sql.DB, schema, name string) int {
 
 func TestTableLifecycleNonShared(t *testing.T) {
 	db, schema := setup(t)
-	tbl := checkpoint.NewTable(db, schema, "_ckpt_test_nonshared", checkpoint.Owned)
+	tbl := checkpoint.NewTable(db, "_ckpt_test_nonshared", checkpoint.Owned)
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_nonshared") })
 
 	require.NoError(t, tbl.Create(t.Context(), ""))
@@ -82,8 +82,8 @@ func TestTableShared(t *testing.T) {
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
 
 	// Two migrations sharing one table in the schema, keyed by statement.
-	a := checkpoint.NewTable(db, schema, name, checkpoint.Shared)
-	b := checkpoint.NewTable(db, schema, name, checkpoint.Shared)
+	a := checkpoint.NewTable(db, name, checkpoint.Shared)
+	b := checkpoint.NewTable(db, name, checkpoint.Shared)
 
 	require.NoError(t, a.Create(t.Context(), "stmtA")) // creates the shared table
 	require.NoError(t, b.Create(t.Context(), "stmtB")) // idempotent; clears only stmtB rows
@@ -123,7 +123,7 @@ func TestCreateOwnedIsFresh(t *testing.T) {
 	db, schema := setup(t)
 	name := "_ckpt_test_fresh"
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
-	tbl := checkpoint.NewTable(db, schema, name, checkpoint.Owned)
+	tbl := checkpoint.NewTable(db, name, checkpoint.Owned)
 
 	require.NoError(t, tbl.Create(t.Context(), ""))
 	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "stale"}))
@@ -140,7 +140,7 @@ func TestTablePersistent(t *testing.T) {
 	db, schema := setup(t)
 	name := "_ckpt_test_persistent"
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
-	tbl := checkpoint.NewTable(db, schema, name, checkpoint.Persistent)
+	tbl := checkpoint.NewTable(db, name, checkpoint.Persistent)
 
 	// Exists is false before Create — datasync reads this as "fresh sync".
 	exists, err := tbl.Exists(t.Context())
