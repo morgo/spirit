@@ -215,11 +215,8 @@ func testEnumReorder(t *testing.T, enableBuffered bool) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		for i := range 50 {
 			if ctx.Err() != nil {
@@ -276,11 +273,8 @@ func testSetReorder(t *testing.T, enableBuffered bool) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		for i := range 50 {
 			if ctx.Err() != nil {
@@ -369,11 +363,8 @@ func testEnumDrop(t *testing.T, enableBuffered, useGTID bool) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		// Concurrent DML uses only retained values; binlog ordinals for
 		// 'pending' (3) and 'archived' (4) under the source enum must
@@ -468,11 +459,8 @@ func TestEnumToVarchar(t *testing.T) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		for i := 1; i <= 100; i++ {
 			if ctx.Err() != nil {
@@ -540,11 +528,8 @@ func TestSetToVarchar(t *testing.T) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		for i := 1; i <= 50; i++ {
 			if ctx.Err() != nil {
@@ -603,11 +588,8 @@ func TestEnumToSet(t *testing.T) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		for i := 1; i <= 100; i++ {
 			if ctx.Err() != nil {
@@ -816,8 +798,8 @@ func testAlterPKIntToBigIntWithDML(t *testing.T, enableBuffered bool) {
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
+		if !waitForCopyRows(t.Context(), m) {
+			return
 		}
 		for i := range 100 {
 			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO altpk_dml (name, val) VALUES ('dml_%d', %d)", i, i))
@@ -898,8 +880,8 @@ func testAlterPKIntToBigIntWithDMLAndAdditionalColumnChange(t *testing.T, enable
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
+		if !waitForCopyRows(t.Context(), m) {
+			return
 		}
 		for i := range 50 {
 			_, _ = tt.DB.ExecContext(t.Context(), fmt.Sprintf("INSERT INTO altpk_multi (name, val) VALUES ('dml_%d', %d)", i, i))
@@ -1008,11 +990,8 @@ func TestBinaryToVarbinaryConcurrentDML(t *testing.T) {
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		for range 50 {
 			if ctx.Err() != nil {
@@ -1194,11 +1173,8 @@ func runBitDMLTest(t *testing.T, tableName, colName, colDef string, values []uin
 	dmlDone := make(chan struct{})
 	go func() {
 		defer close(dmlDone)
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
+		if !waitForCopyRows(ctx, m) {
+			return
 		}
 		// UPDATE the marker rows mid-migration. Each update produces a
 		// binlog row image carrying the BIT value as int64; the applier
