@@ -540,6 +540,32 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
 }
 
+// TestDivergenceIsFatalAbortsDespiteRecopier: with DivergenceIsFatal set, a
+// confirmed stable divergence returns ErrPermanentDivergence and the Recopier
+// is NOT invoked, even though one is configured. This is the migration cutover
+// gate's policy made explicit (vs. datasync, which leaves it false and heals).
+func TestDivergenceIsFatalAbortsDespiteRecopier(t *testing.T) {
+	chunker := newTestChunker(1)
+	recopier := &fakeRecopier{} // must never be called
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+	cfg.DivergenceIsFatal = true
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			return 100, 99, 1000, nil // stable divergence: src always 100, tgt 99
+		},
+	)
+
+	// Run returns ErrPermanentDivergence on its own; t.Context() is cancelled at
+	// test cleanup, which tears down any remaining workers.
+	err := c.Run(t.Context())
+	require.ErrorIs(t, err, ErrPermanentDivergence,
+		"DivergenceIsFatal must abort with ErrPermanentDivergence even with a Recopier set")
+	require.Equal(t, 0, recopier.callCount(), "the Recopier must not be called when DivergenceIsFatal")
+	require.Positive(t, c.Stats().PermanentFailures)
+}
+
 // TestRecopyPassDoesNotFireFirstCleanPass: a chunk stably diverges and is
 // recopied. The pass containing the recopy must NOT fire FirstCleanPass —
 // a recopy is a repair, not a verification (the rewritten rows were never

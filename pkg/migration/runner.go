@@ -1627,8 +1627,9 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			// RetryDelay omitted: the constructor defaults it to
 			// checksum.DefaultContinuousRetryDelay.
 			Logger: r.logger,
-			// No Recopier: a stable divergence must abort the cutover rather
-			// than silently self-heal (see the function doc).
+			// Replication keeps _new in sync, so a confirmed divergence means a
+			// real problem: abort the cutover (no Recopier, no self-heal).
+			DivergenceIsFatal: true,
 		},
 	)
 	if err != nil {
@@ -1666,10 +1667,10 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 	//     replication lag the retry loop reconciles. Under writes during the
 	//     wait it is routinely >0, so gating on it would abort the cutover on
 	//     nearly every sentinel-drop.
-	// Whether a *confirmed* divergence aborts or self-heals is governed by the
-	// Recopier: migration configures none, so a stable divergence becomes
-	// ErrPermanentDivergence and aborts here; datasync configures a MySQLRecopier
-	// and heals instead. That is the replication-backed vs. copy-only policy knob.
+	// Whether a *confirmed* divergence aborts or self-heals is the explicit
+	// DivergenceIsFatal policy: migration sets it true (replication-backed, so a
+	// stable divergence becomes ErrPermanentDivergence and aborts here), while
+	// datasync sets it false and heals via its Recopier.
 	if ctx.Err() != nil && errors.Is(runErr, context.Canceled) {
 		return nil
 	}

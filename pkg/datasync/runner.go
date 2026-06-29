@@ -551,6 +551,10 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			MinPassInterval: checksum.ContinuousMinPassInterval,
 			Recopier:        recopier,
 			Logger:          r.logger,
+			// Sync verifies a target it keeps converging (and under --copy-only
+			// expects to find diverged rows), so a confirmed divergence is
+			// repaired by the Recopier, not fatal.
+			DivergenceIsFatal: false,
 		},
 	)
 	if err != nil {

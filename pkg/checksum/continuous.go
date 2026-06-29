@@ -157,11 +157,25 @@ type ContinuousCheckerConfig struct {
 
 	// Recopier is invoked when the retry path detects stable target
 	// divergence (src CRC unchanged across a retry window, target still
-	// wrong). When nil, that condition surfaces as ErrPermanentDivergence
-	// from Run — useful for tests and for callers that prefer to halt
-	// rather than self-heal. Production sync callers should provide
-	// MySQLRecopier.
+	// wrong) and DivergenceIsFatal is false. When nil, that condition
+	// surfaces as ErrPermanentDivergence from Run — useful for tests and
+	// for callers that prefer to halt rather than self-heal. Production
+	// sync callers should provide MySQLRecopier.
 	Recopier Recopier
+
+	// DivergenceIsFatal selects the policy for a confirmed stable divergence,
+	// making explicit the replication-backed vs. copy-only distinction rather
+	// than inferring it from Recopier presence:
+	//   - true  (migration's cutover gate): the target is kept in sync by
+	//     replication, so a confirmed difference means something is genuinely
+	//     wrong. Run returns ErrPermanentDivergence and the caller aborts. No
+	//     Recopier is configured.
+	//   - false (datasync, especially --copy-only): the checker's job is to find
+	//     and re-copy diverged rows, so a confirmed difference is repaired via
+	//     Recopier and the run continues.
+	// When false, a Recopier must be set; without one a divergence is treated as
+	// fatal anyway (there is nothing to heal with).
+	DivergenceIsFatal bool
 
 	// MinPassInterval is the minimum wall-clock time between the start of one
 	// pass and the start of the next, measured from the previous pass's start
@@ -855,11 +869,11 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		return res
 	}
 
-	// Source unchanged, target still wrong → stable divergence. With a
-	// Recopier configured, self-heal by recopying the chunk; otherwise
-	// surface ErrPermanentDivergence (legacy behavior — preserved for
-	// tests and for callers that want to halt rather than self-heal).
-	if c.cfg.Recopier != nil {
+	// Source unchanged, target still wrong → stable divergence. Self-heal by
+	// recopying the chunk when a Recopier is configured and the caller has not
+	// declared divergence fatal; otherwise surface ErrPermanentDivergence so the
+	// caller (e.g. migration's cutover gate) aborts.
+	if c.cfg.Recopier != nil && !c.cfg.DivergenceIsFatal {
 		if err := c.cfg.Recopier.Recopy(ctx, item.chunk); err != nil {
 			res.err = fmt.Errorf("recopy chunk %s: %w", item.chunk.String(), err)
 			return res
