@@ -68,6 +68,8 @@ When you consider that many migrations are best measured in _days_, this feature
 
 Spirit supports cutting over multiple schema changes at once using the `--statement` option.
 
+Only one atomic multi-table migration may run at a time **per schema**: they all coordinate through a single shared `_spirit_checkpoint` (and `_spirit_sentinel`), so a second one started against the same schema fails fast rather than corrupting the first's checkpoint. Plain single-table migrations have no such restriction — any number can run concurrently in a schema, as long as they target **different** tables (two migrations on the *same* table are serialized by a metadata lock).
+
 ## Performance
 
 Our internal goal for Spirit is to be able to migrate a 10TiB table in under 5 days. We believe we are able to achieve this in most-cases, but it depends on:

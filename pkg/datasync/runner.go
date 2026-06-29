@@ -883,7 +883,7 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB) (bool, 
 	if !exists {
 		return false, nil
 	}
-	rec, err := tbl.ReadLatest(ctx, "")
+	rec, err := tbl.ReadLatest(ctx)
 	// No row, or a checkpoint we can't read with this version's schema, both
 	// mean "nothing resumable here" — so --force is free to drop and start
 	// fresh. A transient read error still propagates: we must not nuke a target
@@ -1174,7 +1174,7 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 // watermark (resume point for a partial copy) and the change-feed position
 // (resume point for continuous sync).
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	if err := r.checkpointTbl().Create(ctx, ""); err != nil {
+	if err := r.checkpointTbl().Create(ctx); err != nil {
 		return fmt.Errorf("failed to create checkpoint table on target: %w", err)
 	}
 	return nil
@@ -1232,7 +1232,7 @@ func (r *Runner) readCheckpoint(ctx context.Context) (watermark, pos string, ok 
 	}
 	// The table exists: a prior attempt owns this target. Read its (optional)
 	// latest saved watermark/position.
-	rec, e := tbl.ReadLatest(ctx, "")
+	rec, e := tbl.ReadLatest(ctx)
 	if errors.Is(e, checkpoint.ErrNotFound) {
 		return "", "", true, nil // table exists but no row written yet → resume, re-copy from scratch
 	}

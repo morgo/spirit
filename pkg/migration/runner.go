@@ -287,8 +287,20 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Take a single metadata lock for all tables to prevent concurrent DDL.
 	// This uses a single DB connection instead of one per table.
 	// We release the lock when this function finishes executing.
-	lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), tables, r.dbConfig, r.logger)
+	//
+	// Atomic multi-table migrations additionally take a schema-scoped lock:
+	// they all share one _spirit_checkpoint/_spirit_sentinel in the schema, so
+	// only one may run per schema at a time. Single-table migrations skip it and
+	// may run concurrently (serialized per-table by the table locks above).
+	var mdlOpts []func(*dbconn.MetadataLock)
+	if len(r.changes) > 1 {
+		mdlOpts = append(mdlOpts, dbconn.WithMultiTableSchemaLock(r.changes[0].table.SchemaName))
+	}
+	lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), tables, r.dbConfig, r.logger, mdlOpts...)
 	if err != nil {
+		if len(r.changes) > 1 {
+			return fmt.Errorf("could not start atomic multi-table migration (another one may already be running in schema %q, or one of its tables is busy): %w", r.changes[0].table.SchemaName, err)
+		}
 		return err
 	}
 
@@ -626,19 +638,17 @@ func (r *Runner) checkpointTableName() string {
 }
 
 // checkpointTbl returns a handle to this migration's checkpoint table (shared
-// machinery in pkg/checkpoint). Multi-table migrations share one table per
-// schema, scoped by statement. Constructed on demand — cheap, and avoids an
-// ordering dependency on when a cached handle would be set during setup.
-// Callers must have r.db and r.changes[0].table initialized (true at every call
-// site: resume, create, dump, drop).
+// machinery in pkg/checkpoint). Always Owned: single-table migrations get a
+// per-table table, and atomic multi-table migrations share one _spirit_checkpoint
+// per schema but only one runs per schema at a time (enforced by the schema lock
+// in Run), so it has a single owner either way. Constructed on demand — cheap,
+// and avoids an ordering dependency on when a cached handle would be set during
+// setup. Callers must have r.db and r.changes[0].table initialized (true at
+// every call site: resume, create, dump, drop).
 func (r *Runner) checkpointTbl() *checkpoint.Table {
-	mode := checkpoint.Owned
-	if len(r.changes) > 1 {
-		mode = checkpoint.Shared // multi-table migrations share one table per schema
-	}
 	// r.db's selected schema is the migrated schema (same connection sentinel
 	// uses), so the checkpoint table lands there — no schema is threaded in.
-	return checkpoint.NewTable(r.db, r.checkpointTableName(), mode)
+	return checkpoint.NewTable(r.db, r.checkpointTableName(), checkpoint.Owned)
 }
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
@@ -1078,19 +1088,18 @@ func (r *Runner) fatalError() bool {
 }
 
 func (r *Runner) dropCheckpoint(ctx context.Context) error {
-	// Multi-table migrations share one checkpoint table per schema, so Drop
-	// deletes only this statement's rows (tolerating the table being gone)
-	// rather than DROPping a table a concurrent migration may be using. See
-	// pkg/checkpoint.
-	return r.checkpointTbl().Drop(ctx, r.migration.Statement)
+	// DROP TABLE IF EXISTS. Safe for the shared multi-table _spirit_checkpoint
+	// because only one multi-table migration runs per schema at a time (schema
+	// lock in Run). See pkg/checkpoint.
+	return r.checkpointTbl().Drop(ctx)
 }
 
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	// Single-table mode DROP+CREATEs (the name is table-derived and same-table
-	// concurrency is excluded by the metadata lock). Multi-table mode shares one
-	// table per schema, so it creates idempotently and clears only this
-	// statement's stale rows. See pkg/checkpoint.
-	return r.checkpointTbl().Create(ctx, r.migration.Statement)
+	// DROP+CREATE (Owned). For single-table the name is table-derived and
+	// same-table concurrency is excluded by the metadata lock; for multi-table
+	// the schema lock guarantees this run is the sole owner of the shared
+	// _spirit_checkpoint, so dropping it is safe. See pkg/checkpoint.
+	return r.checkpointTbl().Create(ctx)
 }
 
 func (r *Runner) Progress() status.Progress {
@@ -1221,30 +1230,26 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
-	// Read the latest checkpoint row. In multi-table mode the shared table can
-	// hold rows from other concurrently-running migrations in the same schema,
-	// so the read is filtered to our statement (so another migration's newer
-	// row cannot mask ours); pkg/checkpoint handles that via the shared flag.
-	rec, err := r.checkpointTbl().ReadLatest(ctx, r.migration.Statement)
+	// Read the latest checkpoint row. The table has a single owner — single-table
+	// migrations get a per-table table, and the shared multi-table
+	// _spirit_checkpoint is guarded by the schema lock — so this is simply "the
+	// newest row, if any"; the statement match below confirms it is ours.
+	rec, err := r.checkpointTbl().ReadLatest(ctx)
 	if err != nil {
 		// Distinguish "no checkpoint to resume from" — a normal state — from a
 		// real read failure (permission denied, server gone, or an incompatible
 		// schema missing a column) so an operator doesn't mistake the absence of
-		// a checkpoint for a permission issue. In multi-table mode the read is
-		// filtered by statement, so not-found means "no checkpoint for this
-		// statement" rather than "the table is empty".
+		// a checkpoint for a permission issue.
 		if errors.Is(err, checkpoint.ErrNotFound) {
-			if len(r.changes) > 1 {
-				return fmt.Errorf("no checkpoint found for this statement in table '%s', nothing to resume from", r.checkpointTableName())
-			}
-			return fmt.Errorf("checkpoint table '%s' is empty, nothing to resume from", r.checkpointTableName())
+			return fmt.Errorf("checkpoint table '%s' has no checkpoint, nothing to resume from", r.checkpointTableName())
 		}
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
 
 	// Validate that the statement matches between the checkpoint and the
-	// migration we are running. In multi-table mode ReadLatest already filtered
-	// by statement; in single-table mode this catches a changed alter.
+	// migration we are running — this catches a changed alter, and (for the
+	// shared multi-table table) a stale checkpoint left by a different
+	// multi-table migration that previously ran in this schema.
 	if r.migration.Statement != rec.Statement {
 		return status.ErrMismatchedAlter
 	}

@@ -1103,3 +1103,43 @@ func TestDeferCutOverTwoMigrationsSharedSentinel(t *testing.T) {
 	require.NoError(t, mA.Close())
 	require.NoError(t, mB.Close())
 }
+
+// TestMultiTableMigrationBlockedPerSchema verifies that only one atomic
+// multi-table migration runs per schema at a time. They all share one
+// _spirit_checkpoint, so a second one — started while the first holds the
+// schema lock — must fail fast rather than corrupt the shared checkpoint.
+// (Single-table migrations are unaffected; see the test above.)
+func TestMultiTableMigrationBlockedPerSchema(t *testing.T) {
+	t.Parallel()
+	dbName, _ := testutils.CreateUniqueTestDatabase(t)
+	for _, tbl := range []string{"mt_lock_a1", "mt_lock_a2", "mt_lock_b1", "mt_lock_b2"} {
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tbl))
+		testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
+			"INSERT INTO %s () VALUES (),(),(),(),(),(),(),(),(),()", tbl))
+	}
+
+	// Migration A (multi-table) parks on its deferred cutover, holding the
+	// schema lock for the whole run.
+	stmtA := "ALTER TABLE mt_lock_a1 ENGINE=InnoDB; ALTER TABLE mt_lock_a2 ENGINE=InnoDB"
+	mA := NewTestRunnerFromStatement(t, stmtA, WithDBName(dbName), WithDeferCutOver(), WithRespectSentinel())
+	require.Len(t, mA.changes, 2)
+	cA := make(chan error)
+	go func() { cA <- mA.Run(t.Context()) }()
+	waitForStatus(t, mA, status.WaitingOnSentinelTable)
+
+	// A second atomic multi-table migration in the same schema must be blocked
+	// fast, with an error that names the cause.
+	stmtB := "ALTER TABLE mt_lock_b1 ENGINE=InnoDB; ALTER TABLE mt_lock_b2 ENGINE=InnoDB"
+	mB := NewTestRunnerFromStatement(t, stmtB, WithDBName(dbName))
+	require.Len(t, mB.changes, 2)
+	err := mB.Run(t.Context())
+	require.Error(t, err, "a second atomic multi-table migration in the same schema must be blocked")
+	require.ErrorContains(t, err, "multi-table")
+	require.NoError(t, mB.Close())
+
+	// Operator approves A; it finishes and releases the schema lock.
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
+	require.NoError(t, <-cA)
+	require.NoError(t, mA.Close())
+}

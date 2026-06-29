@@ -384,7 +384,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// by an incompatible spirit version (e.g. missing or renamed a column) fails
 	// the read and aborts the move; we do not support cross-version resume.
 	tgt0 := &r.targets[0]
-	rec, err := r.checkpointTbl().ReadLatest(ctx, "")
+	rec, err := r.checkpointTbl().ReadLatest(ctx)
 	if err != nil {
 		return fmt.Errorf("could not read from checkpoint table '%s' on target: %w", checkpointTableName, err)
 	}
@@ -589,7 +589,7 @@ func (r *Runner) canResumeFromCheckpoint(ctx context.Context) (bool, error) {
 		r.logger.Info("resume pre-checks failed", "reason", err)
 		return false, nil
 	}
-	if _, err := r.checkpointTbl().ReadLatest(ctx, ""); err != nil {
+	if _, err := r.checkpointTbl().ReadLatest(ctx); err != nil {
 		// No usable checkpoint (missing row, or a layout this version can't read).
 		if errors.Is(err, checkpoint.ErrNotFound) || checkpoint.IsIncompatible(err) {
 			return false, nil
@@ -610,7 +610,7 @@ func (r *Runner) wipeTargets(ctx context.Context) error {
 			}
 		}
 	}
-	return r.checkpointTbl().Drop(ctx, "") // Owned → DROP TABLE IF EXISTS
+	return r.checkpointTbl().Drop(ctx) // Owned → DROP TABLE IF EXISTS
 }
 
 func (r *Runner) newCopy(ctx context.Context) error {
@@ -709,7 +709,7 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 // (targets[0]) by convention. Targets are sorted in Run() so targets[0] is
 // stable across a stop and a later resume.
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	if err := r.checkpointTbl().Create(ctx, ""); err != nil {
+	if err := r.checkpointTbl().Create(ctx); err != nil {
 		return err
 	}
 	tgt0 := &r.targets[0]

@@ -59,8 +59,9 @@ type Record struct {
 	// a single source (migration), or a JSON map of per-source positions for a
 	// multi-source move. Stored in the binlog_position column.
 	Position string
-	// Statement is the migration's ALTER statement, used to match a resume to
-	// its checkpoint and to scope a shared table. Empty for move.
+	// Statement is the migration's ALTER statement, which the runner uses to
+	// match a resume to its checkpoint (ErrMismatchedAlter). Empty for move and
+	// datasync.
 	Statement string
 	// OriginalTableName is the untruncated source table name, stored so a
 	// single-table migration can detect the rare case where two long table
@@ -75,27 +76,22 @@ type Record struct {
 // their configured max age to decide whether replaying from here is worthwhile.
 func (r Record) Age() time.Duration { return time.Since(r.CreatedAt) }
 
-// Mode selects how a Table is created, cleared, and read, matching the three
-// checkpoint lifecycles in spirit.
+// Mode selects how a Table is created, matching spirit's checkpoint lifecycles.
+// Either way Write keeps a single row (REPLACE on id=1) and ReadLatest reads it.
 type Mode int
 
 const (
 	// Owned is a per-run table this run owns outright: Create DROPs and
 	// recreates it (so it always matches this version's schema and carries no
-	// stale rows), Write keeps a single row (overwrites in place), and Drop
-	// drops it. Used by single-table migrations and by move.
+	// stale rows), and Drop drops it. Used by single-table and atomic
+	// multi-table migrations (only one of the latter runs per schema at a time,
+	// so the shared _spirit_checkpoint has a single owner) and by move.
 	Owned Mode = iota
-	// Shared is one table per schema shared by concurrently-running multi-table
-	// migrations: Create is idempotent and clears only this statement's rows,
-	// Write appends (one migration's row must not overwrite another's), Drop
-	// deletes only this statement's rows, and ReadLatest is scoped to this
-	// statement — so concurrent migrations never clobber or mask each other.
-	Shared
 	// Persistent is a long-lived table whose existence outlives any single run,
-	// used by datasync: Create is idempotent and never clears, Write keeps a
-	// single row, and Drop drops it. The caller decides fresh-vs-resume from
-	// Exists and ReadLatest (not by recreating the table), so Create must never
-	// destroy the rows a resume needs.
+	// used by datasync: Create is idempotent and never clears, and Drop drops
+	// it. The caller decides fresh-vs-resume from Exists and ReadLatest (not by
+	// recreating the table), so Create must never destroy the rows a resume
+	// needs.
 	Persistent
 )
 
@@ -131,32 +127,20 @@ const tableDDL = `(
 
 // Create prepares the checkpoint table for a run. Behaviour depends on Mode:
 //
-//   - Owned (single-table migration, move): DROP + CREATE, so the table always
-//     matches this spirit version's schema and carries no stale rows.
-//   - Shared (multi-table migration): CREATE IF NOT EXISTS — a concurrent
-//     migration in the schema may already own the table, and a DROP would
-//     destroy its live rows — then DELETE this statement's stale rows so a
-//     fresh start is never mistaken for resumable progress.
+//   - Owned (single-table / atomic multi-table migration, move): DROP + CREATE,
+//     so the table always matches this spirit version's schema and carries no
+//     stale rows. Safe for the shared multi-table _spirit_checkpoint because
+//     only one multi-table migration runs per schema at a time.
 //   - Persistent (datasync): CREATE IF NOT EXISTS and nothing else. The table
 //     is long-lived and its existence is the caller's resume signal, so it is
 //     never dropped or cleared here.
-//
-// statement is used only in Shared mode.
-func (t *Table) Create(ctx context.Context, statement string) error {
+func (t *Table) Create(ctx context.Context) error {
 	switch t.mode {
 	case Owned:
 		if err := dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n", t.name); err != nil {
 			return err
 		}
 		return dbconn.Exec(ctx, t.db, "CREATE TABLE %n "+tableDDL, t.name)
-	case Shared:
-		if err := dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n "+tableDDL, t.name); err != nil {
-			return err
-		}
-		if err := dbconn.Exec(ctx, t.db, "DELETE FROM %n WHERE statement = %?", t.name, statement); err != nil {
-			return fmt.Errorf("could not clear stale rows from shared checkpoint table %q (if it was left behind by an incompatible spirit version, drop it manually): %w", t.name, err)
-		}
-		return nil
 	case Persistent:
 		return dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n "+tableDDL, t.name)
 	default:
@@ -164,39 +148,17 @@ func (t *Table) Create(ctx context.Context, statement string) error {
 	}
 }
 
-// Drop removes this run's checkpoint. Owned/Persistent: DROP TABLE IF EXISTS.
-// Shared: DELETE only this statement's rows (tolerating the table being already
-// gone), so a concurrent migration's rows in the shared table survive.
-func (t *Table) Drop(ctx context.Context, statement string) error {
-	if t.mode == Shared {
-		err := dbconn.Exec(ctx, t.db, "DELETE FROM %n WHERE statement = %?", t.name, statement)
-		if mysqlErr, ok := errors.AsType[*mysql.MySQLError](err); ok && mysqlErr.Number == erNoSuchTable {
-			return nil
-		}
-		return err
-	}
+// Drop removes this run's checkpoint (DROP TABLE IF EXISTS).
+func (t *Table) Drop(ctx context.Context) error {
 	return dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n", t.name)
 }
 
-// Write records a checkpoint row.
-//
-// Owned and Persistent keep a single row, overwriting it in place (REPLACE on
-// the fixed primary key id=1): these tables have one logical owner, so there is
-// no value in accumulating history, and REPLACE is one atomic statement — a
-// crash mid-write leaves either the old row or the new one, never none. Shared
-// appends instead, because one multi-table migration's row must not overwrite a
-// concurrent migration's; those rows are bounded by the migration's runtime and
-// ReadLatest picks the newest per statement.
-//
-// created_at is (re)assigned by the server on each write.
+// Write records a checkpoint row, keeping a single row by overwriting it in
+// place (REPLACE on the fixed primary key id=1). The table has one logical
+// owner, so there is no value in accumulating history, and REPLACE is one atomic
+// statement — a crash mid-write leaves either the old row or the new one, never
+// none. created_at is (re)assigned by the server on each write.
 func (t *Table) Write(ctx context.Context, rec Record) error {
-	if t.mode == Shared {
-		return dbconn.Exec(ctx, t.db,
-			"INSERT INTO %n (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (%?, %?, %?, %?, %?)",
-			t.name,
-			rec.CopierWatermark, rec.ChecksumWatermark, rec.Position, rec.Statement, rec.OriginalTableName,
-		)
-	}
 	return dbconn.Exec(ctx, t.db,
 		"REPLACE INTO %n (id, copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (1, %?, %?, %?, %?, %?)",
 		t.name,
@@ -204,27 +166,20 @@ func (t *Table) Write(ctx context.Context, rec Record) error {
 	)
 }
 
-// ReadLatest returns the most recent checkpoint row. In shared mode it is
-// filtered to statement, so another concurrent migration's newer row can't mask
-// this one. Returns ErrNotFound when there is no matching row.
+// ReadLatest returns the most recent checkpoint row, or ErrNotFound when there
+// is none.
 //
 // Columns are selected explicitly (not SELECT *): a checkpoint table written by
 // an incompatible spirit version that is missing a column surfaces as a read
 // error, so resume fails safely rather than silently misreading.
-func (t *Table) ReadLatest(ctx context.Context, statement string) (Record, error) {
+func (t *Table) ReadLatest(ctx context.Context) (Record, error) {
 	query := fmt.Sprintf(
-		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, created_at FROM `%s`",
+		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, created_at FROM `%s` ORDER BY id DESC LIMIT 1",
 		t.name)
-	var args []any
-	if t.mode == Shared {
-		query += " WHERE statement = ?"
-		args = append(args, statement)
-	}
-	query += " ORDER BY id DESC LIMIT 1"
 
 	var rec Record
 	var createdAt string
-	err := t.db.QueryRowContext(ctx, query, args...).Scan(
+	err := t.db.QueryRowContext(ctx, query).Scan(
 		&rec.CopierWatermark, &rec.ChecksumWatermark, &rec.Position, &rec.Statement, &rec.OriginalTableName, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, ErrNotFound

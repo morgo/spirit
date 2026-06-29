@@ -31,15 +31,15 @@ func countRows(t *testing.T, db *sql.DB, schema, name string) int {
 	return n
 }
 
-func TestTableLifecycleNonShared(t *testing.T) {
+func TestTableLifecycleOwned(t *testing.T) {
 	db, schema := setup(t)
-	tbl := checkpoint.NewTable(db, "_ckpt_test_nonshared", checkpoint.Owned)
-	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_nonshared") })
+	tbl := checkpoint.NewTable(db, "_ckpt_test_owned", checkpoint.Owned)
+	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_owned") })
 
-	require.NoError(t, tbl.Create(t.Context(), ""))
+	require.NoError(t, tbl.Create(t.Context()))
 
 	// Empty table → ErrNotFound (a normal "nothing to resume" state).
-	_, err := tbl.ReadLatest(t.Context(), "")
+	_, err := tbl.ReadLatest(t.Context())
 	require.ErrorIs(t, err, checkpoint.ErrNotFound)
 
 	// Write a row and read every field back.
@@ -51,7 +51,7 @@ func TestTableLifecycleNonShared(t *testing.T) {
 		OriginalTableName: "t1",
 	}
 	require.NoError(t, tbl.Write(t.Context(), rec))
-	got, err := tbl.ReadLatest(t.Context(), "")
+	got, err := tbl.ReadLatest(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, rec.CopierWatermark, got.CopierWatermark)
 	require.Equal(t, rec.ChecksumWatermark, got.ChecksumWatermark)
@@ -64,57 +64,16 @@ func TestTableLifecycleNonShared(t *testing.T) {
 	// Single-owner: Write overwrites the one row in place rather than appending,
 	// so the table stays capped at one row and ReadLatest returns it.
 	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "cw2"}))
-	got, err = tbl.ReadLatest(t.Context(), "")
+	got, err = tbl.ReadLatest(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "cw2", got.CopierWatermark)
-	require.Equal(t, 1, countRows(t, db, schema, "_ckpt_test_nonshared"), "Owned Write must keep exactly one row")
+	require.Equal(t, 1, countRows(t, db, schema, "_ckpt_test_owned"), "Owned Write must keep exactly one row")
 
 	// Drop removes the table entirely; a subsequent read errors (not ErrNotFound).
-	require.NoError(t, tbl.Drop(t.Context(), ""))
-	_, err = tbl.ReadLatest(t.Context(), "")
+	require.NoError(t, tbl.Drop(t.Context()))
+	_, err = tbl.ReadLatest(t.Context())
 	require.Error(t, err)
 	require.NotErrorIs(t, err, checkpoint.ErrNotFound)
-}
-
-func TestTableShared(t *testing.T) {
-	db, schema := setup(t)
-	name := "_ckpt_test_shared"
-	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
-
-	// Two migrations sharing one table in the schema, keyed by statement.
-	a := checkpoint.NewTable(db, name, checkpoint.Shared)
-	b := checkpoint.NewTable(db, name, checkpoint.Shared)
-
-	require.NoError(t, a.Create(t.Context(), "stmtA")) // creates the shared table
-	require.NoError(t, b.Create(t.Context(), "stmtB")) // idempotent; clears only stmtB rows
-
-	require.NoError(t, a.Write(t.Context(), checkpoint.Record{CopierWatermark: "a1", Statement: "stmtA"}))
-	require.NoError(t, b.Write(t.Context(), checkpoint.Record{CopierWatermark: "b1", Statement: "stmtB"}))
-	require.NoError(t, a.Write(t.Context(), checkpoint.Record{CopierWatermark: "a2", Statement: "stmtA"}))
-
-	// Shared appends (unlike the single-owner modes): one row must not overwrite
-	// a concurrent migration's, so all three writes are retained.
-	require.Equal(t, 3, countRows(t, db, schema, name), "Shared Write must append")
-
-	// Each reads its own latest row, unmasked by the other's newer row.
-	gotA, err := a.ReadLatest(t.Context(), "stmtA")
-	require.NoError(t, err)
-	require.Equal(t, "a2", gotA.CopierWatermark)
-	gotB, err := b.ReadLatest(t.Context(), "stmtB")
-	require.NoError(t, err)
-	require.Equal(t, "b1", gotB.CopierWatermark)
-
-	// Drop(A) deletes only A's rows; B's row and the table survive.
-	require.NoError(t, a.Drop(t.Context(), "stmtA"))
-	_, err = a.ReadLatest(t.Context(), "stmtA")
-	require.ErrorIs(t, err, checkpoint.ErrNotFound)
-	gotB, err = b.ReadLatest(t.Context(), "stmtB")
-	require.NoError(t, err)
-	require.Equal(t, "b1", gotB.CopierWatermark)
-
-	// Drop tolerates the shared table already being gone.
-	require.NoError(t, dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name))
-	require.NoError(t, a.Drop(t.Context(), "stmtA"))
 }
 
 // TestCreateOwnedIsFresh verifies Owned Create drops any pre-existing table (so
@@ -125,11 +84,11 @@ func TestCreateOwnedIsFresh(t *testing.T) {
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
 	tbl := checkpoint.NewTable(db, name, checkpoint.Owned)
 
-	require.NoError(t, tbl.Create(t.Context(), ""))
+	require.NoError(t, tbl.Create(t.Context()))
 	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "stale"}))
 	// Re-create: the prior row must be gone.
-	require.NoError(t, tbl.Create(t.Context(), ""))
-	_, err := tbl.ReadLatest(t.Context(), "")
+	require.NoError(t, tbl.Create(t.Context()))
+	_, err := tbl.ReadLatest(t.Context())
 	require.ErrorIs(t, err, checkpoint.ErrNotFound)
 }
 
@@ -147,14 +106,14 @@ func TestTablePersistent(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, exists)
 
-	require.NoError(t, tbl.Create(t.Context(), ""))
+	require.NoError(t, tbl.Create(t.Context()))
 
 	// After Create the table exists (the resume signal) but has no row yet —
 	// datasync resumes and re-copies from scratch in this state.
 	exists, err = tbl.Exists(t.Context())
 	require.NoError(t, err)
 	require.True(t, exists)
-	_, err = tbl.ReadLatest(t.Context(), "")
+	_, err = tbl.ReadLatest(t.Context())
 	require.ErrorIs(t, err, checkpoint.ErrNotFound)
 
 	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "wm1", Position: "pos1"}))
@@ -163,14 +122,14 @@ func TestTablePersistent(t *testing.T) {
 	require.Equal(t, 1, countRows(t, db, schema, name), "Persistent Write must keep exactly one row")
 
 	// Re-create must be a no-op that preserves the existing row (unlike Owned).
-	require.NoError(t, tbl.Create(t.Context(), ""))
-	got, err := tbl.ReadLatest(t.Context(), "")
+	require.NoError(t, tbl.Create(t.Context()))
+	got, err := tbl.ReadLatest(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "wm2", got.CopierWatermark, "re-create must not drop the table")
 	require.Equal(t, "pos2", got.Position)
 
 	// Drop removes the table; Exists is false again.
-	require.NoError(t, tbl.Drop(t.Context(), ""))
+	require.NoError(t, tbl.Drop(t.Context()))
 	exists, err = tbl.Exists(t.Context())
 	require.NoError(t, err)
 	require.False(t, exists)
