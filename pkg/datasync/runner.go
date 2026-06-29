@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -825,7 +826,7 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 	// has the database selected when it's dropped. A resumable run is left
 	// intact and resumes as normal.
 	if r.sync.Force {
-		resumable, rerr := r.hasResumableCheckpoint(ctx, adminDB, cfg.DBName)
+		resumable, rerr := r.forceTargetResumable(ctx, adminDB, cfg)
 		if rerr != nil {
 			return rerr
 		}
@@ -845,32 +846,55 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 	return nil
 }
 
-// hasResumableCheckpoint reports whether the target database holds a sync
-// checkpoint that can be resumed from (a row carrying a copier watermark). It
-// runs on the passed connection (typically the no-database admin connection),
-// using fully-qualified names so it works without a selected database — and so
-// it can be called before r.target.DB is opened.
-func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB, dbName string) (bool, error) {
-	var exists int
-	e := db.QueryRowContext(ctx,
-		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-		dbName, syncCheckpointTableName).Scan(&exists)
-	if errors.Is(e, sql.ErrNoRows) {
+// forceTargetResumable reports whether the target holds a resumable checkpoint,
+// for the --force decision. The checkpoint package keys on the connection's
+// selected schema, but --force runs on a no-database admin connection before
+// r.target.DB is opened — so this confirms the database exists (via the admin
+// connection) and then opens a short-lived connection *to* that schema to
+// inspect the checkpoint. A missing database is trivially not resumable.
+func (r *Runner) forceTargetResumable(ctx context.Context, adminDB *sql.DB, cfg *mysql.Config) (bool, error) {
+	var present int
+	err := adminDB.QueryRowContext(ctx,
+		"SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?", cfg.DBName).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil // no target database yet → nothing to resume
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to check for target database: %w", err)
+	}
+	schemaDB, err := dbconn.New(cfg.FormatDSN(), r.targetDBConfig)
+	if err != nil {
+		return false, fmt.Errorf("failed to connect to target database to check for a checkpoint: %w", err)
+	}
+	defer utils.CloseAndLog(schemaDB)
+	return r.hasResumableCheckpoint(ctx, schemaDB)
+}
+
+// hasResumableCheckpoint reports whether db's selected schema holds a sync
+// checkpoint that can be resumed from (a row carrying a copier watermark). db
+// must be connected to the target schema (the checkpoint package keys on
+// DATABASE()).
+func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB) (bool, error) {
+	tbl := checkpoint.NewTable(db, syncCheckpointTableName, checkpoint.Persistent)
+	exists, err := tbl.Exists(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to check for checkpoint table: %w", err)
+	}
+	if !exists {
 		return false, nil
 	}
-	if e != nil {
-		return false, fmt.Errorf("failed to check for checkpoint table: %w", e)
-	}
-	var watermark string
-	e = db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT IFNULL(copier_watermark, '') FROM `%s`.`%s` WHERE id = 1", dbName, syncCheckpointTableName)).Scan(&watermark)
-	if errors.Is(e, sql.ErrNoRows) {
+	rec, err := tbl.ReadLatest(ctx)
+	// No row, or a checkpoint we can't read with this version's schema, both
+	// mean "nothing resumable here" — so --force is free to drop and start
+	// fresh. A transient read error still propagates: we must not nuke a target
+	// just because the checkpoint was briefly unreadable.
+	if errors.Is(err, checkpoint.ErrNotFound) || checkpoint.IsIncompatible(err) {
 		return false, nil
 	}
-	if e != nil {
-		return false, fmt.Errorf("failed to read checkpoint: %w", e)
+	if err != nil {
+		return false, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	return watermark != "", nil
+	return rec.CopierWatermark != "", nil
 }
 
 // createTargetTables creates each source table on the target using the
@@ -1137,17 +1161,20 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 	return r.createCheckpointTable(ctx)
 }
 
+// checkpointTbl returns a handle to datasync's checkpoint table on the target.
+// datasync uses Persistent mode: the table is long-lived and its existence is
+// the resume signal (see readCheckpoint), so Create never drops or clears it.
+// It always lives on the target because the source may be read-only.
+func (r *Runner) checkpointTbl() *checkpoint.Table {
+	return checkpoint.NewTable(r.target.DB, syncCheckpointTableName, checkpoint.Persistent)
+}
+
 // createCheckpointTable creates the checkpoint table on the target (always
 // the target, since the source may be read-only). It records the copier's low
 // watermark (resume point for a partial copy) and the change-feed position
 // (resume point for continuous sync).
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, r.target.DB, `CREATE TABLE IF NOT EXISTS %n.%n (
-	id INT NOT NULL PRIMARY KEY,
-	copier_watermark TEXT,
-	source_position TEXT,
-	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-	)`, r.target.Config.DBName, syncCheckpointTableName); err != nil {
+	if err := r.checkpointTbl().Create(ctx); err != nil {
 		return fmt.Errorf("failed to create checkpoint table on target: %w", err)
 	}
 	return nil
@@ -1155,9 +1182,9 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 
 // dumpCheckpoint records the copier's low watermark (so a partial copy can
 // resume) and the change-feed position (so continuous sync can resume) in the
-// target checkpoint table (single row, id=1). It is a no-op until the copy
-// pipeline is built, and skips writing whenever the watermark isn't ready yet,
-// so it never persists an unparseable watermark.
+// target checkpoint table's single row (REPLACE on id=1). It is a no-op until
+// the copy pipeline is built, and skips writing whenever the watermark isn't
+// ready yet, so it never persists an unparseable watermark.
 func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	r.progMu.RLock()
 	chunker := r.copyChunker
@@ -1178,9 +1205,10 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	if repl != nil {
 		pos = repl.Position()
 	}
-	return dbconn.Exec(ctx, r.target.DB,
-		"REPLACE INTO %n.%n (id, copier_watermark, source_position) VALUES (1, %?, %?)",
-		r.target.Config.DBName, syncCheckpointTableName, watermark, pos)
+	return r.checkpointTbl().Write(ctx, checkpoint.Record{
+		CopierWatermark: watermark,
+		Position:        pos,
+	})
 }
 
 // readCheckpoint reports whether the target carries a sync checkpoint and, if
@@ -1194,28 +1222,32 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 // re-copy idempotently instead of tripping the fresh-sync target-empty guard.
 // (watermark/pos may be empty in that case; startResume handles it.)
 func (r *Runner) readCheckpoint(ctx context.Context) (watermark, pos string, ok bool, err error) {
-	var exists int
-	e := r.target.DB.QueryRowContext(ctx,
-		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
-		r.target.Config.DBName, syncCheckpointTableName).Scan(&exists)
-	if errors.Is(e, sql.ErrNoRows) {
-		return "", "", false, nil // no checkpoint table → not a prior import; fresh sync
-	}
+	tbl := r.checkpointTbl()
+	exists, e := tbl.Exists(ctx)
 	if e != nil {
 		return "", "", false, fmt.Errorf("failed to check for checkpoint table: %w", e)
 	}
+	if !exists {
+		return "", "", false, nil // no checkpoint table → not a prior import; fresh sync
+	}
 	// The table exists: a prior attempt owns this target. Read its (optional)
-	// saved watermark/position.
-	e = r.target.DB.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT IFNULL(copier_watermark, ''), IFNULL(source_position, '') FROM `%s`.`%s` WHERE id = 1",
-			r.target.Config.DBName, syncCheckpointTableName)).Scan(&watermark, &pos)
-	if errors.Is(e, sql.ErrNoRows) {
+	// latest saved watermark/position.
+	rec, e := tbl.ReadLatest(ctx)
+	if errors.Is(e, checkpoint.ErrNotFound) {
 		return "", "", true, nil // table exists but no row written yet → resume, re-copy from scratch
+	}
+	if checkpoint.IsIncompatible(e) {
+		// The target carries a checkpoint table from an incompatible spirit
+		// version. We can't resume from it, and we can't silently re-copy onto
+		// a non-empty target, so fail with an actionable message rather than a
+		// raw "Unknown column" — the operator drops it or re-runs with --force
+		// (which now recovers; see hasResumableCheckpoint).
+		return "", "", false, fmt.Errorf("checkpoint table %q on the target is from an incompatible spirit version (%w); drop it or re-run with --force to start fresh", syncCheckpointTableName, e)
 	}
 	if e != nil {
 		return "", "", false, fmt.Errorf("failed to read checkpoint: %w", e)
 	}
-	return watermark, pos, true, nil
+	return rec.CopierWatermark, rec.Position, true, nil
 }
 
 // startBackgroundRoutines starts the periodic flush (which advances the
