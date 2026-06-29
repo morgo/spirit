@@ -416,10 +416,11 @@ func TestSyncResume(t *testing.T) {
 	require.Equal(t, 3, countRows("t1"))
 	require.Equal(t, 2, countRows("t2"))
 
-	// A copy must persist a checkpoint with a copier watermark.
+	// A copy must persist a checkpoint with a copier watermark. The checkpoint
+	// is a single row (REPLACE on id=1).
 	var wm string
 	require.NoError(t, tgt.QueryRowContext(context.Background(),
-		"SELECT IFNULL(copier_watermark, '') FROM _spirit_sync_checkpoint WHERE id = 1").Scan(&wm))
+		"SELECT IFNULL(copier_watermark, '') FROM _spirit_sync_checkpoint").Scan(&wm))
 	require.NotEmpty(t, wm, "a copy should record a copier watermark")
 
 	// Second run with the target left intact: it must detect the checkpoint and
@@ -573,6 +574,86 @@ func TestSyncForce(t *testing.T) {
 	require.Equal(t, 3, n)
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t2").Scan(&n))
 	require.Equal(t, 2, n)
+}
+
+// TestSyncResumeIncompatibleCheckpoint covers recovery when the target carries a
+// checkpoint table from an incompatible spirit version (e.g. across the format
+// change): the read can't resume, so a normal run fails with an actionable
+// message rather than a raw "Unknown column", and --force treats it as
+// not-resumable and re-copies cleanly instead of being wedged.
+func TestSyncResumeIncompatibleCheckpoint(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_incompat_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_incompat_dest"
+	sourceDSN := src.FormatDSN()
+	targetDSN := dest.FormatDSN()
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_incompat_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_incompat_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_incompat_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_incompat_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_incompat_dest`)
+
+	newSync := func(force bool) *Sync {
+		return &Sync{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			Force:           force,
+		}
+	}
+
+	// First run completes: target has data + a current-schema checkpoint.
+	r1, err := NewRunner(newSync(false))
+	require.NoError(t, err)
+	require.NoError(t, runUntilCopied(t, r1))
+	require.NoError(t, r1.Close())
+
+	// Simulate an upgrade across the checkpoint-format change: replace the
+	// checkpoint table with an old-version layout (source_position, no
+	// binlog_position) carrying a watermark, leaving the copied data in place.
+	testutils.RunSQL(t, "DROP TABLE sync_incompat_dest._spirit_sync_checkpoint")
+	testutils.RunSQL(t, `CREATE TABLE sync_incompat_dest._spirit_sync_checkpoint (
+		id INT NOT NULL PRIMARY KEY,
+		copier_watermark TEXT,
+		source_position TEXT,
+		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+	)`)
+	testutils.RunSQL(t, `INSERT INTO sync_incompat_dest._spirit_sync_checkpoint (id, copier_watermark, source_position) VALUES (1, 'stale-wm', 'stale-pos')`)
+
+	// Without --force: can't read the checkpoint and can't safely re-copy onto a
+	// non-empty target → fail with a message that points at the remedy.
+	r2, err := NewRunner(newSync(false))
+	require.NoError(t, err)
+	runErr := runUntilCopied(t, r2)
+	require.NoError(t, r2.Close())
+	require.Error(t, runErr, "an incompatible checkpoint must not silently resume or re-copy")
+	require.Contains(t, runErr.Error(), "--force", "the error should point the operator at --force")
+
+	// With --force: the incompatible checkpoint is treated as not-resumable, so
+	// the target is dropped and re-copied cleanly.
+	r3, err := NewRunner(newSync(true))
+	require.NoError(t, err)
+	require.NoError(t, runUntilCopied(t, r3))
+	require.NoError(t, r3.Close())
+
+	tgt, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n, "force must re-copy the source data")
+	// The fresh copy recreated the checkpoint table with the current schema, so
+	// it is readable again (the binlog_position column the old layout lacked).
+	var n2 int
+	require.NoError(t, tgt.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE table_schema='sync_incompat_dest' AND table_name='_spirit_sync_checkpoint' AND column_name='binlog_position'").Scan(&n2))
+	require.Equal(t, 1, n2, "force must recreate the checkpoint table with the current schema")
 }
 
 // TestSyncCreateTableLegacyDefault verifies that target tables are created with

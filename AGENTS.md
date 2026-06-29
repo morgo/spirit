@@ -251,6 +251,7 @@ These three runners began as copy-paste forks and **drift silently** — a safet
 | Concern | Shared home | Used by |
 |---|---|---|
 | Status + checkpoint loops (`WatchTask`) and the `State` machine | `pkg/status` (`Task` interface: `Progress`/`Status`/`DumpCheckpoint`/`Cancel`) | migration, move, datasync |
+| Checkpoint table (one schema + create/drop/exists/write/read) | `pkg/checkpoint` (`Table` + `Mode`) | migration, move, datasync |
 | Sentinel cutover gate (`Create`/`Exists`/`Wait`) | `pkg/sentinel` | migration, move (datasync has no cutover) |
 | Continuous (eventually-consistent) checksum | `pkg/checksum` `ContinuousChecker` | migration (defer-cutover), datasync |
 | Row copy, write layer, chunking, change feed, connections, throttling | `pkg/copier`, `pkg/applier`, `pkg/table`, `pkg/change`, `pkg/dbconn`, `pkg/throttler` | all |
@@ -260,15 +261,15 @@ How the recently-unified pieces handle per-tool differences, as patterns to copy
 - **`sentinel.Wait`** takes the two genuinely runner-specific steps as callbacks (`RunChecksum`, `InvalidateWatermark`) — e.g. migration scopes its watermark `UPDATE` by `statement` (its checkpoint table is shared across multi-table migrations) while move blanks the whole per-move table. The poll/timeout/continuous-checksum-lifecycle orchestration is shared; only the divergent bits are injected.
 - **`status.WatchTask`** is consumed via a small interface (`status.Task`); each runner keeps a `var _ status.Task = (*Runner)(nil)` assertion so a signature drift fails the build. A checkpoint-write failure is **fatal** here (calls `Cancel()`); don't reintroduce a loop that swallows it.
 - **`checksum.ContinuousChecker`** is configured per-tool: migration runs it with **no `Recopier`** (a confirmed divergence must *abort* the cutover via `ErrPermanentDivergence`), datasync runs it **with** a `MySQLRecopier` (self-heal). Both pace passes with `MinPassInterval`.
-- **`pkg/sentinel`** takes the schema from the connection (`DATABASE()` / unqualified DDL), not a passed-in schema name, so it works under Vitess. Prefer this pattern for new helpers — point the `*sql.DB` at the right schema rather than threading a schema string.
+- **`pkg/sentinel`** takes the schema from the connection (`DATABASE()` / unqualified DDL), not a passed-in schema name, so it works under Vitess. Prefer this pattern for new helpers — point the `*sql.DB` at the right schema rather than threading a schema string. `pkg/checkpoint` follows it too.
+- **`pkg/checkpoint`** owns the one checkpoint-table schema and its create/drop/exists/write/read, keyed on the connection's selected schema (`DATABASE()` / unqualified, like sentinel). `Write` keeps a **single row** (`REPLACE` on `id=1` — atomic, so a crash never leaves no checkpoint, and bounded). Two `Mode`s differ only in `Create`: `Transient` (DROP+CREATE — a checkpoint for one finite run: single-table & atomic multi-table migration, move) vs `Persistent` (CREATE IF NOT EXISTS, never cleared — a continuous run: datasync, whose existence is its resume signal). Resume *policy* stays per-runner (statement match, collision, max-age, multi-source positions, datasync's three-state `Exists` routing); the package interprets no watermarks. `checkpoint.IsIncompatible` tells an unreadable cross-version checkpoint apart from a transient read error, so recovery never fires on a blip — migration falls back to a fresh run; datasync recovers under `--force` (drops the target DB).
 
 ### Not yet unified (live drift — touch with care)
 
-- **Checkpoint table schema + dump/resume** differ across all three (`pkg/migration` has `checksum_watermark`/`statement`/`original_table_name`; datasync has `source_position`; columns and resume semantics diverge). A `pkg/checkpoint` extraction is planned; until then, a checkpoint change in one runner almost certainly needs a deliberate decision about the other two.
 - **move's continuous checksum** still uses the distributed/sharded `checksum.Checker` (it is multi-source / possibly multi-target); `ContinuousChecker` is single-source/single-target.
 - **`fatalError` / `Close` teardown** are similar but not identical between the three — keep the run-all-steps + `errors.Join` teardown idiom and the `>= CutOver` no-op guard in `fatalError` consistent when you touch them.
 
-When you add a checkpoint field, a teardown step, a new lifecycle phase, or a safety gate, grep all three `runner.go` files and decide explicitly: port, or extract.
+When you add a checkpoint field, add it to `pkg/checkpoint`'s schema — it is shared by all three. When you add a teardown step, a new lifecycle phase, or a safety gate, grep all three `runner.go` files and decide explicitly: port, or extract.
 
 ## Contributing Philosophy
 
