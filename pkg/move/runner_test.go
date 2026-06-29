@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -1201,7 +1202,7 @@ func TestResumeFromCheckpointNotTooOld(t *testing.T) {
 	require.NoError(t, r.Close())
 }
 
-// TestCreateSentinelTableIdempotent verifies that createSentinelTable
+// TestCreateSentinelTableIdempotent verifies that sentinel.Create
 // adopts an existing sentinel rather than DROP+CREATE-ing it. The sentinel
 // name is shared with concurrent spirit processes polling it every
 // sentinelCheckInterval, so a DROP+CREATE pair opens a window in which a
@@ -1226,19 +1227,19 @@ func TestCreateSentinelTableIdempotent(t *testing.T) {
 
 	// Pre-create the sentinel with a marker row, as if another spirit
 	// process (or an earlier run) had already created it.
-	testutils.RunSQL(t, "CREATE TABLE "+srcDB+"."+sentinelTableName+" (id int NOT NULL PRIMARY KEY)")
-	testutils.RunSQL(t, "INSERT INTO "+srcDB+"."+sentinelTableName+" VALUES (1)")
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+"."+sentinel.TableName+" (id int NOT NULL PRIMARY KEY)")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+"."+sentinel.TableName+" VALUES (1)")
 
 	// Both calls must succeed and adopt the existing table.
-	require.NoError(t, r.createSentinelTable(t.Context()))
-	require.NoError(t, r.createSentinelTable(t.Context()))
+	require.NoError(t, sentinel.Create(t.Context(), r.sources[0].db))
+	require.NoError(t, sentinel.Create(t.Context(), r.sources[0].db))
 
-	exists, err := r.sentinelTableExists(t.Context())
+	exists, err := sentinel.Exists(t.Context(), r.sources[0].db)
 	require.NoError(t, err)
-	require.True(t, exists, "sentinel must exist after createSentinelTable")
+	require.True(t, exists, "sentinel must exist after sentinel.Create")
 
 	var markerCount int
 	require.NoError(t, db.QueryRowContext(t.Context(),
-		"SELECT COUNT(*) FROM "+srcDB+"."+sentinelTableName).Scan(&markerCount))
+		"SELECT COUNT(*) FROM "+srcDB+"."+sentinel.TableName).Scan(&markerCount))
 	require.Equal(t, 1, markerCount, "the pre-existing sentinel must be adopted, not dropped and recreated")
 }

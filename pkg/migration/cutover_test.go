@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
@@ -847,7 +848,7 @@ func TestDropAfterCutover(t *testing.T) {
 
 // TestDeferCutOver tests that deferred cutover times out waiting for the sentinel table.
 func TestDeferCutOver(t *testing.T) {
-	t.Skip("skipping: this test waits for sentinelWaitLimit to expire, which is too slow with the current 48 hour limit")
+	t.Skip("skipping: this test waits for sentinel.WaitLimit to expire, which is too slow with the current 48 hour limit")
 	t.Parallel()
 
 	dbName, _ := testutils.CreateUniqueTestDatabase(t)
@@ -912,12 +913,12 @@ func TestDeferCutOverE2E(t *testing.T) {
 		var rowCount int
 		_ = db.QueryRowContext(t.Context(), fmt.Sprintf(
 			`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
-			WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`, dbName, sentinelTableName)).Scan(&rowCount)
+			WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`, dbName, sentinel.TableName)).Scan(&rowCount)
 		return rowCount > 0
 	}, 30*time.Second, 10*time.Millisecond, "sentinel table should appear within 30s")
 
 	// Drop the sentinel table — migration should complete.
-	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
 
 	err = <-c
 	require.NoError(t, err)
@@ -972,7 +973,7 @@ func TestDeferCutOverE2EBinlogAdvance(t *testing.T) {
 		binlogPos = newBinlogPos
 	}
 
-	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
 
 	err = <-c
 	require.NoError(t, err)
@@ -1000,8 +1001,8 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	testutils.RunSQLInDatabase(t, dbName, fmt.Sprintf(
 		`CREATE TABLE %s (id bigint unsigned not null auto_increment, primary key(id))`, tableName))
 
-	// Build a minimal runner: createSentinelTable and sentinelTableExists
-	// only need r.db and r.changes[0].table.
+	// Build a minimal runner: sentinel.Create / sentinel.Exists only need a
+	// *sql.DB whose current schema is dbName (they use DATABASE()).
 	m := NewTestRunner(t, tableName, "ENGINE=InnoDB", WithDBName(dbName))
 	var err error
 	m.db, err = dbconn.New(testutils.DSNForDatabase(dbName), dbconn.NewDBConfig())
@@ -1012,10 +1013,10 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	}()
 
 	// Migration A creates the sentinel...
-	require.NoError(t, m.createSentinelTable(t.Context()))
+	require.NoError(t, sentinel.Create(t.Context(), m.db))
 	// ...and creating it again when it already exists must succeed without
 	// dropping it first (idempotent create).
-	require.NoError(t, m.createSentinelTable(t.Context()))
+	require.NoError(t, sentinel.Create(t.Context(), m.db))
 
 	// Start a poller that mimics waitOnSentinelTable's existence probe, but
 	// much tighter than the production 1s interval so it lands inside any
@@ -1026,7 +1027,7 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for pollCtx.Err() == nil {
-			exists, err := m.sentinelTableExists(pollCtx)
+			exists, err := sentinel.Exists(pollCtx, m.db)
 			if err != nil {
 				return // context cancelled; test is over
 			}
@@ -1040,7 +1041,7 @@ func TestSentinelCreateNeverObservedAbsent(t *testing.T) {
 	// Concurrently, migration B (re)creates the sentinel many times — as a
 	// stream of fresh --defer-cutover migrations starting would.
 	for range 50 {
-		require.NoError(t, m.createSentinelTable(t.Context()))
+		require.NoError(t, sentinel.Create(t.Context(), m.db))
 	}
 	cancelPoll()
 	wg.Wait()
@@ -1090,13 +1091,13 @@ func TestDeferCutOverTwoMigrationsSharedSentinel(t *testing.T) {
 	// Give A several sentinel poll intervals to (incorrectly) notice any
 	// sentinel gap left by B's setup. It must still be waiting: the operator
 	// has not approved either cutover yet.
-	time.Sleep(3 * sentinelCheckInterval)
+	time.Sleep(3 * sentinel.CheckInterval)
 	require.Equal(t, status.WaitingOnSentinelTable, mA.status.Get(),
 		"migration A was released from its deferred cutover by migration B starting; the operator never dropped the sentinel")
 
 	// Operator approves: drop the shared sentinel once; both migrations
 	// proceed to cutover.
-	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinelTableName)
+	testutils.RunSQLInDatabase(t, dbName, "DROP TABLE "+sentinel.TableName)
 	require.NoError(t, <-cA)
 	require.NoError(t, <-cB)
 	require.NoError(t, mA.Close())

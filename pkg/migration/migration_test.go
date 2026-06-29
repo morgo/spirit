@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/checksum"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -26,7 +28,14 @@ func TestMain(m *testing.M) {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
-	sentinelCheckInterval = 100 * time.Millisecond
+	sentinel.CheckInterval = 100 * time.Millisecond
+	// Continuous-checksum pacing/retry are tuned here once, before any test
+	// runs, rather than mutated inside individual tests — so the package globals
+	// can't race the many t.Parallel() tests. Only the divergence test depends
+	// on these; the defer-cutover tests drop the sentinel well before the first
+	// inter-pass interval, so they run a single pass regardless of the value.
+	checksum.ContinuousMinPassInterval = 2 * time.Second
+	checksum.DefaultContinuousRetryDelay = 1 * time.Second
 	goleak.VerifyTestMain(m)
 }
 

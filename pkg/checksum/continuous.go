@@ -114,9 +114,24 @@ type Recopier interface {
 // fields. Exported so callers can reference them when tuning.
 const (
 	DefaultContinuousConcurrency     = 4
-	DefaultContinuousRetryDelay      = time.Minute
 	DefaultContinuousMaxQueueSize    = 1024
 	DefaultContinuousTargetChunkTime = 1 * time.Second
+)
+
+// Shared continuous-checksum pacing. Vars (not consts) so tests can shorten
+// them; production never overrides them. Keeping them here makes the pacing
+// identical across every caller (migrate, sync).
+var (
+	// ContinuousMinPassInterval is the production value callers pass as
+	// MinPassInterval: the minimum time between passes, so a small table whose
+	// pass finishes in seconds doesn't re-scan back-to-back during a possibly
+	// days-long sentinel wait. (Not a constructor default — a zero MinPassInterval
+	// legitimately means "back-to-back", which the package's own tests rely on.)
+	ContinuousMinPassInterval = 1 * time.Hour
+	// DefaultContinuousRetryDelay is the constructor default for RetryDelay: the
+	// wait before re-reading a mismatched chunk, giving in-flight replication
+	// time to converge so transient lag isn't mistaken for real divergence.
+	DefaultContinuousRetryDelay = time.Minute
 )
 
 // ContinuousCheckerConfig configures a ContinuousChecker. See Default for
@@ -142,11 +157,35 @@ type ContinuousCheckerConfig struct {
 
 	// Recopier is invoked when the retry path detects stable target
 	// divergence (src CRC unchanged across a retry window, target still
-	// wrong). When nil, that condition surfaces as ErrPermanentDivergence
-	// from Run — useful for tests and for callers that prefer to halt
-	// rather than self-heal. Production sync callers should provide
-	// MySQLRecopier.
+	// wrong) and DivergenceIsFatal is false. When nil, that condition
+	// surfaces as ErrPermanentDivergence from Run — useful for tests and
+	// for callers that prefer to halt rather than self-heal. Production
+	// sync callers should provide MySQLRecopier.
 	Recopier Recopier
+
+	// DivergenceIsFatal selects the policy for a confirmed stable divergence,
+	// making explicit the replication-backed vs. copy-only distinction rather
+	// than inferring it from Recopier presence:
+	//   - true  (migration's cutover gate): the target is kept in sync by
+	//     replication, so a confirmed difference means something is genuinely
+	//     wrong. Run returns ErrPermanentDivergence and the caller aborts. No
+	//     Recopier is configured.
+	//   - false (datasync, especially --copy-only): the checker's job is to find
+	//     and re-copy diverged rows, so a confirmed difference is repaired via
+	//     Recopier and the run continues.
+	// When false, a Recopier must be set; without one a divergence is treated as
+	// fatal anyway (there is nothing to heal with).
+	DivergenceIsFatal bool
+
+	// MinPassInterval is the minimum wall-clock time between the start of one
+	// pass and the start of the next, measured from the previous pass's start
+	// (a pass that already ran longer than MinPassInterval incurs no extra
+	// wait). The very first pass always runs immediately. Zero means passes
+	// run back-to-back, which is convenient for tests but heavy in production:
+	// the migration and datasync runners both pass ContinuousMinPassInterval
+	// (1h) so a small table whose pass finishes in seconds does not re-scan
+	// continuously. The wait honours context cancellation.
+	MinPassInterval time.Duration
 
 	Logger *slog.Logger
 }
@@ -461,8 +500,23 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		workerWG.Wait()
 	}()
 
+	var lastPassStart time.Time
 	for passNum := uint64(1); ; passNum++ {
 		if passNum > 1 {
+			// Pace passes: wait until MinPassInterval has elapsed since the
+			// previous pass STARTED (a pass that already ran longer incurs no
+			// extra wait). The first pass is never delayed. 0 = back-to-back.
+			if wait := c.cfg.MinPassInterval - time.Since(lastPassStart); wait > 0 {
+				c.cfg.Logger.Debug("continuous checksum waiting before next pass",
+					"pass_number", passNum, "wait", wait.Round(time.Second).String())
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
 			if err := c.chunker.Reset(); err != nil {
 				return fmt.Errorf("reset chunker for pass %d: %w", passNum, err)
 			}
@@ -482,6 +536,7 @@ func (c *ContinuousChecker) Run(ctx context.Context) error {
 		// most operators want.
 		c.cfg.Logger.Debug("continuous checksum pass starting", "pass_number", passNum)
 		passStart := time.Now()
+		lastPassStart = passStart
 
 		if err := c.runOnePass(ctx, workCh, resultCh); err != nil {
 			return err
@@ -814,11 +869,11 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		return res
 	}
 
-	// Source unchanged, target still wrong → stable divergence. With a
-	// Recopier configured, self-heal by recopying the chunk; otherwise
-	// surface ErrPermanentDivergence (legacy behavior — preserved for
-	// tests and for callers that want to halt rather than self-heal).
-	if c.cfg.Recopier != nil {
+	// Source unchanged, target still wrong → stable divergence. Self-heal by
+	// recopying the chunk when a Recopier is configured and the caller has not
+	// declared divergence fatal; otherwise surface ErrPermanentDivergence so the
+	// caller (e.g. migration's cutover gate) aborts.
+	if c.cfg.Recopier != nil && !c.cfg.DivergenceIsFatal {
 		if err := c.cfg.Recopier.Recopy(ctx, item.chunk); err != nil {
 			res.err = fmt.Errorf("recopy chunk %s: %w", item.chunk.String(), err)
 			return res
@@ -1034,6 +1089,19 @@ func (c *ContinuousChecker) Stats() ContinuousCheckerStats {
 		PermanentFailures:             c.permanentFailures.Load(),
 		FirstCleanPassAt:              firstAt,
 	}
+}
+
+// DifferencesFound returns the lifetime number of chunks that mismatched on
+// their initial (fresh-walk) read — i.e. Stats().MismatchesDetected. It exists
+// so a ContinuousChecker can be consumed through the same minimal "has this
+// checker observed any divergence?" view the migration runner uses to gate
+// checkpoint-watermark persistence (DumpCheckpoint / invalidateChecksumWatermark),
+// matching the Checker.DifferencesFound semantics of the SingleChecker /
+// DistributedChecker. A transient mismatch that later reconciles on retry still
+// counts here, so the gate stays conservative: any hint of divergence blanks the
+// persisted watermark and forces re-verification on resume.
+func (c *ContinuousChecker) DifferencesFound() uint64 {
+	return c.mismatchesDetected.Load()
 }
 
 // FirstCleanPass returns a channel that is closed the first time a pass

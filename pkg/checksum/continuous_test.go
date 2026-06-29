@@ -199,6 +199,33 @@ func (testWriter) Write(p []byte) (int, error) { return len(p), nil }
 // Tests
 // ---------------------------------------------------------------------------
 
+// TestContinuousMinPassIntervalPacesPasses verifies MinPassInterval throttles
+// the gap between passes: the first pass runs immediately, then each subsequent
+// pass waits until MinPassInterval has elapsed since the previous pass started.
+// With an always-clean table, reaching 3 passes therefore cannot happen before
+// 2*MinPassInterval. Only the lower bound is asserted (the upper bound would be
+// timing-flaky).
+func TestContinuousMinPassIntervalPacesPasses(t *testing.T) {
+	const interval = 100 * time.Millisecond
+	cfg := fastConfig()
+	cfg.MinPassInterval = interval
+	chunker := newTestChunker(1)
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			return 7, 7, 100, nil // always match
+		},
+	)
+
+	start := time.Now()
+	stop, _ := runUntil(t, c)
+	t.Cleanup(func() { _ = stop() })
+
+	require.Eventually(t, func() bool { return c.Stats().PassesCompleted >= 3 },
+		5*time.Second, 5*time.Millisecond, "expected at least 3 passes")
+	require.GreaterOrEqual(t, time.Since(start), 2*interval,
+		"three passes must span at least two inter-pass intervals; pacing not applied")
+}
+
 // TestCleanPassQuietTable: every chunk matches on first read; first clean
 // pass should fire promptly and counters should reflect the pass.
 func TestCleanPassQuietTable(t *testing.T) {
@@ -511,6 +538,32 @@ func TestRecopyOnStableDivergence(t *testing.T) {
 
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestDivergenceIsFatalAbortsDespiteRecopier: with DivergenceIsFatal set, a
+// confirmed stable divergence returns ErrPermanentDivergence and the Recopier
+// is NOT invoked, even though one is configured. This is the migration cutover
+// gate's policy made explicit (vs. datasync, which leaves it false and heals).
+func TestDivergenceIsFatalAbortsDespiteRecopier(t *testing.T) {
+	chunker := newTestChunker(1)
+	recopier := &fakeRecopier{} // must never be called
+	cfg := fastConfig()
+	cfg.Recopier = recopier
+	cfg.DivergenceIsFatal = true
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			return 100, 99, 1000, nil // stable divergence: src always 100, tgt 99
+		},
+	)
+
+	// Run returns ErrPermanentDivergence on its own; t.Context() is cancelled at
+	// test cleanup, which tears down any remaining workers.
+	err := c.Run(t.Context())
+	require.ErrorIs(t, err, ErrPermanentDivergence,
+		"DivergenceIsFatal must abort with ErrPermanentDivergence even with a Recopier set")
+	require.Equal(t, 0, recopier.callCount(), "the Recopier must not be called when DivergenceIsFatal")
+	require.Positive(t, c.Stats().PermanentFailures)
 }
 
 // TestRecopyPassDoesNotFireFirstCleanPass: a chunk stably diverges and is
