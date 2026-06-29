@@ -86,11 +86,10 @@ type Runner struct {
 	sourceDBConfig *dbconn.DBConfig
 	targetDBConfig *dbconn.DBConfig
 
-	// watchDone is closed when the status-logging goroutine exits.
-	watchDone chan struct{}
-
-	// checkpointDone is closed when the periodic checkpoint goroutine exits.
-	checkpointDone chan struct{}
+	// watchTaskWait blocks until the status + checkpoint goroutines started by
+	// status.WatchTask have exited. Invoked from Close so a late checkpoint
+	// write cannot land after teardown begins.
+	watchTaskWait func()
 
 	// fatalErr records a fatal source-side event (e.g. DDL on a synced
 	// table) that should surface as the Run error rather than a clean
@@ -388,6 +387,12 @@ func (r *Runner) runCopyOnlyChecksum(ctx context.Context) error {
 	}
 	r.logger.Info("Copy-only sync stopped", "total_time", time.Since(r.startTime).Round(time.Second).String())
 
+	// A recorded fatal (e.g. a checkpoint-write failure that status.WatchTask
+	// cancelled us for) must surface rather than be masked by the clean
+	// ctx-cancel return below.
+	if ferr := r.fatal(); ferr != nil {
+		return ferr
+	}
 	// A real checksum failure outranks a clean nil — surface it.
 	if checksumErr != nil && !errors.Is(checksumErr, context.Canceled) {
 		return fmt.Errorf("continuous checksum failed: %w", checksumErr)
@@ -1213,24 +1218,6 @@ func (r *Runner) readCheckpoint(ctx context.Context) (watermark, pos string, ok 
 	return watermark, pos, true, nil
 }
 
-// dumpCheckpointLoop periodically records the source position on the
-// target until ctx is cancelled.
-func (r *Runner) dumpCheckpointLoop(ctx context.Context, done chan struct{}) {
-	defer close(done)
-	ticker := time.NewTicker(status.CheckpointDumpInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := r.dumpCheckpoint(ctx); err != nil {
-				r.logger.Warn("failed to write checkpoint", "error", err)
-			}
-		}
-	}
-}
-
 // startBackgroundRoutines starts the periodic flush (which advances the
 // applied position and keeps the target caught up), the status logger, and the
 // periodic checkpoint loop. The checkpoint loop runs for the whole run (copy
@@ -1240,47 +1227,13 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 	if !r.sync.CopyOnly {
 		r.replClient.StartPeriodicFlush(ctx, r.sync.FlushInterval)
 	}
-	r.watchDone = make(chan struct{})
-	go r.watchStatus(ctx)
-	r.checkpointDone = make(chan struct{})
-	go r.dumpCheckpointLoop(ctx, r.checkpointDone)
-}
-
-// watchStatus logs progress periodically until ctx is cancelled.
-func (r *Runner) watchStatus(ctx context.Context) {
-	defer close(r.watchDone)
-	ticker := time.NewTicker(status.StatusInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Guard the change feed in case status logging starts before the
-			// repl client is wired.
-			pending := 0
-			if r.replClient != nil {
-				pending = r.replClient.GetDeltaLen()
-			}
-			switch {
-			case r.status.Get() == status.CopyRows && r.copier != nil:
-				r.logger.Info("sync status",
-					"phase", "initial-copy",
-					"progress", r.copier.GetProgress(),
-					"eta", r.copier.GetETA(),
-					"pending-changes", pending,
-					"elapsed", time.Since(r.startTime).Round(time.Second).String(),
-				)
-			case r.replClient != nil:
-				r.logger.Info("sync status",
-					"phase", "continuous",
-					"pending-changes", pending,
-					"position", r.replClient.Position(),
-					"elapsed", time.Since(r.startTime).Round(time.Second).String(),
-				)
-			}
-		}
-	}
+	// Share the status + checkpoint loop with the migration and move runners
+	// (status.WatchTask); *Runner satisfies status.Task via Progress / Status /
+	// DumpCheckpoint / Cancel. Unlike the previous bespoke loop, a checkpoint
+	// write failure is now fatal — WatchTask calls Cancel() so the sync stops
+	// rather than running on without durable progress (a re-run then resumes
+	// from the last good checkpoint).
+	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
 }
 
 // fatalError is the change client's CancelFunc: it records the fatal
@@ -1296,20 +1249,29 @@ func (r *Runner) watchStatus(ctx context.Context) {
 // must be read under progMu like Cancel() does, and fatalOnce makes the
 // record-and-cancel side effects idempotent.
 func (r *Runner) fatalError() bool {
+	r.recordFatal(errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause"))
+	return true
+}
+
+// recordFatal records the first fatal error and cancels the run; later calls
+// are no-ops, so the first cause wins. Safe for concurrent use. It is how an
+// out-of-band failure (the change source's CancelFunc, or a checkpoint write
+// that status.WatchTask is about to cancel us for) makes Run return the cause
+// instead of a bare ctx-cancel that the shutdown paths map to nil.
+func (r *Runner) recordFatal(err error) {
 	r.fatalOnce.Do(func() {
 		r.fatalMu.Lock()
-		r.fatalErr = errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause")
+		r.fatalErr = err
 		r.fatalMu.Unlock()
 		r.progMu.RLock()
 		cancel := r.cancelFunc
 		r.progMu.RUnlock()
-		// cancelFunc can be nil if fatalError fires before Run has set it
-		// (e.g. test paths that bypass Run); nil-check before calling.
+		// cancelFunc can be nil if this fires before Run has set it (e.g. test
+		// paths that bypass Run); nil-check before calling.
 		if cancel != nil {
 			cancel()
 		}
 	})
-	return true
 }
 
 func (r *Runner) fatal() error {
@@ -1328,11 +1290,11 @@ func (r *Runner) Close() error {
 	if r.cancelFunc != nil {
 		r.cancelFunc()
 	}
-	if r.watchDone != nil {
-		<-r.watchDone
-	}
-	if r.checkpointDone != nil {
-		<-r.checkpointDone
+	// Wait for the status + checkpoint goroutines (status.WatchTask) to exit
+	// before tearing down connections, so a late DumpCheckpoint can't run
+	// against a closed pool.
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
 	}
 	if r.replClient != nil {
 		r.replClient.StopPeriodicFlush()
@@ -1388,6 +1350,10 @@ func (r *Runner) setCopyChunker(c table.Chunker) {
 // surface live progress and force a checkpoint, the same way it monitors a
 // spirit migration.Runner. These accessors are safe to call concurrently with
 // Run from another goroutine.
+
+// *Runner drives the shared status + checkpoint loop (status.WatchTask) via
+// these four methods; the assertion fails the build if their signatures drift.
+var _ status.Task = (*Runner)(nil)
 
 // Progress returns a structured snapshot of the sync's current state: the
 // phase, a short human-readable summary, and per-table copy progress during
@@ -1500,10 +1466,19 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// Idempotent: createCheckpointTable uses CREATE TABLE IF NOT EXISTS, so
 	// this is safe even in the brief window before startFresh/startResume has
 	// created the table.
-	if err := r.createCheckpointTable(ctx); err != nil {
-		return err
+	err := r.createCheckpointTable(ctx)
+	if err == nil {
+		err = r.dumpCheckpoint(ctx)
 	}
-	return r.dumpCheckpoint(ctx)
+	// status.WatchTask treats a non-nil return here as fatal and cancels the
+	// run. Record it as a fatal error so Run surfaces the checkpoint failure
+	// instead of letting the resulting ctx-cancel look like a clean shutdown
+	// (which the sync paths otherwise map to a nil / exit-0 return). A
+	// context.Canceled here is the shutdown itself, not a checkpoint fault.
+	if err != nil && !errors.Is(err, context.Canceled) {
+		r.recordFatal(fmt.Errorf("checkpoint write failed: %w", err))
+	}
+	return err
 }
 
 // Cancel stops the sync by cancelling the Run context. Safe to call before
