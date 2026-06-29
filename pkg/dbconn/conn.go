@@ -641,3 +641,57 @@ func GetTLSConfigForBinlog(config *DBConfig, host string) (*tls.Config, error) {
 
 	return tlsConfig, nil
 }
+
+// SplitDSNs splits a comma-separated list of DSNs into a slice, trimming
+// surrounding whitespace and dropping empty entries. An empty input returns
+// nil. (Used for the replica DSN list, but takes no position on what the
+// individual DSNs mean.)
+func SplitDSNs(dsnList string) []string {
+	if dsnList == "" {
+		return nil
+	}
+	parts := strings.Split(dsnList, ",")
+	dsns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			dsns = append(dsns, trimmed)
+		}
+	}
+	return dsns
+}
+
+// RedactDSN returns dsn with the password masked, safe for logging. It keeps
+// the username, host and parameters so logs stay useful, masking only the
+// password and only when one was actually present. If the driver can't parse
+// the DSN it still never echoes a password: it redacts the credentials section
+// before '@', or — lacking '@' — masks from the first ':' (a malformed
+// "user:password" still has its password hidden).
+func RedactDSN(dsn string) string {
+	if dsn == "" {
+		return dsn
+	}
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		// Unparseable — never risk echoing a password. If there's a credentials
+		// separator ('@'), redact everything up to it. Otherwise a ':' may still
+		// separate a "user:password" pair whose tail is malformed (no host), so
+		// mask from the first ':'. Only a string with neither '@' nor ':' has
+		// nothing credential-shaped to leak.
+		if i := strings.LastIndex(dsn, "@"); i >= 0 {
+			return "<redacted>" + dsn[i:]
+		}
+		if user, _, found := strings.Cut(dsn, ":"); found {
+			return user + ":***"
+		}
+		return dsn
+	}
+	// Mask only when the DSN actually carried a password field (user:pass@ or
+	// user:@), so a password-less "user@host" DSN is left untouched. The first
+	// colon must precede the first '@' (a colon inside host:port comes after).
+	at := strings.Index(dsn, "@")
+	colon := strings.Index(dsn, ":")
+	if colon != -1 && at != -1 && colon < at {
+		cfg.Passwd = "***"
+	}
+	return cfg.FormatDSN()
+}
