@@ -61,9 +61,10 @@ func Exists(ctx context.Context, db *sql.DB) (bool, error) {
 	return count > 0, nil
 }
 
-// WaitConfig holds the dependencies of Wait; all four fields are required. The
-// poll/timeout timing comes from the package-level WaitLimit / CheckInterval so
-// it is identical across callers.
+// WaitConfig holds the dependencies of Wait. Exists, RunChecksum and
+// InvalidateWatermark are required; Logger is optional (a nil Logger defaults to
+// slog.Default()). The poll/timeout timing comes from the package-level
+// WaitLimit / CheckInterval so it is identical across callers.
 type WaitConfig struct {
 	// Exists probes whether the sentinel table still exists. It is called once
 	// up front (an absent sentinel means "proceed immediately") and then once
@@ -170,6 +171,12 @@ func Wait(ctx context.Context, cfg WaitConfig) (retErr error) {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			// Parent cancellation: return promptly rather than waiting for the
+			// next CheckInterval tick or for RunChecksum to observe the cancel.
+			// The deferred cleanup still stops the continuous goroutine and runs
+			// InvalidateWatermark.
+			return ctx.Err()
 		case t := <-ticker.C:
 			sentinelExists, err := cfg.Exists(ctx)
 			if err != nil {
