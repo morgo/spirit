@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
@@ -19,8 +20,8 @@ import (
 
 func TestMain(m *testing.M) {
 	status.CheckpointDumpInterval = 100 * time.Millisecond
-	sentinelCheckInterval = 100 * time.Millisecond
-	sentinelWaitLimit = 10 * time.Second
+	sentinel.CheckInterval = 100 * time.Millisecond
+	sentinel.WaitLimit = 10 * time.Second
 	goleak.VerifyTestMain(m)
 }
 

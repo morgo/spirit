@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -26,7 +27,7 @@ func TestMain(m *testing.M) {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 	status.CheckpointDumpInterval = 100 * time.Millisecond
 	status.StatusInterval = 10 * time.Millisecond // the status will be accurate to 1ms
-	sentinelCheckInterval = 100 * time.Millisecond
+	sentinel.CheckInterval = 100 * time.Millisecond
 	goleak.VerifyTestMain(m)
 }
 

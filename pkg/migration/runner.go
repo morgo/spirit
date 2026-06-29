@@ -29,20 +29,11 @@ import (
 // These are really consts, but set to var for testing.
 var (
 	tableStatUpdateInterval = 5 * time.Minute
-	sentinelCheckInterval   = 1 * time.Second
-	sentinelWaitLimit       = 48 * time.Hour
-	sentinelTableName       = sentinel.TableName   // single source of truth lives in pkg/sentinel
 	checkpointTableName     = "_spirit_checkpoint" // const for multi-migration checkpoints.
-	// continuousChecksumMinInterval is the minimum time between continuous-
-	// checksum passes during the sentinel wait (passed to the ContinuousChecker
-	// as MinPassInterval). Without it, small tables whose pass finishes in
-	// seconds would re-scan back-to-back for the whole (possibly days-long) wait.
-	continuousChecksumMinInterval = 1 * time.Hour
-	// continuousChecksumRetryDelay is how long the continuous checker waits
-	// before re-reading a chunk that mismatched, giving in-flight replication
-	// time to converge so transient lag isn't mistaken for real divergence.
-	// Overridden small in tests that deliberately corrupt the shadow table.
-	continuousChecksumRetryDelay = checksum.DefaultContinuousRetryDelay
+	// Sentinel-wait timing lives in pkg/sentinel (sentinel.WaitLimit /
+	// sentinel.CheckInterval / sentinel.TableName) and continuous-checksum
+	// pacing in pkg/checksum (checksum.ContinuousMinPassInterval /
+	// checksum.DefaultContinuousRetryDelay), so they are shared with move/sync.
 )
 
 // errNoSuchTable is MySQL error 1146 (ER_NO_SUCH_TABLE).
@@ -375,7 +366,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.migration.RespectSentinel {
 		r.sentinelWaitStartTime = time.Now()
 		r.status.Set(status.WaitingOnSentinelTable)
-		if err := r.waitOnSentinelTable(ctx); err != nil {
+		// Block on the sentinel via the shared sentinel.Wait (poll/timeout timing
+		// lives in the sentinel package). The continuous-checksum lifecycle and
+		// watermark invalidation are migration-specific — invalidateChecksumWatermark
+		// scopes its UPDATE by statement because the checkpoint table is shared in
+		// multi-table mode — so they are injected as callbacks. See pkg/sentinel.
+		if err := sentinel.Wait(ctx, sentinel.WaitConfig{
+			Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
+			RunChecksum:         r.runContinuousChecksum,
+			InvalidateWatermark: r.invalidateChecksumWatermark,
+			Logger:              r.logger,
+		}); err != nil {
 			return err
 		}
 	}
@@ -1535,10 +1536,10 @@ func (r *Runner) Status() string {
 		return fmt.Sprintf("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s conns-in-use=%d",
 			r.status.Get().String(),
 			r.changes[0].table.SchemaName,
-			sentinelTableName,
+			sentinel.TableName,
 			time.Since(r.startTime).Round(time.Second),
 			time.Since(r.sentinelWaitStartTime).Round(time.Second),
-			sentinelWaitLimit,
+			sentinel.WaitLimit,
 			r.db.Stats().InUse,
 		)
 	case status.ApplyChangeset, status.PostChecksum:
@@ -1561,32 +1562,6 @@ func (r *Runner) Status() string {
 		)
 	}
 	return ""
-}
-
-// Check every sentinelCheckInterval up to sentinelWaitLimit to see if sentinelTable has been dropped.
-// While we wait, run a "continuous checksum" loop in the background as a
-// best-effort consistency re-check. The continuous checksum is purely
-// opportunistic — the initial checksum (already run in postCopyPhase) is
-// the correctness gate. The continuous loop is cancelled when the sentinel
-// drops; any in-flight chunk recopy runs under context.WithoutCancel up to
-// fixChunkTimeout so the DELETE + re-insert pair stays atomic, then the
-// goroutine exits. A real "checksum found differences" surfaced from that
-// in-flight repair is promoted into retErr and aborts cutover.
-func (r *Runner) waitOnSentinelTable(ctx context.Context) error {
-	// The continuous-checksum lifecycle and watermark invalidation are
-	// migration-specific (invalidateChecksumWatermark scopes its UPDATE by
-	// statement because the checkpoint table is shared in multi-table mode),
-	// so they are injected into the shared sentinel.Wait orchestration as
-	// callbacks rather than reimplemented here. See pkg/sentinel.
-	return sentinel.Wait(ctx, sentinel.WaitConfig{
-		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
-		RunChecksum:         r.runContinuousChecksum,
-		InvalidateWatermark: r.invalidateChecksumWatermark,
-		Logger:              r.logger,
-		WaitLimit:           sentinelWaitLimit,
-		CheckInterval:       sentinelCheckInterval,
-		TableName:           sentinelTableName,
-	})
 }
 
 // invalidateChecksumWatermark blanks the checksum_watermark on this
@@ -1648,9 +1623,10 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 			// replace the hard-coded 1 with the migration's thread count.
 			Concurrency:     1,
 			TargetChunkTime: r.migration.TargetChunkTime,
-			MinPassInterval: continuousChecksumMinInterval,
-			RetryDelay:      continuousChecksumRetryDelay,
-			Logger:          r.logger,
+			MinPassInterval: checksum.ContinuousMinPassInterval,
+			// RetryDelay omitted: the constructor defaults it to
+			// checksum.DefaultContinuousRetryDelay.
+			Logger: r.logger,
 			// No Recopier: a stable divergence must abort the cutover rather
 			// than silently self-heal (see the function doc).
 		},

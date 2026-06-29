@@ -114,9 +114,24 @@ type Recopier interface {
 // fields. Exported so callers can reference them when tuning.
 const (
 	DefaultContinuousConcurrency     = 4
-	DefaultContinuousRetryDelay      = time.Minute
 	DefaultContinuousMaxQueueSize    = 1024
 	DefaultContinuousTargetChunkTime = 1 * time.Second
+)
+
+// Shared continuous-checksum pacing. Vars (not consts) so tests can shorten
+// them; production never overrides them. Keeping them here makes the pacing
+// identical across every caller (migrate, sync).
+var (
+	// ContinuousMinPassInterval is the production value callers pass as
+	// MinPassInterval: the minimum time between passes, so a small table whose
+	// pass finishes in seconds doesn't re-scan back-to-back during a possibly
+	// days-long sentinel wait. (Not a constructor default — a zero MinPassInterval
+	// legitimately means "back-to-back", which the package's own tests rely on.)
+	ContinuousMinPassInterval = 1 * time.Hour
+	// DefaultContinuousRetryDelay is the constructor default for RetryDelay: the
+	// wait before re-reading a mismatched chunk, giving in-flight replication
+	// time to converge so transient lag isn't mistaken for real divergence.
+	DefaultContinuousRetryDelay = time.Minute
 )
 
 // ContinuousCheckerConfig configures a ContinuousChecker. See Default for
@@ -153,7 +168,7 @@ type ContinuousCheckerConfig struct {
 	// (a pass that already ran longer than MinPassInterval incurs no extra
 	// wait). The very first pass always runs immediately. Zero means passes
 	// run back-to-back, which is convenient for tests but heavy in production:
-	// the migration and datasync runners both pass continuousChecksumMinInterval
+	// the migration and datasync runners both pass ContinuousMinPassInterval
 	// (1h) so a small table whose pass finishes in seconds does not re-scan
 	// continuously. The wait honours context cancellation.
 	MinPassInterval time.Duration

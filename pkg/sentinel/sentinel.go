@@ -28,6 +28,16 @@ import (
 // which table to drop to release a deferred cutover.
 const TableName = "_spirit_sentinel"
 
+// WaitLimit bounds how long Wait blocks for the sentinel to be dropped before
+// giving up; CheckInterval is the existence-probe period. They are package
+// vars (not consts) only so tests can shorten them; production never overrides
+// them. Keeping the timing here makes the cutover wait identical across every
+// caller (migrate, move).
+var (
+	WaitLimit     = 48 * time.Hour
+	CheckInterval = 1 * time.Second
+)
+
 // Create creates the sentinel table in db's currently-selected schema if it
 // does not already exist. The schema is taken from the connection (the table
 // name is unqualified) rather than passed in, so this works under Vitess where
@@ -51,9 +61,9 @@ func Exists(ctx context.Context, db *sql.DB) (bool, error) {
 	return count > 0, nil
 }
 
-// WaitConfig holds the dependencies of Wait. Exists, RunChecksum,
-// InvalidateWatermark and Logger are required; WaitLimit and CheckInterval
-// must be positive.
+// WaitConfig holds the dependencies of Wait; all four fields are required. The
+// poll/timeout timing comes from the package-level WaitLimit / CheckInterval so
+// it is identical across callers.
 type WaitConfig struct {
 	// Exists probes whether the sentinel table still exists. It is called once
 	// up front (an absent sentinel means "proceed immediately") and then once
@@ -75,15 +85,6 @@ type WaitConfig struct {
 	InvalidateWatermark func(ctx context.Context) error
 
 	Logger *slog.Logger
-
-	// WaitLimit bounds the total time spent waiting for the sentinel to be
-	// dropped; CheckInterval is the existence-probe period.
-	WaitLimit     time.Duration
-	CheckInterval time.Duration
-
-	// TableName is used only in log messages (callers pass the package
-	// TableName, kept overridable so log output names the right table).
-	TableName string
 }
 
 // Wait blocks until the sentinel table is dropped (proceed with cutover),
@@ -105,8 +106,8 @@ func Wait(ctx context.Context, cfg WaitConfig) (retErr error) {
 	}
 
 	cfg.Logger.Warn("cutover deferred while sentinel table exists; will wait",
-		"sentinel-table", cfg.TableName,
-		"wait-limit", cfg.WaitLimit.String(),
+		"sentinel-table", TableName,
+		"wait-limit", WaitLimit.String(),
 	)
 
 	// Spawn the continuous checksum. It uses its own checker + chunker and is
@@ -150,10 +151,10 @@ func Wait(ctx context.Context, cfg WaitConfig) (retErr error) {
 		}
 	}()
 
-	timer := time.NewTimer(cfg.WaitLimit)
+	timer := time.NewTimer(WaitLimit)
 	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
 
-	ticker := time.NewTicker(cfg.CheckInterval)
+	ticker := time.NewTicker(CheckInterval)
 	defer ticker.Stop()
 	for {
 		select {

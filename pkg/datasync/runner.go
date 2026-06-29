@@ -44,13 +44,6 @@ const (
 	shutdownCheckpointTimeout = 10 * time.Second
 )
 
-// continuousChecksumMinInterval is the minimum time between continuous-checksum
-// passes (passed to the ContinuousChecker as MinPassInterval). Production paces
-// at 1h so a long-running sync's verifier does not re-scan the whole dataset
-// back-to-back; this matches the migration runner (#979). Kept a var so tests
-// can drop it to 0 (back-to-back) for prompt convergence — see TestMain.
-var continuousChecksumMinInterval = 1 * time.Hour
-
 // sourceInfo holds the single source's connection state.
 type sourceInfo struct {
 	db     *sql.DB
@@ -555,7 +548,7 @@ func (r *Runner) runContinuousChecksum(ctx context.Context) error {
 		checksum.ContinuousCheckerConfig{
 			Concurrency:     r.sync.Threads,
 			TargetChunkTime: r.sync.TargetChunkTime,
-			MinPassInterval: continuousChecksumMinInterval,
+			MinPassInterval: checksum.ContinuousMinPassInterval,
 			Recopier:        recopier,
 			Logger:          r.logger,
 		},

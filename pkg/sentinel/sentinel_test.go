@@ -25,6 +25,16 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// setTiming overrides the package-level wait timing for one test and restores
+// it afterward. These tests are not parallel, so mutating the shared vars is
+// safe; production never overrides them.
+func setTiming(t *testing.T, waitLimit, checkInterval time.Duration) {
+	t.Helper()
+	ow, oc := sentinel.WaitLimit, sentinel.CheckInterval
+	sentinel.WaitLimit, sentinel.CheckInterval = waitLimit, checkInterval
+	t.Cleanup(func() { sentinel.WaitLimit, sentinel.CheckInterval = ow, oc })
+}
+
 // blockingChecksum returns a RunChecksum that records it started, then blocks
 // until its context is cancelled — a "healthy" continuous checksum that only
 // exits when Wait tears it down.
@@ -43,9 +53,6 @@ func TestWaitSentinelAbsentUpFront(t *testing.T) {
 		RunChecksum:         blockingChecksum(&checksumStarted),
 		InvalidateWatermark: func(context.Context) error { invalidateCalled.Store(true); return nil },
 		Logger:              discardLogger(),
-		WaitLimit:           time.Hour,
-		CheckInterval:       time.Millisecond,
-		TableName:           sentinel.TableName,
 	})
 	require.NoError(t, err)
 	// An absent sentinel means "proceed immediately": no checksum is spawned
@@ -55,6 +62,7 @@ func TestWaitSentinelAbsentUpFront(t *testing.T) {
 }
 
 func TestWaitSentinelDropped(t *testing.T) {
+	setTiming(t, time.Hour, time.Millisecond)
 	var calls atomic.Int32
 	var checksumStarted, invalidateCalled atomic.Bool
 	err := sentinel.Wait(t.Context(), sentinel.WaitConfig{
@@ -63,9 +71,6 @@ func TestWaitSentinelDropped(t *testing.T) {
 		RunChecksum:         blockingChecksum(&checksumStarted),
 		InvalidateWatermark: func(context.Context) error { invalidateCalled.Store(true); return nil },
 		Logger:              discardLogger(),
-		WaitLimit:           time.Hour,
-		CheckInterval:       time.Millisecond,
-		TableName:           sentinel.TableName,
 	})
 	require.NoError(t, err)
 	assert.True(t, checksumStarted.Load(), "checksum must run while waiting")
@@ -73,6 +78,7 @@ func TestWaitSentinelDropped(t *testing.T) {
 }
 
 func TestWaitTimeout(t *testing.T) {
+	setTiming(t, 20*time.Millisecond, 5*time.Millisecond)
 	var invalidateCalled atomic.Bool
 	var checksumStarted atomic.Bool
 	err := sentinel.Wait(t.Context(), sentinel.WaitConfig{
@@ -80,9 +86,6 @@ func TestWaitTimeout(t *testing.T) {
 		RunChecksum:         blockingChecksum(&checksumStarted),
 		InvalidateWatermark: func(context.Context) error { invalidateCalled.Store(true); return nil },
 		Logger:              discardLogger(),
-		WaitLimit:           20 * time.Millisecond,
-		CheckInterval:       5 * time.Millisecond,
-		TableName:           sentinel.TableName,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out waiting for sentinel table")
@@ -98,14 +101,13 @@ func TestWaitExistsErrorUpFront(t *testing.T) {
 		RunChecksum:         func(context.Context) error { return nil },
 		InvalidateWatermark: func(context.Context) error { return nil },
 		Logger:              discardLogger(),
-		WaitLimit:           time.Hour,
-		CheckInterval:       time.Millisecond,
-		TableName:           sentinel.TableName,
 	})
 	require.ErrorIs(t, err, sentinelErr)
 }
 
 func TestWaitContinuousChecksumFails(t *testing.T) {
+	// CheckInterval huge so the failure, not a tick, drives the result.
+	setTiming(t, time.Hour, time.Hour)
 	checksumErr := errors.New("chunk diverged")
 	var invalidateCalled atomic.Bool
 	err := sentinel.Wait(t.Context(), sentinel.WaitConfig{
@@ -113,9 +115,6 @@ func TestWaitContinuousChecksumFails(t *testing.T) {
 		RunChecksum:         func(context.Context) error { return checksumErr },       // exits on its own
 		InvalidateWatermark: func(context.Context) error { invalidateCalled.Store(true); return nil },
 		Logger:              discardLogger(),
-		WaitLimit:           time.Hour,
-		CheckInterval:       time.Hour, // ensure the failure, not a tick, drives the result
-		TableName:           sentinel.TableName,
 	})
 	require.ErrorIs(t, err, checksumErr)
 	assert.Contains(t, err.Error(), "continuous checksum failed")
@@ -123,6 +122,7 @@ func TestWaitContinuousChecksumFails(t *testing.T) {
 }
 
 func TestWaitInvalidateWatermarkErrorIsJoined(t *testing.T) {
+	setTiming(t, time.Hour, time.Millisecond)
 	invalidateErr := errors.New("could not blank watermark")
 	var calls atomic.Int32
 	var checksumStarted atomic.Bool
@@ -131,9 +131,6 @@ func TestWaitInvalidateWatermarkErrorIsJoined(t *testing.T) {
 		RunChecksum:         blockingChecksum(&checksumStarted),
 		InvalidateWatermark: func(context.Context) error { return invalidateErr },
 		Logger:              discardLogger(),
-		WaitLimit:           time.Hour,
-		CheckInterval:       time.Millisecond,
-		TableName:           sentinel.TableName,
 	})
 	// The sentinel was dropped cleanly (nil), but the failed watermark cleanup
 	// must surface so a resume can't silently skip re-verification.
@@ -142,6 +139,7 @@ func TestWaitInvalidateWatermarkErrorIsJoined(t *testing.T) {
 }
 
 func TestWaitParentContextCancelled(t *testing.T) {
+	setTiming(t, time.Hour, time.Hour)
 	ctx, cancel := context.WithCancel(t.Context())
 	var invalidateCalled atomic.Bool
 	var checksumStarted atomic.Bool
@@ -155,9 +153,6 @@ func TestWaitParentContextCancelled(t *testing.T) {
 		RunChecksum:         blockingChecksum(&checksumStarted),
 		InvalidateWatermark: func(context.Context) error { invalidateCalled.Store(true); return nil },
 		Logger:              discardLogger(),
-		WaitLimit:           time.Hour,
-		CheckInterval:       time.Hour,
-		TableName:           sentinel.TableName,
 	})
 	require.ErrorIs(t, err, context.Canceled)
 	// Cleanup still runs even though the parent context was cancelled.
