@@ -657,7 +657,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 // table that it owns outright.
 func (r *Runner) checkpointTbl() *checkpoint.Table {
 	tgt0 := &r.targets[0]
-	return checkpoint.NewTable(tgt0.DB, tgt0.Config.DBName, checkpointTableName, false)
+	return checkpoint.NewTable(tgt0.DB, tgt0.Config.DBName, checkpointTableName, checkpoint.Owned)
 }
 
 // createCheckpointTable creates the checkpoint table on the first target

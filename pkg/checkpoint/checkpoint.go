@@ -1,17 +1,15 @@
-// Package checkpoint owns the "append-row" checkpoint table shared by the
-// migration and move runners: its schema, lifecycle (create/drop), and row
-// read/write. A checkpoint records where the row copy and (for migrate/move)
-// the checksum got to, plus the change-feed position, so an interrupted run can
-// resume instead of starting over.
+// Package checkpoint owns the append-row checkpoint table shared by all three
+// runners (migration, move, datasync): its schema, lifecycle (create / drop /
+// exists), and row read/write. A checkpoint records where the row copy and
+// (for migrate/move) the checksum got to, plus the change-feed position, so an
+// interrupted run can resume instead of starting over.
 //
 // The table is append-only (one row per periodic dump, newest by id); resume
-// reads the latest row. The package owns the table mechanics; callers own the
+// reads the latest row. Three Modes cover the runners' differing lifecycles —
+// see Mode. The package owns the table mechanics; callers own the
 // interpretation of the watermarks and the resume policy (staleness max-age,
-// statement match, table-name collision) via the returned Record — see Record's
-// fields and Age.
-//
-// datasync uses a different, single-row checkpoint model and does not use this
-// package.
+// statement match, table-name collision, and — for datasync — using Exists as
+// the resume signal) via the returned Record, Age, and Exists.
 package checkpoint
 
 import (
@@ -61,24 +59,42 @@ type Record struct {
 // their configured max age to decide whether replaying from here is worthwhile.
 func (r Record) Age() time.Duration { return time.Since(r.CreatedAt) }
 
-// Table manages a checkpoint table on db at schema.name.
-//
-// In shared mode (multi-table migrations that share one checkpoint table per
-// schema) Create/Drop/ReadLatest scope to a single statement instead of owning
-// the whole table, so concurrent migrations in the same schema never clobber
-// each other's rows.
+// Mode selects how a Table is created, cleared, and read, matching the three
+// checkpoint lifecycles in spirit.
+type Mode int
+
+const (
+	// Owned is a per-run table this run owns outright: Create DROPs and
+	// recreates it (so it always matches this version's schema and carries no
+	// stale rows), Drop drops it, and ReadLatest reads the newest row. Used by
+	// single-table migrations and by move.
+	Owned Mode = iota
+	// Shared is one table per schema shared by concurrently-running multi-table
+	// migrations: Create is idempotent and clears only this statement's rows,
+	// Drop deletes only this statement's rows, and ReadLatest is scoped to this
+	// statement — so concurrent migrations never clobber or mask each other.
+	Shared
+	// Persistent is a long-lived table whose existence outlives any single run,
+	// used by datasync: Create is idempotent and never clears, and Drop drops
+	// it. The caller decides fresh-vs-resume from Exists and ReadLatest (not by
+	// recreating the table), so Create must never destroy the rows a resume
+	// needs. ReadLatest reads the newest row.
+	Persistent
+)
+
+// Table manages a checkpoint table on db at schema.name. mode selects its
+// create / clear / read behaviour; see Mode.
 type Table struct {
 	db     *sql.DB
 	schema string
 	name   string
-	shared bool
+	mode   Mode
 }
 
-// NewTable returns a handle to the checkpoint table schema.name on db. Pass
-// shared=true for the multi-table migration case (one table per schema, scoped
-// by statement); false for a per-run table that this run owns outright.
-func NewTable(db *sql.DB, schema, name string, shared bool) *Table {
-	return &Table{db: db, schema: schema, name: name, shared: shared}
+// NewTable returns a handle to the checkpoint table schema.name on db, with the
+// lifecycle selected by mode.
+func NewTable(db *sql.DB, schema, name string, mode Mode) *Table {
+	return &Table{db: db, schema: schema, name: name, mode: mode}
 }
 
 // SchemaName returns the table's schema.
@@ -99,18 +115,27 @@ const tableDDL = `(
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`
 
-// Create prepares the checkpoint table for a fresh run of statement.
+// Create prepares the checkpoint table for a run. Behaviour depends on Mode:
 //
-//   - Non-shared (single-table migration, move): DROP + CREATE, so the table
-//     always matches this spirit version's schema.
+//   - Owned (single-table migration, move): DROP + CREATE, so the table always
+//     matches this spirit version's schema and carries no stale rows.
 //   - Shared (multi-table migration): CREATE IF NOT EXISTS — a concurrent
 //     migration in the schema may already own the table, and a DROP would
 //     destroy its live rows — then DELETE this statement's stale rows so a
 //     fresh start is never mistaken for resumable progress.
+//   - Persistent (datasync): CREATE IF NOT EXISTS and nothing else. The table
+//     is long-lived and its existence is the caller's resume signal, so it is
+//     never dropped or cleared here.
 //
-// statement is used only in shared mode.
+// statement is used only in Shared mode.
 func (t *Table) Create(ctx context.Context, statement string) error {
-	if t.shared {
+	switch t.mode {
+	case Owned:
+		if err := dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n.%n", t.schema, t.name); err != nil {
+			return err
+		}
+		return dbconn.Exec(ctx, t.db, "CREATE TABLE %n.%n "+tableDDL, t.schema, t.name)
+	case Shared:
 		if err := dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n.%n "+tableDDL, t.schema, t.name); err != nil {
 			return err
 		}
@@ -118,18 +143,18 @@ func (t *Table) Create(ctx context.Context, statement string) error {
 			return fmt.Errorf("could not clear stale rows from shared checkpoint table %q (if it was left behind by an incompatible spirit version, drop it manually): %w", t.name, err)
 		}
 		return nil
+	case Persistent:
+		return dbconn.Exec(ctx, t.db, "CREATE TABLE IF NOT EXISTS %n.%n "+tableDDL, t.schema, t.name)
+	default:
+		return fmt.Errorf("checkpoint: unknown table mode %d", t.mode)
 	}
-	if err := dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n.%n", t.schema, t.name); err != nil {
-		return err
-	}
-	return dbconn.Exec(ctx, t.db, "CREATE TABLE %n.%n "+tableDDL, t.schema, t.name)
 }
 
-// Drop removes this run's checkpoint. Non-shared: DROP TABLE IF EXISTS. Shared:
-// DELETE only this statement's rows (tolerating the table being already gone),
-// so a concurrent migration's rows in the shared table survive.
+// Drop removes this run's checkpoint. Owned/Persistent: DROP TABLE IF EXISTS.
+// Shared: DELETE only this statement's rows (tolerating the table being already
+// gone), so a concurrent migration's rows in the shared table survive.
 func (t *Table) Drop(ctx context.Context, statement string) error {
-	if t.shared {
+	if t.mode == Shared {
 		err := dbconn.Exec(ctx, t.db, "DELETE FROM %n.%n WHERE statement = %?", t.schema, t.name, statement)
 		if mysqlErr, ok := errors.AsType[*mysql.MySQLError](err); ok && mysqlErr.Number == erNoSuchTable {
 			return nil
@@ -160,7 +185,7 @@ func (t *Table) ReadLatest(ctx context.Context, statement string) (Record, error
 		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, created_at FROM `%s`.`%s`",
 		t.schema, t.name)
 	var args []any
-	if t.shared {
+	if t.mode == Shared {
 		query += " WHERE statement = ?"
 		args = append(args, statement)
 	}
@@ -182,4 +207,23 @@ func (t *Table) ReadLatest(ctx context.Context, statement string) (Record, error
 		return Record{}, fmt.Errorf("could not parse checkpoint created_at timestamp: %w", err)
 	}
 	return rec, nil
+}
+
+// Exists reports whether the checkpoint table exists. datasync uses this as its
+// resume signal: the table is created before any rows are copied, so its
+// presence means a prior run already owns the target — even one that died
+// before writing its first checkpoint row. Uses information_schema, so it works
+// on a connection with no database selected (datasync's pre-open admin check).
+func (t *Table) Exists(ctx context.Context) (bool, error) {
+	var one int
+	err := t.db.QueryRowContext(ctx,
+		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",
+		t.schema, t.name).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

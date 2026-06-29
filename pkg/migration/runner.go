@@ -632,7 +632,11 @@ func (r *Runner) checkpointTableName() string {
 // Callers must have r.db and r.changes[0].table initialized (true at every call
 // site: resume, create, dump, drop).
 func (r *Runner) checkpointTbl() *checkpoint.Table {
-	return checkpoint.NewTable(r.db, r.changes[0].table.SchemaName, r.checkpointTableName(), len(r.changes) > 1)
+	mode := checkpoint.Owned
+	if len(r.changes) > 1 {
+		mode = checkpoint.Shared // multi-table migrations share one table per schema
+	}
+	return checkpoint.NewTable(r.db, r.changes[0].table.SchemaName, r.checkpointTableName(), mode)
 }
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {

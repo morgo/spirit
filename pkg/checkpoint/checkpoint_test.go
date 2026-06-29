@@ -24,7 +24,7 @@ func setup(t *testing.T) (*sql.DB, string) {
 
 func TestTableLifecycleNonShared(t *testing.T) {
 	db, schema := setup(t)
-	tbl := checkpoint.NewTable(db, schema, "_ckpt_test_nonshared", false)
+	tbl := checkpoint.NewTable(db, schema, "_ckpt_test_nonshared", checkpoint.Owned)
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_nonshared") })
 
 	require.NoError(t, tbl.Create(t.Context(), ""))
@@ -71,8 +71,8 @@ func TestTableShared(t *testing.T) {
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
 
 	// Two migrations sharing one table in the schema, keyed by statement.
-	a := checkpoint.NewTable(db, schema, name, true)
-	b := checkpoint.NewTable(db, schema, name, true)
+	a := checkpoint.NewTable(db, schema, name, checkpoint.Shared)
+	b := checkpoint.NewTable(db, schema, name, checkpoint.Shared)
 
 	require.NoError(t, a.Create(t.Context(), "stmtA")) // creates the shared table
 	require.NoError(t, b.Create(t.Context(), "stmtB")) // idempotent; clears only stmtB rows
@@ -102,13 +102,13 @@ func TestTableShared(t *testing.T) {
 	require.NoError(t, a.Drop(t.Context(), "stmtA"))
 }
 
-// TestCreateNonSharedIsFresh verifies non-shared Create drops any pre-existing
-// table (so a stale row can't be mistaken for resumable progress).
-func TestCreateNonSharedIsFresh(t *testing.T) {
+// TestCreateOwnedIsFresh verifies Owned Create drops any pre-existing table (so
+// a stale row can't be mistaken for resumable progress).
+func TestCreateOwnedIsFresh(t *testing.T) {
 	db, schema := setup(t)
 	name := "_ckpt_test_fresh"
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
-	tbl := checkpoint.NewTable(db, schema, name, false)
+	tbl := checkpoint.NewTable(db, schema, name, checkpoint.Owned)
 
 	require.NoError(t, tbl.Create(t.Context(), ""))
 	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "stale"}))
@@ -116,4 +116,45 @@ func TestCreateNonSharedIsFresh(t *testing.T) {
 	require.NoError(t, tbl.Create(t.Context(), ""))
 	_, err := tbl.ReadLatest(t.Context(), "")
 	require.ErrorIs(t, err, checkpoint.ErrNotFound)
+}
+
+// TestTablePersistent covers the datasync lifecycle: Create is idempotent and
+// never clears (so a re-create preserves the rows a resume needs), writes
+// append, and Exists is the resume signal — distinct from "has a row".
+func TestTablePersistent(t *testing.T) {
+	db, schema := setup(t)
+	name := "_ckpt_test_persistent"
+	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
+	tbl := checkpoint.NewTable(db, schema, name, checkpoint.Persistent)
+
+	// Exists is false before Create — datasync reads this as "fresh sync".
+	exists, err := tbl.Exists(t.Context())
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	require.NoError(t, tbl.Create(t.Context(), ""))
+
+	// After Create the table exists (the resume signal) but has no row yet —
+	// datasync resumes and re-copies from scratch in this state.
+	exists, err = tbl.Exists(t.Context())
+	require.NoError(t, err)
+	require.True(t, exists)
+	_, err = tbl.ReadLatest(t.Context(), "")
+	require.ErrorIs(t, err, checkpoint.ErrNotFound)
+
+	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "wm1", Position: "pos1"}))
+	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "wm2", Position: "pos2"}))
+
+	// Re-create must be a no-op that preserves existing rows (unlike Owned).
+	require.NoError(t, tbl.Create(t.Context(), ""))
+	got, err := tbl.ReadLatest(t.Context(), "")
+	require.NoError(t, err)
+	require.Equal(t, "wm2", got.CopierWatermark, "re-create must not drop the table")
+	require.Equal(t, "pos2", got.Position)
+
+	// Drop removes the table; Exists is false again.
+	require.NoError(t, tbl.Drop(t.Context(), ""))
+	exists, err = tbl.Exists(t.Context())
+	require.NoError(t, err)
+	require.False(t, exists)
 }
