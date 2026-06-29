@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/require"
 )
@@ -140,8 +139,8 @@ func TestCheckConstraintWithDML(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		for m.status.Get() < status.CopyRows {
-			time.Sleep(time.Millisecond)
+		if !waitForCopyRows(t.Context(), m) {
+			return
 		}
 		for i := range 100 {
 			// Insert valid rows (val must be > 0 and < 10000).
