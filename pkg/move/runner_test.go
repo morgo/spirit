@@ -471,7 +471,10 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 	// checkpoint table from an incompatible version (old binlog_positions column,
 	// which this version's read can't find).
 	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
-	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (name) VALUES ('stale')")
+	// id 999 is outside the source's 1..5: a mere overlay (upsert) of the source
+	// rows would leave this row behind, so its absence after --force proves the
+	// table was actually dropped and recreated.
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (999, 'stale')")
 	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+"._spirit_checkpoint (copier_watermark, binlog_positions) VALUES ('stale-wm', '{}')")
 
@@ -501,6 +504,11 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 	var count int
 	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count))
 	require.Equal(t, 5, count, "force must wipe the stale data and re-copy the source")
+	// The out-of-range stale row must be gone — proving a drop+recreate, not an
+	// overlay of the source onto the existing table.
+	var stale int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1 WHERE id = 999 OR name = 'stale'").Scan(&stale))
+	require.Zero(t, stale, "force must drop+recreate the target, not overlay the source onto stale rows")
 }
 
 // TestMoveWithVarcharPK verifies a move on a table with a non-memory-comparable

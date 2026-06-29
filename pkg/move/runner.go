@@ -573,6 +573,16 @@ func (r *Runner) setup(ctx context.Context) error {
 		if werr := r.wipeTargets(ctx); werr != nil {
 			return fmt.Errorf("force: failed to wipe target before a fresh copy: %w", werr)
 		}
+		// --force only overrides the target-not-empty decision — it must not
+		// bypass the other post-setup safety checks (rename_safety,
+		// source_schema_consistency, ...). Re-run them against the now-wiped
+		// target (target_state passes for the absent tables, exactly as a fresh
+		// move); abort if anything still fails rather than copying into a state
+		// that would only fail at cutover. RunChecks iterates a map, so the
+		// original failure was not necessarily target_state.
+		if err := r.runChecks(ctx, check.ScopePostSetup); err != nil {
+			return fmt.Errorf("force: target still fails post-setup checks after wiping: %w", err)
+		}
 		return r.newCopy(ctx)
 	}
 	// The post-setup checks returned no errors so we can proceed with new copy
