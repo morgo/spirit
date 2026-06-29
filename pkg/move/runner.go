@@ -15,6 +15,7 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
@@ -379,19 +380,17 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		return err
 	}
 
-	// Read checkpoint from targets[0] by convention.
-	// A checkpoint table without the created_at column was written by an
-	// older spirit version; the read fails and the move aborts (we do not
-	// support cross-version resume).
+	// Read checkpoint from targets[0] by convention. A checkpoint table written
+	// by an incompatible spirit version (e.g. missing or renamed a column) fails
+	// the read and aborts the move; we do not support cross-version resume.
 	tgt0 := &r.targets[0]
-	query := fmt.Sprintf("SELECT id, copier_watermark, checksum_watermark, binlog_positions, statement, created_at FROM `%s`.`%s` ORDER BY id DESC LIMIT 1",
-		tgt0.Config.DBName, checkpointTableName)
-	var copierWatermark, binlogPositionsJSON, stmt, createdAtStr string
-	var id int
-	err = tgt0.DB.QueryRowContext(ctx, query).Scan(&id, &copierWatermark, &r.checksumWatermark, &binlogPositionsJSON, &stmt, &createdAtStr)
+	rec, err := r.checkpointTbl().ReadLatest(ctx, "")
 	if err != nil {
 		return fmt.Errorf("could not read from checkpoint table '%s' on target: %w", checkpointTableName, err)
 	}
+	copierWatermark := rec.CopierWatermark
+	r.checksumWatermark = rec.ChecksumWatermark
+	binlogPositionsJSON := rec.Position
 
 	// Check if the checkpoint is too old to safely resume — replaying many
 	// days of binary logs can be slower than re-copying, and the binlogs may
@@ -400,13 +399,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// move cannot silently fall back to a fresh copy: the target tables are
 	// non-empty (that is exactly why setup() chose the resume path), so we
 	// fail loudly and leave the decision to the operator.
-	// The connection uses time_zone="+00:00", so timestamps are in UTC.
-	createdAt, parseErr := time.Parse(time.DateTime, createdAtStr)
-	if parseErr != nil {
-		return fmt.Errorf("could not parse checkpoint created_at timestamp: %w", parseErr)
-	}
-	checkpointAge := time.Since(createdAt)
-	if checkpointAge >= r.move.CheckpointMaxAge {
+	if checkpointAge := rec.Age(); checkpointAge >= r.move.CheckpointMaxAge {
 		return fmt.Errorf("%w: checkpoint is %s old (max allowed: %s). To proceed, either re-run with a larger --checkpoint-max-age, or wipe the target tables (including '%s') and restart the move from scratch",
 			status.ErrCheckpointTooOld,
 			checkpointAge.Round(time.Second),
@@ -658,25 +651,23 @@ func (r *Runner) newCopy(ctx context.Context) error {
 	return nil
 }
 
+// checkpointTbl returns a handle to the checkpoint table on the first target
+// (targets[0]) by convention. Targets are sorted in Run() so targets[0] is
+// stable across a stop and a later resume. Move uses a per-run (non-shared)
+// table that it owns outright.
+func (r *Runner) checkpointTbl() *checkpoint.Table {
+	tgt0 := &r.targets[0]
+	return checkpoint.NewTable(tgt0.DB, tgt0.Config.DBName, checkpointTableName, false)
+}
+
 // createCheckpointTable creates the checkpoint table on the first target
 // (targets[0]) by convention. Targets are sorted in Run() so targets[0] is
 // stable across a stop and a later resume.
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
+	if err := r.checkpointTbl().Create(ctx, ""); err != nil {
+		return err
+	}
 	tgt0 := &r.targets[0]
-	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n.%n", tgt0.Config.DBName, checkpointTableName); err != nil {
-		return err
-	}
-	if err := dbconn.Exec(ctx, tgt0.DB, `CREATE TABLE %n.%n (
-	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
-	copier_watermark TEXT,
-	checksum_watermark TEXT,
-	binlog_positions TEXT,
-	statement TEXT,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-	)`,
-		tgt0.Config.DBName, checkpointTableName); err != nil {
-		return err
-	}
 	r.checkpointTable = table.NewTableInfo(tgt0.DB, tgt0.Config.DBName, checkpointTableName)
 	return nil
 }
@@ -1524,15 +1515,13 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	r.logger.Info("checkpoint",
 		"low-watermark", copierWatermark,
 		"binlog-positions", string(positionsJSON))
-	err = dbconn.Exec(ctx, r.targets[0].DB, "INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_positions, statement) VALUES (%?, %?, %?, %?)",
-		r.checkpointTable.SchemaName,
-		r.checkpointTable.TableName,
-		copierWatermark,
-		checksumWatermark,
-		string(positionsJSON),
-		"",
-	)
-	if err != nil {
+	// Statement and OriginalTableName are unused by move; Position carries the
+	// JSON map of per-source change-feed positions.
+	if err := r.checkpointTbl().Write(ctx, checkpoint.Record{
+		CopierWatermark:   copierWatermark,
+		ChecksumWatermark: checksumWatermark,
+		Position:          string(positionsJSON),
+	}); err != nil {
 		return status.ErrCouldNotWriteCheckpoint
 	}
 	return nil

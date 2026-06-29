@@ -72,8 +72,10 @@ func TestResumeStateCheck(t *testing.T) {
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		copier_watermark TEXT,
 		checksum_watermark TEXT,
-		binlog_positions TEXT,
-		statement TEXT
+		binlog_position TEXT,
+		statement TEXT,
+		original_table_name VARCHAR(64) NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`)
 	require.NoError(t, err)
 	defer func() {
@@ -262,7 +264,8 @@ func TestResumeStateCheckSchemaTypesAndCollation(t *testing.T) {
 	// validation to proceed.
 	_, err = tgtDB.ExecContext(t.Context(), fmt.Sprintf(`CREATE TABLE %s._spirit_checkpoint (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
-		copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT)`, tgtName))
+		copier_watermark TEXT, checksum_watermark TEXT, binlog_position TEXT, statement TEXT,
+		original_table_name VARCHAR(64) NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`, tgtName))
 	require.NoError(t, err)
 
 	sourceTable := table.NewTableInfo(srcDB, srcName, "t")

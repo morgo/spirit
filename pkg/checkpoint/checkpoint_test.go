@@ -1,0 +1,119 @@
+package checkpoint_test
+
+import (
+	"database/sql"
+	"testing"
+	"time"
+
+	"github.com/block/spirit/pkg/checkpoint"
+	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/testutils"
+	"github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/require"
+)
+
+func setup(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return db, cfg.DBName
+}
+
+func TestTableLifecycleNonShared(t *testing.T) {
+	db, schema := setup(t)
+	tbl := checkpoint.NewTable(db, schema, "_ckpt_test_nonshared", false)
+	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_nonshared") })
+
+	require.NoError(t, tbl.Create(t.Context(), ""))
+
+	// Empty table → ErrNotFound (a normal "nothing to resume" state).
+	_, err := tbl.ReadLatest(t.Context(), "")
+	require.ErrorIs(t, err, checkpoint.ErrNotFound)
+
+	// Write a row and read every field back.
+	rec := checkpoint.Record{
+		CopierWatermark:   "cw1",
+		ChecksumWatermark: "sw1",
+		Position:          "pos1",
+		Statement:         "ALTER TABLE t ENGINE=InnoDB",
+		OriginalTableName: "t1",
+	}
+	require.NoError(t, tbl.Write(t.Context(), rec))
+	got, err := tbl.ReadLatest(t.Context(), "")
+	require.NoError(t, err)
+	require.Equal(t, rec.CopierWatermark, got.CopierWatermark)
+	require.Equal(t, rec.ChecksumWatermark, got.ChecksumWatermark)
+	require.Equal(t, rec.Position, got.Position)
+	require.Equal(t, rec.Statement, got.Statement)
+	require.Equal(t, rec.OriginalTableName, got.OriginalTableName)
+	require.False(t, got.CreatedAt.IsZero())
+	require.Less(t, got.Age(), time.Hour, "a just-written checkpoint is fresh")
+
+	// Append-only: ReadLatest returns the newest row.
+	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "cw2"}))
+	got, err = tbl.ReadLatest(t.Context(), "")
+	require.NoError(t, err)
+	require.Equal(t, "cw2", got.CopierWatermark)
+
+	// Drop removes the table entirely; a subsequent read errors (not ErrNotFound).
+	require.NoError(t, tbl.Drop(t.Context(), ""))
+	_, err = tbl.ReadLatest(t.Context(), "")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, checkpoint.ErrNotFound)
+}
+
+func TestTableShared(t *testing.T) {
+	db, schema := setup(t)
+	name := "_ckpt_test_shared"
+	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
+
+	// Two migrations sharing one table in the schema, keyed by statement.
+	a := checkpoint.NewTable(db, schema, name, true)
+	b := checkpoint.NewTable(db, schema, name, true)
+
+	require.NoError(t, a.Create(t.Context(), "stmtA")) // creates the shared table
+	require.NoError(t, b.Create(t.Context(), "stmtB")) // idempotent; clears only stmtB rows
+
+	require.NoError(t, a.Write(t.Context(), checkpoint.Record{CopierWatermark: "a1", Statement: "stmtA"}))
+	require.NoError(t, b.Write(t.Context(), checkpoint.Record{CopierWatermark: "b1", Statement: "stmtB"}))
+	require.NoError(t, a.Write(t.Context(), checkpoint.Record{CopierWatermark: "a2", Statement: "stmtA"}))
+
+	// Each reads its own latest row, unmasked by the other's newer row.
+	gotA, err := a.ReadLatest(t.Context(), "stmtA")
+	require.NoError(t, err)
+	require.Equal(t, "a2", gotA.CopierWatermark)
+	gotB, err := b.ReadLatest(t.Context(), "stmtB")
+	require.NoError(t, err)
+	require.Equal(t, "b1", gotB.CopierWatermark)
+
+	// Drop(A) deletes only A's rows; B's row and the table survive.
+	require.NoError(t, a.Drop(t.Context(), "stmtA"))
+	_, err = a.ReadLatest(t.Context(), "stmtA")
+	require.ErrorIs(t, err, checkpoint.ErrNotFound)
+	gotB, err = b.ReadLatest(t.Context(), "stmtB")
+	require.NoError(t, err)
+	require.Equal(t, "b1", gotB.CopierWatermark)
+
+	// Drop tolerates the shared table already being gone.
+	require.NoError(t, dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name))
+	require.NoError(t, a.Drop(t.Context(), "stmtA"))
+}
+
+// TestCreateNonSharedIsFresh verifies non-shared Create drops any pre-existing
+// table (so a stale row can't be mistaken for resumable progress).
+func TestCreateNonSharedIsFresh(t *testing.T) {
+	db, schema := setup(t)
+	name := "_ckpt_test_fresh"
+	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
+	tbl := checkpoint.NewTable(db, schema, name, false)
+
+	require.NoError(t, tbl.Create(t.Context(), ""))
+	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "stale"}))
+	// Re-create: the prior row must be gone.
+	require.NoError(t, tbl.Create(t.Context(), ""))
+	_, err := tbl.ReadLatest(t.Context(), "")
+	require.ErrorIs(t, err, checkpoint.ErrNotFound)
+}
