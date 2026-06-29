@@ -1111,7 +1111,7 @@ func (r *Runner) startFresh(ctx context.Context) error {
 			return fmt.Errorf("failed to start change source: %w", err)
 		}
 	}
-	return r.createCheckpointTable(ctx)
+	return r.checkpointTbl().Create(ctx)
 }
 
 // startResume rebuilds the copy pipeline and opens the chunker at the
@@ -1158,7 +1158,7 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 			return fmt.Errorf("failed to start change source: %w", err)
 		}
 	}
-	return r.createCheckpointTable(ctx)
+	return r.checkpointTbl().Create(ctx)
 }
 
 // checkpointTbl returns a handle to datasync's checkpoint table on the target.
@@ -1167,17 +1167,6 @@ func (r *Runner) startResume(ctx context.Context, watermark, pos string) error {
 // It always lives on the target because the source may be read-only.
 func (r *Runner) checkpointTbl() *checkpoint.Table {
 	return checkpoint.NewTable(r.target.DB, syncCheckpointTableName, checkpoint.Persistent)
-}
-
-// createCheckpointTable creates the checkpoint table on the target (always
-// the target, since the source may be read-only). It records the copier's low
-// watermark (resume point for a partial copy) and the change-feed position
-// (resume point for continuous sync).
-func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	if err := r.checkpointTbl().Create(ctx); err != nil {
-		return fmt.Errorf("failed to create checkpoint table on target: %w", err)
-	}
-	return nil
 }
 
 // dumpCheckpoint records the copier's low watermark (so a partial copy can
@@ -1498,8 +1487,8 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 	// Idempotent: createCheckpointTable uses CREATE TABLE IF NOT EXISTS, so
 	// this is safe even in the brief window before startFresh/startResume has
 	// created the table.
-	err := r.createCheckpointTable(ctx)
-	if err == nil {
+	err := r.checkpointTbl().Create(ctx)
+	if err == nil { // success
 		err = r.dumpCheckpoint(ctx)
 	}
 	// status.WatchTask treats a non-nil return here as fatal and cancels the
