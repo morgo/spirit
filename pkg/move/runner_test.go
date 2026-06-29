@@ -449,6 +449,68 @@ func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
 	require.Equal(t, 5, count)
 }
 
+// TestMoveForceWipesUnresumableTarget verifies --force recovery: when the target
+// is non-empty but cannot be resumed (here a checkpoint table from an
+// incompatible spirit version — the old binlog_positions column), a normal run
+// fails and points at --force, and --force wipes the target tables + checkpoint
+// and copies fresh.
+func TestMoveForceWipesUnresumableTarget(t *testing.T) {
+	srcDB := "source_force_wipe"
+	dstDB := "dest_force_wipe"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (name) VALUES ('a'),('b'),('c'),('d'),('e')")
+
+	// Target already holds the table with stale data (a prior partial run) plus a
+	// checkpoint table from an incompatible version (old binlog_positions column,
+	// which this version's read can't find).
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
+	// id 999 is outside the source's 1..5: a mere overlay (upsert) of the source
+	// rows would leave this row behind, so its absence after --force proves the
+	// table was actually dropped and recreated.
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (999, 'stale')")
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+"._spirit_checkpoint (copier_watermark, binlog_positions) VALUES ('stale-wm', '{}')")
+
+	newMove := func(force bool) *Move {
+		return &Move{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			Force:           force,
+		}
+	}
+
+	// Without --force: an unresumable non-empty target is a hard error that
+	// points the operator at --force.
+	err := newMove(false).Run()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--force")
+
+	// With --force: wipe the stale target + checkpoint and copy the source fresh.
+	require.NoError(t, newMove(true).Run())
+
+	targetDB, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	var count int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, 5, count, "force must wipe the stale data and re-copy the source")
+	// The out-of-range stale row must be gone — proving a drop+recreate, not an
+	// overlay of the source onto the existing table.
+	var stale int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1 WHERE id = 999 OR name = 'stale'").Scan(&stale))
+	require.Zero(t, stale, "force must drop+recreate the target, not overlay the source onto stale rows")
+}
+
 // TestMoveWithVarcharPK verifies a move on a table with a non-memory-comparable
 // primary key (VARCHAR with a CI collation) — the case from issue #607. The
 // move runs under concurrent writes to exercise the binlog replay path.
