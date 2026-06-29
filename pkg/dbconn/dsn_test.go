@@ -18,7 +18,12 @@ func TestRedactDSN(t *testing.T) {
 		{"DSN without password", "user@tcp(localhost:3306)/database", "user@tcp(localhost:3306)/database"},
 		{"DSN with empty password", "user:@tcp(localhost:3306)/database", "user:***@tcp(localhost:3306)/database"},
 		{"empty DSN", "", ""},
-		{"malformed DSN without @", "user:password", "user:password"},
+		// Unparseable, no '@': a "user:password" pair must still have its
+		// password masked rather than logged verbatim.
+		{"malformed user:password without @", "user:password", "user:***"},
+		{"malformed multi-colon without @", "user:pa:ss", "user:***"},
+		// Unparseable with neither '@' nor ':' has nothing credential-shaped.
+		{"malformed plain string", "garbage", "garbage"},
 		{"DSN with colon in password", "user:pass:word@tcp(localhost:3306)/database", "user:***@tcp(localhost:3306)/database"},
 	}
 	for _, tc := range tests {

@@ -663,19 +663,25 @@ func SplitDSNs(dsnList string) []string {
 // RedactDSN returns dsn with the password masked, safe for logging. It keeps
 // the username, host and parameters so logs stay useful, masking only the
 // password and only when one was actually present. If the driver can't parse
-// the DSN it falls back to redacting everything up to the credentials
-// separator ('@') so a password is never echoed verbatim.
+// the DSN it still never echoes a password: it redacts the credentials section
+// before '@', or — lacking '@' — masks from the first ':' (a malformed
+// "user:password" still has its password hidden).
 func RedactDSN(dsn string) string {
 	if dsn == "" {
 		return dsn
 	}
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
-		// Unparseable — never risk echoing a password. Redact up to the
-		// credentials section if there is one; a DSN with no '@' has no
-		// credentials section to leak, so return it unchanged.
+		// Unparseable — never risk echoing a password. If there's a credentials
+		// separator ('@'), redact everything up to it. Otherwise a ':' may still
+		// separate a "user:password" pair whose tail is malformed (no host), so
+		// mask from the first ':'. Only a string with neither '@' nor ':' has
+		// nothing credential-shaped to leak.
 		if i := strings.LastIndex(dsn, "@"); i >= 0 {
 			return "<redacted>" + dsn[i:]
+		}
+		if user, _, found := strings.Cut(dsn, ":"); found {
+			return user + ":***"
 		}
 		return dsn
 	}
