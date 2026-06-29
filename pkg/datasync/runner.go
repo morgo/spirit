@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -176,7 +175,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.cancelFunc = cancel
 	r.startTime = time.Now()
 	r.progMu.Unlock()
-	r.logger.Info("Starting sync", "source_dsn", redactDSN(r.sync.SourceDSN))
+	r.logger.Info("Starting sync", "source_dsn", dbconn.RedactDSN(r.sync.SourceDSN))
 
 	r.sourceDBConfig = dbconn.NewDBConfig()
 	// Sync only ever reads the source data (copy SELECTs + the change feed).
@@ -1486,12 +1485,4 @@ func (r *Runner) Cancel() {
 	if cancel != nil {
 		cancel()
 	}
-}
-
-// redactDSN strips credentials from a DSN for safe logging.
-func redactDSN(dsn string) string {
-	if i := strings.LastIndex(dsn, "@"); i >= 0 {
-		return "<redacted>" + dsn[i:]
-	}
-	return dsn
 }
