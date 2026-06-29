@@ -30,11 +30,11 @@ type tableChange struct {
 func (c *tableChange) createNewTable(ctx context.Context) error {
 	newName := utils.NewTableName(c.table.TableName)
 	// drop the newName if we've decided to call this func.
-	if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.table.SchemaName, newName); err != nil {
+	if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n", newName); err != nil {
 		return err
 	}
-	if err := dbconn.Exec(ctx, c.runner.db, "CREATE TABLE %n.%n LIKE %n.%n",
-		c.table.SchemaName, newName, c.table.SchemaName, c.table.TableName); err != nil {
+	if err := dbconn.Exec(ctx, c.runner.db, "CREATE TABLE %n LIKE %n",
+		newName, c.table.TableName); err != nil {
 		return err
 	}
 	c.newTable = table.NewTableInfo(c.runner.db, c.stmt.Schema, newName)
@@ -49,12 +49,12 @@ func (c *tableChange) createNewTable(ctx context.Context) error {
 // We first attempt to do this using ALGORITHM=COPY so we don't burn
 // an INSTANT version. But surprisingly this is not supported for all DDLs (issue #277)
 func (c *tableChange) alterNewTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n "+c.stmt.TrimAlter()+", ALGORITHM=COPY",
-		c.newTable.SchemaName, c.newTable.TableName); err != nil {
+	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n "+c.stmt.TrimAlter()+", ALGORITHM=COPY",
+		c.newTable.TableName); err != nil {
 		// Retry without the ALGORITHM=COPY. If there is a second error, then the DDL itself
 		// is not supported. It could be a syntax error, in which case we return the second error,
 		// which will probably be easier to read because it is unaltered.
-		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n "+c.stmt.Alter, c.newTable.SchemaName, c.newTable.TableName); err != nil {
+		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n "+c.stmt.Alter, c.newTable.TableName); err != nil {
 			return err
 		}
 	}
@@ -75,8 +75,8 @@ func (c *tableChange) preserveAutoIncrement(ctx context.Context) error {
 	// Get AUTO_INCREMENT from the original table.
 	var originalAutoInc sql.NullInt64
 	err := c.runner.db.QueryRowContext(ctx,
-		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		c.table.SchemaName, c.table.TableName).Scan(&originalAutoInc)
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		c.table.TableName).Scan(&originalAutoInc)
 	if err != nil {
 		return fmt.Errorf("failed to get AUTO_INCREMENT value from original table: %w", err)
 	}
@@ -89,8 +89,8 @@ func (c *tableChange) preserveAutoIncrement(ctx context.Context) error {
 	// Get AUTO_INCREMENT from the new table to detect if it was explicitly set by the ALTER.
 	var newTableAutoInc sql.NullInt64
 	err = c.runner.db.QueryRowContext(ctx,
-		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-		c.newTable.SchemaName, c.newTable.TableName).Scan(&newTableAutoInc)
+		"SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+		c.newTable.TableName).Scan(&newTableAutoInc)
 	if err != nil {
 		return fmt.Errorf("failed to get AUTO_INCREMENT value from new table: %w", err)
 	}
@@ -102,8 +102,8 @@ func (c *tableChange) preserveAutoIncrement(ctx context.Context) error {
 		return nil
 	}
 
-	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n AUTO_INCREMENT = %?",
-		c.newTable.SchemaName, c.newTable.TableName, originalAutoInc.Int64); err != nil {
+	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n AUTO_INCREMENT = %?",
+		c.newTable.TableName, originalAutoInc.Int64); err != nil {
 		return fmt.Errorf("failed to set AUTO_INCREMENT on new table: %w", err)
 	}
 	c.runner.logger.Info("preserved AUTO_INCREMENT value",
@@ -113,7 +113,7 @@ func (c *tableChange) preserveAutoIncrement(ctx context.Context) error {
 }
 
 func (c *tableChange) dropOldTable(ctx context.Context) error {
-	return dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.table.SchemaName, c.oldTableName())
+	return dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n", c.oldTableName())
 }
 
 func (c *tableChange) oldTableName() string {
@@ -132,12 +132,11 @@ func (c *tableChange) attemptInstantDDL(ctx context.Context) error {
 			[]*table.TableInfo{c.table},
 			c.runner.dbConfig,
 			c.runner.logger,
-			"ALTER TABLE %n.%n ALGORITHM=INSTANT, "+c.stmt.Alter,
-			c.table.SchemaName,
+			"ALTER TABLE %n ALGORITHM=INSTANT, "+c.stmt.Alter,
 			c.table.TableName,
 		)
 	}
-	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n ALGORITHM=INSTANT, "+c.stmt.Alter, c.table.SchemaName, c.table.TableName)
+	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INSTANT, "+c.stmt.Alter, c.table.TableName)
 }
 
 func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
@@ -148,17 +147,16 @@ func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
 			[]*table.TableInfo{c.table},
 			c.runner.dbConfig,
 			c.runner.logger,
-			"ALTER TABLE %n.%n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter,
-			c.table.SchemaName,
+			"ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter,
 			c.table.TableName,
 		)
 	}
-	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n.%n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter, c.table.SchemaName, c.table.TableName)
+	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter, c.table.TableName)
 }
 
 func (c *tableChange) cleanup(ctx context.Context) error {
 	if c.newTable != nil {
-		if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n.%n", c.newTable.SchemaName, c.newTable.TableName); err != nil {
+		if err := dbconn.Exec(ctx, c.runner.db, "DROP TABLE IF EXISTS %n", c.newTable.TableName); err != nil {
 			return err
 		}
 	}
