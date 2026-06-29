@@ -31,10 +31,10 @@ func countRows(t *testing.T, db *sql.DB, schema, name string) int {
 	return n
 }
 
-func TestTableLifecycleOwned(t *testing.T) {
+func TestTableLifecycleTransient(t *testing.T) {
 	db, schema := setup(t)
-	tbl := checkpoint.NewTable(db, "_ckpt_test_owned", checkpoint.Owned)
-	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_owned") })
+	tbl := checkpoint.NewTable(db, "_ckpt_test_transient", checkpoint.Transient)
+	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, "_ckpt_test_transient") })
 
 	require.NoError(t, tbl.Create(t.Context()))
 
@@ -67,7 +67,7 @@ func TestTableLifecycleOwned(t *testing.T) {
 	got, err = tbl.ReadLatest(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "cw2", got.CopierWatermark)
-	require.Equal(t, 1, countRows(t, db, schema, "_ckpt_test_owned"), "Owned Write must keep exactly one row")
+	require.Equal(t, 1, countRows(t, db, schema, "_ckpt_test_transient"), "Transient Write must keep exactly one row")
 
 	// Drop removes the table entirely; a subsequent read errors (not ErrNotFound).
 	require.NoError(t, tbl.Drop(t.Context()))
@@ -76,13 +76,13 @@ func TestTableLifecycleOwned(t *testing.T) {
 	require.NotErrorIs(t, err, checkpoint.ErrNotFound)
 }
 
-// TestCreateOwnedIsFresh verifies Owned Create drops any pre-existing table (so
+// TestCreateTransientIsFresh verifies Transient Create drops any pre-existing table (so
 // a stale row can't be mistaken for resumable progress).
-func TestCreateOwnedIsFresh(t *testing.T) {
+func TestCreateTransientIsFresh(t *testing.T) {
 	db, schema := setup(t)
 	name := "_ckpt_test_fresh"
 	t.Cleanup(func() { _ = dbconn.Exec(t.Context(), db, "DROP TABLE IF EXISTS %n.%n", schema, name) })
-	tbl := checkpoint.NewTable(db, name, checkpoint.Owned)
+	tbl := checkpoint.NewTable(db, name, checkpoint.Transient)
 
 	require.NoError(t, tbl.Create(t.Context()))
 	require.NoError(t, tbl.Write(t.Context(), checkpoint.Record{CopierWatermark: "stale"}))
@@ -121,7 +121,7 @@ func TestTablePersistent(t *testing.T) {
 	// Single row, overwritten in place — a continuous sync can't grow it.
 	require.Equal(t, 1, countRows(t, db, schema, name), "Persistent Write must keep exactly one row")
 
-	// Re-create must be a no-op that preserves the existing row (unlike Owned).
+	// Re-create must be a no-op that preserves the existing row (unlike Transient).
 	require.NoError(t, tbl.Create(t.Context()))
 	got, err := tbl.ReadLatest(t.Context())
 	require.NoError(t, err)

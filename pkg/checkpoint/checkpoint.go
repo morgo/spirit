@@ -1,13 +1,13 @@
-// Package checkpoint owns the append-row checkpoint table shared by all three
-// runners (migration, move, datasync): its schema, lifecycle (create / drop /
-// exists), and row read/write. A checkpoint records where the row copy and
-// (for migrate/move) the checksum got to, plus the change-feed position, so an
+// Package checkpoint owns the checkpoint table shared by all three runners
+// (migration, move, datasync): its schema, lifecycle (create / drop / exists),
+// and row read/write. A checkpoint records where the row copy and (for
+// migrate/move) the checksum got to, plus the change-feed position, so an
 // interrupted run can resume instead of starting over.
 //
-// Single-owner tables (Owned, Persistent) keep one row, overwritten in place
-// each dump; the multi-table Shared table appends one row per statement. Either
-// way resume reads the newest row. Three Modes cover the runners' differing
-// lifecycles — see Mode. The package owns the table mechanics; callers own the
+// The table holds a single row, overwritten in place each dump (REPLACE on
+// id=1), and resume reads it. Two Modes cover the runners' differing
+// lifecycles — Transient (one finite run) and Persistent (a continuous run);
+// see Mode. The package owns the table mechanics; callers own the
 // interpretation of the watermarks and the resume policy (staleness max-age,
 // statement match, table-name collision, and — for datasync — using Exists as
 // the resume signal) via the returned Record, Age, and Exists.
@@ -81,17 +81,18 @@ func (r Record) Age() time.Duration { return time.Since(r.CreatedAt) }
 type Mode int
 
 const (
-	// Owned is a per-run table this run owns outright: Create DROPs and
-	// recreates it (so it always matches this version's schema and carries no
-	// stale rows), and Drop drops it. Used by single-table and atomic
-	// multi-table migrations (only one of the latter runs per schema at a time,
-	// so the shared _spirit_checkpoint has a single owner) and by move.
-	Owned Mode = iota
-	// Persistent is a long-lived table whose existence outlives any single run,
-	// used by datasync: Create is idempotent and never clears, and Drop drops
-	// it. The caller decides fresh-vs-resume from Exists and ReadLatest (not by
-	// recreating the table), so Create must never destroy the rows a resume
-	// needs.
+	// Transient is a checkpoint for one finite run: it lives only as long as the
+	// migration/move that owns it. Create DROPs and recreates the table (so it
+	// always matches this version's schema and carries no stale rows) and Drop
+	// drops it. Used by single-table and atomic multi-table migrations (only one
+	// of the latter runs per schema at a time, so the shared _spirit_checkpoint
+	// has a single owner) and by move.
+	Transient Mode = iota
+	// Persistent is a checkpoint for a continuous, never-ending run (datasync):
+	// the table outlives any single run, so Create is idempotent and never
+	// clears, and the caller decides fresh-vs-resume from Exists and ReadLatest
+	// (not by recreating the table) — Create must never destroy the rows a
+	// resume needs. Drop drops it.
 	Persistent
 )
 
@@ -127,16 +128,16 @@ const tableDDL = `(
 
 // Create prepares the checkpoint table for a run. Behaviour depends on Mode:
 //
-//   - Owned (single-table / atomic multi-table migration, move): DROP + CREATE,
-//     so the table always matches this spirit version's schema and carries no
-//     stale rows. Safe for the shared multi-table _spirit_checkpoint because
-//     only one multi-table migration runs per schema at a time.
+//   - Transient (single-table / atomic multi-table migration, move): DROP +
+//     CREATE, so the table always matches this spirit version's schema and
+//     carries no stale rows. Safe for the shared multi-table _spirit_checkpoint
+//     because only one multi-table migration runs per schema at a time.
 //   - Persistent (datasync): CREATE IF NOT EXISTS and nothing else. The table
 //     is long-lived and its existence is the caller's resume signal, so it is
 //     never dropped or cleared here.
 func (t *Table) Create(ctx context.Context) error {
 	switch t.mode {
-	case Owned:
+	case Transient:
 		if err := dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n", t.name); err != nil {
 			return err
 		}

@@ -638,7 +638,7 @@ func (r *Runner) checkpointTableName() string {
 }
 
 // checkpointTbl returns a handle to this migration's checkpoint table (shared
-// machinery in pkg/checkpoint). Always Owned: single-table migrations get a
+// machinery in pkg/checkpoint). Always Transient: single-table migrations get a
 // per-table table, and atomic multi-table migrations share one _spirit_checkpoint
 // per schema but only one runs per schema at a time (enforced by the schema lock
 // in Run), so it has a single owner either way. Constructed on demand — cheap,
@@ -648,7 +648,7 @@ func (r *Runner) checkpointTableName() string {
 func (r *Runner) checkpointTbl() *checkpoint.Table {
 	// r.db's selected schema is the migrated schema (same connection sentinel
 	// uses), so the checkpoint table lands there — no schema is threaded in.
-	return checkpoint.NewTable(r.db, r.checkpointTableName(), checkpoint.Owned)
+	return checkpoint.NewTable(r.db, r.checkpointTableName(), checkpoint.Transient)
 }
 
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
@@ -1095,7 +1095,7 @@ func (r *Runner) dropCheckpoint(ctx context.Context) error {
 }
 
 func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	// DROP+CREATE (Owned). For single-table the name is table-derived and
+	// DROP+CREATE (Transient). For single-table the name is table-derived and
 	// same-table concurrency is excluded by the metadata lock; for multi-table
 	// the schema lock guarantees this run is the sole owner of the shared
 	// _spirit_checkpoint, so dropping it is safe. See pkg/checkpoint.

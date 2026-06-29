@@ -610,7 +610,7 @@ func (r *Runner) wipeTargets(ctx context.Context) error {
 			}
 		}
 	}
-	return r.checkpointTbl().Drop(ctx) // Owned → DROP TABLE IF EXISTS
+	return r.checkpointTbl().Drop(ctx) // Transient → DROP TABLE IF EXISTS
 }
 
 func (r *Runner) newCopy(ctx context.Context) error {
@@ -702,7 +702,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 func (r *Runner) checkpointTbl() *checkpoint.Table {
 	// targets[0].DB is connected to that target's schema, so the checkpoint
 	// table lands there — no schema is threaded in.
-	return checkpoint.NewTable(r.targets[0].DB, checkpointTableName, checkpoint.Owned)
+	return checkpoint.NewTable(r.targets[0].DB, checkpointTableName, checkpoint.Transient)
 }
 
 // createCheckpointTable creates the checkpoint table on the first target
