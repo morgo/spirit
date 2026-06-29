@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -260,16 +259,11 @@ func TestInvalidateChecksumWatermarkAfterContinuousDivergence(t *testing.T) {
 // without a Recopier, so a confirmed divergence surfaces as
 // ErrPermanentDivergence and aborts rather than self-healing.)
 //
-// Not parallel: it shortens the package-global continuous-checksum pacing and
-// retry delay so the divergence is detected and confirmed promptly.
+// Not parallel: it relies on the short continuous-checksum pacing / retry delay
+// set once in TestMain (checksum.ContinuousMinPassInterval = 2s,
+// checksum.DefaultContinuousRetryDelay = 1s) so the divergence is detected and
+// confirmed promptly.
 func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
-	origInterval := checksum.ContinuousMinPassInterval
-	checksum.ContinuousMinPassInterval = 2 * time.Second
-	t.Cleanup(func() { checksum.ContinuousMinPassInterval = origInterval })
-	origRetry := checksum.DefaultContinuousRetryDelay
-	checksum.DefaultContinuousRetryDelay = 1 * time.Second
-	t.Cleanup(func() { checksum.DefaultContinuousRetryDelay = origRetry })
-
 	tableName := "cont_chk_clear"
 	tt := testutils.NewTestTable(t, tableName, `CREATE TABLE cont_chk_clear (
 		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,

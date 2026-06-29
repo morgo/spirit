@@ -89,15 +89,27 @@ type WaitConfig struct {
 
 // Wait blocks until the sentinel table is dropped (proceed with cutover),
 // WaitLimit elapses (error), or the continuous checksum exits on its own
-// (error). It returns nil only when it is safe to proceed with cutover.
+// (error). It returns nil only when it is safe to proceed with cutover. If the
+// sentinel is already absent on entry, it returns nil immediately — no checksum
+// goroutine is spawned and InvalidateWatermark is not called.
 //
-// For the lifetime of the wait it runs RunChecksum in the background. On
-// return — by any path, including parent-context cancellation — it stops that
-// goroutine and then calls InvalidateWatermark: if the continuous checksum
-// repaired a chunk, the run is about to abort, and the persisted
-// checksum_watermark must be blanked so a resume re-verifies rather than
-// trusting a watermark that was recorded just before the difference was found.
+// Otherwise it runs RunChecksum in the background for the lifetime of the wait,
+// and on every subsequent return path (sentinel dropped, timeout, checksum
+// failure, or parent-context cancellation) it stops that goroutine and then
+// calls InvalidateWatermark: if the continuous checksum repaired a chunk, the
+// run is about to abort, and the persisted checksum_watermark must be blanked so
+// a resume re-verifies rather than trusting a watermark recorded just before the
+// difference was found.
+//
+// Exists, RunChecksum and InvalidateWatermark are required (Wait returns an
+// error if any is nil); a nil Logger defaults to slog.Default().
 func Wait(ctx context.Context, cfg WaitConfig) (retErr error) {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Exists == nil || cfg.RunChecksum == nil || cfg.InvalidateWatermark == nil {
+		return errors.New("sentinel.Wait: Exists, RunChecksum and InvalidateWatermark are required")
+	}
 	if sentinelExists, err := cfg.Exists(ctx); err != nil {
 		return err
 	} else if !sentinelExists {

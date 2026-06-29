@@ -35,6 +35,36 @@ func setTiming(t *testing.T, waitLimit, checkInterval time.Duration) {
 	t.Cleanup(func() { sentinel.WaitLimit, sentinel.CheckInterval = ow, oc })
 }
 
+func TestWaitRequiresCallbacks(t *testing.T) {
+	// A nil required callback returns a clear error rather than panicking — Wait
+	// is a shared helper, so a misconfigured call site must fail loudly.
+	for _, tc := range []struct {
+		name string
+		cfg  sentinel.WaitConfig
+	}{
+		{"nil Exists", sentinel.WaitConfig{RunChecksum: func(context.Context) error { return nil }, InvalidateWatermark: func(context.Context) error { return nil }}},
+		{"nil RunChecksum", sentinel.WaitConfig{Exists: func(context.Context) (bool, error) { return false, nil }, InvalidateWatermark: func(context.Context) error { return nil }}},
+		{"nil InvalidateWatermark", sentinel.WaitConfig{Exists: func(context.Context) (bool, error) { return false, nil }, RunChecksum: func(context.Context) error { return nil }}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := sentinel.Wait(t.Context(), tc.cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "required")
+		})
+	}
+}
+
+func TestWaitNilLoggerDoesNotPanic(t *testing.T) {
+	// A nil Logger must default to slog.Default() rather than panic.
+	err := sentinel.Wait(t.Context(), sentinel.WaitConfig{
+		Exists:              func(context.Context) (bool, error) { return false, nil }, // absent → returns nil
+		RunChecksum:         func(context.Context) error { return nil },
+		InvalidateWatermark: func(context.Context) error { return nil },
+		Logger:              nil,
+	})
+	require.NoError(t, err)
+}
+
 // blockingChecksum returns a RunChecksum that records it started, then blocks
 // until its context is cancelled — a "healthy" continuous checksum that only
 // exits when Wait tears it down.
