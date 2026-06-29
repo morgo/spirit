@@ -42,15 +42,10 @@ func mkIniFile(t *testing.T, content string) string {
 // tighter budget produces spurious timeouts (see issue #946).
 func waitForStatus(t *testing.T, m *Runner, target status.State) {
 	t.Helper()
-	timeout := time.After(60 * time.Second)
-	for m.status.Get() < target {
-		select {
-		case <-timeout:
-			t.Fatalf("timeout waiting for status >= %s, current status: %s", target, m.status.Get())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	require.Eventually(t, func() bool {
+		return m.status.Get() >= target
+	}, 60*time.Second, 10*time.Millisecond,
+		"timeout waiting for status >= %s, last status: %s", target, m.status.Get())
 }
 
 // RunnerOption is a functional option for configuring a test Runner.
