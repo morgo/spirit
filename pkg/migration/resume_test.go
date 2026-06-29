@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,16 +30,12 @@ import (
 // successful checkpoint.
 func waitForCheckpoint(t *testing.T, runner *Runner) {
 	t.Helper()
-	for runner.status.Get() < status.CopyRows {
-		time.Sleep(time.Millisecond)
-	}
-	for {
-		err := runner.DumpCheckpoint(t.Context())
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	require.Eventually(t, func() bool {
+		return runner.status.Get() >= status.CopyRows
+	}, 60*time.Second, time.Millisecond, "timeout waiting for status >= copyRows")
+	require.Eventually(t, func() bool {
+		return runner.DumpCheckpoint(t.Context()) == nil
+	}, 30*time.Second, 10*time.Millisecond, "timeout waiting for first successful checkpoint")
 }
 
 // Test int to bigint primary key while resuming from checkpoint.
@@ -188,8 +185,11 @@ func TestCheckpoint(t *testing.T) {
 	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk1))
 	require.NoError(t, ccopier.CopyChunk(t.Context(), chunk3))
 
-	time.Sleep(time.Second) // wait for status to be updated.
-	require.Contains(t, r.Status(), `migration status: state=copyRows copy-progress=3000/11040 27.17% binlog-deltas=0`)
+	// The status update is asynchronous (the applier phones home after each
+	// chunk completes), so poll until it reflects all three copied chunks.
+	require.Eventually(t, func() bool {
+		return strings.Contains(r.Status(), `migration status: state=copyRows copy-progress=3000/11040 27.17% binlog-deltas=0`)
+	}, 10*time.Second, 50*time.Millisecond, "status never reached expected copy progress; last status: %s", r.Status())
 
 	// The watermark should exist now, because migrateChunk()
 	// gives feedback back to table.
