@@ -321,9 +321,9 @@ func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 		"SELECT copier_watermark FROM `%s` ORDER BY id DESC LIMIT 1", checkpointTable)).Scan(&copierWM))
 	require.NotEmpty(t, copierWM, "copier_watermark must survive the abort")
 
-	// ... but no row anywhere may still carry a checksum_watermark: both the
-	// rows dumped after the difference was recorded (suppression) and the
-	// rows dumped before it (abort-path UPDATE) must be blank.
+	// ... but the checkpoint must not still carry a checksum_watermark — both
+	// the suppression on dumps after the difference was recorded and the
+	// abort-path UPDATE keep the (single, REPLACE-overwritten) row blank.
 	var stale int
 	require.NoError(t, tt.DB.QueryRowContext(t.Context(), fmt.Sprintf(
 		"SELECT COUNT(*) FROM `%s` WHERE checksum_watermark <> ''", checkpointTable)).Scan(&stale))

@@ -4,9 +4,10 @@
 // (for migrate/move) the checksum got to, plus the change-feed position, so an
 // interrupted run can resume instead of starting over.
 //
-// The table is append-only (one row per periodic dump, newest by id); resume
-// reads the latest row. Three Modes cover the runners' differing lifecycles —
-// see Mode. The package owns the table mechanics; callers own the
+// Single-owner tables (Owned, Persistent) keep one row, overwritten in place
+// each dump; the multi-table Shared table appends one row per statement. Either
+// way resume reads the newest row. Three Modes cover the runners' differing
+// lifecycles — see Mode. The package owns the table mechanics; callers own the
 // interpretation of the watermarks and the resume policy (staleness max-age,
 // statement match, table-name collision, and — for datasync — using Exists as
 // the resume signal) via the returned Record, Age, and Exists.
@@ -66,19 +67,20 @@ type Mode int
 const (
 	// Owned is a per-run table this run owns outright: Create DROPs and
 	// recreates it (so it always matches this version's schema and carries no
-	// stale rows), Drop drops it, and ReadLatest reads the newest row. Used by
-	// single-table migrations and by move.
+	// stale rows), Write keeps a single row (overwrites in place), and Drop
+	// drops it. Used by single-table migrations and by move.
 	Owned Mode = iota
 	// Shared is one table per schema shared by concurrently-running multi-table
 	// migrations: Create is idempotent and clears only this statement's rows,
-	// Drop deletes only this statement's rows, and ReadLatest is scoped to this
+	// Write appends (one migration's row must not overwrite another's), Drop
+	// deletes only this statement's rows, and ReadLatest is scoped to this
 	// statement — so concurrent migrations never clobber or mask each other.
 	Shared
 	// Persistent is a long-lived table whose existence outlives any single run,
-	// used by datasync: Create is idempotent and never clears, and Drop drops
-	// it. The caller decides fresh-vs-resume from Exists and ReadLatest (not by
-	// recreating the table), so Create must never destroy the rows a resume
-	// needs. ReadLatest reads the newest row.
+	// used by datasync: Create is idempotent and never clears, Write keeps a
+	// single row, and Drop drops it. The caller decides fresh-vs-resume from
+	// Exists and ReadLatest (not by recreating the table), so Create must never
+	// destroy the rows a resume needs.
 	Persistent
 )
 
@@ -104,7 +106,8 @@ func (t *Table) SchemaName() string { return t.schema }
 func (t *Table) Name() string { return t.name }
 
 // tableDDL is the column list for CREATE TABLE. The schema is the union of what
-// migrate and move need; move leaves statement and original_table_name empty.
+// the runners need; move and datasync leave statement and original_table_name
+// empty. id is the primary key single-owner modes REPLACE on to keep one row.
 const tableDDL = `(
 	id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 	copier_watermark TEXT,
@@ -164,10 +167,27 @@ func (t *Table) Drop(ctx context.Context, statement string) error {
 	return dbconn.Exec(ctx, t.db, "DROP TABLE IF EXISTS %n.%n", t.schema, t.name)
 }
 
-// Write appends a checkpoint row. id and created_at are assigned by the server.
+// Write records a checkpoint row.
+//
+// Owned and Persistent keep a single row, overwriting it in place (REPLACE on
+// the fixed primary key id=1): these tables have one logical owner, so there is
+// no value in accumulating history, and REPLACE is one atomic statement — a
+// crash mid-write leaves either the old row or the new one, never none. Shared
+// appends instead, because one multi-table migration's row must not overwrite a
+// concurrent migration's; those rows are bounded by the migration's runtime and
+// ReadLatest picks the newest per statement.
+//
+// created_at is (re)assigned by the server on each write.
 func (t *Table) Write(ctx context.Context, rec Record) error {
+	if t.mode == Shared {
+		return dbconn.Exec(ctx, t.db,
+			"INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (%?, %?, %?, %?, %?)",
+			t.schema, t.name,
+			rec.CopierWatermark, rec.ChecksumWatermark, rec.Position, rec.Statement, rec.OriginalTableName,
+		)
+	}
 	return dbconn.Exec(ctx, t.db,
-		"INSERT INTO %n.%n (copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (%?, %?, %?, %?, %?)",
+		"REPLACE INTO %n.%n (id, copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (1, %?, %?, %?, %?, %?)",
 		t.schema, t.name,
 		rec.CopierWatermark, rec.ChecksumWatermark, rec.Position, rec.Statement, rec.OriginalTableName,
 	)
