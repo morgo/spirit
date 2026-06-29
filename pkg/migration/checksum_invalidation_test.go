@@ -76,7 +76,7 @@ func setupRunnerForChecksumTest(t *testing.T, tableName string) *Runner {
 	require.NoError(t, r.changes[0].dropOldTable(t.Context()))
 	require.NoError(t, r.changes[0].createNewTable(t.Context()))
 	require.NoError(t, r.changes[0].alterNewTable(t.Context()))
-	require.NoError(t, r.createCheckpointTable(t.Context()))
+	require.NoError(t, r.checkpointTbl().Create(t.Context()))
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
 
 	require.True(t, checkpointTableExists(t, r),

@@ -459,7 +459,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	// drop the checkpoint table
 	if r.checkpointTable != nil {
-		if err := r.dropCheckpoint(ctx); err != nil {
+		if err := r.checkpointTbl().Drop(ctx); err != nil {
 			return err
 		}
 	}
@@ -801,7 +801,7 @@ func (r *Runner) newMigration(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.createCheckpointTable(ctx); err != nil {
+	if err := r.checkpointTbl().Create(ctx); err != nil {
 		return err
 	}
 	if r.migration.DeferCutOver {
@@ -832,7 +832,6 @@ func (r *Runner) newMigration(ctx context.Context) error {
 	if err := r.setupCopierCheckerAndReplClient(ctx); err != nil {
 		return err
 	}
-
 	// Start the binary log feed now
 	if err := r.replClient.Start(ctx); err != nil {
 		return err
@@ -1072,34 +1071,15 @@ func (r *Runner) fatalError() bool {
 		// fatalError fires during early setup, before
 		// createCheckpointTable runs — skip the drop in that case.
 		if r.checkpointTable != nil && r.db != nil {
-			if err := r.dropCheckpoint(context.Background()); err != nil {
+			if err := r.checkpointTbl().Drop(context.Background()); err != nil {
 				r.logger.Error("could not remove checkpoint",
 					"error", err,
 				)
 			}
 		}
-		// cancelFunc can also be nil during early setup or in test paths
-		// that bypass Run; nil-check before calling.
-		if r.cancelFunc != nil {
-			r.cancelFunc()
-		}
+		r.Cancel()
 	})
 	return true
-}
-
-func (r *Runner) dropCheckpoint(ctx context.Context) error {
-	// DROP TABLE IF EXISTS. Safe for the shared multi-table _spirit_checkpoint
-	// because only one multi-table migration runs per schema at a time (schema
-	// lock in Run). See pkg/checkpoint.
-	return r.checkpointTbl().Drop(ctx)
-}
-
-func (r *Runner) createCheckpointTable(ctx context.Context) error {
-	// DROP+CREATE (Transient). For single-table the name is table-derived and
-	// same-table concurrency is excluded by the metadata lock; for multi-table
-	// the schema lock guarantees this run is the sole owner of the shared
-	// _spirit_checkpoint, so dropping it is safe. See pkg/checkpoint.
-	return r.checkpointTbl().Create(ctx)
 }
 
 func (r *Runner) Progress() status.Progress {
@@ -1154,7 +1134,6 @@ func (r *Runner) Progress() status.Progress {
 			IsComplete: copyChunker.IsRead(),
 		})
 	}
-
 	return status.Progress{
 		CurrentState: r.status.Get(),
 		Summary:      summary,
@@ -1171,9 +1150,7 @@ func (r *Runner) Close() error {
 	// dumper) observe ctx.Done() and exit. This is normally already done
 	// by Run's deferred cancel, but Close() may be called via paths that
 	// don't run that defer; calling it here is idempotent and cheap.
-	if r.cancelFunc != nil {
-		r.cancelFunc()
-	}
+	r.Cancel()
 	// Wait for the status/checkpoint dumper goroutines to exit *before*
 	// tearing down the database connection, so a late DumpCheckpoint INSERT
 	// cannot land in the checkpoint table after the caller assumes Close()

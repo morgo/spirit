@@ -917,7 +917,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	// Delete checkpoint table from targets[0].
 	tgt0 := &r.targets[0]
-	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n.%n", tgt0.Config.DBName, checkpointTableName); err != nil {
+	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n", checkpointTableName); err != nil {
 		return err
 	}
 	r.logger.Info("Move operation complete.")
@@ -977,7 +977,7 @@ func (r *Runner) fatalError() bool {
 		// during early setup, before createCheckpointTable runs — skip the
 		// drop in that case.
 		if r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
-			if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n.%n", r.checkpointTable.SchemaName, r.checkpointTable.TableName); err != nil {
+			if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n", r.checkpointTable.TableName); err != nil {
 				r.logger.Error("could not remove checkpoint",
 					"error", err,
 				)
@@ -1350,8 +1350,7 @@ func (r *Runner) invalidateChecksumWatermark(ctx context.Context) error {
 		return nil
 	}
 	r.logger.Warn("continuous checksum found differences; clearing persisted checksum watermark so the next run re-verifies from the start of the checksum phase")
-	return dbconn.Exec(ctx, r.targets[0].DB, "UPDATE %n.%n SET checksum_watermark = %?",
-		r.checkpointTable.SchemaName,
+	return dbconn.Exec(ctx, r.targets[0].DB, "UPDATE %n SET checksum_watermark = %?",
 		r.checkpointTable.TableName,
 		"",
 	)
