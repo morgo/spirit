@@ -381,10 +381,8 @@ func TestCheckpointResumeDuringChecksum(t *testing.T) {
 	go func() {
 		c <- r.Run(ctx)
 	}()
-	for r.status.Get() < status.WaitingOnSentinelTable {
-		// Wait for the sentinel table.
-		time.Sleep(time.Millisecond)
-	}
+	// Wait for the migration to block on the sentinel table.
+	waitForStatus(t, r, status.WaitingOnSentinelTable)
 
 	require.NoError(t, r.checksum(t.Context()))       // run the checksum, the original Run is blocked on sentinel.
 	require.NoError(t, r.DumpCheckpoint(t.Context())) // dump a checkpoint with the watermark.
