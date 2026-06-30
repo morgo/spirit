@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/table"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -606,9 +607,10 @@ func TestRecopyPassDoesNotFireFirstCleanPass(t *testing.T) {
 	stop, _ := runUntil(t, c)
 
 	// Wait for pass 1 — the pass containing the recopy — to complete.
-	require.Eventually(t, func() bool {
-		return c.Stats().PassesCompleted >= 1
-	}, 2*time.Second, 5*time.Millisecond, "pass 1 did not complete in time; stats=%+v", c.Stats())
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		stats := c.Stats()
+		assert.GreaterOrEqualf(collect, stats.PassesCompleted, uint64(1), "pass 1 did not complete in time; stats=%+v", stats)
+	}, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, recopier.callCount(), "chunk should have been recopied in pass 1")
 
 	// Pass 1 contained a recopy, so it must not satisfy the
@@ -837,9 +839,10 @@ func TestMultiplePassesResetCounters(t *testing.T) {
 	stop, _ := runUntil(t, c)
 
 	// Wait for at least 2 passes
-	require.Eventually(t, func() bool {
-		return c.Stats().PassesCompleted >= 2
-	}, 3*time.Second, 10*time.Millisecond, "did not reach 2 passes in time; stats=%+v", c.Stats())
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		stats := c.Stats()
+		assert.GreaterOrEqualf(collect, stats.PassesCompleted, uint64(2), "did not reach 2 passes in time; stats=%+v", stats)
+	}, 3*time.Second, 10*time.Millisecond)
 	err := stop()
 	require.True(t, errors.Is(err, context.Canceled) || err == nil)
 
