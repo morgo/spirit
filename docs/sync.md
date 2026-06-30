@@ -167,7 +167,7 @@ Intended for testing/iterating.
 - Default value: `false`
 
 > **⚠️ Experimental.** See the full caveats and on-disk-format warning in the
-> [migrate `--gtid` documentation](migrate.md#gtid).
+> [migrate `--enable-experimental-gtid` documentation](migrate.md#enable-experimental-gtid).
 
 When set to `true`, the built-in MySQL binlog source switches from the default
 binlog **file + offset** coordinate to a MySQL **GTID set** coordinate. The

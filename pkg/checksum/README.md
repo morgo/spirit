@@ -31,12 +31,15 @@ There are also some known cases where a checksum failure is not a bug. This incl
 
 ## Implementations
 
-The checksum package contains two implementations:
+The checksum package contains three implementations:
 
 1. **SingleChecker** - Compares two tables on the same MySQL server (for schema changes, or 1:1 moves)
 2. **DistributedChecker** - Compares a source table against multiple distributed target databases (for sharded scenarios)
+3. **ContinuousChecker** - A lock-free, *eventually-consistent* verifier that runs indefinitely against a live system where the target lags the source by a small replication delay (used by `spirit sync`, and by `spirit migrate` while waiting on a deferred cutover)
 
-Both implementations use the same underlying checksum algorithm: **CRC32 with XOR aggregation**. This technique computes a checksum for each chunk of rows and can efficiently detect differences without comparing individual rows.
+`SingleChecker` and `DistributedChecker` take a brief table lock to establish a consistent `REPEATABLE READ` snapshot; `ContinuousChecker` deliberately does not (see [Continuous checksum](#continuous-checksum) below).
+
+All three use the same underlying checksum algorithm: **CRC32 with XOR aggregation**. This technique computes a checksum for each chunk of rows and can efficiently detect differences without comparing individual rows.
 
 ## Checksum Algorithm
 
@@ -58,3 +61,16 @@ The actual implementation includes additional handling:
 - **Type casting**: Applies `CAST` operations to convert columns to the target table's type for comparable string representations
 
 The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt-table-checksum** from Percona Toolkit, which established this as a reliable method for verifying data consistency in MySQL. This same approach has since been adopted by other database tools, including TiDB's data migration and verification utilities, demonstrating its effectiveness for distributed database scenarios.
+
+## Continuous checksum
+
+`ContinuousChecker` verifies a target that is still converging toward the source over a live replication feed, so a first-attempt mismatch is *expected* (the target simply hasn't caught up yet) rather than alarming. It runs in **passes**: each pass walks every chunk once and then drains a delayed-retry queue until empty. A mismatched chunk is re-read after a short delay and passes once the target's CRC matches a source CRC the checker has witnessed. A chunk whose source keeps changing (a "hot chunk") cycles to the back of the queue without blocking the pass.
+
+When a chunk's source CRC is stable across the retry window but the target still disagrees, that is a **stable divergence**. How the checker reacts is governed by two config fields:
+
+- **`Recopier`** — when set, a stable divergence is *repaired* by recopying that chunk from the source: `DELETE` the key range on the target, re-`SELECT` from the source, and re-apply through the same write path the change feed uses. `MySQLRecopier` is the production implementation used by `spirit sync`. Recopies are serialized and run under a cancellation-detached, time-bounded (10 minute) context, so a chunk is never left deleted-but-not-rewritten.
+- **`DivergenceIsFatal`** — selects the policy explicitly, rather than inferring it from `Recopier` presence:
+  - `true` (e.g. `spirit migrate`'s deferred-cutover check): replication keeps the new table in sync, so a confirmed stable divergence is a real bug. `Run` returns `ErrPermanentDivergence` and the caller aborts the cutover. No `Recopier` is configured.
+  - `false` (e.g. `spirit sync`): the target is expected to converge, so divergences self-heal via the `Recopier`. A `Recopier` is **required** in this mode; without one, divergence is treated as fatal.
+
+The two are decoupled: `DivergenceIsFatal: true` aborts even if a `Recopier` is supplied. Passes are paced by `MinPassInterval` so a small table is not re-checksummed back-to-back. `FirstCleanPass` exposes a channel that closes the first time a pass completes with every chunk read-verified equal and zero recopies — the signal that the target is known consistent.

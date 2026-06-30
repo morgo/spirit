@@ -17,6 +17,7 @@ This will copy all tables from the source database to the target database, verif
 - [create-sentinel](#create-sentinel)
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [enable-experimental-gtid](#enable-experimental-gtid)
+- [force](#force)
 - [source-dsn](#source-dsn)
 - [target-chunk-time](#target-chunk-time)
 - [target-dsn](#target-dsn)
@@ -65,17 +66,26 @@ Each continuous-checksum pass runs once with no internal retry (the loop itself 
 
 When set to `true`, target tables are created without secondary indexes. The indexes are restored from the source schema just before cutover. This can significantly speed up the initial data load for tables with many secondary indexes.
 
+### force
+
+- Type: Boolean
+- Default value: `false`
+
+When Move cannot resume from an existing checkpoint — for example the checkpoint was written by an incompatible Spirit version, or the target is in a state the resume path cannot validate — it fails rather than risk corrupting a partially-copied target (see [checkpoint-max-age](#checkpoint-max-age)).
+
+Passing `--force` changes that recovery behaviour: instead of failing, Move wipes the target tables and starts the copy fresh, re-running the post-setup safety checks against the cleaned target rather than bypassing them. Use it only when the target's current contents can safely be discarded.
+
 ### enable-experimental-gtid
 
 - Type: Boolean
 - Default value: `false`
 
 > **⚠️ Experimental.** See the full caveats and on-disk-format warning in the
-> [migrate `--enable-experimental-gtid` documentation](migrate.md#gtid).
+> [migrate `--enable-experimental-gtid` documentation](migrate.md#enable-experimental-gtid).
 
 When set to `true`, Move switches each source's replication change feed from
 the default binlog **file + offset** coordinate to a MySQL **GTID set**
-coordinate. Behaviour is identical to [`spirit migrate --enable-experimental-gtid`](migrate.md#gtid)
+coordinate. Behaviour is identical to [`spirit migrate --enable-experimental-gtid`](migrate.md#enable-experimental-gtid)
 in every other respect — the copier, applier, checksum, sentinel wait, cutover,
 and checkpoint contract are unchanged.
 
