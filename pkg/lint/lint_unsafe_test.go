@@ -164,52 +164,6 @@ func TestUnsafeLinter_AlterTableDropForeignKey(t *testing.T) {
 	require.Empty(t, violations)
 }
 
-// DISABLED: This test is disabled because the MODIFY COLUMN warning functionality
-// has been commented out in UnsafeLinter (lint_unsafe.go lines 101-117).
-// The linter no longer warns about MODIFY COLUMN operations.
-// To re-enable this test, uncomment the MODIFY COLUMN warning code in UnsafeLinter.
-/*
-func TestUnsafeLinter_AlterTableModifyColumn(t *testing.T) {
-	sql := `ALTER TABLE users MODIFY COLUMN name VARCHAR(500)`
-	stmts, err := statement.New(sql)
-	require.NoError(t, err)
-
-	linter := &UnsafeLinter{}
-	violations := linter.Lint(nil, stmts)
-
-	// MODIFY COLUMN is considered safe (lossy changes detected at runtime)
-	require.Len(t, violations, 1)
-	require.Equal(t, "unsafe", violations[0].Linter.Name())
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "Changing column type could lead to data loss by truncation")
-	require.Equal(t, "users", violations[0].Location.Table)
-	require.Equal(t, "name", *violations[0].Location.Column)
-}
-*/
-
-// DISABLED: This test is disabled because the MODIFY/CHANGE COLUMN warning functionality
-// has been commented out in UnsafeLinter (lint_unsafe.go lines 101-117).
-// The linter no longer warns about CHANGE COLUMN operations.
-// To re-enable this test, uncomment the MODIFY/CHANGE COLUMN warning code in UnsafeLinter.
-/*
-func TestUnsafeLinter_AlterTableChangeColumn(t *testing.T) {
-	sql := `ALTER TABLE users CHANGE COLUMN name full_name VARCHAR(255)`
-	stmts, err := statement.New(sql)
-	require.NoError(t, err)
-
-	linter := &UnsafeLinter{}
-	violations := linter.Lint(nil, stmts)
-
-	// CHANGE COLUMN is considered safe (lossy changes detected at runtime)
-	require.Len(t, violations, 1)
-	require.Equal(t, "unsafe", violations[0].Linter.Name())
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "Changing column type could lead to data loss by truncation")
-	require.Equal(t, "users", violations[0].Location.Table)
-	require.Equal(t, "name", *violations[0].Location.Column)
-}
-*/
-
 func TestUnsafeLinter_AlterTableRenameColumn(t *testing.T) {
 	sql := `ALTER TABLE users RENAME COLUMN name TO full_name`
 	stmts, err := statement.New(sql)

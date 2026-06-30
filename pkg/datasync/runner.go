@@ -15,6 +15,7 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
@@ -763,7 +764,7 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 	for _, t := range r.sourceTables {
 		var dummy int
 		err := r.target.DB.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT 1 FROM `%s`.`%s` LIMIT 1", r.target.Config.DBName, t.TableName)).Scan(&dummy)
+			fmt.Sprintf("SELECT 1 FROM %s.%s LIMIT 1", sqlescape.EscapeIdentifier(r.target.Config.DBName), sqlescape.EscapeIdentifier(t.TableName))).Scan(&dummy)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue // table exists but is empty
 		}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -75,7 +76,7 @@ func validateExistingTargetTable(ctx context.Context, target applier.Target, tab
 	// Check 1: Table must have zero rows
 	// Use LIMIT 1 instead of COUNT(*) for performance - we only need to know if there's at least one row
 	var hasRows int
-	err := target.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM `%s`.`%s` LIMIT 1", target.Config.DBName, tableName)).Scan(&hasRows)
+	err := target.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s.%s LIMIT 1", sqlescape.EscapeIdentifier(target.Config.DBName), sqlescape.EscapeIdentifier(tableName))).Scan(&hasRows)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("failed to check if table '%s' on target %d is empty: %w", tableName, targetIndex, err)
 	}

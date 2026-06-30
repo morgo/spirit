@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -38,7 +39,7 @@ func NewTableLock(ctx context.Context, db *sql.DB, tables []*table.TableInfo, co
 		if idx > 0 {
 			builder.WriteString(", ")
 		}
-		builder.WriteString("`" + tbl.TableName + "` WRITE")
+		builder.WriteString(sqlescape.EscapeIdentifier(tbl.TableName) + " WRITE")
 	}
 	lockStmt := builder.String()
 

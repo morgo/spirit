@@ -1591,5 +1591,5 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 		alterClauses = append(alterClauses, sb.String())
 	}
 	// Combine all ADD INDEX clauses into a single ALTER TABLE statement
-	return fmt.Sprintf("ALTER TABLE `%s` %s", tableName, strings.Join(alterClauses, ", ")), nil
+	return fmt.Sprintf("ALTER TABLE %s %s", sqlescape.EscapeIdentifier(tableName), strings.Join(alterClauses, ", ")), nil
 }

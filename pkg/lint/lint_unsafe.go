@@ -2,8 +2,8 @@ package lint
 
 import (
 	"fmt"
-	"strings"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 )
@@ -102,21 +102,6 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 					//
 					// I do not believe that PlanetScale has this detection, so we may decide to
 					// implement it here in future.
-					/*
-						v := Violation{
-							Linter:   l,
-							Location: &Location{Table: change.Table},
-							Message:  "Changing column type could lead to data loss by truncation",
-							Severity: SeverityWarning,
-						}
-						if spec.OldColumnName != nil {
-							v.Location.Column = &spec.OldColumnName.Name.O
-						} else if len(spec.NewColumns) > 0 {
-							v.Location.Column = &spec.NewColumns[0].Name.Name.O
-						}
-						violations = append(violations, v)
-
-					*/
 				case ast.AlterTableDropForeignKey, ast.AlterTableRenameColumn,
 					ast.AlterTableRenameTable, ast.AlterTableDropIndex, ast.AlterTableDropCheck,
 					ast.AlterTableOption:
@@ -136,7 +121,7 @@ func unsafeDropColumnViolation(l *UnsafeLinter, tableName string, spec *ast.Alte
 	if spec.OldColumnName != nil {
 		columnName := spec.OldColumnName.Name.O
 		location.Column = &columnName
-		message += " " + quoteUnsafeIdentifier(columnName)
+		message += " " + sqlescape.EscapeIdentifier(columnName)
 	}
 
 	return Violation{
@@ -145,8 +130,4 @@ func unsafeDropColumnViolation(l *UnsafeLinter, tableName string, spec *ast.Alte
 		Message:  message,
 		Severity: SeverityError,
 	}
-}
-
-func quoteUnsafeIdentifier(identifier string) string {
-	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }

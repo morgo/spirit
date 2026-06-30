@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
 // LazyFindP90 finds the second to last value in a slice.
@@ -92,7 +94,7 @@ func removeZerofill(s string) string {
 func QuoteColumns(cols []string) string {
 	q := make([]string, len(cols))
 	for i, col := range cols {
-		q[i] = "`" + col + "`"
+		q[i] = sqlescape.EscapeIdentifier(col)
 	}
 	return strings.Join(q, ", ")
 }
@@ -105,14 +107,14 @@ func QuoteColumns(cols []string) string {
 // vals[i].String() is inlined directly into the SQL fragment because
 // Datum.String() returns a pre-escaped self-contained SQL literal
 // (see its doc comment for the contract). Don't change the format
-// strings below to add quoting or escaping — the values already carry
-// it.
+// strings below to add quoting or escaping for the values — they already
+// carry it. Column identifiers are escaped via sqlescape.EscapeIdentifier.
 func expandRowConstructorComparison(cols []string, operator Operator, vals []Datum) string {
 	if len(cols) != len(vals) {
 		panic("cols should be same size as values")
 	}
 	if len(cols) == 1 {
-		return fmt.Sprintf("`%s` %s %s", cols[0], operator, vals[0].String())
+		return fmt.Sprintf("%s %s %s", sqlescape.EscapeIdentifier(cols[0]), operator, vals[0].String())
 	}
 	// Unless we are in the "final" position
 	// we need to use a different intermediate operator
@@ -128,8 +130,8 @@ func expandRowConstructorComparison(cols []string, operator Operator, vals []Dat
 	buffer := []string{}
 	for i, col := range cols {
 		if i == 0 {
-			conds = append(conds, fmt.Sprintf("(`%s` %s %s)", col, intermediateOperator, vals[i].String()))
-			buffer = append(buffer, fmt.Sprintf("`%s` %s %s", col, "=", vals[i].String()))
+			conds = append(conds, fmt.Sprintf("(%s %s %s)", sqlescape.EscapeIdentifier(col), intermediateOperator, vals[i].String()))
+			buffer = append(buffer, fmt.Sprintf("%s %s %s", sqlescape.EscapeIdentifier(col), "=", vals[i].String()))
 			continue
 		}
 		// If we are in the final position we can
@@ -138,8 +140,8 @@ func expandRowConstructorComparison(cols []string, operator Operator, vals []Dat
 		if i == len(cols)-1 {
 			intermediateOperator = operator
 		}
-		conds = append(conds, fmt.Sprintf("(%s AND `%s` %s %s)", strings.Join(buffer, " AND "), col, intermediateOperator, vals[i].String()))
-		buffer = append(buffer, fmt.Sprintf("`%s` %s %s", col, "=", vals[i].String()))
+		conds = append(conds, fmt.Sprintf("(%s AND %s %s %s)", strings.Join(buffer, " AND "), sqlescape.EscapeIdentifier(col), intermediateOperator, vals[i].String()))
+		buffer = append(buffer, fmt.Sprintf("%s %s %s", sqlescape.EscapeIdentifier(col), "=", vals[i].String()))
 	}
 	return "(" + strings.Join(conds, "\n OR ") + ")"
 }

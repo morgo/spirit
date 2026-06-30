@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/pingcap/tidb/pkg/parser/format"
 )
@@ -75,7 +76,7 @@ func DeclarativeToImperative(current, desired []table.TableSchema, opts *DiffOpt
 	slices.Sort(dropNames)
 
 	for _, name := range dropNames {
-		stmts, err := New(fmt.Sprintf("DROP TABLE `%s`", name))
+		stmts, err := New(fmt.Sprintf("DROP TABLE %s", sqlescape.EscapeIdentifier(name)))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse DROP TABLE for %q: %w", name, err)
 		}
