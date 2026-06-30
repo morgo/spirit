@@ -9,9 +9,20 @@ import (
 // GradualThrottler): tests that exercise the autoscaler's continuous signal
 // use their own GradualThrottler stub instead.
 type Mock struct {
+	// blockDuration is how long BlockWait blocks for. The zero value means
+	// the default of 1s, so &Mock{} keeps its historical behaviour; tests can
+	// set it explicitly to keep fast or to make cancellation unambiguous.
+	blockDuration time.Duration
 }
 
 var _ Throttler = &Mock{}
+
+func (t *Mock) blockFor() time.Duration {
+	if t.blockDuration == 0 {
+		return time.Second
+	}
+	return t.blockDuration
+}
 
 func (t *Mock) Open(_ context.Context) error {
 	return nil
@@ -27,7 +38,7 @@ func (t *Mock) IsThrottled() bool {
 
 func (t *Mock) BlockWait(ctx context.Context) {
 	// Use a timer with context cancellation for interruptible sleep
-	timer := time.NewTimer(time.Second)
+	timer := time.NewTimer(t.blockFor())
 	defer timer.Stop()
 
 	select {
