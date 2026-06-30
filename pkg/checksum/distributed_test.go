@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"testing"
@@ -15,6 +16,72 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
+
+type noopDistributedApplier struct{}
+
+func (a *noopDistributedApplier) Start(context.Context) error { return nil }
+
+func (a *noopDistributedApplier) Apply(context.Context, *table.Chunk, [][]any, applier.ApplyCallback) error {
+	return nil
+}
+
+func (a *noopDistributedApplier) DeleteKeys(context.Context, *table.TableInfo, *table.TableInfo, [][]any, []*dbconn.TableLock) (int64, error) {
+	return 0, nil
+}
+
+func (a *noopDistributedApplier) UpsertRows(context.Context, *table.ColumnMapping, []applier.LogicalRow, []*dbconn.TableLock) (int64, error) {
+	return 0, nil
+}
+
+func (a *noopDistributedApplier) Wait(context.Context) error { return nil }
+func (a *noopDistributedApplier) Stop() error                { return nil }
+func (a *noopDistributedApplier) GetTargets() []applier.Target {
+	return nil
+}
+
+type noopChangeSource struct{}
+
+func (s *noopChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error {
+	return nil
+}
+func (s *noopChangeSource) Start(context.Context) error                     { return nil }
+func (s *noopChangeSource) StartFromPosition(context.Context, string) error { return nil }
+func (s *noopChangeSource) Position() string                                { return "" }
+func (s *noopChangeSource) Flush(context.Context) error                     { return nil }
+func (s *noopChangeSource) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error {
+	return nil
+}
+func (s *noopChangeSource) BlockWait(context.Context) error { return nil }
+func (s *noopChangeSource) GetDeltaLen() int                { return 0 }
+func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error {
+	return nil
+}
+func (s *noopChangeSource) StartPeriodicFlush(context.Context, time.Duration) {}
+func (s *noopChangeSource) StopPeriodicFlush()                                {}
+func (s *noopChangeSource) AllChangesFlushed() bool                           { return true }
+func (s *noopChangeSource) Close()                                            {}
+
+func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	config := NewCheckerDefaultConfig()
+	config.Applier = &noopDistributedApplier{}
+	config.YieldTimeout = 137 * time.Millisecond
+
+	checker, err := NewChecker(
+		[]*sql.DB{db},
+		table.NewMockChunker("yield_config", 1),
+		[]change.Source{&noopChangeSource{}},
+		config,
+	)
+	require.NoError(t, err)
+
+	distributedChecker, ok := checker.(*DistributedChecker)
+	require.True(t, ok)
+	require.Equal(t, config.YieldTimeout, distributedChecker.yieldTimeout)
+}
 
 func TestFixCorruptWithApplier(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
