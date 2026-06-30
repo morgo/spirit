@@ -534,11 +534,15 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	closeErr := c.trxPool.Close()
 	// Distinguish between the yield timeout expiring and the parent context
 	// being canceled. If the parent context is still valid but the yield context
-	// expired and the chunker hasn't finished, this was a yield — not a failure.
+	// expired, this was a yield — not a failure. We resume from the watermark
+	// when either the chunker hasn't finished, or an in-flight query/rollback
+	// was cancelled by the deadline (err1/closeErr != nil): the latter happens
+	// when the timeout fires on the final chunk after all chunks have been
+	// dispatched (IsRead() is already true), so !IsRead() alone would miss it.
 	// This check must come before inspecting closeErr or err1, because the yield
 	// timeout can cause both transaction rollback errors and context errors from
 	// in-flight queries.
-	if ctx.Err() == nil && yieldCtx.Err() != nil && !c.chunker.IsRead() {
+	if ctx.Err() == nil && yieldCtx.Err() != nil && (!c.chunker.IsRead() || err1 != nil || closeErr != nil) {
 		return ErrYieldTimeout
 	}
 	if closeErr != nil {

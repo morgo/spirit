@@ -642,10 +642,15 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	}
 	// Distinguish between the yield timeout expiring and the parent context
 	// being canceled. If the parent context is still valid but the yield context
-	// expired and the chunker hasn't finished, this was a yield, not a failure.
-	// This check must come before inspecting err1, because the yield timeout can
-	// cause context errors from in-flight queries.
-	if ctx.Err() == nil && yieldCtx.Err() != nil && !c.chunker.IsRead() {
+	// expired, this was a yield, not a failure. We resume from the watermark
+	// when either the chunker hasn't finished, or an in-flight chunk query was
+	// cancelled by the deadline (err1 != nil): the latter happens when the
+	// timeout fires on the final chunk after all chunks have been dispatched
+	// (IsRead() is already true), so !IsRead() alone would miss it and surface
+	// the deadline as a spurious failure. This check must come before inspecting
+	// err1, because the yield timeout can cause context errors from in-flight
+	// queries.
+	if ctx.Err() == nil && yieldCtx.Err() != nil && (!c.chunker.IsRead() || err1 != nil) {
 		return ErrYieldTimeout
 	}
 	if err1 != nil {
