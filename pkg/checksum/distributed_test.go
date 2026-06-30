@@ -83,6 +83,82 @@ func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
 	require.Equal(t, config.YieldTimeout, distributedChecker.yieldTimeout)
 }
 
+// TestDistributedCheckerYieldTimeout drives the distributed checker through
+// real yield/resume cycles. With a short YieldTimeout and a table wide enough
+// that one pass exceeds the timeout window, runChecksumWithYield must release
+// its source/target transaction pools, resume from the low watermark, and
+// still pass — and yieldsPerformed records that at least one yield actually
+// happened. This is the distributed analog of TestYieldTimeout (single
+// checker); TestDistributedCheckerHonorsYieldTimeoutConfig above only checks
+// the config plumbing, not the runtime behavior.
+func TestDistributedCheckerYieldTimeout(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS yield_dist_t1")
+	testutils.RunSQL(t, "CREATE TABLE yield_dist_t1 (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(255), c VARCHAR(255), PRIMARY KEY (a))")
+	// Wide rows so a single checksum pass takes longer than the yield window
+	// and forces at least one yield/resume cycle. Same technique as
+	// TestYieldTimeout (single checker); the row count is sized so the pass
+	// still overruns the window on CI hardware faster than a dev laptop,
+	// keeping the yield deterministic rather than flaky.
+	testutils.RunSQL(t, "INSERT INTO yield_dist_t1 (b, c) SELECT REPEAT('x', 200), REPEAT('y', 200) FROM information_schema.columns a, information_schema.columns b LIMIT 150000")
+
+	// The target holds an identical copy, so the checksum passes despite
+	// yielding repeatedly.
+	testutils.RunSQL(t, "CREATE TABLE "+newDBName+".yield_dist_t1 LIKE yield_dist_t1")
+	testutils.RunSQL(t, "INSERT INTO "+newDBName+".yield_dist_t1 SELECT * FROM yield_dist_t1")
+
+	destCfg := cfg.Clone()
+	destCfg.DBName = newDBName
+
+	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src)
+	dest, err := dbconn.New(destCfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dest)
+
+	t1 := table.NewTableInfo(src, "test", "yield_dist_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(dest, newDBName, "yield_dist_t1")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	target := applier.Target{DB: dest, KeyRange: "0", Config: destCfg}
+	app, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	feed := change.NewBinlogClient(src, cfg.Addr, cfg.User, cfg.Passwd, app, change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.Applier = app
+	// Concurrency 1 so the first chunk completes in order and sets the low
+	// watermark; a short timeout so a pass yields mid-table before the table is
+	// fully read. The lock-acquisition phase runs under the parent context, not
+	// the yield context, so this short window only bounds the chunk loop — the
+	// first 1000-row chunk still completes well within it. See TestYieldTimeout.
+	config.Concurrency = 1
+	config.YieldTimeout = 50 * time.Millisecond
+
+	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+
+	// The checksum must still pass — it resumes from the watermark after each yield.
+	require.NoError(t, checker.Run(t.Context()))
+
+	distributedChecker, ok := checker.(*DistributedChecker)
+	require.True(t, ok)
+	require.Positive(t, distributedChecker.yieldsPerformed.Load(), "expected at least one yield to occur")
+	t.Logf("yields performed: %d", distributedChecker.yieldsPerformed.Load())
+}
+
 func TestFixCorruptWithApplier(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
