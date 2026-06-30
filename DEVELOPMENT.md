@@ -15,8 +15,8 @@ If the `MYSQL_DSN` is not specified, it currently defaults to `spirit:spirit@tcp
 ### Running tests with docker on specific MySQL version
 ```bash
 cd compose/
-docker compose down --volumes && docker compose up -f compose.yml -f 8.0.28.yml 
-docker compose up mysql test --abort-on-container-exit
+docker compose -f compose.yml -f 8.0.28.yml down --volumes
+docker compose -f compose.yml -f 8.0.28.yml up mysql test --abort-on-container-exit
 ```
 
 ## Running linter
@@ -52,4 +52,4 @@ make setup-hooks
 ./scripts/setup-git-hooks.sh
 ```
 
-This configures a pre-push hook that runs golangci-lint in Docker, catching errors before they reach the remote repository. Commits remain fast and unblocked. See `.githooks/README.md` for more details.
+This configures a pre-push hook that runs golangci-lint in Docker, catching errors before they reach the remote repository. Commits remain fast and unblocked.

@@ -166,7 +166,7 @@ pkg/
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
   statement/  → SQL parsing via TiDB parser (ALTER, CREATE, DROP, RENAME)
-  lint/       → Static analysis framework for schemas and DDL (15 built-in linters)
+  lint/       → Static analysis framework for schemas and DDL (17 built-in linters)
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
@@ -227,7 +227,7 @@ Three chunker implementations:
 Uses the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) for SQL parsing. If a DDL cannot be parsed by TiDB, Spirit cannot execute it. `parse_create_table.go` provides structured `CREATE TABLE` parsing.
 
 ### `pkg/lint`
-15 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
+17 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
 
 ### `pkg/dbconn`
 Handles connection management including:
@@ -260,13 +260,13 @@ How the recently-unified pieces handle per-tool differences, as patterns to copy
 
 - **`sentinel.Wait`** takes the two genuinely runner-specific steps as callbacks (`RunChecksum`, `InvalidateWatermark`) — e.g. migration scopes its watermark `UPDATE` by `statement` (its checkpoint table is shared across multi-table migrations) while move blanks the whole per-move table. The poll/timeout/continuous-checksum-lifecycle orchestration is shared; only the divergent bits are injected.
 - **`status.WatchTask`** is consumed via a small interface (`status.Task`); each runner keeps a `var _ status.Task = (*Runner)(nil)` assertion so a signature drift fails the build. A checkpoint-write failure is **fatal** here (calls `Cancel()`); don't reintroduce a loop that swallows it.
-- **`checksum.ContinuousChecker`** is configured per-tool: migration runs it with **no `Recopier`** (a confirmed divergence must *abort* the cutover via `ErrPermanentDivergence`), datasync runs it **with** a `MySQLRecopier` (self-heal). Both pace passes with `MinPassInterval`.
+- **`checksum.ContinuousChecker`** is configured per-tool, and whether a confirmed stable divergence *aborts* or *self-heals* is an **explicit `ContinuousCheckerConfig.DivergenceIsFatal` policy** (block/spirit#994) — it is no longer *inferred* from `Recopier` presence. **migration**: `DivergenceIsFatal: true` with **no `Recopier`** — replication keeps `_new` in sync, so a confirmed divergence is a real bug and `Run` returns `checksum.ErrPermanentDivergence` to abort the cutover. **datasync**: `DivergenceIsFatal: false` plus a `MySQLRecopier` — it verifies a still-converging target, so divergences are expected and self-heal by recopying the chunk from source. When `DivergenceIsFatal` is false a `Recopier` is mandatory (without one, divergence is treated as fatal); the two knobs are decoupled, so `DivergenceIsFatal: true` aborts **even if** a `Recopier` is supplied (`TestDivergenceIsFatalAbortsDespiteRecopier`). Both pace passes with `MinPassInterval` (`checksum.ContinuousMinPassInterval`).
 - **`pkg/sentinel`** takes the schema from the connection (`DATABASE()` / unqualified DDL), not a passed-in schema name, so it works under Vitess. Prefer this pattern for new helpers — point the `*sql.DB` at the right schema rather than threading a schema string. `pkg/checkpoint` follows it too.
 - **`pkg/checkpoint`** owns the one checkpoint-table schema and its create/drop/exists/write/read, keyed on the connection's selected schema (`DATABASE()` / unqualified, like sentinel). `Write` keeps a **single row** (`REPLACE` on `id=1` — atomic, so a crash never leaves no checkpoint, and bounded). Two `Mode`s differ only in `Create`: `Transient` (DROP+CREATE — a checkpoint for one finite run: single-table & atomic multi-table migration, move) vs `Persistent` (CREATE IF NOT EXISTS, never cleared — a continuous run: datasync, whose existence is its resume signal). Resume *policy* stays per-runner (statement match, collision, max-age, multi-source positions, datasync's three-state `Exists` routing); the package interprets no watermarks. `checkpoint.IsIncompatible` tells an unreadable cross-version checkpoint apart from a transient read error, so recovery never fires on a blip — migration falls back to a fresh run; datasync recovers under `--force` (drops the target DB).
 
 ### Not yet unified (live drift — touch with care)
 
-- **move's continuous checksum** still uses the distributed/sharded `checksum.Checker` (it is multi-source / possibly multi-target); `ContinuousChecker` is single-source/single-target.
+- **move's continuous checksum** still uses the distributed/sharded `checksum.Checker` (it is multi-source / possibly multi-target); `ContinuousChecker` is single-source/single-target. The explicit `DivergenceIsFatal` policy above was introduced partly to keep this future conversion clean: move is replication-backed like migration, so it would set `DivergenceIsFatal: true`. The blocker is multi-source/multi-target support in `ContinuousChecker`, not the abort policy.
 - **`fatalError` / `Close` teardown** are similar but not identical between the three — keep the run-all-steps + `errors.Join` teardown idiom and the `>= CutOver` no-op guard in `fatalError` consistent when you touch them.
 
 When you add a checkpoint field, add it to `pkg/checkpoint`'s schema — it is shared by all three. When you add a teardown step, a new lifecycle phase, or a safety gate, grep all three `runner.go` files and decide explicitly: port, or extract.
@@ -293,7 +293,7 @@ Key principles:
 
 ### Adding a new linter
 1. Create `pkg/lint/lint_<name>.go` implementing the `Linter` interface
-2. Register it in an `init()` function using `RegisterLinter()`
+2. Register it in an `init()` function using `Register()` (defined in `registry.go`)
 3. Create `pkg/lint/lint_<name>_test.go` with comprehensive test cases
 4. Follow the pattern of existing linters (e.g., `lint_has_fk.go`)
 

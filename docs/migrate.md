@@ -25,6 +25,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [lint](#lint)
 - [lint-only](#lint-only)
 - [lock-wait-timeout](#lock-wait-timeout)
+- [max-commit-latency](#max-commit-latency)
 - [password](#password)
 - [replica-dsn](#replica-dsn)
   - [Replica TLS Behavior](#replica-tls-behavior)
@@ -212,7 +213,7 @@ spirit migrate --enable-experimental-gtid \
 ### host
 
 - Type: String
-- Default value: `localhost:3306`
+- Default value: `127.0.0.1:3306`
 - Examples: `mydbhost`, `mydbhost:3307`
 
 The host (and optional port) to use when connecting to MySQL. If no port is provided, 3306 is used.
@@ -419,6 +420,15 @@ The signal comes from the Aurora throttlers — threads-running and commit-laten
 If a signal stops updating mid-migration (for example the monitoring connection is partitioned, or grants are revoked), the controller does not keep scaling on the frozen value: after ~15 seconds without a successful sample the signal reports a neutral utilization inside the hold band, freezing the write-thread count in place (a warning is logged). Scaling resumes automatically when sampling recovers.
 
 This flag only applies to the default buffered copier; with [unbuffered](#unbuffered) it is ignored (with a warning). Autoscaling is not yet supported by `spirit move`.
+
+### max-commit-latency
+
+- Type: Duration
+- Default value: `100ms`
+
+Throttles the copy when the server's average commit latency exceeds this threshold, protecting the primary workload's write latency from the migration's own write volume.
+
+It is currently **auto-enabled only on Aurora** (auto-detected); on other servers it has no effect. The default of `100ms` is intentionally a high upper bound, so it trims only the most extreme tail latencies rather than throttling under normal load. See [block/spirit#468](https://github.com/block/spirit/issues/468).
 
 ### tls-ca
 
