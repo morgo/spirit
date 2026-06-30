@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 )
@@ -255,7 +256,7 @@ func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
 	renameFragments := []string{}
 	for _, cfg := range c.config {
 		tablesToLock = append(tablesToLock, cfg.table, cfg.newTable)
-		oldQuotedName := fmt.Sprintf("`%s`", cfg.oldTableName)
+		oldQuotedName := sqlescape.EscapeIdentifier(cfg.oldTableName)
 		renameFragments = append(renameFragments,
 			fmt.Sprintf("%s TO %s", cfg.table.QuotedTableName, oldQuotedName),
 			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedTableName, cfg.table.QuotedTableName),
@@ -320,7 +321,7 @@ func (c *CutOver) partialRenameForTest(ctx context.Context) error {
 	// but only include the first rename (original -> _old)
 	for _, cfg := range c.config {
 		tablesToLock = append(tablesToLock, cfg.table, cfg.newTable)
-		oldQuotedName := fmt.Sprintf("`%s`", cfg.oldTableName)
+		oldQuotedName := sqlescape.EscapeIdentifier(cfg.oldTableName)
 		// Only add the first rename: original table -> _old
 		// Intentionally skip the second rename: _new -> original
 		renameFragments = append(renameFragments,

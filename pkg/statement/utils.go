@@ -9,22 +9,13 @@ import (
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
-// quoteIdent wraps a MySQL identifier in backticks, doubling any embedded
-// backtick to escape it per MySQL's identifier-quoting rules. The
-// previous open-coded form (a Go format string with %s inside backticks)
-// produced broken SQL when an identifier contained a backtick — caught
-// only at re-parse time as a confusing parse error rather than at
-// emission. See TestQuoteIdent for the doubled-backtick edge cases.
-func quoteIdent(s string) string {
-	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
-}
-
-// quoteIdentList applies quoteIdent to each element and joins them with
-// the given separator. Helps the common "column list" rendering pattern.
+// quoteIdentList quotes each identifier via sqlescape.EscapeIdentifier (the
+// single source of truth for MySQL identifier quoting) and joins them with the
+// given separator. Helps the common "column list" rendering pattern.
 func quoteIdentList(idents []string, sep string) string {
 	quoted := make([]string, len(idents))
 	for i, s := range idents {
-		quoted[i] = quoteIdent(s)
+		quoted[i] = sqlescape.EscapeIdentifier(s)
 	}
 	return strings.Join(quoted, sep)
 }

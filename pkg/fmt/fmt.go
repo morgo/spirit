@@ -72,7 +72,7 @@ func (cmd *FmtCmd) Run() error {
 	}
 
 	// Ensure the working database exists.
-	if _, err := bootstrapDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cmd.Database)); err != nil {
+	if _, err := bootstrapDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", sqlescape.EscapeIdentifier(cmd.Database))); err != nil {
 		return fmt.Errorf("failed to create database %s: %w", cmd.Database, err)
 	}
 

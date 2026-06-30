@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
@@ -363,10 +364,10 @@ func convertCreateIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, erro
 	default:
 		keyType = "INDEX"
 	}
-	alterStmt := fmt.Sprintf("ADD %s `%s` (%s)", keyType, ciStmt.IndexName, strings.Join(parts, ", "))
+	alterStmt := fmt.Sprintf("ADD %s %s (%s)", keyType, sqlescape.EscapeIdentifier(ciStmt.IndexName), strings.Join(parts, ", "))
 	// We hint in the statement that it's been rewritten
 	// and in the stmtNode we reparse from the alterStmt.
-	statement := fmt.Sprintf("/* rewritten from CREATE INDEX */ ALTER TABLE `%s` %s", ciStmt.Table.Name, alterStmt)
+	statement := fmt.Sprintf("/* rewritten from CREATE INDEX */ ALTER TABLE %s %s", sqlescape.EscapeIdentifier(ciStmt.Table.Name.String()), alterStmt)
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(statement, "", "")
 	if err != nil {
@@ -389,10 +390,10 @@ func convertDropIndexToAlterTable(stmt ast.StmtNode) (*AbstractStatement, error)
 	if !isDropIndexStmt {
 		return nil, errors.New("not a DROP INDEX statement")
 	}
-	alterStmt := fmt.Sprintf("DROP INDEX `%s`", diStmt.IndexName)
+	alterStmt := fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(diStmt.IndexName))
 	// We hint in the statement that it's been rewritten
 	// and in the stmtNode we reparse from the alterStmt.
-	statement := fmt.Sprintf("/* rewritten from DROP INDEX */ ALTER TABLE `%s` %s", diStmt.Table.Name, alterStmt)
+	statement := fmt.Sprintf("/* rewritten from DROP INDEX */ ALTER TABLE %s %s", sqlescape.EscapeIdentifier(diStmt.Table.Name.String()), alterStmt)
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(statement, "", "")
 	if err != nil {

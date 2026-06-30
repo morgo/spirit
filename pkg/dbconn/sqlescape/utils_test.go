@@ -463,6 +463,25 @@ func TestEscapeString(t *testing.T) {
 	}
 }
 
+func TestEscapeIdentifier(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"foo", "`foo`"},
+		{"", "``"},
+		{"foo`bar", "`foo``bar`"},
+		{"`", "````"}, // open + doubled backtick + close = 4 backticks
+		{"a`b`c", "`a``b``c`"},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, EscapeIdentifier(tc.in), "input=%q", tc.in)
+	}
+	// EscapeIdentifier must agree with the %n verb, which now delegates to it.
+	out, err := EscapeSQL("use %n", "foo`bar")
+	require.NoError(t, err)
+	require.Equal(t, "use "+EscapeIdentifier("foo`bar"), out)
+}
+
 func BenchmarkEscapeString(b *testing.B) {
 	for b.Loop() {
 		escapeSQL("select %?", "3") //nolint:errcheck

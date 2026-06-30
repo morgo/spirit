@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/lint"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/migration/check"
@@ -603,10 +603,7 @@ func (r *Runner) lint(ctx context.Context) error {
 }
 
 func (r *Runner) getCreateTable(ctx context.Context, db string, tbl string) (*statement.CreateTable, error) {
-	// Escape backticks in db and tbl names to be extra pedantic
-	db = strings.ReplaceAll(db, "`", "``")
-	tbl = strings.ReplaceAll(tbl, "`", "``")
-	sql := fmt.Sprintf("show create table `%s`.`%s`", db, tbl)
+	sql := fmt.Sprintf("show create table %s.%s", sqlescape.EscapeIdentifier(db), sqlescape.EscapeIdentifier(tbl))
 
 	row := r.db.QueryRowContext(ctx, sql)
 	var createTable string

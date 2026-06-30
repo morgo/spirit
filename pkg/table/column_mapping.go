@@ -2,6 +2,8 @@ package table
 
 import (
 	"strings"
+
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
 // ColumnMapping represents the column relationship between a source and target table,
@@ -91,8 +93,8 @@ func (m *ColumnMapping) Columns() (source, target string) {
 	srcQuoted := make([]string, len(m.sourceColumns))
 	tgtQuoted := make([]string, len(m.targetColumns))
 	for i := range m.sourceColumns {
-		srcQuoted[i] = "`" + m.sourceColumns[i] + "`"
-		tgtQuoted[i] = "`" + m.targetColumns[i] + "`"
+		srcQuoted[i] = sqlescape.EscapeIdentifier(m.sourceColumns[i])
+		tgtQuoted[i] = sqlescape.EscapeIdentifier(m.targetColumns[i])
 	}
 	return strings.Join(srcQuoted, ", "), strings.Join(tgtQuoted, ", ")
 }
