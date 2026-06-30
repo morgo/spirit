@@ -37,7 +37,8 @@ func TestBackoffDuration(t *testing.T) {
 	// Every retry — including the first (attempt 0) — must back off for a
 	// non-zero duration. The previous formula slept 0ns on attempt 0 and
 	// whenever the jitter rolled 0, so the retry-storm protection silently did
-	// not apply. 200 samples per attempt exercise the full jitter range.
+	// not apply. We take multiple samples per attempt to cover a variety of
+	// jitter values without sleeping.
 	for attempt := range 6 {
 		upper := time.Duration((attempt+1)*10) * time.Millisecond
 		for range 200 {
