@@ -1526,7 +1526,7 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 
 		// Add index name if present
 		if constraint.Name != "" {
-			fmt.Fprintf(&sb, " `%s`", constraint.Name)
+			fmt.Fprintf(&sb, " %s", sqlescape.EscapeIdentifier(constraint.Name))
 		}
 
 		// Add columns
@@ -1538,7 +1538,7 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 			switch {
 			case key.Column != nil:
 				// Regular column reference
-				fmt.Fprintf(&sb, "`%s`", key.Column.Name.String())
+				sb.WriteString(sqlescape.EscapeIdentifier(key.Column.Name.String()))
 				// Add length if specified
 				if key.Length > 0 {
 					fmt.Fprintf(&sb, "(%d)", key.Length)
