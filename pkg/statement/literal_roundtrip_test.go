@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/testutils"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
@@ -33,7 +34,7 @@ func openScratch(t *testing.T) *sql.DB {
 func showCreate(t *testing.T, db *sql.DB, table string) string {
 	t.Helper()
 	var name, createSQL string
-	err := db.QueryRowContext(t.Context(), "SHOW CREATE TABLE "+quoteIdent(table)).Scan(&name, &createSQL)
+	err := db.QueryRowContext(t.Context(), "SHOW CREATE TABLE "+sqlescape.EscapeIdentifier(table)).Scan(&name, &createSQL)
 	require.NoError(t, err)
 	return createSQL
 }
@@ -71,12 +72,12 @@ func applyAndConverge(t *testing.T, db *sql.DB, table, createSQL, targetSQL stri
 	t.Helper()
 
 	// Start from a clean slate.
-	_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+quoteIdent(table))
+	_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+sqlescape.EscapeIdentifier(table))
 	require.NoError(t, err)
 	_, err = db.ExecContext(t.Context(), createSQL)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+quoteIdent(table))
+		_, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+sqlescape.EscapeIdentifier(table))
 	})
 
 	source, err := ParseCreateTable(showCreate(t, db, table))

@@ -139,7 +139,7 @@ func (ct *CreateTable) Diff(target *CreateTable, opts *DiffOptions) ([]*Abstract
 // buildAlterStatement constructs and parses an ALTER TABLE statement from clauses.
 func (ct *CreateTable) buildAlterStatement(clauses []string) (*AbstractStatement, error) {
 	alter := strings.Join(clauses, ", ")
-	alterStmt := fmt.Sprintf("ALTER TABLE %s %s", quoteIdent(ct.TableName), alter)
+	alterStmt := fmt.Sprintf("ALTER TABLE %s %s", sqlescape.EscapeIdentifier(ct.TableName), alter)
 
 	p := parser.New()
 	stmtNodes, _, err := p.Parse(alterStmt, "", "")
@@ -186,7 +186,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 	var dropClauses []string
 	for _, sourceCol := range ct.Columns {
 		if _, exists := targetColumns[strings.ToLower(sourceCol.Name)]; !exists {
-			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", quoteIdent(sourceCol.Name)))
+			dropClauses = append(dropClauses, fmt.Sprintf("DROP COLUMN %s", sqlescape.EscapeIdentifier(sourceCol.Name)))
 		}
 	}
 	slices.Sort(dropClauses)
@@ -211,7 +211,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 			if prevColumn == "" {
 				clause += " FIRST"
 			} else if !isLastColumn {
-				clause += fmt.Sprintf(" AFTER %s", quoteIdent(prevColumn))
+				clause += fmt.Sprintf(" AFTER %s", sqlescape.EscapeIdentifier(prevColumn))
 			}
 			// If it's the last column, omit AFTER clause (implicit)
 			clauses = append(clauses, clause)
@@ -244,7 +244,7 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 					if prevColumn == "" {
 						clause += " FIRST"
 					} else {
-						clause += fmt.Sprintf(" AFTER %s", quoteIdent(prevColumn))
+						clause += fmt.Sprintf(" AFTER %s", sqlescape.EscapeIdentifier(prevColumn))
 					}
 				}
 				clauses = append(clauses, clause)
@@ -373,7 +373,7 @@ func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, target
 			// 2. Source has table-level PK and target has inline PK (table-level -> inline transition)
 			if sourcePKIndex == nil || (sourcePKIndex != nil && targetPKIndex == nil) {
 				pkColumn = targetCol.Name
-				addClause = fmt.Sprintf("ADD PRIMARY KEY (%s)", quoteIdent(pkColumn))
+				addClause = fmt.Sprintf("ADD PRIMARY KEY (%s)", sqlescape.EscapeIdentifier(pkColumn))
 				break
 			}
 		}
@@ -492,7 +492,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 					pkDropAdded = true
 				}
 			} else {
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
 			}
 		} else if !indexesEqual(sourceIdx, targetIdx) && !indexesEqualIgnoreVisibility(sourceIdx, targetIdx) {
 			// Index exists but changed (and not just visibility) - need to drop and re-add
@@ -510,11 +510,11 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 				// MySQL will actually apply.
 				optionOnlyChanged[sourceIdx.Name] = true
 				separateStatements = append(separateStatements,
-					[]string{fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name))},
+					[]string{fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name))},
 					[]string{formatAddIndex(targetIdx)},
 				)
 			default:
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", quoteIdent(sourceIdx.Name)))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP INDEX %s", sqlescape.EscapeIdentifier(sourceIdx.Name)))
 			}
 		}
 	}
@@ -559,9 +559,9 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 			// Only visibility changed
 			targetVisible := targetIdx.Invisible == nil || !*targetIdx.Invisible
 			if targetVisible {
-				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s VISIBLE", quoteIdent(targetIdx.Name)))
+				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s VISIBLE", sqlescape.EscapeIdentifier(targetIdx.Name)))
 			} else {
-				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s INVISIBLE", quoteIdent(targetIdx.Name)))
+				alterClauses = append(alterClauses, fmt.Sprintf("ALTER INDEX %s INVISIBLE", sqlescape.EscapeIdentifier(targetIdx.Name)))
 			}
 		}
 	}
@@ -629,9 +629,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		if !exists || !constraintsEqual(sourceConstr, targetConstr) {
 			switch sourceConstr.Type {
 			case "FOREIGN KEY":
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", quoteIdent(sourceConstr.Name)))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
 			case "CHECK":
-				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK %s", quoteIdent(sourceConstr.Name)))
+				dropClauses = append(dropClauses, fmt.Sprintf("DROP CHECK %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
 			}
 		}
 	}
@@ -1204,7 +1204,7 @@ func formatColumnDefinition(col *Column) string {
 		typeDef += " unsigned"
 	}
 
-	parts = append(parts, fmt.Sprintf("%s %s", quoteIdent(col.Name), typeDef))
+	parts = append(parts, fmt.Sprintf("%s %s", sqlescape.EscapeIdentifier(col.Name), typeDef))
 
 	// Charset and collation (skip for binary types and JSON)
 	isBinaryType := col.Type == "varbinary" || col.Type == "binary" ||
@@ -1314,7 +1314,7 @@ func formatAddIndex(idx *Index) string {
 		keyword = "ADD INDEX"
 	}
 	if idx.Type != "PRIMARY KEY" && idx.Name != "" {
-		keyword += " " + quoteIdent(idx.Name)
+		keyword += " " + sqlescape.EscapeIdentifier(idx.Name)
 	}
 	parts = append(parts, keyword)
 
@@ -1327,7 +1327,7 @@ func formatAddIndex(idx *Index) string {
 				columns = append(columns, fmt.Sprintf("(%s)", *col.Expression))
 			} else {
 				// Regular column reference
-				colStr := quoteIdent(col.Name)
+				colStr := sqlescape.EscapeIdentifier(col.Name)
 				if col.Length != nil {
 					colStr += fmt.Sprintf("(%d)", *col.Length)
 				}
@@ -1337,7 +1337,7 @@ func formatAddIndex(idx *Index) string {
 	} else {
 		// Fall back to simple column names
 		for _, col := range idx.Columns {
-			columns = append(columns, quoteIdent(col))
+			columns = append(columns, sqlescape.EscapeIdentifier(col))
 		}
 	}
 	parts = append(parts, fmt.Sprintf("(%s)", strings.Join(columns, ", ")))
@@ -1377,31 +1377,31 @@ func formatAddConstraint(constr *Constraint) string {
 	switch constr.Type {
 	case "CHECK":
 		if constr.Name != "" {
-			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT %s CHECK (%s)", quoteIdent(constr.Name), *constr.Expression))
+			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT %s CHECK (%s)", sqlescape.EscapeIdentifier(constr.Name), *constr.Expression))
 		} else {
 			parts = append(parts, fmt.Sprintf("ADD CHECK (%s)", *constr.Expression))
 		}
 	case "FOREIGN KEY":
 		var columns []string
 		for _, col := range constr.Columns {
-			columns = append(columns, quoteIdent(col))
+			columns = append(columns, sqlescape.EscapeIdentifier(col))
 		}
 		var refColumns []string
 		for _, col := range constr.References.Columns {
-			refColumns = append(refColumns, quoteIdent(col))
+			refColumns = append(refColumns, sqlescape.EscapeIdentifier(col))
 		}
 
 		var fkClause string
 		if constr.Name != "" {
 			fkClause = fmt.Sprintf("ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
-				quoteIdent(constr.Name),
+				sqlescape.EscapeIdentifier(constr.Name),
 				strings.Join(columns, ", "),
-				quoteIdent(constr.References.Table),
+				sqlescape.EscapeIdentifier(constr.References.Table),
 				strings.Join(refColumns, ", "))
 		} else {
 			fkClause = fmt.Sprintf("ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
 				strings.Join(columns, ", "),
-				quoteIdent(constr.References.Table),
+				sqlescape.EscapeIdentifier(constr.References.Table),
 				strings.Join(refColumns, ", "))
 		}
 
@@ -1727,7 +1727,7 @@ func formatPartitionDefinition(def *PartitionDefinition) string {
 	var parts []string
 
 	// Partition name
-	parts = append(parts, "PARTITION "+quoteIdent(def.Name))
+	parts = append(parts, "PARTITION "+sqlescape.EscapeIdentifier(def.Name))
 
 	// Values clause
 	if def.Values != nil {

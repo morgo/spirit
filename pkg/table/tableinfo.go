@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
 const (
@@ -100,7 +102,7 @@ func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 		db:              db,
 		SchemaName:      schema,
 		TableName:       table,
-		QuotedTableName: fmt.Sprintf("`%s`", table),
+		QuotedTableName: sqlescape.EscapeIdentifier(table),
 	}
 }
 
@@ -483,7 +485,7 @@ func (t *TableInfo) wrapCastType(col string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("column %q not found in table %s", col, t.TableName)
 	}
-	return fmt.Sprintf("CAST(`%s` AS %s)", col, castableTp(tp)), nil
+	return fmt.Sprintf("CAST(%s AS %s)", sqlescape.EscapeIdentifier(col), castableTp(tp)), nil
 }
 
 // wrapCastTypeAs generates a CAST expression using sqlCol as the column reference
@@ -496,7 +498,7 @@ func (t *TableInfo) wrapCastTypeAs(sqlCol, typeCol string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("column %q not found for type lookup in table %s", typeCol, t.TableName)
 	}
-	return fmt.Sprintf("CAST(`%s` AS %s)", sqlCol, castableTp(tp)), nil
+	return fmt.Sprintf("CAST(%s AS %s)", sqlescape.EscapeIdentifier(sqlCol), castableTp(tp)), nil
 }
 
 func (t *TableInfo) datumTp(col string) (datumTp, error) {

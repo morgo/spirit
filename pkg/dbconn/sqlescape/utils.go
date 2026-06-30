@@ -88,6 +88,28 @@ func EscapeString(s string) string {
 	return string(escapeStringBackslash(buf, s))
 }
 
+// EscapeIdentifier quotes a MySQL identifier (table, column, index name, ...)
+// by wrapping it in backticks and doubling any embedded backtick, per MySQL's
+// identifier-quoting rules. It is the standalone form of the %n verb used by
+// EscapeSQL, and the single source of truth for identifier quoting across
+// spirit — prefer it over open-coding "`"+s+"`", which produces broken SQL
+// (or allows a quoting break-out) when s contains a backtick.
+func EscapeIdentifier(identifier string) string {
+	return string(appendEscapedIdentifier(make([]byte, 0, len(identifier)+2), identifier))
+}
+
+// appendEscapedIdentifier appends identifier to buf as a backtick-quoted MySQL
+// identifier, doubling any embedded backtick. It is the single implementation
+// of identifier quoting — both EscapeIdentifier and the EscapeSQL %n verb use
+// it. strings.ReplaceAll returns its input unchanged when there is no backtick,
+// so the common case appends straight to buf with no extra allocation, keeping
+// the %n verb on its zero-allocation hot path.
+func appendEscapedIdentifier(buf []byte, identifier string) []byte {
+	buf = append(buf, '`')
+	buf = append(buf, strings.ReplaceAll(identifier, "`", "``")...)
+	return append(buf, '`')
+}
+
 // escapeStringBackslash will escape string into the buffer, with backslash.
 func escapeStringBackslash(buf []byte, v string) []byte {
 	return escapeBytesBackslash(buf, []byte(v))
@@ -122,9 +144,7 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 			if !ok {
 				return nil, errors.Errorf("expect a string identifier, got %v", arg)
 			}
-			buf = append(buf, '`')
-			buf = append(buf, strings.ReplaceAll(v, "`", "``")...)
-			buf = append(buf, '`')
+			buf = appendEscapedIdentifier(buf, v)
 			i++ // skip specifier
 		case '?':
 			if argPos >= len(args) {

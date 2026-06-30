@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 )
 
 // TableSchema represents a table's name and its raw CREATE TABLE DDL statement.
@@ -91,7 +93,7 @@ func LoadSchemaFromDB(ctx context.Context, db *sql.DB, opts ...FilterOption) ([]
 			continue
 		}
 		var tbl, createStmt string
-		err := db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", name)).Scan(&tbl, &createStmt)
+		err := db.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE %s", sqlescape.EscapeIdentifier(name))).Scan(&tbl, &createStmt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get CREATE TABLE for %s: %w", name, err)
 		}

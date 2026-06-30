@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/move/check"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
@@ -212,7 +213,7 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 	for i, src := range c.sources {
 		renameFragments := make([]string, 0, len(src.Tables))
 		for _, tbl := range src.Tables {
-			oldQuotedName := fmt.Sprintf("`%s`", check.CutoverOldName(tbl.TableName))
+			oldQuotedName := sqlescape.EscapeIdentifier(check.CutoverOldName(tbl.TableName))
 			renameFragments = append(renameFragments,
 				fmt.Sprintf("%s TO %s", tbl.QuotedTableName, oldQuotedName),
 			)
@@ -225,7 +226,7 @@ func (c *CutOver) renameAllSources(ctx context.Context, sourceLocks []*dbconn.Ta
 			for _, j := range completedRenames {
 				undoFragments := make([]string, 0, len(c.sources[j].Tables))
 				for _, tbl := range c.sources[j].Tables {
-					oldQuotedName := fmt.Sprintf("`%s`", check.CutoverOldName(tbl.TableName))
+					oldQuotedName := sqlescape.EscapeIdentifier(check.CutoverOldName(tbl.TableName))
 					undoFragments = append(undoFragments,
 						fmt.Sprintf("%s TO %s", oldQuotedName, tbl.QuotedTableName),
 					)
