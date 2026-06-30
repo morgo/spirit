@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -564,6 +566,103 @@ func TestDivergenceIsFatalAbortsDespiteRecopier(t *testing.T) {
 	require.ErrorIs(t, err, ErrPermanentDivergence,
 		"DivergenceIsFatal must abort with ErrPermanentDivergence even with a Recopier set")
 	require.Equal(t, 0, recopier.callCount(), "the Recopier must not be called when DivergenceIsFatal")
+	require.Positive(t, c.Stats().PermanentFailures)
+}
+
+// fakeFeed is a minimal change.Source double for continuous-checksum tests.
+// Only Flush carries behaviour — it runs flushFn so a test can simulate the
+// target catching up as buffered changes are applied (apply lag draining).
+// Every other method is an inert no-op.
+type fakeFeed struct {
+	flushFn func(ctx context.Context) error
+	flushes atomic.Int64
+}
+
+var _ change.Source = (*fakeFeed)(nil)
+
+func (f *fakeFeed) Flush(ctx context.Context) error {
+	f.flushes.Add(1)
+	if f.flushFn != nil {
+		return f.flushFn(ctx)
+	}
+	return nil
+}
+func (f *fakeFeed) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker) error { return nil }
+func (f *fakeFeed) Start(context.Context) error                                        { return nil }
+func (f *fakeFeed) StartFromPosition(context.Context, string) error                    { return nil }
+func (f *fakeFeed) Position() string                                                   { return "" }
+func (f *fakeFeed) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error     { return nil }
+func (f *fakeFeed) BlockWait(context.Context) error                                    { return nil }
+func (f *fakeFeed) GetDeltaLen() int                                                   { return 0 }
+func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error               { return nil }
+func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)                  {}
+func (f *fakeFeed) StopPeriodicFlush()                                                 {}
+func (f *fakeFeed) AllChangesFlushed() bool                                            { return true }
+func (f *fakeFeed) Close()                                                             {}
+
+// TestDivergenceIsFatalReconcilesApplyLag is the regression test for the
+// false-positive cutover abort: a chunk that is merely behind on applying
+// buffered changes (apply lag) must NOT be reported as a fatal divergence.
+// Before declaring a stable divergence on the fatal path, the checker drains
+// the change feed and re-reads; once the feed flushes, the target catches up
+// and the chunk verifies clean — the same reconciliation the cutover performs
+// under its table lock.
+func TestDivergenceIsFatalReconcilesApplyLag(t *testing.T) {
+	chunker := newTestChunker(1)
+	var drained atomic.Bool
+	feed := &fakeFeed{
+		flushFn: func(context.Context) error { drained.Store(true); return nil },
+	}
+	cfg := fastConfig()
+	cfg.DivergenceIsFatal = true // migration cutover-gate policy; no Recopier
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			// Source is stable at 100. The target lags at 99 (a buffered change
+			// not yet flushed) until the feed drains, after which it matches.
+			if drained.Load() {
+				return 100, 100, 1000, nil
+			}
+			return 100, 99, 1000, nil
+		},
+	)
+	c.feed = feed // attach a feed so the drain-and-confirm path engages
+
+	stop, _ := runUntil(t, c)
+	select {
+	case <-c.FirstCleanPass():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("FirstCleanPass did not fire — apply lag misclassified as divergence; stats=%+v", c.Stats())
+	}
+	require.Equal(t, uint64(0), c.Stats().PermanentFailures, "apply lag must not count as permanent divergence")
+	require.True(t, drained.Load(), "the checker must drain the feed before judging divergence")
+	require.GreaterOrEqual(t, feed.flushes.Load(), int64(1), "feed.Flush must be called to confirm divergence")
+
+	err := stop()
+	require.True(t, errors.Is(err, context.Canceled) || err == nil)
+}
+
+// TestDivergenceIsFatalStillAbortsAfterDrain guards the fix above: a genuine
+// divergence — one the feed drain does NOT reconcile — must still return
+// ErrPermanentDivergence. The drain rules out apply lag; it must not mask real
+// corruption.
+func TestDivergenceIsFatalStillAbortsAfterDrain(t *testing.T) {
+	chunker := newTestChunker(1)
+	feed := &fakeFeed{} // Flush is a no-op: draining changes nothing
+	cfg := fastConfig()
+	cfg.DivergenceIsFatal = true
+
+	c := newTestChecker(t, chunker, cfg,
+		func(ctx context.Context, chunk *table.Chunk, attempt int) (int64, int64, uint64, error) {
+			return 100, 99, 1000, nil // stable, real divergence; a drain won't fix it
+		},
+	)
+	c.feed = feed
+
+	err := c.Run(t.Context())
+	require.ErrorIs(t, err, ErrPermanentDivergence,
+		"a divergence that survives a feed drain must still be fatal")
+	require.GreaterOrEqual(t, feed.flushes.Load(), int64(1), "the checker must attempt a drain before the fatal verdict")
 	require.Positive(t, c.Stats().PermanentFailures)
 }
 
