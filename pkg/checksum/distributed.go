@@ -49,6 +49,8 @@ type DistributedChecker struct {
 	differencesFound atomic.Uint64
 	recopyLock       sync.Mutex
 	maxRetries       int
+	yieldTimeout     time.Duration
+	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
 }
 
 var _ Checker = (*DistributedChecker)(nil)
@@ -492,8 +494,16 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 			c.differencesFound.Store(0)
 		}
 
-		// Run the actual checksum
-		if err := c.runChecksum(ctx); err != nil {
+		// If the parent context is already cancelled, retrying is pointless.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Run the checksum with yield support. A single checksum pass may be
+		// split across multiple runChecksum calls if the yield timeout fires.
+		// Between yields we release the REPEATABLE READ transaction pools and
+		// resume from the low watermark with fresh snapshots.
+		if err := c.runChecksumWithYield(ctx); err != nil {
 			// This is really not expected to fail, since if there are differences
 			// it will run the resolver and report the differences in DifferencesFound().
 			return err
@@ -515,6 +525,50 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 	// do our best-case to differentiate that we believe this ALTER statement is lossy, and
 	// customize the returned error based on it.
 	return fmt.Errorf("checksum failed after %d attempts. This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit", c.maxRetries)
+}
+
+// runChecksumWithYield runs the checksum, automatically yielding and resuming
+// when the yield timeout expires. Each yield releases the long-running
+// REPEATABLE READ transaction pools on sources and targets, then re-acquires
+// table locks and fresh snapshots before resuming from the low watermark.
+func (c *DistributedChecker) runChecksumWithYield(ctx context.Context) error {
+	for {
+		err := c.runChecksum(ctx)
+		if !errors.Is(err, ErrYieldTimeout) {
+			return err
+		}
+		// The yield timeout fired. Get the low watermark so we can resume.
+		watermark, wmErr := c.chunker.GetLowWatermark()
+		if wmErr != nil {
+			// If the watermark isn't ready (e.g. the timeout fired before any
+			// chunks were processed), reset and start over rather than failing.
+			if errors.Is(wmErr, table.ErrWatermarkNotReady) {
+				c.yieldsPerformed.Add(1)
+				c.logger.Info("distributed checksum yielding but no watermark available, restarting from beginning",
+					"yieldTimeout", c.yieldTimeout,
+				)
+				c.setInvalid(false)
+				if resetErr := c.chunker.Reset(); resetErr != nil {
+					return fmt.Errorf("failed to reset chunker after yield: %w", resetErr)
+				}
+				continue
+			}
+			return fmt.Errorf("failed to get low watermark after yield: %w", wmErr)
+		}
+		c.yieldsPerformed.Add(1)
+		c.logger.Info("distributed checksum yielding to release long-running transactions",
+			"watermark", watermark,
+			"yieldTimeout", c.yieldTimeout,
+		)
+		// Reset the isInvalid flag since we are resuming, not failing.
+		c.setInvalid(false)
+		// Re-open the chunker at the watermark position.
+		if err := c.chunker.OpenAtWatermark(watermark); err != nil {
+			return fmt.Errorf("failed to resume chunker from watermark after yield: %w", err)
+		}
+		// Loop back to runChecksum which will re-acquire the table locks
+		// and create fresh REPEATABLE READ transactions.
+	}
 }
 
 func (c *DistributedChecker) runChecksum(ctx context.Context) error {
@@ -541,7 +595,14 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 		}
 	}()
 
-	g, errGrpCtx := errgroup.WithContext(ctx)
+	// Create a yield-timeout context to limit how long a single checksum pass
+	// can hold distributed REPEATABLE READ transaction pools open. Long-running
+	// read views cause InnoDB history list length (HLL) growth, so we
+	// periodically yield to release them and re-acquire fresh ones.
+	yieldCtx, yieldCancel := context.WithTimeout(ctx, c.yieldTimeout)
+	defer yieldCancel()
+
+	g, errGrpCtx := errgroup.WithContext(yieldCtx)
 	g.SetLimit(c.concurrency)
 	for !c.chunker.IsRead() && c.isHealthy(errGrpCtx) {
 		g.Go(func() error {
@@ -578,6 +639,14 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 				// Continue closing other pools even if one fails
 			}
 		}
+	}
+	// Distinguish between the yield timeout expiring and the parent context
+	// being canceled. If the parent context is still valid but the yield context
+	// expired and the chunker hasn't finished, this was a yield, not a failure.
+	// This check must come before inspecting err1, because the yield timeout can
+	// cause context errors from in-flight queries.
+	if ctx.Err() == nil && yieldCtx.Err() != nil && !c.chunker.IsRead() {
+		return ErrYieldTimeout
 	}
 	if err1 != nil {
 		c.logger.Error("checksum failed")

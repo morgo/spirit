@@ -1741,6 +1741,21 @@ func TestGetMissingSecondaryIndexes(t *testing.T) {
 			tableName:     "users",
 			expectedAlter: "ALTER TABLE `users` ADD INDEX `idx_name` (`name`) COMMENT 'Test: apostrophe\\' and \\\"quotes\\\" and backslash\\\\'",
 		},
+		{
+			// A backtick inside an index or column name must be doubled,
+			// the same way the table name already is, or the generated
+			// ALTER TABLE breaks out of the identifier quoting.
+			name: "Index and column names containing a backtick are escaped",
+			sourceCreateTable: "CREATE TABLE t (\n" +
+				"  `c``1` INT,\n" +
+				"  INDEX `i``x` (`c``1`)\n" +
+				")",
+			targetCreateTable: "CREATE TABLE t (\n" +
+				"  `c``1` INT\n" +
+				")",
+			tableName:     "t",
+			expectedAlter: "ALTER TABLE `t` ADD INDEX `i``x` (`c``1`)",
+		},
 	}
 
 	for _, tc := range testCases {
