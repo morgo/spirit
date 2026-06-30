@@ -22,6 +22,8 @@ CREATE TABLE _tablename_chkpnt (
 
 The checkpoint captures everything needed to resume: where the copier was, the opaque change-source position to resume streaming from, and the original DDL statement.
 
+**Atomic multi-table migrations** (one `--statement` containing several `ALTER`s) are the exception to the per-table naming above. Rather than a `_<table>_chkpnt` table per table, they share a single fixed-name `_spirit_checkpoint` table per schema, with the `original_table_name` column left empty. Because that name is fixed, only one atomic multi-table migration may run per schema at a time — they coordinate through a schema-scoped lock, so a second one fails fast rather than corrupting the first's checkpoint. Plain single-table migrations are unaffected and continue to use `_<table>_chkpnt`.
+
 ## What happens on resume
 
 When a new Runner starts (`Runner.Run()` → `setup()`), it always attempts `resumeFromCheckpoint()` first. This performs several validation steps before committing to the resume path:

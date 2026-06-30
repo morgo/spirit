@@ -104,6 +104,7 @@ type CopierConfig struct {
 - **`DBConfig`**: Database connection configuration including retry settings.
 - **`Applier`**: Used by the buffered copier to write rows to the target. The migration runner shares one applier between the copier and the replication client, so this field may be set even when the copier itself is unbuffered — the unbuffered copier ignores it. Required (non-nil) for the buffered copier (i.e. whenever `Unbuffered` is false).
 - **`Unbuffered`** (default: `false`): Selects between the buffered and unbuffered copier implementations. When `false` (the default), the buffered copier streams rows through `Applier`; when `true`, the legacy unbuffered copier issues `INSERT IGNORE INTO _new ... SELECT FROM original` directly and ignores `Applier`. Both the struct's zero value and `NewCopierDefaultConfig()` leave this `false`, so the buffered copier is the default and a non-nil `Applier` is required. The migration runner sets `Unbuffered` from `--unbuffered`; the move/sync runners always leave it `false`.
+- **`Autoscale`** (`AutoscaleConfig`, default: disabled): configures the experimental write-thread autoscaler, enabled via `--enable-experimental-autoscaling`. When `Enabled`, it scales the applier's live write-worker count between `StartThreads` and `MaxThreads` based on throttler utilization. Only applies to the buffered copier with a dynamically-scalable applier. See [Write-thread autoscaling](#write-thread-autoscaling-experimental) under Core Concepts.
 
 ## Usage
 
@@ -238,6 +239,19 @@ Both copier implementations use goroutines for parallel chunk processing:
 - Each reader goroutine reads chunks and sends rows to the applier
 - The applier has its own internal parallelism for writing
 - Callbacks notify readers when writes complete
+
+### Write-thread autoscaling (experimental)
+
+When `AutoscaleConfig.Enabled` is set (the `--enable-experimental-autoscaling` flag), the buffered copier runs a control loop that adjusts the applier's live write-worker count between `StartThreads` and `MaxThreads`, based on a throttler's continuous **utilization** signal. It only engages when the throttler implements `throttler.GradualThrottler` (the Aurora throttlers do) and the applier implements the dynamic-scaling capability (`SingleTargetApplier` does; `ShardedApplier` does not); otherwise it is skipped.
+
+Each tick (5s, aligned to the throttler poll) it reads utilization — `0` = idle, `1.0` = the point the hard-stop trips — and steers toward a dead band:
+
+- **below 40%**: add one thread (cooldown-gated)
+- **40–70%**: hold
+- **70–100%**: shed one thread (cooldown-gated)
+- **≥100%**: halve (the first breach is immediate)
+
+Steps are ±1 with a ~15s per-direction cooldown; only the panic zone is multiplicative. The shape is deliberately gentle because the signal is largely self-induced — the copy's own write workers move `Threads_running` — so classic AIMD halving would sawtooth. The autoscaler never touches the binary `BlockWait()` hard-stop, which remains the safety net underneath. See `autoscaler.go` and [issue #831](https://github.com/block/spirit/issues/831).
 
 ### Error Handling
 
