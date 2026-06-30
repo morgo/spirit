@@ -1,10 +1,9 @@
 package lint
 
-// NOTE: Many tests in this file are temporarily disabled because the signed integer
-// warning functionality has been commented out in PrimaryKeyLinter (lint_primary_key_type.go lines 137-156).
-// The linter no longer warns about signed integer types (e.g., BIGINT without UNSIGNED).
-// Tests that are disabled use t.Skip() at the beginning with an explanation.
-// To re-enable these tests, uncomment the signed integer warning code in PrimaryKeyLinter.
+// NOTE: PrimaryKeyLinter deliberately does not warn about signed-integer
+// primary keys (e.g. BIGINT without UNSIGNED) — that check was judged too
+// noisy for real-world schemas. The isSignedIntType helper and its unit tests
+// (TestIsSignedIntType_*) are retained should the policy be revisited.
 
 import (
 	"fmt"
@@ -28,31 +27,6 @@ func TestPrimaryKeyLinter_BigIntUnsigned(t *testing.T) {
 
 	// BIGINT UNSIGNED is ideal - no violations
 	require.Empty(t, violations)
-}
-
-func TestPrimaryKeyLinter_BigIntSigned(t *testing.T) {
-	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
-	sql := `CREATE TABLE users (
-		id BIGINT PRIMARY KEY,
-		name VARCHAR(255)
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &PrimaryKeyLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	// BIGINT without UNSIGNED should be a warning
-	require.Len(t, violations, 1)
-	require.Equal(t, "primary_key", violations[0].Linter.Name())
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "signed BIGINT")
-	require.Contains(t, violations[0].Message, "UNSIGNED is preferred")
-	require.Equal(t, "users", violations[0].Location.Table)
-	require.NotNil(t, violations[0].Location.Column)
-	require.Equal(t, "id", *violations[0].Location.Column)
-	require.NotNil(t, violations[0].Suggestion)
-	require.Contains(t, *violations[0].Suggestion, "BIGINT UNSIGNED")
 }
 
 func TestPrimaryKeyLinter_Binary(t *testing.T) {
@@ -162,26 +136,6 @@ func TestPrimaryKeyLinter_CompositePrimaryKeyAllGood(t *testing.T) {
 
 	// Both columns are BIGINT UNSIGNED - no violations
 	require.Empty(t, violations)
-}
-
-func TestPrimaryKeyLinter_CompositePrimaryKeyMixed(t *testing.T) {
-	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
-	sql := `CREATE TABLE user_roles (
-		user_id BIGINT,
-		role_id BIGINT UNSIGNED,
-		PRIMARY KEY (user_id, role_id)
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &PrimaryKeyLinter{}
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	// user_id is signed BIGINT (warning)
-	require.Len(t, violations, 1)
-	require.Equal(t, "primary_key", violations[0].Linter.Name())
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Equal(t, "user_id", *violations[0].Location.Column)
 }
 
 func TestPrimaryKeyLinter_NoPrimaryKey(t *testing.T) {
@@ -426,30 +380,6 @@ func TestPrimaryKeyLinter_ConfigureAllowInt(t *testing.T) {
 
 	// INT should be allowed with custom config - no violations
 	require.Empty(t, violations)
-}
-
-func TestPrimaryKeyLinter_ConfigureAllowIntSigned(t *testing.T) {
-	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
-	sql := `CREATE TABLE users (
-		id INT PRIMARY KEY,
-		name VARCHAR(255)
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &PrimaryKeyLinter{}
-	err = linter.Configure(map[string]string{
-		"allowedTypes": "bigint,int",
-	})
-	require.NoError(t, err)
-
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	// Signed INT should still give warning about signedness
-	require.Len(t, violations, 1)
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "signed INT")
-	require.Contains(t, violations[0].Message, "UNSIGNED is preferred")
 }
 
 func TestPrimaryKeyLinter_ConfigureAllowVarchar(t *testing.T) {
@@ -870,29 +800,6 @@ func TestPrimaryKeyLinter_ConfigureVarbinaryStillWorks(t *testing.T) {
 
 	// VARBINARY should still work correctly with parser quirk
 	require.Empty(t, violations)
-}
-
-func TestPrimaryKeyLinter_ConfigureSignedWarningStillWorks(t *testing.T) {
-	t.Skip("DISABLED: Signed integer warnings commented out in lint_primary_key_type.go lines 137-156")
-	sql := `CREATE TABLE users (
-		id INT PRIMARY KEY,
-		name VARCHAR(255)
-	)`
-	ct, err := statement.ParseCreateTable(sql)
-	require.NoError(t, err)
-
-	linter := &PrimaryKeyLinter{}
-	err = linter.Configure(map[string]string{
-		"allowedTypes": "int,bigint",
-	})
-	require.NoError(t, err)
-
-	violations := linter.Lint([]*statement.CreateTable{ct}, nil)
-
-	// Should still warn about signed INT
-	require.Len(t, violations, 1)
-	require.Equal(t, SeverityWarning, violations[0].Severity)
-	require.Contains(t, violations[0].Message, "signed INT")
 }
 
 func TestPrimaryKeyLinter_IntegrationWithConfig(t *testing.T) {

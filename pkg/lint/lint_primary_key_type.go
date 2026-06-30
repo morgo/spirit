@@ -156,23 +156,10 @@ func (l *PrimaryKeyLinter) checkColumnType(tableName string, column *statement.C
 	columnType := strings.ToUpper(column.Type)
 
 	if _, ok := l.allowedTypes[columnType]; ok {
-		// If the PK column uses a signed integer type, return a warning that it should be unsigned instead
-		// disabling this functionality for now to avoid overly verbose linter output
-		/*
-			if isSignedIntType(column) {
-				return &Violation{
-					Linter:   l,
-					Severity: SeverityWarning,
-					Message:  fmt.Sprintf("Primary key column %q uses signed %s; UNSIGNED is preferred", column.Name, columnType),
-					Location: &Location{
-						Table:  tableName,
-						Column: &column.Name,
-					},
-					Suggestion: new(fmt.Sprintf("Consider using BIGINT UNSIGNED for column '%s' to avoid negative values and increase range", column.Name)),
-				}
-			}
-
-		*/
+		// A PK on an allowed type passes. We deliberately do NOT emit a
+		// "prefer UNSIGNED" warning for signed integer PKs — it was judged
+		// too noisy for real-world schemas. isSignedIntType (with its unit
+		// tests) is retained should that policy be revisited.
 		return nil
 	}
 

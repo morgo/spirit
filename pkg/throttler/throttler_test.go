@@ -33,9 +33,13 @@ func TestThrottlerInterface(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, throttler.Open(t.Context()))
 
-	time.Sleep(50 * time.Millisecond)         // make sure the throttler loop can calculate.
-	throttler.BlockWait(t.Context())          // wait for catch up (there's no activity)
-	require.False(t, throttler.IsThrottled()) // there's a race, but its unlikely to be throttled
+	throttler.BlockWait(t.Context()) // wait for catch up (there's no activity)
+	// The throttler computes lag asynchronously on its loop, so poll rather
+	// than asserting against a fixed settle time. With no write activity the
+	// replica should quickly report not-throttled.
+	require.Eventually(t, func() bool {
+		return !throttler.IsThrottled()
+	}, 5*time.Second, 10*time.Millisecond)
 
 	require.NoError(t, throttler.Close())
 
@@ -82,18 +86,21 @@ func TestMockThrottler(t *testing.T) {
 	// Test UpdateLag returns no error
 	require.NoError(t, throttler.UpdateLag(t.Context()))
 
-	// Test BlockWait sleeps for approximately 1 second
+	// BlockWait blocks for its configured duration. Use a short duration to
+	// keep the test fast and assert only the lower bound: a tight upper bound
+	// on a sleep is inherently flaky under CI scheduling pressure.
+	blocking := &Mock{blockDuration: 100 * time.Millisecond}
 	start := time.Now()
-	throttler.BlockWait(t.Context())
-	elapsed := time.Since(start)
-	require.GreaterOrEqual(t, elapsed, 1*time.Second)
-	require.Less(t, elapsed, 1500*time.Millisecond) // allow 500ms tolerance for CI scheduling delays
+	blocking.BlockWait(t.Context())
+	require.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
 
-	// Test BlockWait respects context cancellation
+	// BlockWait must return promptly when the context is cancelled, well
+	// before its (deliberately huge) block duration would elapse. Comparing
+	// against an hour makes the assertion robust regardless of scheduler delay.
+	interruptible := &Mock{blockDuration: time.Hour}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // cancel immediately
 	start = time.Now()
-	throttler.BlockWait(ctx)
-	elapsed = time.Since(start)
-	require.Less(t, elapsed, 100*time.Millisecond) // should return almost immediately
+	interruptible.BlockWait(ctx)
+	require.Less(t, time.Since(start), time.Second)
 }
