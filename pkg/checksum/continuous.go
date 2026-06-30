@@ -35,8 +35,12 @@
 //       success the chunk counts as resolved for pass-completion purposes
 //       (in the per-pass "recopies" bucket), but the pass is no longer
 //       clean — the repaired rows were never observed equal, so they are
-//       re-verified by the next pass's fresh walk. Without a Recopier the
-//       run returns ErrPermanentDivergence.
+//       re-verified by the next pass's fresh walk. Without a Recopier (or
+//       when DivergenceIsFatal is set) the divergence is fatal — but first,
+//       if a change feed is present, the checker drains it (Flush) and
+//       re-reads: a target merely behind on applying buffered changes (apply
+//       lag) reconciles here and passes, so only a mismatch that survives a
+//       full drain returns ErrPermanentDivergence.
 //
 // Hot chunks slow but do not block pass completion: they cycle to the back
 // of the FIFO while other entries resolve. A genuinely permanently-hot row
@@ -892,6 +896,46 @@ func (c *ContinuousChecker) executeWork(ctx context.Context, item *workItem) *wo
 		res.passed = true
 		res.recopied = true
 		return res
+	}
+
+	// Fatal-divergence path (no Recopier, or DivergenceIsFatal — e.g. the
+	// migration cutover gate). Before declaring a permanent divergence, drain
+	// the change feed and re-read the chunk. A target that is merely behind on
+	// applying buffered changes (apply lag) would otherwise be misclassified as
+	// divergence and abort the cutover — even though the cutover's own
+	// FlushUnderTableLock reconciles exactly that lag moments later. Draining
+	// here performs the same reconciliation before we judge, so only a mismatch
+	// that survives a full drain (with the source still unchanged) is treated as
+	// real. The feed is advisory and may be nil (e.g. copy-only sync has no
+	// feed); with nothing to drain, the mismatch is taken at face value.
+	if c.feed != nil {
+		if flushErr := c.feed.Flush(ctx); flushErr != nil {
+			res.err = fmt.Errorf("drain change feed before divergence verdict for chunk %s: %w", item.chunk.String(), flushErr)
+			return res
+		}
+		srcCRC, tgtCRC, srcCount, tgtCount, err = c.readChunk(ctx, item.chunk)
+		if err != nil {
+			res.err = fmt.Errorf("re-read chunk %s after feed drain: %w", item.chunk.String(), err)
+			return res
+		}
+		newSrc = chunkSig{crc: srcCRC, count: srcCount}
+		newTgt = chunkSig{crc: tgtCRC, count: tgtCount}
+		res.newSrc = newSrc
+		res.newTgt = newTgt
+		if newTgt == newSrc || newTgt == item.originalSrc {
+			// The target caught up once the feed drained: this was apply lag,
+			// not divergence. Counts as a normal verified pass (not a recopy).
+			res.passed = true
+			return res
+		}
+		if newSrc != item.originalSrc {
+			// The source changed again while we drained — treat it as a hot
+			// chunk and re-enqueue (handleResult re-queues a retry result that
+			// is neither passed nor permanent) instead of declaring divergence.
+			return res
+		}
+		// Source still unchanged and target still wrong after a full drain →
+		// genuine divergence. Fall through.
 	}
 	res.permanent = true
 	return res
