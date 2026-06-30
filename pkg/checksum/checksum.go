@@ -166,6 +166,7 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 			fixDifferences: config.FixDifferences,
 			maxRetries:     config.MaxRetries,
 			applier:        config.Applier,
+			yieldTimeout:   config.YieldTimeout,
 		}, nil
 	}
 	return &SingleChecker{
