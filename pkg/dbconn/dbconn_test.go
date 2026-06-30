@@ -33,6 +33,22 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+func TestBackoffDuration(t *testing.T) {
+	// Every retry — including the first (attempt 0) — must back off for a
+	// non-zero duration. The previous formula slept 0ns on attempt 0 and
+	// whenever the jitter rolled 0, so the retry-storm protection silently did
+	// not apply. We take multiple samples per attempt to cover a variety of
+	// jitter values without sleeping.
+	for attempt := range 6 {
+		upper := time.Duration((attempt+1)*10) * time.Millisecond
+		for range 200 {
+			d := backoffDuration(attempt)
+			require.Positivef(t, d, "attempt %d backed off for 0ns", attempt)
+			require.LessOrEqualf(t, d, upper, "attempt %d exceeded its max of %s", attempt, upper)
+		}
+	}
+}
+
 func getVariable(trx *sql.Tx, name string, sessionScope bool) (string, error) {
 	var value string
 	scope := "GLOBAL"
