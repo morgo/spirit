@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +75,7 @@ func (tt *TestTable) dropArtifacts(ctx context.Context) {
 		fmt.Sprintf("_%s_chkpnt", tt.Name),
 	}
 	for _, tbl := range tables {
-		_, err := tt.DB.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl))
+		_, err := tt.DB.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", sqlescape.EscapeIdentifier(tbl)))
 		if err != nil && !isIdentifierTooLongError(err) {
 			// Log but don't fail — cleanup is best-effort and the test
 			// may already be finished (e.g., context canceled race).
@@ -111,13 +112,13 @@ func (tt *TestTable) SeedRows(t *testing.T, insertSelectSQL string, targetRows i
 
 	// Count initial rows (may be >1 if the SELECT produces multiple rows).
 	var count int
-	err = tt.DB.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM `%s`", tt.Name)).Scan(&count)
+	err = tt.DB.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", sqlescape.EscapeIdentifier(tt.Name))).Scan(&count)
 	require.NoError(t, err)
 
 	// Double rows until we reach the target.
 	for count < targetRows {
 		_, err = tt.DB.ExecContext(t.Context(),
-			fmt.Sprintf("%s FROM `%s`", insertSelectSQL, tt.Name))
+			fmt.Sprintf("%s FROM %s", insertSelectSQL, sqlescape.EscapeIdentifier(tt.Name)))
 		require.NoError(t, err)
 		count *= 2
 	}

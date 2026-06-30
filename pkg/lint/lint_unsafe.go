@@ -2,8 +2,8 @@ package lint
 
 import (
 	"fmt"
-	"strings"
 
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 )
@@ -121,7 +121,7 @@ func unsafeDropColumnViolation(l *UnsafeLinter, tableName string, spec *ast.Alte
 	if spec.OldColumnName != nil {
 		columnName := spec.OldColumnName.Name.O
 		location.Column = &columnName
-		message += " " + quoteUnsafeIdentifier(columnName)
+		message += " " + sqlescape.EscapeIdentifier(columnName)
 	}
 
 	return Violation{
@@ -130,8 +130,4 @@ func unsafeDropColumnViolation(l *UnsafeLinter, tableName string, spec *ast.Alte
 		Message:  message,
 		Severity: SeverityError,
 	}
-}
-
-func quoteUnsafeIdentifier(identifier string) string {
-	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }

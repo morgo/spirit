@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/checksum"
+	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/migration/check"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
@@ -185,7 +186,7 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 		// Trim whitespace and remove trailing semicolon. Without this, the attemptInstantDDL and attemptInplaceDDL functions will fail.
 		m.Alter = strings.TrimSpace(m.Alter)
 		m.Alter = strings.TrimSuffix(m.Alter, ";")
-		fullStatement := fmt.Sprintf("ALTER TABLE `%s` %s", m.Table, m.Alter)
+		fullStatement := fmt.Sprintf("ALTER TABLE %s %s", sqlescape.EscapeIdentifier(m.Table), m.Alter)
 		m.Statement = fullStatement // used in resume from checkpoint
 		p := parser.New()
 		stmtNodes, _, err := p.Parse(fullStatement, "", "")

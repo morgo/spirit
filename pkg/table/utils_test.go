@@ -84,6 +84,11 @@ func TestQuoteCols(t *testing.T) {
 
 	cols = []string{"a"}
 	require.Equal(t, "`a`", QuoteColumns(cols))
+
+	// Identifiers containing a backtick must have it doubled, otherwise the
+	// quoting breaks out and produces invalid SQL.
+	require.Equal(t, "`a``b`", QuoteColumns([]string{"a`b"}))
+	require.Equal(t, "`a``b`, `c`", QuoteColumns([]string{"a`b", "c"}))
 }
 
 func TestExpandRowConstructorComparison(t *testing.T) {
