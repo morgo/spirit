@@ -277,10 +277,20 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, dupKeyHandling DupKey
 	return rowsAffected, err
 }
 
-// backoff sleeps a few milliseconds before retrying.
-func backoff(i int) {
-	randFactor := i * rand.IntN(10) * int(time.Millisecond)
-	time.Sleep(time.Duration(randFactor))
+// backoffDuration returns the delay before a retry for the given 0-based
+// attempt: a short, jittered interval that grows with the attempt. The
+// (attempt+1) factor and the +1 on the jitter guarantee that every retry —
+// including the first (attempt 0) — backs off for a non-zero time. The
+// previous formula (i * rand.IntN(10) * ms) slept 0ns on the first retry and
+// whenever the jitter rolled 0, so the retry-storm protection did not actually
+// apply when it was first needed.
+func backoffDuration(attempt int) time.Duration {
+	return time.Duration((attempt+1)*(rand.IntN(10)+1)) * time.Millisecond
+}
+
+// backoff sleeps for backoffDuration(attempt) before retrying.
+func backoff(attempt int) {
+	time.Sleep(backoffDuration(attempt))
 }
 
 // ForceExec is like Exec but it has some added logic to force kill
