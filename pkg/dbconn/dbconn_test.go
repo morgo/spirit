@@ -280,6 +280,16 @@ func TestRetryableTrxRetriesKilledConnection(t *testing.T) {
 	testRetryableTrxSurvivesKill(t, "retry_kill_conn", "KILL %d")
 }
 
+func TestShouldRetryForceExecAfterKill(t *testing.T) {
+	require.False(t, shouldRetryForceExecAfterKill(nil, true))
+	require.False(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: errLockWaitTimeout}, false))
+	require.False(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: errDeadlock}, true))
+	require.False(t, shouldRetryForceExecAfterKill(errors.New("not a mysql error"), true))
+	require.True(t, shouldRetryForceExecAfterKill(&mysql.MySQLError{Number: errLockWaitTimeout}, true))
+	require.True(t, shouldRetryForceExecAfterKill(fmt.Errorf("force exec failed: %w",
+		&mysql.MySQLError{Number: errLockWaitTimeout}), true))
+}
+
 func TestForceExec(t *testing.T) {
 	config := NewDBConfig()
 	config.LockWaitTimeout = 1 // as short as possible.

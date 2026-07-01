@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
@@ -317,15 +318,18 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	// since the minimum LockWaitTimeout=1 second
 	duration := forceKillGracePeriod(dbConfig.LockWaitTimeout)
 	var wg sync.WaitGroup
+	var killTimerFired atomic.Bool
 	wg.Add(1)
 	timer := time.AfterFunc(duration, func() {
 		defer wg.Done()
+		killTimerFired.Store(true)
 		err := KillLockingTransactions(ctx, db, tables, dbConfig, logger, []int{connId})
 		if err != nil {
 			return // just return, we can't do much more here
 		}
 	})
-	_, err = trx.ExecContext(ctx, sqlescape.MustEscapeSQL(stmt, args...))
+	escapedStmt := sqlescape.MustEscapeSQL(stmt, args...)
+	_, err = trx.ExecContext(ctx, escapedStmt)
 	if timer.Stop() {
 		// Timer was stopped before it fired, so the goroutine never started.
 		// We need to manually decrement the WaitGroup.
@@ -335,7 +339,19 @@ func ForceExec(ctx context.Context, db *sql.DB, tables []*table.TableInfo, dbCon
 	// This prevents a race where the goroutine kills connections that
 	// are now being used for subsequent operations.
 	wg.Wait()
+	if shouldRetryForceExecAfterKill(err, killTimerFired.Load()) {
+		logger.Warn("retrying statement after lock wait timeout because force-kill timer fired", "error", err)
+		_, err = trx.ExecContext(ctx, escapedStmt)
+	}
 	return err
+}
+
+func shouldRetryForceExecAfterKill(err error, killTimerFired bool) bool {
+	if !killTimerFired {
+		return false
+	}
+	val, ok := errors.AsType[*mysql.MySQLError](err)
+	return ok && val.Number == errLockWaitTimeout
 }
 
 // Exec is like db.Exec but only returns an error.
