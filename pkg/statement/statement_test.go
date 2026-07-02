@@ -188,6 +188,16 @@ func TestAlgorithmInplaceConsideredSafe(t *testing.T) {
 	require.NoError(t, test("change column `a` `a` varchar(100)"))
 	require.NoError(t, test("modify `a` varchar(255)"))
 	require.NoError(t, test("change column `a` `new_a` varchar(50)"))
+	require.NoError(t, test("modify `a` varchar(100) NULL")) // explicit NULL never converts
+
+	// VARCHAR modifications that MySQL *accepts* under ALGORITHM=INPLACE but
+	// performs with a full table rebuild are unsafe: NOT NULL conversion and
+	// column reorder (FIRST/AFTER).
+	require.ErrorIs(t, test("modify `a` varchar(200) NOT NULL"), ErrUnsafeForInplace)
+	require.ErrorIs(t, test("change column `a` `a` varchar(200) NOT NULL"), ErrUnsafeForInplace)
+	require.ErrorIs(t, test("modify `a` varchar(200) FIRST"), ErrUnsafeForInplace)
+	require.ErrorIs(t, test("modify `a` varchar(200) AFTER `b`"), ErrUnsafeForInplace)
+	require.ErrorIs(t, test("change column `a` `a` varchar(200) AFTER `b`"), ErrUnsafeForInplace)
 
 	// Non-VARCHAR column modifications should be unsafe (table-rebuilding)
 	require.ErrorIs(t, test("modify `a` int"), ErrUnsafeForInplace)
