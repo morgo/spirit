@@ -153,17 +153,22 @@ func TestComparesTo(t *testing.T) {
 	require.False(t, b1.comparesTo(b2))
 }
 
-func TestWatermarkAboveClause(t *testing.T) {
+func TestWatermarkRecopyClause(t *testing.T) {
 	// Single-column auto-increment key
 	ti := NewTableInfo(nil, "test", "t1")
 	ti.KeyColumns = []string{"id"}
 	ti.columnsMySQLTps = map[string]string{"id": "bigint"}
 
-	// Build a watermark JSON: chunk with upper bound id=100
+	// Build a watermark JSON: chunk covering [50, 100). The resumed copy
+	// restarts from the LOWER bound (inclusive), so the clause must match
+	// id >= 50 — the exact range the copier re-copies. Matching only rows
+	// above the upper bound (id > 100) would leave rows in [50, 100] on the
+	// target that the recopy cannot remove if they no longer exist on the
+	// source (resurrection of deleted rows).
 	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["50"],"Inclusive":true},"UpperBound":{"Value":["100"],"Inclusive":false}}`
-	clause, err := WatermarkAboveClause(ti, watermark)
+	clause, err := WatermarkRecopyClause(ti, watermark)
 	require.NoError(t, err)
-	require.Equal(t, "`id` > 100", clause)
+	require.Equal(t, "`id` >= 50", clause)
 
 	// Composite key
 	ti2 := NewTableInfo(nil, "test", "t2")
@@ -171,28 +176,29 @@ func TestWatermarkAboveClause(t *testing.T) {
 	ti2.columnsMySQLTps = map[string]string{"tenant_id": "int", "item_id": "int"}
 
 	watermark2 := `{"Key":["tenant_id","item_id"],"ChunkSize":1000,"LowerBound":{"Value":["1","50"],"Inclusive":true},"UpperBound":{"Value":["2","100"],"Inclusive":false}}`
-	clause2, err := WatermarkAboveClause(ti2, watermark2)
+	clause2, err := WatermarkRecopyClause(ti2, watermark2)
 	require.NoError(t, err)
 	require.Contains(t, clause2, "`tenant_id`")
 	require.Contains(t, clause2, "`item_id`")
-	// Should be a row constructor comparison: ((tenant_id > 2) OR (tenant_id = 2 AND item_id > 100))
-	require.Equal(t, "((`tenant_id` > 2)\n OR (`tenant_id` = 2 AND `item_id` > 100))", clause2)
+	// Should be a row constructor comparison on the lower bound:
+	// ((tenant_id > 1) OR (tenant_id = 1 AND item_id >= 50))
+	require.Equal(t, "((`tenant_id` > 1)\n OR (`tenant_id` = 1 AND `item_id` >= 50))", clause2)
 
 	// Invalid JSON
-	_, err = WatermarkAboveClause(ti, "not-json")
+	_, err = WatermarkRecopyClause(ti, "not-json")
 	require.Error(t, err)
 
 	// Foreign formats must fail loudly rather than decode into a zero-value
 	// chunk that renders as "DELETE ... WHERE ()" (issue: resume broken for
 	// multi-table and composite-PK moves).
 	// Multi-chunker map format:
-	_, err = WatermarkAboveClause(ti, `{"localhost:3306.test.t1":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}"}`)
+	_, err = WatermarkRecopyClause(ti, `{"localhost:3306.test.t1":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}"}`)
 	require.Error(t, err)
 	// Composite chunker envelope format:
-	_, err = WatermarkAboveClause(ti, `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}","RowsCopied":50}`)
+	_, err = WatermarkRecopyClause(ti, `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"50\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"100\"],\"Inclusive\":false}}","RowsCopied":50}`)
 	require.Error(t, err)
 	// Empty object:
-	_, err = WatermarkAboveClause(ti, `{}`)
+	_, err = WatermarkRecopyClause(ti, `{}`)
 	require.Error(t, err)
 }
 

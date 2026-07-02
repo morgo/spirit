@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -400,53 +401,122 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 }
 
 // TestMoveResumeDeletesAboveWatermark verifies that when a move operation
-// resumes from a checkpoint, rows above the watermark are deleted from the
-// target tables before resuming. This prevents phantom rows from the
-// keyAboveWatermark optimization race condition.
+// resumes from a checkpoint, the target tables are pruned of every row at or
+// above the watermark chunk's LOWER bound — the copier's resume position —
+// not just of rows above the chunk's upper bound. The delete range must
+// coincide with the recopy range: a row inside the watermark chunk that was
+// copied before the crash but whose source DELETE committed in the unflushed
+// window would otherwise survive on the target (the recopy reads the current
+// source snapshot, which no longer has it, and the keyAboveWatermark
+// optimization can discard its replayed binlog DELETE because the key is
+// above the post-crash source max) and be resurrected at cutover.
 func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
-	sourceDSN := testutils.DSNForDatabase("source_resume_wm")
-	targetDSN := testutils.DSNForDatabase("dest_resume_wm")
+	srcDB := "source_resume_wm"
+	dstDB := "dest_resume_wm"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
 
-	// Clean up both databases
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS source_resume_wm`)
-	testutils.RunSQL(t, `DROP DATABASE IF EXISTS dest_resume_wm`)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
 
-	// Setup source database with a table and data
-	testutils.RunSQL(t, `CREATE DATABASE source_resume_wm`)
-	testutils.RunSQL(t, `CREATE TABLE source_resume_wm.t1 (
-		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-		name VARCHAR(50) NOT NULL
-	)`)
-	testutils.RunSQL(t, `INSERT INTO source_resume_wm.t1 (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')`)
+	// Enough rows for several chunks so the checkpointed watermark chunk has
+	// a lower bound above the table minimum. Same shape/size as
+	// TestResumeFromCheckpointTooOld's t1 (~1010 rows).
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARBINARY(64))")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64)")
+	for range 3 { // 1 -> 2 -> 10 -> 1010 rows
+		testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (val) SELECT RANDOM_BYTES(64) FROM "+srcDB+".t1 a JOIN "+srcDB+".t1 b JOIN "+srcDB+".t1 c LIMIT 5000")
+	}
 
-	// Setup target database with the same table
-	testutils.RunSQL(t, `CREATE DATABASE dest_resume_wm`)
-	testutils.RunSQL(t, `CREATE TABLE dest_resume_wm.t1 (
-		id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-		name VARCHAR(50) NOT NULL
-	)`)
+	// Batched INSERT..SELECT can leave auto-increment gaps, so read the
+	// actual max id and row count instead of assuming they are equal.
+	sourceDB, err := sql.Open("mysql", sourceDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(sourceDB)
+	var srcMaxID, srcCount int
+	require.NoError(t, sourceDB.QueryRowContext(t.Context(),
+		"SELECT MAX(id), COUNT(*) FROM t1").Scan(&srcMaxID, &srcCount))
 
-	// Run a full move to verify the basic path works end-to-end.
 	move := &Move{
 		SourceDSN:       sourceDSN,
 		TargetDSN:       targetDSN,
 		TargetChunkTime: 100 * time.Millisecond,
-		Threads:         2,
-		WriteThreads:    2,
+		Threads:         1,
+		WriteThreads:    1,
 	}
+	checkpointAndStop(t, move)
 
-	err := move.Run()
-	require.NoError(t, err)
-
-	// Verify all rows were copied
+	// Read back the copier watermark the checkpoint recorded. A single-table
+	// auto-inc move uses the optimistic chunker, whose watermark is the raw
+	// chunk JSON of the last contiguously-completed bounded chunk.
 	targetDB, err := sql.Open("mysql", targetDSN)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(targetDB)
-
-	var count int
-	err = targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count)
+	var watermark string
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT copier_watermark FROM "+checkpointTableName+" ORDER BY id DESC LIMIT 1").Scan(&watermark))
+	var chunk table.JSONChunk
+	require.NoError(t, json.Unmarshal([]byte(watermark), &chunk))
+	require.Len(t, chunk.LowerBound.Value, 1)
+	lower, err := strconv.Atoi(chunk.LowerBound.Value[0])
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	upper, err := strconv.Atoi(chunk.UpperBound.Value[0])
+	require.NoError(t, err)
+	// The resume position must be meaningful for the assertions below: not
+	// the whole table, with previously-copied rows at/above it, and with the
+	// chunk extending past the source max so the in-chunk marker row cannot
+	// exist on the source. All hold for this seed: the first chunk is
+	// StartingChunkSize=1000 rows, so the watermark chunk is ~[1001, 2000+).
+	require.Greater(t, lower, 1)
+	require.LessOrEqual(t, lower, srcMaxID)
+	require.Greater(t, upper, srcMaxID+1)
+	var belowResumeCount int
+	require.NoError(t, sourceDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM t1 WHERE id < ?", lower).Scan(&belowResumeCount))
+
+	// Plant two marker rows on the TARGET only, simulating rows that were
+	// copied before the crash and then deleted on the source in the
+	// unflushed window: one INSIDE the watermark chunk [lower, upper) — the
+	// resurrection candidate that a delete of only `id > upper bound` leaves
+	// behind — and one above the chunk (the classic phantom, deleted by both
+	// old and new behavior).
+	inChunkID := srcMaxID + 1 // > source max, < upper: inside the watermark chunk
+	aboveChunkID := upper + 1000
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s.t1 (id, val) VALUES (%d, 'in-chunk'), (%d, 'above-chunk')",
+		dstDB, inChunkID, aboveChunkID))
+
+	// Resume. setup() finds the checkpoint and takes the resume path, which
+	// runs deleteAboveWatermark before opening the chunker at the watermark.
+	r, ctx := buildTestRunner(t, move)
+	require.NoError(t, r.setup(ctx))
+	require.True(t, r.usedResumeFromCheckpoint)
+
+	// The target must hold no rows at/above the copier's resume position:
+	// both markers AND the previously-copied rows in [lower, srcMaxID] are
+	// gone, because the copier is about to re-copy exactly that range.
+	var count int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM t1 WHERE id >= ?", lower).Scan(&count))
+	require.Zero(t, count, "no target rows may survive at/above the watermark chunk's lower bound")
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, belowResumeCount, count, "rows below the resume position must be untouched")
+
+	// Let the resumed copier re-copy [lower, ∞) from the current source
+	// snapshot: rows that still exist on the source come back; the marker
+	// rows do not — they no longer exist on the source, so nothing
+	// re-creates them.
+	require.NoError(t, r.copier.Run(ctx))
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, srcCount, count, "recopy must restore exactly the source rows")
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM t1 WHERE id IN (?, ?)", inChunkID, aboveChunkID).Scan(&count))
+	require.Zero(t, count, "rows deleted on the source must not be resurrected by the resume")
+
+	closeTestRunner(t, r)
 }
 
 // TestMoveForceWipesUnresumableTarget verifies --force recovery: when the target
@@ -623,14 +693,12 @@ func TestMoveWithVarcharPK(t *testing.T) {
 		"source/target row counts must match after move with VARCHAR PK")
 }
 
-// checkpointAndStop drives a move through setup, the full row copy and a
-// checkpoint dump, then tears everything down without cutover — simulating a
-// move that was interrupted after writing a checkpoint. The checkpoint table
-// is left behind on the first target (targets[0]) for a subsequent resume.
-// This mirrors the first phase of TestResumeFromCheckpointE2E. It supports
-// both single-source moves (SourceDSN) and multi-source moves (SourceDSNs),
-// mirroring how Runner.Run builds and sorts the source list.
-func checkpointAndStop(t *testing.T, move *Move) {
+// buildTestRunner constructs a Runner with sources and targets wired the same
+// way Runner.Run does (including source ordering), but stops short of calling
+// setup(). Tests use it to drive the setup/copy phases individually. Callers
+// own the teardown (see closeTestRunner). It supports both single-source
+// moves (SourceDSN) and multi-source moves (SourceDSNs).
+func buildTestRunner(t *testing.T, move *Move) (*Runner, context.Context) {
 	r, err := NewRunner(move)
 	require.NoError(t, err)
 
@@ -663,20 +731,34 @@ func checkpointAndStop(t *testing.T, move *Move) {
 		DB:       targetDB,
 		Config:   targetConfig,
 	}}
+	return r, ctx
+}
+
+// closeTestRunner tears down a runner built by buildTestRunner without
+// cutover. Runner.Close() cancels the context (idempotent) and shuts down
+// repl clients/chunkers and closes the targets, so call it first; it does
+// not close the sources, so close the source DBs afterwards.
+func closeTestRunner(t *testing.T, r *Runner) {
+	require.NoError(t, r.Close())
+	for i := range r.sources {
+		require.NoError(t, r.sources[i].db.Close())
+	}
+}
+
+// checkpointAndStop drives a move through setup, the full row copy and a
+// checkpoint dump, then tears everything down without cutover — simulating a
+// move that was interrupted after writing a checkpoint. The checkpoint table
+// is left behind on the first target (targets[0]) for a subsequent resume.
+// This mirrors the first phase of TestResumeFromCheckpointE2E.
+func checkpointAndStop(t *testing.T, move *Move) {
+	r, ctx := buildTestRunner(t, move)
 	require.NoError(t, r.setup(ctx))
 
 	// Copy all rows, then write a checkpoint.
 	require.NoError(t, r.copier.Run(ctx))
 	require.NoError(t, r.DumpCheckpoint(ctx))
 
-	// Close everything manually, without cutover. Runner.Close() cancels the
-	// context (idempotent) and shuts down repl clients/chunkers and closes the
-	// targets, so call it first; it does not close the sources, so close the
-	// source DBs afterwards.
-	require.NoError(t, r.Close())
-	for i := range r.sources {
-		require.NoError(t, r.sources[i].db.Close())
-	}
+	closeTestRunner(t, r)
 }
 
 // TestResumeFromCheckpointMultiTableE2E covers resume-from-checkpoint for a
@@ -1067,7 +1149,10 @@ func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 // against real target tables, with each watermark format a checkpoint can
 // contain: the multi-chunker map (including a table with no entry), the
 // composite chunker envelope, and the raw single-chunk JSON written by
-// checkpoints from before this change (resume compatibility).
+// checkpoints from before this change (resume compatibility). In every
+// format the delete must start at the watermark chunk's LOWER bound
+// (inclusive) — the copier's resume position — so that the deleted range
+// coincides with the range the resumed copy re-copies.
 func TestDeleteAboveWatermarkFormats(t *testing.T) {
 	srcDB := "source_delwm"
 	dstDB := "dest_delwm"
@@ -1117,37 +1202,118 @@ func TestDeleteAboveWatermarkFormats(t *testing.T) {
 		return r
 	}
 
-	rawChunkUpper5 := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["1"],"Inclusive":true},"UpperBound":{"Value":["5"],"Inclusive":false}}`
+	rawChunkLower3 := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["3"],"Inclusive":true},"UpperBound":{"Value":["5"],"Inclusive":false}}`
 
-	// Multi-chunker map format: t1 has a watermark with upper bound id=5;
-	// t2 has no entry (its chunker wasn't ready at checkpoint time). Rows
-	// above id=5 must be deleted from t1; t2 must be emptied entirely
+	// Multi-chunker map format: t1 has a watermark chunk [3, 5); t2 has no
+	// entry (its chunker wasn't ready at checkpoint time). Rows at/above the
+	// lower bound id=3 must be deleted from t1 — the resumed copy re-copies
+	// from id=3, not from above the chunk — and t2 must be emptied entirely
 	// because it restarts from scratch on resume.
-	multiWatermark, err := json.Marshal(map[string]string{t1.QualifiedName(): rawChunkUpper5})
+	multiWatermark, err := json.Marshal(map[string]string{t1.QualifiedName(): rawChunkLower3})
 	require.NoError(t, err)
 	require.NoError(t, newRunner(t1, t2).deleteAboveWatermark(ctx, string(multiWatermark)))
 
 	var count int
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
-	require.Equal(t, 5, count, "t1 must keep only ids 1..5")
+	require.Equal(t, 2, count, "t1 must keep only ids 1..2 (below the watermark lower bound)")
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t2").Scan(&count))
 	require.Zero(t, count, "t2 has no watermark and must be emptied")
 
 	// Composite chunker envelope format (single-table move): the ChunkJSON
-	// inside the envelope carries the bound. Rows above id='m' must go.
+	// inside the envelope carries the bounds [c, m). Rows at/above id='c'
+	// must go.
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t2 (id, val) VALUES ('a','1'),('b','2'),('m','5'),('p','6'),('z','7')")
-	envelope := `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"a\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"m\"],\"Inclusive\":false}}","RowsCopied":3}`
+	envelope := `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"c\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"m\"],\"Inclusive\":false}}","RowsCopied":3}`
 	require.NoError(t, newRunner(t2).deleteAboveWatermark(ctx, envelope))
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t2").Scan(&count))
-	require.Equal(t, 3, count, "t2 must keep only ids <= 'm'")
+	require.Equal(t, 2, count, "t2 must keep only ids below 'c'")
 
 	// Raw single-chunk format (single-table auto-inc move): compatibility
 	// with checkpoints written by the optimistic chunker.
 	testutils.RunSQL(t, "DELETE FROM "+dstDB+".t1")
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, val) VALUES (1,'a'),(4,'b'),(5,'c'),(6,'d'),(9,'e')")
-	require.NoError(t, newRunner(t1).deleteAboveWatermark(ctx, rawChunkUpper5))
+	require.NoError(t, newRunner(t1).deleteAboveWatermark(ctx, rawChunkLower3))
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
-	require.Equal(t, 3, count, "t1 must keep only ids 1, 4, 5")
+	require.Equal(t, 1, count, "t1 must keep only id 1")
+}
+
+// TestDeleteAboveWatermarkRemovesRowsDeletedOnSource is a regression test for
+// resume resurrecting rows that were deleted on the source. Scenario: a row k
+// inside the watermark chunk [L, U) was copied to the target before the
+// crash, and its source DELETE committed in the unflushed window just before
+// the crash. On resume, k no longer exists on the source, so the recopy
+// (which reads the current source snapshot) never touches it, and the
+// keyAboveWatermark optimization can discard its replayed binlog DELETE (k
+// can be above the post-crash source max that seeds checkpointHighPtr).
+// The only thing that removes k is deleteAboveWatermark — which therefore
+// must delete from the watermark chunk's LOWER bound, not from above its
+// upper bound. Before the fix, k survived the delete and was resurrected.
+func TestDeleteAboveWatermarkRemovesRowsDeletedOnSource(t *testing.T) {
+	srcDB := "source_delwm_rez"
+	dstDB := "dest_delwm_rez"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+
+	for _, db := range []string{srcDB, dstDB} {
+		testutils.RunSQL(t, "CREATE TABLE "+db+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARCHAR(64))")
+	}
+	// The target holds everything that was copied before the crash: ids
+	// 1..10, including k=4. The source no longer has k=4 — its DELETE
+	// committed pre-crash, after the rows were copied.
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, val) VALUES (1,'a'),(2,'b'),(3,'c'),(4,'deleted-on-source'),(5,'e'),(6,'f'),(7,'g'),(8,'h'),(9,'i'),(10,'j')")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (id, val) VALUES (1,'a'),(2,'b'),(3,'c'),(5,'e'),(6,'f'),(7,'g'),(8,'h'),(9,'i'),(10,'j')")
+
+	ctx := t.Context()
+	dbConfig := dbconn.NewDBConfig()
+	srcConn, err := dbconn.New(sourceDSN, dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(srcConn)
+	srcCfg, err := mysql.ParseDSN(sourceDSN)
+	require.NoError(t, err)
+	dstConn, err := dbconn.New(targetDSN, dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dstConn)
+	dstCfg, err := mysql.ParseDSN(targetDSN)
+	require.NoError(t, err)
+
+	t1 := table.NewTableInfo(srcConn, srcDB, "t1")
+	t1.Host = srcCfg.Addr // matches what Runner.getTables sets
+	require.NoError(t, t1.SetInfo(ctx))
+
+	r, err := NewRunner(&Move{})
+	require.NoError(t, err)
+	r.sources = []sourceInfo{{db: srcConn, config: srcCfg, dsn: sourceDSN, tables: []*table.TableInfo{t1}}}
+	r.sourceTables = []*table.TableInfo{t1}
+	r.targets = []applier.Target{{KeyRange: "0", DB: dstConn, Config: dstCfg}}
+
+	// Watermark chunk [3, 7): k=4 is strictly inside it. A delete of only
+	// `id > 7` (the old behavior) does not touch k.
+	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["3"],"Inclusive":true},"UpperBound":{"Value":["7"],"Inclusive":false}}`
+	require.NoError(t, r.deleteAboveWatermark(ctx, watermark))
+
+	// k must be gone: it is inside the recopy range, so it must have been
+	// deleted along with everything else the copier is about to re-copy.
+	var count int
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1 WHERE id = 4").Scan(&count))
+	require.Zero(t, count, "a row deleted on the source must not survive the resume delete")
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, 2, count, "only rows below the resume position (ids 1..2) may remain")
+
+	// Emulate the recopy the resumed chunker performs: re-copy `id >= 3`
+	// from the current source snapshot (in tests source and target live on
+	// the same MySQL instance, so a cross-database INSERT..SELECT is
+	// equivalent). After delete+recopy the target must equal the source —
+	// k stays gone because nothing re-creates it.
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 SELECT * FROM "+srcDB+".t1 WHERE id >= 3")
+	var srcRows, dstRows string
+	require.NoError(t, srcConn.QueryRowContext(ctx, "SELECT GROUP_CONCAT(id ORDER BY id) FROM t1").Scan(&srcRows))
+	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT GROUP_CONCAT(id ORDER BY id) FROM t1").Scan(&dstRows))
+	require.Equal(t, srcRows, dstRows, "target must equal source after delete+recopy")
 }
 
 func varcharPKWriteOne(ctx context.Context, db *sql.DB, srcDB string) error {
