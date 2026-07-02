@@ -808,6 +808,7 @@ func (s *gatedSubscription) Flush(_ context.Context, _ bool, _ []*dbconn.TableLo
 	return true, nil
 }
 func (s *gatedSubscription) Tables() []*table.TableInfo                           { return nil }
+func (s *gatedSubscription) ImmutableColumnOrdinal() int                          { return -1 }
 func (s *gatedSubscription) SetWatermarkOptimization(context.Context, bool) error { return nil }
 func (s *gatedSubscription) Close()                                               {}
 
@@ -1236,6 +1237,37 @@ func TestProcessDDLNotification(t *testing.T) {
 		cancelled = false
 		c.processDDLNotification("other_schema", "orders")
 		require.False(t, cancelled, "should not cancel on DDL in a different schema")
+	})
+
+	t.Run("default mode: move-style subscription (nil newTable)", func(t *testing.T) {
+		// Move-flow subscriptions have no destination-side TableInfo (see
+		// BufferedSubscriptionConfig.NewTable). Regression: the match loop
+		// used to walk past the current table into a nil Tables() entry
+		// and panic the readStream goroutine on any DDL notification for
+		// a non-subscribed table.
+		cancelled := false
+		c := &binlogClient{
+			logger:           slog.Default(),
+			callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
+			subs:             newSubscriptionRegistry(),
+		}
+		chunker, err := table.NewChunker(tbl, table.ChunkerConfig{})
+		require.NoError(t, err)
+		sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
+			CurrentTable: tbl,
+			Applier:      applier.NewSingleTargetForTest(t, db),
+			Chunker:      chunker,
+		})
+		require.NoError(t, err)
+		require.True(t, c.subs.Add(dbName+".orders", sub))
+
+		// DDL on an unrelated table must be ignored — not panic.
+		c.processDDLNotification(dbName, "unrelated_table")
+		require.False(t, cancelled, "should not cancel on DDL for an unrelated table")
+
+		// DDL on the subscribed table still cancels.
+		c.processDDLNotification(dbName, "orders")
+		require.True(t, cancelled, "should cancel on DDL matching the subscribed table")
 	})
 
 	t.Run("schema filter without table filter: cancels on any table in schema", func(t *testing.T) {

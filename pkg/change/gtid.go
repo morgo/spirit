@@ -62,11 +62,12 @@ type gtidClient struct {
 	// to the new table. Both are *MysqlGTIDSet; never nil after Start.
 	//
 	// pendingSID/pendingGNO carry the GTID of the in-progress transaction
-	// (set on GTIDEvent, applied to bufferedGTID on XIDEvent). This
-	// matters because resume positions advance per-transaction: a GTID
-	// must only enter the resume set after its full row-event stream has
-	// been buffered, otherwise a crash mid-transaction would silently
-	// skip its tail on the next run.
+	// (set on GTIDEvent, applied to bufferedGTID by promotePendingGTID
+	// when the transaction's binlog group ends). This matters because
+	// resume positions advance per-transaction: a GTID must only enter
+	// the resume set after its full row-event stream has been buffered,
+	// otherwise a crash mid-transaction would silently skip its tail on
+	// the next run. See promotePendingGTID for the group shapes.
 	bufferedGTID mysql.GTIDSet
 	flushedGTID  mysql.GTIDSet
 	pendingSID   []byte
@@ -178,6 +179,12 @@ func normalizeGTIDString(s string) string {
 	}, s)
 }
 
+// hasPrefixFold reports whether s begins with prefix, matched
+// case-insensitively (strings.HasPrefix + strings.EqualFold).
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
 // setBufferedGTID adds gtid to bufferedGTID under c.mu. The set grows
 // monotonically — there is no "rewind" in GTID semantics.
 func (c *gtidClient) setBufferedGTID(sid []byte, gno int64) {
@@ -205,15 +212,34 @@ func (c *gtidClient) getBufferedGTID() mysql.GTIDSet {
 // recent GTIDEvent into bufferedGTID and clears the pending state. It is
 // a no-op when there is no pending GTID (e.g. right after a reconnect).
 //
-// This must be called whenever the current transaction's event stream
-// ends, regardless of how it ends: XIDEvent (InnoDB commit), a COMMIT or
-// ROLLBACK QueryEvent (non-transactional engines / mixed-engine
-// rollbacks), or any other QueryEvent, including statements the TiDB
-// parser cannot parse (CREATE TRIGGER, stored procedures, XA, ...).
+// This must be called when — and only when — the current transaction's
+// binlog group ends: XIDEvent (InnoDB commit), a COMMIT or ROLLBACK
+// QueryEvent (non-transactional engines / mixed-engine rollbacks), a
+// standalone statement that is its own transaction (DDL, statements the
+// TiDB parser cannot parse such as CREATE TRIGGER or stored procedures),
+// an XA_PREPARE_LOG_EVENT, or an XA COMMIT / XA ROLLBACK QueryEvent.
 // Every GTIDEvent the server streams corresponds to an entry in its
 // gtid_executed, so any path that drops a pending GTID instead of
 // promoting it leaves bufferedGTID permanently behind gtid_executed and
 // wedges BlockWait/Flush forever.
+//
+// The "only when" direction matters just as much: promoting before the
+// group's row events have been buffered lets a concurrent flush() publish
+// the GTID as a resume coordinate too early; a crash then resumes past it
+// and its row events are silently lost. This is why a mid-group QueryEvent
+// must not promote. Regular transactions have no mid-group QueryEvents
+// besides BEGIN, but XA transactions do — their first group is written to
+// the binlog in one piece at XA PREPARE time, shaped as (verified against
+// MySQL 8.0):
+//
+//	GTIDEvent(g1) → Query("XA START x") → row events →
+//	Query("XA END x") → XA_PREPARE_LOG_EVENT
+//
+// with the terminal XA COMMIT or XA ROLLBACK arriving any amount of time
+// later as a QueryEvent under its own GTID (g2), with no row events.
+// (`XA COMMIT ... ONE PHASE` is instead logged as the XA_PREPARE_LOG_EVENT
+// terminator of the first group, so both group shapes end at either an
+// XA_PREPARE_LOG_EVENT or a plain QueryEvent terminator.)
 func (c *gtidClient) promotePendingGTID() {
 	c.mu.Lock()
 	pendingSID := c.pendingSID
@@ -552,6 +578,31 @@ func (c *gtidClient) readStream(ctx context.Context) {
 				c.promotePendingGTID()
 				continue
 			}
+			// XA statements must not fall through to the parser path below
+			// (which promotes): see the XA group shape documented on
+			// promotePendingGTID. "XA START" opens the group exactly like
+			// BEGIN — its row events have not been buffered yet — and
+			// "XA END" is not a terminator either (the group ends at the
+			// XA_PREPARE_LOG_EVENT that follows), so for both the pending
+			// GTID must stay pending. Promoting here would let a concurrent
+			// flush publish g1 as a resume coordinate before its row events
+			// are buffered; a crash before the next flush then resumes past
+			// g1 and silently loses its rows. The server rewrites these
+			// statements canonically (`XA BEGIN 'x'` is binlogged as
+			// "XA START X'78',X'',1"), so a keyword prefix match is exact.
+			if hasPrefixFold(q, "XA START ") || hasPrefixFold(q, "XA END ") {
+				continue
+			}
+			// XA COMMIT / XA ROLLBACK (the two-phase outcome, decided after
+			// the prepare) are each their own single-statement transaction:
+			// own GTID, no row events. Promote, same as COMMIT/ROLLBACK
+			// above. (The one-phase variant `XA COMMIT ... ONE PHASE` never
+			// takes this path — it is logged as an XA_PREPARE_LOG_EVENT,
+			// handled below.)
+			if hasPrefixFold(q, "XA COMMIT ") || hasPrefixFold(q, "XA ROLLBACK ") {
+				c.promotePendingGTID()
+				continue
+			}
 			ddlTables, err := extractTablesFromDDLStmts(string(event.Schema), string(event.Query))
 			if err != nil {
 				// The TiDB parser does not understand all syntax (CREATE/DROP
@@ -591,6 +642,21 @@ func (c *gtidClient) readStream(ctx context.Context) {
 			*replication.RotateEvent:
 			// Stream housekeeping events. Position tracking advances via
 			// GTIDEvent/XIDEvent above, not via these.
+		case *replication.GenericEvent:
+			// Event types without a dedicated go-mysql decoder surface as
+			// GenericEvent; the header carries the real type. The one we
+			// must act on is XA_PREPARE_LOG_EVENT: it terminates an XA
+			// transaction's first binlog group (it is also how the server
+			// logs `XA COMMIT ... ONE PHASE`). All of the transaction's row
+			// events precede it in the group and have been buffered, and
+			// the server records the GTID in gtid_executed at prepare time,
+			// so this — not the earlier "XA START"/"XA END" QueryEvents —
+			// is the point where the pending GTID is safe to promote.
+			if ev.Header.EventType == replication.XA_PREPARE_LOG_EVENT {
+				c.promotePendingGTID()
+				continue
+			}
+			c.logger.Debug("Received unknown event type", "type", ev.Header.EventType.String())
 		default:
 			c.logger.Debug("Received unknown event type", "type", fmt.Sprintf("%T", ev.Event))
 		}
@@ -612,6 +678,14 @@ func (c *gtidClient) processDDLNotification(schema, table string) {
 		matchFound := false
 		for _, sub := range c.subs.Snapshot() {
 			for _, tsub := range sub.Tables() {
+				if tsub == nil {
+					// Defensive: in-tree subscriptions never emit nil
+					// entries (bufferedMap.Tables omits a nil newTable),
+					// but the interface can't guarantee it for other
+					// implementations, and a DDL notification must never
+					// crash the stream reader.
+					continue
+				}
 				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
 					break
@@ -657,6 +731,7 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	}
 
 	if eventType == eventTypeUpdate {
+		immutableOrdinal := sub.ImmutableColumnOrdinal()
 		for i := 0; i < len(e.Rows); i += 2 {
 			beforeRow := e.Rows[i]
 			afterRow := e.Rows[i+1]
@@ -666,6 +741,12 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 			}
 			afterKey, err := tbl.PrimaryKeyValues(afterRow)
 			if err != nil {
+				return err
+			}
+			// See the matching block in binlog.go's processRowsEvent: an
+			// UPDATE to the declared-immutable sharding column must fail
+			// the stream fatally.
+			if err := checkImmutableColumn(tbl, immutableOrdinal, beforeRow, afterRow, beforeKey); err != nil {
 				return err
 			}
 			if pkChanged(beforeKey, afterKey) {
