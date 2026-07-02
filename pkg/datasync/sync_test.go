@@ -880,6 +880,84 @@ func TestSyncResumeSourceIdentity(t *testing.T) {
 	require.Equal(t, 3, n)
 }
 
+// TestSyncFreshTargetSchemaMismatch verifies that a fresh sync refuses a
+// pre-existing (empty) target table whose schema differs from the source,
+// before any row is copied. The copy and continuous replication write with
+// REPLACE/INSERT IGNORE, so a collation difference — the dangerous case being
+// on a primary-key column — would silently collapse case-distinct rows and
+// the continuous checksum would never converge. An identical pre-created
+// table must still be accepted (the declarative pre-created-schema workflow).
+func TestSyncFreshTargetSchemaMismatch(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_schemachk_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_schemachk_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_schemachk_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_schemachk_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_schemachk_src.t1 (
+		id INT PRIMARY KEY,
+		val VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
+	)`)
+	testutils.RunSQL(t, `INSERT INTO sync_schemachk_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_schemachk_dest`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_schemachk_dest`)
+
+	newRunner := func() *Runner {
+		r, nerr := NewRunner(&Sync{
+			SourceDSN:       src.FormatDSN(),
+			TargetDSN:       dest.FormatDSN(),
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+		})
+		require.NoError(t, nerr)
+		return r
+	}
+
+	tgt, err := sql.Open("mysql", dest.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+
+	// Pre-create the target table EMPTY but with a different collation on the
+	// val column. Before the schema check, this passed the fresh-sync
+	// target-empty guard with zero schema comparison.
+	testutils.RunSQL(t, `CREATE TABLE sync_schemachk_dest.t1 (
+		id INT PRIMARY KEY,
+		val VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci
+	)`)
+
+	r1 := newRunner()
+	err = runUntilCopied(t, r1)
+	require.NoError(t, r1.Close())
+	require.Error(t, err, "a pre-existing target table with a mismatched schema must be rejected")
+	require.ErrorContains(t, err, "does not match the source")
+	require.ErrorContains(t, err, "t1")
+
+	// The sync failed during setup: nothing was copied and no checkpoint was
+	// created that would claim ownership of the target.
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Zero(t, n, "the sync must error before copying any rows")
+	require.NoError(t, tgt.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE table_schema='sync_schemachk_dest' AND table_name='_spirit_sync_checkpoint'").Scan(&n))
+	require.Zero(t, n, "the sync must error before creating its checkpoint table")
+
+	// An identical pre-created table passes and the copy proceeds.
+	testutils.RunSQL(t, `DROP TABLE sync_schemachk_dest.t1`)
+	testutils.RunSQL(t, `CREATE TABLE sync_schemachk_dest.t1 (
+		id INT PRIMARY KEY,
+		val VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
+	)`)
+	r2 := newRunner()
+	require.NoError(t, runUntilCopied(t, r2), "an identical pre-created table must be accepted")
+	require.NoError(t, r2.Close())
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n)
+}
+
 // TestSyncCreateTableLegacyDefault verifies that target tables are created with
 // a relaxed sql_mode. The source DDL can carry a legacy zero-date default that
 // a strict target (sql_mode=TRADITIONAL, as the import's injected target uses)

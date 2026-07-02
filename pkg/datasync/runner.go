@@ -794,17 +794,33 @@ func (r *Runner) getTables(ctx context.Context) ([]*table.TableInfo, error) {
 	return tables, rows.Err()
 }
 
-// checkTargetEmpty verifies that, for a fresh sync, none of the source
-// tables already exist with data on the target. A table that does not yet
-// exist is fine (startFresh will create it). Uses only SELECT on the
-// target.
+// checkTargetEmpty verifies that, for a fresh sync, any source table that
+// already exists on the target is empty AND schema-identical to its source
+// table. A table that does not yet exist is fine (startFresh will create it).
+// Uses only SELECT on the target.
+//
+// The schema comparison matters because the copy and the continuous
+// replication write with REPLACE/INSERT IGNORE: on a pre-created table whose
+// primary-key collation differs from the source (e.g. source utf8mb4_bin vs a
+// target created with the default utf8mb4_0900_ai_ci), case-distinct source
+// rows silently collapse into a single target row, and the continuous checksum
+// then never converges. Erroring here — before any copy starts — mirrors
+// move's target_state check, using the same canonical comparison
+// (statement.SchemaDiff), which ignores instance-specific noise like
+// AUTO_INCREMENT counters but compares column types, charset, collation,
+// indexes and constraints.
 func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 	for _, t := range r.sourceTables {
 		var dummy int
 		err := r.target.DB.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT 1 FROM %s.%s LIMIT 1", sqlescape.EscapeIdentifier(r.target.Config.DBName), sqlescape.EscapeIdentifier(t.TableName))).Scan(&dummy)
 		if errors.Is(err, sql.ErrNoRows) {
-			continue // table exists but is empty
+			// The table exists and is empty: acceptable for a fresh sync, but
+			// only if its schema matches the source.
+			if err := r.checkTargetTableSchema(ctx, t); err != nil {
+				return err
+			}
+			continue
 		}
 		if err != nil {
 			// A missing target table is expected on a fresh sync.
@@ -816,6 +832,47 @@ func (r *Runner) checkTargetEmpty(ctx context.Context) error {
 		return fmt.Errorf("target table %q already exists and is not empty; sync requires an empty target (drop it, or start from a checkpoint)", t.TableName)
 	}
 	return nil
+}
+
+// checkTargetTableSchema errors when a pre-existing target table's schema
+// differs from its source table's, comparing the canonicalized SHOW CREATE
+// TABLE of both sides via statement.SchemaDiff (see checkTargetEmpty for why
+// a difference — especially a collation difference on the primary key — is
+// unsafe to copy into).
+func (r *Runner) checkTargetTableSchema(ctx context.Context, t *table.TableInfo) error {
+	sourceCreate, err := showCreateTable(ctx, r.source.db, t.SchemaName, t.TableName)
+	if err != nil {
+		return fmt.Errorf("failed to read source schema for table %q: %w", t.TableName, err)
+	}
+	targetCreate, err := showCreateTable(ctx, r.target.DB, r.target.Config.DBName, t.TableName)
+	if err != nil {
+		return fmt.Errorf("failed to read target schema for pre-existing table %q: %w", t.TableName, err)
+	}
+	diff, err := statement.SchemaDiff(t.TableName, sourceCreate, targetCreate)
+	if err != nil {
+		return fmt.Errorf("failed to compare schema for pre-existing target table %q: %w", t.TableName, err)
+	}
+	if diff != "" {
+		return fmt.Errorf("target table %q already exists but its schema does not match the source; reconcile the target to the source with: %s. Ensure the table matches exactly (including column types, charset and collation), or drop it and let sync create it", t.TableName, diff)
+	}
+	r.logger.Info("validated pre-existing empty target table against the source schema",
+		"table", t.TableName, "database", r.target.Config.DBName)
+	return nil
+}
+
+// showCreateTable returns the SHOW CREATE TABLE statement for schema.table on
+// db. Identifiers are quoted with sqlescape's %n verb, consistent with the
+// rest of the codebase (and with pkg/move/check's equivalent helper).
+func showCreateTable(ctx context.Context, db *sql.DB, schema, tableName string) (string, error) {
+	query, err := sqlescape.EscapeSQL("SHOW CREATE TABLE %n.%n", schema, tableName)
+	if err != nil {
+		return "", err
+	}
+	var name, createStmt string
+	if err := db.QueryRowContext(ctx, query).Scan(&name, &createStmt); err != nil {
+		return "", err
+	}
+	return createStmt, nil
 }
 
 // createApplier returns the caller-injected applier, or constructs a
@@ -940,8 +997,9 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context) (bool, error) {
 
 // createTargetTables creates each source table on the target using the
 // source's SHOW CREATE TABLE. Tables that already exist are skipped: on a
-// fresh sync checkTargetEmpty has confirmed they are empty, and on a resume
-// they were created by a previous run.
+// fresh sync checkTargetEmpty has confirmed they are empty and
+// schema-identical to the source, and on a resume they were created by a
+// previous run.
 //
 // When DeferSecondaryIndexes is set, the regular secondary indexes are
 // stripped from the CREATE so the bulk copy loads an index-free table; they
