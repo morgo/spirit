@@ -151,15 +151,22 @@ func indexParts(index statement.Index) []statement.IndexColumn {
 }
 
 // renderIndexPart formats a single key part for human-readable messages,
-// including prefix lengths (col(10)) and expression parts ((LOWER(name))).
+// including prefix lengths (col(10)), expression parts ((LOWER(name))), and
+// descending key parts (col DESC).
 func renderIndexPart(p statement.IndexColumn) string {
-	if p.Expression != nil {
-		return "(" + *p.Expression + ")"
+	var rendered string
+	switch {
+	case p.Expression != nil:
+		rendered = "(" + *p.Expression + ")"
+	case p.Length != nil:
+		rendered = fmt.Sprintf("%s(%d)", p.Name, *p.Length)
+	default:
+		rendered = p.Name
 	}
-	if p.Length != nil {
-		return fmt.Sprintf("%s(%d)", p.Name, *p.Length)
+	if p.Desc {
+		rendered += " DESC"
 	}
-	return p.Name
+	return rendered
 }
 
 // renderIndexParts formats a list of key parts for human-readable messages.
@@ -192,7 +199,15 @@ func renderIndexColumns(index statement.Index) string {
 //     covering-scan and full-ordering capability.
 //   - Column-name comparison is case-insensitive, matching MySQL identifier
 //     semantics.
+//   - Key-part direction must match: a DESC key part stores the opposite
+//     ordering from an ASC one, so at the same position in two multi-column
+//     indexes they do not produce interchangeable orderings.
 func indexColumnPartCovers(a, b statement.IndexColumn) bool {
+	// Direction must match for both column and expression key parts.
+	if a.Desc != b.Desc {
+		return false
+	}
+
 	// Expression parts only match identical expressions.
 	if a.Expression != nil || b.Expression != nil {
 		if a.Expression == nil || b.Expression == nil {
@@ -305,11 +320,12 @@ func isRedundantToIndex(indexA statement.Index, indexB statement.Index) bool {
 }
 
 // isPlainPKColumn reports whether index key part p is a plain column reference
-// (no prefix length, no expression) whose name matches the given PK column.
-// InnoDB auto-appends the *full* PK column to secondary indexes, so a prefixed
-// or expression key part does not stand in for a PK column.
+// (no prefix length, no expression, ascending) whose name matches the given PK
+// column. InnoDB auto-appends the *full* PK column to secondary indexes in
+// ascending order, so a prefixed, expression, or DESC key part does not stand
+// in for a PK column.
 func isPlainPKColumn(p statement.IndexColumn, pkColumn string) bool {
-	return p.Expression == nil && p.Length == nil && strings.EqualFold(p.Name, pkColumn)
+	return p.Expression == nil && p.Length == nil && !p.Desc && strings.EqualFold(p.Name, pkColumn)
 }
 
 // hasRedundantPKPrefix checks if a secondary index leads with the full
