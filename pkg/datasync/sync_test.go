@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
@@ -351,16 +352,18 @@ func TestFatalErrorConcurrentWithRunSetup(t *testing.T) {
 		runner.progMu.Unlock()
 	})
 	wg.Go(func() {
-		require.True(t, runner.fatalError())
+		require.True(t, runner.fatalError(change.FatalReasonStreamError))
 	})
 	wg.Wait()
 
-	// The fatal condition is recorded regardless of which goroutine won.
+	// The fatal condition is recorded regardless of which goroutine won,
+	// and the recorded error names the reason class.
 	require.Error(t, runner.fatal())
+	require.ErrorContains(t, runner.fatal(), change.FatalReasonStreamError.String())
 
 	// Repeated invocations still report "acted upon" but never
 	// double-cancel or re-record (fatalOnce).
-	require.True(t, runner.fatalError())
+	require.True(t, runner.fatalError(change.FatalReasonSchemaChange))
 	require.LessOrEqual(t, cancelCalls.Load(), int64(1))
 }
 

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -42,14 +44,14 @@ func TestFatalErrorIsIdempotent(t *testing.T) {
 		cancelFunc: func() { cancelCalls.Add(1) },
 	}
 
-	require.True(t, r.fatalError(), "first call must return true")
+	require.True(t, r.fatalError(change.FatalReasonSchemaChange), "first call must return true")
 	require.Equal(t, int32(1), cancelCalls.Load(), "first call must cancel once")
 	require.Equal(t, status.ErrCleanup, r.status.Get(), "status must transition to ErrCleanup")
 
 	// Subsequent calls: status (ErrCleanup) > CutOver, so the early
 	// return kicks in. cancel must not be re-invoked.
-	require.False(t, r.fatalError(), "subsequent call returns false via the past-cutover guard")
-	require.False(t, r.fatalError(), "and again")
+	require.False(t, r.fatalError(change.FatalReasonSchemaChange), "subsequent call returns false via the past-cutover guard")
+	require.False(t, r.fatalError(change.FatalReasonStreamError), "and again, regardless of reason")
 	require.Equal(t, int32(1), cancelCalls.Load(), "cancel must not be re-invoked")
 }
 
@@ -72,7 +74,7 @@ func TestFatalErrorConcurrentRace(t *testing.T) {
 	for range goroutines {
 		wg.Go(func() {
 			<-start
-			r.fatalError()
+			r.fatalError(change.FatalReasonSchemaChange)
 		})
 	}
 	close(start)
@@ -94,7 +96,7 @@ func TestFatalErrorPastCutoverIsNoop(t *testing.T) {
 	}
 	r.status.Set(status.CutOver)
 
-	require.False(t, r.fatalError(), "fatalError at/past cutover must return false")
+	require.False(t, r.fatalError(change.FatalReasonSchemaChange), "fatalError at/past cutover must return false")
 	require.Equal(t, int32(0), cancelCalls.Load(), "must not cancel at/past cutover")
 	require.Equal(t, status.CutOver, r.status.Get(), "status must not transition")
 }
@@ -108,7 +110,50 @@ func TestFatalErrorSafeWithoutCancelFunc(t *testing.T) {
 		// cancelFunc intentionally nil
 	}
 	require.NotPanics(t, func() {
-		require.True(t, r.fatalError())
+		require.True(t, r.fatalError(change.FatalReasonStreamError))
+	})
+}
+
+// TestFatalErrorReasonCheckpointHandling pins the cause-aware checkpoint
+// policy, mirroring the migration-runner test of the same name: a
+// schema-change fatal (foreign DDL on a source table) must DROP the
+// checkpoint table on the target — resuming against a changed schema could
+// corrupt data — while a stream-error fatal (a source's binlog reader gave up
+// after its recreate attempts) must PRESERVE it, because a dead stream is
+// exactly the failure checkpoint resume recovers from.
+func TestFatalErrorReasonCheckpointHandling(t *testing.T) {
+	// makeRunner builds a minimal Runner whose first target holds a real
+	// checkpoint table, in a database unique to the subtest.
+	makeRunner := func(t *testing.T) (*Runner, *atomic.Int32) {
+		dbName, db := testutils.CreateUniqueTestDatabase(t)
+		require.NoError(t, checkpoint.NewTable(db, checkpointTableName, checkpoint.Transient).Create(t.Context()))
+		var cancelCalls atomic.Int32
+		r := &Runner{
+			logger:          slog.Default(),
+			cancelFunc:      func() { cancelCalls.Add(1) },
+			targets:         []applier.Target{{KeyRange: "0", DB: db}},
+			checkpointTable: table.NewTableInfo(db, dbName, checkpointTableName),
+		}
+		require.True(t, checkpointTableExists(t, r), "checkpoint table must exist after setup")
+		return r, &cancelCalls
+	}
+
+	t.Run("SchemaChangeDropsCheckpoint", func(t *testing.T) {
+		r, cancelCalls := makeRunner(t)
+		require.True(t, r.fatalError(change.FatalReasonSchemaChange))
+		require.Equal(t, status.ErrCleanup, r.status.Get())
+		require.Equal(t, int32(1), cancelCalls.Load(), "must cancel the move")
+		require.False(t, checkpointTableExists(t, r),
+			"a schema-change fatal must invalidate (drop) the checkpoint table")
+	})
+
+	t.Run("StreamErrorPreservesCheckpoint", func(t *testing.T) {
+		r, cancelCalls := makeRunner(t)
+		require.True(t, r.fatalError(change.FatalReasonStreamError))
+		require.Equal(t, status.ErrCleanup, r.status.Get())
+		require.Equal(t, int32(1), cancelCalls.Load(), "must still cancel the move")
+		require.True(t, checkpointTableExists(t, r),
+			"a stream-error fatal must preserve the checkpoint table so the move can resume")
 	})
 }
 

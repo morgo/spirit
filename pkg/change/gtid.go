@@ -49,7 +49,7 @@ type gtidClient struct {
 
 	subs *subscriptionRegistry
 
-	callerCancelFunc func() bool
+	callerCancelFunc func(FatalReason) bool
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
 
@@ -490,7 +490,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 						"total_attempts", recreateAttempts,
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
-					c.fatalError()
+					c.fatalError(FatalReasonStreamError)
 					return
 				}
 
@@ -554,7 +554,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		case *replication.RowsEvent:
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing GTID rows event", "error", err)
-				c.fatalError()
+				c.fatalError(FatalReasonStreamError)
 				return
 			}
 		case *replication.QueryEvent:
@@ -691,7 +691,7 @@ func (c *gtidClient) processDDLNotification(schema, table string) {
 			return
 		}
 	}
-	if c.fatalError() {
+	if c.fatalError(FatalReasonSchemaChange) {
 		c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
 	}
 }
@@ -761,9 +761,10 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	return nil
 }
 
-func (c *gtidClient) fatalError() bool {
+// fatalError mirrors binlogClient.fatalError; see the doc comment there.
+func (c *gtidClient) fatalError(reason FatalReason) bool {
 	if c.callerCancelFunc != nil {
-		return c.callerCancelFunc()
+		return c.callerCancelFunc(reason)
 	}
 	return false
 }
