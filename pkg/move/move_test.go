@@ -402,6 +402,186 @@ func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 		"postCopyPhase must ANALYZE the TARGET schema (w3c_dest.t1); stats row was not repopulated, so ANALYZE hit the wrong schema")
 }
 
+// TestDeltasFlushedDuringIndexRestore is a regression test for the
+// availability bug where postCopyPhase stopped the periodic flush before
+// restoreSecondaryIndexes. With --defer-secondary-indexes the restore is one
+// giant ALTER per table which can run for hours on a large table; with
+// flushing stopped for that window, deltas accumulated until the buffered
+// subscription parked the binlog reader on its soft memory limit, and a
+// source purging binlogs past the parked reader's position would fail the
+// move fatally (checkpoint dropped, restart from scratch).
+//
+// The test pins postCopyPhase inside restoreSecondaryIndexes by holding a
+// metadata lock on the target's t1 (an open transaction that has read from
+// it), so the deferred-index ALTER blocks. It then injects writes on source
+// table t2 and asserts they are applied to the target WHILE the restore step
+// is still running — which is only possible if the periodic flush stays
+// active across the index restore. On the old code the deltas sat buffered
+// until the checksum phase and this test times out.
+func TestDeltasFlushedDuringIndexRestore(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	src := cfg.Clone()
+	src.DBName = "idxflush_src"
+	dest := cfg.Clone()
+	dest.DBName = "idxflush_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS idxflush_src`)
+	testutils.RunSQL(t, `CREATE DATABASE idxflush_src`)
+	// t1 carries the secondary index that is deferred and restored post-copy.
+	testutils.RunSQL(t, `CREATE TABLE idxflush_src.t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARBINARY(255), KEY val_idx (val))`)
+	// t2 has no secondary index; it receives the post-copy deltas.
+	testutils.RunSQL(t, `CREATE TABLE idxflush_src.t2 (id INT NOT NULL PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO idxflush_src.t1 (val) VALUES (RANDOM_BYTES(255)), (RANDOM_BYTES(255)), (RANDOM_BYTES(255))`)
+	testutils.RunSQL(t, `INSERT INTO idxflush_src.t2 (id, val) VALUES (1, 'one'), (2, 'two'), (3, 'three')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS idxflush_dest`)
+	testutils.RunSQL(t, `CREATE DATABASE idxflush_dest`)
+	t.Cleanup(func() {
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS idxflush_src`)
+		testutils.RunSQL(t, `DROP DATABASE IF EXISTS idxflush_dest`)
+	})
+
+	move := &Move{
+		SourceDSN:             src.FormatDSN(),
+		TargetDSN:             dest.FormatDSN(),
+		TargetChunkTime:       100 * time.Millisecond,
+		Threads:               1,
+		WriteThreads:          1,
+		DeferSecondaryIndexes: true,
+	}
+	r, err := NewRunner(move)
+	require.NoError(t, err)
+
+	// Drive the same setup the real Run() does (mirroring
+	// TestPostCopyAnalyzeTargetSchema), then run the copier so the target
+	// tables exist and are populated.
+	var ctx context.Context
+	ctx, r.cancelFunc = context.WithCancel(t.Context())
+	r.dbConfig = dbconn.NewDBConfig()
+	srcDB, err := dbconn.New(r.move.SourceDSN, r.dbConfig)
+	require.NoError(t, err)
+	srcConfig, err := mysql.ParseDSN(r.move.SourceDSN)
+	require.NoError(t, err)
+	r.sources = []sourceInfo{{db: srcDB, config: srcConfig, dsn: r.move.SourceDSN}}
+	targetDB, err := dbconn.New(r.move.TargetDSN, r.dbConfig)
+	require.NoError(t, err)
+	targetConfig, err := mysql.ParseDSN(r.move.TargetDSN)
+	require.NoError(t, err)
+	r.targets = []applier.Target{{
+		KeyRange: "0",
+		DB:       targetDB,
+		Config:   targetConfig,
+	}}
+	require.NoError(t, r.setup(ctx))
+	t.Cleanup(func() {
+		r.cancelFunc()
+		// Runner.Close() closes the target DB and repl clients but not the raw
+		// source DB connection, so close it explicitly to avoid a goroutine leak
+		// (goleak runs in TestMain).
+		require.NoError(t, srcDB.Close())
+		require.NoError(t, r.Close())
+	})
+
+	// run() starts the periodic flush in startBackgroundRoutines before the
+	// copy, and postCopyPhase keeps it running through the index restore.
+	// Start it here directly with a short interval so the test doesn't wait
+	// on change.DefaultFlushInterval ticks.
+	r.sources[0].replClient.StartPeriodicFlush(ctx, 100*time.Millisecond)
+
+	require.NoError(t, r.copier.Run(ctx))
+	// run() disables the watermark optimization once the copy is done so
+	// binlog events for rows above the final copy watermark are buffered
+	// rather than discarded. The post-copy writes below depend on this.
+	require.NoError(t, r.setWatermarkOptimizationAll(ctx, false))
+
+	// Precondition: the secondary index was deferred, so it must not exist
+	// on the target yet.
+	var idxCount int
+	require.NoError(t, targetDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = 'idxflush_dest' AND table_name = 't1' AND index_name = 'val_idx'`).Scan(&idxCount))
+	require.Zero(t, idxCount, "precondition: secondary index should have been deferred")
+
+	// Hold a metadata lock on the target's t1 from an open transaction so
+	// the deferred-index ALTER blocks, keeping postCopyPhase pinned inside
+	// restoreSecondaryIndexes. The dbconn pool sets lock_wait_timeout=30 for
+	// the ALTER's session; the block window below stays well under that.
+	blockerDB, err := sql.Open("mysql", dest.FormatDSN())
+	require.NoError(t, err)
+	blockerTx, err := blockerDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	var ignored int
+	require.NoError(t, blockerTx.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&ignored))
+	release := func() {
+		// Idempotent: a second Rollback returns sql.ErrTxDone and a second
+		// Close is a no-op; both are safe to ignore.
+		_ = blockerTx.Rollback()
+		_ = blockerDB.Close()
+	}
+
+	done := make(chan struct{})
+	var postCopyErr error
+	go func() {
+		defer close(done)
+		postCopyErr = r.postCopyPhase(ctx)
+	}()
+	t.Cleanup(func() {
+		// If an assertion below fails, make sure the postCopyPhase goroutine
+		// exits before the outer cleanup tears down connections: release the
+		// MDL blocker, cancel the context, and wait for it.
+		release()
+		r.cancelFunc()
+		<-done
+	})
+
+	// Wait until the restore's ALTER is actually blocked on our MDL.
+	require.Eventually(t, func() bool {
+		var waiting int
+		err := targetDB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM performance_schema.processlist WHERE db = 'idxflush_dest' AND state = 'Waiting for table metadata lock' AND info LIKE 'ALTER TABLE%'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 30*time.Second, 50*time.Millisecond, "deferred-index ALTER never blocked on the held metadata lock")
+	require.Equal(t, status.RestoreSecondaryIndexes, r.status.Get())
+
+	// Inject deltas on the source while the index restore is in progress.
+	// The initial ApplyChangeset drain finished before the ALTER started, and
+	// the checksum's own flush cannot run until the restore completes, so
+	// these rows can only reach the target via the periodic flush.
+	testutils.RunSQL(t, `INSERT INTO idxflush_src.t2 (id, val) VALUES (1001, 'delta-1'), (1002, 'delta-2'), (1003, 'delta-3')`)
+
+	require.Eventually(t, func() bool {
+		var n int
+		err := targetDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM t2 WHERE id IN (1001, 1002, 1003)`).Scan(&n)
+		return err == nil && n == 3
+	}, 15*time.Second, 100*time.Millisecond,
+		"deltas were not applied while the index restore was running: the periodic flush must stay active during restoreSecondaryIndexes")
+
+	// The deltas arrived while postCopyPhase was still in the restore step —
+	// i.e. before the checksum phase had a chance to flush anything.
+	require.Equal(t, status.RestoreSecondaryIndexes, r.status.Get(),
+		"postCopyPhase advanced past the index restore while its ALTER should still be blocked")
+	select {
+	case <-done:
+		t.Fatalf("postCopyPhase returned while its ALTER should still be blocked: %v", postCopyErr)
+	default:
+	}
+
+	// Release the metadata lock and let postCopyPhase finish (index restore,
+	// ANALYZE, checksum).
+	release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("timed out waiting for postCopyPhase to complete")
+	}
+	require.NoError(t, postCopyErr)
+
+	// The deferred index was restored on the target.
+	require.NoError(t, targetDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = 'idxflush_dest' AND table_name = 't1' AND index_name = 'val_idx'`).Scan(&idxCount))
+	require.Positive(t, idxCount, "deferred secondary index should have been restored")
+}
+
 // TestAnalyzeTableMissingTargetIsError verifies that analyzeTable inspects the
 // ANALYZE TABLE result set and surfaces a missing table as an error, rather
 // than silently returning nil (the failure mode that hid the cross-schema bug

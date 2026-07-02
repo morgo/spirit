@@ -1188,11 +1188,18 @@ func (r *Runner) restoreIndexesForTargets(ctx context.Context, host string, targ
 // When create-sentinel is not in use this is also the last phase
 // before cutover.
 func (r *Runner) postCopyPhase(ctx context.Context) error {
-	// Disable the periodic flush and flush all pending events.
-	// We want it disabled for ANALYZE TABLE and acquiring a table lock
-	// *but* it will be started again briefly inside of the checksum
-	// runner to ensure that the lag does not grow too long.
-	r.stopPeriodicFlushAll()
+	// Flush all pending events, but leave the periodic flush running until
+	// just before the checksum. With --defer-secondary-indexes,
+	// restoreSecondaryIndexes issues one giant ALTER per table that can run
+	// for hours, and both it and ANALYZE TABLE permit concurrent DML on the
+	// target: adding a regular secondary index is online (INPLACE) DDL in
+	// InnoDB, so the applier can keep draining deltas while they run
+	// (mirroring pkg/datasync's restoreSecondaryIndexes). If flushing
+	// stopped here instead, deltas would accumulate until the buffered
+	// subscription parks the binlog reader on its soft memory limit (see
+	// pkg/change/subscription_buffered.go), unread binlog would pile up
+	// server-side, and a source purging binlogs past the reader's position
+	// during an hours-long index build would fail the move fatally.
 	r.status.Set(status.ApplyChangeset)
 	if err := r.flushAllReplClients(ctx); err != nil {
 		return err
@@ -1222,6 +1229,18 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 			}
 		}
 	}
+
+	// Now stop the periodic flush: the checksum requires it. The checker
+	// must be the only flusher — its initConnPool acquires
+	// LOCK TABLES ... WRITE on sources and targets and flushes the
+	// remaining deltas on the lock connections, and a periodic flush
+	// executing DML against those locked tables from regular connections
+	// would deadlock with the lock holder (see the same rule in
+	// SingleChecker.runChecksum). There is no flush gap of concern here:
+	// the checker flushes again before locking, restarts the periodic
+	// flush itself for the long chunk-verification phase, and stops it
+	// when it finishes.
+	r.stopPeriodicFlushAll()
 
 	// On resume from checkpoint, r.checksumWatermark carries the high-water
 	// mark from a previous run. With the sentinel wait now after the initial
