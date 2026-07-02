@@ -230,3 +230,121 @@ func TestRoundTrip_Zerofill(t *testing.T) {
 		require.Nil(t, stmts, "identical zerofill on both sides must be nil; got: %+v", stmts)
 	})
 }
+
+// TestRoundTrip_VarcharBinaryAttribute verifies that the legacy BINARY
+// column attribute (e.g. `c varchar(100) BINARY`, meaning "binary collation
+// of the column's charset") is not misparsed as a binary data type. Before
+// the fix, the binary type flag alone triggered the varchar->varbinary
+// (char->binary, text->blob, ...) conversion, so diffing a live
+// `varchar(100) ... COLLATE utf8mb4_bin` column against a desired file
+// written with the BINARY attribute emitted a destructive
+// MODIFY COLUMN c varbinary(100).
+func TestRoundTrip_VarcharBinaryAttribute(t *testing.T) {
+	db := openScratch(t)
+
+	t.Run("table_default_charset_converges", func(t *testing.T) {
+		// MySQL 8.0.45 canonicalizes the BINARY attribute (varchar/char/text)
+		// to the _bin collation of the table default charset.
+		fileSQL := "CREATE TABLE tf_vcbin (id INT NOT NULL PRIMARY KEY, " +
+			"c VARCHAR(100) BINARY, c2 CHAR(10) BINARY, t2 TEXT BINARY) DEFAULT CHARSET=utf8mb4"
+		_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_vcbin")
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(), fileSQL)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_vcbin") })
+		canonical := showCreate(t, db, "tf_vcbin")
+		require.Contains(t, canonical, "varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin",
+			"sanity: MySQL canonicalizes the BINARY attribute to the binary collation")
+
+		// Diffing the live canonical form against the desired file (still
+		// written with the BINARY attribute) must be a no-op — in particular
+		// it must NOT emit a varchar -> varbinary type change.
+		live, err := ParseCreateTable(canonical)
+		require.NoError(t, err)
+		target, err := ParseCreateTable(fileSQL)
+		require.NoError(t, err)
+
+		stmts, err := live.Diff(target, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "BINARY attribute must converge with the canonical COLLATE form; got: %+v", stmts)
+	})
+
+	t.Run("explicit_charset_converges", func(t *testing.T) {
+		// With an explicit column charset, the attribute resolves to that
+		// charset's _bin collation (latin1 -> latin1_bin).
+		fileSQL := "CREATE TABLE tf_vcbin_l1 (id INT NOT NULL PRIMARY KEY, " +
+			"c VARCHAR(100) CHARACTER SET latin1 BINARY) DEFAULT CHARSET=utf8mb4"
+		_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_vcbin_l1")
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(), fileSQL)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_vcbin_l1") })
+		canonical := showCreate(t, db, "tf_vcbin_l1")
+		require.Contains(t, canonical, "varchar(100) CHARACTER SET latin1 COLLATE latin1_bin")
+
+		live, err := ParseCreateTable(canonical)
+		require.NoError(t, err)
+		target, err := ParseCreateTable(fileSQL)
+		require.NoError(t, err)
+
+		stmts, err := live.Diff(target, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "explicit-charset BINARY attribute must converge; got: %+v", stmts)
+	})
+
+	t.Run("no_varbinary_emitted_and_applies", func(t *testing.T) {
+		createSQL := "CREATE TABLE tf_vcbin2 (id INT NOT NULL PRIMARY KEY) DEFAULT CHARSET=utf8mb4"
+		targetSQL := "CREATE TABLE tf_vcbin2 (id INT NOT NULL PRIMARY KEY, c VARCHAR(100) BINARY) DEFAULT CHARSET=utf8mb4"
+
+		source, err := ParseCreateTable(createSQL)
+		require.NoError(t, err)
+		target, err := ParseCreateTable(targetSQL)
+		require.NoError(t, err)
+		stmts, err := source.Diff(target, nil)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1)
+		require.NotContains(t, stmts[0].Statement, "varbinary",
+			"the BINARY attribute must not become a varbinary type change")
+		require.Contains(t, stmts[0].Statement, "varchar(100)")
+		require.Contains(t, stmts[0].Statement, "COLLATE utf8mb4_bin")
+
+		// The emitted ALTER must apply against real MySQL and converge, and
+		// the resulting column must be a varchar with the binary collation.
+		afterCreate := applyAndConverge(t, db, "tf_vcbin2", createSQL, targetSQL)
+		require.Contains(t, afterCreate, "varchar(100)")
+		require.Contains(t, afterCreate, "utf8mb4_bin")
+		require.NotContains(t, afterCreate, "varbinary")
+	})
+
+	t.Run("real_binary_types_regression_guard", func(t *testing.T) {
+		// True binary types (which the parser represents with the "binary"
+		// charset) must still be converted to their binary type names.
+		parsed, err := ParseCreateTable("CREATE TABLE tf_vb (id INT NOT NULL PRIMARY KEY, " +
+			"v VARBINARY(100), b BINARY(16), bl BLOB, tb TINYBLOB, mb MEDIUMBLOB, lb LONGBLOB)")
+		require.NoError(t, err)
+		for col, want := range map[string]string{
+			"v": "varbinary", "b": "binary", "bl": "blob",
+			"tb": "tinyblob", "mb": "mediumblob", "lb": "longblob",
+		} {
+			c := parsed.Columns.ByName(col)
+			require.NotNil(t, c)
+			require.Equal(t, want, c.Type)
+		}
+
+		// And a live varbinary column still diffs nil against the same file.
+		fileSQL := "CREATE TABLE tf_vb (id INT NOT NULL PRIMARY KEY, v VARBINARY(100)) DEFAULT CHARSET=utf8mb4"
+		_, err = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_vb")
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(), fileSQL)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_vb") })
+
+		live, err := ParseCreateTable(showCreate(t, db, "tf_vb"))
+		require.NoError(t, err)
+		target, err := ParseCreateTable(fileSQL)
+		require.NoError(t, err)
+		stmts, err := live.Diff(target, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "identical varbinary columns must diff nil; got: %+v", stmts)
+	})
+}
