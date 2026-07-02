@@ -1172,6 +1172,76 @@ func TestReadStreamDeliversWrappedLogPosEvents(t *testing.T) {
 		"expected exactly one wraparound warning per file")
 }
 
+// TestProcessRowsEventUnknownSubtypeFails asserts that a rows-event subtype
+// parseEventType does not recognize is a hard error, not a logged skip.
+// go-mysql delivers e.g. PARTIAL_UPDATE_ROWS_EVENT (emitted once
+// binlog_row_value_options=PARTIAL_JSON is set — the global can change after
+// preflight) as a regular *replication.RowsEvent; pre-fix processRowsEvent
+// dropped its rows with only logger.Error, silently losing changes. It must
+// fail exactly like the minimal-row-image case so readStream cancels the
+// migration via fatalError.
+func TestProcessRowsEventUnknownSubtypeFails(t *testing.T) {
+	t1 := `CREATE TABLE subscription_test (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	t2 := `CREATE TABLE _subscription_test_new (
+		id INT NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`
+	srcTable, dstTable := setupTestTables(t, t1, t2)
+
+	client := &binlogClient{
+		logger: slog.Default(),
+		subs:   newSubscriptionRegistry(),
+	}
+	sub := &bufferedMap{
+		logger:               client.logger,
+		table:                srcTable,
+		newTable:             dstTable,
+		changes:              make(map[string]bufferedChange),
+		pkIsMemoryComparable: true,
+	}
+	sub.cond = sync.NewCond(&sub.Mutex)
+	require.True(t, client.subs.Add(encodeSchemaTable(srcTable.SchemaName, srcTable.TableName), sub))
+
+	mkEvent := func(et replication.EventType, schema, tableName string) (*replication.BinlogEvent, *replication.RowsEvent) {
+		rows := &replication.RowsEvent{
+			Table: &replication.TableMapEvent{
+				Schema: []byte(schema),
+				Table:  []byte(tableName),
+			},
+			Rows: [][]any{{1, "x"}},
+		}
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: et, LogPos: 1000},
+			Event:  rows,
+		}, rows
+	}
+
+	// Sanity: a recognized subtype flows through and buffers the row.
+	ev, rows := mkEvent(replication.WRITE_ROWS_EVENTv2, srcTable.SchemaName, srcTable.TableName)
+	require.NoError(t, client.processRowsEvent(ev, rows))
+	require.Equal(t, 1, sub.Length())
+
+	// An unrecognized subtype for a subscribed table must hard-error,
+	// naming the event type (string and header value) and the table.
+	ev, rows = mkEvent(replication.PARTIAL_UPDATE_ROWS_EVENT, srcTable.SchemaName, srcTable.TableName)
+	err := client.processRowsEvent(ev, rows)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "PartialUpdateRowsEvent")
+	require.ErrorContains(t, err, fmt.Sprintf("0x%02x", uint8(replication.PARTIAL_UPDATE_ROWS_EVENT)))
+	require.ErrorContains(t, err, srcTable.TableName)
+	require.Equal(t, 1, sub.Length(), "the unsupported event must not buffer rows")
+
+	// Events for tables without a subscription stay ignored regardless of
+	// subtype (e.g. writes to unrelated tables, or to a _new table).
+	ev, rows = mkEvent(replication.PARTIAL_UPDATE_ROWS_EVENT, srcTable.SchemaName, "not_subscribed")
+	require.NoError(t, client.processRowsEvent(ev, rows))
+}
+
 // TestRecreateStreamerSkipsFlushedReplay locks in the fix end-to-end by
 // driving the real consecutive-error path that calls recreateStreamer:
 //  1. Stream an INSERT + UPDATE for one PK and flush, so the target holds

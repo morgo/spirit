@@ -796,8 +796,19 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 		return fmt.Errorf("received a minimal RBR event for table %s.%s, but we require binlog_row_image=FULL on the source server", string(e.Table.Schema), string(e.Table.Table))
 	}
 
-	tbl := sub.Tables()[0]
 	eventType := parseEventType(ev.Header.EventType)
+	if eventType == eventTypeUnknown {
+		// Hard-fail, mirroring the minimal-row-image check above: an
+		// unrecognized rows-event subtype (e.g. PARTIAL_UPDATE_ROWS_EVENT,
+		// which the server emits once binlog_row_value_options=PARTIAL_JSON
+		// is set — the global can change after our preflight check) still
+		// carries row changes. Dropping it with only an error log would
+		// silently lose those changes; they'd only be caught by the
+		// checksum where enabled.
+		return fmt.Errorf("received unsupported rows event type %v (0x%02x) for table %s.%s: cannot apply its row changes", ev.Header.EventType, uint8(ev.Header.EventType), string(e.Table.Schema), string(e.Table.Table))
+	}
+
+	tbl := sub.Tables()[0]
 
 	// Decode ENUM ordinals / SET bitmasks back to their string form and
 	// re-pad BINARY(N) values (MySQL strips trailing 0x00 from the row
@@ -852,7 +863,10 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 		case eventTypeDelete:
 			sub.HasChanged(key, nil, true)
 		default:
-			c.logger.Error("unknown event type", "type", ev.Header.EventType)
+			// Unreachable: eventTypeUnknown is rejected above and
+			// eventTypeUpdate returned earlier. Kept as a hard error so a
+			// future eventType addition cannot silently drop rows.
+			return fmt.Errorf("unhandled rows event type %v (0x%02x) for table %s.%s", ev.Header.EventType, uint8(ev.Header.EventType), string(e.Table.Schema), string(e.Table.Table))
 		}
 	}
 	return nil
