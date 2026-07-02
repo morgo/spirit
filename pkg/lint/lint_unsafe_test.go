@@ -116,6 +116,48 @@ func TestUnsafeLinter_AlterTableCoalescePartitions(t *testing.T) {
 	require.Equal(t, SeverityError, violations[0].Severity)
 }
 
+func TestUnsafeLinter_AlterTableTruncatePartition(t *testing.T) {
+	sql := `ALTER TABLE users TRUNCATE PARTITION p0`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &UnsafeLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// TRUNCATE PARTITION deletes all rows in the partition, so it is unsafe
+	require.Len(t, violations, 1)
+	require.Equal(t, "unsafe", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "Unsafe operation detected: TRUNCATE PARTITION", violations[0].Message)
+	require.Equal(t, "users", violations[0].Location.Table)
+}
+
+func TestUnsafeLinter_AlterTableTruncatePartitionAll(t *testing.T) {
+	sql := `ALTER TABLE users TRUNCATE PARTITION ALL`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &UnsafeLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// TRUNCATE PARTITION ALL deletes all rows in every partition, so it is unsafe
+	require.Len(t, violations, 1)
+	require.Equal(t, "unsafe", violations[0].Linter.Name())
+	require.Equal(t, SeverityError, violations[0].Severity)
+}
+
+func TestUnsafeLinter_AlterTableAddPartition(t *testing.T) {
+	sql := `ALTER TABLE users ADD PARTITION (PARTITION p2026 VALUES LESS THAN (2027))`
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &UnsafeLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	// ADD PARTITION is safe - no violations
+	require.Empty(t, violations)
+}
+
 func TestUnsafeLinter_AlterTableAddColumn(t *testing.T) {
 	sql := `ALTER TABLE users ADD COLUMN email VARCHAR(255)`
 	stmts, err := statement.New(sql)
