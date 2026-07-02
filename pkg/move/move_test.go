@@ -130,7 +130,8 @@ func testResumeFromCheckpointE2E(t *testing.T, deferSecondaryIndexes bool) {
 		DB:       db,
 		Config:   targetConfig,
 	}}
-	require.NoError(t, r.setup(ctx))
+	require.NoError(t, r.setupDiscovery(ctx))
+	require.NoError(t, r.setupUnderLocks(ctx))
 
 	// copy what there is to be copied. we don't need to cancel it,
 	// we are just running the copier part.
@@ -371,7 +372,8 @@ func TestPostCopyAnalyzeTargetSchema(t *testing.T) {
 		DB:       targetDB,
 		Config:   targetConfig,
 	}}
-	require.NoError(t, r.setup(ctx))
+	require.NoError(t, r.setupDiscovery(ctx))
+	require.NoError(t, r.setupUnderLocks(ctx))
 	t.Cleanup(func() {
 		r.cancelFunc()
 		// Runner.Close() closes the target DB and repl clients but not the raw

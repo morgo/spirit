@@ -71,10 +71,13 @@ func TestDatum(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "1", unsigned.String())
 
-	// Test binary type.
+	// Test binary type. Binary datums always render as 0x-hex literals —
+	// even valid-UTF-8 values — so that checkpoint JSON round-trips through
+	// datumValFromString (which hex-decodes any binaryType value with a
+	// "0x" prefix).
 	binary, err := NewDatum("0", binaryType)
 	require.NoError(t, err)
-	require.Equal(t, `"0"`, binary.String())
+	require.Equal(t, `0x30`, binary.String())
 
 	// Test string comparisons (VARCHAR/TEXT)
 	str1, err := NewDatumFromValue("apple", "VARCHAR(255)")

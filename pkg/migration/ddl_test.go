@@ -92,6 +92,56 @@ func TestIndexVisibility(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
+// TestUnsupportedClauseRejectedBeforeDDL tests that a user-supplied ALGORITHM=
+// or LOCK= clause fails the migration before any DDL is attempted directly on
+// MySQL. attemptMySQLDDL prepends its own ALGORITHM= assertion, and MySQL
+// resolves duplicate options last-one-wins — so without the early check, a
+// trailing user clause would override Spirit's and could execute a blocking
+// table rebuild (the preflight illegalClause check only runs after the direct
+// DDL attempt has already been made).
+func TestUnsupportedClauseRejectedBeforeDDL(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "rejectalgorithm", `CREATE TABLE rejectalgorithm (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		b INT NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+
+	columnExists := func(name string) bool {
+		var count int
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='rejectalgorithm' AND column_name=?",
+			name).Scan(&count))
+		return count > 0
+	}
+
+	// --alter path: a trailing ALGORITHM= clause must fail fast.
+	m := NewTestRunner(t, "rejectalgorithm", "ADD COLUMN c INT, ALGORITHM=INPLACE", WithThreads(1))
+	err := m.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsupported clause")
+	require.False(t, m.usedInstantDDL)
+	require.False(t, m.usedInplaceDDL)
+	require.NoError(t, m.Close())
+	require.False(t, columnExists("c")) // no DDL may have been executed
+
+	// --statement path: ALGORITHM= and LOCK= must also fail fast.
+	m = NewTestRunnerFromStatement(t, "ALTER TABLE rejectalgorithm ADD COLUMN d INT, ALGORITHM=COPY, LOCK=SHARED", WithThreads(1))
+	err = m.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsupported clause")
+	require.False(t, m.usedInstantDDL)
+	require.False(t, m.usedInplaceDDL)
+	require.NoError(t, m.Close())
+	require.False(t, columnExists("d")) // no DDL may have been executed
+
+	// The same ALTER without the illegal clauses still works.
+	m = NewTestRunner(t, "rejectalgorithm", "ADD COLUMN c INT", WithThreads(1))
+	require.NoError(t, m.Run(t.Context()))
+	require.NoError(t, m.Close())
+	require.True(t, columnExists("c"))
+}
+
 // TestStatementWorkflowStillInstant tests that a Statement-based ALTER that qualifies
 // for instant DDL is still detected and applied instantly.
 func TestStatementWorkflowStillInstant(t *testing.T) {
