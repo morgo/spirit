@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,6 +222,65 @@ func TestGTIDClientNonXIDCommit(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// xaTestXIDPrefix namespaces the XA xids used by tests in this file.
+// Each run generates unique xids under it (a hard-coded xid would fail
+// XA START with XAER_DUPID against a prepared transaction left dangling
+// by an interrupted prior run on a shared server), and the prefix keeps
+// any stragglers attributable and sweepable by prefix.
+const xaTestXIDPrefix = "spirit_gtid_xa"
+
+// rollbackDanglingXATestTxns rolls back prepared XA transactions left
+// dangling by an interrupted run. A run that dies between XA PREPARE and
+// XA COMMIT leaves a prepared transaction that survives disconnect and
+// keeps its row and metadata locks, wedging any later statement that
+// touches the same tables.
+//
+// knownXIDs (the calling run's own xids) are rolled back by exact name —
+// that needs no special privilege and is the path that matters when a
+// test fails gracefully. Stragglers from prior hard-killed runs are
+// additionally swept by prefix via XA RECOVER, but XA RECOVER requires
+// XA_RECOVER_ADMIN, which the tsandbox user provisioned by
+// compose/bootstrap.sql does not hold — so the sweep is typically a
+// logged no-op, and the per-run unique table names in
+// TestGTIDClientXATransaction are what keep such stragglers from
+// blocking future runs. Errors are deliberately ignored beyond logging:
+// this is best-effort hygiene on a shared server (XAER_NOTA for an
+// already-terminated xid is the happy path).
+func rollbackDanglingXATestTxns(t *testing.T, db *sql.DB, knownXIDs ...string) {
+	t.Helper()
+	xids := slices.Clone(knownXIDs)
+	rows, err := db.QueryContext(context.Background(), "XA RECOVER")
+	if err != nil {
+		t.Logf("XA RECOVER unavailable (likely missing XA_RECOVER_ADMIN); sweeping only this run's xids: %v", err)
+	} else {
+		func() {
+			defer utils.CloseAndLog(rows)
+			for rows.Next() {
+				var formatID, gtridLen, bqualLen int64
+				var data []byte
+				if err := rows.Scan(&formatID, &gtridLen, &bqualLen, &data); err != nil {
+					continue
+				}
+				if gtridLen <= 0 || gtridLen > int64(len(data)) {
+					continue
+				}
+				gtrid := string(data[:gtridLen])
+				if bqualLen == 0 && strings.HasPrefix(gtrid, xaTestXIDPrefix) && !slices.Contains(xids, gtrid) {
+					xids = append(xids, gtrid)
+				}
+			}
+			_ = rows.Err()
+		}()
+	}
+	for _, xid := range xids {
+		// The xids here are exclusively ones these tests generated
+		// (prefix + UUID): plain ASCII, safe to single-quote back.
+		if _, err := db.ExecContext(context.Background(), fmt.Sprintf("XA ROLLBACK '%s'", xid)); err == nil {
+			t.Logf("rolled back dangling prepared XA transaction %q", xid)
+		}
+	}
+}
+
 // TestGTIDClientXATransaction drives a real two-phase XA transaction
 // (plus a one-phase variant) through the feed end-to-end. The binlog
 // shape, verified against MySQL 8.0: nothing is written until XA
@@ -234,32 +295,57 @@ func TestGTIDClientNonXIDCommit(t *testing.T) {
 // only returns once bufferedGTID covers the server's gtid_executed, so a
 // handler that failed to promote at the XA prepare (or at the terminal
 // XA COMMIT) would time out here.
+//
+// Both the xids and the table names are unique per run. Unique xids
+// because XA START against a hard-coded xid fails with XAER_DUPID if an
+// interrupted prior run left a prepared transaction under that name.
+// Unique table names because such a straggler also keeps metadata locks
+// on the tables it touched until it is terminated — and it cannot even
+// be discovered without XA_RECOVER_ADMIN (see
+// rollbackDanglingXATestTxns) — so reusing fixed table names would let
+// it block the next run's DROP TABLE indefinitely. With fresh names,
+// stragglers from hard-killed runs leak in isolation instead of wedging
+// future runs; graceful failures are reclaimed by the cleanup below.
 func TestGTIDClientXATransaction(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidxat1, gtidxat2")
-	testutils.RunSQL(t, "CREATE TABLE gtidxat1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
-	testutils.RunSQL(t, "CREATE TABLE gtidxat2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	// Unique per run: see the doc comment. The gtrid limit is 64 bytes;
+	// prefix + suffix + UUID stays well under it.
+	xid := xaTestXIDPrefix + "_" + uuid.NewString()
+	xid1p := xaTestXIDPrefix + "_1p_" + uuid.NewString()
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
+	srcTable := "gtidxat1_" + suffix
+	dstTable := "gtidxat2_" + suffix
+
+	// Best-effort sweep of stragglers from prior interrupted runs (a
+	// logged no-op without XA_RECOVER_ADMIN).
+	rollbackDanglingXATestTxns(t, db)
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS %s, %s", srcTable, dstTable))
+	testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE %s (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))", srcTable))
+	testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE %s (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))", dstTable))
 	t.Cleanup(func() {
-		// A failure between XA PREPARE and XA COMMIT leaves a prepared
-		// transaction dangling: it survives disconnect, keeps its locks,
-		// and would block this test's DROP TABLE on the next run. Roll
-		// back any leftovers on a fresh connection (the errors are
-		// XAER_NOTA on the happy path — deliberately ignored).
+		// The test's defers (including closing db) have already run by
+		// cleanup time, so use a fresh connection. Terminate this run's
+		// XA transactions first — a failure between XA PREPARE and XA
+		// COMMIT would otherwise leave the DROP below blocked on the
+		// prepared transaction's metadata locks. The lock_wait_timeout
+		// bounds the worst case so a leftover can fail the cleanup but
+		// not hang the suite.
 		cleanupDB, err := sql.Open("mysql", testutils.DSN())
 		if err != nil {
 			return
 		}
 		defer utils.CloseAndLog(cleanupDB)
-		_, _ = cleanupDB.ExecContext(context.Background(), "XA ROLLBACK 'spirit_gtid_xa'")
-		_, _ = cleanupDB.ExecContext(context.Background(), "XA ROLLBACK 'spirit_gtid_xa1p'")
+		rollbackDanglingXATestTxns(t, cleanupDB, xid, xid1p)
+		_, _ = cleanupDB.ExecContext(context.Background(), "SET SESSION lock_wait_timeout=5")
+		_, _ = cleanupDB.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s, %s", srcTable, dstTable))
 	})
 
-	t1 := table.NewTableInfo(db, "test", "gtidxat1")
+	t1 := table.NewTableInfo(db, "test", srcTable)
 	require.NoError(t, t1.SetInfo(t.Context()))
-	t2 := table.NewTableInfo(db, "test", "gtidxat2")
+	t2 := table.NewTableInfo(db, "test", dstTable)
 	require.NoError(t, t2.SetInfo(t.Context()))
 
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
@@ -283,10 +369,10 @@ func TestGTIDClientXATransaction(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	xaExec("XA START 'spirit_gtid_xa'")
-	xaExec("INSERT INTO gtidxat1 (a, b, c) VALUES (1, 2, 3)")
-	xaExec("INSERT INTO gtidxat1 (a, b, c) VALUES (2, 3, 4)")
-	xaExec("XA END 'spirit_gtid_xa'")
+	xaExec(fmt.Sprintf("XA START '%s'", xid))
+	xaExec(fmt.Sprintf("INSERT INTO %s (a, b, c) VALUES (1, 2, 3)", srcTable))
+	xaExec(fmt.Sprintf("INSERT INTO %s (a, b, c) VALUES (2, 3, 4)", srcTable))
+	xaExec(fmt.Sprintf("XA END '%s'", xid))
 
 	// Before XA PREPARE nothing of the transaction exists in the binary
 	// log — no GTID has been assigned yet, so it cannot be in the
@@ -294,7 +380,7 @@ func TestGTIDClientXATransaction(t *testing.T) {
 	require.NoError(t, client.BlockWait(t.Context()))
 	require.Equal(t, 0, client.GetDeltaLen(), "row events must not stream before XA PREPARE")
 
-	xaExec("XA PREPARE 'spirit_gtid_xa'")
+	xaExec(fmt.Sprintf("XA PREPARE '%s'", xid))
 
 	// The prepare flushes the whole group and terminates it.
 	require.NoError(t, client.BlockWait(t.Context()))
@@ -306,11 +392,11 @@ func TestGTIDClientXATransaction(t *testing.T) {
 	// ROLLBACK of the prepared transaction would not be compensated.)
 	require.NoError(t, client.Flush(t.Context()))
 	var count int
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM gtidxat2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable)).Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
 
-	xaExec("XA COMMIT 'spirit_gtid_xa'")
+	xaExec(fmt.Sprintf("XA COMMIT '%s'", xid))
 
 	// Capture gtid_executed right after the commit: it necessarily
 	// includes both the prepare-group GTID (g1) and the commit GTID (g2).
@@ -334,14 +420,14 @@ func TestGTIDClientXATransaction(t *testing.T) {
 
 	// One-phase variant: `XA COMMIT ... ONE PHASE` is a single group
 	// terminated by an XA_PREPARE_LOG_EVENT rather than a QueryEvent.
-	xaExec("XA START 'spirit_gtid_xa1p'")
-	xaExec("INSERT INTO gtidxat1 (a, b, c) VALUES (3, 4, 5)")
-	xaExec("XA END 'spirit_gtid_xa1p'")
-	xaExec("XA COMMIT 'spirit_gtid_xa1p' ONE PHASE")
+	xaExec(fmt.Sprintf("XA START '%s'", xid1p))
+	xaExec(fmt.Sprintf("INSERT INTO %s (a, b, c) VALUES (3, 4, 5)", srcTable))
+	xaExec(fmt.Sprintf("XA END '%s'", xid1p))
+	xaExec(fmt.Sprintf("XA COMMIT '%s' ONE PHASE", xid1p))
 
 	require.NoError(t, client.BlockWait(t.Context()))
 	require.NoError(t, client.Flush(t.Context()))
-	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM gtidxat2").Scan(&count)
+	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable)).Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 3, count)
 }
