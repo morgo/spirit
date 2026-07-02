@@ -49,12 +49,15 @@ func (c *tableChange) createNewTable(ctx context.Context) error {
 // We first attempt to do this using ALGORITHM=COPY so we don't burn
 // an INSTANT version. But surprisingly this is not supported for all DDLs (issue #277)
 func (c *tableChange) alterNewTable(ctx context.Context) error {
-	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n "+c.stmt.TrimAlter()+", ALGORITHM=COPY",
-		c.newTable.TableName); err != nil {
+	// The user's ALTER clause is spliced in with %r: it is raw SQL that may
+	// legitimately contain % characters (e.g. COMMENT '100%new'), which must
+	// not be interpreted as format specifiers.
+	if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r, ALGORITHM=COPY",
+		c.newTable.TableName, c.stmt.TrimAlter()); err != nil {
 		// Retry without the ALGORITHM=COPY. If there is a second error, then the DDL itself
 		// is not supported. It could be a syntax error, in which case we return the second error,
 		// which will probably be easier to read because it is unaltered.
-		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n "+c.stmt.Alter, c.newTable.TableName); err != nil {
+		if err := dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n %r", c.newTable.TableName, c.stmt.Alter); err != nil {
 			return err
 		}
 	}
@@ -125,6 +128,8 @@ func (c *tableChange) oldTableName() string {
 }
 
 func (c *tableChange) attemptInstantDDL(ctx context.Context) error {
+	// The user's ALTER clause is spliced in with %r so that % characters in
+	// its literals are not interpreted as format specifiers.
 	if !c.runner.migration.SkipForceKill {
 		return dbconn.ForceExec(
 			ctx,
@@ -132,14 +137,16 @@ func (c *tableChange) attemptInstantDDL(ctx context.Context) error {
 			[]*table.TableInfo{c.table},
 			c.runner.dbConfig,
 			c.runner.logger,
-			"ALTER TABLE %n ALGORITHM=INSTANT, "+c.stmt.Alter,
+			"ALTER TABLE %n ALGORITHM=INSTANT, %r",
 			c.table.TableName,
+			c.stmt.Alter,
 		)
 	}
-	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INSTANT, "+c.stmt.Alter, c.table.TableName)
+	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INSTANT, %r", c.table.TableName, c.stmt.Alter)
 }
 
 func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
+	// As in attemptInstantDDL, the user's ALTER clause is spliced in with %r.
 	if !c.runner.migration.SkipForceKill {
 		return dbconn.ForceExec(
 			ctx,
@@ -147,11 +154,12 @@ func (c *tableChange) attemptInplaceDDL(ctx context.Context) error {
 			[]*table.TableInfo{c.table},
 			c.runner.dbConfig,
 			c.runner.logger,
-			"ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter,
+			"ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, %r",
 			c.table.TableName,
+			c.stmt.Alter,
 		)
 	}
-	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, "+c.stmt.Alter, c.table.TableName)
+	return dbconn.Exec(ctx, c.runner.db, "ALTER TABLE %n ALGORITHM=INPLACE, LOCK=NONE, %r", c.table.TableName, c.stmt.Alter)
 }
 
 func (c *tableChange) cleanup(ctx context.Context) error {

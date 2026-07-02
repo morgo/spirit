@@ -424,6 +424,28 @@ func TestEscapeSQL(t *testing.T) {
 	}
 }
 
+func TestEscapeSQLRawVerb(t *testing.T) {
+	// %r splices its argument verbatim: %-sequences inside it are data, not
+	// format specifiers, and string quoting is not applied.
+	r, err := EscapeSQL("ALTER TABLE %n ALGORITHM=INSTANT, %r", "t1",
+		"ADD COLUMN b VARCHAR(20) DEFAULT '50%% off' COMMENT '100%new, a%?b'")
+	require.NoError(t, err)
+	require.Equal(t, "ALTER TABLE `t1` ALGORITHM=INSTANT, ADD COLUMN b VARCHAR(20) DEFAULT '50%% off' COMMENT '100%new, a%?b'", r)
+
+	// %r composes with other verbs, in either order.
+	r, err = EscapeSQL("%r WHERE c = %?", "SELECT 1 FROM t1", 5)
+	require.NoError(t, err)
+	require.Equal(t, "SELECT 1 FROM t1 WHERE c = 5", r)
+
+	// A missing argument is an error, same as %n / %?.
+	_, err = EscapeSQL("%r")
+	require.ErrorContains(t, err, "missing arguments")
+
+	// Only strings can be spliced raw.
+	_, err = EscapeSQL("%r", 42)
+	require.ErrorContains(t, err, "expect a raw SQL string")
+}
+
 func TestMustUtils(t *testing.T) {
 	require.PanicsWithError(t, "missing arguments, need 1-th arg, but only got 0 args", func() {
 		MustEscapeSQL("%?")

@@ -251,6 +251,21 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 				}
 			}
 			i++ // skip specifier
+		case 'r':
+			if argPos >= len(args) {
+				return nil, errors.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
+			}
+			arg := args[argPos]
+			argPos++
+
+			v, ok := arg.(string)
+			if !ok {
+				return nil, errors.Errorf("expect a raw SQL string for %%r, got %v", arg)
+			}
+			// Spliced verbatim: buf is never re-scanned, so %-sequences inside
+			// v (e.g. COMMENT '100%new') are data, not format specifiers.
+			buf = append(buf, v...)
+			i++ // skip specifier
 		case '%':
 			buf = append(buf, '%')
 			i++ // skip specifier
@@ -280,6 +295,11 @@ func appendSQLArgString(buf []byte, s string) []byte {
 // 1. %?: automatic conversion by the type of arguments. E.g. []string -> ('s1','s2'..)
 // 2. %%: output %
 // 3. %n: for identifiers, for example ("use %n", db)
+// 4. %r: (spirit extension) splices a string argument in verbatim, with no
+// quoting and no format interpretation. Use it to embed raw user-provided SQL
+// (such as an ALTER clause) into a trusted format string; never concatenate
+// user SQL into the format string itself, where its %n/%?/%% sequences would
+// be misinterpreted.
 // But it does not prevent you from doing:
 /*
 	EscapeSQL("select '%?", ";SQL injection!;") => "select '';SQL injection!;'".
