@@ -1261,17 +1261,19 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // fatalError is the change client's CancelFunc: it records the fatal
 // condition and cancels the run so runContinuous can surface it. Per the
 // CancelFunc contract (change.ClientConfig), it fires for DDL detected on a
-// synced table AND for fatal stream errors (minimal RBR detection, exhausted
-// streamer recreation attempts) — the callback carries no cause, so the
-// recorded error stays cause-neutral and points at the change client's logs,
-// which name the actual trigger.
+// synced table (change.FatalReasonSchemaChange) AND for fatal stream errors
+// such as minimal RBR detection or exhausted streamer recreation attempts
+// (change.FatalReasonStreamError). The reason names the trigger class in the
+// recorded error; the change client's logs carry the details. Unlike
+// migration/move, no resume state is invalidated for either reason: the
+// datasync checkpoint is Persistent and the caller decides fresh-vs-resume.
 //
 // fatalError is safe to call concurrently: it is invoked from the change
 // client's stream goroutine, so cancelFunc (written by Run under progMu)
 // must be read under progMu like Cancel() does, and fatalOnce makes the
 // record-and-cancel side effects idempotent.
-func (r *Runner) fatalError() bool {
-	r.recordFatal(errors.New("the change source signaled a fatal error (DDL on a synced table, or an unrecoverable stream error); sync cannot continue safely — see prior log lines for the cause"))
+func (r *Runner) fatalError(reason change.FatalReason) bool {
+	r.recordFatal(fmt.Errorf("the change source signaled a fatal error (%s); sync cannot continue safely — see prior log lines for the cause", reason))
 	return true
 }
 

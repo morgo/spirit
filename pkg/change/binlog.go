@@ -54,11 +54,13 @@ type binlogClient struct {
 
 	// callerCancelFunc is an optional callback that is called when a DDL
 	// change is detected on a subscribed table, or when a fatal stream
-	// error occurs. The caller is expected to handle cancellation and
-	// cleanup in this callback. It returns true if the error was acted
-	// upon (i.e. the caller actually cancelled), or false if it was
-	// ignored (e.g. because the migration is already past cutover).
-	callerCancelFunc func() bool
+	// error occurs; the FatalReason distinguishes the two so the caller
+	// can decide whether persisted resume state must be invalidated. The
+	// caller is expected to handle cancellation and cleanup in this
+	// callback. It returns true if the error was acted upon (i.e. the
+	// caller actually cancelled), or false if it was ignored (e.g.
+	// because the migration is already past cutover).
+	callerCancelFunc func(FatalReason) bool
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
 
@@ -233,9 +235,13 @@ func (c *binlogClient) StartFromPosition(ctx context.Context, pos string) error 
 	if pos == "" {
 		return errors.New("StartFromPosition: empty position; use Start instead for a fresh start")
 	}
+	// Parse failures are wrapped with ErrPositionNotFound, mirroring the
+	// GTID client: an unparseable position (e.g. a GTID-set checkpoint from
+	// a --gtid run) can never become resumable by retrying, so callers
+	// should treat it the same as a purged binlog and start fresh.
 	parsed, err := parseBinlogPositionString(pos)
 	if err != nil {
-		return fmt.Errorf("StartFromPosition: %w", err)
+		return fmt.Errorf("%w: StartFromPosition: %w", ErrPositionNotFound, err)
 	}
 	c.mu.Lock()
 	c.flushedPos = parsed
@@ -291,28 +297,15 @@ func (c *binlogClient) getCurrentBinlogPosition(ctx context.Context) (mysql.Posi
 	}, nil
 }
 
-// Start initializes the binlog syncer and spawns the binlog reader
-// goroutine. Returns once the reader is running; the stream itself
-// continues until Close is called or ctx is cancelled.
-// Satisfies Source interface.
-func (c *binlogClient) Start(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	host, portStr, err := net.SplitHostPort(c.host)
-	if err != nil {
-		return fmt.Errorf("failed to parse host: %w", err)
-	}
-	// convert portStr to a uint16
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return fmt.Errorf("failed to parse port: %w", err)
-	}
-	c.cfg = replication.BinlogSyncerConfig{
+// buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
+// out (mirroring gtidClient.buildSyncerConfig) so tests can assert the
+// decode options below stay in sync between the two clients.
+func (c *binlogClient) buildSyncerConfig(host string, port uint16) replication.BinlogSyncerConfig {
+	return replication.BinlogSyncerConfig{
 		ServerID: c.serverID,
 		Flavor:   "mysql",
 		Host:     host,
-		Port:     uint16(port),
+		Port:     port,
 		User:     c.username,
 		Password: c.password,
 		Logger:   c.logger,
@@ -337,6 +330,26 @@ func (c *binlogClient) Start(ctx context.Context) error {
 		// consistent with the UTC-pinned copier connections.
 		TimestampStringLocation: time.UTC,
 	}
+}
+
+// Start initializes the binlog syncer and spawns the binlog reader
+// goroutine. Returns once the reader is running; the stream itself
+// continues until Close is called or ctx is cancelled.
+// Satisfies Source interface.
+func (c *binlogClient) Start(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	host, portStr, err := net.SplitHostPort(c.host)
+	if err != nil {
+		return fmt.Errorf("failed to parse host: %w", err)
+	}
+	// convert portStr to a uint16
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return fmt.Errorf("failed to parse port: %w", err)
+	}
+	c.cfg = c.buildSyncerConfig(host, uint16(port))
 
 	// Apply TLS configuration using the same infrastructure as main database connections
 	if c.dbConfig != nil {
@@ -516,7 +529,7 @@ func (c *binlogClient) readStream(ctx context.Context) {
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
 
-					c.fatalError()
+					c.fatalError(FatalReasonStreamError)
 					return
 				}
 
@@ -596,7 +609,7 @@ func (c *binlogClient) readStream(ctx context.Context) {
 			}
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing binlog rows event", "error", err)
-				c.fatalError()
+				c.fatalError(FatalReasonStreamError)
 				return
 			}
 		case *replication.QueryEvent:
@@ -681,7 +694,7 @@ func (c *binlogClient) processDDLNotification(schema, table string) {
 			return
 		}
 	}
-	if c.fatalError() {
+	if c.fatalError(FatalReasonSchemaChange) {
 		c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
 	}
 }
@@ -776,15 +789,17 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 }
 
 // fatalError is called from within the readStream goroutine when a truly fatal
-// stream error occurs (e.g. unrecoverable stream error, minimal RBR detection,
-// or a fatal rows event error). It returns true if the caller acknowledged the
+// condition occurs, with reason distinguishing DDL on a watched table
+// (FatalReasonSchemaChange) from stream failures such as an unrecoverable
+// stream error, minimal RBR detection, or a fatal rows event error
+// (FatalReasonStreamError). It returns true if the caller acknowledged the
 // error (i.e. the cancel function was called and acted upon).
 //
 // IMPORTANT: This method must NOT call Close() because Close() calls
 // streamWG.Wait(), which would deadlock since readStream is the caller.
-func (c *binlogClient) fatalError() bool {
+func (c *binlogClient) fatalError(reason FatalReason) bool {
 	if c.callerCancelFunc != nil {
-		return c.callerCancelFunc()
+		return c.callerCancelFunc(reason)
 	}
 	return false
 }

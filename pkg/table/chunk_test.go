@@ -25,6 +25,50 @@ func TestBoundaryJSONControlChar(t *testing.T) {
 	require.Equal(t, []string{"foo\x16bar"}, parsed.Value)
 }
 
+// TestBinaryChunkJSONRoundTrip guards against checkpoint corruption for
+// binary boundary values that are valid UTF-8. The restore path
+// (datumValFromString) unconditionally hex-decodes any binaryType value with
+// a "0x" prefix, so the serializer must always hex-encode binary datums: a
+// VARBINARY boundary holding the ASCII string "0xab" written as a plain
+// string would otherwise be restored as the single byte 0xAB — and a resumed
+// chunker would then silently skip (or re-copy) rows. Odd-length ("0xabc")
+// and non-hex ("0xzz") variants would fail to restore at all.
+func TestBinaryChunkJSONRoundTrip(t *testing.T) {
+	ti := NewTableInfo(nil, "test", "t1")
+	ti.columnsMySQLTps = map[string]string{"pk": "varbinary(40)"}
+
+	values := []string{
+		"0xab",             // valid-UTF-8, even-length hex: previously corrupted to "\xab"
+		"0xabc",            // odd-length hex: previously errored on restore
+		"0xzz",             // non-hex after "0x" prefix: previously errored on restore
+		"0xdeadbeef",       // e.g. an Ethereum-style address stored as an ASCII string
+		"plain",            // no "0x" prefix
+		"\x00\x01\xff\xfe", // real binary (not valid UTF-8) always worked
+	}
+	for _, val := range values {
+		lower, err := NewDatum(val, binaryType)
+		require.NoError(t, err)
+		upper, err := NewDatum(val+"9", binaryType)
+		require.NoError(t, err)
+		chunk := &Chunk{
+			Key:        []string{"pk"},
+			ChunkSize:  1000,
+			LowerBound: &Boundary{Value: []Datum{lower}, Inclusive: true},
+			UpperBound: &Boundary{Value: []Datum{upper}, Inclusive: false},
+		}
+		chunkJSON := chunk.JSON()
+		require.True(t, json.Valid([]byte(chunkJSON)), "chunk JSON must be valid: %q", chunkJSON)
+
+		restored, err := newChunkFromJSON(ti, chunkJSON)
+		require.NoError(t, err, "restoring chunk JSON for value %q", val)
+		require.Equal(t, val, restored.LowerBound.Value[0].Val, "lower bound must round-trip for value %q", val)
+		require.Equal(t, val+"9", restored.UpperBound.Value[0].Val, "upper bound must round-trip for value %q", val)
+		// The restored chunk must serialize identically, so a checkpoint
+		// written after a resume round-trips again.
+		require.JSONEq(t, chunkJSON, restored.JSON())
+	}
+}
+
 func TestChunk2String(t *testing.T) {
 	chunk := &Chunk{
 		Key: []string{"id"},

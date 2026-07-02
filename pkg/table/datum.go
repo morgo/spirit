@@ -129,6 +129,13 @@ func NewDatum(val any, tp datumTp) (Datum, error) {
 	return Datum{
 		Val: val,
 		Tp:  tp,
+		// Binary values must always serialize as 0x-hex literals, even when
+		// they happen to be valid UTF-8 (e.g. a VARBINARY key holding the
+		// ASCII string "0xab"). The checkpoint-restore path
+		// (datumValFromString) unconditionally hex-decodes binaryType values
+		// with a "0x" prefix, so serializing such a value as a plain string
+		// would corrupt the watermark boundary on resume.
+		forceHexEncode: tp == binaryType,
 	}, nil
 }
 
@@ -228,39 +235,14 @@ func NewDatumFromValueWithType(value any, ct ColumnType) (Datum, error) {
 		value = u
 	}
 
-	// Convert []byte to string for non-numeric types
+	// Convert []byte to string. NewDatum parses numeric types from strings,
+	// and marks binaryType datums with forceHexEncode so binary data is
+	// always hex-encoded in SQL output — even data that is valid UTF-8
+	// (which IsBinaryString() would not catch).
 	if b, ok := value.([]byte); ok {
-		switch tp { //nolint:exhaustive
-		case signedType, unsignedType:
-			// For numeric types, convert []byte to string then parse
-			value = string(b)
-		case binaryType:
-			// For binary types, convert to string and set forceHexEncode.
-			// We always want to hex-encode binary data in SQL output.
-			// The forceHexEncode flag ensures this happens even for data
-			// that is valid UTF-8 (which IsBinaryString() would not catch).
-			d, err := NewDatum(string(b), tp)
-			if err != nil {
-				return Datum{}, err
-			}
-			d.forceHexEncode = true
-			return d, nil
-		default:
-			// For unknown types (text, datetime, json, etc), convert to string
-			value = string(b)
-		}
+		value = string(b)
 	}
-
-	d, err := NewDatum(value, tp)
-	if err != nil {
-		return Datum{}, err
-	}
-	// Ensure binary types are always hex-encoded, even when the input value
-	// is not []byte (e.g. a string). This is consistent with the []byte path above.
-	if tp == binaryType {
-		d.forceHexEncode = true
-	}
-	return d, nil
+	return NewDatum(value, tp)
 }
 
 func NewNilDatum(tp datumTp) Datum {

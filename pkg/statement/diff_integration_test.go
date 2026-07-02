@@ -125,6 +125,87 @@ func TestDiffIntegrationFulltextRebuildPreservesParser(t *testing.T) {
 	require.Nil(t, stmts)
 }
 
+// TestDiffIntegrationInlineUnique verifies that a desired schema written with
+// a column-level UNIQUE (`c int unique`) diffs cleanly against the live
+// canonical form MySQL reports (`c int` + `UNIQUE KEY c (c)`), and that when
+// the unique index is missing the emitted DDL creates it exactly once and the
+// re-diff converges.
+//
+// Regression: inline UNIQUE only existed as Column.Unique and was invisible to
+// diffIndexes, so this diff used to emit
+// `MODIFY COLUMN c int(11) NULL, DROP INDEX c` — silently dropping the live
+// uniqueness constraint — and never converged (a MODIFY COLUMN cannot
+// re-express UNIQUE).
+func TestDiffIntegrationInlineUnique(t *testing.T) {
+	// Create the table from the inline form; MySQL canonicalizes it.
+	tt := testutils.NewTestTable(t, "diff_inline_unique",
+		"CREATE TABLE diff_inline_unique (id int primary key, c int unique)")
+
+	desired, err := ParseCreateTable("CREATE TABLE diff_inline_unique (id int primary key, c int unique)")
+	require.NoError(t, err)
+
+	// The server names the canonicalized unique index after the column.
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "UNIQUE KEY `c` (`c`)")
+
+	source, err := ParseCreateTable(live)
+	require.NoError(t, err)
+
+	// Headline regression: live-canonical vs desired-inline must be a no-op.
+	stmts, err := source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+
+	// Drop the unique index out from under the desired schema; the diff must
+	// re-add it, exactly once.
+	_, err = tt.DB.ExecContext(t.Context(), "ALTER TABLE diff_inline_unique DROP INDEX c")
+	require.NoError(t, err)
+
+	source, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err = source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_inline_unique` ADD UNIQUE INDEX `c` (`c`)", stmts[0].Statement)
+
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+
+	// Convergence: the index is back under its canonical name and a re-diff
+	// yields nil.
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "UNIQUE KEY `c` (`c`)")
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestDiffIntegrationInlineUniqueNameCollision verifies the synthesized names
+// follow the server's declaration-order naming when an inline unique and an
+// unnamed table-level key share a base name: the inline unique on c claims
+// `c` and the unnamed KEY (c, d) is pushed to `c_2`. The live canonical form
+// must diff as a no-op against the original inline form.
+func TestDiffIntegrationInlineUniqueNameCollision(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_inline_uniq_col",
+		"CREATE TABLE diff_inline_uniq_col (id int primary key, c int unique, d int, key (c, d))")
+
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "UNIQUE KEY `c` (`c`)")
+	require.Contains(t, live, "KEY `c_2` (`c`,`d`)",
+		"server is expected to push the unnamed key past the inline unique's name")
+
+	desired, err := ParseCreateTable("CREATE TABLE diff_inline_uniq_col (id int primary key, c int unique, d int, key (c, d))")
+	require.NoError(t, err)
+	source, err := ParseCreateTable(live)
+	require.NoError(t, err)
+
+	stmts, err := source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
 // TestDiffIntegrationKeyBlockSize verifies that a KEY_BLOCK_SIZE difference on
 // an index whose column list is unchanged is detected, and that executing the
 // statements Diff() emits actually applies the change on a real MySQL server.
@@ -338,6 +419,45 @@ func TestDiffIntegrationCheckEnforcement(t *testing.T) {
 	source, err = ParseCreateTable(postAlter)
 	require.NoError(t, err)
 	stmts, err = source.Diff(desiredNewExpr, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestDiffIntegrationDescIndex verifies that changing an index key part from
+// ascending to descending (MySQL 8.0+) is detected by Diff(), that the emitted
+// combined `DROP INDEX k, ADD INDEX k (a DESC)` really rebuilds the index on a
+// real MySQL server (unlike the option-only cases, MySQL does not no-op a
+// direction change), and that a re-diff afterwards converges to nil.
+//
+// This is a regression test: the DESC modifier used to be dropped during
+// parsing, so KEY k (a) and KEY k (a DESC) diffed as equal and restored
+// descending indexes silently became ascending.
+func TestDiffIntegrationDescIndex(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_desc_idx",
+		"CREATE TABLE diff_desc_idx (id int primary key, a int, b int, KEY k (a, b))")
+
+	target, err := ParseCreateTable("CREATE TABLE diff_desc_idx (id int primary key, a int, b int, KEY k (a DESC, b))")
+	require.NoError(t, err)
+
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+
+	stmts, err := source.Diff(target, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_desc_idx` DROP INDEX `k`, ADD INDEX `k` (`a` DESC, `b`)", stmts[0].Statement)
+
+	// Execute the emitted statement exactly as the Runner would, and verify
+	// the index really became descending.
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "KEY `k` (`a` DESC,`b`)")
+
+	// Re-diff: the schemas now converge.
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(target, nil)
 	require.NoError(t, err)
 	require.Nil(t, stmts)
 }

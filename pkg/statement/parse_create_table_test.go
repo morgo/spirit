@@ -354,6 +354,50 @@ func TestSchemaAnalyzer_IndexVisibilityStructured(t *testing.T) {
 	require.True(t, invisibleNames["uk_email_multi"], "Should include uk_email_multi in invisible indexes")
 }
 
+// TestSchemaAnalyzer_DescendingIndexKeyParts verifies that DESC key parts
+// (MySQL 8.0+) are captured on IndexColumn for plain column, prefix, and
+// functional (expression) index parts. MySQL 8.0's SHOW CREATE TABLE prints
+// KEY `k` (`a` DESC), so dropping the flag would silently re-create
+// descending indexes as ascending.
+func TestSchemaAnalyzer_DescendingIndexKeyParts(t *testing.T) {
+	sql := `
+	CREATE TABLE desc_index_test (
+		id INT PRIMARY KEY,
+		a INT,
+		b VARCHAR(100),
+		c VARCHAR(100),
+		KEY k (a DESC, b),
+		KEY fidx ((lower(c)) DESC),
+		KEY pfx (c(10) DESC)
+	)
+	`
+
+	ct, err := ParseCreateTable(sql)
+	require.NoError(t, err)
+
+	indexes := ct.GetCreateTable().Indexes
+
+	k := indexes.ByName("k")
+	require.NotNil(t, k, "Should find k")
+	require.Len(t, k.ColumnList, 2)
+	require.Equal(t, "a", k.ColumnList[0].Name)
+	require.True(t, k.ColumnList[0].Desc, "a should be a descending key part")
+	require.Equal(t, "b", k.ColumnList[1].Name)
+	require.False(t, k.ColumnList[1].Desc, "b should be an ascending key part")
+
+	fidx := indexes.ByName("fidx")
+	require.NotNil(t, fidx, "Should find fidx")
+	require.Len(t, fidx.ColumnList, 1)
+	require.NotNil(t, fidx.ColumnList[0].Expression)
+	require.True(t, fidx.ColumnList[0].Desc, "functional key part should be descending")
+
+	pfx := indexes.ByName("pfx")
+	require.NotNil(t, pfx, "Should find pfx")
+	require.Len(t, pfx.ColumnList, 1)
+	require.NotNil(t, pfx.ColumnList[0].Length)
+	require.True(t, pfx.ColumnList[0].Desc, "prefix key part should be descending")
+}
+
 // Benchmark to show performance characteristics
 func BenchmarkParseCreateTable(b *testing.B) {
 	sql := `
@@ -1951,6 +1995,149 @@ func TestGetMissingSecondaryIndexes_FunctionalIndexesLiveMySQL(t *testing.T) {
 	// Execute the generated DDL against MySQL to prove it is valid.
 	_, err = db.ExecContext(t.Context(), alterStmt)
 	require.NoError(t, err)
+
+	// After applying, no indexes should be reported missing anymore.
+	alterStmt, err = GetMissingSecondaryIndexes(showCreate("src"), showCreate("dst"), "dst")
+	require.NoError(t, err)
+	require.Empty(t, alterStmt, "expected no missing indexes after applying DDL, got: %s", alterStmt)
+}
+
+// TestGetMissingSecondaryIndexes_DescendingIndexes covers DESC key parts
+// (MySQL 8.0+). Previously the DESC modifier was dropped from the generated
+// ADD INDEX, so a deferred KEY k (a DESC) was silently restored as the
+// ascending KEY k (a).
+func TestGetMissingSecondaryIndexes_DescendingIndexes(t *testing.T) {
+	testCases := []struct {
+		name              string
+		sourceCreateTable string
+		targetCreateTable string
+		tableName         string
+		expectedAlter     string
+		expectEmpty       bool
+	}{
+		{
+			name: "Descending index missing on target",
+			sourceCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b INT,
+				c VARCHAR(255),
+				KEY k (b DESC, c)
+			)`,
+			targetCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b INT,
+				c VARCHAR(255)
+			)`,
+			tableName:     "t1",
+			expectedAlter: "ALTER TABLE `t1` ADD INDEX `k` (`b` DESC, `c`)",
+		},
+		{
+			name: "Descending prefix and functional parts missing on target",
+			sourceCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255),
+				KEY k (b(10) DESC, (lower(b)) DESC)
+			)`,
+			targetCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b VARCHAR(255)
+			)`,
+			tableName:     "t1",
+			expectedAlter: "ALTER TABLE `t1` ADD INDEX `k` (`b`(10) DESC, (LOWER(`b`)) DESC)",
+		},
+		{
+			name: "Descending index present on both sides",
+			sourceCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b INT,
+				KEY k (b DESC)
+			)`,
+			targetCreateTable: `CREATE TABLE t1 (
+				a INT NOT NULL PRIMARY KEY,
+				b INT,
+				KEY k (b DESC)
+			)`,
+			tableName:   "t1",
+			expectEmpty: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := GetMissingSecondaryIndexes(tc.sourceCreateTable, tc.targetCreateTable, tc.tableName)
+			require.NoError(t, err)
+
+			if tc.expectEmpty {
+				require.Empty(t, result, "Expected empty result but got: %s", result)
+			} else {
+				require.Equal(t, tc.expectedAlter, result)
+			}
+		})
+	}
+}
+
+// TestGetMissingSecondaryIndexes_DescendingIndexesLiveMySQL verifies the full
+// round trip that spirit move performs for descending indexes: the source's
+// SHOW CREATE TABLE (which prints KEY `k` (`a` DESC)) is fed into
+// GetMissingSecondaryIndexes, the generated ALTER is executed on the target,
+// and the target really ends up with a descending index.
+func TestGetMissingSecondaryIndexes_DescendingIndexesLiveMySQL(t *testing.T) {
+	admin, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := admin.ExecContext(context.Background(), "DROP DATABASE IF EXISTS test_descidx")
+		require.NoError(t, err)
+		require.NoError(t, admin.Close())
+	})
+
+	_, err = admin.ExecContext(t.Context(), "DROP DATABASE IF EXISTS test_descidx")
+	require.NoError(t, err)
+	_, err = admin.ExecContext(t.Context(), "CREATE DATABASE test_descidx")
+	require.NoError(t, err)
+
+	db, err := sql.Open("mysql", testutils.DSNForDatabase("test_descidx"))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	// Source table with descending key parts, including a functional one.
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE src (
+		a INT NOT NULL PRIMARY KEY,
+		b INT,
+		c VARCHAR(255),
+		KEY k (b DESC, c),
+		KEY fidx ((lower(c)) DESC)
+	)`)
+	require.NoError(t, err)
+
+	// Target table with the same columns but no secondary indexes,
+	// as created during a move before indexes are restored.
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE dst (
+		a INT NOT NULL PRIMARY KEY,
+		b INT,
+		c VARCHAR(255)
+	)`)
+	require.NoError(t, err)
+
+	showCreate := func(table string) string {
+		var name, createStmt string
+		require.NoError(t, db.QueryRowContext(t.Context(), "SHOW CREATE TABLE `"+table+"`").Scan(&name, &createStmt))
+		return createStmt
+	}
+
+	alterStmt, err := GetMissingSecondaryIndexes(showCreate("src"), showCreate("dst"), "dst")
+	require.NoError(t, err)
+	require.NotEmpty(t, alterStmt)
+
+	// Execute the generated DDL against MySQL to prove it is valid.
+	_, err = db.ExecContext(t.Context(), alterStmt)
+	require.NoError(t, err)
+
+	// The restored indexes must be descending, not silently ascending.
+	dstCreate := showCreate("dst")
+	require.Contains(t, dstCreate, "KEY `k` (`b` DESC,`c`)")
+	require.Contains(t, dstCreate, "KEY `fidx` ((lower(`c`)) DESC)")
 
 	// After applying, no indexes should be reported missing anymore.
 	alterStmt, err = GetMissingSecondaryIndexes(showCreate("src"), showCreate("dst"), "dst")

@@ -397,7 +397,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// have been purged anyway. This must happen before any destructive step
 	// (deleteAboveWatermark below modifies the targets). Unlike migrate,
 	// move cannot silently fall back to a fresh copy: the target tables are
-	// non-empty (that is exactly why setup() chose the resume path), so we
+	// non-empty (that is exactly why setupUnderLocks() chose the resume path), so we
 	// fail loudly and leave the decision to the operator.
 	if checkpointAge := rec.Age(); checkpointAge >= r.move.CheckpointMaxAge {
 		return fmt.Errorf("%w: checkpoint is %s old (max allowed: %s). To proceed, either re-run with a larger --checkpoint-max-age, or wipe the target tables (including '%s') and restart the move from scratch",
@@ -471,7 +471,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) setup(ctx context.Context) error {
+// setupDiscovery is the read-only first phase of setup: it runs the
+// preflight checks and populates the table lists (r.sourceTables and each
+// r.sources[i].tables). Run() calls it before acquiring the per-source
+// metadata locks — the lock names are derived from the table lists, so
+// discovery has to happen first — and nothing in here may modify the source
+// or the target. All potentially destructive setup lives in setupUnderLocks.
+func (r *Runner) setupDiscovery(ctx context.Context) error {
 	var err error
 
 	// Run preflight checks on the source database
@@ -499,8 +505,19 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	if len(r.sourceTables) == 0 {
 		r.logger.Info("No tables found in source database; nothing to move")
-		return nil
 	}
+	return nil
+}
+
+// setupUnderLocks is the second phase of setup. It contains every step that
+// can modify the source or the target — the resume path's
+// delete-above-watermark, --force's target wipe, target table and checkpoint
+// creation, and starting the replication clients — so Run() only calls it
+// after the per-source metadata locks are held. That ordering guarantees a
+// concurrent second spirit invocation against the same sources fails on the
+// lock before it can destroy the first run's target data.
+func (r *Runner) setupUnderLocks(ctx context.Context) error {
+	var err error
 
 	// Resolve the number of apply (write) threads against the target now that
 	// it is connected. WriteThreads==0 means "auto-size": on Aurora it becomes
@@ -812,7 +829,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	slices.SortFunc(r.targets, func(a, b applier.Target) int {
 		return strings.Compare(targetKey(a), targetKey(b))
 	})
-	if err := r.setup(ctx); err != nil {
+	// Discovery is read-only: preflight checks plus building the per-source
+	// table lists (which the metadata lock names below are derived from).
+	if err := r.setupDiscovery(ctx); err != nil {
 		return err
 	}
 
@@ -858,6 +877,16 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	// Now that the locks are held, run the rest of setup. It includes steps
+	// that modify the target (the resume path deletes rows above the
+	// checkpointed watermark; --force drops the target tables), which must
+	// never race with another spirit process moving the same sources: a
+	// concurrent invocation has to die on the lock above before it can touch
+	// the first run's target.
+	if err := r.setupUnderLocks(ctx); err != nil {
+		return err
+	}
 
 	r.startBackgroundRoutines(ctx)
 	if err := r.setWatermarkOptimizationAll(ctx, true); err != nil {
@@ -957,8 +986,9 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 }
 
 // fatalError is the callback provided to the replication client.
-// It is called when a DDL change is detected on a subscribed table,
-// or when a fatal stream error occurs. The replication client may perform
+// It is called when a DDL change is detected on a subscribed table
+// (change.FatalReasonSchemaChange), or when a fatal stream error occurs
+// (change.FatalReasonStreamError). The replication client may perform
 // its own logging either before or after invoking this callback, and DDL
 // logging may be skipped entirely if this callback returns false.
 //
@@ -968,29 +998,46 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // terminated and cleaned up), and false when the error should not be treated
 // as fatal (in which case the client may continue without logging the DDL).
 //
+// The reason decides what happens to the checkpoint: a schema change
+// invalidates it (resuming against a changed table definition could corrupt
+// data), while a stream error preserves it — a dead binlog stream is exactly
+// the failure checkpoint resume exists to recover from, so a re-run picks up
+// the copy and replays the change stream from the checkpointed positions.
+//
 // fatalError is safe to call concurrently — every source's repl client is
 // wired to this same callback, so a burst of fatal events from multiple
 // binlog goroutines is realistic. fatalOnce makes the invalidate-and-cancel
 // side effects idempotent and prevents racing with Close() teardown of
 // r.checkpointTable / r.targets / r.cancelFunc.
-func (r *Runner) fatalError() bool {
+func (r *Runner) fatalError(reason change.FatalReason) bool {
 	if r.status.Get() >= status.CutOver {
 		return false
 	}
 	r.fatalOnce.Do(func() {
 		r.status.Set(status.ErrCleanup)
-		// Invalidate the checkpoint, so we don't try to resume.
-		// If we don't do this, the move will permanently be blocked from proceeding.
-		// Letting it start again is the better choice.
-		// Use a background context since the move context may already be
-		// cancelled. checkpointTable can still be nil if fatalError fires
-		// during early setup, before createCheckpointTable runs — skip the
-		// drop in that case.
-		if r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
-			if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n", r.checkpointTable.TableName); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
+		switch reason { //nolint: exhaustive // schema change intentionally handled by default: drop is the safe fallback for unknown reasons
+		case change.FatalReasonStreamError:
+			// The stream died but the source tables are not known to have
+			// changed, so the checkpoint remains valid. Keep it and tell the
+			// operator how to recover.
+			r.logger.Error("fatal replication stream error; the checkpoint has been preserved — re-run spirit to resume the move from it")
+		default:
+			// Schema change — and, defensively, any future reason we don't
+			// recognize (invalidating is the safe default: it costs a restart,
+			// while wrongly resuming could corrupt data).
+			// Invalidate the checkpoint, so we don't try to resume.
+			// If we don't do this, the move will permanently be blocked from proceeding.
+			// Letting it start again is the better choice.
+			// Use a background context since the move context may already be
+			// cancelled. checkpointTable can still be nil if fatalError fires
+			// during early setup, before createCheckpointTable runs — skip the
+			// drop in that case.
+			if r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
+				if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n", r.checkpointTable.TableName); err != nil {
+					r.logger.Error("could not remove checkpoint",
+						"error", err,
+					)
+				}
 			}
 		}
 		// cancelFunc can be nil during early setup or in test paths that

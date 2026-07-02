@@ -74,8 +74,8 @@ func (l *UnsafeLinter) Lint(_ []*statement.CreateTable, changes []*statement.Abs
 				switch spec.Tp { //nolint: exhaustive
 				case ast.AlterTableDropColumn:
 					violations = append(violations, unsafeDropColumnViolation(l, change.Table, spec))
-				case ast.AlterTableDropPrimaryKey, ast.AlterTableDropPartition, ast.AlterTableDiscardPartitionTablespace,
-					ast.AlterTableDiscardTablespace, ast.AlterTableCoalescePartitions:
+				case ast.AlterTableDropPrimaryKey, ast.AlterTableDropPartition, ast.AlterTableTruncatePartition,
+					ast.AlterTableDiscardPartitionTablespace, ast.AlterTableDiscardTablespace, ast.AlterTableCoalescePartitions:
 					violations = append(violations, Violation{
 						Linter:   l,
 						Location: &Location{Table: change.Table},
