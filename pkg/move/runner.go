@@ -395,7 +395,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Check if the checkpoint is too old to safely resume — replaying many
 	// days of binary logs can be slower than re-copying, and the binlogs may
 	// have been purged anyway. This must happen before any destructive step
-	// (deleteAboveWatermark below modifies the targets). Unlike migrate,
+	// (deleteRecopyRange below modifies the targets). Unlike migrate,
 	// move cannot silently fall back to a fresh copy: the target tables are
 	// non-empty (that is exactly why setupUnderLocks() chose the resume path), so we
 	// fail loudly and leave the decision to the operator.
@@ -409,7 +409,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	// With multiple sources, a persisted checksum watermark cannot be trusted.
-	// deleteAboveWatermark (below) runs every (source, table) DELETE against
+	// deleteRecopyRange (below) runs every (source, table) DELETE against
 	// every target, and same-named tables from different sources interleave in
 	// the target tables — so one source's DELETE also removes OTHER sources'
 	// rows below their own watermarks. Those rows are not recopied (each
@@ -419,12 +419,12 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// where the hole sits, so discard it and force a full pass.
 	//
 	// With a single source the watermark is kept: deletes are per-table, and
-	// each table's delete range (above its watermark upper bound) is a subset
-	// of its recopy range (from the watermark lower bound), so nothing below
-	// the checksum watermark can have been deleted without being recopied.
+	// each table's delete range coincides exactly with its recopy range (both
+	// start at the watermark chunk's lower bound), so nothing below the
+	// checksum watermark can have been deleted without being recopied.
 	if len(r.sources) > 1 && r.checksumWatermark != "" {
 		r.logger.Info("discarding persisted checksum watermark: multi-source resume requires a full checksum pass",
-			"reason", "deleteAboveWatermark may remove rows below other sources' watermarks; only a from-scratch checksum re-verifies and repairs them",
+			"reason", "deleteRecopyRange may remove rows below other sources' watermarks; only a from-scratch checksum re-verifies and repairs them",
 			"sources", len(r.sources))
 		r.checksumWatermark = ""
 	}
@@ -441,15 +441,18 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		}
 	}
 
-	// Delete rows above the watermark from all target tables before resuming.
-	// When resuming from a checkpoint, the keyAboveWatermark optimization
-	// needs to know the highest key in the target table to avoid discarding
-	// binlog events for keys that were already copied. In the move path the
-	// target is on a different server, so we can't (easily) read its max value.
-	// Instead, we delete everything above the watermark from the targets,
-	// guaranteeing that no rows exist above the copier's resume position.
-	// The copier will re-copy these rows, and the checksum will verify.
-	if err := r.deleteAboveWatermark(ctx, copierWatermark); err != nil {
+	// Delete rows at/above the copier's resume position (the watermark
+	// chunk's lower bound) from all target tables before resuming, so that
+	// the deleted range coincides exactly with the range the copier is about
+	// to re-copy. When resuming from a checkpoint, the keyAboveWatermark
+	// optimization needs to know the highest key in the target table to avoid
+	// discarding binlog events for keys that were already copied. In the move
+	// path the target is on a different server, so we can't (easily) read its
+	// max value. Instead, we guarantee no rows exist at/above the copier's
+	// resume position: the copier re-copies the deleted range from the
+	// current source snapshot (so rows deleted on the source stay gone), and
+	// the checksum will verify. See deleteRecopyRange for the races.
+	if err := r.deleteRecopyRange(ctx, copierWatermark); err != nil {
 		return err
 	}
 
@@ -1678,30 +1681,39 @@ func (r *Runner) flushAllReplClients(ctx context.Context) error {
 	return nil
 }
 
-// deleteAboveWatermark deletes rows above the copier watermark from all target
-// tables. This is called during resume-from-checkpoint because of a race
-// condition with the keyAboveWatermark optimization:
+// deleteRecopyRange deletes rows at or above the copier's resume position
+// — the watermark chunk's LOWER bound — from all target tables. The deleted
+// range deliberately coincides with the range the resumed copier re-copies
+// (the chunkers restart from the watermark chunk's lower bound, inclusive),
+// which closes two races with the keyAboveWatermark optimization:
 //
 // During normal copying, the keyAboveWatermark optimization discards binlog
 // events for keys the copier "hasn't reached yet" — these rows don't exist
 // in the target, so deletes/updates for them can be safely ignored. But after
-// a resume, some rows above the watermark may have already been copied to the
-// target before the interruption. If a DELETE event arrives for one of these
-// rows and keyAboveWatermark discards it, the row remains in the target as
-// a phantom row that no longer exists in the source.
+// a crash, rows at or above the resume position may have already been copied
+// to the target:
+//
+//   - a row above the watermark chunk's upper bound was copied before the
+//     crash; a DELETE for it arrives after resume and is discarded, leaving a
+//     phantom row on the target (the classic race).
+//   - subtler: a row INSIDE the watermark chunk was copied, and its source
+//     DELETE committed in the unflushed window just before the crash. After
+//     resume the row no longer exists on the source, so the recopy (which
+//     reads the current source snapshot) never touches it, and its replayed
+//     DELETE can be discarded — the key sits above the post-crash source max
+//     that seeds checkpointHighPtr (see OpenAtWatermark). Deleting only rows
+//     above the chunk's upper bound resurrects such rows at cutover.
 //
 // In the migration path, this is solved by reading the target table's max
 // value and temporarily disabling the optimization up to that point. In the
 // move path, the target is on a different server, so we can't cheaply read
-// its max value. Instead, we delete everything above the watermark from the
-// targets before resuming. This guarantees no rows exist above the copier's
-// resume position, so the optimization is safe.
-//
-// tl;dr: this is required to prevent a race where:
-//   - watermark is at key=100, but a row at key=105 was inserted and copied.
-//   - immediately after resume there is a delete for key=105 but we incorrectly
-//     skip it because it is above the watermark.
-func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark string) error {
+// its max value. Instead, we delete exactly what the resumed copy is about to
+// re-copy: afterwards a target row exists iff it is below the resume position,
+// and every deleted row is re-created iff it still exists on the source.
+// Deleting already-copied rows inside the watermark chunk is safe — the
+// copier re-copies that range from the current source snapshot before the
+// checksum and cutover, and binlog replay converges concurrent changes.
+func (r *Runner) deleteRecopyRange(ctx context.Context, copierWatermark string) error {
 	// The checkpoint watermark format depends on how many chunkers the copy
 	// chunker wraps: a single (source, table) pair stores that chunker's own
 	// watermark (raw chunk JSON for auto-inc PKs, or the composite chunker's
@@ -1720,12 +1732,12 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 		// A table without a watermark entry was not ready when the
 		// checkpoint was written. On resume the chunker restarts it from
 		// scratch (multiChunker.OpenAtWatermark falls back to Open()), so
-		// every row already copied to the target sits "above" the (empty)
-		// watermark and must be deleted before the recopy.
-		aboveClause := "1=1"
+		// the recopy range is the whole table and every row already copied
+		// to the target must be deleted before the recopy.
+		recopyClause := "1=1"
 		watermark, hasWatermark := watermarks[src.QualifiedName()]
 		if hasWatermark {
-			aboveClause, err = table.WatermarkAboveClause(src, watermark)
+			recopyClause, err = table.WatermarkRecopyClause(src, watermark)
 			if err != nil {
 				return fmt.Errorf("failed to parse watermark for table %s: %w", src.TableName, err)
 			}
@@ -1743,14 +1755,14 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 		// prevent.
 		for i, target := range r.targets {
 			deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE %s",
-				src.QuotedTableName, aboveClause)
+				src.QuotedTableName, recopyClause)
 			result, err := target.DB.ExecContext(ctx, deleteStmt)
 			if err != nil {
-				return fmt.Errorf("failed to delete above watermark on target %d table %s: %w", i, src.TableName, err)
+				return fmt.Errorf("failed to delete the recopy range on target %d table %s: %w", i, src.TableName, err)
 			}
 			rowsDeleted, _ := result.RowsAffected()
 			if rowsDeleted > 0 {
-				r.logger.Info("deleted rows above watermark from target",
+				r.logger.Info("deleted rows at/above the copier resume position from target",
 					"target", i,
 					"table", src.TableName,
 					"rowsDeleted", rowsDeleted,
