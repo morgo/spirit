@@ -237,30 +237,42 @@ func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 	}, nil
 }
 
-// WatermarkAboveClause parses a watermark JSON string (as produced by
+// WatermarkRecopyClause parses a watermark JSON string (as produced by
 // GetLowWatermark/checkpoint) and returns a SQL WHERE clause that matches
-// rows strictly above the watermark's upper bound. This is used by the move
-// path to delete rows above the watermark from target tables before resuming,
-// so that the keyAboveWatermark optimization is safe without needing to read
-// the target table's max value.
+// every row the resumed copy will re-copy: rows at or above the watermark
+// chunk's LOWER bound. On resume the chunkers restore their pointer from the
+// lower bound and emit their next chunk with an inclusive lower bound (see
+// OpenAtWatermark in chunker_composite.go and chunker_optimistic.go), so the
+// recopy range is always `key >= lower bound` regardless of the persisted
+// Inclusive flag — which is why the clause uses >= unconditionally.
 //
-// For example, if the watermark upper bound is id=100, this returns
-// something like "`id` > 100".
-func WatermarkAboveClause(ti *TableInfo, watermarkJSON string) (string, error) {
+// The move path deletes exactly this range from the target tables before
+// resuming (see move.Runner.deleteRecopyRange). Because the deleted range
+// coincides with the recopied range, a target row survives resume iff it is
+// below the resume position (already fully copied) or still exists on the
+// source to be re-copied. Deleting less — e.g. only rows strictly above the
+// watermark chunk's upper bound — resurrects rows that were copied and then
+// deleted on the source just before the crash: the recopy reads the current
+// source snapshot, so it cannot remove them, and the keyAboveWatermark
+// optimization may discard their replayed binlog DELETEs.
+//
+// For example, if the watermark lower bound is id=50, this returns
+// something like "`id` >= 50".
+func WatermarkRecopyClause(ti *TableInfo, watermarkJSON string) (string, error) {
 	chunk, err := newChunkFromJSON(ti, watermarkJSON)
 	if err != nil {
 		return "", fmt.Errorf("could not parse watermark: %w", err)
 	}
-	if chunk.UpperBound == nil {
-		return "", fmt.Errorf("watermark has no upper bound")
+	if chunk.LowerBound == nil {
+		return "", fmt.Errorf("watermark has no lower bound")
 	}
-	return expandRowConstructorComparison(chunk.Key, OpGreaterThan, chunk.UpperBound.Value), nil
+	return expandRowConstructorComparison(chunk.Key, OpGreaterEqual, chunk.LowerBound.Value), nil
 }
 
 // WatermarkPerTable parses a copier watermark in any of the formats produced
 // by the chunkers' GetLowWatermark implementations and normalizes it into a
 // map of TableInfo.QualifiedName() -> raw single-chunk JSON (the format
-// accepted by WatermarkAboveClause). The formats are owned by the chunkers:
+// accepted by WatermarkRecopyClause). The formats are owned by the chunkers:
 //
 //   - multiChunker (used for two or more chunkers): a JSON map keyed by
 //     QualifiedName, where each value is the child chunker's own watermark.

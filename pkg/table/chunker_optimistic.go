@@ -264,15 +264,17 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	// In the move path there is no new table per se, so NewChunker defaults
 	// NewTi to the source table — NewTi is never nil and the nil-check below
 	// is purely defensive. On a move resume checkpointHighPtr is therefore
-	// seeded from the *source* table's current max, and that is load-bearing,
-	// not an accident: Runner.deleteAboveWatermark only deletes target rows
-	// strictly above the watermark chunk's upper bound, so rows in the
-	// watermark chunk itself can still exist on the target. Replayed binlog
-	// DELETEs for those rows must not be discarded by KeyAboveHighWatermark
-	// (the re-copy reads from the source, where the row is already gone, so
-	// nothing else would remove the phantom row). Seeding from the source max
-	// keeps the optimization disabled for every key that existed at resume
-	// time, which covers them.
+	// seeded from the *source* table's current max, which keeps the
+	// optimization disabled for every key that still EXISTS on the source at
+	// resume time. It does NOT cover keys deleted on the source in the
+	// unflushed window before the crash: those can sit above the post-crash
+	// source max, so their replayed DELETEs may still be discarded. The
+	// guarantee for them comes from move.Runner.deleteRecopyRange, which
+	// deletes every target row at/above the watermark chunk's lower bound —
+	// exactly the range this chunker re-copies after restoring chunkPtr
+	// below — so a row that no longer exists on the source is removed from
+	// the target rather than resurrected, and a discarded DELETE for it is a
+	// no-op.
 	if t.NewTi != nil {
 		checkpointHighPtr, err := NewDatum(t.NewTi.MaxValue().Val, t.Ti.MaxValue().Tp)
 		if err != nil {
