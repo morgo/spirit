@@ -22,6 +22,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestSyncerConfigDecodeOptions verifies that both change sources pin the
+// row-decode options that keep replayed values byte-identical to what the
+// server stored: TIMESTAMPs must be rendered in UTC (the applier writes
+// over time_zone='+00:00' connections, so a process-local-time string
+// would shift stored values on any non-UTC host) and JSON must be
+// rendered as MySQL text (see the rationale in binlog.go). The GTID
+// client previously omitted TimestampStringLocation, silently corrupting
+// TIMESTAMP columns under --gtid on non-UTC hosts.
+func TestSyncerConfigDecodeOptions(t *testing.T) {
+	configs := map[string]replication.BinlogSyncerConfig{
+		"binlog": (&binlogClient{serverID: 123}).buildSyncerConfig("127.0.0.1", 3306),
+		"gtid":   (&gtidClient{serverID: 123}).buildSyncerConfig("127.0.0.1", 3306),
+	}
+	for name, cfg := range configs {
+		require.Equal(t, time.UTC, cfg.TimestampStringLocation, "%s client must decode TIMESTAMP values in UTC", name)
+		require.True(t, cfg.RenderJSONAsMySQLText, "%s client must render JSON as MySQL text", name)
+	}
+}
+
 // TestGTIDClient mirrors TestReplClient but uses the GTID-backed change
 // source. Verifies the basic INSERT → buffer → flush loop end-to-end.
 func TestGTIDClient(t *testing.T) {

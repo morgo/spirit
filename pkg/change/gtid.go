@@ -309,6 +309,30 @@ func (c *gtidClient) StartFromPosition(ctx context.Context, pos string) error {
 	return c.Start(ctx)
 }
 
+// buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
+// out (mirroring binlogClient.buildSyncerConfig) so tests can assert the
+// decode options below stay in sync between the two clients.
+func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.BinlogSyncerConfig {
+	return replication.BinlogSyncerConfig{
+		ServerID: c.serverID,
+		Flavor:   "mysql",
+		Host:     host,
+		Port:     port,
+		User:     c.username,
+		Password: c.password,
+		Logger:   c.logger,
+		// Render JSON the same way the binlog client does — see the
+		// rationale on NewBinlogClient.
+		RenderJSONAsMySQLText: true,
+		// Decode TIMESTAMP values in UTC the same way the binlog client
+		// does — see the rationale on NewBinlogClient. Without this, the
+		// decoder uses the process's local timezone while the applier
+		// writes over time_zone='+00:00' connections, silently shifting
+		// stored TIMESTAMP values on any non-UTC host.
+		TimestampStringLocation: time.UTC,
+	}
+}
+
 // Start satisfies Source. On a fresh start it reads @@GLOBAL.gtid_executed
 // and begins streaming from there; on a resume (flushedGTID already
 // primed by StartFromPosition) it validates the position covers
@@ -325,18 +349,7 @@ func (c *gtidClient) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse port: %w", err)
 	}
-	c.cfg = replication.BinlogSyncerConfig{
-		ServerID: c.serverID,
-		Flavor:   "mysql",
-		Host:     host,
-		Port:     uint16(port),
-		User:     c.username,
-		Password: c.password,
-		Logger:   c.logger,
-		// Render JSON the same way the binlog client does — see the
-		// rationale on NewBinlogClient.
-		RenderJSONAsMySQLText: true,
-	}
+	c.cfg = c.buildSyncerConfig(host, uint16(port))
 	if c.dbConfig != nil {
 		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.dbConfig, host)
 		if err != nil {

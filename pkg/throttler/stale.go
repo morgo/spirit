@@ -5,31 +5,42 @@ import (
 	"time"
 )
 
-// Staleness guard for polled gradual signals.
+// Staleness guard for polled throttle signals.
 //
-// The Aurora throttlers sample on a background loop and cache the result;
-// Utilization() only reads the cache. If sampling fails persistently (monitor
-// connections partitioned, grants revoked mid-migration, a failover the pool
-// won't reconnect from), the poll loop logs and continues — and the cached
-// value freezes. A value frozen below the autoscaler's low watermark would add
-// a write thread every cooldown until the 2x cap, ramping blind on a dead
-// signal, with the binary IsThrottled hard-stop equally frozen. The guard
-// breaks that failure mode: once the last successful sample is older than
-// staleSignalThreshold, Utilization() reports StaleUtilizationHold — a value
-// inside the autoscaler's dead band — so the controller freezes scaling in
-// place (no growth, no shrink) until sampling recovers.
+// The throttlers sample on a background loop and cache the result; readers
+// only see the cache. If sampling fails persistently (monitor connections
+// partitioned, grants revoked mid-migration, a failover the pool won't
+// reconnect from), the poll loop logs and continues — and the cached value
+// freezes at whatever it was when things were last healthy. The guard tracks
+// the time of the last successful sample so a throttler can stop trusting a
+// frozen value once it is older than staleSignalThreshold. What "stop
+// trusting" means depends on what the signal protects:
 //
-// IsThrottled()/BlockWait() are deliberately NOT touched by the guard: they
-// keep reporting the last computed state exactly as before, so the binary
-// throttle semantics are unchanged whether the signal is fresh or stale.
+//   - The Aurora gradual throttlers (CommitLatency, ThreadsRunning) apply the
+//     guard to Utilization() only. A value frozen below the autoscaler's low
+//     watermark would add a write thread every cooldown until the 2x cap,
+//     ramping blind on a dead signal — so while stale, Utilization() reports
+//     StaleUtilizationHold, a value inside the autoscaler's dead band,
+//     freezing scaling in place (no growth, no shrink) until sampling
+//     recovers. Their binary IsThrottled()/BlockWait() are deliberately NOT
+//     touched by the guard: these signals are best-effort load protection,
+//     and the hard-stop keeps reporting the last computed state exactly as
+//     before, fresh or stale.
+//
+//   - The Replica throttler applies the guard to IsThrottled() itself and
+//     fails closed. Its lag tolerance (--replica-max-lag) is a hard budget,
+//     and a lag value frozen at a healthy level would let the copy run at
+//     full speed against a budget nobody is measuring — so while stale,
+//     IsThrottled() reports true, pausing the copy until polling recovers.
 const (
 	// staleSignalThreshold is how old the last successful sample may be
-	// before Utilization() stops trusting the cached value. Three poll
-	// intervals (commitLatencyPollInterval and threadsRunningPollInterval are
-	// both 5s): one or two failed or slow polls — a brief failover blip, one
-	// stalled status query — don't flap the guard, but the signal is
-	// declared stale before the autoscaler can take more than one blind step,
-	// since its increases are spaced (acCooldownTicks+1)*acTick = 15s apart.
+	// before the cached value is no longer trusted. Three poll intervals
+	// (commitLatencyPollInterval, threadsRunningPollInterval and the replica
+	// throttler's loopInterval are all 5s): one or two failed or slow polls —
+	// a brief failover blip, one stalled status query — don't flap the guard,
+	// but the signal is declared stale before the autoscaler can take more
+	// than one blind step, since its increases are spaced
+	// (acCooldownTicks+1)*acTick = 15s apart.
 	staleSignalThreshold = 15 * time.Second
 
 	// StaleUtilizationHold is the utilization reported while the signal is
@@ -42,9 +53,9 @@ const (
 )
 
 // staleGuard tracks the freshness of a polled signal. It is embedded by the
-// gradual throttlers (CommitLatency, ThreadsRunning): applySample marks the
-// signal fresh, Utilization checks it. All methods are safe for concurrent
-// use.
+// gradual throttlers (CommitLatency, ThreadsRunning — applySample marks the
+// signal fresh, Utilization checks it) and by Replica (applyLag marks fresh,
+// IsThrottled checks it). All methods are safe for concurrent use.
 type staleGuard struct {
 	lastSampleAt atomic.Int64 // unixnano of the last successful sample; 0 = never sampled
 	warned       atomic.Bool  // true once the current stale period has been logged
