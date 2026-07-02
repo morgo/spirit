@@ -156,6 +156,17 @@ type PartitionValues struct {
 // Numeric/expression partition values remain plain Go strings.
 type partitionStringLiteral string
 
+// partitionMaxValue is a sentinel representing the MAXVALUE keyword inside a
+// partition VALUES LESS THAN value list (e.g. the tuple elements of
+// VALUES LESS THAN (10, MAXVALUE) in multi-column RANGE COLUMNS). Without a
+// distinct type, MAXVALUE would be stored as the plain string "MAXVALUE" and
+// emitted as the quoted string literal 'MAXVALUE', which MySQL rejects
+// (error 1697). The single-expression form (VALUES LESS THAN MAXVALUE, or
+// its parenthesized spelling) is normalized further, to
+// PartitionValues.Type == "MAXVALUE" (see parsePartitionClause), matching
+// SHOW CREATE TABLE's bare-keyword form.
+type partitionMaxValue struct{}
+
 // SubPartitionOptions represents subpartitioning configuration
 type SubPartitionOptions struct {
 	Type       string   `json:"type"`                 // HASH, KEY
@@ -1092,6 +1103,19 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 			values.Values = append(values.Values, ct.parsePartitionValue(expr))
 		}
 
+		// Normalize the single-expression MAXVALUE form (VALUES LESS THAN
+		// MAXVALUE, or its parenthesized spelling VALUES LESS THAN (MAXVALUE)
+		// as printed by SHOW CREATE TABLE for RANGE COLUMNS) to the dedicated
+		// "MAXVALUE" type so that emission produces the bare keyword. MySQL
+		// accepts the bare form for both RANGE and single-column RANGE
+		// COLUMNS, and both spellings parse to the same representation here,
+		// so they always compare equal (verified against MySQL 8.0.45).
+		if len(values.Values) == 1 {
+			if _, isMax := values.Values[0].(partitionMaxValue); isMax {
+				return &PartitionValues{Type: "MAXVALUE", Values: []any{}}
+			}
+		}
+
 		return values
 	case *ast.PartitionDefinitionClauseIn:
 		values := &PartitionValues{
@@ -1124,12 +1148,17 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 	}
 }
 
-// parsePartitionValue parses a single partition value expression. String
-// literals (LIST/RANGE COLUMNS on a string column) are wrapped in
-// partitionStringLiteral carrying their true raw value, so emission can
-// quote them unconditionally. Numeric literals and expressions (e.g.
-// YEAR(col)) fall back to the Restored text form as plain strings.
+// parsePartitionValue parses a single partition value expression. The
+// MAXVALUE keyword becomes the partitionMaxValue sentinel so it is emitted
+// bare (never as the string literal 'MAXVALUE', which MySQL rejects with
+// error 1697). String literals (LIST/RANGE COLUMNS on a string column) are
+// wrapped in partitionStringLiteral carrying their true raw value, so
+// emission can quote them unconditionally. Numeric literals and expressions
+// (e.g. YEAR(col)) fall back to the Restored text form as plain strings.
 func (ct *CreateTable) parsePartitionValue(expr ast.ExprNode) any {
+	if _, isMax := expr.(*ast.MaxValueExpr); isMax {
+		return partitionMaxValue{}
+	}
 	if literal, isStr := stringLiteralValue(expr); isStr {
 		return partitionStringLiteral(literal)
 	}
