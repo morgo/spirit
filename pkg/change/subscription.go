@@ -32,7 +32,13 @@ type Subscription interface {
 	// holding — one per target server — and the applier executes each
 	// target's statements under that target's own lock.
 	Flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) (allChangesFlushed bool, err error)
-	Tables() []*table.TableInfo // returns the tables related to the subscription in currentTable, newTable order
+	// Tables returns the tables related to the subscription in
+	// currentTable, newTable order. Move-flow subscriptions have no
+	// destination-side TableInfo, in which case only [currentTable] is
+	// returned. Entries are never nil: consumers (the clients' DDL
+	// subscription-match loops, out-of-tree change.Source event routing)
+	// iterate and dereference them.
+	Tables() []*table.TableInfo
 
 	// ImmutableColumnOrdinal returns the position (an index into
 	// Tables()[0].Columns, and thus into each full binlog row image) of a

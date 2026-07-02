@@ -681,6 +681,14 @@ func (c *binlogClient) processDDLNotification(schema, table string) {
 		matchFound := false
 		for _, sub := range c.subs.Snapshot() {
 			for _, tsub := range sub.Tables() { // currentTable, newTable
+				if tsub == nil {
+					// Defensive: in-tree subscriptions never emit nil
+					// entries (bufferedMap.Tables omits a nil newTable),
+					// but the interface can't guarantee it for other
+					// implementations, and a DDL notification must never
+					// crash the stream reader.
+					continue
+				}
 				if tsub.SchemaName == schema && tsub.TableName == table {
 					matchFound = true
 					break

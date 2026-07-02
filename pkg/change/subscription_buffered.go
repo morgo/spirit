@@ -190,8 +190,8 @@ type BufferedSubscriptionConfig struct {
 
 	// NewTable is the destination-side TableInfo. May be nil for
 	// MoveTables/import flows where source and destination share the
-	// same schema; in that case Subscription.Tables() returns
-	// [CurrentTable, nil].
+	// same schema; in that case Subscription.Tables() returns just
+	// [CurrentTable].
 	NewTable *table.TableInfo
 
 	// Applier writes batched changes to the target. Required.
@@ -306,6 +306,16 @@ func (s *bufferedMap) Length() int {
 }
 
 func (s *bufferedMap) Tables() []*table.TableInfo {
+	if s.newTable == nil {
+		// Move-flow subscriptions have no destination-side TableInfo (see
+		// BufferedSubscriptionConfig.NewTable). Omit the nil rather than
+		// returning [table, nil]: Tables() consumers — the DDL
+		// subscription-match loops in the binlog/GTID clients, and
+		// out-of-tree change.Source implementations routing row events per
+		// the Source interface contract — iterate and dereference the
+		// entries, and a nil entry panics the stream-reader goroutine.
+		return []*table.TableInfo{s.table}
+	}
 	return []*table.TableInfo{s.table, s.newTable}
 }
 

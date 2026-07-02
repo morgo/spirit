@@ -46,11 +46,11 @@ func TestImmutableColumnUpdateFatal(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	cancelled := make(chan struct{}, 1)
+	cancelled := make(chan FatalReason, 1)
 	clientConfig := NewClientDefaultConfig()
-	clientConfig.CancelFunc = func() bool {
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
 		select {
-		case cancelled <- struct{}{}:
+		case cancelled <- reason:
 		default:
 		}
 		return true
@@ -79,7 +79,10 @@ func TestImmutableColumnUpdateFatal(t *testing.T) {
 	// of the row could not be removed from its previous shard.
 	testutils.RunSQL(t, "UPDATE immutcol_t1 SET user_id = 999 WHERE id = 2")
 	select {
-	case <-cancelled:
+	case reason := <-cancelled:
+		// Reported as a stream error, not a schema change: the watched
+		// table's definition did not change, so resume state stays valid.
+		require.Equal(t, FatalReasonStreamError, reason)
 	case <-time.After(30 * time.Second):
 		t.Fatal("expected the client to cancel the operation after an UPDATE to the sharding column")
 	}
@@ -92,7 +95,7 @@ func TestImmutableColumnUpdateFatalGTID(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(db)
 
-	testutils.RunSQL(t, "DROP TABLE IF EXISTS immutcol_gtid_t1")
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS immutcol_gtid_t1, immutcol_gtid_other")
 	testutils.RunSQL(t, "CREATE TABLE immutcol_gtid_t1 (id INT NOT NULL, user_id INT NOT NULL, name VARCHAR(255), PRIMARY KEY (id))")
 	testutils.RunSQL(t, "INSERT INTO immutcol_gtid_t1 VALUES (1, 100, 'a'), (2, 200, 'b')")
 
@@ -103,11 +106,11 @@ func TestImmutableColumnUpdateFatalGTID(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	cancelled := make(chan struct{}, 1)
+	cancelled := make(chan FatalReason, 1)
 	clientConfig := NewClientDefaultConfig()
-	clientConfig.CancelFunc = func() bool {
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
 		select {
-		case cancelled <- struct{}{}:
+		case cancelled <- reason:
 		default:
 		}
 		return true
@@ -119,6 +122,15 @@ func TestImmutableColumnUpdateFatalGTID(t *testing.T) {
 	require.NoError(t, client.AddSubscription(t1, nil, chunker))
 	require.NoError(t, client.Start(t.Context()))
 	defer client.Close()
+
+	// DDL on an UNRELATED table must be ignored. Regression: the
+	// subscription-match loop in processDDLNotification used to walk past
+	// the current table into the nil newTable entry of this move-style
+	// subscription and panic the readStream goroutine — killing the whole
+	// process whenever any other session ran DDL while a client without a
+	// DDL filter schema was streaming.
+	testutils.RunSQL(t, "CREATE TABLE immutcol_gtid_other (id INT NOT NULL, PRIMARY KEY (id))")
+	testutils.RunSQL(t, "DROP TABLE immutcol_gtid_other")
 
 	// A benign UPDATE flows through as a normal change.
 	testutils.RunSQL(t, "UPDATE immutcol_gtid_t1 SET name = 'aa' WHERE id = 1")
@@ -133,7 +145,8 @@ func TestImmutableColumnUpdateFatalGTID(t *testing.T) {
 	// An UPDATE that modifies the sharding column is fatal.
 	testutils.RunSQL(t, "UPDATE immutcol_gtid_t1 SET user_id = 999 WHERE id = 2")
 	select {
-	case <-cancelled:
+	case reason := <-cancelled:
+		require.Equal(t, FatalReasonStreamError, reason)
 	case <-time.After(30 * time.Second):
 		t.Fatal("expected the client to cancel the operation after an UPDATE to the sharding column")
 	}
@@ -160,11 +173,11 @@ func TestImmutableColumnUnconfigured(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	cancelled := make(chan struct{}, 1)
+	cancelled := make(chan FatalReason, 1)
 	clientConfig := NewClientDefaultConfig()
-	clientConfig.CancelFunc = func() bool {
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
 		select {
-		case cancelled <- struct{}{}:
+		case cancelled <- reason:
 		default:
 		}
 		return true
