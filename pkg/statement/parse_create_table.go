@@ -64,6 +64,7 @@ type IndexColumn struct {
 	Name       string  `json:"name,omitempty"`       // Column name (empty for expression indexes)
 	Expression *string `json:"expression,omitempty"` // Expression for functional indexes
 	Length     *int    `json:"length,omitempty"`     // Prefix length for string columns
+	Desc       bool    `json:"desc,omitempty"`       // Descending key part (MySQL 8.0+), e.g. KEY (a DESC)
 }
 
 // Index represents an index definition
@@ -484,6 +485,28 @@ func (ct *CreateTable) autoNameIndexes() {
 		}
 	}
 
+	// Inline column-level UNIQUEs claim their server-assigned names BEFORE any
+	// unnamed table-level index is auto-named: the server names indexes in
+	// declaration order and column definitions normally precede table-level
+	// keys, so in `c int UNIQUE, KEY (c, d)` the unique index gets `c` and the
+	// unnamed key is pushed to `c_2`. The names are only reserved here — not
+	// materialized into ct.Indexes — so the inline declaration stays
+	// column-level state (Column.Unique) everywhere else. effectiveIndexes
+	// recomputes the same names at diff time; keep the two in sync.
+	for _, col := range ct.Columns {
+		if !col.Unique {
+			continue
+		}
+		name := col.Name
+		for suffix := 2; ; suffix++ {
+			if _, taken := usedNames[name]; !taken {
+				break
+			}
+			name = fmt.Sprintf("%s_%d", col.Name, suffix)
+		}
+		usedNames[name] = 0
+	}
+
 	for i := range ct.Indexes {
 		idx := &ct.Indexes[i]
 		if idx.Name != "" || idx.Type == "PRIMARY KEY" {
@@ -881,7 +904,9 @@ func (ct *CreateTable) parseIndexColumns(keys []*ast.IndexPartSpecification) []s
 func (ct *CreateTable) parseIndexColumnList(keys []*ast.IndexPartSpecification) []IndexColumn {
 	columns := make([]IndexColumn, 0, len(keys))
 	for _, key := range keys {
-		col := IndexColumn{}
+		// Desc applies to both column and expression key parts,
+		// e.g. KEY (a DESC) and KEY ((lower(b)) DESC).
+		col := IndexColumn{Desc: key.Desc}
 
 		// Check if this is a column reference or an expression
 		if key.Column != nil {
@@ -1555,6 +1580,11 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 				fmt.Fprintf(&sb, "(%s)", exprSb.String())
 			default:
 				return "", fmt.Errorf("index %q has a key part with neither a column nor an expression", constraint.Name)
+			}
+			// Descending key part (MySQL 8.0+). ASC is MySQL's canonical
+			// default and is never emitted explicitly.
+			if key.Desc {
+				sb.WriteString(" DESC")
 			}
 		}
 		sb.WriteString(")")

@@ -297,28 +297,15 @@ func (c *binlogClient) getCurrentBinlogPosition(ctx context.Context) (mysql.Posi
 	}, nil
 }
 
-// Start initializes the binlog syncer and spawns the binlog reader
-// goroutine. Returns once the reader is running; the stream itself
-// continues until Close is called or ctx is cancelled.
-// Satisfies Source interface.
-func (c *binlogClient) Start(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	host, portStr, err := net.SplitHostPort(c.host)
-	if err != nil {
-		return fmt.Errorf("failed to parse host: %w", err)
-	}
-	// convert portStr to a uint16
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return fmt.Errorf("failed to parse port: %w", err)
-	}
-	c.cfg = replication.BinlogSyncerConfig{
+// buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
+// out (mirroring gtidClient.buildSyncerConfig) so tests can assert the
+// decode options below stay in sync between the two clients.
+func (c *binlogClient) buildSyncerConfig(host string, port uint16) replication.BinlogSyncerConfig {
+	return replication.BinlogSyncerConfig{
 		ServerID: c.serverID,
 		Flavor:   "mysql",
 		Host:     host,
-		Port:     uint16(port),
+		Port:     port,
 		User:     c.username,
 		Password: c.password,
 		Logger:   c.logger,
@@ -343,6 +330,26 @@ func (c *binlogClient) Start(ctx context.Context) error {
 		// consistent with the UTC-pinned copier connections.
 		TimestampStringLocation: time.UTC,
 	}
+}
+
+// Start initializes the binlog syncer and spawns the binlog reader
+// goroutine. Returns once the reader is running; the stream itself
+// continues until Close is called or ctx is cancelled.
+// Satisfies Source interface.
+func (c *binlogClient) Start(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	host, portStr, err := net.SplitHostPort(c.host)
+	if err != nil {
+		return fmt.Errorf("failed to parse host: %w", err)
+	}
+	// convert portStr to a uint16
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return fmt.Errorf("failed to parse port: %w", err)
+	}
+	c.cfg = c.buildSyncerConfig(host, uint16(port))
 
 	// Apply TLS configuration using the same infrastructure as main database connections
 	if c.dbConfig != nil {

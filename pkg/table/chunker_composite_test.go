@@ -199,6 +199,105 @@ func TestCompositeChunkerBinary(t *testing.T) {
 	// test if we make small changes.
 	require.True(t, totalChunks < 1005 && totalChunks > 995)
 }
+
+// TestCompositeChunkerBinaryHexStringWatermark is a regression test for
+// checkpoint corruption with VARBINARY keys whose values are valid-UTF-8
+// ASCII strings that look like hex literals (e.g. Ethereum-style "0x..."
+// addresses). Boundary datums built by nextQueryToDatums must be hex-encoded
+// in the watermark JSON: datumValFromString unconditionally hex-decodes
+// "0x"-prefixed binaryType values on restore, so a plain-string "0xAB"
+// boundary would be restored as the raw byte 0xAB — which sorts above every
+// ASCII key, so the resumed chunker would find no rows, send the final chunk,
+// and silently skip the rest of the table.
+func TestCompositeChunkerBinaryHexStringWatermark(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS composite_hexstring_t1")
+	testutils.RunSQL(t, `CREATE TABLE composite_hexstring_t1 (
+		pk varbinary(40) NOT NULL,
+		a int NOT NULL,
+		PRIMARY KEY (pk)
+	)`)
+	// 95 rows with pk values "0xA1".."0xFF": ASCII strings (valid UTF-8),
+	// but with the "0x" prefix that the checkpoint-restore path treats as
+	// hex encoding. Fixed-width, so lexicographic order == numeric order.
+	testutils.RunSQL(t, `INSERT INTO composite_hexstring_t1 (pk, a)
+		WITH RECURSIVE seq AS (
+			SELECT 161 AS n UNION ALL SELECT n + 1 FROM seq WHERE n < 255
+		) SELECT CONCAT('0x', HEX(n)), n FROM seq`)
+
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	t1 := NewTableInfo(db, "test", "composite_hexstring_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Equal(t, binaryType, t1.keyDatums[0])
+
+	chunker, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	comp := chunker.(*chunkerComposite)
+	comp.SetDynamicChunking(false)
+	require.NoError(t, comp.Open())
+	comp.chunkSize = 10 // Open() resets to StartingChunkSize; force multiple chunks
+
+	chunk1, err := comp.Next()
+	require.NoError(t, err)
+	comp.Feedback(chunk1, time.Millisecond, 10)
+
+	chunk2, err := comp.Next()
+	require.NoError(t, err)
+	comp.Feedback(chunk2, time.Millisecond, 10)
+
+	// The watermark is now chunk2. Its lower bound is the 11th pk value.
+	wantPtrs := chunk2.LowerBound.Value
+	require.Len(t, wantPtrs, 1)
+	require.Equal(t, "0xAB", wantPtrs[0].Val) // 161+10 = 171 = 0xAB
+
+	watermark, err := comp.GetLowWatermark()
+	require.NoError(t, err)
+	// The boundary value must be serialized as a hex literal of the ASCII
+	// string "0xAB" (0x30784142), not as the plain string "0xAB".
+	var compositeWM compositeWatermark
+	require.NoError(t, json.Unmarshal([]byte(watermark), &compositeWM))
+	require.Contains(t, compositeWM.ChunkJSON, `0x30784142`)
+	require.NotContains(t, compositeWM.ChunkJSON, `"0xAB"`)
+
+	// Restore into a fresh chunker, as happens on resume-from-checkpoint.
+	chunker2, err := NewChunker(t1, ChunkerConfig{})
+	require.NoError(t, err)
+	comp2 := chunker2.(*chunkerComposite)
+	comp2.SetDynamicChunking(false)
+	require.NoError(t, comp2.OpenAtWatermark(watermark))
+
+	// The restored chunk pointers must equal the pre-serialization datums.
+	require.Equal(t, wantPtrs, comp2.chunkPtrs)
+
+	// The resumed chunker must cover exactly the rows at/above the restored
+	// pointer: pk >= "0xAB" (rows 171..255 = 85 rows).
+	var expectedRows int
+	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM composite_hexstring_t1 WHERE pk >= ?", wantPtrs[0].Val).Scan(&expectedRows)
+	require.NoError(t, err)
+	require.Equal(t, 85, expectedRows)
+
+	comp2.chunkSize = 10
+	coveredRows := 0
+	for range 100 {
+		chunk, err := comp2.Next()
+		if err != nil {
+			require.ErrorIs(t, err, ErrTableIsRead)
+			break
+		}
+		var chunkRows int
+		err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM composite_hexstring_t1 WHERE "+chunk.String()).Scan(&chunkRows)
+		require.NoError(t, err)
+		coveredRows += chunkRows
+	}
+	require.Equal(t, expectedRows, coveredRows)
+}
+
 func TestCompositeChunkerInt(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS compositeint_t1")
 	testutils.RunSQL(t, `CREATE TABLE compositeint_t1 (

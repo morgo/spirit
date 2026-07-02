@@ -97,7 +97,8 @@ func setupRunnerForChecksumTest(t *testing.T, dbSuffix string) (*Runner, context
 	require.NoError(t, err)
 	r.targets = []applier.Target{{KeyRange: "0", DB: tgtDB, Config: tgtCfg}}
 
-	require.NoError(t, r.setup(ctx))
+	require.NoError(t, r.setupDiscovery(ctx))
+	require.NoError(t, r.setupUnderLocks(ctx))
 	require.NoError(t, r.copier.Run(ctx))
 
 	// Bring the checksum chunker into a state where it has a low-watermark.

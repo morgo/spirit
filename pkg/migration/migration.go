@@ -44,7 +44,7 @@ type Migration struct {
 	EnableExperimentalAutoscaling bool          `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
 	TargetChunkTime               time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
 	ReplicaDSN                    string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
-	ReplicaMaxLag                 time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles." optional:"" default:"120s"`
+	ReplicaMaxLag                 time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles. If lag becomes unobservable (lag polling keeps failing) the migration pauses (fails closed) until polling recovers; remove --replica-dsn to proceed without lag protection." optional:"" default:"120s"`
 	LockWaitTimeout               time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
 	SkipDropAfterCutover          bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
 	DeferCutOver                  bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
