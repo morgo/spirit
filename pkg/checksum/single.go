@@ -377,6 +377,10 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 		c.execTime = time.Since(startTime)
 	}()
 
+	// A previous Run may have left the checker poisoned (isInvalid=true from
+	// an errored attempt); every Run starts healthy.
+	c.setInvalid(false)
+
 	// Try the checksum up to n times if differences are found and we can fix them
 	var lastErr error
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
@@ -388,6 +392,10 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)
+			// Reset the invalid flag left set by the failed attempt: it makes
+			// isHealthy() false, which would skip every chunk and turn this
+			// retry into a vacuous pass.
+			c.setInvalid(false)
 		}
 
 		// If the parent context is already cancelled, retrying is pointless —
