@@ -482,6 +482,10 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 		_ = c.applier.Stop()
 	}()
 
+	// A previous Run may have left the checker poisoned (isInvalid=true from
+	// an errored attempt); every Run starts healthy.
+	c.setInvalid(false)
+
 	// Try the checksum up to n times if differences are found and we can fix them
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
@@ -492,6 +496,10 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)
+			// Reset the invalid flag left set by a failed attempt: it makes
+			// isHealthy() false, which would skip every chunk and turn this
+			// retry into a vacuous pass.
+			c.setInvalid(false)
 		}
 
 		// If the parent context is already cancelled, retrying is pointless.
