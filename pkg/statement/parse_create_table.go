@@ -85,14 +85,15 @@ type Index struct {
 
 // Constraint represents a table constraint
 type Constraint struct {
-	Raw        *ast.Constraint      `json:"-"`
-	Name       string               `json:"name"`
-	Type       string               `json:"type"` // CHECK, FOREIGN KEY, etc.
-	Columns    []string             `json:"columns,omitempty"`
-	Expression *string              `json:"expression,omitempty"`
-	References *ForeignKeyReference `json:"references,omitempty"`
-	Definition *string              `json:"definition,omitempty"` // Generated definition string for compatibility
-	Options    map[string]any       `json:"options,omitempty"`
+	Raw         *ast.Constraint      `json:"-"`
+	Name        string               `json:"name"`
+	Type        string               `json:"type"` // CHECK, FOREIGN KEY, etc.
+	Columns     []string             `json:"columns,omitempty"`
+	Expression  *string              `json:"expression,omitempty"`
+	References  *ForeignKeyReference `json:"references,omitempty"`
+	Definition  *string              `json:"definition,omitempty"`   // Generated definition string for compatibility
+	NotEnforced bool                 `json:"not_enforced,omitempty"` // CHECK constraints only: true when NOT ENFORCED
+	Options     map[string]any       `json:"options,omitempty"`
 }
 
 type Indexes []Index
@@ -912,6 +913,15 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 	case ast.ConstraintCheck:
 		constr.Type = "CHECK"
 
+		// Capture the enforcement state. The parser defaults Enforced to
+		// true, so an absent keyword and an explicit ENFORCED both parse as
+		// enforced — matching MySQL, which omits ENFORCED (the default) from
+		// SHOW CREATE TABLE and renders the non-default state inside a
+		// versioned comment: /*!80016 NOT ENFORCED */. The parser processes
+		// that versioned-comment form too (it is above its minimum version),
+		// so MySQL's canonical output parses with Enforced=false.
+		constr.NotEnforced = !constraint.Enforced
+
 		if constraint.Expr != nil {
 			// Use restoreExpressionText (not parseExpression) so the stored
 			// expression has any balanced outer parentheses stripped. MySQL's
@@ -924,6 +934,9 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 				constr.Expression = &exprStr
 				// Generate definition string
 				definition := fmt.Sprintf("CHECK (%s)", exprStr)
+				if constr.NotEnforced {
+					definition += " NOT ENFORCED"
+				}
 				constr.Definition = &definition
 			}
 		}
@@ -935,14 +948,22 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 				Columns: ct.parseIndexColumns(constraint.Refer.IndexPartSpecifications),
 			}
 
-			// Parse ON DELETE action (check if ReferOpt is non-empty)
-			if constraint.Refer.OnDelete != nil && constraint.Refer.OnDelete.ReferOpt.String() != "" {
+			// Parse ON DELETE / ON UPDATE actions (check if ReferOpt is
+			// non-empty). An explicit NO ACTION is normalized to absent:
+			// NO ACTION is MySQL's default referential action (and a synonym
+			// for RESTRICT in InnoDB), and SHOW CREATE TABLE omits it. Keeping
+			// it verbatim would make a desired schema spelling out NO ACTION
+			// forever differ from the live table, re-emitting the same
+			// DROP+ADD FOREIGN KEY on every declarative run. RESTRICT is NOT
+			// normalized: SHOW CREATE TABLE prints it, so it round-trips.
+			if constraint.Refer.OnDelete != nil && constraint.Refer.OnDelete.ReferOpt.String() != "" &&
+				constraint.Refer.OnDelete.ReferOpt != ast.ReferOptionNoAction {
 				onDelete := constraint.Refer.OnDelete.ReferOpt.String()
 				fkRef.OnDelete = &onDelete
 			}
 
-			// Parse ON UPDATE action (check if ReferOpt is non-empty)
-			if constraint.Refer.OnUpdate != nil && constraint.Refer.OnUpdate.ReferOpt.String() != "" {
+			if constraint.Refer.OnUpdate != nil && constraint.Refer.OnUpdate.ReferOpt.String() != "" &&
+				constraint.Refer.OnUpdate.ReferOpt != ast.ReferOptionNoAction {
 				onUpdate := constraint.Refer.OnUpdate.ReferOpt.String()
 				fkRef.OnUpdate = &onUpdate
 			}

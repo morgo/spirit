@@ -490,6 +490,60 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_v2 CHECK (age >= 18))",
 			expected: "ALTER TABLE `t1` DROP CHECK `chk_v1`, ADD CONSTRAINT `chk_v2` CHECK (`age`>=18)",
 		},
+		// CHECK constraint enforcement ([NOT] ENFORCED)
+		{
+			// MySQL's SHOW CREATE TABLE renders NOT ENFORCED inside a
+			// versioned comment; it must converge with the plain spelling.
+			name:     "CheckNotEnforcedBothSides",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK ((age >= 0)) /*!80016 NOT ENFORCED */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0) NOT ENFORCED)",
+			expected: "",
+		},
+		{
+			// Explicit ENFORCED is the default; it converges with the absent
+			// keyword (MySQL omits ENFORCED from SHOW CREATE TABLE).
+			name:     "CheckExplicitEnforcedEqualsAbsent",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0) ENFORCED)",
+			expected: "",
+		},
+		{
+			// An enforcement-only change is applied in place with ALTER CHECK
+			// rather than DROP+ADD.
+			name:     "CheckFlipToNotEnforced",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` ALTER CHECK `chk_age` NOT ENFORCED",
+		},
+		{
+			name:     "CheckFlipToEnforced",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK ((age >= 0)) /*!80016 NOT ENFORCED */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0))",
+			expected: "ALTER TABLE `t1` ALTER CHECK `chk_age` ENFORCED",
+		},
+		{
+			// When a NOT ENFORCED check is re-added for another reason (here
+			// an expression change), the ADD must preserve NOT ENFORCED —
+			// previously it silently re-enabled enforcement.
+			name:     "CheckNotEnforcedReAddKeepsNotEnforced",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK ((age >= 0)) /*!80016 NOT ENFORCED */)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 18) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` DROP CHECK `chk_age`, ADD CONSTRAINT `chk_age` CHECK (`age`>=18) NOT ENFORCED",
+		},
+		{
+			name:     "AddNewCheckNotEnforced",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_age CHECK (age >= 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `chk_age` CHECK (`age`>=0) NOT ENFORCED",
+		},
+		{
+			// Same expression under different names but different enforcement
+			// must NOT be treated as a rename-equivalent pair.
+			name:     "CheckEnforcementDiffersAcrossNames",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_v1 CHECK (age >= 0))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, age INT, CONSTRAINT chk_v2 CHECK (age >= 0) NOT ENFORCED)",
+			expected: "ALTER TABLE `t1` DROP CHECK `chk_v1`, ADD CONSTRAINT `chk_v2` CHECK (`age`>=0) NOT ENFORCED",
+		},
 		{
 			name:     "AddForeignKey",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
@@ -793,6 +847,51 @@ func TestDiff(t *testing.T) {
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
 			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE",
+		},
+		{
+			// NO ACTION is MySQL's default referential action, and SHOW CREATE
+			// TABLE omits it. An explicitly spelled NO ACTION in the desired
+			// schema must compare equal to the live table's absent clause, or
+			// the same DROP+ADD FOREIGN KEY re-emits on every declarative run.
+			name:     "ForeignKeyNoActionEqualsAbsent",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION ON UPDATE NO ACTION)",
+			expected: "",
+		},
+		{
+			name:     "ForeignKeyAbsentEqualsNoAction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE NO ACTION)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			expected: "",
+		},
+		{
+			// A genuinely new FK spelled with NO ACTION is emitted without the
+			// clause, so the ADD round-trips through SHOW CREATE TABLE.
+			name:     "AddForeignKeyWithNoActionOmitsClause",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
+			expected: "ALTER TABLE `t1` ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
+		},
+		{
+			// RESTRICT is semantically identical to NO ACTION in InnoDB, but
+			// SHOW CREATE TABLE prints it, so it round-trips verbatim and must
+			// NOT be normalized away.
+			name:     "ForeignKeyRestrictRoundTrips",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT ON UPDATE RESTRICT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT ON UPDATE RESTRICT)",
+			expected: "",
+		},
+		{
+			name:     "ForeignKeyAddRestrictStillDiffs",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE RESTRICT",
+		},
+		{
+			name:     "ForeignKeyCascadeToNoAction",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE NO ACTION)",
+			expected: "ALTER TABLE `t1` DROP FOREIGN KEY `fk_user`, ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)",
 		},
 
 		// Composite Primary Key Changes
