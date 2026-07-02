@@ -497,8 +497,9 @@ func TestSyncResumeNoWatermarkRow(t *testing.T) {
 
 // TestSyncForce verifies the Force flag: when a resumable checkpoint exists the
 // target is kept and resumed (no drop); when it can't resume (no checkpoint but
-// a non-empty target) the target database is dropped and recreated so the copy
-// can proceed instead of tripping the fresh-sync target-empty guard.
+// a non-empty target) the sync-owned target tables are dropped and recreated so
+// the copy can proceed instead of tripping the fresh-sync target-empty guard —
+// while tables that don't belong to the sync survive.
 func TestSyncForce(t *testing.T) {
 	cfg, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
@@ -548,8 +549,8 @@ func TestSyncForce(t *testing.T) {
 	// First copy completes and writes a checkpoint.
 	require.NoError(t, run(false))
 
-	// Sentinel table not present in the source: survives a resume, vanishes
-	// on a force drop+recreate.
+	// Sentinel table not present in the source: not owned by the sync, so it
+	// survives both a resume and a per-table force wipe.
 	testutils.RunSQL(t, `CREATE TABLE sync_force_dest._keep_me (id INT PRIMARY KEY)`)
 
 	// Force with a resumable checkpoint present: must NOT drop — the sentinel
@@ -565,15 +566,99 @@ func TestSyncForce(t *testing.T) {
 	// Without force this would fail the target-empty guard.
 	require.Error(t, run(false), "a non-empty target with no checkpoint must fail without force")
 
-	// With force it drops + recreates: the sentinel is gone and the data is
-	// freshly re-copied.
+	// With force the sync-owned tables are dropped + recreated and the data is
+	// freshly re-copied; the foreign table is untouched (the wipe is per-table,
+	// never DROP DATABASE).
 	require.NoError(t, run(true))
-	require.False(t, tableExists("_keep_me"), "force must drop+recreate when it cannot resume")
+	require.True(t, tableExists("_keep_me"), "force must not touch tables the sync does not own")
 	var n int
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t1").Scan(&n))
 	require.Equal(t, 3, n)
 	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sync_force_dest.t2").Scan(&n))
 	require.Equal(t, 2, n)
+}
+
+// TestSyncForcePreservesForeignTables is the safety regression test for the
+// --force wipe scope: a target database shared with a table the sync never
+// owned (a "foreign" table), holding a stale non-resumable checkpoint (present
+// but without a copier watermark) plus leftover junk in a source-named table.
+// --force must recover by wiping only the sync-owned objects: the foreign
+// table and its rows survive, the source-named tables are recreated with
+// exactly the source's data, and the checkpoint is recreated. Before the
+// per-table wipe, --force executed DROP DATABASE and destroyed the foreign
+// table.
+func TestSyncForcePreservesForeignTables(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_forcewipe_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_forcewipe_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_forcewipe_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_forcewipe_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_forcewipe_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_forcewipe_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_forcewipe_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_forcewipe_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_forcewipe_dest`)
+
+	newSync := func(force bool) *Sync {
+		return &Sync{
+			SourceDSN:       src.FormatDSN(),
+			TargetDSN:       dest.FormatDSN(),
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			Force:           force,
+		}
+	}
+	run := func(force bool) error {
+		r, nerr := NewRunner(newSync(force))
+		require.NoError(t, nerr)
+		rerr := runUntilCopied(t, r)
+		require.NoError(t, r.Close())
+		return rerr
+	}
+
+	// First run copies everything and writes a current-schema checkpoint.
+	require.NoError(t, run(false))
+
+	// An unrelated reporting table shares the target database. It must survive
+	// any --force recovery.
+	testutils.RunSQL(t, `CREATE TABLE sync_forcewipe_dest.reporting (id INT PRIMARY KEY, note VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_forcewipe_dest.reporting VALUES (1,'keep'),(2,'me')`)
+
+	// Make the checkpoint stale/non-resumable (present, but no copier
+	// watermark) and plant junk in a source-named table, simulating a prior
+	// run that died before its first watermark write.
+	testutils.RunSQL(t, `UPDATE sync_forcewipe_dest._spirit_sync_checkpoint SET copier_watermark = ''`)
+	testutils.RunSQL(t, `INSERT INTO sync_forcewipe_dest.t1 VALUES (999,'junk')`)
+
+	// --force recovers by wiping only the sync-owned tables.
+	require.NoError(t, run(true))
+
+	tgt, err := sql.Open("mysql", dest.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+
+	// The foreign table and its rows survive.
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM reporting").Scan(&n))
+	require.Equal(t, 2, n, "a table the sync never owned must survive --force")
+
+	// The source-named tables were recreated with exactly the source's data.
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n, "t1 must be recreated with the source's rows")
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1 WHERE id = 999").Scan(&n))
+	require.Zero(t, n, "junk from the prior partial run must be gone")
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t2").Scan(&n))
+	require.Equal(t, 2, n)
+
+	// The checkpoint table was recreated by the fresh run.
+	require.NoError(t, tgt.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE table_schema='sync_forcewipe_dest' AND table_name='_spirit_sync_checkpoint'").Scan(&n))
+	require.Equal(t, 1, n)
 }
 
 // TestSyncResumeIncompatibleCheckpoint covers recovery when the target carries a

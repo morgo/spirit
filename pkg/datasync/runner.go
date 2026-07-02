@@ -700,6 +700,17 @@ func (r *Runner) setup(ctx context.Context) error {
 		}
 	}
 
+	// Force: when the target cannot resume, wipe the sync-owned objects (the
+	// target copies of the source tables + the checkpoint table) so this run
+	// starts fresh instead of tripping the fresh-sync target-empty guard.
+	// Unlike a DROP DATABASE, unrelated tables sharing the target database
+	// survive. A resumable target is kept and resumes as normal.
+	if r.sync.Force {
+		if err := r.forceFreshTarget(ctx); err != nil {
+			return err
+		}
+	}
+
 	// If a checkpoint exists on the target, resume: open the copier chunker at
 	// the saved watermark (continuing a partial copy) and open the change feed
 	// at the saved position — skipping the target-empty check. So a restarted
@@ -821,25 +832,6 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 		return fmt.Errorf("failed to connect to target server to ensure database: %w", err)
 	}
 	defer utils.CloseAndLog(adminDB)
-	// Force: drop and recreate the target database unless a resumable
-	// checkpoint exists. We do this here, on the admin connection (no database
-	// selected) and before r.target.DB is ever queried, so no live connection
-	// has the database selected when it's dropped. A resumable run is left
-	// intact and resumes as normal.
-	if r.sync.Force {
-		resumable, rerr := r.forceTargetResumable(ctx, adminDB, cfg)
-		if rerr != nil {
-			return rerr
-		}
-		if resumable {
-			r.logger.Info("force set, but a resumable checkpoint exists; keeping target and resuming", "database", cfg.DBName)
-		} else {
-			r.logger.Warn("force set and no resumable checkpoint; dropping and recreating target database", "database", cfg.DBName)
-			if err := dbconn.Exec(ctx, adminDB, "DROP DATABASE IF EXISTS %n", cfg.DBName); err != nil {
-				return fmt.Errorf("failed to drop target database %q: %w", cfg.DBName, err)
-			}
-		}
-	}
 	if err := dbconn.Exec(ctx, adminDB, "CREATE DATABASE IF NOT EXISTS %n", cfg.DBName); err != nil {
 		return fmt.Errorf("failed to create target database %q: %w", cfg.DBName, err)
 	}
@@ -847,36 +839,46 @@ func (r *Runner) ensureTargetDatabase(ctx context.Context, cfg *mysql.Config) er
 	return nil
 }
 
-// forceTargetResumable reports whether the target holds a resumable checkpoint,
-// for the --force decision. The checkpoint package keys on the connection's
-// selected schema, but --force runs on a no-database admin connection before
-// r.target.DB is opened — so this confirms the database exists (via the admin
-// connection) and then opens a short-lived connection *to* that schema to
-// inspect the checkpoint. A missing database is trivially not resumable.
-func (r *Runner) forceTargetResumable(ctx context.Context, adminDB *sql.DB, cfg *mysql.Config) (bool, error) {
-	var present int
-	err := adminDB.QueryRowContext(ctx,
-		"SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?", cfg.DBName).Scan(&present)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil // no target database yet → nothing to resume
-	}
+// forceFreshTarget implements --force: when the target cannot resume, wipe the
+// sync-owned objects — the target copies of the source tables plus the sync
+// checkpoint table — so the run starts fresh instead of tripping the
+// fresh-sync target-empty guard. A resumable target (checkpoint with a copier
+// watermark) is kept untouched and resumes as normal.
+//
+// The wipe is deliberately per-object, mirroring move's wipeTargets, never
+// DROP DATABASE: sync's own fresh-run model tolerates a target database shared
+// with unrelated tables (checkTargetEmpty only ever validates tables named
+// after source tables), so --force must not destroy tables the sync never
+// owned. Dropping the checkpoint table erases the resume signal, so the
+// subsequent readCheckpoint sees a fresh target.
+func (r *Runner) forceFreshTarget(ctx context.Context) error {
+	resumable, err := r.hasResumableCheckpoint(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to check for target database: %w", err)
+		return err
 	}
-	schemaDB, err := dbconn.New(cfg.FormatDSN(), r.targetDBConfig)
-	if err != nil {
-		return false, fmt.Errorf("failed to connect to target database to check for a checkpoint: %w", err)
+	if resumable {
+		r.logger.Info("force set, but a resumable checkpoint exists; keeping target and resuming", "database", r.target.Config.DBName)
+		return nil
 	}
-	defer utils.CloseAndLog(schemaDB)
-	return r.hasResumableCheckpoint(ctx, schemaDB)
+	r.logger.Warn("force set and no resumable checkpoint; dropping the sync's target tables for a fresh start",
+		"database", r.target.Config.DBName)
+	for _, t := range r.sourceTables {
+		if err := dbconn.Exec(ctx, r.target.DB, "DROP TABLE IF EXISTS %n.%n", r.target.Config.DBName, t.TableName); err != nil {
+			return fmt.Errorf("force: failed to drop target table %q: %w", t.TableName, err)
+		}
+	}
+	if err := r.checkpointTbl().Drop(ctx); err != nil {
+		return fmt.Errorf("force: failed to drop checkpoint table: %w", err)
+	}
+	return nil
 }
 
-// hasResumableCheckpoint reports whether db's selected schema holds a sync
-// checkpoint that can be resumed from (a row carrying a copier watermark). db
-// must be connected to the target schema (the checkpoint package keys on
-// DATABASE()).
-func (r *Runner) hasResumableCheckpoint(ctx context.Context, db *sql.DB) (bool, error) {
-	tbl := checkpoint.NewTable(db, syncCheckpointTableName, checkpoint.Persistent)
+// hasResumableCheckpoint reports whether the target holds a sync checkpoint
+// that can be resumed from (a row carrying a copier watermark). Used by
+// --force to decide between resuming and wiping the sync-owned tables for a
+// fresh start.
+func (r *Runner) hasResumableCheckpoint(ctx context.Context) (bool, error) {
+	tbl := r.checkpointTbl()
 	exists, err := tbl.Exists(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to check for checkpoint table: %w", err)
