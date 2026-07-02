@@ -648,6 +648,34 @@ func TestDiff(t *testing.T) {
 			expected: "ALTER TABLE `t1` DROP INDEX `idx_abc`, ADD INDEX `idx_abc` (`a`, `b`)",
 		},
 
+		// Index Key Part Direction Changes (MySQL 8.0+ descending indexes).
+		// KEY (a) and KEY (a DESC) are physically different indexes, so a
+		// direction change must produce a DROP+ADD rather than a nil diff.
+		{
+			name:     "ChangeIndexAscToDesc",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, INDEX idx_a (a))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, INDEX idx_a (a DESC))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_a`, ADD INDEX `idx_a` (`a` DESC)",
+		},
+		{
+			name:     "ChangeIndexDescToAsc",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, INDEX idx_a (a DESC))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, INDEX idx_a (a))",
+			expected: "ALTER TABLE `t1` DROP INDEX `idx_a`, ADD INDEX `idx_a` (`a`)",
+		},
+		{
+			name:     "NoChangesDescIndex",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, INDEX idx_ab (a DESC, b))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, INDEX idx_ab (a DESC, b))",
+			expected: "",
+		},
+		{
+			name:     "AddIndexWithDescParts",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, c VARCHAR(100))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, c VARCHAR(100), INDEX idx_mixed (a DESC, c(10) DESC, (lower(c)) DESC))",
+			expected: "ALTER TABLE `t1` ADD INDEX `idx_mixed` (`a` DESC, `c`(10) DESC, (LOWER(`c`)) DESC)",
+		},
+
 		// Foreign Key with ON DELETE / ON UPDATE
 		{
 			name:     "AddForeignKeyWithOnDelete",

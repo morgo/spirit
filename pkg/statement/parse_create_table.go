@@ -64,6 +64,7 @@ type IndexColumn struct {
 	Name       string  `json:"name,omitempty"`       // Column name (empty for expression indexes)
 	Expression *string `json:"expression,omitempty"` // Expression for functional indexes
 	Length     *int    `json:"length,omitempty"`     // Prefix length for string columns
+	Desc       bool    `json:"desc,omitempty"`       // Descending key part (MySQL 8.0+), e.g. KEY (a DESC)
 }
 
 // Index represents an index definition
@@ -881,7 +882,9 @@ func (ct *CreateTable) parseIndexColumns(keys []*ast.IndexPartSpecification) []s
 func (ct *CreateTable) parseIndexColumnList(keys []*ast.IndexPartSpecification) []IndexColumn {
 	columns := make([]IndexColumn, 0, len(keys))
 	for _, key := range keys {
-		col := IndexColumn{}
+		// Desc applies to both column and expression key parts,
+		// e.g. KEY (a DESC) and KEY ((lower(b)) DESC).
+		col := IndexColumn{Desc: key.Desc}
 
 		// Check if this is a column reference or an expression
 		if key.Column != nil {
@@ -1555,6 +1558,11 @@ func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName 
 				fmt.Fprintf(&sb, "(%s)", exprSb.String())
 			default:
 				return "", fmt.Errorf("index %q has a key part with neither a column nor an expression", constraint.Name)
+			}
+			// Descending key part (MySQL 8.0+). ASC is MySQL's canonical
+			// default and is never emitted explicitly.
+			if key.Desc {
+				sb.WriteString(" DESC")
 			}
 		}
 		sb.WriteString(")")

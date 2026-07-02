@@ -166,3 +166,42 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stmts)
 }
+
+// TestDiffIntegrationDescIndex verifies that changing an index key part from
+// ascending to descending (MySQL 8.0+) is detected by Diff(), that the emitted
+// combined `DROP INDEX k, ADD INDEX k (a DESC)` really rebuilds the index on a
+// real MySQL server (unlike the option-only cases, MySQL does not no-op a
+// direction change), and that a re-diff afterwards converges to nil.
+//
+// This is a regression test: the DESC modifier used to be dropped during
+// parsing, so KEY k (a) and KEY k (a DESC) diffed as equal and restored
+// descending indexes silently became ascending.
+func TestDiffIntegrationDescIndex(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_desc_idx",
+		"CREATE TABLE diff_desc_idx (id int primary key, a int, b int, KEY k (a, b))")
+
+	target, err := ParseCreateTable("CREATE TABLE diff_desc_idx (id int primary key, a int, b int, KEY k (a DESC, b))")
+	require.NoError(t, err)
+
+	source, err := ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+
+	stmts, err := source.Diff(target, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_desc_idx` DROP INDEX `k`, ADD INDEX `k` (`a` DESC, `b`)", stmts[0].Statement)
+
+	// Execute the emitted statement exactly as the Runner would, and verify
+	// the index really became descending.
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "KEY `k` (`a` DESC,`b`)")
+
+	// Re-diff: the schemas now converge.
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(target, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}

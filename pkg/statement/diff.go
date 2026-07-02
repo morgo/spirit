@@ -1120,6 +1120,10 @@ func indexColumnsEqual(a, b *IndexColumn) bool {
 	if !ptrEqual(a.Length, b.Length) {
 		return false
 	}
+	// KEY (a) and KEY (a DESC) are physically different indexes.
+	if a.Desc != b.Desc {
+		return false
+	}
 	return true
 }
 
@@ -1322,17 +1326,23 @@ func formatAddIndex(idx *Index) string {
 	var columns []string
 	if len(idx.ColumnList) > 0 {
 		for _, col := range idx.ColumnList {
+			var colStr string
 			if col.Expression != nil {
 				// Expression index (functional index) - needs double parentheses
-				columns = append(columns, fmt.Sprintf("(%s)", *col.Expression))
+				colStr = fmt.Sprintf("(%s)", *col.Expression)
 			} else {
 				// Regular column reference
-				colStr := sqlescape.EscapeIdentifier(col.Name)
+				colStr = sqlescape.EscapeIdentifier(col.Name)
 				if col.Length != nil {
 					colStr += fmt.Sprintf("(%d)", *col.Length)
 				}
-				columns = append(columns, colStr)
 			}
+			// Descending key part (MySQL 8.0+). ASC is MySQL's canonical
+			// default and is never emitted explicitly.
+			if col.Desc {
+				colStr += " DESC"
+			}
+			columns = append(columns, colStr)
 		}
 	} else {
 		// Fall back to simple column names
