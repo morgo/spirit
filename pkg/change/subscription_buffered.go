@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -189,8 +190,8 @@ type BufferedSubscriptionConfig struct {
 
 	// NewTable is the destination-side TableInfo. May be nil for
 	// MoveTables/import flows where source and destination share the
-	// same schema; in that case Subscription.Tables() returns
-	// [CurrentTable, nil].
+	// same schema; in that case Subscription.Tables() returns just
+	// [CurrentTable].
 	NewTable *table.TableInfo
 
 	// Applier writes batched changes to the target. Required.
@@ -233,6 +234,17 @@ func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, erro
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	// If the source table is sharded, its sharding (vindex) column must be
+	// resolvable to an ordinal — the change source enforces the column's
+	// immutability on every UPDATE event (see checkImmutableColumn via
+	// ImmutableColumnOrdinal), so a misconfigured column must fail here at
+	// setup time rather than per-event. Tables without a ShardingColumn
+	// (migrations, single-target moves) skip this: no enforcement.
+	if cfg.CurrentTable.ShardingColumn != "" &&
+		!slices.Contains(cfg.CurrentTable.Columns, cfg.CurrentTable.ShardingColumn) {
+		return nil, fmt.Errorf("NewBufferedSubscription: sharding column %s not found in columns of table %s.%s",
+			cfg.CurrentTable.ShardingColumn, cfg.CurrentTable.SchemaName, cfg.CurrentTable.TableName)
 	}
 	sub := &bufferedMap{
 		table:                cfg.CurrentTable,
@@ -328,7 +340,32 @@ func (s *bufferedMap) Length() int {
 }
 
 func (s *bufferedMap) Tables() []*table.TableInfo {
+	if s.newTable == nil {
+		// Move-flow subscriptions have no destination-side TableInfo (see
+		// BufferedSubscriptionConfig.NewTable). Omit the nil rather than
+		// returning [table, nil]: Tables() consumers — the DDL
+		// subscription-match loops in the binlog/GTID clients, and
+		// out-of-tree change.Source implementations routing row events per
+		// the Source interface contract — iterate and dereference the
+		// entries, and a nil entry panics the stream-reader goroutine.
+		return []*table.TableInfo{s.table}
+	}
 	return []*table.TableInfo{s.table, s.newTable}
+}
+
+// ImmutableColumnOrdinal satisfies Subscription. The ordinal is derived
+// from the source table's ShardingColumn on each call rather than stored,
+// so a zero-value bufferedMap (tests build these directly) cannot
+// accidentally declare column 0 immutable. The same derivation is used by
+// the sharded applier when routing rows (see ShardedApplier.UpsertRows);
+// NewBufferedSubscription validates at setup time that a configured column
+// resolves, so -1 here always means "not sharded". TableInfo.Columns and
+// ShardingColumn are fixed after setup, so no lock is required.
+func (s *bufferedMap) ImmutableColumnOrdinal() int {
+	if s.table.ShardingColumn == "" {
+		return -1
+	}
+	return slices.Index(s.table.Columns, s.table.ShardingColumn)
 }
 
 // queueModeActive reports whether new events should be appended to the
