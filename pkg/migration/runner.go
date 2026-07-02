@@ -312,6 +312,23 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.logger.Error("failed to release metadata lock", "error", err)
 		}
 	}()
+	// Reject ALTERs that contain unsupported clauses such as ALGORITHM=
+	// or LOCK= *before* any DDL is attempted directly on MySQL.
+	// attemptMySQLDDL prepends its own ALGORITHM= (and LOCK=) assertions,
+	// and MySQL resolves duplicate options last-one-wins: a user-supplied
+	// "ALGORITHM=COPY, LOCK=SHARED" would override our ALGORITHM=INSTANT
+	// and execute as a blocking table rebuild. The preflight illegalClause
+	// check below also rejects these clauses, but it only runs after the
+	// direct DDL attempt has already failed, which is too late to protect
+	// this path.
+	for _, change := range r.changes {
+		if !change.stmt.IsAlterTable() {
+			continue // the check only applies to ALTER TABLE statements
+		}
+		if err := change.stmt.AlterContainsUnsupportedClause(); err != nil {
+			return err
+		}
+	}
 	// This step is technically optional, but first we attempt to
 	// use MySQL's built-in DDL. This is because it's usually faster
 	// when it is compatible. If it returns no error, that means it
