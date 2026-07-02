@@ -85,6 +85,87 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, email VARCHAR(100), UNIQUE KEY idx_email (email))",
 			expected: "ALTER TABLE `t1` ADD UNIQUE INDEX `idx_email` (`email`)",
 		},
+		// Inline column-level UNIQUE: MySQL canonicalizes `c INT UNIQUE` into
+		// a table-level `UNIQUE KEY c (c)` (that is what SHOW CREATE TABLE
+		// reports), so the two representations must diff as equal. Regression:
+		// the inline form used to be invisible to diffIndexes, so diffing the
+		// live canonical form against a desired inline form emitted
+		// `MODIFY COLUMN c ..., DROP INDEX c` — silently dropping the
+		// uniqueness constraint — and never converged.
+		{
+			name:     "InlineUniqueVsCanonicalNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY c (c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "",
+		},
+		{
+			name:     "CanonicalVsInlineUniqueNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY c (c))",
+			expected: "",
+		},
+		{
+			name:     "InlineUniqueBothSidesNoChange",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "",
+		},
+		{
+			// Uniqueness added via the inline form: emitted exactly once, as
+			// an index-level ADD (a MODIFY COLUMN cannot express UNIQUE).
+			name:     "AddInlineUnique",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "ALTER TABLE `t1` ADD UNIQUE INDEX `c` (`c`)",
+		},
+		{
+			// A NEW column declared inline-unique: the ADD COLUMN does not
+			// carry UNIQUE, so the folded index set must add the index —
+			// exactly once.
+			name:     "AddColumnWithInlineUnique",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `c` int(11) NULL, ADD UNIQUE INDEX `c` (`c`)",
+		},
+		{
+			// Uniqueness removed relative to an inline declaration.
+			name:     "DropInlineUnique",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
+			expected: "ALTER TABLE `t1` DROP INDEX `c`",
+		},
+		{
+			// Safety net: an inline-derived name is only a guess at the
+			// server-assigned one. A live unique index on the same column set
+			// under a different explicit name satisfies the inline
+			// declaration — it must never be dropped.
+			name:     "InlineUniqueMatchesDifferentlyNamedLiveUnique",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, UNIQUE KEY uniq_c (c))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
+			expected: "",
+		},
+		{
+			// Name collision with an unnamed table-level key: the server
+			// names indexes in declaration order, so the inline unique claims
+			// `c` and the unnamed KEY (c, d) is pushed to `c_2`. The parsed
+			// inline form must synthesize the same names as the live
+			// canonical form.
+			name:     "InlineUniqueNameCollision",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT, d INT, UNIQUE KEY c (c), KEY c_2 (c, d))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE, d INT, KEY (c, d))",
+			expected: "",
+		},
+		{
+			// Interleaved declaration: an explicit KEY named after the unique
+			// column forces the server to suffix the inline unique to c_2
+			// (verified against MySQL 8.0: `d int, key c (d), c int unique`).
+			// Explicit names are reserved before inline uniques claim theirs,
+			// so the synthesized name matches.
+			name:     "InlineUniqueSuffixedPastExplicitKey",
+			source:   "CREATE TABLE t1 (d INT, c INT, UNIQUE KEY c_2 (c), KEY c (d))",
+			target:   "CREATE TABLE t1 (d INT, KEY c (d), c INT UNIQUE)",
+			expected: "",
+		},
 		{
 			// Adding WITH PARSER to an index with an unchanged column list is
 			// an option-only change. A combined DROP+ADD in a single ALTER is a

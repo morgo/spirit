@@ -406,6 +406,65 @@ func (ct *CreateTable) getEffectivePrimaryKeyColumns() []string {
 	return nil
 }
 
+// effectiveIndexes returns the table's indexes with any inline column-level
+// UNIQUE declarations (`c int UNIQUE`) folded in as table-level UNIQUE
+// indexes, plus the set of index names that were synthesized this way.
+//
+// MySQL never stores a column-level UNIQUE: it canonicalizes it into a
+// table-level `UNIQUE KEY` named after the column (suffixed _2, _3, ... when
+// that name is already taken — the same convention autoNameIndexes
+// replicates), which is what SHOW CREATE TABLE reports. Folding the inline
+// form here lets diffIndexes compare a user-written schema against the live
+// canonical form symmetrically: a representation-only difference produces no
+// clauses, while a real difference produces exactly one ADD/DROP.
+//
+// autoNameIndexes reserves these names before auto-naming unnamed table-level
+// indexes (the server names inline uniques first), so the names computed here
+// agree with the rest of the parsed schema; keep the two loops in sync.
+func (ct *CreateTable) effectiveIndexes() ([]Index, map[string]bool) {
+	hasInlineUnique := false
+	for i := range ct.Columns {
+		if ct.Columns[i].Unique {
+			hasInlineUnique = true
+			break
+		}
+	}
+	if !hasInlineUnique {
+		return ct.Indexes, nil
+	}
+
+	// Clone so the synthesized entries never leak into ct.Indexes.
+	indexes := slices.Clone(ct.Indexes)
+	inlineDerived := make(map[string]bool)
+	usedNames := make(map[string]bool, len(indexes))
+	for i := range indexes {
+		usedNames[indexes[i].Name] = true
+	}
+	for _, col := range ct.Columns {
+		if !col.Unique {
+			continue
+		}
+		// Guess the server-assigned name: the column name, or the first free
+		// _N suffix when an explicitly-declared index already claims it. If
+		// the guess is wrong (the live table named it differently), the
+		// content-based pairing in diffIndexes still prevents a spurious
+		// DROP/ADD of an equivalent unique index.
+		name := col.Name
+		for suffix := 2; usedNames[name]; suffix++ {
+			name = fmt.Sprintf("%s_%d", col.Name, suffix)
+		}
+		usedNames[name] = true
+		inlineDerived[name] = true
+		indexes = append(indexes, Index{
+			Name:       name,
+			Type:       "UNIQUE",
+			Columns:    []string{col.Name},
+			ColumnList: []IndexColumn{{Name: col.Name}},
+		})
+	}
+	return indexes, inlineDerived
+}
+
 // diffIndexes compares indexes and returns ALTER clauses for differences.
 //
 // Most index changes are emitted into the combined ALTER (the returned
@@ -417,15 +476,60 @@ func (ct *CreateTable) getEffectivePrimaryKeyColumns() []string {
 // must run as two separate ALTER statements. Those are returned via the second
 // value as standalone clause-lists (each becomes its own ALTER statement).
 func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separateStatements [][]string) {
+	// Fold inline column-level UNIQUEs into both index sets so that
+	// `c int UNIQUE` participates in index diffing like the table-level
+	// `UNIQUE KEY c (c)` MySQL canonicalizes it into.
+	sourceIdxList, sourceInlineDerived := ct.effectiveIndexes()
+	targetIdxList, targetInlineDerived := target.effectiveIndexes()
+
 	// Build maps for easier lookup
 	sourceIndexes := make(map[string]*Index)
-	for i := range ct.Indexes {
-		sourceIndexes[ct.Indexes[i].Name] = &ct.Indexes[i]
+	for i := range sourceIdxList {
+		sourceIndexes[sourceIdxList[i].Name] = &sourceIdxList[i]
 	}
 
 	targetIndexes := make(map[string]*Index)
-	for i := range target.Indexes {
-		targetIndexes[target.Indexes[i].Name] = &target.Indexes[i]
+	for i := range targetIdxList {
+		targetIndexes[targetIdxList[i].Name] = &targetIdxList[i]
+	}
+
+	// Safety net for inline-derived names: the synthesized name is only a
+	// guess at what the server assigned. Pair unique indexes that cover the
+	// same column set but carry different names whenever at least one side's
+	// name came from an inline declaration, so we never DROP a live unique
+	// index (or ADD a duplicate) that the other side's inline UNIQUE already
+	// expresses. Two explicitly named unique indexes that differ only in name
+	// are NOT paired — that is a real rename (DROP + ADD).
+	matchedSourceUnique := make(map[string]bool) // source name -> matched
+	matchedTargetUnique := make(map[string]bool) // target name -> matched
+	for i := range sourceIdxList {
+		sourceIdx := &sourceIdxList[i]
+		if sourceIdx.Type != "UNIQUE" {
+			continue
+		}
+		if _, exactMatch := targetIndexes[sourceIdx.Name]; exactMatch {
+			continue // handled by the normal name-based path
+		}
+		for j := range targetIdxList {
+			targetIdx := &targetIdxList[j]
+			if targetIdx.Type != "UNIQUE" {
+				continue
+			}
+			if _, exactMatch := sourceIndexes[targetIdx.Name]; exactMatch {
+				continue // this target index already has a name match in source
+			}
+			if matchedTargetUnique[targetIdx.Name] {
+				continue // already paired with another source index
+			}
+			if !sourceInlineDerived[sourceIdx.Name] && !targetInlineDerived[targetIdx.Name] {
+				continue // both explicitly named: a genuine rename
+			}
+			if indexColumnsIdenticalIgnoreName(sourceIdx, targetIdx) {
+				matchedSourceUnique[sourceIdx.Name] = true
+				matchedTargetUnique[targetIdx.Name] = true
+				break
+			}
+		}
 	}
 
 	// Collect DROP operations and sort by name for deterministic output
@@ -479,8 +583,11 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	// column list. Such indexes are routed out of dropClauses/addClauses below.
 	optionOnlyChanged := make(map[string]bool)
 
-	for i := range ct.Indexes {
-		sourceIdx := &ct.Indexes[i]
+	for i := range sourceIdxList {
+		sourceIdx := &sourceIdxList[i]
+		if matchedSourceUnique[sourceIdx.Name] {
+			continue // equivalent unique index exists in target under an inline-derived pairing
+		}
 		targetIdx, existsInTarget := targetIndexes[sourceIdx.Name]
 
 		if !existsInTarget {
@@ -523,7 +630,10 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 
 	// Collect ADD operations and sort by name for deterministic output
 	var addClauses []string
-	for _, targetIdx := range target.Indexes {
+	for _, targetIdx := range targetIdxList {
+		if matchedTargetUnique[targetIdx.Name] {
+			continue // equivalent unique index exists in source under an inline-derived pairing
+		}
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
 		if !existsInSource {
@@ -552,7 +662,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 
 	// Collect ALTER INDEX operations for visibility changes (must come after DROP/ADD)
 	var alterClauses []string
-	for _, targetIdx := range target.Indexes {
+	for _, targetIdx := range targetIdxList {
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
 		if existsInSource && !indexesEqual(sourceIdx, &targetIdx) && indexesEqualIgnoreVisibility(sourceIdx, &targetIdx) {
@@ -830,9 +940,12 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if a.PrimaryKey != b.PrimaryKey {
 		return false
 	}
-	if a.Unique != b.Unique {
-		return false
-	}
+	// Unique is intentionally NOT compared: a column-level UNIQUE is
+	// representation, not state. MySQL canonicalizes `c int UNIQUE` into a
+	// table-level UNIQUE KEY (that is what SHOW CREATE TABLE reports), and a
+	// MODIFY COLUMN cannot express uniqueness anyway (formatColumnDefinition
+	// never emits UNIQUE). Inline uniques are folded into index-level diffing
+	// instead — see effectiveIndexes / diffIndexes.
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
@@ -937,9 +1050,9 @@ func columnsEqualIgnorePK(a, b *Column, opts *DiffOptions) bool {
 		return false
 	}
 	// Skip PrimaryKey comparison
-	if a.Unique != b.Unique {
-		return false
-	}
+	// Unique is intentionally not compared — inline UNIQUE is folded into
+	// index-level diffing (see effectiveIndexes / diffIndexes and the
+	// matching comment in columnsEqualWithContext).
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
@@ -1060,6 +1173,14 @@ func indexColumnListIdentical(a, b *Index) bool {
 	if a.Name != b.Name {
 		return false
 	}
+	return indexColumnsIdenticalIgnoreName(a, b)
+}
+
+// indexColumnsIdenticalIgnoreName reports whether two indexes have the same
+// type and column list, regardless of their names or options. Used to pair a
+// unique index synthesized from an inline column-level UNIQUE (whose name is
+// only a guess at the server-assigned one) with an equivalent live index.
+func indexColumnsIdenticalIgnoreName(a, b *Index) bool {
 	if a.Type != b.Type {
 		return false
 	}
