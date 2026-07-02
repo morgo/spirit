@@ -39,6 +39,7 @@ type Column struct {
 	Precision       *int              `json:"precision,omitempty"`
 	Scale           *int              `json:"scale,omitempty"`
 	Unsigned        *bool             `json:"unsigned,omitempty"`
+	Zerofill        *bool             `json:"zerofill,omitempty"`    // ZEROFILL display attribute (implies unsigned)
 	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
 	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
 	Nullable        bool              `json:"nullable"`
@@ -157,6 +158,17 @@ type PartitionValues struct {
 // like '2020' would be rendered bare and rejected by MySQL (error 1654).
 // Numeric/expression partition values remain plain Go strings.
 type partitionStringLiteral string
+
+// partitionMaxValue is a sentinel representing the MAXVALUE keyword inside a
+// partition VALUES LESS THAN value list (e.g. the tuple elements of
+// VALUES LESS THAN (10, MAXVALUE) in multi-column RANGE COLUMNS). Without a
+// distinct type, MAXVALUE would be stored as the plain string "MAXVALUE" and
+// emitted as the quoted string literal 'MAXVALUE', which MySQL rejects
+// (error 1697). The single-expression form (VALUES LESS THAN MAXVALUE, or
+// its parenthesized spelling) is normalized further, to
+// PartitionValues.Type == "MAXVALUE" (see parsePartitionClause), matching
+// SHOW CREATE TABLE's bare-keyword form.
+type partitionMaxValue struct{}
 
 // SubPartitionOptions represents subpartitioning configuration
 type SubPartitionOptions struct {
@@ -378,9 +390,64 @@ func (ct *CreateTable) parseToStruct() {
 		ct.TableOptions = ct.parseTableOptions(ct.Raw.Options)
 	}
 
+	// Resolve the legacy BINARY column attribute into a binary collation.
+	// Must run after table options so an unspecified column charset can
+	// fall back to the table charset. See normalizeBinaryAttribute.
+	ct.normalizeBinaryAttribute()
+
 	// Parse partition options
 	if ct.Raw.Partition != nil {
 		ct.Partition = ct.parsePartitionOptions(ct.Raw.Partition)
+	}
+}
+
+// normalizeBinaryAttribute resolves the legacy BINARY column attribute
+// (e.g. `c varchar(100) BINARY`) the way MySQL does: BINARY does not change
+// the data type, it selects the binary (_bin) collation of the column's
+// charset. Verified against MySQL 8.0.45, the canonical forms are:
+//
+//	c varchar(100) BINARY                        (table charset utf8mb4)
+//	  -> varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
+//	c varchar(100) CHARACTER SET latin1 BINARY
+//	  -> varchar(100) CHARACTER SET latin1 COLLATE latin1_bin
+//
+// The TiDB parser surfaces the attribute as the binary type flag with a
+// non-"binary" (usually empty) charset — distinct from true binary types
+// (VARBINARY/BINARY/BLOB), which carry the "binary" charset and are
+// converted to their binary type names in parseColumn. Without this
+// normalization, diffing a live `varchar ... COLLATE utf8mb4_bin` column
+// against a desired file written with the BINARY attribute would emit a
+// destructive MODIFY to varbinary.
+//
+// MySQL lets BINARY win over an explicit COLLATE in the same column
+// definition (varchar(100) BINARY COLLATE utf8mb4_general_ci resolves to
+// utf8mb4_bin), so any parsed collation is overridden here. If neither the
+// column nor the table declares a charset the attribute cannot be resolved
+// (the effective charset is a server default only known at runtime); the
+// column keeps its character type and no collation is invented.
+func (ct *CreateTable) normalizeBinaryAttribute() {
+	for i := range ct.Columns {
+		col := &ct.Columns[i]
+		if col.Raw == nil || !mysql.HasBinaryFlag(col.Raw.Tp.GetFlag()) {
+			continue
+		}
+		if col.Raw.Tp.GetCharset() == "binary" {
+			continue // true binary type (VARBINARY et al.), converted in parseColumn
+		}
+		// Resolve the effective charset: explicit column charset first,
+		// then the table default charset.
+		charsetName := ""
+		if col.Charset != nil {
+			charsetName = *col.Charset
+		} else if ct.TableOptions != nil && ct.TableOptions.Charset != nil {
+			charsetName = *ct.TableOptions.Charset
+		}
+		if charsetName == "" || charsetName == "binary" {
+			continue
+		}
+		// Every MySQL character set has a <charset>_bin collation.
+		collation := charsetName + "_bin"
+		col.Collation = &collation
 	}
 }
 
@@ -584,8 +651,15 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 
 	// Check if this is a binary type (VARBINARY, BLOB, etc.)
 	// The TiDB parser converts binary types to their text equivalents,
-	// so we need to check the binary flag and convert back
-	if mysql.HasBinaryFlag(col.Tp.GetFlag()) {
+	// so we need to check the binary flag and convert back. True binary
+	// types carry the special "binary" charset; the binary flag with any
+	// other (or no) charset is the legacy BINARY column *attribute*
+	// (e.g. varchar(100) BINARY), which does NOT change the data type —
+	// MySQL canonicalizes it to the binary collation of the column's
+	// charset (varchar(100) COLLATE utf8mb4_bin). That case is resolved by
+	// normalizeBinaryAttribute once table options are known; converting it
+	// here would emit a destructive varchar -> varbinary type change.
+	if mysql.HasBinaryFlag(col.Tp.GetFlag()) && col.Tp.GetCharset() == "binary" {
 		switch column.Type {
 		case "varchar":
 			column.Type = "varbinary"
@@ -620,6 +694,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	if mysql.HasUnsignedFlag(col.Tp.GetFlag()) {
 		unsigned := true
 		column.Unsigned = &unsigned
+	}
+
+	// Check if the column type is zerofill. MySQL still prints the attribute
+	// in SHOW CREATE TABLE (e.g. int(10) unsigned zerofill), so dropping it
+	// here would both hide a real difference from Diff and silently strip
+	// the attribute from MODIFY COLUMN emission. Note the parser mirrors
+	// MySQL in adding the unsigned flag automatically for zerofill columns.
+	if mysql.HasZerofillFlag(col.Tp.GetFlag()) {
+		zerofill := true
+		column.Zerofill = &zerofill
 	}
 
 	// Extract charset and collation from the type itself
@@ -1138,6 +1222,19 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 			values.Values = append(values.Values, ct.parsePartitionValue(expr))
 		}
 
+		// Normalize the single-expression MAXVALUE form (VALUES LESS THAN
+		// MAXVALUE, or its parenthesized spelling VALUES LESS THAN (MAXVALUE)
+		// as printed by SHOW CREATE TABLE for RANGE COLUMNS) to the dedicated
+		// "MAXVALUE" type so that emission produces the bare keyword. MySQL
+		// accepts the bare form for both RANGE and single-column RANGE
+		// COLUMNS, and both spellings parse to the same representation here,
+		// so they always compare equal (verified against MySQL 8.0.45).
+		if len(values.Values) == 1 {
+			if _, isMax := values.Values[0].(partitionMaxValue); isMax {
+				return &PartitionValues{Type: "MAXVALUE", Values: []any{}}
+			}
+		}
+
 		return values
 	case *ast.PartitionDefinitionClauseIn:
 		values := &PartitionValues{
@@ -1170,12 +1267,17 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 	}
 }
 
-// parsePartitionValue parses a single partition value expression. String
-// literals (LIST/RANGE COLUMNS on a string column) are wrapped in
-// partitionStringLiteral carrying their true raw value, so emission can
-// quote them unconditionally. Numeric literals and expressions (e.g.
-// YEAR(col)) fall back to the Restored text form as plain strings.
+// parsePartitionValue parses a single partition value expression. The
+// MAXVALUE keyword becomes the partitionMaxValue sentinel so it is emitted
+// bare (never as the string literal 'MAXVALUE', which MySQL rejects with
+// error 1697). String literals (LIST/RANGE COLUMNS on a string column) are
+// wrapped in partitionStringLiteral carrying their true raw value, so
+// emission can quote them unconditionally. Numeric literals and expressions
+// (e.g. YEAR(col)) fall back to the Restored text form as plain strings.
 func (ct *CreateTable) parsePartitionValue(expr ast.ExprNode) any {
+	if _, isMax := expr.(*ast.MaxValueExpr); isMax {
+		return partitionMaxValue{}
+	}
 	if literal, isStr := stringLiteralValue(expr); isStr {
 		return partitionStringLiteral(literal)
 	}
@@ -1338,8 +1440,18 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 	case *ast.FuncCallExpr:
 		// Handle function calls like CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(3), UUID(), etc.
 		// We use Restore to preserve function arguments (e.g. precision in CURRENT_TIMESTAMP(3)).
+		// RestoreKeyWordLowercase renders the function name and any keywords
+		// inside its arguments in lowercase — matching MySQL's canonical
+		// SHOW CREATE TABLE form (e.g. DEFAULT (concat(...))) so that
+		// function-name case never causes a spurious diff — while leaving
+		// string-literal arguments byte-exact. The previous strings.ToLower
+		// over the whole Restored text corrupted literal case:
+		// DEFAULT (concat('A')) round-tripped to concat('a'), emitting a
+		// different default value and making defaults that differ only in
+		// literal case compare equal.
 		var sb strings.Builder
-		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+		rCtx := format.NewRestoreCtx(format.RestoreStringSingleQuotes|format.RestoreKeyWordLowercase|
+			format.RestoreNameBackQuotes|format.RestoreStringWithoutCharset, &sb)
 		if err := e.Restore(rCtx); err != nil {
 			return e.FnName.L // fallback to function name on error
 		}
@@ -1354,7 +1466,7 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 		if isTimestampFunc && len(e.Args) == 0 && strings.HasSuffix(restored, "()") {
 			restored = strings.TrimSuffix(restored, "()")
 		}
-		return strings.ToLower(restored)
+		return restored
 	default:
 		// For other types, fall back to text representation
 		var sb strings.Builder
