@@ -48,7 +48,7 @@ func TestNewCutOverValidation(t *testing.T) {
 
 	// Empty tables.
 	cfg := change.NewClientDefaultConfig()
-	cfg.CancelFunc = func() bool { return false }
+	cfg.CancelFunc = func(change.FatalReason) bool { return false }
 	srcConfig, err := mysql.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 	replClient := change.NewBinlogClient(db, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
@@ -131,7 +131,7 @@ func TestCutOverSingleSource(t *testing.T) {
 	defer utils.CloseAndLog(replDB)
 
 	cfg := change.NewClientDefaultConfig()
-	cfg.CancelFunc = func() bool { return false }
+	cfg.CancelFunc = func(change.FatalReason) bool { return false }
 	replClient := change.NewBinlogClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 	require.NoError(t, replClient.Start(ctx))
 	defer replClient.Close()
@@ -219,7 +219,7 @@ func TestCutOverFuncCalledOnceAcrossRenameRetry(t *testing.T) {
 	defer utils.CloseAndLog(replDB)
 
 	cfg := change.NewClientDefaultConfig()
-	cfg.CancelFunc = func() bool { return false }
+	cfg.CancelFunc = func(change.FatalReason) bool { return false }
 	replClient := change.NewBinlogClient(replDB, srcConfig.Addr, srcConfig.User, srcConfig.Passwd, nil, cfg)
 	require.NoError(t, replClient.Start(ctx))
 	defer replClient.Close()

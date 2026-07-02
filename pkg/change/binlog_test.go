@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -546,11 +547,12 @@ func TestDDLNotification(t *testing.T) {
 	cfg, err := mysql2.ParseDSN(testutils.DSN())
 	require.NoError(t, err)
 
-	// Use a channel to track cancel calls from the CancelFunc callback.
-	cancelled := make(chan struct{}, 1)
+	// Use a channel to track cancel calls (and the reason passed)
+	// from the CancelFunc callback.
+	cancelled := make(chan FatalReason, 1)
 	clientConfig := NewClientDefaultConfig()
-	clientConfig.CancelFunc = func() bool {
-		cancelled <- struct{}{}
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
+		cancelled <- reason
 		return true
 	}
 	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*binlogClient)
@@ -563,7 +565,9 @@ func TestDDLNotification(t *testing.T) {
 	// Alter the existing table ddl_t2, check that we get notification of it.
 	testutils.RunSQL(t, "ALTER TABLE ddl_t2 ADD COLUMN d INT")
 
-	<-cancelled // CancelFunc was called
+	// CancelFunc was called, and DDL must be reported as a schema change so
+	// callers know to invalidate their checkpoints.
+	require.Equal(t, FatalReasonSchemaChange, <-cancelled)
 }
 
 // TestCompositePKUpdate tests that we correctly handle
@@ -1128,8 +1132,16 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
+	// Also capture the reason: exhausted recreate attempts are a stream
+	// error, NOT a schema change, so callers must not invalidate checkpoints.
+	var gotReason atomic.Int64
+	gotReason.Store(-1)
 	clientConfig := NewClientDefaultConfig()
-	clientConfig.CancelFunc = func() bool { cancel(); return true }
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
+		gotReason.Store(int64(reason))
+		cancel()
+		return true
+	}
 	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*binlogClient)
 	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
 	require.NoError(t, err)
@@ -1155,8 +1167,11 @@ func TestMaxRecreateAttemptsError(t *testing.T) {
 	// With maxRecreateAttempts=3 (set in TestMain) and fast failures, this should be quick.
 	client.streamWG.Wait()
 
-	// Verify that the caller's context was cancelled via the CancelFunc callback.
+	// Verify that the caller's context was cancelled via the CancelFunc callback,
+	// and that the fatal was classified as a stream error.
 	require.Error(t, ctx.Err(), "caller context should be cancelled")
+	require.Equal(t, int64(FatalReasonStreamError), gotReason.Load(),
+		"exhausted recreate attempts must be reported as a stream error")
 
 	client.Close()
 }
@@ -1167,7 +1182,7 @@ func TestProcessDDLNotification(t *testing.T) {
 		cancelled := false
 		c := &binlogClient{
 			logger:           slog.Default(),
-			callerCancelFunc: func() bool { cancelled = true; return true },
+			callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
 			ddlFilterSchema:  filterSchema,
 			ddlFilterTables:  toSet(filterTables),
 			subs:             newSubscriptionRegistry(),
@@ -1188,10 +1203,15 @@ func TestProcessDDLNotification(t *testing.T) {
 
 	t.Run("default mode: cancels on exact subscription match", func(t *testing.T) {
 		cancelled := false
+		reason := FatalReason(-1)
 		c := &binlogClient{
-			logger:           slog.Default(),
-			callerCancelFunc: func() bool { cancelled = true; return true },
-			subs:             newSubscriptionRegistry(),
+			logger: slog.Default(),
+			callerCancelFunc: func(r FatalReason) bool {
+				cancelled = true
+				reason = r
+				return true
+			},
+			subs: newSubscriptionRegistry(),
 		}
 		sub := &bufferedMap{
 			table:    tbl,
@@ -1202,9 +1222,11 @@ func TestProcessDDLNotification(t *testing.T) {
 		sub.cond = sync.NewCond(&sub.Mutex)
 		require.True(t, c.subs.Add(dbName+".orders", sub))
 
-		// DDL on the subscribed table should cancel.
+		// DDL on the subscribed table should cancel, reported as a schema change.
 		c.processDDLNotification(dbName, "orders")
 		require.True(t, cancelled, "should cancel on DDL matching a subscribed table")
+		require.Equal(t, FatalReasonSchemaChange, reason,
+			"DDL must be reported as a schema change so callers invalidate checkpoints")
 
 		// DDL on an unrelated table should not cancel.
 		cancelled = false
