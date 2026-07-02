@@ -828,14 +828,22 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 				Columns: ct.parseIndexColumns(constraint.Refer.IndexPartSpecifications),
 			}
 
-			// Parse ON DELETE action (check if ReferOpt is non-empty)
-			if constraint.Refer.OnDelete != nil && constraint.Refer.OnDelete.ReferOpt.String() != "" {
+			// Parse ON DELETE / ON UPDATE actions (check if ReferOpt is
+			// non-empty). An explicit NO ACTION is normalized to absent:
+			// NO ACTION is MySQL's default referential action (and a synonym
+			// for RESTRICT in InnoDB), and SHOW CREATE TABLE omits it. Keeping
+			// it verbatim would make a desired schema spelling out NO ACTION
+			// forever differ from the live table, re-emitting the same
+			// DROP+ADD FOREIGN KEY on every declarative run. RESTRICT is NOT
+			// normalized: SHOW CREATE TABLE prints it, so it round-trips.
+			if constraint.Refer.OnDelete != nil && constraint.Refer.OnDelete.ReferOpt.String() != "" &&
+				constraint.Refer.OnDelete.ReferOpt != ast.ReferOptionNoAction {
 				onDelete := constraint.Refer.OnDelete.ReferOpt.String()
 				fkRef.OnDelete = &onDelete
 			}
 
-			// Parse ON UPDATE action (check if ReferOpt is non-empty)
-			if constraint.Refer.OnUpdate != nil && constraint.Refer.OnUpdate.ReferOpt.String() != "" {
+			if constraint.Refer.OnUpdate != nil && constraint.Refer.OnUpdate.ReferOpt.String() != "" &&
+				constraint.Refer.OnUpdate.ReferOpt != ast.ReferOptionNoAction {
 				onUpdate := constraint.Refer.OnUpdate.ReferOpt.String()
 				fkRef.OnUpdate = &onUpdate
 			}

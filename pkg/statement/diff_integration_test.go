@@ -166,3 +166,84 @@ func TestDiffIntegrationKeyBlockSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stmts)
 }
+
+// TestDiffIntegrationForeignKeyNoAction verifies against a real MySQL server
+// that a desired schema spelling out ON DELETE NO ACTION / ON UPDATE NO ACTION
+// converges with the live table. MySQL omits NO ACTION from SHOW CREATE TABLE
+// output (it is the default action, a synonym for RESTRICT in InnoDB), so
+// before the parse-time normalization this produced the same DROP+ADD FOREIGN
+// KEY on every diff — an ALTER that never changed SHOW CREATE output.
+func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
+	// Parent must be created first; TestTable cleanup is LIFO so the child
+	// (created last) is dropped before the parent.
+	_ = testutils.NewTestTable(t, "diff_fkna_parent",
+		"CREATE TABLE diff_fkna_parent (id int primary key)")
+	tt := testutils.NewTestTable(t, "diff_fkna_child",
+		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_pid (pid), "+
+			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE NO ACTION ON UPDATE NO ACTION)")
+
+	// Document the server behavior this fix depends on: SHOW CREATE TABLE
+	// omits NO ACTION.
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.NotContains(t, live, "NO ACTION")
+
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_pid (pid), " +
+			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE NO ACTION ON UPDATE NO ACTION)")
+	require.NoError(t, err)
+
+	source, err := ParseCreateTable(live)
+	require.NoError(t, err)
+
+	// The explicit NO ACTION spelling converges with the live table.
+	stmts, err := source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "explicit NO ACTION must converge with live schema")
+
+	// A genuine action change (NO ACTION -> CASCADE) still produces a diff,
+	// and applying it converges. The desired FK uses a different constraint
+	// name because MySQL rejects a same-name DROP FOREIGN KEY + ADD
+	// CONSTRAINT within a single ALTER (Error 1826).
+	desiredCascade, err := ParseCreateTable(
+		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_pid (pid), " +
+			"CONSTRAINT fk_pid2 FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE CASCADE)")
+	require.NoError(t, err)
+	stmts, err = source.Diff(desiredCascade, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_fkna_child` DROP FOREIGN KEY `fk_pid`, ADD CONSTRAINT `fk_pid2` FOREIGN KEY (`pid`) REFERENCES `diff_fkna_parent` (`id`) ON DELETE CASCADE", stmts[0].Statement)
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+	source, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
+	require.NoError(t, err)
+	stmts, err = source.Diff(desiredCascade, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+}
+
+// TestDiffIntegrationForeignKeyRestrict is the regression guard for the
+// NO ACTION normalization: RESTRICT has identical semantics in InnoDB but IS
+// printed by SHOW CREATE TABLE, so it must round-trip verbatim — neither
+// normalized away nor producing a spurious diff.
+func TestDiffIntegrationForeignKeyRestrict(t *testing.T) {
+	_ = testutils.NewTestTable(t, "diff_fkr_parent",
+		"CREATE TABLE diff_fkr_parent (id int primary key)")
+	tt := testutils.NewTestTable(t, "diff_fkr_child",
+		"CREATE TABLE diff_fkr_child (id int primary key, pid int, KEY fk_pid (pid), "+
+			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkr_parent (id) ON DELETE RESTRICT ON UPDATE RESTRICT)")
+
+	// Document the server behavior: RESTRICT is printed (unlike NO ACTION).
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "ON DELETE RESTRICT ON UPDATE RESTRICT")
+
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_fkr_child (id int primary key, pid int, KEY fk_pid (pid), " +
+			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkr_parent (id) ON DELETE RESTRICT ON UPDATE RESTRICT)")
+	require.NoError(t, err)
+
+	source, err := ParseCreateTable(live)
+	require.NoError(t, err)
+	stmts, err := source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "RESTRICT must round-trip unchanged")
+}
