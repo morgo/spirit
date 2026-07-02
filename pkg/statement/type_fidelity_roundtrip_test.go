@@ -169,3 +169,64 @@ func TestRoundTrip_ExpressionDefaultLiteralCase(t *testing.T) {
 		require.Nil(t, stmts, "function-name case must not produce a diff; got: %+v", stmts)
 	})
 }
+
+// TestRoundTrip_Zerofill verifies that the ZEROFILL attribute survives
+// parse -> diff -> emission. Before the fix, parseColumn never read
+// mysql.HasZerofillFlag, so `int(10) unsigned zerofill` and
+// `int(10) unsigned` parsed identically: Diff reported a false equal, and
+// MODIFY emission silently stripped the attribute.
+func TestRoundTrip_Zerofill(t *testing.T) {
+	db := openScratch(t)
+
+	t.Run("zerofill_difference_detected", func(t *testing.T) {
+		// Table named tf_zf (not tf_zerofill) so that the NotContains
+		// assertion below cannot match the table name itself.
+		plain, err := ParseCreateTable(
+			"CREATE TABLE tf_zf (id INT NOT NULL PRIMARY KEY, n INT(10) UNSIGNED)")
+		require.NoError(t, err)
+		filled, err := ParseCreateTable(
+			"CREATE TABLE tf_zf (id INT NOT NULL PRIMARY KEY, n INT(10) UNSIGNED ZEROFILL)")
+		require.NoError(t, err)
+
+		stmts, err := plain.Diff(filled, nil)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1, "zerofill vs non-zerofill must produce a diff")
+		require.Contains(t, stmts[0].Statement, "zerofill")
+
+		// And the reverse direction removes the attribute.
+		stmts, err = filled.Diff(plain, nil)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1)
+		require.NotContains(t, stmts[0].Statement, "zerofill")
+	})
+
+	t.Run("zerofill_preserved_in_modify_and_applies", func(t *testing.T) {
+		createSQL := "CREATE TABLE tf_zerofill (id INT NOT NULL PRIMARY KEY, n INT(10) UNSIGNED)"
+		targetSQL := "CREATE TABLE tf_zerofill (id INT NOT NULL PRIMARY KEY, n INT(10) UNSIGNED ZEROFILL)"
+
+		// The emitted MODIFY must carry the attribute, be accepted by real
+		// MySQL, and converge on re-diff.
+		afterCreate := applyAndConverge(t, db, "tf_zerofill", createSQL, targetSQL)
+		require.Contains(t, afterCreate, "int(10) unsigned zerofill")
+	})
+
+	t.Run("identical_zerofill_is_nil_diff", func(t *testing.T) {
+		// A live zerofill column diffed against the same desired definition
+		// must be a no-op (canonical SHOW CREATE TABLE form on the live side).
+		targetSQL := "CREATE TABLE tf_zerofill2 (id INT NOT NULL PRIMARY KEY, n INT(10) UNSIGNED ZEROFILL)"
+		_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_zerofill2")
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(), targetSQL)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_zerofill2") })
+
+		live, err := ParseCreateTable(showCreate(t, db, "tf_zerofill2"))
+		require.NoError(t, err)
+		target, err := ParseCreateTable(targetSQL)
+		require.NoError(t, err)
+
+		stmts, err := live.Diff(target, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "identical zerofill on both sides must be nil; got: %+v", stmts)
+	})
+}

@@ -39,6 +39,7 @@ type Column struct {
 	Precision       *int              `json:"precision,omitempty"`
 	Scale           *int              `json:"scale,omitempty"`
 	Unsigned        *bool             `json:"unsigned,omitempty"`
+	Zerofill        *bool             `json:"zerofill,omitempty"`    // ZEROFILL display attribute (implies unsigned)
 	EnumValues      []string          `json:"enum_values,omitempty"` // Permitted values for ENUM type
 	SetValues       []string          `json:"set_values,omitempty"`  // Permitted values for SET type
 	Nullable        bool              `json:"nullable"`
@@ -607,6 +608,16 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	if mysql.HasUnsignedFlag(col.Tp.GetFlag()) {
 		unsigned := true
 		column.Unsigned = &unsigned
+	}
+
+	// Check if the column type is zerofill. MySQL still prints the attribute
+	// in SHOW CREATE TABLE (e.g. int(10) unsigned zerofill), so dropping it
+	// here would both hide a real difference from Diff and silently strip
+	// the attribute from MODIFY COLUMN emission. Note the parser mirrors
+	// MySQL in adding the unsigned flag automatically for zerofill columns.
+	if mysql.HasZerofillFlag(col.Tp.GetFlag()) {
+		zerofill := true
+		column.Zerofill = &zerofill
 	}
 
 	// Extract charset and collation from the type itself

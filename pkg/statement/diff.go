@@ -787,6 +787,9 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	if !ptrEqual(a.Unsigned, b.Unsigned) {
 		return false
 	}
+	if !ptrEqual(a.Zerofill, b.Zerofill) {
+		return false
+	}
 	if a.Nullable != b.Nullable {
 		return false
 	}
@@ -899,6 +902,9 @@ func columnsEqualIgnorePK(a, b *Column, opts *DiffOptions) bool {
 		return false
 	}
 	if !ptrEqual(a.Unsigned, b.Unsigned) {
+		return false
+	}
+	if !ptrEqual(a.Zerofill, b.Zerofill) {
 		return false
 	}
 	if a.Nullable != b.Nullable {
@@ -1202,6 +1208,10 @@ func formatColumnDefinition(col *Column) string {
 
 	if col.Unsigned != nil && *col.Unsigned {
 		typeDef += " unsigned"
+	}
+
+	if col.Zerofill != nil && *col.Zerofill {
+		typeDef += " zerofill"
 	}
 
 	parts = append(parts, fmt.Sprintf("%s %s", sqlescape.EscapeIdentifier(col.Name), typeDef))
