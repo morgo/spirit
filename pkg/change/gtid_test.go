@@ -718,3 +718,42 @@ func TestGTIDRoundtripPosition(t *testing.T) {
 	require.NoError(t, client2.StartFromPosition(t.Context(), pos))
 	client2.Close()
 }
+
+// TestGTIDProcessDDLNotificationMoveStyle mirrors the "move-style
+// subscription (nil newTable)" subtest of TestProcessDDLNotification for
+// the GTID client. Regression: with no ddlFilterSchema configured, the
+// subscription-match loop used to walk past the current table into the
+// nil Tables() entry of a move-style subscription and panic the
+// readStream goroutine on any DDL notification for a non-subscribed
+// table.
+func TestGTIDProcessDDLNotificationMoveStyle(t *testing.T) {
+	dbName, db := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, dbName, "CREATE TABLE orders (id INT NOT NULL PRIMARY KEY)")
+
+	tbl := table.NewTableInfo(db, dbName, "orders")
+	require.NoError(t, tbl.SetInfo(t.Context()))
+
+	cancelled := false
+	c := &gtidClient{
+		logger:           slog.Default(),
+		callerCancelFunc: func(FatalReason) bool { cancelled = true; return true },
+		subs:             newSubscriptionRegistry(),
+	}
+	chunker, err := table.NewChunker(tbl, table.ChunkerConfig{})
+	require.NoError(t, err)
+	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
+		CurrentTable: tbl,
+		Applier:      applier.NewSingleTargetForTest(t, db),
+		Chunker:      chunker,
+	})
+	require.NoError(t, err)
+	require.True(t, c.subs.Add(dbName+".orders", sub))
+
+	// DDL on an unrelated table must be ignored — not panic.
+	c.processDDLNotification(dbName, "unrelated_table")
+	require.False(t, cancelled, "should not cancel on DDL for an unrelated table")
+
+	// DDL on the subscribed table still cancels.
+	c.processDDLNotification(dbName, "orders")
+	require.True(t, cancelled, "should cancel on DDL matching the subscribed table")
+}
