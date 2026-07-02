@@ -234,7 +234,16 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 			// Only safe if changing length of a VARCHAR column. We don't know the type of the column
 			// or its length, so we cannot determine if this is safe only by parsing. We can simply try
 			// INPLACE, and if it fails we will retry with our own schema change process.
-			if spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar {
+			//
+			// "Try INPLACE and let MySQL reject it" does not protect against
+			// rebuild-class changes that MySQL *accepts* under ALGORITHM=INPLACE
+			// though: converting a column to NOT NULL and reordering a column
+			// (FIRST/AFTER) both succeed as INPLACE with a full table rebuild,
+			// which can block replicas. A NOT NULL redeclaration can't be proven
+			// unchanged from the statement alone (we don't have the current
+			// nullability here), so it conservatively routes to the copy process.
+			if spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar &&
+				!columnReordered(spec) && !columnDeclaredNotNull(spec.NewColumns[0]) {
 				continue
 			}
 			unsafeClauses++
@@ -249,6 +258,23 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 		return ErrUnsafeForInplace
 	}
 	return nil
+}
+
+// columnReordered returns true if a MODIFY/CHANGE COLUMN spec moves the
+// column with a FIRST or AFTER clause.
+func columnReordered(spec *ast.AlterTableSpec) bool {
+	return spec.Position != nil && spec.Position.Tp != ast.ColumnPositionNone
+}
+
+// columnDeclaredNotNull returns true if the new column definition
+// declares NOT NULL.
+func columnDeclaredNotNull(col *ast.ColumnDef) bool {
+	for _, opt := range col.Options {
+		if opt.Tp == ast.ColumnOptionNotNull {
+			return true
+		}
+	}
+	return false
 }
 
 // AlterContainsUnsupportedClause checks to see if any clauses of an ALTER
