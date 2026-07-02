@@ -179,8 +179,8 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 	_ = testutils.NewTestTable(t, "diff_fkna_parent",
 		"CREATE TABLE diff_fkna_parent (id int primary key)")
 	tt := testutils.NewTestTable(t, "diff_fkna_child",
-		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_pid (pid), "+
-			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE NO ACTION ON UPDATE NO ACTION)")
+		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_fkna_pid (pid), "+
+			"CONSTRAINT fk_fkna_pid FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE NO ACTION ON UPDATE NO ACTION)")
 
 	// Document the server behavior this fix depends on: SHOW CREATE TABLE
 	// omits NO ACTION.
@@ -188,8 +188,8 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 	require.NotContains(t, live, "NO ACTION")
 
 	desired, err := ParseCreateTable(
-		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_pid (pid), " +
-			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE NO ACTION ON UPDATE NO ACTION)")
+		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_fkna_pid (pid), " +
+			"CONSTRAINT fk_fkna_pid FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE NO ACTION ON UPDATE NO ACTION)")
 	require.NoError(t, err)
 
 	source, err := ParseCreateTable(live)
@@ -205,13 +205,13 @@ func TestDiffIntegrationForeignKeyNoAction(t *testing.T) {
 	// name because MySQL rejects a same-name DROP FOREIGN KEY + ADD
 	// CONSTRAINT within a single ALTER (Error 1826).
 	desiredCascade, err := ParseCreateTable(
-		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_pid (pid), " +
-			"CONSTRAINT fk_pid2 FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE CASCADE)")
+		"CREATE TABLE diff_fkna_child (id int primary key, pid int, KEY fk_fkna_pid (pid), " +
+			"CONSTRAINT fk_fkna_pid2 FOREIGN KEY (pid) REFERENCES diff_fkna_parent (id) ON DELETE CASCADE)")
 	require.NoError(t, err)
 	stmts, err = source.Diff(desiredCascade, nil)
 	require.NoError(t, err)
 	require.Len(t, stmts, 1)
-	require.Equal(t, "ALTER TABLE `diff_fkna_child` DROP FOREIGN KEY `fk_pid`, ADD CONSTRAINT `fk_pid2` FOREIGN KEY (`pid`) REFERENCES `diff_fkna_parent` (`id`) ON DELETE CASCADE", stmts[0].Statement)
+	require.Equal(t, "ALTER TABLE `diff_fkna_child` DROP FOREIGN KEY `fk_fkna_pid`, ADD CONSTRAINT `fk_fkna_pid2` FOREIGN KEY (`pid`) REFERENCES `diff_fkna_parent` (`id`) ON DELETE CASCADE", stmts[0].Statement)
 	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
 	require.NoError(t, err)
 	source, err = ParseCreateTable(showCreateTable(t, tt.DB, tt.Name))
@@ -229,16 +229,16 @@ func TestDiffIntegrationForeignKeyRestrict(t *testing.T) {
 	_ = testutils.NewTestTable(t, "diff_fkr_parent",
 		"CREATE TABLE diff_fkr_parent (id int primary key)")
 	tt := testutils.NewTestTable(t, "diff_fkr_child",
-		"CREATE TABLE diff_fkr_child (id int primary key, pid int, KEY fk_pid (pid), "+
-			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkr_parent (id) ON DELETE RESTRICT ON UPDATE RESTRICT)")
+		"CREATE TABLE diff_fkr_child (id int primary key, pid int, KEY fk_fkr_pid (pid), "+
+			"CONSTRAINT fk_fkr_pid FOREIGN KEY (pid) REFERENCES diff_fkr_parent (id) ON DELETE RESTRICT ON UPDATE RESTRICT)")
 
 	// Document the server behavior: RESTRICT is printed (unlike NO ACTION).
 	live := showCreateTable(t, tt.DB, tt.Name)
 	require.Contains(t, live, "ON DELETE RESTRICT ON UPDATE RESTRICT")
 
 	desired, err := ParseCreateTable(
-		"CREATE TABLE diff_fkr_child (id int primary key, pid int, KEY fk_pid (pid), " +
-			"CONSTRAINT fk_pid FOREIGN KEY (pid) REFERENCES diff_fkr_parent (id) ON DELETE RESTRICT ON UPDATE RESTRICT)")
+		"CREATE TABLE diff_fkr_child (id int primary key, pid int, KEY fk_fkr_pid (pid), " +
+			"CONSTRAINT fk_fkr_pid FOREIGN KEY (pid) REFERENCES diff_fkr_parent (id) ON DELETE RESTRICT ON UPDATE RESTRICT)")
 	require.NoError(t, err)
 
 	source, err := ParseCreateTable(live)
@@ -246,4 +246,98 @@ func TestDiffIntegrationForeignKeyRestrict(t *testing.T) {
 	stmts, err := source.Diff(desired, nil)
 	require.NoError(t, err)
 	require.Nil(t, stmts, "RESTRICT must round-trip unchanged")
+}
+
+// TestDiffIntegrationCheckEnforcement verifies against a real MySQL server
+// that the [NOT] ENFORCED state of CHECK constraints round-trips through
+// SHOW CREATE TABLE (which renders it as /*!80016 NOT ENFORCED */), that
+// enforcement flips are applied in place with ALTER CHECK, and that a
+// NOT ENFORCED check re-added for an expression change stays NOT ENFORCED
+// instead of silently re-enabling enforcement.
+func TestDiffIntegrationCheckEnforcement(t *testing.T) {
+	tt := testutils.NewTestTable(t, "diff_chk_enf",
+		"CREATE TABLE diff_chk_enf (id int primary key, age int, "+
+			"CONSTRAINT chk_dce_age CHECK (age >= 0) NOT ENFORCED)")
+
+	// Document the server's canonical rendering.
+	live := showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, live, "/*!80016 NOT ENFORCED */")
+
+	// Desired NOT ENFORCED vs live NOT ENFORCED converges.
+	desired, err := ParseCreateTable(
+		"CREATE TABLE diff_chk_enf (id int primary key, age int, " +
+			"CONSTRAINT chk_dce_age CHECK (age >= 0) NOT ENFORCED)")
+	require.NoError(t, err)
+	source, err := ParseCreateTable(live)
+	require.NoError(t, err)
+	stmts, err := source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts, "NOT ENFORCED on both sides must converge")
+
+	// A row violating the (unenforced) check: flipping enforcement ON must
+	// surface MySQL's validation error rather than silently passing, which
+	// also proves ALTER CHECK ... ENFORCED validates existing rows just as
+	// an enforced ADD CONSTRAINT would.
+	_, err = tt.DB.ExecContext(t.Context(), "INSERT INTO diff_chk_enf VALUES (1, -5)")
+	require.NoError(t, err)
+
+	desiredEnforced, err := ParseCreateTable(
+		"CREATE TABLE diff_chk_enf (id int primary key, age int, " +
+			"CONSTRAINT chk_dce_age CHECK (age >= 0))")
+	require.NoError(t, err)
+	stmts, err = source.Diff(desiredEnforced, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_chk_enf` ALTER CHECK `chk_dce_age` ENFORCED", stmts[0].Statement)
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.ErrorContains(t, err, "chk_dce_age", "enforcing over violating rows must fail")
+
+	// Remove the violating row; the same ALTER now applies and converges.
+	_, err = tt.DB.ExecContext(t.Context(), "DELETE FROM diff_chk_enf")
+	require.NoError(t, err)
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+	postAlter := showCreateTable(t, tt.DB, tt.Name)
+	require.NotContains(t, postAlter, "NOT ENFORCED")
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(desiredEnforced, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+
+	// Flip back to NOT ENFORCED: exactly one in-place ALTER, then converges.
+	stmts, err = source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_chk_enf` ALTER CHECK `chk_dce_age` NOT ENFORCED", stmts[0].Statement)
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+	postAlter = showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "/*!80016 NOT ENFORCED */")
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(desired, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
+
+	// Expression change on a NOT ENFORCED check: the re-add must carry
+	// NOT ENFORCED through to the server (previously it silently flipped
+	// enforcement back on).
+	desiredNewExpr, err := ParseCreateTable(
+		"CREATE TABLE diff_chk_enf (id int primary key, age int, " +
+			"CONSTRAINT chk_dce_age CHECK (age >= 18) NOT ENFORCED)")
+	require.NoError(t, err)
+	stmts, err = source.Diff(desiredNewExpr, nil)
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	require.Equal(t, "ALTER TABLE `diff_chk_enf` DROP CHECK `chk_dce_age`, ADD CONSTRAINT `chk_dce_age` CHECK (`age`>=18) NOT ENFORCED", stmts[0].Statement)
+	_, err = tt.DB.ExecContext(t.Context(), stmts[0].Statement)
+	require.NoError(t, err)
+	postAlter = showCreateTable(t, tt.DB, tt.Name)
+	require.Contains(t, postAlter, "/*!80016 NOT ENFORCED */")
+	source, err = ParseCreateTable(postAlter)
+	require.NoError(t, err)
+	stmts, err = source.Diff(desiredNewExpr, nil)
+	require.NoError(t, err)
+	require.Nil(t, stmts)
 }

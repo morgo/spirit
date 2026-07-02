@@ -616,8 +616,11 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		}
 	}
 
-	// Collect DROP operations and sort by name for deterministic output
+	// Collect DROP operations and sort by name for deterministic output.
+	// CHECK constraints that differ only in enforcement are not dropped;
+	// they are flipped in place with ALTER CHECK (collected separately).
 	var dropClauses []string
+	var enforcementClauses []string
 	for i := range ct.Constraints {
 		sourceConstr := &ct.Constraints[i]
 		if matchedSourceByExpression[sourceConstr.Name] {
@@ -627,6 +630,19 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 
 		// Drop if constraint doesn't exist in target OR if it changed
 		if !exists || !constraintsEqual(sourceConstr, targetConstr) {
+			if exists && constraintsEqualExceptEnforcement(sourceConstr, targetConstr) {
+				// Only the [NOT] ENFORCED state changed: use MySQL's targeted
+				// ALTER CHECK clause instead of DROP+ADD. Flipping to NOT
+				// ENFORCED is then metadata-only (INSTANT-capable); flipping
+				// to ENFORCED validates existing rows either way, exactly as
+				// an enforced re-ADD would.
+				if targetConstr.NotEnforced {
+					enforcementClauses = append(enforcementClauses, fmt.Sprintf("ALTER CHECK %s NOT ENFORCED", sqlescape.EscapeIdentifier(sourceConstr.Name)))
+				} else {
+					enforcementClauses = append(enforcementClauses, fmt.Sprintf("ALTER CHECK %s ENFORCED", sqlescape.EscapeIdentifier(sourceConstr.Name)))
+				}
+				continue
+			}
 			switch sourceConstr.Type {
 			case "FOREIGN KEY":
 				dropClauses = append(dropClauses, fmt.Sprintf("DROP FOREIGN KEY %s", sqlescape.EscapeIdentifier(sourceConstr.Name)))
@@ -637,6 +653,8 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 	}
 	slices.Sort(dropClauses)
 	clauses = append(clauses, dropClauses...)
+	slices.Sort(enforcementClauses)
+	clauses = append(clauses, enforcementClauses...)
 
 	// Collect ADD operations and sort by name for deterministic output
 	var addClauses []string
@@ -647,6 +665,9 @@ func (ct *CreateTable) diffConstraints(target *CreateTable) []string {
 		sourceConstr, existsInSource := sourceConstraints[targetConstr.Name]
 
 		if !existsInSource || !constraintsEqual(sourceConstr, &targetConstr) {
+			if existsInSource && constraintsEqualExceptEnforcement(sourceConstr, &targetConstr) {
+				continue // enforcement-only change; handled by ALTER CHECK above
+			}
 			addClauses = append(addClauses, formatAddConstraint(&targetConstr))
 		}
 	}
@@ -1136,6 +1157,29 @@ func constraintsEqual(a, b *Constraint) bool {
 // auto-generated names (e.g., MySQL generates different CHECK constraint names when
 // the original expression text differs only in charset introducers like _utf8mb3).
 func constraintsEqualIgnoreName(a, b *Constraint) bool {
+	// CHECK constraint enforcement state ([NOT] ENFORCED)
+	if a.NotEnforced != b.NotEnforced {
+		return false
+	}
+	return constraintsEqualIgnoreNameAndEnforcement(a, b)
+}
+
+// constraintsEqualExceptEnforcement reports whether two same-named CHECK
+// constraints are identical apart from their [NOT] ENFORCED state. Such a
+// pair is applied with a targeted ALTER CHECK clause instead of DROP+ADD.
+func constraintsEqualExceptEnforcement(a, b *Constraint) bool {
+	if a.Type != "CHECK" || b.Type != "CHECK" {
+		return false
+	}
+	if a.NotEnforced == b.NotEnforced {
+		return false // not an enforcement change
+	}
+	return a.Name == b.Name && constraintsEqualIgnoreNameAndEnforcement(a, b)
+}
+
+// constraintsEqualIgnoreNameAndEnforcement compares all constraint attributes
+// except the name and the CHECK enforcement state.
+func constraintsEqualIgnoreNameAndEnforcement(a, b *Constraint) bool {
 	if a.Type != b.Type {
 		return false
 	}
@@ -1376,11 +1420,19 @@ func formatAddConstraint(constr *Constraint) string {
 
 	switch constr.Type {
 	case "CHECK":
+		clause := ""
 		if constr.Name != "" {
-			parts = append(parts, fmt.Sprintf("ADD CONSTRAINT %s CHECK (%s)", sqlescape.EscapeIdentifier(constr.Name), *constr.Expression))
+			clause = fmt.Sprintf("ADD CONSTRAINT %s CHECK (%s)", sqlescape.EscapeIdentifier(constr.Name), *constr.Expression)
 		} else {
-			parts = append(parts, fmt.Sprintf("ADD CHECK (%s)", *constr.Expression))
+			clause = fmt.Sprintf("ADD CHECK (%s)", *constr.Expression)
 		}
+		// ENFORCED is MySQL's default and is omitted (as SHOW CREATE TABLE
+		// does), so the ADD round-trips; NOT ENFORCED must be spelled out or
+		// the re-added constraint would silently become enforced.
+		if constr.NotEnforced {
+			clause += " NOT ENFORCED"
+		}
+		parts = append(parts, clause)
 	case "FOREIGN KEY":
 		var columns []string
 		for _, col := range constr.Columns {

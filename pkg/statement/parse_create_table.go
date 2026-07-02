@@ -83,14 +83,15 @@ type Index struct {
 
 // Constraint represents a table constraint
 type Constraint struct {
-	Raw        *ast.Constraint      `json:"-"`
-	Name       string               `json:"name"`
-	Type       string               `json:"type"` // CHECK, FOREIGN KEY, etc.
-	Columns    []string             `json:"columns,omitempty"`
-	Expression *string              `json:"expression,omitempty"`
-	References *ForeignKeyReference `json:"references,omitempty"`
-	Definition *string              `json:"definition,omitempty"` // Generated definition string for compatibility
-	Options    map[string]any       `json:"options,omitempty"`
+	Raw         *ast.Constraint      `json:"-"`
+	Name        string               `json:"name"`
+	Type        string               `json:"type"` // CHECK, FOREIGN KEY, etc.
+	Columns     []string             `json:"columns,omitempty"`
+	Expression  *string              `json:"expression,omitempty"`
+	References  *ForeignKeyReference `json:"references,omitempty"`
+	Definition  *string              `json:"definition,omitempty"`   // Generated definition string for compatibility
+	NotEnforced bool                 `json:"not_enforced,omitempty"` // CHECK constraints only: true when NOT ENFORCED
+	Options     map[string]any       `json:"options,omitempty"`
 }
 
 type Indexes []Index
@@ -805,6 +806,15 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 	case ast.ConstraintCheck:
 		constr.Type = "CHECK"
 
+		// Capture the enforcement state. The parser defaults Enforced to
+		// true, so an absent keyword and an explicit ENFORCED both parse as
+		// enforced — matching MySQL, which omits ENFORCED (the default) from
+		// SHOW CREATE TABLE and renders the non-default state inside a
+		// versioned comment: /*!80016 NOT ENFORCED */. The parser processes
+		// that versioned-comment form too (it is above its minimum version),
+		// so MySQL's canonical output parses with Enforced=false.
+		constr.NotEnforced = !constraint.Enforced
+
 		if constraint.Expr != nil {
 			// Use restoreExpressionText (not parseExpression) so the stored
 			// expression has any balanced outer parentheses stripped. MySQL's
@@ -817,6 +827,9 @@ func (ct *CreateTable) parseConstraint(constraint *ast.Constraint) Constraint {
 				constr.Expression = &exprStr
 				// Generate definition string
 				definition := fmt.Sprintf("CHECK (%s)", exprStr)
+				if constr.NotEnforced {
+					definition += " NOT ENFORCED"
+				}
 				constr.Definition = &definition
 			}
 		}
