@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1034,10 +1035,24 @@ func (r *Runner) setup(ctx context.Context) error {
 
 	// We always attempt to resume from a checkpoint.
 	if err = r.resumeFromCheckpoint(ctx); err != nil {
-		// Resume is best-effort: a mismatched alter, expired binlog, too-old
-		// checkpoint, or truncation collision all mean the checkpoint can't be
-		// used. Spirit logs the reason and falls back to a fresh migration so
-		// it always makes forward progress.
+		if !resumeErrorIsDefinitive(err) {
+			// The error does not prove "there is nothing to resume from" — it
+			// only proves a step of the resume failed (e.g. a transient
+			// connection error on the probe or checkpoint read). Falling
+			// through to a fresh migration here would DROP the partially
+			// populated _new table and the checkpoint, silently destroying
+			// possibly days of copy progress over a blip. Fail instead: all
+			// state is preserved, and re-running spirit retries the resume.
+			return fmt.Errorf("resuming from checkpoint failed with a possibly-transient error; "+
+				"refusing to start a fresh migration because that would discard resumable copy progress. "+
+				"Re-run spirit to retry the resume, or drop the checkpoint table %q to force a fresh start: %w",
+				r.checkpointTableName(), err)
+		}
+		// Resume is definitively not possible: no checkpoint exists (first
+		// run, or it was invalidated), or it can't be used — a mismatched
+		// alter, expired binlog, too-old checkpoint, truncation collision, or
+		// unreadable content. Spirit logs the reason and falls back to a
+		// fresh migration so it always makes forward progress.
 		r.logger.Info("could not resume from checkpoint",
 			"reason", err,
 		) // explain why it failed.
@@ -1064,34 +1079,52 @@ func (r *Runner) setup(ctx context.Context) error {
 }
 
 // fatalError is the callback provided to the replication client.
-// It is called when a DDL change is detected on a subscribed table,
-// or when a fatal stream error occurs. The replication client is
+// It is called when a DDL change is detected on a subscribed table
+// (change.FatalReasonSchemaChange), or when a fatal stream error occurs
+// (change.FatalReasonStreamError). The replication client is
 // responsible for any logging related to these errors.
 // It returns true if the error was acted upon (migration cancelled),
 // or false if it was ignored (e.g. because the migration is already
 // past cutover, where Spirit's own RENAME TABLE DDL is expected).
 //
+// The reason decides what happens to the checkpoint: a schema change
+// invalidates it (resuming against a changed table definition could corrupt
+// data), while a stream error preserves it — a dead binlog stream is exactly
+// the failure checkpoint resume exists to recover from, so a re-run picks up
+// the copy and replays the binlog from the checkpointed position.
+//
 // fatalError is safe to call concurrently. fatalOnce makes the
 // invalidate-and-cancel side effects idempotent and prevents racing
 // with Close() teardown of r.db / r.checkpointTable / r.cancelFunc.
-func (r *Runner) fatalError() bool {
+func (r *Runner) fatalError(reason change.FatalReason) bool {
 	if r.status.Get() >= status.CutOver {
 		return false
 	}
 	r.fatalOnce.Do(func() {
 		r.status.Set(status.ErrCleanup)
-		// Invalidate the checkpoint, so we don't try to resume.
-		// If we don't do this, the migration will permanently be blocked
-		// from proceeding. Letting it start again is the better choice.
-		// Use a background context since the migration context may
-		// already be cancelled. checkpointTable can still be nil if
-		// fatalError fires during early setup, before
-		// createCheckpointTable runs — skip the drop in that case.
-		if r.checkpointTable != nil && r.db != nil {
-			if err := r.checkpointTbl().Drop(context.Background()); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
+		switch reason { //nolint: exhaustive // schema change intentionally handled by default: drop is the safe fallback for unknown reasons
+		case change.FatalReasonStreamError:
+			// The stream died but the subscribed tables are not known to have
+			// changed, so the checkpoint remains valid. Keep it and tell the
+			// operator how to recover.
+			r.logger.Error("fatal replication stream error; the checkpoint has been preserved — re-run spirit to resume the migration from it")
+		default:
+			// Schema change — and, defensively, any future reason we don't
+			// recognize (invalidating is the safe default: it costs a restart,
+			// while wrongly resuming could corrupt data).
+			// Invalidate the checkpoint, so we don't try to resume.
+			// If we don't do this, the migration will permanently be blocked
+			// from proceeding. Letting it start again is the better choice.
+			// Use a background context since the migration context may
+			// already be cancelled. checkpointTable can still be nil if
+			// fatalError fires during early setup, before
+			// createCheckpointTable runs — skip the drop in that case.
+			if r.checkpointTable != nil && r.db != nil {
+				if err := r.checkpointTbl().Drop(context.Background()); err != nil {
+					r.logger.Error("could not remove checkpoint",
+						"error", err,
+					)
+				}
 			}
 		}
 		r.Cancel()
@@ -1220,7 +1253,10 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	for _, change := range r.changes {
 		newName := utils.NewTableName(change.table.TableName)
 		if err := dbconn.Exec(ctx, r.db, "SELECT 1 FROM %n.%n LIMIT 1", change.stmt.Schema, newName); err != nil {
-			return fmt.Errorf("could not find new table '%s' to resume from checkpoint", newName)
+			// Wrap the underlying error: resumeErrorIsDefinitive relies on it
+			// to tell "the table does not exist" (ER_NO_SUCH_TABLE — start
+			// fresh) apart from a transient probe failure (fail the run).
+			return fmt.Errorf("could not read new table '%s' to resume from checkpoint: %w", newName, err)
 		}
 	}
 
@@ -1233,9 +1269,10 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 		// Distinguish "no checkpoint to resume from" — a normal state — from a
 		// real read failure (permission denied, server gone, or an incompatible
 		// schema missing a column) so an operator doesn't mistake the absence of
-		// a checkpoint for a permission issue.
+		// a checkpoint for a permission issue. Both paths wrap the underlying
+		// error: resumeErrorIsDefinitive classifies it in setup().
 		if errors.Is(err, checkpoint.ErrNotFound) {
-			return fmt.Errorf("checkpoint table '%s' has no checkpoint, nothing to resume from", r.checkpointTableName())
+			return fmt.Errorf("checkpoint table '%s' has no checkpoint, nothing to resume from: %w", r.checkpointTableName(), err)
 		}
 		return fmt.Errorf("could not read from table '%s', err:%w", r.checkpointTableName(), err)
 	}
@@ -1310,9 +1347,10 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Open the change source at the checkpointed position. StartFromPosition
 	// validates the position is still resumable (e.g. binlog file purged on
 	// MySQL) and starts streaming. If the source can no longer reach the
-	// position, surface it as status.ErrBinlogNotFound so resume tests pick it
-	// up; otherwise propagate the error so the caller can abandon
-	// resume-from-checkpoint and start fresh.
+	// position, surface it as status.ErrBinlogNotFound — a definitive
+	// "cannot resume", so setup() falls back to a fresh migration; any other
+	// error propagates as-is and fails the run (state preserved), because it
+	// may be transient.
 	if err := r.replClient.StartFromPosition(ctx, binlogPosition); err != nil {
 		r.logger.Warn("resuming from checkpoint failed because resuming from the previous source position failed",
 			"position", binlogPosition,
@@ -1329,6 +1367,50 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	)
 	r.usedResumeFromCheckpoint = true
 	return nil
+}
+
+// resumeErrorIsDefinitive reports whether an error returned by
+// resumeFromCheckpoint definitively means "there is no usable checkpoint to
+// resume from", making it safe for setup() to fall back to a fresh migration —
+// whose first act is to DROP the _new and checkpoint tables. Anything not
+// recognized here (connection failures, timeouts, unknown errors) is treated
+// as possibly transient: setup() then fails the run and preserves all state,
+// because guessing "start fresh" on a blip silently destroys the copy
+// progress a multi-day migration has accumulated.
+func resumeErrorIsDefinitive(err error) bool {
+	// Sentinel classifications produced along the resume path.
+	for _, definitive := range []error{
+		checkpoint.ErrNotFound,        // checkpoint table exists but holds no row
+		status.ErrMismatchedAlter,     // checkpoint belongs to a different statement
+		status.ErrCheckpointCollision, // checkpoint belongs to a different table
+		status.ErrCheckpointTooOld,    // replaying would be slower than restarting
+		status.ErrBinlogNotFound,      // position purged from (or unparseable by) the source
+	} {
+		if errors.Is(err, definitive) {
+			return true
+		}
+	}
+	// ER_NO_SUCH_TABLE on the _new probe (nothing was ever copied — the
+	// normal first-run path) or on the checkpoint read (a previous run
+	// invalidated it), or ER_BAD_FIELD_ERROR (a checkpoint table layout this
+	// version cannot read).
+	if checkpoint.IsIncompatible(err) {
+		return true
+	}
+	// Unusable checkpoint *content*: watermarks are JSON documents and
+	// created_at must parse as a DATETIME. A decode failure means the stored
+	// state can never be resumed from — retrying will not help — so a fresh
+	// start is the only way forward.
+	if _, ok := errors.AsType[*json.SyntaxError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[*time.ParseError](err); ok {
+		return true
+	}
+	return false
 }
 
 // initChunkers sets up the chunker(s) for the migration.
