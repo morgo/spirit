@@ -283,6 +283,40 @@ func sizeOfQueuedChange(c queuedChange) int64 {
 	return queuedChangeOverhead + int64(len(c.key)) + estimateRowSize(c.logicalRow.RowImage) + estimateRowSize(c.originalKey)
 }
 
+// estimateRenderedBytes returns a rough byte estimate of what a row image
+// (or key tuple) will occupy once the applier renders it into a SQL
+// statement. Binary values hex-encode at two characters per byte and quoted
+// strings can double under escaping, so variable-width values are counted at
+// twice their in-memory length; scalars render as short literals. Mirrors
+// the copy path's estimateRowSize (pkg/applier): deliberately approximate,
+// because the applier.MaxStatementSizeBytes budget it feeds is conservative
+// against the typical 64 MiB max_allowed_packet.
+func estimateRenderedBytes(values []any) int64 {
+	var n int64 = 2 // parentheses around the tuple
+	for _, v := range values {
+		n += 4 // separator plus quotes / 0x prefix
+		switch x := v.(type) {
+		case []byte:
+			n += int64(len(x)) * 2
+		case string:
+			n += int64(len(x)) * 2
+		default:
+			n += 20 // numeric / temporal literals are short
+		}
+	}
+	return n
+}
+
+// renderedBytesOfChange estimates the rendered-SQL contribution of one
+// buffered change: deletes contribute their key tuple (the DELETE ... IN
+// element list), upserts their full row image (the REPLACE ... VALUES list).
+func renderedBytesOfChange(lr applier.LogicalRow, originalKey []any) int64 {
+	if lr.IsDeleted {
+		return estimateRenderedBytes(originalKey)
+	}
+	return estimateRenderedBytes(lr.RowImage)
+}
+
 // Assert that bufferedMap implements subscription
 var _ Subscription = (*bufferedMap)(nil)
 
@@ -435,7 +469,7 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, locks 
 	var deleteKeys [][]any
 	var upsertRows []applier.LogicalRow
 	var keysFlushed []string
-	var i int
+	var batchBytes int64
 	allChangesFlushed := true
 
 	var locksToUse []*dbconn.TableLock
@@ -455,20 +489,30 @@ func (s *bufferedMap) flushMapLocked(ctx context.Context, underLock bool, locks 
 			allChangesFlushed = false
 			continue
 		}
-		i++
+		// Cut the batch when either cap is reached: DefaultBatchSize rows,
+		// or the estimated rendered statement size would exceed the byte
+		// budget the copy path also uses. Without the byte cap, buffered
+		// wide rows (LONGTEXT / BLOB) can render into a single REPLACE
+		// larger than max_allowed_packet — a deterministic, non-retryable
+		// failure. A single row over the budget still flushes, alone in
+		// its own batch (a row can't be split).
+		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
+		if batchLen := len(deleteKeys) + len(upsertRows); batchLen >= DefaultBatchSize ||
+			(batchLen > 0 && batchBytes+rowBytes > applier.MaxStatementSizeBytes) {
+			if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
+				return false, err
+			}
+			deleteKeys = nil
+			upsertRows = nil
+			batchBytes = 0
+		}
 		keysFlushed = append(keysFlushed, key) // we are going to flush this key (hashed map key)
 		if change.logicalRow.IsDeleted {
 			deleteKeys = append(deleteKeys, change.originalKey)
 		} else {
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
-		if (i % DefaultBatchSize) == 0 {
-			if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
-				return false, err
-			}
-			deleteKeys = nil
-			upsertRows = nil
-		}
+		batchBytes += rowBytes
 	}
 
 	if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
@@ -556,21 +600,29 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 
 	var deleteKeys [][]any
 	var upsertRows []applier.LogicalRow
+	var batchBytes int64
 	flushSegment := func() error {
 		if err := s.flushBatch(ctx, deleteKeys, upsertRows, locksToUse); err != nil {
 			return err
 		}
 		deleteKeys = nil
 		upsertRows = nil
+		batchBytes = 0
 		return nil
 	}
 
 	prevIsDelete := s.queue[0].logicalRow.IsDeleted
 	var drainedBytes int64
 	for _, change := range s.queue {
+		// The byte cap mirrors flushMapLocked: cut the segment before the
+		// estimated rendered statement would exceed the budget, so wide
+		// rows can't produce a REPLACE/DELETE over max_allowed_packet. An
+		// oversized single row still flushes alone in its own segment.
+		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
 		typeFlip := change.logicalRow.IsDeleted != prevIsDelete
 		batchFull := len(deleteKeys)+len(upsertRows) >= DefaultBatchSize
-		if typeFlip || batchFull {
+		overBudget := len(deleteKeys)+len(upsertRows) > 0 && batchBytes+rowBytes > applier.MaxStatementSizeBytes
+		if typeFlip || batchFull || overBudget {
 			if err := flushSegment(); err != nil {
 				return err
 			}
@@ -580,6 +632,7 @@ func (s *bufferedMap) flushQueueLocked(ctx context.Context, underLock bool, lock
 		} else {
 			upsertRows = append(upsertRows, change.logicalRow)
 		}
+		batchBytes += rowBytes
 		drainedBytes += sizeOfQueuedChange(change)
 		prevIsDelete = change.logicalRow.IsDeleted
 	}
