@@ -144,6 +144,8 @@ func TestUnsafeLinter_AlterTableTruncatePartitionAll(t *testing.T) {
 	require.Len(t, violations, 1)
 	require.Equal(t, "unsafe", violations[0].Linter.Name())
 	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Equal(t, "Unsafe operation detected: TRUNCATE PARTITION", violations[0].Message)
+	require.Equal(t, "users", violations[0].Location.Table)
 }
 
 func TestUnsafeLinter_AlterTableAddPartition(t *testing.T) {
