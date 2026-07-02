@@ -34,6 +34,11 @@ var numericPartitionValueRe = regexp.MustCompile(`^-?(0|[1-9]\d*)(\.\d+)?$`)
 // previous fmt.Sprintf("%v", v) form generated broken SQL when a string
 // partition value contained a single quote.
 //
+// A partitionMaxValue sentinel is the MAXVALUE keyword (e.g. a tuple
+// element of a multi-column RANGE COLUMNS bound) and always renders bare —
+// quoting it would produce the string literal 'MAXVALUE', which MySQL
+// rejects (error 1697).
+//
 // A partitionStringLiteral carries the "this was a quoted string literal"
 // fact straight from the parser, so it is always quote+escaped — this is
 // what stops a numeric-looking LIST COLUMNS value like '2020' on a VARCHAR
@@ -46,6 +51,9 @@ var numericPartitionValueRe = regexp.MustCompile(`^-?(0|[1-9]\d*)(\.\d+)?$`)
 // ParseFloat-accepting curiosities (NaN, Inf, "1e10") and zero-prefix
 // forms ("01").
 func formatPartitionValue(v any) string {
+	if _, ok := v.(partitionMaxValue); ok {
+		return "MAXVALUE"
+	}
 	if sl, ok := v.(partitionStringLiteral); ok {
 		return "'" + sqlescape.EscapeString(string(sl)) + "'"
 	}
