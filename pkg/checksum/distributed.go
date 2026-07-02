@@ -482,6 +482,10 @@ func (c *DistributedChecker) Run(ctx context.Context) error {
 		_ = c.applier.Stop()
 	}()
 
+	// A previous Run may have left the checker poisoned (isInvalid=true from
+	// an errored attempt); every Run starts healthy.
+	c.setInvalid(false)
+
 	// Try the checksum up to n times if differences are found and we can fix them
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
