@@ -741,6 +741,145 @@ func TestSyncResumeIncompatibleCheckpoint(t *testing.T) {
 	require.Equal(t, 1, n2, "force must recreate the checkpoint table with the current schema")
 }
 
+// TestSyncPositionEncodeDecode covers the checkpoint-position payload codec:
+// round-tripping preserves position + identity, and anything that is not our
+// structured payload (legacy bare positions, empty strings, foreign JSON,
+// wrong versions) decodes as a legacy position with no identity attached.
+func TestSyncPositionEncodeDecode(t *testing.T) {
+	// Round trip.
+	raw, err := encodeSyncPosition("binlog.000123:456", "6d1f6f10-0000-1111-2222-333344445555", "db1:3306")
+	require.NoError(t, err)
+	p, ok := decodeSyncPosition(raw)
+	require.True(t, ok, "an encoded payload must decode as structured")
+	require.Equal(t, "binlog.000123:456", p.Position)
+	require.Equal(t, "6d1f6f10-0000-1111-2222-333344445555", p.ServerUUID)
+	require.Equal(t, "db1:3306", p.SourceAddr)
+
+	// Empty identity still round-trips (injected sources record no identity).
+	raw, err = encodeSyncPosition("vgtid-opaque", "", "")
+	require.NoError(t, err)
+	p, ok = decodeSyncPosition(raw)
+	require.True(t, ok)
+	require.Equal(t, "vgtid-opaque", p.Position)
+	require.Empty(t, p.ServerUUID)
+
+	// Legacy / foreign inputs: returned verbatim as the position, not ours.
+	for _, legacy := range []string{
+		"",                        // no saved position
+		"binlog.000042:4",         // pre-identity file:pos checkpoint
+		"uuid:1-100",              // pre-identity GTID checkpoint
+		`{"foo":"bar"}`,           // JSON, but not our payload (unknown fields)
+		`{"v":99,"position":"x"}`, // future/unknown version
+		`{not json`,               // malformed
+	} {
+		p, ok = decodeSyncPosition(legacy)
+		require.False(t, ok, "input %q must not decode as a structured payload", legacy)
+		require.Equal(t, legacy, p.Position)
+		require.Empty(t, p.ServerUUID)
+	}
+}
+
+// TestSyncResumeSourceIdentity verifies that a file:pos resume is gated on the
+// recorded source identity. Binlog file names are sequential on every server,
+// so after a failover/replica promotion/source rebuild behind the same
+// endpoint, a checkpointed position usually "exists" on the new server and
+// would silently skip or replay the wrong events. The checkpoint therefore
+// records @@server_uuid, and resume must hard-error when it doesn't match —
+// while a matching identity resumes normally, and --force recovers by
+// starting fresh.
+func TestSyncResumeSourceIdentity(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	src := cfg.Clone()
+	src.DBName = "sync_identity_src"
+	dest := cfg.Clone()
+	dest.DBName = "sync_identity_dest"
+
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_identity_src`)
+	testutils.RunSQL(t, `CREATE DATABASE sync_identity_src`)
+	testutils.RunSQL(t, `CREATE TABLE sync_identity_src.t1 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_identity_src.t1 VALUES (1,'one'),(2,'two'),(3,'three')`)
+	testutils.RunSQL(t, `CREATE TABLE sync_identity_src.t2 (id INT PRIMARY KEY, val VARCHAR(255))`)
+	testutils.RunSQL(t, `INSERT INTO sync_identity_src.t2 VALUES (10,'ten'),(20,'twenty')`)
+	testutils.RunSQL(t, `DROP DATABASE IF EXISTS sync_identity_dest`)
+
+	newSync := func(force bool) *Sync {
+		return &Sync{
+			SourceDSN:       src.FormatDSN(),
+			TargetDSN:       dest.FormatDSN(),
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+			Force:           force,
+		}
+	}
+	run := func(force bool) error {
+		r, nerr := NewRunner(newSync(force))
+		require.NoError(t, nerr)
+		rerr := runUntilCopied(t, r)
+		require.NoError(t, r.Close())
+		return rerr
+	}
+
+	// First run: copies and records a checkpoint carrying the source identity.
+	require.NoError(t, run(false))
+
+	tgt, err := sql.Open("mysql", dest.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(tgt)
+
+	// The stored position is the structured payload with the real
+	// @@server_uuid of the source and a non-empty inner position.
+	var realUUID string
+	srcDB, err := sql.Open("mysql", src.FormatDSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(srcDB)
+	require.NoError(t, srcDB.QueryRowContext(context.Background(), "SELECT @@server_uuid").Scan(&realUUID))
+	var storedUUID, storedPos string
+	require.NoError(t, tgt.QueryRowContext(context.Background(),
+		`SELECT JSON_UNQUOTE(JSON_EXTRACT(binlog_position, '$.server_uuid')),
+		        JSON_UNQUOTE(JSON_EXTRACT(binlog_position, '$.position'))
+		 FROM _spirit_sync_checkpoint`).Scan(&storedUUID, &storedPos))
+	require.Equal(t, realUUID, storedUUID, "the checkpoint must record the source's @@server_uuid")
+	require.NotEmpty(t, storedPos, "the checkpoint must record a change-feed position")
+
+	// Simulate a replaced source behind the same endpoint: same position, a
+	// different server_uuid. The inner position still names a binlog file
+	// that exists on this server, so before the identity check this resume
+	// would have succeeded silently.
+	testutils.RunSQL(t, `UPDATE sync_identity_dest._spirit_sync_checkpoint
+		SET binlog_position = JSON_SET(binlog_position, '$.server_uuid', '00000000-dead-beef-0000-000000000000')`)
+	err = run(false)
+	require.Error(t, err, "a checkpoint recorded on a different source server must not resume")
+	require.ErrorContains(t, err, "different source server")
+	require.ErrorContains(t, err, "--force")
+
+	// Restore the real identity: the resume proceeds normally, data intact.
+	testutils.RunSQL(t, `UPDATE sync_identity_dest._spirit_sync_checkpoint
+		SET binlog_position = JSON_SET(binlog_position, '$.server_uuid', '`+realUUID+`')`)
+	require.NoError(t, run(false), "a matching source identity must resume normally")
+	var n int
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n)
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t2").Scan(&n))
+	require.Equal(t, 2, n)
+
+	// A legacy checkpoint (bare position, no identity — written by an older
+	// spirit) is unverifiable and must refuse to resume, pointing at --force.
+	testutils.RunSQL(t, `UPDATE sync_identity_dest._spirit_sync_checkpoint
+		SET binlog_position = JSON_UNQUOTE(JSON_EXTRACT(binlog_position, '$.position'))`)
+	err = run(false)
+	require.Error(t, err, "an identity-less legacy checkpoint must not silently resume")
+	require.ErrorContains(t, err, "no source identity")
+	require.ErrorContains(t, err, "--force")
+
+	// --force recovers: the unverifiable checkpoint is treated as
+	// non-resumable, the sync-owned tables are wiped, and a fresh copy runs.
+	require.NoError(t, run(true))
+	require.NoError(t, tgt.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM t1").Scan(&n))
+	require.Equal(t, 3, n)
+}
+
 // TestSyncCreateTableLegacyDefault verifies that target tables are created with
 // a relaxed sql_mode. The source DDL can carry a legacy zero-date default that
 // a strict target (sql_mode=TRADITIONAL, as the import's injected target uses)

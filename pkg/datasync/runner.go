@@ -3,9 +3,11 @@ package datasync
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +67,13 @@ type Runner struct {
 	ownsTarget bool
 
 	sourceTables []*table.TableInfo
+
+	// sourceUUID is the source server's @@server_uuid, fetched once during
+	// setup when the built-in change clients are used (Sync.Source == nil; an
+	// injected change.Source may not be plain MySQL). It is recorded in every
+	// checkpoint and, for the file:pos change source, verified on resume — see
+	// syncPosition.
+	sourceUUID string
 
 	applier     applier.Applier
 	replClient  change.Source
@@ -700,6 +709,17 @@ func (r *Runner) setup(ctx context.Context) error {
 		}
 	}
 
+	// Record the source's identity. @@server_uuid uniquely identifies the
+	// server instance and changes across failover/promotion/rebuild, which is
+	// what lets a resume detect that a file:pos checkpoint belongs to a
+	// different server (see syncPosition). Fetched only for the built-in
+	// change clients — an injected change.Source may not be plain MySQL.
+	if r.sync.Source == nil {
+		if err := r.source.db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&r.sourceUUID); err != nil {
+			return fmt.Errorf("failed to read @@server_uuid from the source: %w", err)
+		}
+	}
+
 	// Force: when the target cannot resume, wipe the sync-owned objects (the
 	// target copies of the source tables + the checkpoint table) so this run
 	// starts fresh instead of tripping the fresh-sync target-empty guard.
@@ -715,11 +735,18 @@ func (r *Runner) setup(ctx context.Context) error {
 	// the saved watermark (continuing a partial copy) and open the change feed
 	// at the saved position — skipping the target-empty check. So a restarted
 	// sync resumes its partial copy instead of starting over.
-	watermark, pos, hasCheckpoint, err := r.readCheckpoint(ctx)
+	watermark, rawPos, hasCheckpoint, err := r.readCheckpoint(ctx)
 	if err != nil {
 		return err
 	}
 	if hasCheckpoint {
+		// Unwrap the saved position and verify it belongs to the server we
+		// are about to stream from; a position from a replaced source is a
+		// hard error, not a silent mis-replay.
+		pos, err := r.resolveResumePosition(rawPos)
+		if err != nil {
+			return err
+		}
 		r.resuming = true
 		r.logger.Info("Found checkpoint on target; resuming", "position", pos)
 		return r.startResume(ctx, watermark, pos)
@@ -897,7 +924,18 @@ func (r *Runner) hasResumableCheckpoint(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
-	return rec.CopierWatermark != "", nil
+	if rec.CopierWatermark == "" {
+		return false, nil
+	}
+	// A checkpoint whose position resume would refuse — recorded on a
+	// different source server, or lacking the identity needed to verify it —
+	// is not resumable either: --force should wipe and start fresh rather
+	// than resume into the same hard error.
+	if _, perr := r.resolveResumePosition(rec.Position); perr != nil {
+		r.logger.Warn("force: checkpoint exists but cannot be resumed against this source; treating as non-resumable", "reason", perr)
+		return false, nil
+	}
+	return true, nil
 }
 
 // createTargetTables creates each source table on the target using the
@@ -1172,6 +1210,96 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 	return checkpoint.NewTable(r.target.DB, syncCheckpointTableName, checkpoint.Persistent)
 }
 
+// syncPositionFormatVersion tags the JSON payload datasync stores in the
+// checkpoint's position column, so a resume can tell the structured payload
+// apart from a legacy bare position string (or an injected source's opaque
+// position that happens to look like JSON).
+const syncPositionFormatVersion = 1
+
+// syncPosition is the payload datasync persists in the checkpoint's Position
+// field: the change source's opaque position, wrapped with the identity of the
+// source server it was observed on.
+//
+// The identity matters because a binlog file:pos position is only meaningful
+// on the server that wrote it: binlog file names are sequential on every
+// server, so after an Aurora/RDS failover behind a stable endpoint, a replica
+// promotion, or a rebuilt source, a file with the checkpointed NAME usually
+// exists on the new server too — and StartFromPosition would succeed there,
+// silently skipping or replaying the wrong events. @@server_uuid changes
+// across all of those transitions, so recording it lets resume hard-fail
+// instead. GTID positions are globally unique and don't need this (see
+// resolveResumePosition). SourceAddr is recorded for diagnostics only: an
+// address can legitimately stay stable across a failover, which is exactly
+// why it cannot be the identity.
+type syncPosition struct {
+	Version    int    `json:"v"`
+	Position   string `json:"position"`
+	ServerUUID string `json:"server_uuid,omitempty"`
+	SourceAddr string `json:"source_addr,omitempty"`
+}
+
+// encodeSyncPosition wraps a change-feed position and the source identity into
+// the JSON payload stored in the checkpoint.
+func encodeSyncPosition(pos, serverUUID, sourceAddr string) (string, error) {
+	b, err := json.Marshal(syncPosition{
+		Version:    syncPositionFormatVersion,
+		Position:   pos,
+		ServerUUID: serverUUID,
+		SourceAddr: sourceAddr,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to encode checkpoint position: %w", err)
+	}
+	return string(b), nil
+}
+
+// decodeSyncPosition parses a persisted checkpoint position. ok reports
+// whether raw carried the structured identity payload; when false, raw is a
+// legacy (pre-identity) or externally-produced bare position, returned
+// verbatim as the Position with no identity attached. Strict decoding
+// (unknown fields rejected + version check) keeps an injected source's opaque
+// position from being misread as our payload even if it is JSON.
+func decodeSyncPosition(raw string) (pos syncPosition, ok bool) {
+	if !strings.HasPrefix(raw, "{") {
+		return syncPosition{Position: raw}, false
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var p syncPosition
+	if err := dec.Decode(&p); err != nil || p.Version != syncPositionFormatVersion {
+		return syncPosition{Position: raw}, false
+	}
+	return p, true
+}
+
+// resolveResumePosition unwraps a persisted checkpoint position and, for the
+// built-in file:pos change source, verifies it was recorded against the server
+// we are about to resume from (see syncPosition for why file:pos positions are
+// not portable across servers). On a mismatch — or when the checkpoint
+// predates identity recording, making it unverifiable — it returns an error
+// rather than risking a silent skip/mis-replay. GTID positions are globally
+// unique (a failed-over server rejects a set it doesn't contain), and an
+// injected change.Source owns its own position semantics; both skip
+// verification and just unwrap.
+func (r *Runner) resolveResumePosition(rawPos string) (string, error) {
+	payload, hasIdentity := decodeSyncPosition(rawPos)
+	if payload.Position == "" {
+		return "", nil // no position was saved; the change feed starts fresh
+	}
+	if r.sync.Source != nil || r.sync.GTID {
+		return payload.Position, nil
+	}
+	if !hasIdentity || payload.ServerUUID == "" {
+		return "", fmt.Errorf("checkpoint position %q carries no source identity (it was written by an older spirit version), so it cannot be verified to belong to the current source server; re-run with --force to discard it and start a fresh sync, or use --gtid",
+			payload.Position)
+	}
+	if payload.ServerUUID != r.sourceUUID {
+		return "", fmt.Errorf("checkpoint position %q was recorded on a different source server (checkpoint server_uuid=%s addr=%s; current source server_uuid=%s addr=%s): a binlog file:position is only valid on the server that wrote it, and resuming here would silently skip or replay the wrong changes (typical after a failover, replica promotion, or source rebuild). Re-run with --force to discard the checkpoint and start a fresh sync, or use --gtid, which resumes safely across failovers",
+			payload.Position, payload.ServerUUID, payload.SourceAddr, r.sourceUUID, r.source.config.Addr)
+	}
+	return payload.Position, nil
+}
+
 // dumpCheckpoint records the copier's low watermark (so a partial copy can
 // resume) and the change-feed position (so continuous sync can resume) in the
 // target checkpoint table's single row (REPLACE on id=1). It is a no-op until
@@ -1197,9 +1325,21 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	if repl != nil {
 		pos = repl.Position()
 	}
+	// The position is stored wrapped with the source's identity so a resume
+	// can refuse a checkpoint recorded against a different server (see
+	// syncPosition). The identity fields are empty for an injected
+	// change.Source; resolveResumePosition doesn't verify those.
+	var addr string
+	if r.source.config != nil {
+		addr = r.source.config.Addr
+	}
+	posPayload, err := encodeSyncPosition(pos, r.sourceUUID, addr)
+	if err != nil {
+		return err
+	}
 	return r.checkpointTbl().Write(ctx, checkpoint.Record{
 		CopierWatermark: watermark,
-		Position:        pos,
+		Position:        posPayload,
 	})
 }
 
