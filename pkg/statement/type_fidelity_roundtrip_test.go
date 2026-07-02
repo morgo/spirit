@@ -99,3 +99,73 @@ func TestRoundTrip_PartitionMaxValue(t *testing.T) {
 		require.NotEmpty(t, stmts, "MAXVALUE must differ from a finite bound")
 	})
 }
+
+// TestRoundTrip_ExpressionDefaultLiteralCase verifies that string literals
+// inside an expression DEFAULT keep their case through parse -> diff ->
+// emission. Before the fix, parseExpression lowercased the whole Restored
+// expression, so MySQL's canonical DEFAULT (concat(_utf8mb4'A',_utf8mb4'B'))
+// round-tripped to concat('a','b') — emission produced a different default
+// value, and two defaults differing only in literal case compared equal.
+func TestRoundTrip_ExpressionDefaultLiteralCase(t *testing.T) {
+	db := openScratch(t)
+
+	t.Run("literal_case_preserved_through_emission", func(t *testing.T) {
+		// Obtain the server's real canonical form: MySQL lowercases the
+		// function name and adds charset introducers, but preserves the
+		// literal case ('A' stays 'A').
+		_, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_exprdef")
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(),
+			"CREATE TABLE tf_exprdef (id INT NOT NULL PRIMARY KEY, c VARCHAR(50) DEFAULT (CONCAT('A','B')))")
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = db.ExecContext(t.Context(), "DROP TABLE IF EXISTS tf_exprdef") })
+		canonical := showCreate(t, db, "tf_exprdef")
+		require.Contains(t, canonical, "'A'", "sanity: MySQL's canonical form keeps literal case")
+
+		// Parsing the canonical form must preserve the literal case (with the
+		// function name in MySQL's canonical lowercase).
+		parsed, err := ParseCreateTable(canonical)
+		require.NoError(t, err)
+		col := parsed.Columns.ByName("c")
+		require.NotNil(t, col)
+		require.NotNil(t, col.Default)
+		require.Equal(t, "concat('A', 'B')", *col.Default)
+
+		// ...and so must the emitted ALTER: re-create the column on a bare
+		// table using the canonical form as the target, then check that MySQL
+		// stored the uppercase literals.
+		afterCreate := applyAndConverge(t, db, "tf_exprdef",
+			"CREATE TABLE tf_exprdef (id INT NOT NULL PRIMARY KEY)", canonical)
+		require.Contains(t, afterCreate, "'A'", "literal case must survive emission")
+		require.NotContains(t, afterCreate, "'a'", "literals must not be lowercased")
+	})
+
+	t.Run("literal_case_only_difference_is_detected", func(t *testing.T) {
+		upper, err := ParseCreateTable(
+			"CREATE TABLE tf_exprdef (id INT NOT NULL PRIMARY KEY, c VARCHAR(50) DEFAULT (concat('A')))")
+		require.NoError(t, err)
+		lower, err := ParseCreateTable(
+			"CREATE TABLE tf_exprdef (id INT NOT NULL PRIMARY KEY, c VARCHAR(50) DEFAULT (concat('a')))")
+		require.NoError(t, err)
+
+		stmts, err := upper.Diff(lower, nil)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1, "defaults differing only in literal case are different defaults")
+		require.Contains(t, stmts[0].Statement, "concat('a')")
+	})
+
+	t.Run("function_name_case_still_compares_equal", func(t *testing.T) {
+		// MySQL canonicalizes function names to lowercase, so a user-written
+		// uppercase CONCAT must compare equal to the canonical concat.
+		upper, err := ParseCreateTable(
+			"CREATE TABLE tf_exprdef (id INT NOT NULL PRIMARY KEY, c VARCHAR(50) DEFAULT (CONCAT('A')))")
+		require.NoError(t, err)
+		lower, err := ParseCreateTable(
+			"CREATE TABLE tf_exprdef (id INT NOT NULL PRIMARY KEY, c VARCHAR(50) DEFAULT (concat('A')))")
+		require.NoError(t, err)
+
+		stmts, err := upper.Diff(lower, nil)
+		require.NoError(t, err)
+		require.Nil(t, stmts, "function-name case must not produce a diff; got: %+v", stmts)
+	})
+}

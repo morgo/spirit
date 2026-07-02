@@ -1321,8 +1321,18 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 	case *ast.FuncCallExpr:
 		// Handle function calls like CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(3), UUID(), etc.
 		// We use Restore to preserve function arguments (e.g. precision in CURRENT_TIMESTAMP(3)).
+		// RestoreKeyWordLowercase renders the function name and any keywords
+		// inside its arguments in lowercase — matching MySQL's canonical
+		// SHOW CREATE TABLE form (e.g. DEFAULT (concat(...))) so that
+		// function-name case never causes a spurious diff — while leaving
+		// string-literal arguments byte-exact. The previous strings.ToLower
+		// over the whole Restored text corrupted literal case:
+		// DEFAULT (concat('A')) round-tripped to concat('a'), emitting a
+		// different default value and making defaults that differ only in
+		// literal case compare equal.
 		var sb strings.Builder
-		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
+		rCtx := format.NewRestoreCtx(format.RestoreStringSingleQuotes|format.RestoreKeyWordLowercase|
+			format.RestoreNameBackQuotes|format.RestoreStringWithoutCharset, &sb)
 		if err := e.Restore(rCtx); err != nil {
 			return e.FnName.L // fallback to function name on error
 		}
@@ -1337,7 +1347,7 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 		if isTimestampFunc && len(e.Args) == 0 && strings.HasSuffix(restored, "()") {
 			restored = strings.TrimSuffix(restored, "()")
 		}
-		return strings.ToLower(restored)
+		return restored
 	default:
 		// For other types, fall back to text representation
 		var sb strings.Builder
