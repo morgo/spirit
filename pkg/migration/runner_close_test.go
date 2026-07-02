@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/status"
 	"github.com/stretchr/testify/require"
 )
@@ -28,14 +29,14 @@ func TestFatalErrorIsIdempotent(t *testing.T) {
 		cancelFunc: func() { cancelCalls.Add(1) },
 	}
 
-	require.True(t, r.fatalError(), "first call must return true")
+	require.True(t, r.fatalError(change.FatalReasonSchemaChange), "first call must return true")
 	require.Equal(t, int32(1), cancelCalls.Load(), "first call must cancel once")
 	require.Equal(t, status.ErrCleanup, r.status.Get(), "status must transition to ErrCleanup")
 
 	// Subsequent calls: status (ErrCleanup) > CutOver, so the early
 	// return kicks in. cancel must not be re-invoked.
-	require.False(t, r.fatalError(), "subsequent call returns false via the past-cutover guard")
-	require.False(t, r.fatalError(), "and again")
+	require.False(t, r.fatalError(change.FatalReasonSchemaChange), "subsequent call returns false via the past-cutover guard")
+	require.False(t, r.fatalError(change.FatalReasonStreamError), "and again, regardless of reason")
 	require.Equal(t, int32(1), cancelCalls.Load(), "cancel must not be re-invoked")
 }
 
@@ -56,7 +57,7 @@ func TestFatalErrorConcurrentRace(t *testing.T) {
 	for range goroutines {
 		done.Go(func() {
 			<-start
-			r.fatalError()
+			r.fatalError(change.FatalReasonSchemaChange)
 		})
 	}
 	close(start)
@@ -78,7 +79,7 @@ func TestFatalErrorPastCutoverIsNoop(t *testing.T) {
 	}
 	r.status.Set(status.CutOver)
 
-	require.False(t, r.fatalError(), "fatalError at/past cutover must return false")
+	require.False(t, r.fatalError(change.FatalReasonSchemaChange), "fatalError at/past cutover must return false")
 	require.Equal(t, int32(0), cancelCalls.Load(), "must not cancel at/past cutover")
 	require.Equal(t, status.CutOver, r.status.Get(), "status must not transition")
 }
@@ -92,6 +93,44 @@ func TestFatalErrorSafeWithoutCancelFunc(t *testing.T) {
 		// cancelFunc intentionally nil
 	}
 	require.NotPanics(t, func() {
-		require.True(t, r.fatalError())
+		require.True(t, r.fatalError(change.FatalReasonStreamError))
+	})
+}
+
+// TestFatalErrorReasonCheckpointHandling pins the cause-aware checkpoint
+// policy: a schema-change fatal (foreign DDL on a subscribed table) must DROP
+// the checkpoint table — resuming against a changed table definition could
+// corrupt data — while a stream-error fatal (binlog reader gave up after its
+// recreate attempts) must PRESERVE it, because a dead stream is exactly the
+// failure that checkpoint resume recovers from: replaying the binlog from the
+// persisted position. Previously both causes dropped the checkpoint, so a
+// ~4-minute binlog-stream outage forced a full restart of the copy.
+func TestFatalErrorReasonCheckpointHandling(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SchemaChangeDropsCheckpoint", func(t *testing.T) {
+		t.Parallel()
+		r := setupRunnerForChecksumTest(t, "fatal_reason_ddl")
+		var cancelCalls atomic.Int32
+		r.cancelFunc = func() { cancelCalls.Add(1) }
+
+		require.True(t, r.fatalError(change.FatalReasonSchemaChange))
+		require.Equal(t, status.ErrCleanup, r.status.Get())
+		require.Equal(t, int32(1), cancelCalls.Load(), "must cancel the migration")
+		require.False(t, checkpointTableExists(t, r),
+			"a schema-change fatal must invalidate (drop) the checkpoint table")
+	})
+
+	t.Run("StreamErrorPreservesCheckpoint", func(t *testing.T) {
+		t.Parallel()
+		r := setupRunnerForChecksumTest(t, "fatal_reason_stream")
+		var cancelCalls atomic.Int32
+		r.cancelFunc = func() { cancelCalls.Add(1) }
+
+		require.True(t, r.fatalError(change.FatalReasonStreamError))
+		require.Equal(t, status.ErrCleanup, r.status.Get())
+		require.Equal(t, int32(1), cancelCalls.Load(), "must still cancel the migration")
+		require.True(t, checkpointTableExists(t, r),
+			"a stream-error fatal must preserve the checkpoint table so the migration can resume")
 	})
 }

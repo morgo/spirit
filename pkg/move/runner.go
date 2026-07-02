@@ -957,8 +957,9 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 }
 
 // fatalError is the callback provided to the replication client.
-// It is called when a DDL change is detected on a subscribed table,
-// or when a fatal stream error occurs. The replication client may perform
+// It is called when a DDL change is detected on a subscribed table
+// (change.FatalReasonSchemaChange), or when a fatal stream error occurs
+// (change.FatalReasonStreamError). The replication client may perform
 // its own logging either before or after invoking this callback, and DDL
 // logging may be skipped entirely if this callback returns false.
 //
@@ -968,29 +969,46 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 // terminated and cleaned up), and false when the error should not be treated
 // as fatal (in which case the client may continue without logging the DDL).
 //
+// The reason decides what happens to the checkpoint: a schema change
+// invalidates it (resuming against a changed table definition could corrupt
+// data), while a stream error preserves it — a dead binlog stream is exactly
+// the failure checkpoint resume exists to recover from, so a re-run picks up
+// the copy and replays the change stream from the checkpointed positions.
+//
 // fatalError is safe to call concurrently — every source's repl client is
 // wired to this same callback, so a burst of fatal events from multiple
 // binlog goroutines is realistic. fatalOnce makes the invalidate-and-cancel
 // side effects idempotent and prevents racing with Close() teardown of
 // r.checkpointTable / r.targets / r.cancelFunc.
-func (r *Runner) fatalError() bool {
+func (r *Runner) fatalError(reason change.FatalReason) bool {
 	if r.status.Get() >= status.CutOver {
 		return false
 	}
 	r.fatalOnce.Do(func() {
 		r.status.Set(status.ErrCleanup)
-		// Invalidate the checkpoint, so we don't try to resume.
-		// If we don't do this, the move will permanently be blocked from proceeding.
-		// Letting it start again is the better choice.
-		// Use a background context since the move context may already be
-		// cancelled. checkpointTable can still be nil if fatalError fires
-		// during early setup, before createCheckpointTable runs — skip the
-		// drop in that case.
-		if r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
-			if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n", r.checkpointTable.TableName); err != nil {
-				r.logger.Error("could not remove checkpoint",
-					"error", err,
-				)
+		switch reason { //nolint: exhaustive // schema change intentionally handled by default: drop is the safe fallback for unknown reasons
+		case change.FatalReasonStreamError:
+			// The stream died but the source tables are not known to have
+			// changed, so the checkpoint remains valid. Keep it and tell the
+			// operator how to recover.
+			r.logger.Error("fatal replication stream error; the checkpoint has been preserved — re-run spirit to resume the move from it")
+		default:
+			// Schema change — and, defensively, any future reason we don't
+			// recognize (invalidating is the safe default: it costs a restart,
+			// while wrongly resuming could corrupt data).
+			// Invalidate the checkpoint, so we don't try to resume.
+			// If we don't do this, the move will permanently be blocked from proceeding.
+			// Letting it start again is the better choice.
+			// Use a background context since the move context may already be
+			// cancelled. checkpointTable can still be nil if fatalError fires
+			// during early setup, before createCheckpointTable runs — skip the
+			// drop in that case.
+			if r.checkpointTable != nil && len(r.targets) > 0 && r.targets[0].DB != nil {
+				if err := dbconn.Exec(context.Background(), r.targets[0].DB, "DROP TABLE IF EXISTS %n", r.checkpointTable.TableName); err != nil {
+					r.logger.Error("could not remove checkpoint",
+						"error", err,
+					)
+				}
 			}
 		}
 		// cancelFunc can be nil during early setup or in test paths that
