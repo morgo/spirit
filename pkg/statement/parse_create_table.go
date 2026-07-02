@@ -484,6 +484,28 @@ func (ct *CreateTable) autoNameIndexes() {
 		}
 	}
 
+	// Inline column-level UNIQUEs claim their server-assigned names BEFORE any
+	// unnamed table-level index is auto-named: the server names indexes in
+	// declaration order and column definitions normally precede table-level
+	// keys, so in `c int UNIQUE, KEY (c, d)` the unique index gets `c` and the
+	// unnamed key is pushed to `c_2`. The names are only reserved here — not
+	// materialized into ct.Indexes — so the inline declaration stays
+	// column-level state (Column.Unique) everywhere else. effectiveIndexes
+	// recomputes the same names at diff time; keep the two in sync.
+	for _, col := range ct.Columns {
+		if !col.Unique {
+			continue
+		}
+		name := col.Name
+		for suffix := 2; ; suffix++ {
+			if _, taken := usedNames[name]; !taken {
+				break
+			}
+			name = fmt.Sprintf("%s_%d", col.Name, suffix)
+		}
+		usedNames[name] = 0
+	}
+
 	for i := range ct.Indexes {
 		idx := &ct.Indexes[i]
 		if idx.Name != "" || idx.Type == "PRIMARY KEY" {

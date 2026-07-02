@@ -194,6 +194,108 @@ func TestFixCorrupt(t *testing.T) {
 	require.Equal(t, uint64(0), singleChecker.differencesFound.Load())
 }
 
+// TestRetryDoesNotVacuouslyPass is a regression test for the retry loop in
+// Run. A failed attempt leaves isInvalid=true (set by the errgroup workers),
+// and the retry reset previously did not clear it. Because isHealthy()
+// returns false while isInvalid is set, the next attempt dispatched zero
+// chunks and completed with differencesFound==0 — logging "checksum passed"
+// and returning nil without having verified a single row. With
+// FixDifferences=false a persistent mismatch must fail every attempt and
+// surface an error, never nil.
+func TestRetryDoesNotVacuouslyPass(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS retrypoison_t1, _retrypoison_t1_new, _retrypoison_t1_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE retrypoison_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _retrypoison_t1_new (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _retrypoison_t1_chkpnt (a INT)") // for binlog advancement
+	testutils.RunSQL(t, "INSERT INTO retrypoison_t1 VALUES (1, 2, 3)")
+	testutils.RunSQL(t, "INSERT INTO _retrypoison_t1_new VALUES (1, 2, 3)")
+	testutils.RunSQL(t, "INSERT INTO _retrypoison_t1_new VALUES (2, 2, 3)") // corrupt: row not in source
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "retrypoison_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_retrypoison_t1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.FixDifferences = false // surface the mismatch as an error on every attempt
+	config.MaxRetries = 2
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+
+	err = checker.Run(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "checksum errored on every attempt")
+	require.ErrorContains(t, err, "checksum mismatch")
+
+	// The final attempt must have actually re-verified chunks: its counter
+	// was reset at the start of the attempt, so a non-zero value proves the
+	// mismatch was re-detected rather than skipped.
+	singleChecker, ok := checker.(*SingleChecker)
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	require.Positive(t, singleChecker.differencesFound.Load())
+}
+
+// TestRunResetsPriorInvalidState covers the cross-Run leak of isInvalid: a
+// prior Run that errored WITHOUT recording differences (e.g. a transient
+// connection failure) leaves isInvalid=true and differencesFound==0. A
+// subsequent Run on the same checker must start healthy — without the reset
+// at the top of Run, attempt 1 skipped every chunk (isHealthy()==false), saw
+// differencesFound==0, and returned nil having verified zero rows. Run must
+// instead do real work: the chunker ends fully read with rows checked.
+func TestRunResetsPriorInvalidState(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS runpoison_t1, _runpoison_t1_new, _runpoison_t1_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE runpoison_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _runpoison_t1_new (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _runpoison_t1_chkpnt (a INT)") // for binlog advancement
+	testutils.RunSQL(t, "INSERT INTO runpoison_t1 VALUES (1, 2, 3), (2, 2, 3)")
+	testutils.RunSQL(t, "INSERT INTO _runpoison_t1_new VALUES (1, 2, 3), (2, 2, 3)")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "runpoison_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_runpoison_t1_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, NewCheckerDefaultConfig())
+	require.NoError(t, err)
+	singleChecker, ok := checker.(*SingleChecker)
+	require.True(t, ok, "checker is not of type *SingleChecker")
+	// Simulate the state left by a prior errored Run that found no differences.
+	singleChecker.setInvalid(true)
+
+	// The data is identical, so the pass must succeed — with real work done.
+	require.NoError(t, checker.Run(t.Context()))
+	require.True(t, chunker.IsRead(), "the chunker must be fully read; a vacuous pass reads no chunks")
+	require.Positive(t, checker.GetProgress().RowsChecked, "rows must actually be verified")
+}
+
 func TestCorruptChecksum(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS chkpcorruptt1, _chkpcorruptt1_new, _chkpcorruptt1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE chkpcorruptt1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
