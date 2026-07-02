@@ -395,7 +395,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// Check if the checkpoint is too old to safely resume — replaying many
 	// days of binary logs can be slower than re-copying, and the binlogs may
 	// have been purged anyway. This must happen before any destructive step
-	// (deleteAboveWatermark below modifies the targets). Unlike migrate,
+	// (deleteRecopyRange below modifies the targets). Unlike migrate,
 	// move cannot silently fall back to a fresh copy: the target tables are
 	// non-empty (that is exactly why setup() chose the resume path), so we
 	// fail loudly and leave the decision to the operator.
@@ -409,7 +409,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	}
 
 	// With multiple sources, a persisted checksum watermark cannot be trusted.
-	// deleteAboveWatermark (below) runs every (source, table) DELETE against
+	// deleteRecopyRange (below) runs every (source, table) DELETE against
 	// every target, and same-named tables from different sources interleave in
 	// the target tables — so one source's DELETE also removes OTHER sources'
 	// rows below their own watermarks. Those rows are not recopied (each
@@ -424,7 +424,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// checksum watermark can have been deleted without being recopied.
 	if len(r.sources) > 1 && r.checksumWatermark != "" {
 		r.logger.Info("discarding persisted checksum watermark: multi-source resume requires a full checksum pass",
-			"reason", "deleteAboveWatermark may remove rows below other sources' watermarks; only a from-scratch checksum re-verifies and repairs them",
+			"reason", "deleteRecopyRange may remove rows below other sources' watermarks; only a from-scratch checksum re-verifies and repairs them",
 			"sources", len(r.sources))
 		r.checksumWatermark = ""
 	}
@@ -451,8 +451,8 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	// max value. Instead, we guarantee no rows exist at/above the copier's
 	// resume position: the copier re-copies the deleted range from the
 	// current source snapshot (so rows deleted on the source stay gone), and
-	// the checksum will verify. See deleteAboveWatermark for the races.
-	if err := r.deleteAboveWatermark(ctx, copierWatermark); err != nil {
+	// the checksum will verify. See deleteRecopyRange for the races.
+	if err := r.deleteRecopyRange(ctx, copierWatermark); err != nil {
 		return err
 	}
 
@@ -1634,7 +1634,7 @@ func (r *Runner) flushAllReplClients(ctx context.Context) error {
 	return nil
 }
 
-// deleteAboveWatermark deletes rows at or above the copier's resume position
+// deleteRecopyRange deletes rows at or above the copier's resume position
 // — the watermark chunk's LOWER bound — from all target tables. The deleted
 // range deliberately coincides with the range the resumed copier re-copies
 // (the chunkers restart from the watermark chunk's lower bound, inclusive),
@@ -1666,7 +1666,7 @@ func (r *Runner) flushAllReplClients(ctx context.Context) error {
 // Deleting already-copied rows inside the watermark chunk is safe — the
 // copier re-copies that range from the current source snapshot before the
 // checksum and cutover, and binlog replay converges concurrent changes.
-func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark string) error {
+func (r *Runner) deleteRecopyRange(ctx context.Context, copierWatermark string) error {
 	// The checkpoint watermark format depends on how many chunkers the copy
 	// chunker wraps: a single (source, table) pair stores that chunker's own
 	// watermark (raw chunk JSON for auto-inc PKs, or the composite chunker's
@@ -1711,7 +1711,7 @@ func (r *Runner) deleteAboveWatermark(ctx context.Context, copierWatermark strin
 				src.QuotedTableName, recopyClause)
 			result, err := target.DB.ExecContext(ctx, deleteStmt)
 			if err != nil {
-				return fmt.Errorf("failed to delete above watermark on target %d table %s: %w", i, src.TableName, err)
+				return fmt.Errorf("failed to delete the recopy range on target %d table %s: %w", i, src.TableName, err)
 			}
 			rowsDeleted, _ := result.RowsAffected()
 			if rowsDeleted > 0 {

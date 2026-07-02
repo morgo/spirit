@@ -400,7 +400,7 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestMoveResumeDeletesAboveWatermark verifies that when a move operation
+// TestMoveResumeDeletesRecopyRange verifies that when a move operation
 // resumes from a checkpoint, the target tables are pruned of every row at or
 // above the watermark chunk's LOWER bound — the copier's resume position —
 // not just of rows above the chunk's upper bound. The delete range must
@@ -410,7 +410,7 @@ func TestMoveFailsGracefullyWithMinimalRBR(t *testing.T) {
 // source snapshot, which no longer has it, and the keyAboveWatermark
 // optimization can discard its replayed binlog DELETE because the key is
 // above the post-crash source max) and be resurrected at cutover.
-func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
+func TestMoveResumeDeletesRecopyRange(t *testing.T) {
 	srcDB := "source_resume_wm"
 	dstDB := "dest_resume_wm"
 	sourceDSN := testutils.DSNForDatabase(srcDB)
@@ -488,8 +488,11 @@ func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
 		dstDB, inChunkID, aboveChunkID))
 
 	// Resume. setup() finds the checkpoint and takes the resume path, which
-	// runs deleteAboveWatermark before opening the chunker at the watermark.
+	// runs deleteRecopyRange before opening the chunker at the watermark.
+	// Defer the teardown immediately so a failing assertion below cannot
+	// leak the runner's repl clients and DB connections into later tests.
 	r, ctx := buildTestRunner(t, move)
+	defer closeTestRunner(t, r)
 	require.NoError(t, r.setup(ctx))
 	require.True(t, r.usedResumeFromCheckpoint)
 
@@ -515,8 +518,6 @@ func TestMoveResumeDeletesAboveWatermark(t *testing.T) {
 	require.NoError(t, targetDB.QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM t1 WHERE id IN (?, ?)", inChunkID, aboveChunkID).Scan(&count))
 	require.Zero(t, count, "rows deleted on the source must not be resurrected by the resume")
-
-	closeTestRunner(t, r)
 }
 
 // TestMoveForceWipesUnresumableTarget verifies --force recovery: when the target
@@ -735,9 +736,14 @@ func buildTestRunner(t *testing.T, move *Move) (*Runner, context.Context) {
 }
 
 // closeTestRunner tears down a runner built by buildTestRunner without
-// cutover. Runner.Close() cancels the context (idempotent) and shuts down
-// repl clients/chunkers and closes the targets, so call it first; it does
-// not close the sources, so close the source DBs afterwards.
+// cutover. Callers must `defer` it immediately after buildTestRunner returns,
+// so that a failing require mid-test (FailNow -> Goexit) still releases the
+// runner's repl clients and DB connections instead of leaking them into later
+// tests; the defer is the only close on every path, so it runs exactly once
+// per runner. Runner.Close() cancels the context (idempotent), shuts down
+// repl clients/chunkers and closes the targets — it is nil-guarded, so it is
+// safe even when setup() failed partway. It does not close the sources, so
+// close the source DBs afterwards.
 func closeTestRunner(t *testing.T, r *Runner) {
 	require.NoError(t, r.Close())
 	for i := range r.sources {
@@ -752,21 +758,21 @@ func closeTestRunner(t *testing.T, r *Runner) {
 // This mirrors the first phase of TestResumeFromCheckpointE2E.
 func checkpointAndStop(t *testing.T, move *Move) {
 	r, ctx := buildTestRunner(t, move)
+	defer closeTestRunner(t, r)
 	require.NoError(t, r.setup(ctx))
 
 	// Copy all rows, then write a checkpoint.
 	require.NoError(t, r.copier.Run(ctx))
 	require.NoError(t, r.DumpCheckpoint(ctx))
-
-	closeTestRunner(t, r)
 }
 
 // TestResumeFromCheckpointMultiTableE2E covers resume-from-checkpoint for a
 // move with more than one table (the default TestBasicMove shape). With two
 // or more (source, table) chunkers, the checkpoint's copier watermark is the
 // multi-chunker's JSON map keyed by table.QualifiedName(), not raw chunk
-// JSON. Before the fix, deleteAboveWatermark fed the whole map to
-// WatermarkAboveClause, which decoded it as a zero-value chunk and produced
+// JSON. Before the fix, the resume delete (now deleteRecopyRange) fed the
+// whole map to the watermark clause parser (now WatermarkRecopyClause), which
+// decoded it as a zero-value chunk and produced
 // "DELETE FROM t WHERE ()" — MySQL syntax error 1064 — so every resume
 // attempt failed with "resume validation passed but checkpoint resume
 // failed" and the move could never recover from its checkpoint.
@@ -839,9 +845,10 @@ func TestResumeFromCheckpointMultiTableE2E(t *testing.T) {
 // single-table move whose PK is not auto-increment (here: VARCHAR), which
 // selects the composite chunker. The composite chunker's watermark is an
 // envelope {"ChunkJSON": "...", "RowsCopied": N}, not raw chunk JSON. Before
-// the fix, deleteAboveWatermark fed the envelope to WatermarkAboveClause,
-// which decoded it as a zero-value chunk and produced "DELETE FROM t WHERE
-// ()" (MySQL error 1064) on every resume attempt.
+// the fix, the resume delete (now deleteRecopyRange) fed the envelope to the
+// watermark clause parser (now WatermarkRecopyClause), which decoded it as a
+// zero-value chunk and produced "DELETE FROM t WHERE ()" (MySQL error 1064)
+// on every resume attempt.
 func TestResumeFromCheckpointCompositePKE2E(t *testing.T) {
 	srcDB := "source_resume_comp"
 	dstDB := "dest_resume_comp"
@@ -920,7 +927,7 @@ func watermarkChunkJSON(lower, upper int) string {
 // TestMultiSourceResumeFromCheckpointE2E covers resume-from-checkpoint for a
 // multi-source (N:1) move where both sources share the same table name and
 // their primary keys interleave in the target table. On resume,
-// deleteAboveWatermark runs every (source, table) pair's DELETE against every
+// deleteRecopyRange runs every (source, table) pair's DELETE against every
 // target, so one source's DELETE can remove the other source's already-copied
 // rows below its own watermark; the full initial checksum pass must repair
 // them before cutover (the persisted-checksum-watermark half of that bug is
@@ -990,8 +997,8 @@ func TestMultiSourceResumeFromCheckpointE2E(t *testing.T) {
 // checksum watermark must be DISCARDED when resuming a move with more than
 // one source.
 //
-// The hole: on resume, deleteAboveWatermark runs each (source, table) pair's
-// "DELETE ... WHERE id > <that source's watermark upper bound>" on every
+// The hole: on resume, deleteRecopyRange runs each (source, table) pair's
+// "DELETE ... WHERE id >= <that source's watermark lower bound>" on every
 // target. Same-named tables from different sources interleave in the target
 // table, so the source with the LOWER watermark deletes the other source's
 // rows between the two watermarks — rows the other source's chunker (which
@@ -1001,13 +1008,13 @@ func TestMultiSourceResumeFromCheckpointE2E(t *testing.T) {
 // move cuts over with rows silently missing.
 //
 // The test crafts the checkpoint row into the worst case: skewed copier
-// watermarks (source A resumes at id 100 / deletes above 151, source B
-// resumes at id 31 / deletes above 51) and a checksum watermark above every
-// row — exactly what a checkpoint dumped during the sentinel wait persists
-// after a clean initial checksum pass. Without the fix the move completes
-// with source A's odd ids 53..99 missing from the target; with the fix the
-// watermark is discarded, the full checksum pass repairs the hole, and every
-// row is present.
+// watermarks (source A resumes at id 100 and deletes at/above it, source B
+// resumes at id 31 and deletes at/above it) and a checksum watermark above
+// every row — exactly what a checkpoint dumped during the sentinel wait
+// persists after a clean initial checksum pass. Without the fix the move
+// completes with source A's odd ids 31..99 missing from the target; with the
+// fix the watermark is discarded, the full checksum pass repairs the hole,
+// and every row is present.
 func TestMultiSourceResumeDiscardsChecksumWatermark(t *testing.T) {
 	srcAName, _ := testutils.CreateUniqueTestDatabase(t)
 	srcBName, _ := testutils.CreateUniqueTestDatabase(t)
@@ -1075,7 +1082,8 @@ func TestMultiSourceResumeDiscardsChecksumWatermark(t *testing.T) {
 	require.NoError(t, r.Close())
 
 	// All 200 rows must be present. Without the fix, source A's odd ids
-	// 53..99 (24 rows) are deleted by source B's DELETE and never restored.
+	// 31..99 (35 rows) are deleted by source B's DELETE (id >= 31) and never
+	// restored — source A's own chunker resumes at id 100.
 	var tgtOdd, tgtEven int
 	require.NoError(t, tgtDB.QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM users WHERE id % 2 = 1").Scan(&tgtOdd))
@@ -1088,10 +1096,10 @@ func TestMultiSourceResumeDiscardsChecksumWatermark(t *testing.T) {
 // TestSingleSourceResumeKeepsChecksumWatermark pins the other half of the
 // multi-source discard fix: a SINGLE-source resume must keep the persisted
 // checksum watermark. Resuming the checksum mid-way is safe there because
-// deletes are per-table and each table's delete range (above its watermark
-// upper bound) is a subset of the range its own chunker recopies (from the
-// watermark lower bound) — no other source's DELETE can remove rows below
-// this source's watermark.
+// deletes are per-table and each table's delete range coincides exactly with
+// the range its own chunker recopies (both start at the watermark chunk's
+// lower bound) — no other source's DELETE can remove rows below this
+// source's watermark.
 func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 	srcName, srcDB := testutils.CreateUniqueTestDatabase(t)
 	tgtName, tgtDB := testutils.CreateUniqueTestDatabase(t)
@@ -1145,7 +1153,7 @@ func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 	require.Equal(t, srcCount, tgtCount)
 }
 
-// TestDeleteAboveWatermarkFormats exercises deleteAboveWatermark directly
+// TestDeleteRecopyRangeFormats exercises deleteRecopyRange directly
 // against real target tables, with each watermark format a checkpoint can
 // contain: the multi-chunker map (including a table with no entry), the
 // composite chunker envelope, and the raw single-chunk JSON written by
@@ -1153,7 +1161,7 @@ func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 // format the delete must start at the watermark chunk's LOWER bound
 // (inclusive) — the copier's resume position — so that the deleted range
 // coincides with the range the resumed copy re-copies.
-func TestDeleteAboveWatermarkFormats(t *testing.T) {
+func TestDeleteRecopyRangeFormats(t *testing.T) {
 	srcDB := "source_delwm"
 	dstDB := "dest_delwm"
 	sourceDSN := testutils.DSNForDatabase(srcDB)
@@ -1165,7 +1173,7 @@ func TestDeleteAboveWatermarkFormats(t *testing.T) {
 	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
 
 	// Schemas exist on both sides; rows only matter on the target, which is
-	// what deleteAboveWatermark prunes.
+	// what deleteRecopyRange prunes.
 	for _, db := range []string{srcDB, dstDB} {
 		testutils.RunSQL(t, "CREATE TABLE "+db+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, val VARCHAR(64))")
 		testutils.RunSQL(t, "CREATE TABLE "+db+".t2 (id VARCHAR(36) NOT NULL PRIMARY KEY, val VARCHAR(64))")
@@ -1211,7 +1219,7 @@ func TestDeleteAboveWatermarkFormats(t *testing.T) {
 	// because it restarts from scratch on resume.
 	multiWatermark, err := json.Marshal(map[string]string{t1.QualifiedName(): rawChunkLower3})
 	require.NoError(t, err)
-	require.NoError(t, newRunner(t1, t2).deleteAboveWatermark(ctx, string(multiWatermark)))
+	require.NoError(t, newRunner(t1, t2).deleteRecopyRange(ctx, string(multiWatermark)))
 
 	var count int
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
@@ -1224,7 +1232,7 @@ func TestDeleteAboveWatermarkFormats(t *testing.T) {
 	// must go.
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t2 (id, val) VALUES ('a','1'),('b','2'),('m','5'),('p','6'),('z','7')")
 	envelope := `{"ChunkJSON":"{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\":[\"c\"],\"Inclusive\":true},\"UpperBound\":{\"Value\":[\"m\"],\"Inclusive\":false}}","RowsCopied":3}`
-	require.NoError(t, newRunner(t2).deleteAboveWatermark(ctx, envelope))
+	require.NoError(t, newRunner(t2).deleteRecopyRange(ctx, envelope))
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t2").Scan(&count))
 	require.Equal(t, 2, count, "t2 must keep only ids below 'c'")
 
@@ -1232,12 +1240,12 @@ func TestDeleteAboveWatermarkFormats(t *testing.T) {
 	// with checkpoints written by the optimistic chunker.
 	testutils.RunSQL(t, "DELETE FROM "+dstDB+".t1")
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, val) VALUES (1,'a'),(4,'b'),(5,'c'),(6,'d'),(9,'e')")
-	require.NoError(t, newRunner(t1).deleteAboveWatermark(ctx, rawChunkLower3))
+	require.NoError(t, newRunner(t1).deleteRecopyRange(ctx, rawChunkLower3))
 	require.NoError(t, dstConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t1").Scan(&count))
 	require.Equal(t, 1, count, "t1 must keep only id 1")
 }
 
-// TestDeleteAboveWatermarkRemovesRowsDeletedOnSource is a regression test for
+// TestDeleteRecopyRangeRemovesRowsDeletedOnSource is a regression test for
 // resume resurrecting rows that were deleted on the source. Scenario: a row k
 // inside the watermark chunk [L, U) was copied to the target before the
 // crash, and its source DELETE committed in the unflushed window just before
@@ -1245,10 +1253,10 @@ func TestDeleteAboveWatermarkFormats(t *testing.T) {
 // (which reads the current source snapshot) never touches it, and the
 // keyAboveWatermark optimization can discard its replayed binlog DELETE (k
 // can be above the post-crash source max that seeds checkpointHighPtr).
-// The only thing that removes k is deleteAboveWatermark — which therefore
+// The only thing that removes k is deleteRecopyRange — which therefore
 // must delete from the watermark chunk's LOWER bound, not from above its
 // upper bound. Before the fix, k survived the delete and was resurrected.
-func TestDeleteAboveWatermarkRemovesRowsDeletedOnSource(t *testing.T) {
+func TestDeleteRecopyRangeRemovesRowsDeletedOnSource(t *testing.T) {
 	srcDB := "source_delwm_rez"
 	dstDB := "dest_delwm_rez"
 	sourceDSN := testutils.DSNForDatabase(srcDB)
@@ -1294,7 +1302,7 @@ func TestDeleteAboveWatermarkRemovesRowsDeletedOnSource(t *testing.T) {
 	// Watermark chunk [3, 7): k=4 is strictly inside it. A delete of only
 	// `id > 7` (the old behavior) does not touch k.
 	watermark := `{"Key":["id"],"ChunkSize":1000,"LowerBound":{"Value":["3"],"Inclusive":true},"UpperBound":{"Value":["7"],"Inclusive":false}}`
-	require.NoError(t, r.deleteAboveWatermark(ctx, watermark))
+	require.NoError(t, r.deleteRecopyRange(ctx, watermark))
 
 	// k must be gone: it is inside the recopy range, so it must have been
 	// deleted along with everything else the copier is about to re-copy.

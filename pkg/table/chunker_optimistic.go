@@ -269,7 +269,7 @@ func (t *chunkerOptimistic) OpenAtWatermark(cp string) error {
 	// resume time. It does NOT cover keys deleted on the source in the
 	// unflushed window before the crash: those can sit above the post-crash
 	// source max, so their replayed DELETEs may still be discarded. The
-	// guarantee for them comes from move.Runner.deleteAboveWatermark, which
+	// guarantee for them comes from move.Runner.deleteRecopyRange, which
 	// deletes every target row at/above the watermark chunk's lower bound —
 	// exactly the range this chunker re-copies after restoring chunkPtr
 	// below — so a row that no longer exists on the source is removed from

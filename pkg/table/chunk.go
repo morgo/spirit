@@ -247,7 +247,7 @@ func newChunkFromJSON(ti *TableInfo, jsonStr string) (*Chunk, error) {
 // Inclusive flag — which is why the clause uses >= unconditionally.
 //
 // The move path deletes exactly this range from the target tables before
-// resuming (see move.Runner.deleteAboveWatermark). Because the deleted range
+// resuming (see move.Runner.deleteRecopyRange). Because the deleted range
 // coincides with the recopied range, a target row survives resume iff it is
 // below the resume position (already fully copied) or still exists on the
 // source to be re-copied. Deleting less — e.g. only rows strictly above the
