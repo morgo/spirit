@@ -11,13 +11,20 @@ import (
 
 const (
 	binlogTrivialThreshold = 10000
-	// DefaultBatchSize is the fixed number of rows in each batched REPLACE/
-	// DELETE statement that the binlog applier emits against the _new
-	// table. Larger is better, but we need to keep the run-time of the
-	// statement well below dbconn.maximumLockTime so that it doesn't
+	// DefaultBatchSize is the maximum number of rows in each batched
+	// REPLACE/DELETE statement that the binlog applier emits against the
+	// _new table. Larger is better, but we need to keep the run-time of
+	// the statement well below dbconn.maximumLockTime so that it doesn't
 	// prevent copy-row tasks from failing. On Aurora tables with
 	// out-of-cache workloads that copy ~300 rows per second this is close
 	// to the safe ceiling.
+	//
+	// Batches are additionally capped by their estimated rendered byte
+	// size (applier.MaxStatementSizeBytes, shared with the copy path's
+	// chunklet splitting) so that wide rows can't accumulate into a
+	// statement larger than max_allowed_packet. Whichever cap is reached
+	// first cuts the batch; see flushMapLocked / flushQueueLocked in
+	// subscription_buffered.go.
 	//
 	// Was previously an initial value for an adaptive sizer (feedback()
 	// driven by p90 apply time). That mechanism was meaningful when the
