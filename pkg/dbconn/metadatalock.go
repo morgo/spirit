@@ -32,6 +32,8 @@ type MetadataLock struct {
 	// newDBConn optionally overrides how the dedicated pool is established.
 	// It is a test seam (set via an option func) so tests can simulate
 	// reconnection failures deterministically; production leaves it nil.
+	// NewMetadataLock enforces the dedicated-pool invariants on whatever
+	// the factory returns, so the seam cannot weaken the lock semantics.
 	newDBConn func() (*sql.DB, error)
 }
 
@@ -75,16 +77,31 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	// 1-minute refresh that holds for any sane wait_timeout (e.g. the 10
 	// minutes we configure). If the keepalive ever fails, the ticker tears
 	// the connection down and re-establishes it.
+	//
+	// The pool is opened by dial (which the test seam can substitute), but
+	// the invariants are enforced here regardless of which factory ran:
+	// GET_LOCK is session scoped, so the pool must serve exactly one
+	// connection and must never recycle it client-side.
+	dial := func() (*sql.DB, error) {
+		return New(dsn, &dbConfig)
+	}
+	if mdl.newDBConn != nil {
+		dial = mdl.newDBConn // test seam, see MetadataLock.newDBConn
+	}
 	newConnection := func() (*sql.DB, error) {
-		db, err := New(dsn, &dbConfig)
+		db, err := dial()
 		if err != nil {
 			return nil, err
 		}
+		if db == nil {
+			// A (nil, nil) return from a misbehaving factory would otherwise
+			// reintroduce the nil-pool dereference the refresh loop guards
+			// against; surface it as a connection failure instead.
+			return nil, errors.New("connection factory returned a nil database")
+		}
+		db.SetMaxOpenConns(1)
 		db.SetConnMaxLifetime(0) // see comment above; keepalive is the refresh ticker
 		return db, nil
-	}
-	if mdl.newDBConn != nil {
-		newConnection = mdl.newDBConn // test seam, see MetadataLock.newDBConn
 	}
 	var err error
 	mdl.db, err = newConnection()
@@ -148,10 +165,12 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 					// and we can try again on the next tick interval.
 					logger.Warn("could not refresh metadata locks", "error", err)
 
-					// try to close the existing connection before replacing it
+					// close the existing connection before replacing it. Even
+					// when Close() returns an error the pool is already marked
+					// as closed and unusable, so don't keep it: log, abandon
+					// it, and proceed straight to reconnection below.
 					if closeErr := mdl.db.Close(); closeErr != nil {
 						logger.Warn("could not close database connection", "error", closeErr)
-						continue
 					}
 				}
 

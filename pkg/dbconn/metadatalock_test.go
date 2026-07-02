@@ -375,12 +375,10 @@ func failableConnFactory(refresh time.Duration) (option func(*MetadataLock), fai
 				failedAttempts.Add(1)
 				return nil, errors.New("simulated connection failure")
 			}
-			db, err := New(testutils.DSN(), NewDBConfig())
-			if err != nil {
-				return nil, err
-			}
-			db.SetConnMaxLifetime(0) // match the production factory
-			return db, nil
+			// The dedicated-pool invariants (single connection, no
+			// client-side recycling) are enforced by NewMetadataLock's
+			// wrapper around this factory, so a plain New suffices here.
+			return New(testutils.DSN(), NewDBConfig())
 		}
 	}
 	return option, fail, failedAttempts
@@ -406,10 +404,11 @@ func TestMetadataLockRefreshSurvivesReconnectFailure(t *testing.T) {
 	closeMDL := closeOnce(mdl)
 	t.Cleanup(func() { _ = closeMDL() })
 
-	// Start the outage. Capture the pool before flipping the switch: the
-	// refresh goroutine only reassigns mdl.db after a refresh failure, and
-	// the atomic Store orders this read before any such write. Closing the
-	// pool makes the next refresh tick fail and enter the reconnect path.
+	// Start the outage. Reading mdl.db here is safe (not a data race): the
+	// refresh goroutine only reassigns it after a refresh failure, and the
+	// first failure is only induced below, by closing the pool. The fail
+	// switch is flipped before the Close so that when the failing tick
+	// fires, its reconnect attempt is already set up to be denied.
 	db := mdl.db
 	fail.Store(true)
 	require.NoError(t, db.Close())
@@ -455,8 +454,8 @@ func TestMetadataLockCloseDuringOutage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, mdl)
 
-	// Start the outage (see TestMetadataLockRefreshSurvivesReconnectFailure
-	// for why the pool is captured before the Store).
+	// Start the outage (see TestMetadataLockRefreshSurvivesReconnectFailure:
+	// reading mdl.db is safe until the first induced refresh failure below).
 	db := mdl.db
 	fail.Store(true)
 	require.NoError(t, db.Close())
