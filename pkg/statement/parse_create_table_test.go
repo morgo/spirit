@@ -146,6 +146,47 @@ func TestSchemaAnalyzer_ComplexConstraints(t *testing.T) {
 	require.Contains(t, *fkConstraint.Definition, "REFERENCES users")
 }
 
+// TestParseCheckConstraintEnforcement verifies that the [NOT] ENFORCED state
+// of CHECK constraints is captured at parse time, including MySQL's canonical
+// SHOW CREATE TABLE form which wraps NOT ENFORCED in a versioned comment:
+// CONSTRAINT `c1` CHECK ((`a` > 0)) /*!80016 NOT ENFORCED */.
+func TestParseCheckConstraintEnforcement(t *testing.T) {
+	// Real SHOW CREATE TABLE output from MySQL 8.0.
+	sql := "CREATE TABLE `t1` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `age` int DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`id`),\n" +
+		"  CONSTRAINT `chk_not_enforced` CHECK ((`age` >= 0)) /*!80016 NOT ENFORCED */,\n" +
+		"  CONSTRAINT `chk_enforced` CHECK ((`age` < 200))\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+
+	ct, err := ParseCreateTable(sql)
+	require.NoError(t, err)
+	require.Len(t, ct.Constraints, 2)
+
+	byName := map[string]*Constraint{}
+	for i := range ct.Constraints {
+		byName[ct.Constraints[i].Name] = &ct.Constraints[i]
+	}
+
+	require.True(t, byName["chk_not_enforced"].NotEnforced)
+	require.Contains(t, *byName["chk_not_enforced"].Definition, "NOT ENFORCED")
+	require.False(t, byName["chk_enforced"].NotEnforced)
+	require.NotContains(t, *byName["chk_enforced"].Definition, "NOT ENFORCED")
+
+	// User-written forms: explicit ENFORCED and the (default) absent keyword
+	// are the same state; explicit NOT ENFORCED is captured.
+	ct, err = ParseCreateTable("CREATE TABLE t1 (a int, " +
+		"CONSTRAINT c1 CHECK (a > 0) NOT ENFORCED, " +
+		"CONSTRAINT c2 CHECK (a < 5) ENFORCED, " +
+		"CONSTRAINT c3 CHECK (a <> 3))")
+	require.NoError(t, err)
+	require.Len(t, ct.Constraints, 3)
+	require.True(t, ct.Constraints[0].NotEnforced)
+	require.False(t, ct.Constraints[1].NotEnforced)
+	require.False(t, ct.Constraints[2].NotEnforced)
+}
+
 func TestSchemaAnalyzer_UnsignedSupport(t *testing.T) {
 	sql := `
 	CREATE TABLE test_unsigned (

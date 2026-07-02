@@ -300,14 +300,15 @@ Each `Constraint` represents CHECK or FOREIGN KEY constraints:
 
 ```go
 type Constraint struct {
-    Raw        *ast.Constraint      // Raw AST node from parser
-    Name       string
-    Type       string                // "CHECK", "FOREIGN KEY"
-    Columns    []string
-    Expression *string               // For CHECK constraints
-    References *ForeignKeyReference  // For FOREIGN KEY constraints
-    Definition *string               // Full constraint definition
-    Options    map[string]any        // Additional constraint options
+    Raw         *ast.Constraint      // Raw AST node from parser
+    Name        string
+    Type        string                // "CHECK", "FOREIGN KEY"
+    Columns     []string
+    Expression  *string               // For CHECK constraints
+    References  *ForeignKeyReference  // For FOREIGN KEY constraints
+    Definition  *string               // Full constraint definition
+    NotEnforced bool                  // For CHECK constraints: true when NOT ENFORCED
+    Options     map[string]any        // Additional constraint options
 }
 ```
 
