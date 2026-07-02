@@ -388,6 +388,10 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)
+			// Reset the invalid flag left set by the failed attempt: it makes
+			// isHealthy() false, which would skip every chunk and turn this
+			// retry into a vacuous pass.
+			c.setInvalid(false)
 		}
 
 		// If the parent context is already cancelled, retrying is pointless —
