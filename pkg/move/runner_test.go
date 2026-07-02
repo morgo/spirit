@@ -493,7 +493,8 @@ func TestMoveResumeDeletesRecopyRange(t *testing.T) {
 	// leak the runner's repl clients and DB connections into later tests.
 	r, ctx := buildTestRunner(t, move)
 	defer closeTestRunner(t, r)
-	require.NoError(t, r.setup(ctx))
+	require.NoError(t, r.setupDiscovery(ctx))
+	require.NoError(t, r.setupUnderLocks(ctx))
 	require.True(t, r.usedResumeFromCheckpoint)
 
 	// The target must hold no rows at/above the copier's resume position:
@@ -580,6 +581,73 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 	var stale int
 	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1 WHERE id = 999 OR name = 'stale'").Scan(&stale))
 	require.Zero(t, stale, "force must drop+recreate the target, not overlay the source onto stale rows")
+}
+
+// TestConcurrentMoveDoesNotWipeTarget is a regression test for the ordering of
+// Run(): the per-source metadata locks must be acquired before any setup step
+// that can modify the target. A second spirit invocation against the same
+// source (orchestrator retry, operator error) has to die on the lock while the
+// first run's target is still untouched. Before the reorder, the second run
+// executed all of setup first — under --force that wiped the first run's
+// target tables (and on the resume path deleted rows above the checkpointed
+// watermark) — and only then failed on the lock.
+func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
+	srcDB := "source_concurrent_lock"
+	dstDB := "dest_concurrent_lock"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (name) VALUES ('a'),('b'),('c')")
+
+	// The target already holds rows — conceptually the data a still-running
+	// move (run A) has copied so far. id 999 is outside the source's range so
+	// its survival proves the table was neither wiped nor overlaid.
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (999, 'precious')")
+
+	// Simulate run A holding the source metadata lock: acquire the same lock
+	// name Run() derives (schema + table) via dbconn.NewMetadataLock directly.
+	// This stands in for a real in-flight move without needing to pause one.
+	lockTables := []*table.TableInfo{{SchemaName: srcDB, TableName: "t1"}}
+	lock, err := dbconn.NewMetadataLock(t.Context(), sourceDSN, lockTables, dbconn.NewDBConfig(), slog.Default())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, lock.Close())
+	}()
+
+	// Run B: --force against the same source. The non-empty, unresumable
+	// target is exactly the state --force wipes — but B must fail on the
+	// metadata lock before it gets the chance.
+	move := &Move{
+		SourceDSN:       sourceDSN,
+		TargetDSN:       targetDSN,
+		TargetChunkTime: 100 * time.Millisecond,
+		Threads:         2,
+		WriteThreads:    2,
+		Force:           true,
+	}
+	err = move.Run()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to acquire metadata lock")
+
+	// The target must be untouched: the pre-existing row is intact and run B
+	// left no artifacts of a restarted copy (no checkpoint table).
+	targetDB, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	var name string
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT name FROM t1 WHERE id = 999").Scan(&name))
+	require.Equal(t, "precious", name, "a concurrent run must not modify the target before acquiring the lock")
+	var artifacts int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+		dstDB, checkpointTableName).Scan(&artifacts))
+	require.Zero(t, artifacts, "a concurrent run must not create a checkpoint table before acquiring the lock")
 }
 
 // TestMoveWithVarcharPK verifies a move on a table with a non-memory-comparable
@@ -759,7 +827,8 @@ func closeTestRunner(t *testing.T, r *Runner) {
 func checkpointAndStop(t *testing.T, move *Move) {
 	r, ctx := buildTestRunner(t, move)
 	defer closeTestRunner(t, r)
-	require.NoError(t, r.setup(ctx))
+	require.NoError(t, r.setupDiscovery(ctx))
+	require.NoError(t, r.setupUnderLocks(ctx))
 
 	// Copy all rows, then write a checkpoint.
 	require.NoError(t, r.copier.Run(ctx))
@@ -1351,7 +1420,7 @@ func varcharPKWriteOne(ctx context.Context, db *sql.DB, srcDB string) error {
 // whose created_at exceeds CheckpointMaxAge. Unlike the migrate equivalent
 // (TestResumeFromCheckpointTooOld in pkg/migration), the move cannot fall
 // back to a fresh copy — the target tables already contain rows, which is
-// the very reason setup() chose the resume path — so the move must fail
+// the very reason setupUnderLocks() chose the resume path — so the move must fail
 // loudly with status.ErrCheckpointTooOld and leave the next step to the
 // operator (raise --checkpoint-max-age, or wipe the targets and restart).
 func TestResumeFromCheckpointTooOld(t *testing.T) {

@@ -49,7 +49,7 @@ type gtidClient struct {
 
 	subs *subscriptionRegistry
 
-	callerCancelFunc func() bool
+	callerCancelFunc func(FatalReason) bool
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
 
@@ -283,6 +283,30 @@ func (c *gtidClient) StartFromPosition(ctx context.Context, pos string) error {
 	return c.Start(ctx)
 }
 
+// buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
+// out (mirroring binlogClient.buildSyncerConfig) so tests can assert the
+// decode options below stay in sync between the two clients.
+func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.BinlogSyncerConfig {
+	return replication.BinlogSyncerConfig{
+		ServerID: c.serverID,
+		Flavor:   "mysql",
+		Host:     host,
+		Port:     port,
+		User:     c.username,
+		Password: c.password,
+		Logger:   c.logger,
+		// Render JSON the same way the binlog client does — see the
+		// rationale on NewBinlogClient.
+		RenderJSONAsMySQLText: true,
+		// Decode TIMESTAMP values in UTC the same way the binlog client
+		// does — see the rationale on NewBinlogClient. Without this, the
+		// decoder uses the process's local timezone while the applier
+		// writes over time_zone='+00:00' connections, silently shifting
+		// stored TIMESTAMP values on any non-UTC host.
+		TimestampStringLocation: time.UTC,
+	}
+}
+
 // Start satisfies Source. On a fresh start it reads @@GLOBAL.gtid_executed
 // and begins streaming from there; on a resume (flushedGTID already
 // primed by StartFromPosition) it validates the position covers
@@ -299,18 +323,7 @@ func (c *gtidClient) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse port: %w", err)
 	}
-	c.cfg = replication.BinlogSyncerConfig{
-		ServerID: c.serverID,
-		Flavor:   "mysql",
-		Host:     host,
-		Port:     uint16(port),
-		User:     c.username,
-		Password: c.password,
-		Logger:   c.logger,
-		// Render JSON the same way the binlog client does — see the
-		// rationale on NewBinlogClient.
-		RenderJSONAsMySQLText: true,
-	}
+	c.cfg = c.buildSyncerConfig(host, uint16(port))
 	if c.dbConfig != nil {
 		tlsConfig, err := dbconn.GetTLSConfigForBinlog(c.dbConfig, host)
 		if err != nil {
@@ -451,7 +464,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 						"total_attempts", recreateAttempts,
 						"recent_errors", recentErrors,
 						"is_closed", c.isClosed.Load())
-					c.fatalError()
+					c.fatalError(FatalReasonStreamError)
 					return
 				}
 
@@ -515,7 +528,7 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		case *replication.RowsEvent:
 			if err = c.processRowsEvent(ev, event); err != nil {
 				c.logger.Error("fatal error processing GTID rows event", "error", err)
-				c.fatalError()
+				c.fatalError(FatalReasonStreamError)
 				return
 			}
 		case *replication.QueryEvent:
@@ -612,7 +625,7 @@ func (c *gtidClient) processDDLNotification(schema, table string) {
 			return
 		}
 	}
-	if c.fatalError() {
+	if c.fatalError(FatalReasonSchemaChange) {
 		c.logger.Error("table definition changed, cancelling operation", "schema", schema, "table", table)
 	}
 }
@@ -682,9 +695,10 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	return nil
 }
 
-func (c *gtidClient) fatalError() bool {
+// fatalError mirrors binlogClient.fatalError; see the doc comment there.
+func (c *gtidClient) fatalError(reason FatalReason) bool {
 	if c.callerCancelFunc != nil {
-		return c.callerCancelFunc()
+		return c.callerCancelFunc(reason)
 	}
 	return false
 }
