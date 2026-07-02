@@ -3,8 +3,10 @@ package dbconn
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,6 +358,126 @@ func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
 	var released sql.NullInt64
 	stmt = sqlescape.MustEscapeSQL("SELECT RELEASE_LOCK(%?)", lockName)
 	require.NoError(t, observer.QueryRowContext(t.Context(), stmt).Scan(&released))
+}
+
+// failableConnFactory returns an option for NewMetadataLock that installs a
+// connection factory under test control, plus the knobs to drive it: set fail
+// to true and every (re-)connection attempt errors — exactly what the real
+// factory does during a server outage, since it pings before returning —
+// and failedAttempts counts how many attempts were denied.
+func failableConnFactory(refresh time.Duration) (option func(*MetadataLock), fail *atomic.Bool, failedAttempts *atomic.Int64) {
+	fail = &atomic.Bool{}
+	failedAttempts = &atomic.Int64{}
+	option = func(mdl *MetadataLock) {
+		mdl.refreshInterval = refresh
+		mdl.newDBConn = func() (*sql.DB, error) {
+			if fail.Load() {
+				failedAttempts.Add(1)
+				return nil, errors.New("simulated connection failure")
+			}
+			db, err := New(testutils.DSN(), NewDBConfig())
+			if err != nil {
+				return nil, err
+			}
+			db.SetConnMaxLifetime(0) // match the production factory
+			return db, nil
+		}
+	}
+	return option, fail, failedAttempts
+}
+
+// TestMetadataLockRefreshSurvivesReconnectFailure pins the fix for a crash
+// during exactly the outage the refresh loop exists to survive. When a
+// refresh fails, the loop tears down the pool and reconnects; newConnection
+// pings the server, so while the outage persists it returns (nil, err) and
+// leaves mdl.db nil. Before the fix, the next tick dereferenced the nil pool
+// in getLocks and panicked in a goroutine with no recover, crashing the whole
+// process mid-migration. The loop must instead keep retrying the connection
+// and re-acquire the locks once the server is reachable again.
+func TestMetadataLockRefreshSurvivesReconnectFailure(t *testing.T) {
+	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "reconnect-fail-retry"}
+	lockTables := []*table.TableInfo{&lockTableInfo}
+	logger := slog.Default()
+
+	option, fail, failedAttempts := failableConnFactory(100 * time.Millisecond)
+	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
+	require.NoError(t, err)
+	require.NotNil(t, mdl)
+	closeMDL := closeOnce(mdl)
+	t.Cleanup(func() { _ = closeMDL() })
+
+	// Start the outage. Capture the pool before flipping the switch: the
+	// refresh goroutine only reassigns mdl.db after a refresh failure, and
+	// the atomic Store orders this read before any such write. Closing the
+	// pool makes the next refresh tick fail and enter the reconnect path.
+	db := mdl.db
+	fail.Store(true)
+	require.NoError(t, db.Close())
+
+	// Survive several ticks with no usable pool: attempt 1 is the tick that
+	// lost the connection, attempts 2+ are ticks that started with mdl.db
+	// nil — the ticks that panicked the process before the fix.
+	require.Eventually(t, func() bool {
+		return failedAttempts.Load() >= 3
+	}, 30*time.Second, 10*time.Millisecond, "expected repeated reconnect attempts during the outage")
+
+	// End the outage: the loop must reconnect and re-acquire the locks.
+	fail.Store(false)
+
+	observer, err := New(testutils.DSN(), NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(observer)
+
+	lockName := computeLockName(&lockTableInfo)
+	stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?)", lockName)
+	require.Eventually(t, func() bool {
+		var owner sql.NullInt64
+		if err := observer.QueryRowContext(t.Context(), stmt).Scan(&owner); err != nil {
+			return false
+		}
+		return owner.Valid
+	}, 30*time.Second, 50*time.Millisecond, "metadata lock was not re-acquired after the outage ended")
+
+	require.NoError(t, closeMDL())
+}
+
+// TestMetadataLockCloseDuringOutage pins the shutdown half of the same fix:
+// if the migration finishes (context canceled / Close called) while the
+// connection is down and could not be re-established, Close must return
+// cleanly instead of panicking on the nil pool in releaseLocks/db.Close.
+func TestMetadataLockCloseDuringOutage(t *testing.T) {
+	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "reconnect-fail-close"}
+	lockTables := []*table.TableInfo{&lockTableInfo}
+	logger := slog.Default()
+
+	option, fail, failedAttempts := failableConnFactory(100 * time.Millisecond)
+	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
+	require.NoError(t, err)
+	require.NotNil(t, mdl)
+
+	// Start the outage (see TestMetadataLockRefreshSurvivesReconnectFailure
+	// for why the pool is captured before the Store).
+	db := mdl.db
+	fail.Store(true)
+	require.NoError(t, db.Close())
+
+	// Wait until the connection has been down across at least one full tick
+	// (>= 2 failed attempts means at least one tick ran with no pool at all).
+	require.Eventually(t, func() bool {
+		return failedAttempts.Load() >= 2
+	}, 30*time.Second, 10*time.Millisecond, "expected reconnect attempts during the outage")
+
+	// Close during the outage: it must not panic and must not block. There is
+	// no connection left, so there are no locks to release and nothing to
+	// close; the refresh goroutine reports a clean shutdown.
+	closed := make(chan error, 1)
+	go func() { closed <- mdl.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("MetadataLock.Close did not return during a connection outage")
+	}
 }
 
 func TestMetadataLockRefreshWithConnIssueSimulation(t *testing.T) {
