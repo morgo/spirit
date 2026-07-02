@@ -9,12 +9,17 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/change"
+	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/copier"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
@@ -988,4 +993,136 @@ func TestResumeRejectsCheckpointFromDifferentTable(t *testing.T) {
 	require.False(t, m2.usedResumeFromCheckpoint,
 		"resume should be skipped when checkpoint records a different original table name")
 	require.NoError(t, m2.Close())
+}
+
+// TestResumeTransientErrorPreservesState pins the fix for the
+// destroy-progress-on-a-blip bug: when resumeFromCheckpoint fails with an
+// error that does NOT prove "there is no usable checkpoint" (here every query
+// fails with "sql: database is closed" — the closed pool stands in for any
+// one-off connection failure on the probe / checkpoint read / SetInfo /
+// StartFromPosition), setup() must FAIL the run instead of falling through to
+// newMigration(), whose first act is to DROP the _new and checkpoint tables —
+// silently destroying possibly days of copy progress. The _new and checkpoint
+// tables must survive, and a subsequent healthy run must resume from them.
+func TestResumeTransientErrorPreservesState(t *testing.T) {
+	t.Parallel()
+	tt := testutils.NewTestTable(t, "transientresume", `CREATE TABLE transientresume (
+		id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		pad VARCHAR(1000) NOT NULL default 'x')`)
+	tt.SeedRows(t, "INSERT INTO transientresume (name, pad) SELECT 'a', REPEAT('x', 1000)", 1000)
+
+	// First run: produce a real checkpoint via normal flow, then stop.
+	m := NewTestRunner(t, "transientresume", "ENGINE=InnoDB",
+		WithThreads(1),
+		WithTargetChunkTime(100*time.Millisecond),
+		WithTestThrottler())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.Run(ctx)
+	}()
+	waitForCheckpoint(t, m)
+	cancel()
+	<-done
+	require.NoError(t, m.Close())
+
+	// Second run, assembled by hand (same shape as TestCheckpoint's preSetup)
+	// so we can hand setup() a broken DB pool: the resume probe then fails
+	// with a transient-class error rather than ER_NO_SUCH_TABLE.
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	r, err := NewRunner(&Migration{
+		Host:            cfg.Addr,
+		Username:        cfg.User,
+		Password:        &cfg.Passwd,
+		Database:        cfg.DBName,
+		Threads:         1,
+		WriteThreads:    1,
+		TargetChunkTime: 100 * time.Millisecond,
+		Table:           "transientresume",
+		Alter:           "ENGINE=InnoDB",
+	})
+	require.NoError(t, err)
+	r.dbConfig = dbconn.NewDBConfig()
+	goodDB, err := dbconn.New(testutils.DSN(), r.dbConfig)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(goodDB)
+	r.changes[0].table = table.NewTableInfo(goodDB, r.migration.Database, r.migration.Table)
+	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
+
+	brokenDB, err := dbconn.New(testutils.DSN(), r.dbConfig)
+	require.NoError(t, err)
+	require.NoError(t, brokenDB.Close()) // all queries now fail with "sql: database is closed"
+	r.db = brokenDB
+
+	err = r.setup(t.Context())
+	require.Error(t, err, "setup must fail rather than start a fresh migration")
+	require.ErrorContains(t, err, "refusing to start a fresh migration",
+		"a transient resume failure must fail the run, not fall through to newMigration")
+
+	// All resumable state must have been preserved.
+	var n int
+	require.NoError(t, goodDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN (?, ?)",
+		utils.NewTableName("transientresume"), utils.CheckpointTableName("transientresume")).Scan(&n))
+	require.Equal(t, 2, n, "the _new and checkpoint tables must survive a transient resume failure")
+	require.NoError(t, goodDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM "+utils.CheckpointTableName("transientresume")).Scan(&n))
+	require.Positive(t, n, "the checkpoint row must survive a transient resume failure")
+
+	// Third run (healthy): must resume from the preserved checkpoint,
+	// proving the state we refused to destroy was still usable.
+	m3 := NewTestRunner(t, "transientresume", "ENGINE=InnoDB", WithThreads(2))
+	require.NoError(t, m3.Run(t.Context()))
+	require.True(t, m3.usedResumeFromCheckpoint,
+		"the healthy re-run must resume from the preserved checkpoint")
+	require.NoError(t, m3.Close())
+}
+
+// TestResumeErrorClassification unit-tests resumeErrorIsDefinitive, the gate
+// that decides whether a resumeFromCheckpoint error means "no usable
+// checkpoint — safe to start fresh" (true) or "possibly transient — fail the
+// run and preserve state" (false). The definitive list must stay in sync with
+// the error classes resumeFromCheckpoint can produce.
+func TestResumeErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	// Definitive: falling back to a fresh migration is safe.
+	badJSON := json.Unmarshal([]byte("{"), &map[string]string{})
+	require.Error(t, badJSON)
+	_, badTime := time.Parse(time.DateTime, "not-a-timestamp")
+	require.Error(t, badTime)
+
+	for _, err := range []error{
+		checkpoint.ErrNotFound,
+		fmt.Errorf("checkpoint table 'x' has no checkpoint, nothing to resume from: %w", checkpoint.ErrNotFound),
+		status.ErrMismatchedAlter,
+		fmt.Errorf("%w: stored=%q expected=%q", status.ErrCheckpointCollision, "a", "b"),
+		fmt.Errorf("%w: checkpoint is 200h old", status.ErrCheckpointTooOld),
+		fmt.Errorf("%w: %w", status.ErrBinlogNotFound, change.ErrPositionNotFound),
+		&mysql.MySQLError{Number: 1146, Message: "Table 'test._t1_new' doesn't exist"},
+		fmt.Errorf("could not read new table '_t1_new' to resume from checkpoint: %w",
+			&mysql.MySQLError{Number: 1146, Message: "Table 'test._t1_new' doesn't exist"}),
+		&mysql.MySQLError{Number: 1054, Message: "Unknown column 'original_table_name' in 'field list'"},
+		fmt.Errorf("could not parse multi-chunker watermark: %w", badJSON),
+		fmt.Errorf("could not parse checkpoint created_at timestamp: %w", badTime),
+	} {
+		require.True(t, resumeErrorIsDefinitive(err), "expected definitive: %v", err)
+	}
+
+	// Possibly transient / unknown: must fail the run and preserve state.
+	for _, err := range []error{
+		errors.New("dial tcp 127.0.0.1:3306: connect: connection refused"),
+		sql.ErrConnDone,
+		fmt.Errorf("could not read from table '_t1_chkpnt', err:%w", driver.ErrBadConn),
+		context.DeadlineExceeded,
+		&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"},
+		&mysql.MySQLError{Number: 1142, Message: "SELECT command denied to user"},
+	} {
+		require.False(t, resumeErrorIsDefinitive(err), "expected NOT definitive: %v", err)
+	}
 }

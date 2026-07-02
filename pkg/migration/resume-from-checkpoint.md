@@ -35,7 +35,11 @@ When a new Runner starts (`Runner.Run()` → `setup()`), it always attempts `res
 5. **Set up copier, checker, and change source** — create the change source and add subscriptions for each table.
 6. **Resume streaming from the saved position** — `replClient.StartFromPosition(ctx, position)` primes the source's internal position and begins streaming. The source validates the position is still resumable; if it isn't (e.g. the MySQL binlog file has been purged), `change.ErrPositionNotFound` is returned and surfaces as `status.ErrBinlogNotFound`, causing Spirit to fall back to `newMigration()`.
 
-If any step fails, Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch. This means resume is best-effort — Spirit will always make forward progress even if the checkpoint is unusable.
+If a step fails in a way that *definitively* proves the checkpoint is unusable, Spirit logs the reason and falls back to `newMigration()`, which starts the migration from scratch (dropping the `_new` and checkpoint tables). The definitive cases are: the `_new` or checkpoint table does not exist (`ER_NO_SUCH_TABLE`), the checkpoint table is empty, the statement or `original_table_name` does not match, the checkpoint is older than `--checkpoint-max-age`, the binlog position has been purged or cannot be parsed, or the stored content (watermarks / `created_at`) cannot be decoded.
+
+Any *other* failure — a connection error on the probe or checkpoint read, a timeout, or an unrecognized error — may be transient, so Spirit refuses to guess: it fails the run with an error telling the operator to retry, leaving the `_new` table and checkpoint intact. Re-running Spirit retries the resume; dropping the checkpoint table forces a fresh start. This asymmetry is deliberate: starting fresh on a blip would silently destroy possibly days of copy progress, while failing loudly costs only a retry.
+
+While the migration is running, a fatal error from the change stream also distinguishes its cause. If DDL is detected on the migrated table, the checkpoint is dropped (resuming against a changed schema could corrupt data) and the migration is cancelled — it starts fresh on the next run. If the stream itself dies (e.g. the source is unreachable for longer than the binlog reader's recreate attempts allow), the migration is cancelled but the checkpoint is preserved: re-running Spirit resumes the copy and replays the binlog from the checkpointed position.
 
 ## Background: how MySQL binary logs work
 
@@ -58,13 +62,13 @@ The tradeoff of falling back to `newMigration()` is that all copy progress is lo
 
 ## Cross-version compatibility
 
-Checkpoint tables are version-specific. Spirit deliberately uses `SELECT *` when reading the checkpoint, so any change to the checkpoint schema (e.g. columns added, removed, or reordered in a newer release) will cause the read to fail. This is by design — Spirit does not attempt to migrate or backfill checkpoint data across versions.
+Checkpoint tables are version-specific. Spirit deliberately selects the checkpoint columns explicitly, so a checkpoint table written by a version with a different schema (e.g. a column this version expects is missing) causes the read to fail with `ER_BAD_FIELD_ERROR`. This is by design — Spirit does not attempt to migrate or backfill checkpoint data across versions.
 
 Practical implications:
 
-- **Upgrading Spirit mid-migration** (older binary → newer binary). The newer binary's `Scan` expects a different number of columns than the on-disk checkpoint provides, so the read fails.
+- **Upgrading Spirit mid-migration** (older binary → newer binary). The newer binary selects a column the on-disk checkpoint does not have, so the read fails.
 - **Rolling back Spirit mid-migration** (newer binary → older binary). Same failure mode in reverse.
-- **Effect:** the read returns a generic `"could not read from table"` error wrapping the underlying `database/sql` scan error. Spirit logs the error and falls through to `newMigration()`. The copy restarts from scratch and all checkpoint progress is lost.
+- **Effect:** the read fails with an incompatible-layout error (`ER_BAD_FIELD_ERROR`), which is classified as a definitive resume failure. Spirit logs the error and falls through to `newMigration()`. The copy restarts from scratch and all checkpoint progress is lost.
 
 Operational guidance:
 
