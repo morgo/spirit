@@ -29,6 +29,12 @@ type MetadataLock struct {
 	refreshInterval time.Duration
 	db              *sql.DB
 	lockNames       []string // Multiple lock names for multiple tables
+	// newDBConn optionally overrides how the dedicated pool is established.
+	// It is a test seam (set via an option func) so tests can simulate
+	// reconnection failures deterministically; production leaves it nil.
+	// NewMetadataLock enforces the dedicated-pool invariants on whatever
+	// the factory returns, so the seam cannot weaken the lock semantics.
+	newDBConn func() (*sql.DB, error)
 }
 
 func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, optionFns ...func(*MetadataLock)) (*MetadataLock, error) {
@@ -71,11 +77,29 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	// 1-minute refresh that holds for any sane wait_timeout (e.g. the 10
 	// minutes we configure). If the keepalive ever fails, the ticker tears
 	// the connection down and re-establishes it.
+	//
+	// The pool is opened by dial (which the test seam can substitute), but
+	// the invariants are enforced here regardless of which factory ran:
+	// GET_LOCK is session scoped, so the pool must serve exactly one
+	// connection and must never recycle it client-side.
+	dial := func() (*sql.DB, error) {
+		return New(dsn, &dbConfig)
+	}
+	if mdl.newDBConn != nil {
+		dial = mdl.newDBConn // test seam, see MetadataLock.newDBConn
+	}
 	newConnection := func() (*sql.DB, error) {
-		db, err := New(dsn, &dbConfig)
+		db, err := dial()
 		if err != nil {
 			return nil, err
 		}
+		if db == nil {
+			// A (nil, nil) return from a misbehaving factory would otherwise
+			// reintroduce the nil-pool dereference the refresh loop guards
+			// against; surface it as a connection failure instead.
+			return nil, errors.New("connection factory returned a nil database")
+		}
+		db.SetMaxOpenConns(1)
 		db.SetConnMaxLifetime(0) // see comment above; keepalive is the refresh ticker
 		return db, nil
 	}
@@ -104,6 +128,16 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 		for {
 			select {
 			case <-ctx.Done():
+				// mdl.db is nil if the connection was torn down on a failed
+				// refresh and every reconnect attempt since has failed: there
+				// is no session left to release locks on and no pool to close.
+				if mdl.db == nil {
+					select {
+					case mdl.closeCh <- nil:
+					default:
+					}
+					return
+				}
 				// Explicitly release the locks before closing the connection.
 				// Relying on connection close alone leaves a small window where
 				// MySQL has not yet finished tearing down the session, so a
@@ -119,7 +153,11 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				}
 				return
 			case <-ticker.C:
-				if err = mdl.getLocks(ctx, logger); err != nil {
+				if mdl.db != nil {
+					if err = mdl.getLocks(ctx, logger); err == nil {
+						logger.Debug("refreshed metadata locks")
+						continue
+					}
 					// if we can't refresh the lock, it's okay.
 					// We have other safety mechanisms in place to prevent corruption
 					// for example, we watch the binary log to see metadata changes
@@ -127,29 +165,32 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 					// and we can try again on the next tick interval.
 					logger.Warn("could not refresh metadata locks", "error", err)
 
-					// try to close the existing connection
+					// close the existing connection before replacing it. Even
+					// when Close() returns an error the pool is already marked
+					// as closed and unusable, so don't keep it: log, abandon
+					// it, and proceed straight to reconnection below.
 					if closeErr := mdl.db.Close(); closeErr != nil {
 						logger.Warn("could not close database connection", "error", closeErr)
-						continue
 					}
-
-					// try to re-establish the connection
-					mdl.db, err = newConnection()
-					if err != nil {
-						logger.Warn("could not re-establish database connection", "error", err)
-						continue
-					}
-
-					// try to acquire the locks again with the new connection
-					if err = mdl.getLocks(ctx, logger); err != nil {
-						logger.Warn("could not acquire metadata locks after re-establishing connection", "error", err)
-						continue
-					}
-
-					logger.Info("re-acquired metadata locks after re-establishing connection")
-				} else {
-					logger.Debug("refreshed metadata locks")
 				}
+
+				// try to (re-)establish the connection. newConnection pings
+				// the server, so while the outage persists it keeps returning
+				// (nil, err) and mdl.db stays nil; the next tick then lands
+				// back here and retries the connection first, instead of
+				// dereferencing the nil pool in getLocks.
+				if mdl.db, err = newConnection(); err != nil {
+					logger.Warn("could not re-establish database connection", "error", err)
+					continue
+				}
+
+				// try to acquire the locks again with the new connection
+				if err = mdl.getLocks(ctx, logger); err != nil {
+					logger.Warn("could not acquire metadata locks after re-establishing connection", "error", err)
+					continue
+				}
+
+				logger.Info("re-acquired metadata locks after re-establishing connection")
 			}
 		}
 	}()
