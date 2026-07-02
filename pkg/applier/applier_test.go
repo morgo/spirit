@@ -128,7 +128,7 @@ func TestEstimateRowSizeRealistic(t *testing.T) {
 		t.Logf("Blog post row size: %d bytes", size)
 	})
 
-	t.Run("row approaching chunkletMaxSize", func(t *testing.T) {
+	t.Run("row approaching MaxStatementSizeBytes", func(t *testing.T) {
 		// Create a row that's close to 1MB
 		largeData := make([]byte, 900000) // 900KB
 		for i := range largeData {
@@ -142,8 +142,8 @@ func TestEstimateRowSizeRealistic(t *testing.T) {
 		size := estimateRowSize(values)
 		// Should be close to but not exceed our threshold
 		require.Greater(t, size, 900000, "should account for large data")
-		require.Less(t, size, chunkletMaxSize, "single row should fit in a chunklet")
-		t.Logf("Large row size: %d bytes (threshold: %d)", size, chunkletMaxSize)
+		require.Less(t, size, MaxStatementSizeBytes, "single row should fit in a chunklet")
+		t.Logf("Large row size: %d bytes (threshold: %d)", size, MaxStatementSizeBytes)
 	})
 }
 
@@ -238,7 +238,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 	})
 
 	t.Run("rows exceeding max size threshold", func(t *testing.T) {
-		// Create rows with large data that exceed chunkletMaxSize (1 MiB)
+		// Create rows with large data that exceed MaxStatementSizeBytes (1 MiB)
 		// Each row is ~100KB, so 11 rows would be ~1.1MB
 		largeData := make([]byte, 100000) // 100KB
 		for i := range largeData {
@@ -261,7 +261,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 				totalSize += estimateRowSize(row.values)
 			}
 			// Allow some overhead, but should be reasonably close to limit
-			require.LessOrEqual(t, totalSize, chunkletMaxSize+10000,
+			require.LessOrEqual(t, totalSize, MaxStatementSizeBytes+10000,
 				"chunklet %d should be under size limit (with small overhead)", i)
 			t.Logf("Chunklet %d: %d rows, ~%d bytes", i, len(chunklet), totalSize)
 		}
@@ -336,7 +336,7 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 	})
 
 	t.Run("single row exceeding size limit", func(t *testing.T) {
-		// Single row that exceeds chunkletMaxSize (1 MiB)
+		// Single row that exceeds MaxStatementSizeBytes (1 MiB)
 		// This is an edge case - the row will be placed in its own chunklet
 		// and we rely on max_allowed_packet being large enough (typically 64 MiB)
 		veryLargeData := make([]byte, 2*1024*1024) // 2 MiB - exceeds our 1 MiB threshold
@@ -354,8 +354,8 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 
 		// Verify the row size does exceed our threshold
 		rowSize := estimateRowSize(rows[0].values)
-		require.Greater(t, rowSize, chunkletMaxSize, "row should exceed chunkletMaxSize")
-		t.Logf("Single row size: %d bytes (exceeds threshold of %d bytes)", rowSize, chunkletMaxSize)
+		require.Greater(t, rowSize, MaxStatementSizeBytes, "row should exceed MaxStatementSizeBytes")
+		t.Logf("Single row size: %d bytes (exceeds threshold of %d bytes)", rowSize, MaxStatementSizeBytes)
 		t.Logf("Note: This relies on max_allowed_packet being large enough (typically 64 MiB)")
 	})
 

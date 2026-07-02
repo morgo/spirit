@@ -15,8 +15,18 @@ import (
 )
 
 const (
-	chunkletMaxRows     = 1000             // Maximum number of rows per chunklet
-	chunkletMaxSize     = 1024 * 1024      // Maximum size in bytes per chunklet (1 MiB)
+	chunkletMaxRows = 1000 // Maximum number of rows per chunklet
+
+	// MaxStatementSizeBytes is the byte budget for the estimated rendered
+	// size of a single multi-row DML statement (1 MiB). Both write paths
+	// batch against it: the copy path splits chunks into chunklets
+	// (splitRowsIntoChunklets) and the binlog-apply path cuts flush
+	// batches (pkg/change) so a REPLACE/DELETE can't grow unbounded with
+	// wide rows. Deliberately far below the typical 64 MiB
+	// max_allowed_packet because the size estimates are rough; a single
+	// row larger than the budget still goes in its own statement.
+	MaxStatementSizeBytes = 1024 * 1024
+
 	defaultBufferSize   = 128              // Size of the shared buffer channel for chunklets
 	defaultWriteWorkers = 2                // Number of write workers, default low for tests, but in practice we can use 40+
 	chunkTaskTimeout    = time.Second * 60 // Timeout for any task (copy chunk, delete keys, upsert rows)
@@ -155,8 +165,8 @@ type ApplierConfig struct {
 func NewApplierDefaultConfig() *ApplierConfig {
 	return &ApplierConfig{
 		Threads:         defaultWriteWorkers,
-		ChunkletMaxRows: chunkletMaxRows, // will be renamed soon.
-		ChunkletMaxSize: 1024 * 1024,     // will be supported soon.
+		ChunkletMaxRows: chunkletMaxRows,       // will be renamed soon.
+		ChunkletMaxSize: MaxStatementSizeBytes, // will be supported soon.
 		Logger:          slog.Default(),
 		DBConfig:        dbconn.NewDBConfig(),
 	}
@@ -179,7 +189,7 @@ func (cfg *ApplierConfig) Validate() error {
 		cfg.ChunkletMaxRows = chunkletMaxRows
 	}
 	if cfg.ChunkletMaxSize <= 0 {
-		cfg.ChunkletMaxSize = 1024 * 1024
+		cfg.ChunkletMaxSize = MaxStatementSizeBytes
 	}
 	return nil
 }
@@ -205,9 +215,9 @@ type rowData struct {
 }
 
 // splitRowsIntoChunklets splits rows into chunklets based on both row count and size thresholds.
-// Returns a slice of row batches where each batch respects both chunkletMaxRows and chunkletMaxSize limits.
+// Returns a slice of row batches where each batch respects both chunkletMaxRows and MaxStatementSizeBytes limits.
 //
-// Note: A single row can exceed chunkletMaxSize by itself. In this case, the row will be placed
+// Note: A single row can exceed MaxStatementSizeBytes by itself. In this case, the row will be placed
 // in its own chunklet regardless of size. This is an edge case where we rely on max_allowed_packet
 // being large enough (typically 64 MiB default vs our 1 MiB threshold).
 func splitRowsIntoChunklets(rows []rowData) [][]rowData {
@@ -222,7 +232,7 @@ func splitRowsIntoChunklets(rows []rowData) [][]rowData {
 		rowSize := estimateRowSize(row.values)
 		// Check if adding this row would exceed either threshold
 		if len(currentChunklet) >= chunkletMaxRows ||
-			(len(currentChunklet) > 0 && currentSize+rowSize > chunkletMaxSize) {
+			(len(currentChunklet) > 0 && currentSize+rowSize > MaxStatementSizeBytes) {
 			// Save current chunklet and start a new one
 			chunklets = append(chunklets, currentChunklet)
 			currentChunklet = make([]rowData, 0, chunkletMaxRows)

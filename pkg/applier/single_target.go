@@ -69,7 +69,7 @@ type SingleTargetApplier struct {
 }
 
 // chunklet represents a small batch of rows for internal processing
-// Limited by either chunkletMaxRows or chunkletMaxSize, whichever is reached first
+// Limited by either chunkletMaxRows or MaxStatementSizeBytes, whichever is reached first
 type chunklet struct {
 	workID int64        // ID of the parent work
 	chunk  *table.Chunk // Original chunk for column info
@@ -428,7 +428,7 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context, quit <-chan struc
 	}
 }
 
-// writeChunklet writes a single chunklet (up to chunkletMaxRows or chunkletMaxSize)
+// writeChunklet writes a single chunklet (up to chunkletMaxRows or MaxStatementSizeBytes)
 func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData chunklet) (int64, error) {
 	if len(chunkletData.rows) == 0 {
 		return 0, nil
