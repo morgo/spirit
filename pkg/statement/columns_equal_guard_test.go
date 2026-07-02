@@ -40,7 +40,6 @@ var columnFieldsCompared = map[string]struct{}{
 	"SRID":            {},
 	"AutoInc":         {},
 	"PrimaryKey":      {},
-	"Unique":          {},
 	"Comment":         {},
 	"Charset":         {},
 	"Collation":       {},
@@ -62,6 +61,11 @@ var columnFieldsNotCompared = map[string]string{
 	// If you start populating Options with semantically meaningful data, it must
 	// be added to both comparisons and removed from this list.
 	"Options": "catch-all map for unmodeled options; currently not compared by diff.go",
+	// Column-level UNIQUE is representation, not state: MySQL canonicalizes it
+	// into a table-level UNIQUE KEY, and MODIFY COLUMN cannot express it. It is
+	// folded into index-level diffing (effectiveIndexes/diffIndexes) instead of
+	// being part of per-column equality.
+	"Unique": "folded into index-level diffing by effectiveIndexes; diffed by diffIndexes, not here",
 }
 
 // TestColumnsEqualAllFieldsAccounted is the primary tripwire: it enumerates the
@@ -177,7 +181,6 @@ func everyComparedFieldMutation() []struct {
 		{"SRID", func(c *Column) { c.SRID = new(uint32(3857)) }},
 		{"AutoInc", func(c *Column) { c.AutoInc = false }},
 		{"PrimaryKey", func(c *Column) { c.PrimaryKey = false }},
-		{"Unique", func(c *Column) { c.Unique = false }},
 		{"Comment", func(c *Column) { c.Comment = new("bye") }},
 		{"Charset", func(c *Column) { c.Charset = new("latin1") }},
 		{"Collation", func(c *Column) { c.Collation = new("latin1_swedish_ci") }},
@@ -201,6 +204,14 @@ func TestColumnsEqualWithContextDetectsEveryField(t *testing.T) {
 	b := baseColumn()
 	require.True(t, ct.columnsEqualWithContext(&a, &b, target, opts),
 		"identical columns must compare equal")
+
+	// Unique is deliberately ignored: inline column-level UNIQUE is folded
+	// into index-level diffing (effectiveIndexes/diffIndexes), so a
+	// Unique-only difference is a representation difference, not a change.
+	uniqueOnly := baseColumn()
+	uniqueOnly.Unique = !uniqueOnly.Unique
+	require.True(t, ct.columnsEqualWithContext(&a, &uniqueOnly, target, opts),
+		"columnsEqualWithContext must ignore a Unique-only difference")
 
 	for _, m := range everyComparedFieldMutation() {
 		t.Run(m.name, func(t *testing.T) {
@@ -231,6 +242,13 @@ func TestColumnsEqualIgnorePKDetectsEveryField(t *testing.T) {
 	pkOnly.PrimaryKey = !pkOnly.PrimaryKey
 	require.True(t, columnsEqualIgnorePK(&a, &pkOnly, opts),
 		"columnsEqualIgnorePK must ignore a PrimaryKey-only difference")
+
+	// Unique is deliberately ignored too — see the matching assertion in
+	// TestColumnsEqualWithContextDetectsEveryField.
+	uniqueOnly := baseColumn()
+	uniqueOnly.Unique = !uniqueOnly.Unique
+	require.True(t, columnsEqualIgnorePK(&a, &uniqueOnly, opts),
+		"columnsEqualIgnorePK must ignore a Unique-only difference")
 
 	for _, m := range everyComparedFieldMutation() {
 		if m.name == "PrimaryKey" {

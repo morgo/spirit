@@ -274,6 +274,24 @@ func (r *Runner) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+	// Reject ALTERs that contain unsupported clauses such as ALGORITHM=
+	// or LOCK= *before* any DDL is attempted directly on MySQL.
+	// attemptMySQLDDL below prepends its own ALGORITHM= (and LOCK=)
+	// assertions, and MySQL resolves duplicate options last-one-wins: a
+	// user-supplied "ALGORITHM=COPY, LOCK=SHARED" would override our
+	// ALGORITHM=INSTANT and execute as a blocking table rebuild. The
+	// preflight illegalClause check also rejects these clauses, but it
+	// only runs after the direct DDL attempt has already failed, which is
+	// too late to protect this path. This is a pure parse-level check, so
+	// it runs before any table introspection or metadata locking.
+	for _, change := range r.changes {
+		if !change.stmt.IsAlterTable() {
+			continue // the check only applies to ALTER TABLE statements
+		}
+		if err := change.stmt.AlterContainsUnsupportedClause(); err != nil {
+			return err
+		}
+	}
 	// Set info for all of the tables.
 	tables := make([]*table.TableInfo, 0, len(r.changes))
 	for _, change := range r.changes {
