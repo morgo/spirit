@@ -76,6 +76,30 @@ func TestRedundantIndexLinter_PrefixRedundancy(t *testing.T) {
 			)`,
 			expectViolated: false,
 		},
+		{
+			name: "index (a DESC) redundant to index (a DESC, b)",
+			createTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_a (a DESC),
+				INDEX idx_ab (a DESC, b)
+			)`,
+			expectViolated: true,
+			violatedIndex:  "idx_a",
+			coveringIndex:  "idx_ab",
+		},
+		{
+			name: "index (a) NOT redundant to index (a DESC, b)",
+			createTable: `CREATE TABLE t1 (
+				id INT PRIMARY KEY,
+				a INT,
+				b INT,
+				INDEX idx_a (a),
+				INDEX idx_ab (a DESC, b)
+			)`,
+			expectViolated: false,
+		},
 	}
 
 	for _, tt := range tests {
