@@ -34,6 +34,20 @@ type Subscription interface {
 	Flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) (allChangesFlushed bool, err error)
 	Tables() []*table.TableInfo // returns the tables related to the subscription in currentTable, newTable order
 
+	// ImmutableColumnOrdinal returns the position (an index into
+	// Tables()[0].Columns, and thus into each full binlog row image) of a
+	// column whose value must never change between the before and after
+	// image of an UPDATE, or -1 when no such column is configured.
+	//
+	// This backs the sharded applier's vindex contract (see
+	// applier.ShardedApplier.UpsertRows): modifications are tracked by
+	// PRIMARY KEY only, so an UPDATE that changed the sharding column
+	// would flush the new row image to its new shard while the old shard
+	// silently kept a stale copy. The change source is expected to treat
+	// such an UPDATE as a fatal error and cancel the operation — see
+	// checkImmutableColumn.
+	ImmutableColumnOrdinal() int
+
 	// SetWatermarkOptimization toggles both high and low watermark
 	// optimizations. For non-memory-comparable PKs toggling switches the
 	// subscription between map mode and queue mode; on such a transition

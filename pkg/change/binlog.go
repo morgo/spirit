@@ -734,6 +734,7 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 
 	if eventType == eventTypeUpdate {
 		// UPDATE events always carry before/after image pairs.
+		immutableOrdinal := sub.ImmutableColumnOrdinal()
 		for i := 0; i < len(e.Rows); i += 2 {
 			beforeRow := e.Rows[i]
 			afterRow := e.Rows[i+1]
@@ -744,6 +745,14 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 			}
 			afterKey, err := tbl.PrimaryKeyValues(afterRow)
 			if err != nil {
+				return err
+			}
+
+			// Sharded operations track changes by PRIMARY KEY only, so an
+			// UPDATE to the sharding (vindex) column would leave a stale
+			// copy of the row on its old shard. The subscription declares
+			// the column immutable and we fail the stream fatally instead.
+			if err := checkImmutableColumn(tbl, immutableOrdinal, beforeRow, afterRow, beforeKey); err != nil {
 				return err
 			}
 

@@ -777,6 +777,9 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 //
 // The way we address this, is we consider the vindex column immutable. The replication client is told
 // that it should error if there are any updates to it, and the entire operation is canceled.
+// The enforcement lives in pkg/change: the subscription resolves the sharding column to an ordinal
+// (Subscription.ImmutableColumnOrdinal) and both processRowsEvent implementations fail fatally when
+// an UPDATE's before/after images differ at that position (see change.checkImmutableColumn).
 //
 // This is likely not too big of a limitation, as Vitess itself recommends that vindex columns be immutable.
 // If it turns out to be a problem, we can revisit tracking by other columns later.

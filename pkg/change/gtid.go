@@ -644,6 +644,7 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	}
 
 	if eventType == eventTypeUpdate {
+		immutableOrdinal := sub.ImmutableColumnOrdinal()
 		for i := 0; i < len(e.Rows); i += 2 {
 			beforeRow := e.Rows[i]
 			afterRow := e.Rows[i+1]
@@ -653,6 +654,12 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 			}
 			afterKey, err := tbl.PrimaryKeyValues(afterRow)
 			if err != nil {
+				return err
+			}
+			// See the matching block in binlog.go's processRowsEvent: an
+			// UPDATE to the declared-immutable sharding column must fail
+			// the stream fatally.
+			if err := checkImmutableColumn(tbl, immutableOrdinal, beforeRow, afterRow, beforeKey); err != nil {
 				return err
 			}
 			if pkChanged(beforeKey, afterKey) {

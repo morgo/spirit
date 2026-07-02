@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/pingcap/tidb/pkg/parser"
@@ -142,6 +143,40 @@ func pkValueEqual(a, b any) bool {
 		return aIsBool && bIsBool && aBool == bBool
 	}
 	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+// checkImmutableColumn returns an error when an UPDATE's before and after
+// row images differ at ordinal — the position of a column the subscription
+// declared immutable via Subscription.ImmutableColumnOrdinal. An ordinal of
+// -1 (no immutable column configured) makes the check a no-op.
+//
+// This enforces the sharded applier's vindex contract (see
+// applier.ShardedApplier.UpsertRows): modifications are tracked by PRIMARY
+// KEY only, so an UPDATE that moved a row's sharding-column value would
+// flush the new row image to its new shard while the old shard silently
+// kept a stale copy of the row. Both processRowsEvent implementations treat
+// the returned error as fatal, which cancels the entire operation.
+//
+// key is the row's before-image PRIMARY KEY, used only for the error
+// message. Values are compared with the same normalisation rules as
+// pkChanged (see pkValueEqual).
+func checkImmutableColumn(tbl *table.TableInfo, ordinal int, beforeRow, afterRow []any, key []any) error {
+	if ordinal < 0 {
+		return nil
+	}
+	// PrimaryKeyValues has already validated that both images carry one
+	// value per table column, and ordinal indexes into tbl.Columns — but
+	// bounds-check anyway so a malformed event fails loudly rather than
+	// panicking the stream reader.
+	if ordinal >= len(beforeRow) || ordinal >= len(afterRow) {
+		return fmt.Errorf("immutable column ordinal %d exceeds row image length (before: %d, after: %d) for table %s.%s",
+			ordinal, len(beforeRow), len(afterRow), tbl.SchemaName, tbl.TableName)
+	}
+	if !pkValueEqual(beforeRow[ordinal], afterRow[ordinal]) {
+		return fmt.Errorf("update to table %s.%s changes the value of the sharding column %s for the row with PRIMARY KEY %v: the sharding (vindex) column is immutable during a sharded operation, because changes are tracked by primary key only and a stale copy of the row would be left behind on its previous shard",
+			tbl.SchemaName, tbl.TableName, tbl.Columns[ordinal], key)
+	}
+	return nil
 }
 
 // isMinimalRowImage returns true if the RowsEvent contains a minimal row image,
