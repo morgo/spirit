@@ -548,8 +548,8 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 	// rows would leave this row behind, so its absence after --force proves the
 	// table was actually dropped and recreated.
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (999, 'stale')")
-	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
-	testutils.RunSQL(t, "INSERT INTO "+dstDB+"._spirit_checkpoint (copier_watermark, binlog_positions) VALUES ('stale-wm', '{}')")
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_move_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+"._spirit_move_checkpoint (copier_watermark, binlog_positions) VALUES ('stale-wm', '{}')")
 
 	newMove := func(force bool) *Move {
 		return &Move{
@@ -586,13 +586,17 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 
 // TestMoveRetryBeforeFirstCheckpointStartsFresh verifies automatic recovery
 // from the state a move leaves when it is stopped before writing its first
-// checkpoint row: the target tables hold a partial copy and _spirit_checkpoint
-// exists but is empty. That state is provably owned by the dead attempt (only
-// a move creates the checkpoint table, after the target passed the
-// empty-target validation), so a bare re-run — no --force — must wipe the
-// partial copy and complete a fresh move. An empty checkpoint table from an
-// incompatible spirit version proves nothing (it cannot be read at all), so
-// that state must still demand --force.
+// checkpoint row: the target holds a partial copy and the move's
+// _spirit_move_checkpoint table exists but is empty. Because that table name is
+// unique to move, an empty one is provably the dead attempt's leavings, so a
+// bare re-run — no --force — wipes the partial copy and completes a fresh move.
+//
+// It also pins the safety boundary: an empty _spirit_checkpoint (the name a
+// killed atomic multi-table MIGRATION leaves behind, NOT a move) is not proof
+// of a dead move, so a bare run against a non-empty target that carries only
+// that table must refuse and demand --force rather than silently wiping
+// unrelated data. (This is the case that regressed when move keyed ownership on
+// the shared _spirit_checkpoint name.)
 func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
 	srcDB := "source_empty_ckpt_retry"
 	dstDB := "dest_empty_ckpt_retry"
@@ -606,9 +610,9 @@ func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
 	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (name) VALUES ('a'),('b'),('c'),('d'),('e')")
 
-	// The dead attempt's leavings: a partial copy of the source, plus a row
-	// outside the source's id range — a mere overlay (upsert) of the source
-	// rows would leave it behind, so its absence proves a real wipe.
+	// A non-empty target, plus a row outside the source's id range: a mere
+	// overlay (upsert) of the source rows would leave it behind, so its survival
+	// proves the target was left untouched and its absence proves a real wipe.
 	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (1, 'a'), (999, 'stale')")
 
@@ -622,20 +626,27 @@ func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
 		}
 	}
 
-	// An EMPTY checkpoint table from an incompatible version (old
-	// binlog_positions column): unreadable, so ownership is unproven and a bare
-	// run must fail pointing at --force, exactly as with a written row.
-	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
-	err := newMove().Run()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--force")
-
-	// An empty checkpoint table with the current schema — what a canceled
-	// pre-first-checkpoint run actually leaves. Create() (Transient) is the
-	// same DROP+CREATE the dead attempt would have executed.
 	targetDB, err := sql.Open("mysql", targetDSN)
 	require.NoError(t, err)
 	defer utils.CloseAndLog(targetDB)
+
+	// Safety boundary: an empty _spirit_checkpoint is what a killed atomic
+	// multi-table migration leaves — its current schema makes it a readable,
+	// empty table, exactly what would have tricked the old code into wiping.
+	// Move must ignore it (different name), refuse without --force, and leave the
+	// target untouched.
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_position TEXT, statement TEXT, original_table_name VARCHAR(64) NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+	err = newMove().Run()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--force")
+	var survived int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1 WHERE id = 999 AND name = 'stale'").Scan(&survived))
+	require.Equal(t, 1, survived, "a foreign migration checkpoint must not cause move to wipe the target")
+	testutils.RunSQL(t, "DROP TABLE "+dstDB+"._spirit_checkpoint")
+
+	// The fix: an empty _spirit_move_checkpoint with the current schema is what a
+	// move canceled before its first checkpoint dump leaves. Create() (Transient)
+	// is the same DROP+CREATE the dead attempt would have executed.
 	require.NoError(t, checkpoint.NewTable(targetDB, checkpointTableName, checkpoint.Transient).Create(t.Context()))
 
 	// The bare retry (no --force) must wipe the partial copy and complete.
@@ -1199,7 +1210,7 @@ func TestMultiSourceResumeDiscardsChecksumWatermark(t *testing.T) {
 	})
 	require.NoError(t, err)
 	res, err := tgtDB.ExecContext(t.Context(),
-		"UPDATE _spirit_checkpoint SET copier_watermark = ?, checksum_watermark = ?",
+		"UPDATE _spirit_move_checkpoint SET copier_watermark = ?, checksum_watermark = ?",
 		string(copierWM), string(checksumWM))
 	require.NoError(t, err)
 	rowsAffected, err := res.RowsAffected()
@@ -1262,7 +1273,7 @@ func TestSingleSourceResumeKeepsChecksumWatermark(t *testing.T) {
 	// itself, so the watermark is raw chunk JSON, not the multi-chunker map.
 	craftedChecksumWM := watermarkChunkJSON(1, 51)
 	res, err := tgtDB.ExecContext(t.Context(),
-		"UPDATE _spirit_checkpoint SET checksum_watermark = ?", craftedChecksumWM)
+		"UPDATE _spirit_move_checkpoint SET checksum_watermark = ?", craftedChecksumWM)
 	require.NoError(t, err)
 	rowsAffected, err := res.RowsAffected()
 	require.NoError(t, err)

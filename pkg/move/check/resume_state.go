@@ -34,7 +34,9 @@ func resumeStateCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 	if tgt0.DB == nil || tgt0.Config == nil {
 		return errors.New("target[0] database connection or config is not initialized")
 	}
-	checkpointTableName := "_spirit_checkpoint"
+	// Must match pkg/move's checkpointTableName. It is duplicated here because
+	// the check package cannot import move (move imports check).
+	checkpointTableName := "_spirit_move_checkpoint"
 	var checkpointExists int
 	err := tgt0.DB.QueryRowContext(ctx,
 		"SELECT 1 FROM information_schema.TABLES WHERE table_schema = ? AND table_name = ?",

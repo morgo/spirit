@@ -34,7 +34,13 @@ import (
 
 var (
 	tableStatUpdateInterval = 5 * time.Minute
-	checkpointTableName     = "_spirit_checkpoint"
+	// checkpointTableName is deliberately distinct from migration's shared
+	// _spirit_checkpoint and datasync's _spirit_sync_checkpoint. A table with
+	// this name can only have been created by a move, which is what lets
+	// decideResume treat an empty one as a dead move's leavings and recover
+	// without --force. Keep it in sync with the literal in
+	// pkg/move/check/resume_state.go (that package cannot import this one).
+	checkpointTableName = "_spirit_move_checkpoint"
 	// Sentinel-wait timing lives in pkg/sentinel (sentinel.WaitLimit /
 	// sentinel.CheckInterval / sentinel.TableName) so it is shared with migrate.
 	//
@@ -216,8 +222,12 @@ func (r *Runner) getTables(ctx context.Context, src *sourceInfo) ([]*table.Table
 		if err := rows.Scan(&tableName); err != nil {
 			return nil, err
 		}
-		if tableName == checkpointTableName || tableName == sentinel.TableName {
-			continue // Skip if the table name is the checkpoint or sentinel table
+		if strings.HasPrefix(tableName, "_spirit_") {
+			// Skip Spirit-internal artifacts: this move's checkpoint
+			// (checkpointTableName) and sentinel (sentinel.TableName), and also
+			// any _spirit_-prefixed table left behind by another operation — e.g.
+			// a migration's _spirit_checkpoint — so it is never copied as data.
+			continue
 		}
 
 		// If SourceTables is specified, only include tables in that list
@@ -622,11 +632,14 @@ const (
 	// resumeCheckpoint: a checkpoint row exists and the resume pre-checks
 	// pass — continue the interrupted move from it.
 	resumeCheckpoint resumeDecision = iota
-	// resumeFreshOwned: the checkpoint table exists but holds no row. Only a
-	// move creates that table (transiently, after the target tables passed the
-	// empty-target validation and before any row is copied), so everything on
-	// the target is a prior attempt's partial copy that died before its first
-	// checkpoint dump. Safe to wipe and start fresh without --force.
+	// resumeFreshOwned: the checkpoint table exists but holds no row. Its name
+	// (checkpointTableName) is unique to move, so only a move creates it —
+	// transiently, after the target tables passed the empty-target validation
+	// and before any row is copied. An empty one therefore means everything on
+	// the target is a prior move attempt's partial copy that died before its
+	// first checkpoint dump: safe to wipe and start fresh without --force. (A
+	// migration's shared _spirit_checkpoint has a different name and never lands
+	// here, so it can't trick move into wiping unrelated data.)
 	resumeFreshOwned
 	// resumeNone: nothing proves spirit owns the target rows — no checkpoint
 	// table at all, one written by an incompatible version, or failing resume
@@ -644,8 +657,10 @@ const (
 // empty-checkpoint recovery also fires when the pre-checks would fail (e.g.
 // the source schema changed since the dead attempt): the target tables are
 // about to be dropped and recreated, so their state cannot matter. This
-// mirrors datasync's readCheckpoint, where the checkpoint table's existence —
-// not a written row — is what marks the target as spirit-owned.
+// mirrors datasync, whose checkpoint table is treated as spirit-owned by its
+// mere existence rather than a written row. The unique table name is
+// load-bearing for both: migration's shared _spirit_checkpoint is NOT proof of
+// a move, so move keys ownership on its own name (see checkpointTableName).
 func (r *Runner) decideResume(ctx context.Context) (resumeDecision, error) {
 	if _, err := r.checkpointTbl().ReadLatest(ctx); err != nil {
 		switch {
@@ -667,7 +682,8 @@ func (r *Runner) decideResume(ctx context.Context) (resumeDecision, error) {
 
 // wipeTargets drops the move's target tables (on every target) and the
 // checkpoint table, so a fresh copy can proceed. Used by --force when the target
-// cannot resume. The source — including any sentinel — is left untouched.
+// cannot resume, and by the empty-checkpoint fresh-start recovery
+// (resumeFreshOwned). The source — including any sentinel — is left untouched.
 func (r *Runner) wipeTargets(ctx context.Context) error {
 	for i := range r.targets {
 		for _, t := range r.sourceTables {
