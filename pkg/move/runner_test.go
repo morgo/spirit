@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/checkpoint"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/status"
@@ -581,6 +582,71 @@ func TestMoveForceWipesUnresumableTarget(t *testing.T) {
 	var stale int
 	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1 WHERE id = 999 OR name = 'stale'").Scan(&stale))
 	require.Zero(t, stale, "force must drop+recreate the target, not overlay the source onto stale rows")
+}
+
+// TestMoveRetryBeforeFirstCheckpointStartsFresh verifies automatic recovery
+// from the state a move leaves when it is stopped before writing its first
+// checkpoint row: the target tables hold a partial copy and _spirit_checkpoint
+// exists but is empty. That state is provably owned by the dead attempt (only
+// a move creates the checkpoint table, after the target passed the
+// empty-target validation), so a bare re-run — no --force — must wipe the
+// partial copy and complete a fresh move. An empty checkpoint table from an
+// incompatible spirit version proves nothing (it cannot be read at all), so
+// that state must still demand --force.
+func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
+	srcDB := "source_empty_ckpt_retry"
+	dstDB := "dest_empty_ckpt_retry"
+	sourceDSN := testutils.DSNForDatabase(srcDB)
+	targetDSN := testutils.DSNForDatabase(dstDB)
+
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+srcDB)
+	testutils.RunSQL(t, "DROP DATABASE IF EXISTS "+dstDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+srcDB)
+	testutils.RunSQL(t, "CREATE DATABASE "+dstDB)
+	testutils.RunSQL(t, "CREATE TABLE "+srcDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
+	testutils.RunSQL(t, "INSERT INTO "+srcDB+".t1 (name) VALUES ('a'),('b'),('c'),('d'),('e')")
+
+	// The dead attempt's leavings: a partial copy of the source, plus a row
+	// outside the source's id range — a mere overlay (upsert) of the source
+	// rows would leave it behind, so its absence proves a real wipe.
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
+	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (1, 'a'), (999, 'stale')")
+
+	newMove := func() *Move {
+		return &Move{
+			SourceDSN:       sourceDSN,
+			TargetDSN:       targetDSN,
+			TargetChunkTime: 100 * time.Millisecond,
+			Threads:         2,
+			WriteThreads:    2,
+		}
+	}
+
+	// An EMPTY checkpoint table from an incompatible version (old
+	// binlog_positions column): unreadable, so ownership is unproven and a bare
+	// run must fail pointing at --force, exactly as with a written row.
+	testutils.RunSQL(t, "CREATE TABLE "+dstDB+"._spirit_checkpoint (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, copier_watermark TEXT, checksum_watermark TEXT, binlog_positions TEXT, statement TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+	err := newMove().Run()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--force")
+
+	// An empty checkpoint table with the current schema — what a canceled
+	// pre-first-checkpoint run actually leaves. Create() (Transient) is the
+	// same DROP+CREATE the dead attempt would have executed.
+	targetDB, err := sql.Open("mysql", targetDSN)
+	require.NoError(t, err)
+	defer utils.CloseAndLog(targetDB)
+	require.NoError(t, checkpoint.NewTable(targetDB, checkpointTableName, checkpoint.Transient).Create(t.Context()))
+
+	// The bare retry (no --force) must wipe the partial copy and complete.
+	require.NoError(t, newMove().Run())
+
+	var count int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1").Scan(&count))
+	require.Equal(t, 5, count, "retry must wipe the partial copy and re-copy the source")
+	var stale int
+	require.NoError(t, targetDB.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM t1 WHERE id = 999 OR name = 'stale'").Scan(&stale))
+	require.Zero(t, stale, "the dead attempt's partial rows must not survive the fresh copy")
 }
 
 // TestConcurrentMoveDoesNotWipeTarget is a regression test for the ordering of

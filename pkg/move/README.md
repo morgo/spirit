@@ -38,6 +38,8 @@ Move operations write periodic checkpoints to a `_spirit_checkpoint` table *on t
 
 The checkpoint records progress *into the targets* (the copier watermark, and the rows `deleteAboveWatermark` prunes on resume), so it lives alongside the data it describes. With N sources and M targets, both slices are sorted deterministically and the checkpoint always lands on the first target (`targets[0]`), so a resume looks in the same place regardless of the order the caller supplied sources or targets. (Earlier 1:N reshard versions stored the checkpoint on the single source; that convention is no longer used.)
 
+A run interrupted *before its first checkpoint dump* leaves the checkpoint table present but empty. Because only a move creates that table — after the target tables passed the empty-target validation and before any row is copied — everything on the target is that attempt's partial copy, and a re-run recovers automatically: it wipes the target tables and starts a fresh copy, no `--force` needed. `--force` remains for the states spirit cannot prove it owns (a non-empty target with no checkpoint table, or a checkpoint written by an incompatible spirit version).
+
 ### Sentinel Table
 
 When `CreateSentinel` is enabled, the runner creates a `_spirit_sentinel` table on the source during setup (before the copy starts) and then *blocks before cutover* until it is dropped by an external actor. The wait sits between the initial checksum and the cutover. This provides a coordination point for orchestration systems that need to perform additional steps between copy completion and cutover.
