@@ -68,7 +68,7 @@ func TestResumeStateCheck(t *testing.T) {
 	// the first target, so create it there. resumeStateCheck only verifies
 	// that the table exists, so the columns here just need to match the
 	// move-runner schema for hygiene.
-	_, err = targetDB.ExecContext(t.Context(), `CREATE TABLE resume_tgt._spirit_checkpoint (
+	_, err = targetDB.ExecContext(t.Context(), `CREATE TABLE resume_tgt._spirit_move_checkpoint (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		copier_watermark TEXT,
 		checksum_watermark TEXT,
@@ -79,7 +79,7 @@ func TestResumeStateCheck(t *testing.T) {
 	)`)
 	require.NoError(t, err)
 	defer func() {
-		_, _ = targetDB.ExecContext(t.Context(), "DROP TABLE IF EXISTS resume_tgt._spirit_checkpoint")
+		_, _ = targetDB.ExecContext(t.Context(), "DROP TABLE IF EXISTS resume_tgt._spirit_move_checkpoint")
 	}()
 	// Test 2: Checkpoint exists but no target tables should fail
 	t.Run("checkpoint exists but no target tables fails", func(t *testing.T) {
@@ -262,7 +262,7 @@ func TestResumeStateCheckSchemaTypesAndCollation(t *testing.T) {
 	require.NoError(t, err)
 	// Checkpoint table must exist on the first target (targets[0]) for resume
 	// validation to proceed.
-	_, err = tgtDB.ExecContext(t.Context(), fmt.Sprintf(`CREATE TABLE %s._spirit_checkpoint (
+	_, err = tgtDB.ExecContext(t.Context(), fmt.Sprintf(`CREATE TABLE %s._spirit_move_checkpoint (
 		id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		copier_watermark TEXT, checksum_watermark TEXT, binlog_position TEXT, statement TEXT,
 		original_table_name VARCHAR(64) NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`, tgtName))
