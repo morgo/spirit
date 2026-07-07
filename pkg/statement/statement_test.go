@@ -183,6 +183,10 @@ func TestAlgorithmInplaceConsideredSafe(t *testing.T) {
 	require.NoError(t, test("add partition (partition `p1` values less than (100))"))
 	require.NoError(t, test("add partition partitions 4"))
 
+	// A table COMMENT change is in-place and metadata-only (INPLACE, not INSTANT)
+	require.NoError(t, test("COMMENT='hello world'"))
+	require.NoError(t, test("comment 'hello world'")) // alternate syntax without '='
+
 	// VARCHAR column modifications are safe (metadata-only)
 	require.NoError(t, test("modify `a` varchar(100)"))
 	require.NoError(t, test("change column `a` `a` varchar(100)"))
@@ -214,13 +218,19 @@ func TestAlgorithmInplaceConsideredSafe(t *testing.T) {
 	require.ErrorIs(t, test("engine=innodb"), ErrUnsafeForInplace)
 	require.ErrorIs(t, test("partition by HASH(`id`) partitions 8;"), ErrUnsafeForInplace)
 	require.ErrorIs(t, test("remove partitioning"), ErrUnsafeForInplace)
+	// COMMENT combined with a rebuild-class option in the *same* clause (space
+	// separated, so a single spec with multiple options) is unsafe.
+	require.ErrorIs(t, test("COMMENT='x' engine=innodb"), ErrUnsafeForInplace)
+	require.ErrorIs(t, test("engine=innodb COMMENT='x'"), ErrUnsafeForInplace)
 
 	// Mixed safe and unsafe operations should be unsafe - these cannot be split
 	// because we cannot safely detect which operations are INSTANT vs INPLACE
 	require.ErrorIs(t, test("drop index `a`, add column `b` int"), ErrMultipleAlterClauses)
 	require.ErrorIs(t, test("ALTER INDEX b INVISIBLE, add column `c` int"), ErrMultipleAlterClauses)
 	require.ErrorIs(t, test("modify `a` varchar(100), add index (b)"), ErrMultipleAlterClauses)
-	require.ErrorIs(t, test("drop index `a`, modify `b` int"), ErrMultipleAlterClauses) // non-VARCHAR modification makes it unsafe
+	require.ErrorIs(t, test("drop index `a`, modify `b` int"), ErrMultipleAlterClauses)  // non-VARCHAR modification makes it unsafe
+	require.ErrorIs(t, test("COMMENT='x', add column `b` int"), ErrMultipleAlterClauses) // safe COMMENT + unsafe clause
+	require.NoError(t, test("COMMENT='x', drop index `a`"))                              // COMMENT + another safe clause
 }
 
 func TestAlterIsAddUnique(t *testing.T) {
