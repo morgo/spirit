@@ -230,6 +230,16 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 			ast.AlterTableAddPartitions,
 			ast.AlterTableDropIndex:
 			continue
+		case ast.AlterTableOption:
+			// A table COMMENT change is in-place and metadata-only. Note it is
+			// not INSTANT: MySQL rejects ALGORITHM=INSTANT but accepts INPLACE.
+			// AlterTableOption also covers rebuild-class options (ENGINE=,
+			// ROW_FORMAT=, AUTO_INCREMENT=, ...), so only treat it as safe when
+			// every option in this spec is COMMENT.
+			if allOptionsComment(spec) {
+				continue
+			}
+			unsafeClauses++
 		case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
 			// Only safe if changing length of a VARCHAR column. We don't know the type of the column
 			// or its length, so we cannot determine if this is safe only by parsing. We can simply try
@@ -258,6 +268,23 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 		return ErrUnsafeForInplace
 	}
 	return nil
+}
+
+// allOptionsComment returns true if every table option in an AlterTableOption
+// spec is a COMMENT change. A table comment change is in-place and
+// metadata-only, but other table options (ENGINE=, ROW_FORMAT=,
+// AUTO_INCREMENT=, ...) can force a table rebuild, so a spec that mixes any of
+// them in is not safe for INPLACE.
+func allOptionsComment(spec *ast.AlterTableSpec) bool {
+	if len(spec.Options) == 0 {
+		return false
+	}
+	for _, opt := range spec.Options {
+		if opt.Tp != ast.TableOptionComment {
+			return false
+		}
+	}
+	return true
 }
 
 // columnReordered returns true if a MODIFY/CHANGE COLUMN spec moves the
