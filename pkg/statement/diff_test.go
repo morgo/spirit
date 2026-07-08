@@ -166,6 +166,53 @@ func TestDiff(t *testing.T) {
 			target:   "CREATE TABLE t1 (d INT, KEY c (d), c INT UNIQUE)",
 			expected: "",
 		},
+		// Type canonicalization: the live table (source) is in MySQL's canonical
+		// form, while the user's saved schema (target) uses a convenience spelling
+		// the parser folds to the same type. These must diff as equal so a schema
+		// file written with BOOL / BOOLEAN / SERIAL does not churn against the
+		// live table. See docs/fmt.md for the transformations MySQL applies.
+		{
+			// BOOL is an alias for tinyint(1); the parser folds it, so the user's
+			// `active BOOL` matches the live `active tinyint(1)`.
+			name:     "CanonicalTinyintVsBool",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOL)",
+			expected: "",
+		},
+		{
+			// BOOLEAN is likewise an alias for tinyint(1).
+			name:     "CanonicalTinyintVsBoolean",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOLEAN)",
+			expected: "",
+		},
+		{
+			// A numeric boolean default matches the canonical quoted form: MySQL
+			// renders numeric column defaults quoted (tinyint(1) DEFAULT '0'), and
+			// diff treats the bare and quoted numeric default as the same value.
+			name:     "CanonicalTinyintVsBooleanDefaultZero",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1) DEFAULT '0')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOLEAN DEFAULT 0)",
+			expected: "",
+		},
+		{
+			// SERIAL expands to BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE. The
+			// canonical live form is the expanded column plus a UNIQUE KEY named
+			// after the column; normalization materializes the inline UNIQUE the
+			// parser derives from SERIAL, so the two forms diff as equal.
+			name:     "CanonicalVsSerial",
+			source:   "CREATE TABLE t1 (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, UNIQUE KEY id (id))",
+			target:   "CREATE TABLE t1 (id SERIAL)",
+			expected: "",
+		},
+		{
+			// Reverse direction: the user's BOOLEAN schema as source, canonical
+			// tinyint(1) as target. Still equal — canonicalization is symmetric.
+			name:     "BooleanVsCanonicalTinyint",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOLEAN)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1))",
+			expected: "",
+		},
 		{
 			// Adding WITH PARSER to an index with an unchanged column list is
 			// an option-only change. A combined DROP+ADD in a single ALTER is a

@@ -7,19 +7,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// columnsEqualWithContext and columnsEqualIgnorePK (both in diff.go)
-// field-by-field compare the parsed Column struct to decide
-// whether a column differs between the source and target schema. If a newly
-// added Column field is NOT wired into these comparisons, two columns that
-// differ only in that field are silently treated as EQUAL — a real ALTER gets
-// dropped and Spirit applies the wrong schema diff. The tests below are the
-// safety net for that class of mistake.
+// columnsEqualWithContext (in diff.go) field-by-field compares the parsed
+// Column struct to decide whether a column differs between the source and
+// target schema. If a newly added Column field is NOT wired into that
+// comparison, two columns that differ only in that field are silently treated
+// as EQUAL — a real ALTER gets dropped and Spirit applies the wrong schema
+// diff. The tests below are the safety net for that class of mistake.
 
 // columnFieldsCompared lists the exported Column fields that the equality logic
-// (columnsEqualWithContext + columnsEqualIgnorePK + the shared
-// columnExtendedAttributesEqual helper) compares. PrimaryKey counts as compared:
-// it IS compared by columnsEqualWithContext and is only skipped by the dedicated
-// *IgnorePK* variant.
+// (columnsEqualWithContext + the shared columnExtendedAttributesEqual helper)
+// compares.
 var columnFieldsCompared = map[string]struct{}{
 	"Name":            {},
 	"Type":            {},
@@ -63,9 +60,9 @@ var columnFieldsNotCompared = map[string]string{
 	"Options": "catch-all map for unmodeled options; currently not compared by diff.go",
 	// Column-level UNIQUE is representation, not state: MySQL canonicalizes it
 	// into a table-level UNIQUE KEY, and MODIFY COLUMN cannot express it. It is
-	// folded into index-level diffing (effectiveIndexes/diffIndexes) instead of
-	// being part of per-column equality.
-	"Unique": "folded into index-level diffing by effectiveIndexes; diffed by diffIndexes, not here",
+	// materialized into a table-level index by indexNormalizer and diffed by
+	// diffIndexes instead of being part of per-column equality.
+	"Unique": "materialized into a table-level index by indexNormalizer; diffed by diffIndexes, not here",
 }
 
 // TestColumnsEqualAllFieldsAccounted is the primary tripwire: it enumerates the
@@ -75,11 +72,11 @@ var columnFieldsNotCompared = map[string]string{
 // decides how the comparison logic should treat it.
 //
 // IF THIS FAILS BECAUSE A FIELD WAS ADDED TO Column:
-// update BOTH columnsEqual functions in diff.go (columnsEqualWithContext AND
-// columnsEqualIgnorePK, plus columnExtendedAttributesEqual for extended
-// attributes) to compare the new field, then add it to columnFieldsCompared. If
-// the new field is intentionally NOT part of column equality (like Raw / Check /
-// Options), add it to columnFieldsNotCompared with a justifying comment instead.
+// update columnsEqualWithContext in diff.go (plus columnExtendedAttributesEqual
+// for extended attributes) to compare the new field, then add it to
+// columnFieldsCompared. If the new field is intentionally NOT part of column
+// equality (like Raw / Check / Options), add it to columnFieldsNotCompared with
+// a justifying comment instead.
 func TestColumnsEqualAllFieldsAccounted(t *testing.T) {
 	typ := reflect.TypeFor[Column]()
 
@@ -220,46 +217,6 @@ func TestColumnsEqualWithContextDetectsEveryField(t *testing.T) {
 			m.mutate(&tgt)
 			require.False(t, ct.columnsEqualWithContext(&src, &tgt, target, opts),
 				"columnsEqualWithContext must return false when %s differs; "+
-					"if you added field %s, make sure diff.go compares it", m.name, m.name)
-		})
-	}
-}
-
-// TestColumnsEqualIgnorePKDetectsEveryField mirrors the above for
-// columnsEqualIgnorePK, which compares the same fields EXCEPT PrimaryKey. Every
-// other comparable field, when flipped, must cause it to return false; flipping
-// PrimaryKey alone must NOT (that is the whole point of the IgnorePK variant).
-func TestColumnsEqualIgnorePKDetectsEveryField(t *testing.T) {
-	opts := &DiffOptions{}
-
-	a := baseColumn()
-	b := baseColumn()
-	require.True(t, columnsEqualIgnorePK(&a, &b, opts),
-		"identical columns must compare equal under columnsEqualIgnorePK")
-
-	// PrimaryKey is deliberately ignored by this function.
-	pkOnly := baseColumn()
-	pkOnly.PrimaryKey = !pkOnly.PrimaryKey
-	require.True(t, columnsEqualIgnorePK(&a, &pkOnly, opts),
-		"columnsEqualIgnorePK must ignore a PrimaryKey-only difference")
-
-	// Unique is deliberately ignored too — see the matching assertion in
-	// TestColumnsEqualWithContextDetectsEveryField.
-	uniqueOnly := baseColumn()
-	uniqueOnly.Unique = !uniqueOnly.Unique
-	require.True(t, columnsEqualIgnorePK(&a, &uniqueOnly, opts),
-		"columnsEqualIgnorePK must ignore a Unique-only difference")
-
-	for _, m := range everyComparedFieldMutation() {
-		if m.name == "PrimaryKey" {
-			continue // ignored by this function by design
-		}
-		t.Run(m.name, func(t *testing.T) {
-			src := baseColumn()
-			tgt := baseColumn()
-			m.mutate(&tgt)
-			require.False(t, columnsEqualIgnorePK(&src, &tgt, opts),
-				"columnsEqualIgnorePK must return false when %s differs; "+
 					"if you added field %s, make sure diff.go compares it", m.name, m.name)
 		})
 	}

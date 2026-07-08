@@ -2,35 +2,46 @@ package statement
 
 import "fmt"
 
-func init() { registerNormalizer(indexNameNormalizer{}) }
+func init() { registerNormalizer(indexNormalizer{}) }
 
-// indexNameNormalizer assigns MySQL's default naming convention to any unnamed
-// non-PRIMARY KEY indexes. MySQL names indexes after the first column in the
-// index. If that name is already taken, it appends _2, _3, etc.
-// This ensures that unnamed indexes like INDEX (col) are treated identically
-// to their MySQL-normalized form KEY `col` (`col`) during diff comparisons.
-type indexNameNormalizer struct{}
+// indexNormalizer canonicalizes a table's secondary indexes the way MySQL does
+// when it stores the definition, so diffIndexes can compare two tables by
+// walking ct.Indexes directly:
+//
+//  1. Inline column-level UNIQUE (`c INT UNIQUE`) is materialized into a
+//     table-level UNIQUE index. MySQL never stores a column-level UNIQUE — it
+//     canonicalizes it into a `UNIQUE KEY` named after the column (suffixed
+//     _2, _3, ... on collision), which is what SHOW CREATE TABLE reports. The
+//     synthesized index is tagged InlineDerived because its name is only a
+//     guess at the server-assigned one.
+//  2. Unnamed table-level indexes are given MySQL's default name (the first
+//     column, suffixed on collision).
+//
+// The two steps share one name-reservation pass: the server names indexes in
+// declaration order and column definitions precede table-level keys, so inline
+// uniques claim their names before unnamed keys are numbered (e.g. in
+// `c INT UNIQUE, KEY (c, d)` the unique gets `c` and the key is pushed to
+// `c_2`). Keeping both steps in one rule is what makes that ordering reliable.
+// PRIMARY KEY indexes are left untouched (MySQL always names them PRIMARY).
+type indexNormalizer struct{}
 
-func (indexNameNormalizer) Name() string { return "auto-name-indexes" }
+func (indexNormalizer) Name() string { return "index-normalization" }
 
-func (indexNameNormalizer) Normalize(ct *CreateTable) *CreateTable {
-	// Track all used index names (including already-named indexes)
-	usedNames := make(map[string]int) // name -> highest suffix used (0 = base name)
+func (indexNormalizer) Normalize(ct *CreateTable) *CreateTable {
+	// Track all used index names (including already-named indexes). The value
+	// is the highest _N suffix seen for that base name (0 = base name only).
+	usedNames := make(map[string]int)
 	for i := range ct.Indexes {
 		if ct.Indexes[i].Name != "" {
 			usedNames[ct.Indexes[i].Name] = 0
 		}
 	}
 
-	// Inline column-level UNIQUEs claim their server-assigned names BEFORE any
-	// unnamed table-level index is auto-named: the server names indexes in
-	// declaration order and column definitions normally precede table-level
-	// keys, so in `c int UNIQUE, KEY (c, d)` the unique index gets `c` and the
-	// unnamed key is pushed to `c_2`. The names are only reserved here — not
-	// materialized into ct.Indexes — so the inline declaration stays
-	// column-level state (Column.Unique) everywhere else. effectiveIndexes
-	// recomputes the same names at diff time; keep the two in sync.
-	for _, col := range ct.Columns {
+	// Step 1: materialize inline column-level UNIQUEs as table-level indexes.
+	// This happens before unnamed table-level indexes are named so the unique
+	// claims the column name first, matching the server's declaration order.
+	for i := range ct.Columns {
+		col := &ct.Columns[i]
 		if !col.Unique {
 			continue
 		}
@@ -42,8 +53,17 @@ func (indexNameNormalizer) Normalize(ct *CreateTable) *CreateTable {
 			name = fmt.Sprintf("%s_%d", col.Name, suffix)
 		}
 		usedNames[name] = 0
+		ct.Indexes = append(ct.Indexes, Index{
+			Name:          name,
+			Type:          "UNIQUE",
+			Columns:       []string{col.Name},
+			ColumnList:    []IndexColumn{{Name: col.Name}},
+			InlineDerived: true,
+		})
+		col.Unique = false
 	}
 
+	// Step 2: assign MySQL's default name to any unnamed non-PRIMARY index.
 	for i := range ct.Indexes {
 		idx := &ct.Indexes[i]
 		if idx.Name != "" || idx.Type == "PRIMARY KEY" {
