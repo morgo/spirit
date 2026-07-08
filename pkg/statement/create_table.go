@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	driver "github.com/pingcap/tidb/pkg/parser/test_driver"
 	"github.com/pingcap/tidb/pkg/parser/types"
 )
 
@@ -81,6 +79,14 @@ type Index struct {
 	KeyBlockSize *uint64           `json:"key_block_size,omitempty"`
 	ParserName   *string           `json:"parser_name,omitempty"`
 	Options      map[string]string `json:"options,omitempty"`
+
+	// InlineDerived marks a UNIQUE index that indexNormalizer synthesized
+	// from an inline column-level UNIQUE (`c INT UNIQUE`). Its name is only a
+	// guess at the server-assigned one (the column name, suffixed on collision),
+	// so diffIndexes pairs it with an equivalent live unique index by column set
+	// even when the names differ, rather than emitting a spurious DROP+ADD.
+	// Not serialized: it is a diff-time hint, not part of the logical schema.
+	InlineDerived bool `json:"-"`
 }
 
 // Constraint represents a table constraint
@@ -328,26 +334,6 @@ func (ct *CreateTable) GetPartition() *PartitionOptions {
 	return ct.Partition
 }
 
-func (indexes Indexes) HasInvisible() bool {
-	for _, idx := range indexes {
-		if idx.Invisible != nil && *idx.Invisible {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (constraints Constraints) HasForeignKeys() bool {
-	for _, c := range constraints {
-		if c.Type == "FOREIGN KEY" {
-			return true
-		}
-	}
-
-	return false
-}
-
 // parseToStruct converts the AST into a structured CreateTable
 func (ct *CreateTable) parseToStruct() {
 	ct.TableName = ct.Raw.Table.Name.String()
@@ -376,257 +362,22 @@ func (ct *CreateTable) parseToStruct() {
 		}
 	}
 
-	// Hoist column-level CHECK constraints into table-level constraints, the
-	// same way MySQL does in SHOW CREATE TABLE. This keeps the parsed form
-	// canonical so a diff against a live (already-hoisted) table converges and
-	// never tries to DROP the live CHECK. See normalizeColumnChecks.
-	ct.normalizeColumnChecks()
-
-	// Auto-generate MySQL default names for unnamed indexes
-	ct.autoNameIndexes()
-
 	// Parse table options
 	if len(ct.Raw.Options) > 0 {
 		ct.TableOptions = ct.parseTableOptions(ct.Raw.Options)
 	}
 
-	// Resolve the legacy BINARY column attribute into a binary collation.
-	// Must run after table options so an unspecified column charset can
-	// fall back to the table charset. See normalizeBinaryAttribute.
-	ct.normalizeBinaryAttribute()
-
 	// Parse partition options
 	if ct.Raw.Partition != nil {
 		ct.Partition = ct.parsePartitionOptions(ct.Raw.Partition)
 	}
-}
 
-// normalizeBinaryAttribute resolves the legacy BINARY column attribute
-// (e.g. `c varchar(100) BINARY`) the way MySQL does: BINARY does not change
-// the data type, it selects the binary (_bin) collation of the column's
-// charset. Verified against MySQL 8.0.45, the canonical forms are:
-//
-//	c varchar(100) BINARY                        (table charset utf8mb4)
-//	  -> varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
-//	c varchar(100) CHARACTER SET latin1 BINARY
-//	  -> varchar(100) CHARACTER SET latin1 COLLATE latin1_bin
-//
-// The TiDB parser surfaces the attribute as the binary type flag with a
-// non-"binary" (usually empty) charset — distinct from true binary types
-// (VARBINARY/BINARY/BLOB), which carry the "binary" charset and are
-// converted to their binary type names in parseColumn. Without this
-// normalization, diffing a live `varchar ... COLLATE utf8mb4_bin` column
-// against a desired file written with the BINARY attribute would emit a
-// destructive MODIFY to varbinary.
-//
-// MySQL lets BINARY win over an explicit COLLATE in the same column
-// definition (varchar(100) BINARY COLLATE utf8mb4_general_ci resolves to
-// utf8mb4_bin), so any parsed collation is overridden here. If neither the
-// column nor the table declares a charset the attribute cannot be resolved
-// (the effective charset is a server default only known at runtime); the
-// column keeps its character type and no collation is invented.
-func (ct *CreateTable) normalizeBinaryAttribute() {
-	for i := range ct.Columns {
-		col := &ct.Columns[i]
-		if col.Raw == nil || !mysql.HasBinaryFlag(col.Raw.Tp.GetFlag()) {
-			continue
-		}
-		if col.Raw.Tp.GetCharset() == "binary" {
-			continue // true binary type (VARBINARY et al.), converted in parseColumn
-		}
-		// Resolve the effective charset: explicit column charset first,
-		// then the table default charset.
-		charsetName := ""
-		if col.Charset != nil {
-			charsetName = *col.Charset
-		} else if ct.TableOptions != nil && ct.TableOptions.Charset != nil {
-			charsetName = *ct.TableOptions.Charset
-		}
-		if charsetName == "" || charsetName == "binary" {
-			continue
-		}
-		// Every MySQL character set has a <charset>_bin collation.
-		collation := charsetName + "_bin"
-		col.Collation = &collation
-	}
-}
-
-// normalizeColumnChecks hoists column-level CHECK constraints into table-level
-// constraints, mirroring what MySQL does in SHOW CREATE TABLE. Without this,
-// a column-level CHECK lives only in Column.Check while the live table (after
-// the ALTER is applied) reports the same constraint in CreateTable.Constraints.
-// A re-diff would then (a) keep emitting MODIFY COLUMN because Column.Check
-// differs and (b) try to DROP the live CHECK because it is absent from the
-// target's Constraints. Hoisting at parse time keeps the parsed form canonical
-// so the re-diff converges and no constraint is ever dropped.
-//
-// MySQL auto-names unnamed CHECK constraints `<table>_chk_<n>`. We replicate
-// that here: user-named CHECKs keep their name; unnamed ones are numbered in
-// the order they are encountered (existing table-level CHECKs first, then the
-// hoisted column-level CHECKs in column order).
-//
-// Naming caveat: MySQL numbers CHECKs in true declaration order, interleaving
-// column-level and table-level CHECKs by their position in the statement. The
-// TiDB parser does not expose reliable per-node source offsets, so when a table
-// mixes column-level and table-level CHECKs our generated `_chk_<n>` numbers can
-// differ from MySQL's. This is purely cosmetic and never causes a constraint to
-// be dropped or a re-diff to diverge: diffConstraints pairs CHECK constraints by
-// expression when the names differ (see matchedByExpression in diffConstraints),
-// so the round-trip still converges. The common case — a table whose CHECKs are
-// all column-level — numbers identically to MySQL.
-func (ct *CreateTable) normalizeColumnChecks() {
-	// Track names already in use so generated names never collide with a
-	// user-supplied constraint name.
-	usedNames := make(map[string]bool)
-	for i := range ct.Constraints {
-		if ct.Constraints[i].Name != "" {
-			usedNames[ct.Constraints[i].Name] = true
-		}
-	}
-
-	// Append a hoisted table-level CHECK for each column-level CHECK, then
-	// clear the column-level field so it no longer participates in column
-	// equality or column-definition emission.
-	for i := range ct.Columns {
-		col := &ct.Columns[i]
-		if col.Check == nil {
-			continue
-		}
-		// Recover the user-supplied constraint name (if any) from the raw
-		// column option; unnamed ones are auto-numbered below.
-		name := ""
-		if col.Raw != nil {
-			for _, opt := range col.Raw.Options {
-				if opt.Tp == ast.ColumnOptionCheck {
-					name = opt.ConstraintName
-					break
-				}
-			}
-		}
-		expr := *col.Check
-		definition := fmt.Sprintf("CHECK (%s)", expr)
-		ct.Constraints = append(ct.Constraints, Constraint{
-			Name:       name,
-			Type:       "CHECK",
-			Expression: &expr,
-			Definition: &definition,
-		})
-		col.Check = nil
-		if name != "" {
-			usedNames[name] = true
-		}
-	}
-
-	// Number the unnamed CHECK constraints `<table>_chk_<n>`. Resolve indices
-	// (not pointers) after all appends are complete so a slice reallocation
-	// during the append loop above cannot leave us with dangling references.
-	counter := 0
-	for i := range ct.Constraints {
-		c := &ct.Constraints[i]
-		if c.Type != "CHECK" || c.Name != "" {
-			continue
-		}
-		var name string
-		for {
-			counter++
-			name = fmt.Sprintf("%s_chk_%d", ct.TableName, counter)
-			if !usedNames[name] {
-				break
-			}
-		}
-		usedNames[name] = true
-		c.Name = name
-	}
-}
-
-// autoNameIndexes assigns MySQL's default naming convention to any unnamed
-// non-PRIMARY KEY indexes. MySQL names indexes after the first column in the
-// index. If that name is already taken, it appends _2, _3, etc.
-// This ensures that unnamed indexes like INDEX (col) are treated identically
-// to their MySQL-normalized form KEY `col` (`col`) during diff comparisons.
-func (ct *CreateTable) autoNameIndexes() {
-	// Track all used index names (including already-named indexes)
-	usedNames := make(map[string]int) // name -> highest suffix used (0 = base name)
-	for i := range ct.Indexes {
-		if ct.Indexes[i].Name != "" {
-			usedNames[ct.Indexes[i].Name] = 0
-		}
-	}
-
-	// Inline column-level UNIQUEs claim their server-assigned names BEFORE any
-	// unnamed table-level index is auto-named: the server names indexes in
-	// declaration order and column definitions normally precede table-level
-	// keys, so in `c int UNIQUE, KEY (c, d)` the unique index gets `c` and the
-	// unnamed key is pushed to `c_2`. The names are only reserved here — not
-	// materialized into ct.Indexes — so the inline declaration stays
-	// column-level state (Column.Unique) everywhere else. effectiveIndexes
-	// recomputes the same names at diff time; keep the two in sync.
-	for _, col := range ct.Columns {
-		if !col.Unique {
-			continue
-		}
-		name := col.Name
-		for suffix := 2; ; suffix++ {
-			if _, taken := usedNames[name]; !taken {
-				break
-			}
-			name = fmt.Sprintf("%s_%d", col.Name, suffix)
-		}
-		usedNames[name] = 0
-	}
-
-	for i := range ct.Indexes {
-		idx := &ct.Indexes[i]
-		if idx.Name != "" || idx.Type == "PRIMARY KEY" {
-			continue
-		}
-
-		// Determine the base name from the first column.
-		// For expression indexes the first column name may be empty;
-		// fall back to a functional_index convention similar to MySQL 8.0.
-		var baseName string
-		switch {
-		case len(idx.Columns) > 0 && idx.Columns[0] != "":
-			baseName = idx.Columns[0]
-		case len(idx.ColumnList) > 0 && idx.ColumnList[0].Name != "":
-			baseName = idx.ColumnList[0].Name
-		case len(idx.ColumnList) > 0:
-			baseName = "functional_index"
-		default:
-			baseName = "idx"
-		}
-
-		// Find a unique name following MySQL's convention:
-		// first try baseName, then baseName_2, baseName_3, ...
-		candidate := baseName
-		if _, taken := usedNames[candidate]; taken {
-			// Start from _2 and increment
-			suffix := 2
-			if prev, ok := usedNames[baseName]; ok && prev >= 2 {
-				suffix = prev + 1
-			}
-			for {
-				candidate = fmt.Sprintf("%s_%d", baseName, suffix)
-				if _, taken := usedNames[candidate]; !taken {
-					break
-				}
-				suffix++
-			}
-		}
-
-		idx.Name = candidate
-		usedNames[candidate] = 0
-		// Track the highest suffix used for this base name
-		if candidate != baseName {
-			// Extract suffix number
-			var suffixNum int
-			if _, err := fmt.Sscanf(candidate, baseName+"_%d", &suffixNum); err == nil {
-				if current, ok := usedNames[baseName]; !ok || suffixNum > current {
-					usedNames[baseName] = suffixNum
-				}
-			}
-		}
-	}
+	// Apply the normalization rules now that every field is populated. This
+	// includes the long-standing normalizers (column-CHECK hoisting, unnamed
+	// index naming, BINARY-attribute resolution) plus any registered by an
+	// init() in a normalize_*.go file. See normalize.go. Copy the result back
+	// onto the receiver so a rule that returns a new instance is honored.
+	*ct = *runNormalizers(ct)
 }
 
 // parseColumn converts a column definition to a Column struct
@@ -657,7 +408,7 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	// (e.g. varchar(100) BINARY), which does NOT change the data type —
 	// MySQL canonicalizes it to the binary collation of the column's
 	// charset (varchar(100) COLLATE utf8mb4_bin). That case is resolved by
-	// normalizeBinaryAttribute once table options are known; converting it
+	// binaryAttributeNormalizer once table options are known; converting it
 	// here would emit a destructive varchar -> varbinary type change.
 	if mysql.HasBinaryFlag(col.Tp.GetFlag()) && col.Tp.GetCharset() == "binary" {
 		switch column.Type {
@@ -1356,79 +1107,6 @@ func (ct *CreateTable) parseSubPartitionDefinition(sub *ast.SubPartitionDefiniti
 	return subDef
 }
 
-// stringLiteralValue returns the true, fully-unescaped value of a quoted
-// string-literal AST node (for example the value behind a single-quoted
-// DEFAULT, or a COMMENT, whose contents include escaped quote or backslash
-// characters) along with true. For any other expression kind it returns an
-// empty string and false.
-//
-// This is the load-bearing fix for the string round-trip bugs: the TiDB
-// parser's Restore re-emits a string literal in its re-escaped, still-quoted
-// form rather than as the raw value, so the previous approach of
-// Restore-then-strip-outer-quotes left the inner escaping in place. Reading
-// the literal's value directly off the AST yields the raw bytes, which we
-// then escape exactly once at emission time via sqlescape (backslash
-// escaping, which MySQL accepts in its default sql_mode). Note MySQL renders
-// a literal quote in SHOW CREATE TABLE as a doubled quote, which the parser
-// also accepts; the doubled and backslash forms are equivalent in the
-// default sql_mode.
-func stringLiteralValue(expr ast.ExprNode) (string, bool) {
-	if v, ok := expr.(*driver.ValueExpr); ok && v.Kind() == driver.KindString {
-		return v.GetString(), true
-	}
-	return "", false
-}
-
-// isExpressionDefault returns true when the default value expression should be
-// wrapped in parentheses in the generated DDL. MySQL requires expression defaults
-// (as opposed to literal defaults) to be enclosed in parens, e.g. DEFAULT (json_object()).
-// This mirrors the logic in the TiDB parser's ColumnOption.Restore for ColumnOptionDefaultValue:
-// non-CURRENT_TIMESTAMP function calls and column name expressions get outer parentheses.
-func isExpressionDefault(expr ast.ExprNode) bool {
-	if expr == nil {
-		return false
-	}
-	switch e := expr.(type) {
-	case *ast.FuncCallExpr:
-		// CURRENT_TIMESTAMP (and aliases NOW, LOCALTIME, etc.) are literal-style defaults
-		// that don't need parens. Everything else is an expression default.
-		switch e.FnName.L {
-		case "current_timestamp", "now", "localtime", "localtimestamp", "utc_timestamp":
-			return false
-		}
-		return true
-	case *ast.ColumnNameExpr:
-		return true
-	default:
-		return false
-	}
-}
-
-// restoreExpressionText restores an expression AST node to its SQL text,
-// stripping redundant outer parentheses. MySQL's SHOW CREATE TABLE wraps
-// generated-column and CHECK expressions in an extra set of parentheses
-// (e.g. GENERATED ALWAYS AS ((`a` + 1))); stripping them ensures a
-// user-written `AS (a + 1)` compares equal to the canonical form.
-// Unlike parseExpression, the result is NOT lowercased and string literals
-// keep their quotes — these expressions may contain case-sensitive literals.
-func restoreExpressionText(expr ast.ExprNode) (string, bool) {
-	for {
-		paren, ok := expr.(*ast.ParenthesesExpr)
-		if !ok {
-			break
-		}
-		expr = paren.Expr
-	}
-
-	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-	if err := expr.Restore(rCtx); err != nil {
-		return "", false
-	}
-
-	return sb.String(), true
-}
-
 // parseExpression converts an expression to a string representation
 func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 	if expr == nil {
@@ -1482,277 +1160,4 @@ func (ct *CreateTable) parseExpression(expr ast.ExprNode) any {
 		}
 		return str
 	}
-}
-
-// extractLengthFromTypeString extracts length from type string like "varchar(100)"
-func extractLengthFromTypeString(typeStr string) int {
-	// Simple regex-like parsing for common cases
-	if strings.Contains(typeStr, "(") && strings.Contains(typeStr, ")") {
-		start := strings.Index(typeStr, "(")
-
-		end := strings.Index(typeStr, ")")
-		if start < end && start != -1 && end != -1 {
-			lengthStr := typeStr[start+1 : end]
-			// Handle cases like "decimal(10,2)" - take the first number
-			if commaIdx := strings.Index(lengthStr, ","); commaIdx != -1 {
-				lengthStr = lengthStr[:commaIdx]
-			}
-
-			var length int
-			if n, err := fmt.Sscanf(lengthStr, "%d", &length); n == 1 && err == nil {
-				return length
-			}
-		}
-	}
-
-	return 0
-}
-
-// extractPrecisionScaleFromTypeString extracts precision and scale from type string like "decimal(10,2)"
-func extractPrecisionScaleFromTypeString(typeStr string) (int, int) {
-	if strings.Contains(typeStr, "(") && strings.Contains(typeStr, ")") {
-		start := strings.Index(typeStr, "(")
-
-		end := strings.Index(typeStr, ")")
-		if start < end && start != -1 && end != -1 {
-			paramStr := typeStr[start+1 : end]
-			if precisionStr, scaleStr, found := strings.Cut(paramStr, ","); found {
-				precisionStr = strings.TrimSpace(precisionStr)
-				scaleStr = strings.TrimSpace(scaleStr)
-
-				var precision, scale int
-				if n, err := fmt.Sscanf(precisionStr, "%d", &precision); n == 1 && err == nil {
-					if n, err := fmt.Sscanf(scaleStr, "%d", &scale); n == 1 && err == nil {
-						return precision, scale
-					}
-
-					return precision, 0
-				}
-			}
-		}
-	}
-
-	return 0, 0
-}
-
-// ByName is a generic function that finds an element by name in any slice of types with Name field
-// NOTE: This function assumes that names are unique within the slice! That will be true for
-// "canonical" CREATE TABLE statements as returned by SHOW CREATE TABLE, but may not be true for
-// arbitrary input.
-func ByName[T HasName](slice []T, name string) *T {
-	for _, item := range slice {
-		if item.GetName() == name {
-			return &item
-		}
-	}
-
-	return nil
-}
-
-func (i Index) GetName() string {
-	return i.Name
-}
-
-func (c Column) GetName() string {
-	return c.Name
-}
-
-func (c Constraint) GetName() string {
-	return c.Name
-}
-
-func (indexes Indexes) ByName(name string) *Index {
-	return ByName(indexes, name)
-}
-
-func (columns Columns) ByName(name string) *Column {
-	return ByName(columns, name)
-}
-
-func (constraints Constraints) ByName(name string) *Constraint {
-	return ByName(constraints, name)
-}
-
-// RemoveSecondaryIndexes takes a CREATE TABLE statement and returns a modified version
-// without secondary indexes (regular INDEX only). PRIMARY KEY, UNIQUE, and FULLTEXT
-// indexes are preserved.
-func RemoveSecondaryIndexes(createStmt string) (string, error) {
-	ct, err := ParseCreateTable(createStmt)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse CREATE TABLE: %w", err)
-	}
-
-	// Filter out regular INDEX entries from the constraints
-	filteredConstraints := make([]*ast.Constraint, 0)
-	for _, constraint := range ct.Raw.Constraints {
-		// Keep everything except regular INDEX
-		switch constraint.Tp {
-		case ast.ConstraintKey, ast.ConstraintIndex:
-			// Skip regular indexes
-			continue
-		default:
-			// Keep PRIMARY KEY, UNIQUE, FULLTEXT, SPATIAL, etc.
-			filteredConstraints = append(filteredConstraints, constraint)
-		}
-	}
-
-	// Update the AST with filtered constraints
-	ct.Raw.Constraints = filteredConstraints
-
-	// Restore the modified AST back to SQL
-	var sb strings.Builder
-	rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
-	if err := ct.Raw.Restore(rCtx); err != nil {
-		return "", fmt.Errorf("failed to restore CREATE TABLE: %w", err)
-	}
-
-	return sb.String(), nil
-}
-
-// GetMissingSecondaryIndexes compares two CREATE TABLE statements (source and target)
-// and returns an ALTER TABLE statement that adds any missing secondary indexes.
-// Returns an empty string if no indexes need to be added.
-// Considers UNIQUE, FULLTEXT, SPATIAL, and regular INDEX types. PRIMARY KEY is excluded as it's fundamental to table structure.
-func GetMissingSecondaryIndexes(sourceCreateTable, targetCreateTable, tableName string) (string, error) {
-	// Parse both CREATE TABLE statements
-	sourceCT, err := ParseCreateTable(sourceCreateTable)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse source CREATE TABLE: %w", err)
-	}
-
-	targetCT, err := ParseCreateTable(targetCreateTable)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse target CREATE TABLE: %w", err)
-	}
-
-	// Build a map of existing indexes on the target (all secondary indexes)
-	targetIndexes := make(map[string]bool)
-	for _, constraint := range targetCT.Raw.Constraints {
-		// Skip PRIMARY KEY, but include all other index types
-		if constraint.Tp == ast.ConstraintPrimaryKey {
-			continue
-		}
-		targetIndexes[constraint.Name] = true
-	}
-
-	// Find missing indexes from source
-	var missingIndexes []*ast.Constraint
-	for _, constraint := range sourceCT.Raw.Constraints {
-		// Consider all secondary indexes (UNIQUE, FULLTEXT, and regular INDEX)
-		// Skip only PRIMARY KEY as it's fundamental to table structure
-		if constraint.Tp == ast.ConstraintPrimaryKey {
-			continue
-		}
-		// Include: UNIQUE, FULLTEXT, SPATIAL, and regular INDEX
-		if constraint.Tp != ast.ConstraintKey &&
-			constraint.Tp != ast.ConstraintIndex &&
-			constraint.Tp != ast.ConstraintUniq &&
-			constraint.Tp != ast.ConstraintUniqKey &&
-			constraint.Tp != ast.ConstraintUniqIndex &&
-			constraint.Tp != ast.ConstraintFulltext &&
-			constraint.Tp != ast.ConstraintSpatial {
-			continue
-		}
-
-		// Check if this index exists on target
-		if !targetIndexes[constraint.Name] {
-			missingIndexes = append(missingIndexes, constraint)
-		}
-	}
-
-	// If no missing indexes, return empty string
-	if len(missingIndexes) == 0 {
-		return "", nil
-	}
-
-	// Build a single ALTER TABLE statement with all missing indexes
-	var alterClauses []string
-	for _, constraint := range missingIndexes {
-		var sb strings.Builder
-
-		// Add appropriate keyword based on constraint type
-		switch constraint.Tp {
-		case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
-			sb.WriteString("ADD UNIQUE INDEX")
-		case ast.ConstraintFulltext:
-			sb.WriteString("ADD FULLTEXT INDEX")
-		case ast.ConstraintSpatial:
-			sb.WriteString("ADD SPATIAL INDEX")
-		default: // ast.ConstraintKey, ast.ConstraintIndex
-			sb.WriteString("ADD INDEX")
-		}
-
-		// Add index name if present
-		if constraint.Name != "" {
-			fmt.Fprintf(&sb, " %s", sqlescape.EscapeIdentifier(constraint.Name))
-		}
-
-		// Add columns
-		sb.WriteString(" (")
-		for i, key := range constraint.Keys {
-			if i > 0 {
-				sb.WriteString(", ")
-			}
-			switch {
-			case key.Column != nil:
-				// Regular column reference
-				sb.WriteString(sqlescape.EscapeIdentifier(key.Column.Name.String()))
-				// Add length if specified
-				if key.Length > 0 {
-					fmt.Fprintf(&sb, "(%d)", key.Length)
-				}
-			case key.Expr != nil:
-				// Functional (expression) index part, e.g. KEY ((lower(b))).
-				// Column is nil in this case; MySQL requires the expression
-				// to be wrapped in its own parentheses.
-				var exprSb strings.Builder
-				rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &exprSb)
-				if err := key.Expr.Restore(rCtx); err != nil {
-					return "", fmt.Errorf("failed to restore expression for index %q: %w", constraint.Name, err)
-				}
-				fmt.Fprintf(&sb, "(%s)", exprSb.String())
-			default:
-				return "", fmt.Errorf("index %q has a key part with neither a column nor an expression", constraint.Name)
-			}
-			// Descending key part (MySQL 8.0+). ASC is MySQL's canonical
-			// default and is never emitted explicitly.
-			if key.Desc {
-				sb.WriteString(" DESC")
-			}
-		}
-		sb.WriteString(")")
-
-		// Add index options if present
-		if constraint.Option != nil {
-			opt := constraint.Option
-
-			// Add USING clause
-			if opt.Tp != ast.IndexTypeInvalid && opt.Tp.String() != "" {
-				sb.WriteString(" USING " + opt.Tp.String())
-			}
-
-			// Add KEY_BLOCK_SIZE
-			if opt.KeyBlockSize > 0 {
-				fmt.Fprintf(&sb, " KEY_BLOCK_SIZE=%d", opt.KeyBlockSize)
-			}
-
-			// Add WITH PARSER (FULLTEXT indexes)
-			if opt.ParserName.L != "" {
-				fmt.Fprintf(&sb, " WITH PARSER %s", opt.ParserName.String())
-			}
-
-			// Add COMMENT
-			if opt.Comment != "" {
-				fmt.Fprintf(&sb, " COMMENT '%s'", sqlescape.EscapeString(opt.Comment))
-			}
-
-			// Add VISIBLE/INVISIBLE
-			if opt.Visibility == ast.IndexVisibilityInvisible {
-				sb.WriteString(" INVISIBLE")
-			}
-		}
-		alterClauses = append(alterClauses, sb.String())
-	}
-	// Combine all ADD INDEX clauses into a single ALTER TABLE statement
-	return fmt.Sprintf("ALTER TABLE %s %s", sqlescape.EscapeIdentifier(tableName), strings.Join(alterClauses, ", ")), nil
 }

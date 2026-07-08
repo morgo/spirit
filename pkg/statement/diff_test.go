@@ -35,19 +35,19 @@ func TestDiff(t *testing.T) {
 			name:     "AddColumn",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `b` int(11) NULL",
+			expected: "ALTER TABLE `t1` ADD COLUMN `b` int NULL",
 		},
 		{
 			name:     "AddColumnInMiddle",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c INT)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `b` int(11) NULL AFTER `id`",
+			expected: "ALTER TABLE `t1` ADD COLUMN `b` int NULL AFTER `id`",
 		},
 		{
 			name:     "AddColumnAtEnd",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c INT)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `c` int(11) NULL",
+			expected: "ALTER TABLE `t1` ADD COLUMN `c` int NULL",
 		},
 		{
 			name:     "DropColumn",
@@ -65,7 +65,7 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderColumn",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (c INT, a INT, b INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int(11) NULL FIRST, MODIFY COLUMN `a` int(11) NULL AFTER `c`, MODIFY COLUMN `b` int(11) NULL AFTER `a`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `c` int NULL FIRST, MODIFY COLUMN `a` int NULL AFTER `c`, MODIFY COLUMN `b` int NULL AFTER `a`",
 		},
 		{
 			name:     "AddIndex",
@@ -125,7 +125,7 @@ func TestDiff(t *testing.T) {
 			name:     "AddColumnWithInlineUnique",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, c INT UNIQUE)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `c` int(11) NULL, ADD UNIQUE INDEX `c` (`c`)",
+			expected: "ALTER TABLE `t1` ADD COLUMN `c` int NULL, ADD UNIQUE INDEX `c` (`c`)",
 		},
 		{
 			// Uniqueness removed relative to an inline declaration.
@@ -164,6 +164,53 @@ func TestDiff(t *testing.T) {
 			name:     "InlineUniqueSuffixedPastExplicitKey",
 			source:   "CREATE TABLE t1 (d INT, c INT, UNIQUE KEY c_2 (c), KEY c (d))",
 			target:   "CREATE TABLE t1 (d INT, KEY c (d), c INT UNIQUE)",
+			expected: "",
+		},
+		// Type canonicalization: the live table (source) is in MySQL's canonical
+		// form, while the user's saved schema (target) uses a convenience spelling
+		// the parser folds to the same type. These must diff as equal so a schema
+		// file written with BOOL / BOOLEAN / SERIAL does not churn against the
+		// live table. See docs/fmt.md for the transformations MySQL applies.
+		{
+			// BOOL is an alias for tinyint(1); the parser folds it, so the user's
+			// `active BOOL` matches the live `active tinyint(1)`.
+			name:     "CanonicalTinyintVsBool",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOL)",
+			expected: "",
+		},
+		{
+			// BOOLEAN is likewise an alias for tinyint(1).
+			name:     "CanonicalTinyintVsBoolean",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1))",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOLEAN)",
+			expected: "",
+		},
+		{
+			// A numeric boolean default matches the canonical quoted form: MySQL
+			// renders numeric column defaults quoted (tinyint(1) DEFAULT '0'), and
+			// diff treats the bare and quoted numeric default as the same value.
+			name:     "CanonicalTinyintVsBooleanDefaultZero",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1) DEFAULT '0')",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOLEAN DEFAULT 0)",
+			expected: "",
+		},
+		{
+			// SERIAL expands to BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE. The
+			// canonical live form is the expanded column plus a UNIQUE KEY named
+			// after the column; normalization materializes the inline UNIQUE the
+			// parser derives from SERIAL, so the two forms diff as equal.
+			name:     "CanonicalVsSerial",
+			source:   "CREATE TABLE t1 (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, UNIQUE KEY id (id))",
+			target:   "CREATE TABLE t1 (id SERIAL)",
+			expected: "",
+		},
+		{
+			// Reverse direction: the user's BOOLEAN schema as source, canonical
+			// tinyint(1) as target. Still equal — canonicalization is symmetric.
+			name:     "BooleanVsCanonicalTinyint",
+			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, active BOOLEAN)",
+			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, active tinyint(1))",
 			expected: "",
 		},
 		{
@@ -299,7 +346,7 @@ func TestDiff(t *testing.T) {
 			name:     "UnsignedColumn",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, count INT)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, count INT UNSIGNED)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `count` int(11) unsigned NULL",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `count` int unsigned NULL",
 		},
 		{
 			name:     "ColumnComment",
@@ -311,7 +358,7 @@ func TestDiff(t *testing.T) {
 			name:     "ColumnCommentRogueValues1",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY COMMENT 'Line1\\nLine2\\rLine3')",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int(11) NOT NULL COMMENT 'Line1\\nLine2\\rLine3'",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int NOT NULL COMMENT 'Line1\\nLine2\\rLine3'",
 		},
 		{
 			name:   "ColumnCommentRogueValues2",
@@ -328,7 +375,7 @@ func TestDiff(t *testing.T) {
 			name:     "AutoIncrement",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int(11) NOT NULL AUTO_INCREMENT",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int NOT NULL AUTO_INCREMENT",
 		},
 		{
 			name:     "SetColumn",
@@ -364,7 +411,7 @@ func TestDiff(t *testing.T) {
 			name:     "MultipleChanges",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, b INT, c VARCHAR(50))",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, b VARCHAR(100), d INT, INDEX idx_d (d))",
-			expected: "ALTER TABLE `t1` DROP COLUMN `c`, MODIFY COLUMN `b` varchar(100) NULL, ADD COLUMN `d` int(11) NULL, ADD INDEX `idx_d` (`d`)",
+			expected: "ALTER TABLE `t1` DROP COLUMN `c`, MODIFY COLUMN `b` varchar(100) NULL, ADD COLUMN `d` int NULL, ADD INDEX `idx_d` (`d`)",
 		},
 		{
 			name:     "DefaultValueFunction_NOW",
@@ -690,13 +737,13 @@ func TestDiff(t *testing.T) {
 			name:     "AddColumnFirst",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (new_col INT, id INT PRIMARY KEY)",
-			expected: "ALTER TABLE `t1` ADD COLUMN `new_col` int(11) NULL FIRST",
+			expected: "ALTER TABLE `t1` ADD COLUMN `new_col` int NULL FIRST",
 		},
 		{
 			name:     "ChangeColumnOrder",
 			source:   "CREATE TABLE t1 (a INT, b INT, c INT)",
 			target:   "CREATE TABLE t1 (b INT, c INT, a INT)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int(11) NULL FIRST, MODIFY COLUMN `c` int(11) NULL AFTER `b`, MODIFY COLUMN `a` int(11) NULL AFTER `c`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `b` int NULL FIRST, MODIFY COLUMN `c` int NULL AFTER `b`, MODIFY COLUMN `a` int NULL AFTER `c`",
 		},
 		// Binary/Blob Types
 		{
@@ -935,7 +982,7 @@ func TestDiff(t *testing.T) {
 			name:     "CompositePrimaryKeyWithAutoIncrement",
 			source:   "CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL)",
 			target:   "CREATE TABLE t1 (a INT NOT NULL AUTO_INCREMENT, b INT NOT NULL, PRIMARY KEY (a, b))",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` int(11) NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`a`, `b`)",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `a` int NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`a`, `b`)",
 		},
 
 		// Column Rename Tests - Should show as DROP + ADD (not safe to rename)
@@ -1215,7 +1262,7 @@ func TestDiff(t *testing.T) {
 			name:     "ReorderUppercaseColumns",
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY, A INT NOT NULL, B INT NOT NULL)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY, B INT NOT NULL, A INT NOT NULL)",
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int(11) NOT NULL AFTER `id`, MODIFY COLUMN `A` int(11) NOT NULL AFTER `B`",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `B` int NOT NULL AFTER `id`, MODIFY COLUMN `A` int NOT NULL AFTER `B`",
 		},
 	}
 
@@ -1401,7 +1448,7 @@ func TestDiff_DiffOptions(t *testing.T) {
 			source:   "CREATE TABLE t1 (id INT PRIMARY KEY)",
 			target:   "CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT)",
 			opts:     nil, // nil uses NewDiffOptions(): IgnoreColumnAutoIncrement=false
-			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int(11) NOT NULL AUTO_INCREMENT",
+			expected: "ALTER TABLE `t1` MODIFY COLUMN `id` int NOT NULL AUTO_INCREMENT",
 		},
 		{
 			name:     "IgnoreColumnAutoIncrement_TargetAdds",
