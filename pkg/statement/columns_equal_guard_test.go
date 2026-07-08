@@ -52,7 +52,7 @@ var columnFieldsNotCompared = map[string]string{
 	// not part of the column's logical definition, so comparing it is meaningless.
 	"Raw": "raw parser AST pointer, not part of logical column definition",
 	// Column-level CHECK is hoisted into table-level CreateTable.Constraints by
-	// the parser (normalizeColumnChecks) and diffed by diffConstraints instead —
+	// the parser (columnCheckNormalizer) and diffed by diffConstraints instead —
 	// see the comment on columnExtendedAttributesEqual. So it is intentionally not
 	// part of per-column equality.
 	"Check": "hoisted to table-level Constraints; diffed by diffConstraints, not here",

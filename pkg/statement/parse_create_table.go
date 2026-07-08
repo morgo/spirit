@@ -376,257 +376,22 @@ func (ct *CreateTable) parseToStruct() {
 		}
 	}
 
-	// Hoist column-level CHECK constraints into table-level constraints, the
-	// same way MySQL does in SHOW CREATE TABLE. This keeps the parsed form
-	// canonical so a diff against a live (already-hoisted) table converges and
-	// never tries to DROP the live CHECK. See normalizeColumnChecks.
-	ct.normalizeColumnChecks()
-
-	// Auto-generate MySQL default names for unnamed indexes
-	ct.autoNameIndexes()
-
 	// Parse table options
 	if len(ct.Raw.Options) > 0 {
 		ct.TableOptions = ct.parseTableOptions(ct.Raw.Options)
 	}
 
-	// Resolve the legacy BINARY column attribute into a binary collation.
-	// Must run after table options so an unspecified column charset can
-	// fall back to the table charset. See normalizeBinaryAttribute.
-	ct.normalizeBinaryAttribute()
-
 	// Parse partition options
 	if ct.Raw.Partition != nil {
 		ct.Partition = ct.parsePartitionOptions(ct.Raw.Partition)
 	}
-}
 
-// normalizeBinaryAttribute resolves the legacy BINARY column attribute
-// (e.g. `c varchar(100) BINARY`) the way MySQL does: BINARY does not change
-// the data type, it selects the binary (_bin) collation of the column's
-// charset. Verified against MySQL 8.0.45, the canonical forms are:
-//
-//	c varchar(100) BINARY                        (table charset utf8mb4)
-//	  -> varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
-//	c varchar(100) CHARACTER SET latin1 BINARY
-//	  -> varchar(100) CHARACTER SET latin1 COLLATE latin1_bin
-//
-// The TiDB parser surfaces the attribute as the binary type flag with a
-// non-"binary" (usually empty) charset — distinct from true binary types
-// (VARBINARY/BINARY/BLOB), which carry the "binary" charset and are
-// converted to their binary type names in parseColumn. Without this
-// normalization, diffing a live `varchar ... COLLATE utf8mb4_bin` column
-// against a desired file written with the BINARY attribute would emit a
-// destructive MODIFY to varbinary.
-//
-// MySQL lets BINARY win over an explicit COLLATE in the same column
-// definition (varchar(100) BINARY COLLATE utf8mb4_general_ci resolves to
-// utf8mb4_bin), so any parsed collation is overridden here. If neither the
-// column nor the table declares a charset the attribute cannot be resolved
-// (the effective charset is a server default only known at runtime); the
-// column keeps its character type and no collation is invented.
-func (ct *CreateTable) normalizeBinaryAttribute() {
-	for i := range ct.Columns {
-		col := &ct.Columns[i]
-		if col.Raw == nil || !mysql.HasBinaryFlag(col.Raw.Tp.GetFlag()) {
-			continue
-		}
-		if col.Raw.Tp.GetCharset() == "binary" {
-			continue // true binary type (VARBINARY et al.), converted in parseColumn
-		}
-		// Resolve the effective charset: explicit column charset first,
-		// then the table default charset.
-		charsetName := ""
-		if col.Charset != nil {
-			charsetName = *col.Charset
-		} else if ct.TableOptions != nil && ct.TableOptions.Charset != nil {
-			charsetName = *ct.TableOptions.Charset
-		}
-		if charsetName == "" || charsetName == "binary" {
-			continue
-		}
-		// Every MySQL character set has a <charset>_bin collation.
-		collation := charsetName + "_bin"
-		col.Collation = &collation
-	}
-}
-
-// normalizeColumnChecks hoists column-level CHECK constraints into table-level
-// constraints, mirroring what MySQL does in SHOW CREATE TABLE. Without this,
-// a column-level CHECK lives only in Column.Check while the live table (after
-// the ALTER is applied) reports the same constraint in CreateTable.Constraints.
-// A re-diff would then (a) keep emitting MODIFY COLUMN because Column.Check
-// differs and (b) try to DROP the live CHECK because it is absent from the
-// target's Constraints. Hoisting at parse time keeps the parsed form canonical
-// so the re-diff converges and no constraint is ever dropped.
-//
-// MySQL auto-names unnamed CHECK constraints `<table>_chk_<n>`. We replicate
-// that here: user-named CHECKs keep their name; unnamed ones are numbered in
-// the order they are encountered (existing table-level CHECKs first, then the
-// hoisted column-level CHECKs in column order).
-//
-// Naming caveat: MySQL numbers CHECKs in true declaration order, interleaving
-// column-level and table-level CHECKs by their position in the statement. The
-// TiDB parser does not expose reliable per-node source offsets, so when a table
-// mixes column-level and table-level CHECKs our generated `_chk_<n>` numbers can
-// differ from MySQL's. This is purely cosmetic and never causes a constraint to
-// be dropped or a re-diff to diverge: diffConstraints pairs CHECK constraints by
-// expression when the names differ (see matchedByExpression in diffConstraints),
-// so the round-trip still converges. The common case — a table whose CHECKs are
-// all column-level — numbers identically to MySQL.
-func (ct *CreateTable) normalizeColumnChecks() {
-	// Track names already in use so generated names never collide with a
-	// user-supplied constraint name.
-	usedNames := make(map[string]bool)
-	for i := range ct.Constraints {
-		if ct.Constraints[i].Name != "" {
-			usedNames[ct.Constraints[i].Name] = true
-		}
-	}
-
-	// Append a hoisted table-level CHECK for each column-level CHECK, then
-	// clear the column-level field so it no longer participates in column
-	// equality or column-definition emission.
-	for i := range ct.Columns {
-		col := &ct.Columns[i]
-		if col.Check == nil {
-			continue
-		}
-		// Recover the user-supplied constraint name (if any) from the raw
-		// column option; unnamed ones are auto-numbered below.
-		name := ""
-		if col.Raw != nil {
-			for _, opt := range col.Raw.Options {
-				if opt.Tp == ast.ColumnOptionCheck {
-					name = opt.ConstraintName
-					break
-				}
-			}
-		}
-		expr := *col.Check
-		definition := fmt.Sprintf("CHECK (%s)", expr)
-		ct.Constraints = append(ct.Constraints, Constraint{
-			Name:       name,
-			Type:       "CHECK",
-			Expression: &expr,
-			Definition: &definition,
-		})
-		col.Check = nil
-		if name != "" {
-			usedNames[name] = true
-		}
-	}
-
-	// Number the unnamed CHECK constraints `<table>_chk_<n>`. Resolve indices
-	// (not pointers) after all appends are complete so a slice reallocation
-	// during the append loop above cannot leave us with dangling references.
-	counter := 0
-	for i := range ct.Constraints {
-		c := &ct.Constraints[i]
-		if c.Type != "CHECK" || c.Name != "" {
-			continue
-		}
-		var name string
-		for {
-			counter++
-			name = fmt.Sprintf("%s_chk_%d", ct.TableName, counter)
-			if !usedNames[name] {
-				break
-			}
-		}
-		usedNames[name] = true
-		c.Name = name
-	}
-}
-
-// autoNameIndexes assigns MySQL's default naming convention to any unnamed
-// non-PRIMARY KEY indexes. MySQL names indexes after the first column in the
-// index. If that name is already taken, it appends _2, _3, etc.
-// This ensures that unnamed indexes like INDEX (col) are treated identically
-// to their MySQL-normalized form KEY `col` (`col`) during diff comparisons.
-func (ct *CreateTable) autoNameIndexes() {
-	// Track all used index names (including already-named indexes)
-	usedNames := make(map[string]int) // name -> highest suffix used (0 = base name)
-	for i := range ct.Indexes {
-		if ct.Indexes[i].Name != "" {
-			usedNames[ct.Indexes[i].Name] = 0
-		}
-	}
-
-	// Inline column-level UNIQUEs claim their server-assigned names BEFORE any
-	// unnamed table-level index is auto-named: the server names indexes in
-	// declaration order and column definitions normally precede table-level
-	// keys, so in `c int UNIQUE, KEY (c, d)` the unique index gets `c` and the
-	// unnamed key is pushed to `c_2`. The names are only reserved here — not
-	// materialized into ct.Indexes — so the inline declaration stays
-	// column-level state (Column.Unique) everywhere else. effectiveIndexes
-	// recomputes the same names at diff time; keep the two in sync.
-	for _, col := range ct.Columns {
-		if !col.Unique {
-			continue
-		}
-		name := col.Name
-		for suffix := 2; ; suffix++ {
-			if _, taken := usedNames[name]; !taken {
-				break
-			}
-			name = fmt.Sprintf("%s_%d", col.Name, suffix)
-		}
-		usedNames[name] = 0
-	}
-
-	for i := range ct.Indexes {
-		idx := &ct.Indexes[i]
-		if idx.Name != "" || idx.Type == "PRIMARY KEY" {
-			continue
-		}
-
-		// Determine the base name from the first column.
-		// For expression indexes the first column name may be empty;
-		// fall back to a functional_index convention similar to MySQL 8.0.
-		var baseName string
-		switch {
-		case len(idx.Columns) > 0 && idx.Columns[0] != "":
-			baseName = idx.Columns[0]
-		case len(idx.ColumnList) > 0 && idx.ColumnList[0].Name != "":
-			baseName = idx.ColumnList[0].Name
-		case len(idx.ColumnList) > 0:
-			baseName = "functional_index"
-		default:
-			baseName = "idx"
-		}
-
-		// Find a unique name following MySQL's convention:
-		// first try baseName, then baseName_2, baseName_3, ...
-		candidate := baseName
-		if _, taken := usedNames[candidate]; taken {
-			// Start from _2 and increment
-			suffix := 2
-			if prev, ok := usedNames[baseName]; ok && prev >= 2 {
-				suffix = prev + 1
-			}
-			for {
-				candidate = fmt.Sprintf("%s_%d", baseName, suffix)
-				if _, taken := usedNames[candidate]; !taken {
-					break
-				}
-				suffix++
-			}
-		}
-
-		idx.Name = candidate
-		usedNames[candidate] = 0
-		// Track the highest suffix used for this base name
-		if candidate != baseName {
-			// Extract suffix number
-			var suffixNum int
-			if _, err := fmt.Sscanf(candidate, baseName+"_%d", &suffixNum); err == nil {
-				if current, ok := usedNames[baseName]; !ok || suffixNum > current {
-					usedNames[baseName] = suffixNum
-				}
-			}
-		}
-	}
+	// Apply the normalization rules now that every field is populated. This
+	// includes the long-standing normalizers (column-CHECK hoisting, unnamed
+	// index naming, BINARY-attribute resolution) plus any registered by an
+	// init() in a normalize_*.go file. See normalize.go. Copy the result back
+	// onto the receiver so a rule that returns a new instance is honored.
+	*ct = *runNormalizers(ct)
 }
 
 // parseColumn converts a column definition to a Column struct
@@ -657,7 +422,7 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 	// (e.g. varchar(100) BINARY), which does NOT change the data type —
 	// MySQL canonicalizes it to the binary collation of the column's
 	// charset (varchar(100) COLLATE utf8mb4_bin). That case is resolved by
-	// normalizeBinaryAttribute once table options are known; converting it
+	// binaryAttributeNormalizer once table options are known; converting it
 	// here would emit a destructive varchar -> varbinary type change.
 	if mysql.HasBinaryFlag(col.Tp.GetFlag()) && col.Tp.GetCharset() == "binary" {
 		switch column.Type {
