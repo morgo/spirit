@@ -176,11 +176,13 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 		targetColumns[strings.ToLower(target.Columns[i].Name)] = &target.Columns[i]
 	}
 
-	// Handle PRIMARY KEY changes (inline column-level PRIMARY KEY)
-	pkDropClause, pkAddClause, pkDropped, pkColumn := ct.diffPrimaryKey(target, sourceColumns, targetColumns)
-	if pkDropClause != "" {
-		clauses = append(clauses, pkDropClause)
-	}
+	// Adding or dropping the PRIMARY KEY itself is emitted by diffIndexes (the
+	// PK is always a table-level index after normalization). We only need the
+	// source/target PK column sets here to recognize the implicit NOT NULL ->
+	// NULL relaxation that dropping a PK produces, and suppress the redundant
+	// MODIFY COLUMN it would otherwise generate.
+	sourcePKColumns := pkColumnSet(ct.getPrimaryKeyIndex())
+	targetPKColumns := pkColumnSet(target.getPrimaryKeyIndex())
 
 	// Collect DROP operations and sort by name for deterministic output
 	var dropClauses []string
@@ -216,26 +218,23 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 			// If it's the last column, omit AFTER clause (implicit)
 			clauses = append(clauses, clause)
 		} else {
-			// Skip modification if only PRIMARY KEY changed (already handled in diffIndexes)
-			// When PRIMARY KEY is dropped, nullability change is implicit, so skip it
-			pkOnlyChange := sourceCol.PrimaryKey != targetCol.PrimaryKey &&
-				columnsEqualIgnorePK(sourceCol, &targetCol, opts)
-
-			// Also check if only nullability changed due to PK drop
-			// (PK columns are NOT NULL, dropping PK makes them NULL)
-			pkDroppedNullabilityChange := pkDropped &&
-				strings.EqualFold(sourceCol.Name, pkColumn) &&
-				sourceCol.PrimaryKey && !targetCol.PrimaryKey &&
+			// Suppress the MODIFY when a column's only change is the implicit
+			// NOT NULL -> NULL relaxation from dropping the primary key it
+			// belonged to (a PK column is NOT NULL; once the PK is gone the
+			// target can declare it NULL). The PK drop itself is emitted by
+			// diffIndexes.
+			lower := strings.ToLower(targetCol.Name)
+			pkDroppedNullabilityChange := sourcePKColumns[lower] && !targetPKColumns[lower] &&
 				!sourceCol.Nullable && targetCol.Nullable
 
 			// MODIFY existing column if:
-			// 1. Column definition changed (and not just PK-related changes)
+			// 1. Column definition changed (and not just the PK-drop nullability relaxation)
 			// 2. Column needs explicit positioning
 			// needsExplicitPosition is keyed by lowercased column name, so
 			// look up with the same normalization to avoid missing a
 			// position-only change when the target's spelling is in mixed
 			// or upper case.
-			needsModify := (!ct.columnsEqualWithContext(sourceCol, &targetCol, target, opts) && !pkOnlyChange && !pkDroppedNullabilityChange) ||
+			needsModify := (!ct.columnsEqualWithContext(sourceCol, &targetCol, target, opts) && !pkDroppedNullabilityChange) ||
 				needsExplicitPosition[strings.ToLower(targetCol.Name)]
 
 			if needsModify {
@@ -252,11 +251,6 @@ func (ct *CreateTable) diffColumns(target *CreateTable, opts *DiffOptions) []str
 		}
 
 		prevColumn = targetCol.Name
-	}
-
-	// Handle PRIMARY KEY adds last
-	if pkAddClause != "" {
-		clauses = append(clauses, pkAddClause)
 	}
 
 	return clauses
@@ -319,150 +313,19 @@ func (ct *CreateTable) calculateColumnPositioning(target *CreateTable, sourceCol
 	return needsExplicitPosition
 }
 
-// diffPrimaryKey handles PRIMARY KEY changes between source and target tables.
-// Returns: dropClause, addClause, pkDropped (bool), pkColumn (string)
-func (ct *CreateTable) diffPrimaryKey(target *CreateTable, sourceColumns, targetColumns map[string]*Column) (string, string, bool, string) {
-	var dropClause, addClause string
-	var pkDropped bool
-	var pkColumn string
-
-	// Check if there's a table-level PK in source or target
-	sourcePKIndex := ct.getPrimaryKeyIndex()
-	targetPKIndex := target.getPrimaryKeyIndex()
-
-	// Get the effective PK columns for both source and target.
-	// PK can be defined as:
-	// 1. Inline PK: column definition includes PRIMARY KEY (column.PrimaryKey = true)
-	// 2. Table-level PK: separate PRIMARY KEY (col1, col2, ...) clause (in Indexes)
-	sourcePKColumns := ct.getEffectivePrimaryKeyColumns()
-	targetPKColumns := target.getEffectivePrimaryKeyColumns()
-
-	// If the PK columns are the same (regardless of inline vs table-level representation),
-	// no change is needed. MySQL normalizes inline PK to table-level PK in SHOW CREATE TABLE,
-	// so we need to compare semantically rather than syntactically. Column
-	// identifiers are case-insensitive in MySQL, so PK columns that differ
-	// only in case (e.g. `PRIMARY KEY (id)` vs `PRIMARY KEY (ID)`) are the
-	// same key.
-	if slices.EqualFunc(sourcePKColumns, targetPKColumns, strings.EqualFold) {
-		return "", "", false, ""
+// pkColumnSet returns the lowercased set of columns in the given PRIMARY KEY
+// index, or nil if idx is nil. Names are lowercased because MySQL column
+// identifiers are case-insensitive. Reading a missing key from the returned
+// (possibly nil) map yields false, so callers can index it directly.
+func pkColumnSet(idx *Index) map[string]bool {
+	if idx == nil {
+		return nil
 	}
-
-	// Check for inline PK removal (column-level PRIMARY KEY)
-	for _, sourceCol := range ct.Columns {
-		targetCol, exists := targetColumns[strings.ToLower(sourceCol.Name)]
-		if exists && sourceCol.PrimaryKey && !targetCol.PrimaryKey {
-			// PRIMARY KEY was removed from this column (inline PK)
-			// But only drop it if there's no table-level PK in target
-			// (if target has table-level PK, diffIndexes will handle the transition)
-			if targetPKIndex == nil {
-				pkDropped = true
-				pkColumn = sourceCol.Name
-				dropClause = "DROP PRIMARY KEY"
-				break
-			}
-		}
+	set := make(map[string]bool, len(idx.Columns))
+	for _, c := range idx.Columns {
+		set[strings.ToLower(c)] = true
 	}
-
-	// Check for inline PK addition (column-level PRIMARY KEY)
-	for _, targetCol := range target.Columns {
-		sourceCol, exists := sourceColumns[strings.ToLower(targetCol.Name)]
-		if exists && !sourceCol.PrimaryKey && targetCol.PrimaryKey {
-			// PRIMARY KEY was added to this column (inline PK)
-			// Add it if:
-			// 1. There's no table-level PK in source (inline PK -> inline PK transition), OR
-			// 2. Source has table-level PK and target has inline PK (table-level -> inline transition)
-			if sourcePKIndex == nil || (sourcePKIndex != nil && targetPKIndex == nil) {
-				pkColumn = targetCol.Name
-				addClause = fmt.Sprintf("ADD PRIMARY KEY (%s)", sqlescape.EscapeIdentifier(pkColumn))
-				break
-			}
-		}
-	}
-
-	// Special case: Table-level PK -> inline PK transition
-	// We need to drop the table-level PK before adding the inline PK
-	if sourcePKIndex != nil && targetPKIndex == nil && addClause != "" {
-		dropClause = "DROP PRIMARY KEY"
-	}
-
-	return dropClause, addClause, pkDropped, pkColumn
-}
-
-// getEffectivePrimaryKeyColumns returns the column names that make up the primary key,
-// regardless of whether it's defined inline (column PRIMARY KEY) or as table-level (PRIMARY KEY (cols)).
-func (ct *CreateTable) getEffectivePrimaryKeyColumns() []string {
-	// First check for table-level PK
-	if pk := ct.getPrimaryKeyIndex(); pk != nil {
-		return pk.Columns
-	}
-
-	// Check for inline PK (column-level)
-	for _, col := range ct.Columns {
-		if col.PrimaryKey {
-			return []string{col.Name}
-		}
-	}
-
-	return nil
-}
-
-// effectiveIndexes returns the table's indexes with any inline column-level
-// UNIQUE declarations (`c int UNIQUE`) folded in as table-level UNIQUE
-// indexes, plus the set of index names that were synthesized this way.
-//
-// MySQL never stores a column-level UNIQUE: it canonicalizes it into a
-// table-level `UNIQUE KEY` named after the column (suffixed _2, _3, ... when
-// that name is already taken — the same convention indexNameNormalizer
-// replicates), which is what SHOW CREATE TABLE reports. Folding the inline
-// form here lets diffIndexes compare a user-written schema against the live
-// canonical form symmetrically: a representation-only difference produces no
-// clauses, while a real difference produces exactly one ADD/DROP.
-//
-// indexNameNormalizer reserves these names before auto-naming unnamed table-level
-// indexes (the server names inline uniques first), so the names computed here
-// agree with the rest of the parsed schema; keep the two loops in sync.
-func (ct *CreateTable) effectiveIndexes() ([]Index, map[string]bool) {
-	hasInlineUnique := false
-	for i := range ct.Columns {
-		if ct.Columns[i].Unique {
-			hasInlineUnique = true
-			break
-		}
-	}
-	if !hasInlineUnique {
-		return ct.Indexes, nil
-	}
-
-	// Clone so the synthesized entries never leak into ct.Indexes.
-	indexes := slices.Clone(ct.Indexes)
-	inlineDerived := make(map[string]bool)
-	usedNames := make(map[string]bool, len(indexes))
-	for i := range indexes {
-		usedNames[indexes[i].Name] = true
-	}
-	for _, col := range ct.Columns {
-		if !col.Unique {
-			continue
-		}
-		// Guess the server-assigned name: the column name, or the first free
-		// _N suffix when an explicitly-declared index already claims it. If
-		// the guess is wrong (the live table named it differently), the
-		// content-based pairing in diffIndexes still prevents a spurious
-		// DROP/ADD of an equivalent unique index.
-		name := col.Name
-		for suffix := 2; usedNames[name]; suffix++ {
-			name = fmt.Sprintf("%s_%d", col.Name, suffix)
-		}
-		usedNames[name] = true
-		inlineDerived[name] = true
-		indexes = append(indexes, Index{
-			Name:       name,
-			Type:       "UNIQUE",
-			Columns:    []string{col.Name},
-			ColumnList: []IndexColumn{{Name: col.Name}},
-		})
-	}
-	return indexes, inlineDerived
+	return set
 }
 
 // diffIndexes compares indexes and returns ALTER clauses for differences.
@@ -476,11 +339,11 @@ func (ct *CreateTable) effectiveIndexes() ([]Index, map[string]bool) {
 // must run as two separate ALTER statements. Those are returned via the second
 // value as standalone clause-lists (each becomes its own ALTER statement).
 func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separateStatements [][]string) {
-	// Fold inline column-level UNIQUEs into both index sets so that
-	// `c int UNIQUE` participates in index diffing like the table-level
-	// `UNIQUE KEY c (c)` MySQL canonicalizes it into.
-	sourceIdxList, sourceInlineDerived := ct.effectiveIndexes()
-	targetIdxList, targetInlineDerived := target.effectiveIndexes()
+	// Inline column-level UNIQUE / PRIMARY KEY have already been materialized
+	// into ct.Indexes by normalization (see indexNormalizer, primaryKeyNormalizer),
+	// so both index sets can be walked directly.
+	sourceIdxList := ct.Indexes
+	targetIdxList := target.Indexes
 
 	// Build maps for easier lookup
 	sourceIndexes := make(map[string]*Index)
@@ -521,7 +384,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 			if matchedTargetUnique[targetIdx.Name] {
 				continue // already paired with another source index
 			}
-			if !sourceInlineDerived[sourceIdx.Name] && !targetInlineDerived[targetIdx.Name] {
+			if !sourceIdx.InlineDerived && !targetIdx.InlineDerived {
 				continue // both explicitly named: a genuine rename
 			}
 			if indexColumnsIdenticalIgnoreName(sourceIdx, targetIdx) {
@@ -535,46 +398,11 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 	// Collect DROP operations and sort by name for deterministic output
 	var dropClauses []string
 
-	// Handle inline PK <-> table-level PK transitions
-	targetPKIndex := target.getPrimaryKeyIndex()
-
-	// Track if we've already added a DROP PRIMARY KEY
+	// The primary key is a table-level index on both sides after normalization
+	// (see primaryKeyNormalizer), so its add/drop/change falls out of the normal
+	// index diff below — no inline-PK special cases are needed. pkDropAdded just
+	// guards against emitting "DROP PRIMARY KEY" twice from the source loop.
 	pkDropAdded := false
-
-	// Check if source has inline PK (column-level PRIMARY KEY)
-	sourceHasInlinePK := false
-	for _, col := range ct.Columns {
-		if col.PrimaryKey {
-			sourceHasInlinePK = true
-			break
-		}
-	}
-
-	// Check if target has inline PK
-	targetHasInlinePK := false
-	for _, col := range target.Columns {
-		if col.PrimaryKey {
-			targetHasInlinePK = true
-			break
-		}
-	}
-
-	// Get effective PK columns for both source and target
-	sourcePKColumns := ct.getEffectivePrimaryKeyColumns()
-	targetPKColumns := target.getEffectivePrimaryKeyColumns()
-
-	// Only handle inline PK <-> table-level PK transitions if the PK columns actually changed.
-	// If the columns are the same, the representations are semantically equivalent.
-	// Compare case-insensitively, matching MySQL's column-name semantics.
-	pkColumnsEqual := slices.EqualFunc(sourcePKColumns, targetPKColumns, strings.EqualFold)
-
-	if sourceHasInlinePK && targetPKIndex != nil && !pkColumnsEqual {
-		// Inline PK -> table-level PK with different columns: drop the inline PK
-		dropClauses = append(dropClauses, "DROP PRIMARY KEY")
-		pkDropAdded = true
-	}
-	// Note: Table-level PK -> inline PK is handled in diffColumns to ensure correct order
-	// (DROP PRIMARY KEY must come before ADD PRIMARY KEY)
 
 	// optionOnlyChanged tracks index names whose column list is unchanged but
 	// whose options differ (e.g. WITH PARSER / KEY_BLOCK_SIZE). These must be
@@ -593,8 +421,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 		if !existsInTarget {
 			// Index removed completely
 			if sourceIdx.Type == "PRIMARY KEY" {
-				// Skip if target has inline PK (handled in diffColumns)
-				if !targetHasInlinePK && !pkDropAdded {
+				if !pkDropAdded {
 					dropClauses = append(dropClauses, "DROP PRIMARY KEY")
 					pkDropAdded = true
 				}
@@ -637,11 +464,7 @@ func (ct *CreateTable) diffIndexes(target *CreateTable) (clauses []string, separ
 		sourceIdx, existsInSource := sourceIndexes[targetIdx.Name]
 
 		if !existsInSource {
-			// New index - add it, but skip PRIMARY KEY if source has equivalent inline PK
-			if targetIdx.Type == "PRIMARY KEY" && pkColumnsEqual {
-				// Source has inline PK with same columns - skip adding table-level PK
-				continue
-			}
+			// New index - add it
 			addClauses = append(addClauses, formatAddIndex(&targetIdx))
 		} else if !indexesEqual(sourceIdx, &targetIdx) {
 			// Index exists but changed - check if only visibility changed
@@ -968,8 +791,8 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 	// representation, not state. MySQL canonicalizes `c int UNIQUE` into a
 	// table-level UNIQUE KEY (that is what SHOW CREATE TABLE reports), and a
 	// MODIFY COLUMN cannot express uniqueness anyway (formatColumnDefinition
-	// never emits UNIQUE). Inline uniques are folded into index-level diffing
-	// instead — see effectiveIndexes / diffIndexes.
+	// never emits UNIQUE). Inline uniques are materialized into table-level
+	// indexes by normalization — see indexNormalizer / diffIndexes.
 	if !ptrEqual(a.Comment, b.Comment) {
 		return false
 	}
@@ -1008,87 +831,6 @@ func (ct *CreateTable) columnsEqualWithContext(a, b *Column, target *CreateTable
 		return false
 	}
 
-	if !slices.Equal(a.EnumValues, b.EnumValues) {
-		return false
-	}
-	if !slices.Equal(a.SetValues, b.SetValues) {
-		return false
-	}
-	return true
-}
-
-// columnsEqualIgnorePK checks if two columns are equal, ignoring the PrimaryKey attribute
-func columnsEqualIgnorePK(a, b *Column, opts *DiffOptions) bool {
-	// Column names are case-insensitive in MySQL.
-	if !strings.EqualFold(a.Name, b.Name) {
-		return false
-	}
-	if a.Type != b.Type {
-		return false
-	}
-	if !ptrEqual(a.Length, b.Length) {
-		return false
-	}
-	if !ptrEqual(a.Precision, b.Precision) {
-		return false
-	}
-	if !ptrEqual(a.Scale, b.Scale) {
-		return false
-	}
-	if !ptrEqual(a.Unsigned, b.Unsigned) {
-		return false
-	}
-	if !ptrEqual(a.Zerofill, b.Zerofill) {
-		return false
-	}
-	if a.Nullable != b.Nullable {
-		return false
-	}
-	// Normalize default values for nullable columns:
-	// For nullable columns, nil and the NULL *keyword* are semantically
-	// equivalent. A quoted string literal 'NULL' (DefaultIsString) is NOT
-	// the keyword and must not collapse.
-	sourceDefault := a.Default
-	targetDefault := b.Default
-	if a.Nullable {
-		if sourceDefault != nil && *sourceDefault == "NULL" && !a.DefaultIsString {
-			sourceDefault = nil
-		}
-		if targetDefault != nil && *targetDefault == "NULL" && !b.DefaultIsString {
-			targetDefault = nil
-		}
-	}
-	if !ptrEqual(sourceDefault, targetDefault) {
-		return false
-	}
-	if a.DefaultIsExpr != b.DefaultIsExpr {
-		return false
-	}
-	if !columnExtendedAttributesEqual(a, b) {
-		return false
-	}
-	// Numeric defaults are always rendered quoted by MySQL, so quotedness is
-	// not meaningful for them; for string columns it is. See the equivalent
-	// guard in columnsEqualWithContext.
-	if a.DefaultIsString != b.DefaultIsString && !isNumericColumnType(a.Type) {
-		return false
-	}
-	if !opts.IgnoreColumnAutoIncrement && a.AutoInc != b.AutoInc {
-		return false
-	}
-	// Skip PrimaryKey comparison
-	// Unique is intentionally not compared — inline UNIQUE is folded into
-	// index-level diffing (see effectiveIndexes / diffIndexes and the
-	// matching comment in columnsEqualWithContext).
-	if !ptrEqual(a.Comment, b.Comment) {
-		return false
-	}
-	if !ptrEqual(a.Charset, b.Charset) {
-		return false
-	}
-	if !ptrEqual(a.Collation, b.Collation) {
-		return false
-	}
 	if !slices.Equal(a.EnumValues, b.EnumValues) {
 		return false
 	}
@@ -1477,7 +1219,7 @@ func formatAddIndex(idx *Index) string {
 	var parts []string
 
 	// Build the ADD clause: keyword + optional name.
-	// The name is omitted when empty (safety net; indexNameNormalizer should
+	// The name is omitted when empty (safety net; indexNormalizer should
 	// have already assigned one during parsing).
 	var keyword string
 	switch idx.Type {

@@ -268,7 +268,9 @@ func TestSchemaAnalyzer_JSONSerialization(t *testing.T) {
 
 	require.Equal(t, "id", deserializedColumns[0].Name)
 	require.Equal(t, "int", deserializedColumns[0].Type)
-	require.True(t, deserializedColumns[0].PrimaryKey)
+	// The inline PRIMARY KEY is normalized into a table-level index, so the
+	// column itself no longer carries the inline PrimaryKey flag.
+	require.False(t, deserializedColumns[0].PrimaryKey)
 
 	require.Equal(t, "name", deserializedColumns[1].Name)
 	require.Contains(t, deserializedColumns[1].Type, "varchar")
@@ -688,7 +690,9 @@ func TestSchemaAnalyzer_EnumSetJSONSerialization(t *testing.T) {
 	// Check id column
 	require.Equal(t, "id", deserializedColumns[0].Name)
 	require.Equal(t, "int", deserializedColumns[0].Type)
-	require.True(t, deserializedColumns[0].PrimaryKey)
+	// The inline PRIMARY KEY is normalized into a table-level index, so the
+	// column no longer carries the inline PrimaryKey flag.
+	require.False(t, deserializedColumns[0].PrimaryKey)
 	require.Nil(t, deserializedColumns[0].EnumValues)
 	require.Nil(t, deserializedColumns[0].SetValues)
 

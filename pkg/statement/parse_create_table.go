@@ -81,6 +81,14 @@ type Index struct {
 	KeyBlockSize *uint64           `json:"key_block_size,omitempty"`
 	ParserName   *string           `json:"parser_name,omitempty"`
 	Options      map[string]string `json:"options,omitempty"`
+
+	// InlineDerived marks a UNIQUE index that indexNormalizer synthesized
+	// from an inline column-level UNIQUE (`c INT UNIQUE`). Its name is only a
+	// guess at the server-assigned one (the column name, suffixed on collision),
+	// so diffIndexes pairs it with an equivalent live unique index by column set
+	// even when the names differ, rather than emitting a spurious DROP+ADD.
+	// Not serialized: it is a diff-time hint, not part of the logical schema.
+	InlineDerived bool `json:"-"`
 }
 
 // Constraint represents a table constraint
