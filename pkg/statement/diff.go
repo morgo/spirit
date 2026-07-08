@@ -412,13 +412,13 @@ func (ct *CreateTable) getEffectivePrimaryKeyColumns() []string {
 //
 // MySQL never stores a column-level UNIQUE: it canonicalizes it into a
 // table-level `UNIQUE KEY` named after the column (suffixed _2, _3, ... when
-// that name is already taken — the same convention autoNameIndexes
+// that name is already taken — the same convention indexNameNormalizer
 // replicates), which is what SHOW CREATE TABLE reports. Folding the inline
 // form here lets diffIndexes compare a user-written schema against the live
 // canonical form symmetrically: a representation-only difference produces no
 // clauses, while a real difference produces exactly one ADD/DROP.
 //
-// autoNameIndexes reserves these names before auto-naming unnamed table-level
+// indexNameNormalizer reserves these names before auto-naming unnamed table-level
 // indexes (the server names inline uniques first), so the names computed here
 // agree with the rest of the parsed schema; keep the two loops in sync.
 func (ct *CreateTable) effectiveIndexes() ([]Index, map[string]bool) {
@@ -1106,7 +1106,7 @@ func columnsEqualIgnorePK(a, b *Column, opts *DiffOptions) bool {
 //
 // Column-level CHECK constraints are intentionally NOT compared here: the
 // parser hoists them into table-level CreateTable.Constraints (see
-// normalizeColumnChecks), so they are diffed by diffConstraints instead. This
+// columnCheckNormalizer), so they are diffed by diffConstraints instead. This
 // matches MySQL's SHOW CREATE TABLE, which always reports CHECKs at table
 // level, and keeps a re-diff convergent.
 func columnExtendedAttributesEqual(a, b *Column) bool {
@@ -1464,7 +1464,7 @@ func formatColumnDefinition(col *Column) string {
 
 	// NOTE: column-level CHECK constraints are deliberately not emitted here.
 	// The parser hoists them into table-level constraints (see
-	// normalizeColumnChecks), so they are emitted as ADD CONSTRAINT ... CHECK
+	// columnCheckNormalizer), so they are emitted as ADD CONSTRAINT ... CHECK
 	// by diffConstraints. Emitting them inline in a MODIFY/ADD COLUMN would
 	// make MySQL hoist them to a table-level CHECK with an auto-name, breaking
 	// re-diff convergence and risking a spurious DROP CHECK.
@@ -1477,7 +1477,7 @@ func formatAddIndex(idx *Index) string {
 	var parts []string
 
 	// Build the ADD clause: keyword + optional name.
-	// The name is omitted when empty (safety net; autoNameIndexes should
+	// The name is omitted when empty (safety net; indexNameNormalizer should
 	// have already assigned one during parsing).
 	var keyword string
 	switch idx.Type {
