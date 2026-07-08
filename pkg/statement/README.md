@@ -10,6 +10,7 @@ Spirit needs to understand DDL statements to:
 3. **Analyze** whether operations are safe for INPLACE algorithm
 4. **Transform** statements (e.g., rewrite `CREATE INDEX` to `ALTER TABLE`)
 5. **Parse** CREATE TABLE statements into structured data for comparison
+6. **Normalize** parsed CREATE TABLE definitions to MySQL's canonical form so equivalent schemas compare equal (see [Normalization](#normalization))
 
 Rather than implementing a custom parser, Spirit leverages the TiDB parser, which provides:
 - Battle-tested SQL parsing compatible with MySQL syntax
@@ -327,6 +328,44 @@ type PartitionOptions struct {
     SubPartition *SubPartitionOptions
 }
 ```
+
+## Normalization
+
+MySQL rewrites many constructs when it stores a table definition, so the form a human writes rarely matches what `SHOW CREATE TABLE` reports. Left unhandled, this produces **spurious diffs** — a schema file that says `active BOOLEAN` would appear to differ from the live `active tinyint(1)`, and a diff would emit a pointless `MODIFY COLUMN`. To prevent this, `ParseCreateTable` runs a pipeline of **normalization rules** over the parsed `CreateTable` before returning it, canonicalizing both sides so `Diff` compares like with like.
+
+Two layers of canonicalization apply:
+
+1. **The TiDB parser** already folds most type *aliases* before Spirit sees them: `BOOL`/`BOOLEAN` → `tinyint(1)`, `SERIAL` → `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`, `INTEGER` → `int`, `NVARCHAR` → `varchar`, `DEC` → `decimal`. Nothing in Spirit is needed for these.
+2. **Spirit's normalization rules** handle the canonicalizations the parser does *not* — each mirrors something MySQL does when storing the table:
+
+   | Rule (`normalize_*.go`) | Canonicalization |
+   |---|---|
+   | `primaryKeyNormalizer` | inline `id INT PRIMARY KEY` → table-level `PRIMARY KEY` index |
+   | `indexNormalizer` | inline `c INT UNIQUE` → table-level `UNIQUE KEY`; assigns MySQL's default names to unnamed indexes |
+   | `columnCheckNormalizer` | hoists a column-level `CHECK` into a table-level constraint |
+   | `binaryAttributeNormalizer` | resolves the legacy `BINARY` column attribute to the column charset's `_bin` collation |
+   | `integerDisplayWidthNormalizer` | strips deprecated integer display widths (`int(11)` → `int`), keeping `tinyint(1)` and `ZEROFILL` |
+
+### Pipeline
+
+Rules implement the `Normalizer` interface (`normalize.go`):
+
+```go
+type Normalizer interface {
+    Name() string
+    Normalize(ct *CreateTable) *CreateTable
+}
+```
+
+- Each rule lives in its own `normalize_<name>.go` file and self-registers via `init()` calling `registerNormalizer(...)` — the same registration pattern `pkg/lint` uses for linters, so a new rule is added by dropping in a file with no change to `Diff` or the parser.
+- `runNormalizers` applies every registered rule at the tail of `parseToStruct`, **after** all fields are populated. Rules therefore see the whole struct and are **order-independent**.
+- Rules rewrite the **structured** fields of `CreateTable` (`Columns`, `Indexes`, …), never `Raw`. Code that reads `Column.Raw` / `CreateTable.Raw` (e.g. AST `Restore`, some linters) bypasses normalization.
+
+Because canonicalization happens at parse time, **`Diff` assumes normalized input**: two `CreateTable`s obtained from `ParseCreateTable` are always canonical, so the diff logic compares them structurally without re-deriving equivalences (inline vs. table-level keys, unnamed indexes, etc.). A `CreateTable` built by hand — without going through `ParseCreateTable` — is *not* normalized.
+
+### Relationship to `spirit fmt`
+
+Normalization is an **offline, best-effort** approximation of what MySQL does: it needs no database and covers the common cases. [`spirit fmt`](../../docs/fmt.md) is the **ground-truth** canonicalizer — it round-trips a `CREATE TABLE` through a live MySQL server and reads back `SHOW CREATE TABLE`, so it captures *every* transformation, including ones normalization does not implement (e.g. `DEFAULT FALSE` → `DEFAULT '0'`). Use `spirit fmt` to canonicalize schema files on disk; normalization keeps in-memory parsing and diffing accurate without a server.
 
 ## Helper Functions
 
