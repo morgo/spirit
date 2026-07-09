@@ -1,6 +1,6 @@
 module github.com/block/spirit
 
-go 1.26.1
+go 1.26.5
 
 require (
 	github.com/alecthomas/kong v1.15.0
