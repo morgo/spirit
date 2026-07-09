@@ -18,6 +18,7 @@ This will copy all tables from the source database to the target database, verif
 - [defer-secondary-indexes](#defer-secondary-indexes)
 - [enable-experimental-gtid](#enable-experimental-gtid)
 - [force](#force)
+- [reverse-window](#reverse-window)
 - [source-dsn](#source-dsn)
 - [target-chunk-time](#target-chunk-time)
 - [target-dsn](#target-dsn)
@@ -102,6 +103,42 @@ a partial failure on one source still resumes the others from their own GTID set
 
 ```bash
 spirit move --enable-experimental-gtid \
+            --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
+            --target-dsn "user:pass@tcp(target-host:3306)/mydb"
+```
+
+### reverse-window
+
+- Type: Duration
+- Default value: `0` (disabled)
+
+A normal Move ends with a one-way cutover: traffic moves to the target and the source tables are renamed to `_old`. `--reverse-window` makes that cutover **reversible** for a bounded period. Given a non-zero duration, Move does not exit after cutover — it stays running and, in change-only mode, streams writes from the target(s) *back* to the source's now-retired `_old` tables, keeping the source current so the move can be rolled back.
+
+While the window is open the run reports the `reverseWindow` state. The reverse feed uses the same change-source coordinate (binlog file+offset, or GTID with [`--enable-experimental-gtid`](#enable-experimental-gtid)) as the forward move. One of three things ends the window:
+
+1. **It elapses.** Move finalizes forward exactly as a normal cutover would — the source stays retired as `_old`, the checkpoint is dropped — and exits.
+2. **A rollback is requested** (see below). Move rolls back to the source and exits.
+3. **The reverse feed dies** (a schema change on a target, or an unrecoverable stream error). Rollback is no longer safe, so Move finalizes forward and exits, logging the reason.
+
+#### Requesting a rollback
+
+A rollback is triggered out of band by creating a table named `_spirit_move_revert` on the **first target** database — the same database that holds the checkpoint. (The log line printed when the window opens names the exact host and database.) The window loop polls for the marker; on seeing it, Move:
+
+1. flushes the reverse feed so the source reflects every target write, then stops it;
+2. renames the source's `_old` tables back to their real names, un-retiring the source;
+3. runs the reverse-cutover hook if the embedding application registered one (the `spirit` CLI does not — programmatic callers use it to switch routing back to the source); and
+4. retires the former target tables to a `_revert` suffix — distinct from `_old`, so a later move can recognize and clean them up.
+
+The marker and the checkpoint are dropped once the rollback completes.
+
+#### Constraints and resume
+
+- **Unsharded source only.** `--reverse-window` requires a single source (a 1→M move). A sharded source would need an M:N reverse and is rejected at startup.
+- **Stale marker.** If `_spirit_move_revert` already exists when a move starts, or when it reaches cutover — e.g. left over from a prior interrupted rollback — the move refuses to run, so a leftover marker is never mistaken for a fresh request.
+- **Resume.** The checkpoint records that the move entered its reverse window (via a `move_phase` column and the cutover time), so a move killed *during* the window resumes back into it rather than re-copying. A move killed *mid-rollback* is not auto-resumed and must be completed manually.
+
+```bash
+spirit move --reverse-window 30m \
             --source-dsn "user:pass@tcp(source-host:3306)/mydb" \
             --target-dsn "user:pass@tcp(target-host:3306)/mydb"
 ```

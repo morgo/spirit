@@ -25,6 +25,17 @@ type Move struct {
 	// validate). Without it, an unresumable non-empty target is a hard error.
 	Force bool `name:"force" help:"When the target cannot resume from a checkpoint, wipe the target tables and start the copy fresh instead of failing." default:"false"`
 
+	// ReverseWindow, when > 0, keeps the move alive after cutover in change-only
+	// reverse mode (targets→source) for this long, so the move can be rolled back
+	// before the source is retired. 0 (the default) is a normal cutover. During
+	// the window the source's now-retired _old tables are kept current from the
+	// targets; an operator rolls back by creating the _spirit_move_revert table on
+	// the first target (see revertmarker.go), otherwise the window elapses and the
+	// move finalizes forward. Requires an unsharded (single) source — see the
+	// guard in Runner.Run. The data plane is ReverseFeed (reversefeed.go); the
+	// post-cutover driver is reverseWindow (reversewindow.go).
+	ReverseWindow time.Duration `name:"reverse-window" help:"After cutover, reverse the move (change-only) and keep it alive for this long to allow rollback. 0 disables (normal cutover)." default:"0"`
+
 	// EnableExperimentalGTID switches the change source from binlog file+position to MySQL GTIDs.
 	// EXPERIMENTAL — see pkg/change/gtid.go. Requires gtid_mode=ON and
 	// enforce_gtid_consistency=ON on every source.
@@ -62,6 +73,9 @@ func (m *Move) Validate() error {
 	}
 	if m.TargetChunkTime < 0 {
 		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)
+	}
+	if m.ReverseWindow < 0 {
+		return fmt.Errorf("--reverse-window must be non-negative, got %s", m.ReverseWindow)
 	}
 	return nil
 }

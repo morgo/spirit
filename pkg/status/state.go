@@ -31,6 +31,12 @@ const (
 	// described in docs/migrate.md.
 	WaitingOnSentinelTable
 	CutOver
+	// ReverseWindow is the post-cutover reverse window, entered only when
+	// --reverse-window > 0: traffic is on the target and spirit keeps the source
+	// current in change-only mode while watching for a revert request. It sorts
+	// after CutOver (so `state >= Checksum` stays true) and lets orchestration
+	// surface that a revert is still possible.
+	ReverseWindow
 	Close
 	ErrCleanup
 )
@@ -55,6 +61,8 @@ func (s State) String() string {
 		return "postChecksum"
 	case CutOver:
 		return "cutOver"
+	case ReverseWindow:
+		return "reverseWindow"
 	case Close:
 		return "close"
 	case ErrCleanup:

@@ -8,9 +8,11 @@ The `status` package provides state management, progress reporting, and periodic
 
 The states are defined in lifecycle order:
 
-`Initial` → `CopyRows` → `WaitingOnSentinelTable` → `ApplyChangeset` → `RestoreSecondaryIndexes` → `AnalyzeTable` → `Checksum` → `PostChecksum` → `CutOver` → `Close` → `ErrCleanup`
+`Initial` → `CopyRows` → `WaitingOnSentinelTable` → `ApplyChangeset` → `RestoreSecondaryIndexes` → `AnalyzeTable` → `Checksum` → `PostChecksum` → `CutOver` → `ReverseWindow` → `Close` → `ErrCleanup`
 
 This ordering is deliberate — the code uses ordinal comparisons (e.g., `state >= CutOver`) to determine when to stop checkpointing and status reporting.
+
+`ReverseWindow` is entered only by a `move` run with [`--reverse-window`](../../docs/move.md#reverse-window) set. It sorts immediately after `CutOver`: the forward cutover is done and traffic is on the target, but Spirit keeps the source current in change-only mode so the move can still be rolled back. Because it is `>= CutOver`, the background status/checkpoint loops have already stopped (the reverse-window driver manages its own checkpoint writes) while orchestration can still observe that a revert is possible.
 
 ## Task Interface
 
