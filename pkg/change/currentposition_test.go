@@ -73,15 +73,11 @@ func currentPositionRoundTrip(t *testing.T, prefix string, newClient func(db *sq
 // TestBinlogCurrentPosition covers binlogClient.CurrentPosition (FLUSH BINARY
 // LOGS + SHOW ... STATUS → file:offset).
 func TestBinlogCurrentPosition(t *testing.T) {
-	currentPositionRoundTrip(t, "curposbin", func(db *sql.DB, host, user, pass string, appl applier.Applier, cfg *ClientConfig) Source {
-		return NewBinlogClient(db, host, user, pass, appl, cfg)
-	})
+	currentPositionRoundTrip(t, "curposbin", NewBinlogClient)
 }
 
 // TestGTIDCurrentPosition covers gtidClient.CurrentPosition
 // (@@GLOBAL.gtid_executed). Requires gtid_mode=ON, like the rest of gtid_test.go.
 func TestGTIDCurrentPosition(t *testing.T) {
-	currentPositionRoundTrip(t, "curposgtid", func(db *sql.DB, host, user, pass string, appl applier.Applier, cfg *ClientConfig) Source {
-		return NewGTIDClient(db, host, user, pass, appl, cfg)
-	})
+	currentPositionRoundTrip(t, "curposgtid", NewGTIDClient)
 }
