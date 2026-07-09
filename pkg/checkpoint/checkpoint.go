@@ -67,6 +67,16 @@ type Record struct {
 	// single-table migration can detect the rare case where two long table
 	// names truncate to the same checkpoint table name. Empty otherwise.
 	OriginalTableName string
+	// Phase is the move's reverse-window lifecycle: "" (copying — the default,
+	// and the only value migration/datasync ever use), "reverse_window" (forward
+	// cutover done, reverse feed live), or "reverting" (reverse cutover under
+	// way). It gates resume so a restart neither re-copies nor re-cuts-over.
+	// Stored in move_phase.
+	Phase string
+	// CutoverAt is when the forward cutover completed, used to compute the
+	// reverse-window deadline across a resume. Zero when not past cutover; stored
+	// in cutover_at as an RFC3339 string ("" when zero).
+	CutoverAt time.Time
 	// CreatedAt is when the row was written (UTC; spirit connections use
 	// time_zone="+00:00").
 	CreatedAt time.Time
@@ -123,6 +133,8 @@ const tableDDL = `(
 	binlog_position TEXT,
 	statement TEXT,
 	original_table_name VARCHAR(64) NOT NULL DEFAULT '',
+	move_phase VARCHAR(32) NOT NULL DEFAULT '',
+	cutover_at TEXT,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`
 
@@ -160,10 +172,15 @@ func (t *Table) Drop(ctx context.Context) error {
 // statement — a crash mid-write leaves either the old row or the new one, never
 // none. created_at is (re)assigned by the server on each write.
 func (t *Table) Write(ctx context.Context, rec Record) error {
+	var cutoverAt string
+	if !rec.CutoverAt.IsZero() {
+		cutoverAt = rec.CutoverAt.UTC().Format(time.RFC3339Nano)
+	}
 	return dbconn.Exec(ctx, t.db,
-		"REPLACE INTO %n (id, copier_watermark, checksum_watermark, binlog_position, statement, original_table_name) VALUES (1, %?, %?, %?, %?, %?)",
+		"REPLACE INTO %n (id, copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, move_phase, cutover_at) VALUES (1, %?, %?, %?, %?, %?, %?, %?)",
 		t.name,
 		rec.CopierWatermark, rec.ChecksumWatermark, rec.Position, rec.Statement, rec.OriginalTableName,
+		rec.Phase, cutoverAt,
 	)
 }
 
@@ -175,18 +192,26 @@ func (t *Table) Write(ctx context.Context, rec Record) error {
 // error, so resume fails safely rather than silently misreading.
 func (t *Table) ReadLatest(ctx context.Context) (Record, error) {
 	query := fmt.Sprintf(
-		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, created_at FROM `%s` ORDER BY id DESC LIMIT 1",
+		"SELECT copier_watermark, checksum_watermark, binlog_position, statement, original_table_name, move_phase, cutover_at, created_at FROM `%s` ORDER BY id DESC LIMIT 1",
 		t.name)
 
 	var rec Record
 	var createdAt string
+	var cutoverAt sql.NullString
 	err := t.db.QueryRowContext(ctx, query).Scan(
-		&rec.CopierWatermark, &rec.ChecksumWatermark, &rec.Position, &rec.Statement, &rec.OriginalTableName, &createdAt)
+		&rec.CopierWatermark, &rec.ChecksumWatermark, &rec.Position, &rec.Statement, &rec.OriginalTableName,
+		&rec.Phase, &cutoverAt, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, ErrNotFound
 	}
 	if err != nil {
 		return Record{}, err
+	}
+	if cutoverAt.Valid && cutoverAt.String != "" {
+		rec.CutoverAt, err = time.Parse(time.RFC3339Nano, cutoverAt.String)
+		if err != nil {
+			return Record{}, fmt.Errorf("could not parse checkpoint cutover_at timestamp: %w", err)
+		}
 	}
 	// Spirit connections use time_zone="+00:00", so created_at is UTC.
 	rec.CreatedAt, err = time.Parse(time.DateTime, createdAt)

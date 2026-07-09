@@ -121,6 +121,17 @@ type Runner struct {
 	usedResumeFromCheckpoint bool
 
 	cutoverFunc func(ctx context.Context) error
+	// reverseCutoverFunc is the reverse-window rollback's traffic switch (route
+	// back to the source). Set via SetReverseCutover; used only when
+	// move.ReverseWindow > 0 and a revert is requested during the window.
+	reverseCutoverFunc func(ctx context.Context) error
+	// reversePositions holds each target's binlog position captured at cutover
+	// (keyed by targetKey) — the start points for the reverse feeds. cutoverAt
+	// is when the forward cutover completed (the reverse-window deadline is
+	// measured from it). Both are set by the cutover postSwitch hook when
+	// move.ReverseWindow > 0.
+	reversePositions map[string]string
+	cutoverAt        time.Time
 
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
@@ -139,6 +150,11 @@ type Runner struct {
 	// Set in startBackgroundRoutines and invoked from Close() so that
 	// late status/checkpoint goroutine activity cannot race with teardown.
 	watchTaskWait func()
+	// bgCancel cancels the context the WatchTask (status + checkpoint dumper)
+	// goroutines run under. Reverse-window mode stops the dumper before cutover
+	// (stopWatchTask) so the reverse window is the sole writer of the checkpoint
+	// row.
+	bgCancel context.CancelFunc
 }
 
 var _ status.Task = (*Runner)(nil)
@@ -397,6 +413,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	rec, err := r.checkpointTbl().ReadLatest(ctx)
 	if err != nil {
 		return fmt.Errorf("could not read from checkpoint table '%s' on target: %w", checkpointTableName, err)
+	}
+	// A checkpoint past the forward cutover (reverse-window mode) must never be
+	// resumed down the copy path: the copy and cutover are already done, and
+	// re-running them would re-invoke the traffic switch and rename the
+	// already-retired tables. Resuming an in-flight reverse window is not yet
+	// supported, so fail loudly rather than corrupt state.
+	if rec.Phase != "" {
+		return fmt.Errorf("cannot resume move: checkpoint is past cutover (phase=%q); resuming an in-flight reverse window is not yet supported", rec.Phase)
 	}
 	copierWatermark := rec.CopierWatermark
 	r.checksumWatermark = rec.ChecksumWatermark
@@ -696,8 +720,127 @@ func (r *Runner) wipeTargets(ctx context.Context) error {
 	return r.checkpointTbl().Drop(ctx) // Transient → DROP TABLE IF EXISTS
 }
 
+// dropStaleRevertTables drops any leftover <table>_revert tables on every
+// target. A reverse-window rollback retires the former targets to their
+// _revert form (check.RevertRetiredName); a later fresh move — and the reverse
+// cutover itself — must clear those first so the retire RENAME cannot collide
+// with a leftover. Safe because only a revert ever creates a _revert table.
+func (r *Runner) dropStaleRevertTables(ctx context.Context) error {
+	for i := range r.targets {
+		for _, t := range r.sourceTables {
+			revertName := check.RevertRetiredName(t.TableName)
+			if err := dbconn.Exec(ctx, r.targets[i].DB, "DROP TABLE IF EXISTS %n", revertName); err != nil {
+				return fmt.Errorf("drop stale revert table %q on target %d: %w", revertName, i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// maybeResumeReverseWindow takes over the run when a prior attempt reached the
+// reverse window, rather than falling through to discovery/copy (which would
+// re-copy the source's now-_old tables — the reported failure mode). It reads
+// the checkpoint before any locks or discovery. Returns handled=true when it
+// owns the run.
+//
+// Not yet handled: an interrupted reverse *cutover* (phase "reverting") leaves
+// an ambiguous half-renamed state, so that surfaces as an error for manual
+// completion rather than an unsafe auto-resume.
+func (r *Runner) maybeResumeReverseWindow(ctx context.Context) (bool, error) {
+	rec, err := r.checkpointTbl().ReadLatest(ctx)
+	if err != nil {
+		// No usable checkpoint (fresh move, empty, or a layout this version
+		// can't read) — not a reverse resume; let the normal flow decide
+		// copy-resume vs fresh.
+		return false, nil //nolint:nilerr
+	}
+	switch rec.Phase {
+	case phaseReverseWindow:
+		r.logger.Warn("resuming an interrupted reverse window from checkpoint", "cutover_at", rec.CutoverAt)
+		return true, r.resumeReverseWindow(ctx, rec)
+	case phaseReverting:
+		return true, fmt.Errorf("a reverse cutover was interrupted (checkpoint phase=%q); resuming a partial rollback is not yet supported — complete it manually", rec.Phase)
+	default:
+		return false, nil // phase "" (copy) — the normal flow handles resume/fresh
+	}
+}
+
+// resumeReverseWindow rebuilds the reverse-window state from the checkpoint and
+// re-enters the window. The reverse feeds restart from the checkpointed
+// positions and catch up whatever the source missed while the process was down.
+//
+// v1 note: no metadata locks are re-acquired here (a concurrent second restart
+// of the same move is an operator error), and the feed always resumes from the
+// original cutover position — correct via idempotent apply, at the cost of
+// re-reading the window's binlog.
+func (r *Runner) resumeReverseWindow(ctx context.Context, rec checkpoint.Record) error {
+	var positions map[string]string
+	if err := json.Unmarshal([]byte(rec.Position), &positions); err != nil {
+		return fmt.Errorf("resume reverse window: parse stored positions: %w", err)
+	}
+	r.reversePositions = positions
+	r.cutoverAt = rec.CutoverAt
+
+	logical, err := r.reverseWindowLogicalTables(ctx)
+	if err != nil {
+		return err
+	}
+	if len(logical) == 0 {
+		return fmt.Errorf("resume reverse window: found no retired (_old) source tables to resume from")
+	}
+	src := &r.sources[0] // reverse-window is single-source (guarded at cutover)
+	src.tables = make([]*table.TableInfo, 0, len(logical))
+	for _, name := range logical {
+		// Only the name is read downstream (buildFeed derives the _old source
+		// and real target TableInfos itself), so no SetInfo — the logical table
+		// no longer exists on the source under this name.
+		src.tables = append(src.tables, table.NewTableInfo(src.db, src.config.DBName, name))
+	}
+	r.sourceTables = src.tables
+
+	return newReverseWindow(r).run(ctx)
+}
+
+// reverseWindowLogicalTables recovers the logical names of the moved tables when
+// resuming a reverse window: the forward cutover renamed each to <name>_old on
+// the source, so it lists those and strips the suffix. When an explicit table
+// list was supplied it is used to filter (ignoring unrelated _old tables).
+func (r *Runner) reverseWindowLogicalTables(ctx context.Context) ([]string, error) {
+	src := &r.sources[0]
+	rows, err := src.db.QueryContext(ctx,
+		"SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name LIKE '%\\_old'",
+		src.config.DBName)
+	if err != nil {
+		return nil, fmt.Errorf("resume reverse window: list retired source tables: %w", err)
+	}
+	defer utils.CloseAndLog(rows)
+	wanted := make(map[string]bool, len(r.move.SourceTables))
+	for _, t := range r.move.SourceTables {
+		wanted[t] = true
+	}
+	var logical []string
+	for rows.Next() {
+		var oldName string
+		if err := rows.Scan(&oldName); err != nil {
+			return nil, err
+		}
+		name := strings.TrimSuffix(oldName, "_old")
+		if len(wanted) > 0 && !wanted[name] {
+			continue // an unrelated _old table, not part of this move
+		}
+		logical = append(logical, name)
+	}
+	return logical, rows.Err()
+}
+
 func (r *Runner) newCopy(ctx context.Context) error {
-	// We are starting fresh:
+	// Starting fresh. Clear any leftover _revert tables from an earlier
+	// reverse-window rollback on these targets, so this run's own reverse
+	// cutover can retire the targets without colliding (and so they don't
+	// linger). Only on the fresh path — a resume must not drop tables.
+	if err := r.dropStaleRevertTables(ctx); err != nil {
+		return err
+	}
 	// For each table, fetch the CREATE TABLE statement from the source and run it on the target.
 	if err := r.createTargetTables(ctx); err != nil {
 		return err
@@ -814,6 +957,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		"dirty", bi.Modified,
 	)
 
+	if r.move.ReverseWindow > 0 && len(r.move.SourceDSNs) > 1 {
+		// Reverse-window is only defined for an unsharded source (1 source →
+		// M targets ⇒ an M:1 reverse). A sharded source would need an M:N
+		// reverse with a reverse sharding provider, which is out of scope.
+		return fmt.Errorf("--reverse-window requires an unsharded (single) source, got %d source shards", len(r.move.SourceDSNs))
+	}
+
 	var err error
 	r.dbConfig = dbconn.NewDBConfig()
 	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
@@ -886,6 +1036,27 @@ func (r *Runner) Run(ctx context.Context) error {
 	slices.SortFunc(r.targets, func(a, b applier.Target) int {
 		return strings.Compare(targetKey(a), targetKey(b))
 	})
+
+	// If a prior run reached the reverse window (or a reverse cutover), resume
+	// that here instead of the normal discovery/copy path. The forward cutover
+	// renamed the source tables to _old, so the normal path would otherwise
+	// treat them as fresh data and re-copy them. This must run before the
+	// revert-marker pre-flight guard, since a resumed window legitimately honors
+	// a marker created before the crash.
+	if handled, err := r.maybeResumeReverseWindow(ctx); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
+	// Pre-flight: refuse to start if a revert marker is already present on
+	// targets[0]. It means a prior reverse-window move on this target requested a
+	// rollback and did not complete cleanly, so the target is in an unknown state
+	// — starting a new move on top of it is unsafe. (The marker is otherwise
+	// created only during a reverse window and dropped by its terminal action.)
+	if err := r.assertNoRevertMarker(ctx, "pre-flight"); err != nil {
+		return err
+	}
 	// Discovery is read-only: preflight checks plus building the per-source
 	// table lists (which the metadata lock names below are derived from).
 	if err := r.setupDiscovery(ctx); err != nil {
@@ -993,6 +1164,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	if r.move.ReverseWindow > 0 {
+		// From here the reverse window is the sole writer of the checkpoint row,
+		// so stop the periodic checkpoint dumper first — otherwise it would
+		// clobber the reverse-window phase / revert flag with a copy-phase row.
+		r.stopWatchTask()
+	}
 	r.logger.Info("Sentinel released, starting cutover")
 	// Create a cutover.
 	r.status.Set(status.CutOver)
@@ -1008,9 +1185,29 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if r.move.ReverseWindow > 0 {
+		// Under the cutover lock, right after the traffic switch, capture the
+		// reverse-feed start positions and record that the move has entered its
+		// reverse window (see captureReverseWindow). The source rename still runs.
+		cutover.SetPostSwitch(func(ctx context.Context) error { return captureReverseWindow(ctx, r) })
+	}
+	// Pre-cutover: refuse to switch traffic if a revert has been requested (a
+	// marker appeared on targets[0] during the copy). Cutting over only to
+	// immediately roll back is pointless — abort while the source is still live.
+	if err := r.assertNoRevertMarker(ctx, "pre-cutover"); err != nil {
+		return err
+	}
 	if err = cutover.Run(ctx); err != nil {
 		return err
 	}
+
+	if r.move.ReverseWindow > 0 {
+		// Hold the reverse window keeping the source current, then complete
+		// forward (retire the source) or roll back. The checkpoint is dropped by
+		// the terminal action, not here.
+		return newReverseWindow(r).run(ctx)
+	}
+
 	// Delete checkpoint table from targets[0].
 	tgt0 := &r.targets[0]
 	if err := dbconn.Exec(ctx, tgt0.DB, "DROP TABLE IF EXISTS %n", checkpointTableName); err != nil {
@@ -1038,8 +1235,43 @@ func (r *Runner) startBackgroundRoutines(ctx context.Context) {
 
 	// Start go routines for checkpointing and dumping status. The returned
 	// wait function is invoked from Close() so we can be sure no late
-	// checkpoint INSERT lands after teardown begins.
-	r.watchTaskWait = status.WatchTask(ctx, r, r.logger)
+	// checkpoint INSERT lands after teardown begins. They run under a child
+	// context so reverse-window mode can stop them independently of Run's ctx
+	// (see stopWatchTask).
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	r.bgCancel = bgCancel
+	r.watchTaskWait = status.WatchTask(bgCtx, r, r.logger)
+}
+
+// stopWatchTask stops the background status/checkpoint dumper and waits for it
+// to exit. Idempotent. Reverse-window mode calls it before cutover so the
+// reverse window owns the checkpoint row exclusively — no periodic dump can
+// clobber the reverse-window phase or the revert flag. Close() then skips the
+// dumper because watchTaskWait is cleared.
+func (r *Runner) stopWatchTask() {
+	if r.bgCancel != nil {
+		r.bgCancel()
+		r.bgCancel = nil
+	}
+	if r.watchTaskWait != nil {
+		r.watchTaskWait()
+		r.watchTaskWait = nil
+	}
+}
+
+// assertNoRevertMarker fails if the revert marker is present on targets[0].
+// Called at pre-flight and pre-cutover (phase names the caller): a marker there
+// means a reverse-window rollback is pending, or a prior reverse-window move did
+// not complete, so neither starting a move nor cutting over makes sense.
+func (r *Runner) assertNoRevertMarker(ctx context.Context, phase string) error {
+	present, err := revertMarkerExists(ctx, r.targets[0].DB)
+	if err != nil {
+		return fmt.Errorf("%s: could not check for revert marker on targets[0]: %w", phase, err)
+	}
+	if present {
+		return fmt.Errorf("%s: revert marker %q is present on targets[0]; a reverse-window rollback is pending or a prior move did not complete — investigate and drop it before proceeding", phase, revertMarkerName)
+	}
+	return nil
 }
 
 // fatalError is the callback provided to the replication client.
@@ -1433,6 +1665,13 @@ func (r *Runner) analyzeTable(ctx context.Context, db *sql.DB, tableName string)
 
 func (r *Runner) SetCutover(cutover func(ctx context.Context) error) {
 	r.cutoverFunc = cutover
+}
+
+// SetReverseCutover registers the rollback traffic switch used if a revert is
+// requested during the reverse window (route back to the source). It mirrors
+// SetCutover and is only consulted when move.ReverseWindow > 0.
+func (r *Runner) SetReverseCutover(fn func(ctx context.Context) error) {
+	r.reverseCutoverFunc = fn
 }
 
 func (r *Runner) Progress() status.Progress {

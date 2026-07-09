@@ -46,6 +46,22 @@ type CutOver struct {
 	// any later step must not reopen the window where straggler writes to
 	// the (now stale) source could be replayed over newer rows on the target.
 	cutoverFuncSucceeded bool
+
+	// postSwitch, when set, runs once under the source locks after the traffic
+	// switch (cutoverFunc) succeeds and before the sources are renamed out of
+	// the way. The reverse-window move uses it to capture each target's binlog
+	// position and persist that the move has entered its reverse window, while
+	// the sources are quiescent (writes switched away, replication flushed) so
+	// the captured positions cleanly bound the post-cutover writes. Like
+	// cutoverFunc it must run at most once; postSwitchDone guards that.
+	postSwitch     func(ctx context.Context) error
+	postSwitchDone bool
+}
+
+// SetPostSwitch registers a hook to run once under the source locks, after the
+// traffic switch and before the source rename. See CutOver.postSwitch.
+func (c *CutOver) SetPostSwitch(fn func(ctx context.Context) error) {
+	c.postSwitch = fn
 }
 
 // NewCutOver creates a new CutOver that handles multiple sources.
@@ -171,6 +187,19 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		}
 		c.cutoverFuncSucceeded = true
 		c.logger.Info("Cutover function complete")
+	}
+
+	// Reverse-window hook: after the traffic switch and before retiring the
+	// sources, capture the reverse-feed start positions and record that the
+	// move has entered its reverse window. Runs once, under the source locks,
+	// while the sources are quiescent. If it fails the cutover fails: the
+	// routing switch has already succeeded, so (like a rename failure past that
+	// point) Run does not retry from the top and surfaces the error.
+	if c.postSwitch != nil && !c.postSwitchDone {
+		if err := c.postSwitch(ctx); err != nil {
+			return fmt.Errorf("reverse-window post-switch hook failed: %w", err)
+		}
+		c.postSwitchDone = true
 	}
 
 	// Rename the source tables out of the way. Once the cutover function has
