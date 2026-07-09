@@ -702,11 +702,12 @@ func (r *Runner) newCopy(ctx context.Context) error {
 		return err
 	}
 
-	// Create sentinel on SOURCE. Idempotent (CREATE IF NOT EXISTS): the
-	// sentinel is shared with every spirit process in the schema and must
-	// never pass through a "table absent" state a concurrent poll could see.
+	// Create the sentinel on targets[0], alongside the checkpoint, so all of
+	// move's coordination tables live in one place (the source tables are
+	// renamed out of the way at cutover). Idempotent (CREATE IF NOT EXISTS) so a
+	// resume recreates it and a concurrent existence probe never sees it absent.
 	if r.move.CreateSentinel {
-		if err := sentinel.Create(ctx, r.sources[0].db); err != nil {
+		if err := sentinel.Create(ctx, r.targets[0].DB); err != nil {
 			return err
 		}
 	}
@@ -983,7 +984,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// invalidateChecksumWatermark blanks the whole per-move checkpoint table),
 	// so they are injected as callbacks. See pkg/sentinel.
 	if err := sentinel.Wait(ctx, sentinel.WaitConfig{
-		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.sources[0].db) },
+		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.targets[0].DB) },
 		RunChecksum:         r.runContinuousChecksum,
 		InvalidateWatermark: r.invalidateChecksumWatermark,
 		Logger:              r.logger,
@@ -1445,7 +1446,7 @@ func (r *Runner) Progress() status.Progress {
 	case status.WaitingOnSentinelTable:
 		r.logger.Info("migration status",
 			"state", r.status.Get().String(),
-			"sentinel-table", fmt.Sprintf("%s.%s", r.sources[0].config.DBName, sentinel.TableName),
+			"sentinel-table", fmt.Sprintf("%s.%s", r.targets[0].Config.DBName, sentinel.TableName),
 			"total-time", time.Since(r.startTime).Round(time.Second).String(),
 			"sentinel-wait-time", time.Since(r.sentinelWaitStartTime).Round(time.Second).String(),
 			"sentinel-max-wait-time", sentinel.WaitLimit.String(),

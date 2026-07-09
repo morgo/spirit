@@ -435,7 +435,10 @@ func TestShardedMoveVindexUpdateFails(t *testing.T) {
 		require.Error(t, err, "a vindex-changing UPDATE must fail the move")
 	case <-time.After(60 * time.Second):
 		// Unblock the sentinel wait so the Run goroutine can exit before we fail.
-		testutils.RunSQLInDatabase(t, srcName, "DROP TABLE IF EXISTS "+sentinel.TableName)
+		// The sentinel lives on targets[0]; drop it on both targets since which
+		// one sorts first is not fixed here.
+		testutils.RunSQLInDatabase(t, tgt0Name, "DROP TABLE IF EXISTS "+sentinel.TableName)
+		testutils.RunSQLInDatabase(t, tgt1Name, "DROP TABLE IF EXISTS "+sentinel.TableName)
 		<-errCh
 		t.Fatal("the move did not fail after a vindex-changing UPDATE")
 	}
