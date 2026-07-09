@@ -683,7 +683,8 @@ func (r *Runner) decideResume(ctx context.Context) (resumeDecision, error) {
 // wipeTargets drops the move's target tables (on every target) and the
 // checkpoint table, so a fresh copy can proceed. Used by --force when the target
 // cannot resume, and by the empty-checkpoint fresh-start recovery
-// (resumeFreshOwned). The source — including any sentinel — is left untouched.
+// (resumeFreshOwned). The source is left untouched; so is the sentinel on
+// targets[0] (a fresh copy recreates it idempotently).
 func (r *Runner) wipeTargets(ctx context.Context) error {
 	for i := range r.targets {
 		for _, t := range r.sourceTables {
