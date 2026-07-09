@@ -169,6 +169,14 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 	w.watched = make([][]*table.TableInfo, len(r.targets))
 	for i := range r.targets {
 		tgt := &r.targets[i]
+		// The reverse feed MUST resume from the position captured at cutover. A
+		// missing/empty entry (e.g. a corrupted or partial checkpoint on resume)
+		// would otherwise fall back to the target's current head, silently
+		// skipping post-cutover writes and making rollback unsafe — so fail loudly.
+		pos, ok := r.reversePositions[targetKey(*tgt)]
+		if !ok || pos == "" {
+			return fmt.Errorf("reverse window: no captured start position for target %d (%s); refusing to start the reverse feed, which would miss post-cutover writes and make rollback unsafe", i, targetKey(*tgt))
+		}
 		watched := make([]*table.TableInfo, 0, len(src.tables))
 		for _, t := range src.tables {
 			wt := table.NewTableInfo(tgt.DB, tgt.Config.DBName, t.TableName)
@@ -184,7 +192,7 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 			User:     tgt.Config.User,
 			Password: tgt.Config.Passwd,
 			Tables:   watched,
-			Position: r.reversePositions[targetKey(*tgt)],
+			Position: pos,
 		})
 	}
 

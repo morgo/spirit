@@ -414,13 +414,14 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("could not read from checkpoint table '%s' on target: %w", checkpointTableName, err)
 	}
-	// A checkpoint past the forward cutover (reverse-window mode) must never be
-	// resumed down the copy path: the copy and cutover are already done, and
-	// re-running them would re-invoke the traffic switch and rename the
-	// already-retired tables. Resuming an in-flight reverse window is not yet
-	// supported, so fail loudly rather than corrupt state.
+	// A checkpoint past the forward cutover (a reverse-window phase) is resumed
+	// earlier by maybeResumeReverseWindow, before discovery/locks — it should
+	// never reach this copy-path resume. This is a defensive backstop: getting
+	// here with a non-empty phase means that earlier handoff was bypassed, so
+	// fail loudly rather than re-run the copy and cutover (which would re-invoke
+	// the traffic switch and rename the already-retired tables).
 	if rec.Phase != "" {
-		return fmt.Errorf("cannot resume move: checkpoint is past cutover (phase=%q); resuming an in-flight reverse window is not yet supported", rec.Phase)
+		return fmt.Errorf("cannot resume move down the copy path: checkpoint is past cutover (phase=%q); a reverse-window resume is handled earlier (see maybeResumeReverseWindow)", rec.Phase)
 	}
 	copierWatermark := rec.CopierWatermark
 	r.checksumWatermark = rec.ChecksumWatermark
