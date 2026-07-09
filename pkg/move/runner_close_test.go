@@ -170,6 +170,7 @@ func (f *fakeChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.Mapped
 func (f *fakeChangeSource) Start(_ context.Context) error                       { return nil }
 func (f *fakeChangeSource) StartFromPosition(_ context.Context, _ string) error { return nil }
 func (f *fakeChangeSource) Position() string                                    { return "" }
+func (f *fakeChangeSource) CurrentPosition(_ context.Context) (string, error)   { return "", nil }
 func (f *fakeChangeSource) Flush(_ context.Context) error                       { return nil }
 func (f *fakeChangeSource) FlushUnderTableLock(_ context.Context, _ []*dbconn.TableLock) error {
 	return nil

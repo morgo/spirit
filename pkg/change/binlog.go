@@ -297,6 +297,21 @@ func (c *binlogClient) getCurrentBinlogPosition(ctx context.Context) (mysql.Posi
 	}, nil
 }
 
+// CurrentPosition satisfies Source. See the interface doc for how it differs
+// from Position (in-memory feed progress vs a live server read). It delegates to
+// getCurrentBinlogPosition, so it FLUSHes first — the returned position is a
+// fresh binlog-file boundary (offset 4), and a feed later resuming from it
+// starts at a clean file, avoiding the table-map-on-a-mid-file-offset quirk —
+// and shares that helper's cached SHOW MASTER STATUS / SHOW BINARY LOG STATUS
+// statement rather than duplicating the fallback and paying an extra round-trip.
+func (c *binlogClient) CurrentPosition(ctx context.Context) (string, error) {
+	pos, err := c.getCurrentBinlogPosition(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to read current binlog position: %w", err)
+	}
+	return formatBinlogPosition(pos), nil
+}
+
 // buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
 // out (mirroring gtidClient.buildSyncerConfig) so tests can assert the
 // decode options below stay in sync between the two clients.

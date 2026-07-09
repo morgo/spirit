@@ -47,6 +47,7 @@ func (s *noopChangeSource) AddSubscription(_, _ *table.TableInfo, _ table.Mapped
 func (s *noopChangeSource) Start(context.Context) error                     { return nil }
 func (s *noopChangeSource) StartFromPosition(context.Context, string) error { return nil }
 func (s *noopChangeSource) Position() string                                { return "" }
+func (s *noopChangeSource) CurrentPosition(context.Context) (string, error) { return "", nil }
 func (s *noopChangeSource) Flush(context.Context) error                     { return nil }
 func (s *noopChangeSource) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error {
 	return nil

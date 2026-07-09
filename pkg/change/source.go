@@ -71,7 +71,29 @@ type Source interface {
 	// it. Advances only at transaction commit boundaries. Returns "" if
 	// no position has been observed yet, signaling that a fresh Start is
 	// required.
+	//
+	// Position reports this *running* feed's in-memory progress and does no
+	// server I/O — contrast CurrentPosition, which reads the live server head.
 	Position() string
+
+	// CurrentPosition queries the source server for its current head position
+	// and returns it in the same opaque encoding as Position (so the result is
+	// a valid StartFromPosition input for this implementation).
+	//
+	// It is mechanically different from Position:
+	//   - Position returns in-memory state: the safe-to-resume point a *running*
+	//     feed has flushed, advancing only at commit boundaries and "" before
+	//     the feed has observed anything. No server round-trip.
+	//   - CurrentPosition issues a live query and needs no running feed. In
+	//     binlog mode it FLUSHes and reads SHOW [BINARY LOG|MASTER] STATUS
+	//     (file:offset); in GTID mode it reads @@GLOBAL.gtid_executed (a GTID
+	//     set). Because the encoding is per-implementation, this is why the
+	//     capture belongs on Source rather than a binlog-only helper.
+	//
+	// Its purpose is to capture a "start here, as of now" point to hand to a
+	// later StartFromPosition — e.g. seeding a reverse feed at cutover, before
+	// that feed has been started.
+	CurrentPosition(ctx context.Context) (string, error)
 
 	// Flush requests that all registered subscriptions flush their
 	// buffered changes to their targets. Blocks until the flush
