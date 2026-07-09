@@ -298,24 +298,18 @@ func (c *binlogClient) getCurrentBinlogPosition(ctx context.Context) (mysql.Posi
 }
 
 // CurrentPosition satisfies Source. See the interface doc for how it differs
-// from Position (in-memory feed progress vs a live server read). In binlog mode
-// it FLUSHes first, so the returned position is a fresh binlog-file boundary
-// (offset 4) — a feed later resuming from it starts at a clean file, avoiding
-// the table-map-on-a-mid-file-offset quirk.
+// from Position (in-memory feed progress vs a live server read). It delegates to
+// getCurrentBinlogPosition, so it FLUSHes first — the returned position is a
+// fresh binlog-file boundary (offset 4), and a feed later resuming from it
+// starts at a clean file, avoiding the table-map-on-a-mid-file-offset quirk —
+// and shares that helper's cached SHOW MASTER STATUS / SHOW BINARY LOG STATUS
+// statement rather than duplicating the fallback and paying an extra round-trip.
 func (c *binlogClient) CurrentPosition(ctx context.Context) (string, error) {
-	if _, err := c.db.ExecContext(ctx, `FLUSH BINARY LOGS`); err != nil {
-		return "", fmt.Errorf("failed to flush binary logs: %w", err)
+	pos, err := c.getCurrentBinlogPosition(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to read current binlog position: %w", err)
 	}
-	var binlogFile, ignored string
-	var binlogPos uint32
-	// SHOW MASTER STATUS (MySQL 8.0) with a fallback to SHOW BINARY LOG STATUS
-	// (MySQL 8.2+), mirroring getCurrentBinlogPosition.
-	if err := c.db.QueryRowContext(ctx, "SHOW MASTER STATUS").Scan(&binlogFile, &binlogPos, &ignored, &ignored, &ignored); err != nil {
-		if err2 := c.db.QueryRowContext(ctx, "SHOW BINARY LOG STATUS").Scan(&binlogFile, &binlogPos, &ignored, &ignored, &ignored); err2 != nil {
-			return "", fmt.Errorf("failed to read current binlog position: %w", err2)
-		}
-	}
-	return formatBinlogPosition(mysql.Position{Name: binlogFile, Pos: binlogPos}), nil
+	return formatBinlogPosition(pos), nil
 }
 
 // buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split

@@ -96,7 +96,7 @@ type ReverseFeed struct {
 
 // NewReverseFeed wires the feeds and their shared applier. It does not open any
 // binlog stream; call Start or Run for that.
-func NewReverseFeed(cfg ReverseFeedConfig) (*ReverseFeed, error) {
+func NewReverseFeed(cfg ReverseFeedConfig) (_ *ReverseFeed, err error) {
 	if len(cfg.Sources) == 0 {
 		return nil, errors.New("reverse feed: at least one source is required")
 	}
@@ -141,6 +141,15 @@ func NewReverseFeed(cfg ReverseFeedConfig) (*ReverseFeed, error) {
 		flushInt: flushInt,
 		fatalCh:  make(chan struct{}),
 	}
+	// If wiring the per-source feeds fails partway, tear down the feeds already
+	// created so we don't leak their binlog syncer goroutines and connections.
+	// The applier is inert until Start (nothing to stop) and does not own
+	// Target.DB, so closing the clients is the whole cleanup.
+	defer func() {
+		if err != nil {
+			rf.Close()
+		}
+	}()
 
 	for si, src := range cfg.Sources {
 		if src.DB == nil {
@@ -161,23 +170,22 @@ func NewReverseFeed(cfg ReverseFeedConfig) (*ReverseFeed, error) {
 		} else {
 			client = change.NewBinlogClient(src.DB, src.Addr, src.User, src.Password, appl, clientCfg)
 		}
+		// Track the client now so the deferred cleanup closes it — and every
+		// earlier client — if a later subscription or source fails to wire up.
+		rf.clients = append(rf.clients, client)
 		for _, sTbl := range src.Tables {
 			uTbl, ok := cfg.TargetTables[sTbl.TableName]
 			if !ok {
-				client.Close()
 				return nil, fmt.Errorf("reverse feed: source %d has no target table for %q", si, sTbl.TableName)
 			}
-			chunker, err := table.NewChunker(sTbl, table.ChunkerConfig{NewTable: uTbl, Logger: logger})
-			if err != nil {
-				client.Close()
-				return nil, fmt.Errorf("reverse feed: chunker for %q: %w", sTbl.TableName, err)
+			chunker, cerr := table.NewChunker(sTbl, table.ChunkerConfig{NewTable: uTbl, Logger: logger})
+			if cerr != nil {
+				return nil, fmt.Errorf("reverse feed: chunker for %q: %w", sTbl.TableName, cerr)
 			}
-			if err := client.AddSubscription(sTbl, uTbl, chunker); err != nil {
-				client.Close()
-				return nil, fmt.Errorf("reverse feed: subscribe %q: %w", sTbl.TableName, err)
+			if aerr := client.AddSubscription(sTbl, uTbl, chunker); aerr != nil {
+				return nil, fmt.Errorf("reverse feed: subscribe %q: %w", sTbl.TableName, aerr)
 			}
 		}
-		rf.clients = append(rf.clients, client)
 	}
 	return rf, nil
 }
@@ -213,11 +221,16 @@ func (rf *ReverseFeed) Start(ctx context.Context) error {
 			err = client.Start(ctx)
 		}
 		if err != nil {
+			// A partial start must not leave earlier feeds running in the
+			// background (leaking goroutines/connections and still applying
+			// changes). Close is idempotent, so the caller's own Close is fine.
+			rf.Close()
 			return fmt.Errorf("reverse feed: start source %d: %w", i, err)
 		}
 		// Change-only: apply every change regardless of copy watermark, since
 		// there is no copier. This is what the forward move disables at cutover.
 		if err := client.SetWatermarkOptimization(ctx, false); err != nil {
+			rf.Close()
 			return fmt.Errorf("reverse feed: disable watermark optimization on source %d: %w", i, err)
 		}
 		client.StartPeriodicFlush(ctx, rf.flushInt)

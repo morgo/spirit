@@ -184,3 +184,19 @@ func TestReverseFeedWindowHoldsAndReturns(t *testing.T) {
 	require.NoError(t, feed.Run(t.Context(), 500*time.Millisecond))
 	require.GreaterOrEqual(t, time.Since(start), 450*time.Millisecond, "Run must hold for ~the window")
 }
+
+// TestReverseFeedStartCleanupOnPartialFailure: when Start fails partway (here
+// the second source has a bogus resume position), the feed it already started
+// for the first source must be torn down, not left running. There is
+// deliberately no feed.Close() — a correct Start already cleaned up, and the
+// package's goleak TestMain fails if the first source's binlog-reader or
+// periodic-flush goroutines survive.
+func TestReverseFeedStartCleanupOnPartialFailure(t *testing.T) {
+	setupFanIn(t)
+	// Source 0 starts from head (succeeds, spawning goroutines); source 1
+	// resumes from an unparseable position and fails, tripping Start's cleanup.
+	feed, _ := newFanInFeed(t, []string{"", "not-a-valid-position"})
+	err := feed.Start(t.Context())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "start source 1", "the second source must be the one that fails")
+}
