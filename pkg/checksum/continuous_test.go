@@ -591,6 +591,7 @@ func (f *fakeFeed) AddSubscription(_, _ *table.TableInfo, _ table.MappedChunker)
 func (f *fakeFeed) Start(context.Context) error                                        { return nil }
 func (f *fakeFeed) StartFromPosition(context.Context, string) error                    { return nil }
 func (f *fakeFeed) Position() string                                                   { return "" }
+func (f *fakeFeed) CurrentPosition(context.Context) (string, error)                    { return "", nil }
 func (f *fakeFeed) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error     { return nil }
 func (f *fakeFeed) BlockWait(context.Context) error                                    { return nil }
 func (f *fakeFeed) GetDeltaLen() int                                                   { return 0 }

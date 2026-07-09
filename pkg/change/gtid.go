@@ -283,6 +283,19 @@ func (c *gtidClient) Position() string {
 	return c.flushedGTID.String()
 }
 
+// CurrentPosition satisfies Source. See the interface doc for how it differs
+// from Position (in-memory feed progress vs a live server read). In GTID mode
+// it reads the server's @@GLOBAL.gtid_executed — no FLUSH and no running feed
+// required — and returns it in the same encoding Position uses, so it round
+// trips through StartFromPosition.
+func (c *gtidClient) CurrentPosition(ctx context.Context) (string, error) {
+	set, err := c.getCurrentGTIDSet(ctx)
+	if err != nil {
+		return "", err
+	}
+	return set.String(), nil
+}
+
 // StartFromPosition satisfies Source. It primes flushedGTID from the
 // previously-returned opaque string, validates it is still resumable
 // against gtid_purged, then begins streaming as Start would.
