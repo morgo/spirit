@@ -12,6 +12,7 @@ A move operation follows this sequence:
 4. **Initial checksum** (post-copy phase) — flush the binlog backlog, restore any secondary indexes that were deferred during table creation (see `DeferSecondaryIndexes` below), run ANALYZE TABLE, and verify data consistency between source and targets. This is the correctness gate; cutover does not proceed unless this checksum succeeds.
 5. **Sentinel wait** — optionally pause before cutover, allowing external orchestration to confirm readiness. While the sentinel blocks cutover, a **continuous checksum** loop runs in the background to keep re-verifying the data; the loop is interrupted as soon as the sentinel is dropped.
 6. **Cutover** — acquire a table lock, flush remaining replication changes, execute the caller-provided cutover function, and rename original tables out of the way.
+7. **Reverse window** (optional) — when `ReverseWindow` is set, the move does not exit after cutover; it holds a change-only reverse feed (targets → the source's `_old` tables) for the configured duration so the move can be rolled back. See [Reverse Window](#reverse-window) below.
 
 ## Design Decisions
 
@@ -51,3 +52,17 @@ While the sentinel blocks the cutover, the runner re-runs the checksum in a loop
 The cutover is split into two parts: a caller-provided function and a table rename. The caller's function runs under a table lock with all replication changes flushed, giving it a consistent view. If it succeeds, the runner renames the original tables to `_old` suffixes.
 
 This separation allows orchestration systems to perform routing changes, such as updating a DNS server or Vitess topology server as part of the atomic cutover.
+
+### Reverse Window
+
+`ReverseWindow` (the `--reverse-window` flag) makes a cutover reversible for a bounded period. Instead of exiting after the cutover rename, the runner stands up a **change-only reverse feed** — the former targets become change sources and the source's now-retired `_old` tables become the write target (`reversefeed.go`, from the reverse-feed foundations) — and holds it for the window (`reversewindow.go`). The feed's start position is captured in the cutover's `postSwitch` hook, under the source lock, so no target write is missed.
+
+The window ends in one of three ways: it elapses (finalize forward — the source stays retired, checkpoint dropped), the feed dies (finalize forward — rollback is no longer safe), or a rollback is requested.
+
+A rollback is requested by creating a `_spirit_move_revert` marker table on the first target (`revertmarker.go`), mirroring the sentinel but with inverted polarity (the operator *creates* it to act, rather than dropping it to proceed). The reverse cutover mirrors the forward one with roles swapped, plus one asymmetry: the source's `_old` tables are renamed back to their real names before traffic returns. The former targets are then retired to a `_revert` suffix — distinct from `_old` so a subsequent move can recognize and drop them (`dropStaleRevertTables` clears leftovers, making revert→retry idempotent). A separate `reverseCutoverFunc` (registered via `SetReverseCutover`, the mirror of the cutover function above) performs the routing switch back to the source.
+
+Two constraints and one resume note:
+
+- **Unsharded source only** — reverse-window is a 1→M forward move reversed as M→1; a sharded source would need an M:N reverse and is rejected at startup.
+- **Stale-marker guard** — a `_spirit_move_revert` present at pre-flight or pre-cutover aborts the run, so a leftover from an interrupted rollback is never read as a fresh request.
+- **Resume** — the checkpoint gains `move_phase` (`reverse_window` / `reverting`) and `cutover_at` columns, so a move killed during the window resumes back into it rather than re-copying. The `reverting` phase (mid-rollback) is not auto-resumed and must be completed manually.
