@@ -16,7 +16,7 @@ import (
 // frozen value once it is older than staleSignalThreshold. What "stop
 // trusting" means depends on what the signal protects:
 //
-//   - The Aurora gradual throttlers (CommitLatency, ThreadsRunning) apply the
+//   - The Aurora gradual throttlers (CommitLatency, AuroraThreads) apply the
 //     guard to Utilization() only. A value frozen below the autoscaler's low
 //     watermark would add a write thread every cooldown until the 2x cap,
 //     ramping blind on a dead signal — so while stale, Utilization() reports
@@ -53,7 +53,7 @@ const (
 )
 
 // staleGuard tracks the freshness of a polled signal. It is embedded by the
-// gradual throttlers (CommitLatency, ThreadsRunning — applySample marks the
+// gradual throttlers (CommitLatency, AuroraThreads — applySample marks the
 // signal fresh, Utilization checks it) and by Replica (applyLag marks fresh,
 // IsThrottled checks it). All methods are safe for concurrent use.
 type staleGuard struct {
