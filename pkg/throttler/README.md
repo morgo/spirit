@@ -95,9 +95,7 @@ Polls Aurora's cumulative commit counters (`AuroraDb_commits` and `AuroraDb_comm
 
 ### Aurora Threads Throttler
 
-```go
-throttler, err := throttler.NewAuroraThreadsThrottler(db, mode, logger)
-```
+Assembled internally by `throttler.AuroraSetup.Build`, not constructed directly: the sampling mode is chosen by a privilege probe rather than supplied by the caller (see below).
 
 Polls a running-thread count every 5 seconds and compares it to the instance vCPU count (read from `@@innodb_buffer_pool_instances`, which Aurora pins to the vCPU count). `Utilization()` reports an EWMA-smoothed `count / vCPUs`, so the autoscaler tracks sustained load rather than instantaneous spikes. It runs in one of two modes, chosen once at setup by a privilege probe (`CanReadRedoAwareThreads`):
 

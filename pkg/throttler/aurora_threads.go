@@ -332,10 +332,12 @@ type AuroraThreads struct {
 
 var _ GradualThrottler = (*AuroraThreads)(nil)
 
-// NewAuroraThreadsThrottler returns a Throttler that polls the given mode's
+// newAuroraThreadsThrottler returns a throttler that polls the given mode's
 // signal and throttles when it exceeds the instance vCPU count (plus the mode's
-// headroom).
-func NewAuroraThreadsThrottler(db *sql.DB, mode threadsMode, logger *slog.Logger) (*AuroraThreads, error) {
+// headroom). It is unexported because mode is an internal type chosen by a
+// privilege probe: AuroraSetup.Build is the public entry point that selects the
+// mode and constructs the throttler.
+func newAuroraThreadsThrottler(db *sql.DB, mode threadsMode, logger *slog.Logger) (*AuroraThreads, error) {
 	if db == nil {
 		return nil, errors.New("AuroraThreads throttler requires a non-nil DB")
 	}

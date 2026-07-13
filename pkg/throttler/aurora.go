@@ -140,7 +140,7 @@ func (s AuroraSetup) Build(ctx context.Context) (AuroraResult, error) {
 		throttlers = append(throttlers, cl)
 	}
 
-	tr, err := NewAuroraThreadsThrottler(monitorDB, mode, s.Logger)
+	tr, err := newAuroraThreadsThrottler(monitorDB, mode, s.Logger)
 	if err != nil {
 		_ = monitorDB.Close()
 		return AuroraResult{}, fmt.Errorf("could not create Aurora threads throttler: %w", err)

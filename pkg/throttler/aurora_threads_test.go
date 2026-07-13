@@ -216,7 +216,7 @@ func TestAuroraThreads_BlockWaitReturnsWhenThrottlingClears(t *testing.T) {
 
 func TestNewAuroraThreadsThrottler_RejectsNilDB(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, err := NewAuroraThreadsThrottler(nil, redoAwareMode, logger)
+	_, err := newAuroraThreadsThrottler(nil, redoAwareMode, logger)
 	require.ErrorContains(t, err, "non-nil DB")
 }
 
