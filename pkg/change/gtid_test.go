@@ -80,6 +80,78 @@ func TestGTIDClient(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// TestGTIDClientTransactionCompression verifies that transactions written
+// with binlog_transaction_compression=ON are decoded and buffered rather
+// than silently dropped. This matters twice over for the GTID client: the
+// row events carry the deltas, and the XIDEvent that promotes the pending
+// GTID into the resume set arrives *inside* the compressed payload (only
+// the GTID event stays outside). A client that skipped payload events would
+// lose the deltas AND leave bufferedGTID permanently behind gtid_executed,
+// so the BlockWait calls below would time out.
+func TestGTIDClientTransactionCompression(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidcompresst1, gtidcompresst2")
+	testutils.RunSQL(t, "CREATE TABLE gtidcompresst1 (a INT NOT NULL, b INT, c VARCHAR(255), PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidcompresst2 (a INT NOT NULL, b INT, c VARCHAR(255), PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "gtidcompresst1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidcompresst2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	conn := compressedConn(t, db)
+
+	// Even a single-row autocommit INSERT is wrapped in a payload event.
+	_, err = conn.ExecContext(t.Context(), "INSERT INTO gtidcompresst1 (a, b, c) VALUES (1, 2, 'compressed')")
+	require.NoError(t, err)
+	require.NoError(t, client.BlockWait(t.Context()), "bufferedGTID must catch up to gtid_executed: the promoting XIDEvent is inside the payload")
+	require.Equal(t, 1, client.GetDeltaLen(), "changes from a compressed transaction must be buffered, not dropped")
+
+	// A multi-statement transaction produces one payload containing several
+	// TableMap/RowsEvents plus the XID terminator.
+	tx, err := conn.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), "INSERT INTO gtidcompresst1 (a, b, c) VALUES (2, 2, REPEAT('x', 200)), (3, 3, REPEAT('y', 200))")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), "UPDATE gtidcompresst1 SET b = 20 WHERE a = 1")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), "DELETE FROM gtidcompresst1 WHERE a = 2")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	// Interleave an uncompressed change from another connection to show both
+	// formats coexist on the same stream.
+	testutils.RunSQL(t, "INSERT INTO gtidcompresst1 (a, b, c) VALUES (4, 4, 'plain')")
+
+	require.NoError(t, client.BlockWait(t.Context()))
+	// Keys pending: 1 (insert+update), 2 (insert+delete), 3 (insert), 4 (insert).
+	require.Equal(t, 4, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+	require.True(t, client.AllChangesFlushed())
+
+	// The new table must match: a=1 (with the in-transaction update applied),
+	// a=3, a=4; a=2 was deleted in the same compressed transaction.
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM gtidcompresst2").Scan(&count))
+	require.Equal(t, 3, count)
+	var b int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM gtidcompresst2 WHERE a = 1").Scan(&b))
+	require.Equal(t, 20, b)
+}
+
 // TestGTIDStartFromMalformedPosition verifies that StartFromPosition
 // rejects an input string that is not a valid GTID set (including the
 // common operator mistake of resuming a legacy file:offset checkpoint
@@ -448,6 +520,105 @@ func TestGTIDClientXATransaction(t *testing.T) {
 	require.NoError(t, client.Flush(t.Context()))
 	err = db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable)).Scan(&count)
 	require.NoError(t, err)
+	require.Equal(t, 3, count)
+}
+
+// TestGTIDClientXATransactionCompression re-runs the XA two-phase dance
+// with binlog_transaction_compression=ON on the XA session. The entire XA
+// first group — Query("XA START"), row events, Query("XA END") and the
+// terminating XA_PREPARE_LOG_EVENT — arrives inside one compressed
+// Transaction_payload event (verified against MySQL 8.0.43); only the
+// terminal XA COMMIT QueryEvent stays outside, under its own GTID. The
+// BlockWait after the prepare is the promotion-liveness assertion: it only
+// returns if processTransactionPayload promoted the pending GTID at the
+// inner XA_PREPARE_LOG_EVENT, and the delta count proves the inner row
+// events were buffered rather than dropped.
+//
+// Unique xids and per-run table names for the same reasons documented on
+// TestGTIDClientXATransaction.
+func TestGTIDClientXATransactionCompression(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	xid := xaTestXIDPrefix + "_comp_" + uuid.NewString()
+	xid1p := xaTestXIDPrefix + "_comp1p_" + uuid.NewString()
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
+	srcTable := "gtidxacompt1_" + suffix
+	dstTable := "gtidxacompt2_" + suffix
+
+	// Best-effort sweep of stragglers from prior interrupted runs (a
+	// logged no-op without XA_RECOVER_ADMIN).
+	rollbackDanglingXATestTxns(t, db)
+	testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS %s, %s", srcTable, dstTable))
+	testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE %s (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))", srcTable))
+	testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE %s (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))", dstTable))
+	t.Cleanup(func() {
+		// See TestGTIDClientXATransaction: terminate this run's XA
+		// transactions before dropping the tables, from a fresh connection.
+		cleanupDB, err := sql.Open("mysql", testutils.DSN())
+		if err != nil {
+			return
+		}
+		defer utils.CloseAndLog(cleanupDB)
+		rollbackDanglingXATestTxns(t, cleanupDB, xid, xid1p)
+		_, _ = cleanupDB.ExecContext(context.Background(), "SET SESSION lock_wait_timeout=5")
+		_, _ = cleanupDB.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s, %s", srcTable, dstTable))
+	})
+
+	t1 := table.NewTableInfo(db, "test", srcTable)
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", dstTable)
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// XA transactions are session-scoped between XA START and XA PREPARE;
+	// the compression-enabled conn pins one session for the whole dance.
+	conn := compressedConn(t, db)
+	xaExec := func(stmt string) {
+		t.Helper()
+		_, err := conn.ExecContext(t.Context(), stmt)
+		require.NoError(t, err)
+	}
+
+	xaExec(fmt.Sprintf("XA START '%s'", xid))
+	xaExec(fmt.Sprintf("INSERT INTO %s (a, b, c) VALUES (1, 2, 3)", srcTable))
+	xaExec(fmt.Sprintf("INSERT INTO %s (a, b, c) VALUES (2, 3, 4)", srcTable))
+	xaExec(fmt.Sprintf("XA END '%s'", xid))
+	xaExec(fmt.Sprintf("XA PREPARE '%s'", xid))
+
+	// The prepare flushes the whole group as one compressed payload. A
+	// handler that dropped the payload (or failed to promote at the inner
+	// XA_PREPARE_LOG_EVENT) would time out here.
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 2, client.GetDeltaLen(), "row events inside the compressed XA group must be buffered")
+
+	xaExec(fmt.Sprintf("XA COMMIT '%s'", xid))
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable)).Scan(&count))
+	require.Equal(t, 2, count)
+
+	// One-phase variant: a single compressed group, likewise terminated by
+	// an XA_PREPARE_LOG_EVENT.
+	xaExec(fmt.Sprintf("XA START '%s'", xid1p))
+	xaExec(fmt.Sprintf("INSERT INTO %s (a, b, c) VALUES (3, 4, 5)", srcTable))
+	xaExec(fmt.Sprintf("XA END '%s'", xid1p))
+	xaExec(fmt.Sprintf("XA COMMIT '%s' ONE PHASE", xid1p))
+
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.NoError(t, client.Flush(t.Context()))
+	require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %s", dstTable)).Scan(&count))
 	require.Equal(t, 3, count)
 }
 

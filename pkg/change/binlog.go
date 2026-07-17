@@ -645,6 +645,35 @@ func (c *binlogClient) readStream(ctx context.Context) {
 			for _, ddlTable := range ddlTables {
 				c.processDDLNotification(ddlTable.schema, ddlTable.table)
 			}
+		case *replication.TransactionPayloadEvent:
+			// binlog_transaction_compression=ON wraps an entire transaction —
+			// the BEGIN QueryEvent, TableMapEvents, row events and the
+			// XIDEvent — in one compressed payload event; only the GTID event
+			// stays outside. go-mysql has already decompressed and re-parsed
+			// the inner events into event.Events (with our decode options
+			// inherited), so we process them exactly as if they had arrived
+			// uncompressed. Letting this fall through to the default case
+			// would silently drop every change in the transaction.
+			//
+			// Inner event headers hold offsets into the uncompressed
+			// transaction cache, NOT file positions, so they must never feed
+			// position tracking: the replay-skip check below covers the whole
+			// payload using the outer end position, and bufferedPos advances
+			// only via the outer header in the generic update after the
+			// switch — once every inner event has been buffered. That makes
+			// replay all-or-nothing, which is safe because bufferedPos only
+			// ever lands on whole-payload boundaries.
+			eventPos := mysql.Position{Name: currentLogName, Pos: ev.Header.LogPos}
+			if shouldSkipReplayedEvent(eventPos, c.getBufferedPos()) {
+				c.logger.Debug("skipping replayed transaction payload event at or below the buffered position",
+					"event_position", eventPos)
+				continue
+			}
+			if err = c.processTransactionPayload(event, eventPos); err != nil {
+				c.logger.Error("fatal error processing binlog transaction payload event", "error", err)
+				c.fatalError(FatalReasonStreamError)
+				return
+			}
 		case *replication.GTIDEvent,
 			*replication.TableMapEvent,
 			*replication.XIDEvent,
@@ -815,6 +844,54 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 			sub.HasChanged(key, nil, true)
 		default:
 			c.logger.Error("unknown event type", "type", ev.Header.EventType)
+		}
+	}
+	return nil
+}
+
+// processTransactionPayload processes the events decompressed from a
+// TransactionPayloadEvent (binlog_transaction_compression=ON, settable
+// per-session by any client regardless of the global value the preflight
+// checks). The payload carries the whole transaction except its GTID
+// event: the BEGIN QueryEvent, TableMapEvents, row events and the XIDEvent
+// terminator. RowsEvents dispatch to subscriptions and QueryEvents go
+// through DDL detection, mirroring their uncompressed equivalents in
+// readStream. payloadPos is the outer event's end position and is used
+// only for log messages — inner headers hold transaction-cache offsets
+// that must not be mistaken for file positions.
+func (c *binlogClient) processTransactionPayload(e *replication.TransactionPayloadEvent, payloadPos mysql.Position) error {
+	for _, inner := range e.Events {
+		switch innerEvent := inner.Event.(type) {
+		case *replication.RowsEvent:
+			// No per-event replay check here: readStream already skipped the
+			// whole payload if its outer end position was at or below
+			// bufferedPos, and bufferedPos never lands inside a payload.
+			if err := c.processRowsEvent(inner, innerEvent); err != nil {
+				return err
+			}
+		case *replication.QueryEvent:
+			// Usually the transaction's BEGIN, which parses cleanly and
+			// yields no DDL tables. Unparseable statements are skipped the
+			// same way readStream skips them.
+			ddlTables, err := extractTablesFromDDLStmts(string(innerEvent.Schema), string(innerEvent.Query))
+			if err != nil {
+				c.logger.Error("Skipping query inside transaction payload that was unable to parse",
+					"file", payloadPos.Name, "pos", payloadPos.Pos)
+				continue
+			}
+			for _, ddlTable := range ddlTables {
+				c.processDDLNotification(ddlTable.schema, ddlTable.table)
+			}
+		case *replication.TableMapEvent, *replication.XIDEvent:
+			// Housekeeping inside the payload. The TableMapEvents were
+			// already consumed by go-mysql's inner parser to decode the
+			// RowsEvents above; position tracking advances via the outer
+			// event only.
+		default:
+			// Same rationale as readStream's default case: log genuinely
+			// unknown inner event types so a future row-event variant can't
+			// cause silent data loss without a trace.
+			c.logger.Debug("Received unknown event type inside transaction payload", "type", fmt.Sprintf("%T", inner.Event))
 		}
 	}
 	return nil
