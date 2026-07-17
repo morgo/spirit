@@ -114,6 +114,7 @@ Spirit works with the default configuration of MySQL 8.0, but checks that you ha
   - `log_slave_updates=1`
   - `performance_schema=1`
   - `binlog_row_value_options=''`
+  - `binlog_transaction_compression=OFF`
 
 Spirit also supports sources running **semi-synchronous replication** (`rpl_semi_sync_source_enabled=ON`). Semi-sync widens the window between when a transaction's row events become visible to replication clients and when its InnoDB commit becomes visible to local `SELECT`s; spirit's buffered replication subscription applies row images directly from the binlog and is robust against that window. This configuration is exercised by a dedicated CI lane — see `compose/semisync.yml` and [issue #746](https://github.com/block/spirit/issues/746).
 
