@@ -20,7 +20,7 @@ type Throttler interface {
 // underlying signal is continuous, not just a binary stop/go. The write-thread
 // autoscaler type-asserts for it and only engages when it is present.
 //
-// The Aurora throttlers (ThreadsRunning, CommitLatency) implement it. The
+// The Aurora throttlers (AuroraThreads, CommitLatency) implement it. The
 // replica-lag throttler deliberately does not: lag is an SLO-style budget,
 // not a load gauge — normalizing it would make the autoscaler treat half the
 // lag budget as headroom and park replicas a minute behind. Signals like that

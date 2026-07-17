@@ -690,6 +690,15 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 			"write_threads", r.migration.WriteThreads)
 		autoscale = false
 	}
+	// redoAware tracks whether the Aurora threads throttler will run its
+	// redo-aware perf_schema signal (which excludes redo-log waiters). It gates
+	// the autoscaler's growth cap below: because that signal ignores redo-log
+	// waiters it will not self-limit if extra write threads oversubscribe the
+	// log, so growing above the start value needs the commit-latency throttler
+	// as the backstop. AuroraSetup.Build makes the authoritative mode choice
+	// (and logs it) when the throttler is built; this is an independent probe of
+	// the same source in the same setup phase, used only to size maxWrite here.
+	redoAware := false
 	// On Aurora instances below MinAutoscaleVCPUs the utilization signal is too
 	// coarse to control on — one thread is half or more of the dead band — so
 	// the controller could only oscillate; run a fixed pool instead. Aurora is
@@ -708,13 +717,19 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 					"vcpus", vCPUs, "min_vcpus", throttler.MinAutoscaleVCPUs,
 					"write_threads", r.migration.WriteThreads)
 				autoscale = false
+			} else {
+				redoAware = throttler.CanReadRedoAwareThreads(ctx, r.db) == nil
 			}
 		}
 	}
 	// Resolve the autoscaler's upper bound. When autoscaling is disabled this
-	// equals WriteThreads (no movement); when enabled it's fixed at 2x the
-	// start value.
-	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale)
+	// equals WriteThreads (no movement). When enabled it is 2x the start value —
+	// except in redo-aware mode with the commit-latency backstop disabled
+	// (--max-commit-latency=0), where it stays at the start value so the
+	// autoscaler can shed but not oversubscribe the redo log unguarded (see
+	// ResolveMaxWriteThreads).
+	commitLatencyEnabled := r.migration.MaxCommitLatency > 0
+	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale, redoAware, commitLatencyEnabled)
 	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
 	// known: threads + maxWrite + controlPlaneConns() (see the MaxOpenConnections
 	// doc in Run). Sizing for maxWrite ensures a scaled-up applier never starves
@@ -875,8 +890,9 @@ func (r *Runner) closeReplicas() error {
 //   - one replication throttler per --replica-dsn (slowest wins)
 //   - a commit-latency throttler if the source is detected as Aurora and
 //     --max-commit-latency is positive (issue #468)
-//   - a threads-running throttler whenever the source is detected as Aurora
-//     (issue #831)
+//   - an Aurora threads throttler whenever the source is detected as Aurora —
+//     the redo-aware perf_schema signal when the user can read the perf-schema
+//     tables it needs, else the Threads_running fallback (issue #831)
 //
 // Multiple replica DSNs can be specified as a comma-separated list.
 // This is common logic shared between resume and new migration paths.
@@ -901,13 +917,13 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	// Aurora throttlers — assembled by the shared throttler.AuroraSetup
 	// helper so the move runner can use the same wiring. The two Aurora
 	// throttlers have independent gates: setting MaxCommitLatency=0 disables
-	// only commit-latency; the threads-running throttler is always enabled
-	// when Aurora is detected (it reads only global_status, which the IsAurora
-	// probe already proved readable). Build returns a zero result on
-	// non-Aurora sources so this call is safe to make unconditionally.
+	// only commit-latency; the Aurora threads throttler is always enabled
+	// when Aurora is detected (Build picks the redo-aware perf_schema signal or
+	// the Threads_running fallback via a privilege probe). Build returns a zero
+	// result on non-Aurora sources so this call is safe to make unconditionally.
 	//
 	// OpenMonitor is invoked lazily by the helper only after IsAurora
-	// returns true (on Aurora the threads-running throttler is always built,
+	// returns true (on Aurora the threads throttler is always built,
 	// so a pool is always needed there), so non-Aurora users never pay the
 	// connect cost. MaxOpenConnections=2 lets both Aurora throttlers poll
 	// concurrently without serializing on a single conn, with a touch of
