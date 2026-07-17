@@ -753,6 +753,244 @@ func TestGTIDClientXAPromotionOrdering(t *testing.T) {
 		5*time.Second, 5*time.Millisecond, "XA ROLLBACK must promote its own GTID")
 }
 
+// TestGTIDClientSavepointPromotionOrdering is the savepoint twin of
+// TestGTIDClientXAPromotionOrdering. MySQL logs "SAVEPOINT `sp1`" (and, in
+// mixed-engine transactions, "ROLLBACK TO `sp1`") as a QueryEvent in the
+// *middle* of a row-format transaction group — verified against MySQL 8.0:
+// GTIDEvent → Query(BEGIN) → row events → Query("SAVEPOINT `sp1`") → more
+// row events → XIDEvent. These statements used to fall through to the
+// parser path, which promotes the pending GTID on both of its branches —
+// before the transaction's remaining row events had been buffered. A flush
+// in that window published a resume coordinate that already covered the
+// transaction, so a crash before the next flush resumed past it and
+// silently lost its tail.
+//
+// Events are injected through a synthetic go-mysql BinlogStreamer for the
+// same reason as in the XA test: the server writes the whole group to the
+// binlog in one burst at COMMIT time, so wall-clock timing cannot reliably
+// observe the stream state between the SAVEPOINT QueryEvent and the
+// XIDEvent of the same burst. Row events for a subscribed table are used
+// as ordering barriers: events are consumed strictly in order, so once
+// GetDeltaLen reflects a row event, every event injected before it has
+// been processed.
+func TestGTIDClientSavepointPromotionOrdering(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// Real tables so TableInfo has genuine column/PK metadata; the event
+	// stream itself is synthetic and never touches the server.
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidspsyn1, gtidspsyn2")
+	testutils.RunSQL(t, "CREATE TABLE gtidspsyn1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidspsyn2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "gtidspsyn1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidspsyn2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+
+	// Wire readStream to a synthetic streamer instead of client.Start().
+	empty, err := mysql.ParseMysqlGTIDSet("")
+	require.NoError(t, err)
+	streamer := replication.NewBinlogStreamer()
+	ctx, cancel := context.WithCancel(t.Context())
+	client.streamer = streamer
+	client.bufferedGTID = empty
+	client.flushedGTID = empty.Clone()
+	client.cancelFunc = cancel
+	client.streamWG.Add(1)
+	go client.readStream(ctx)
+	defer client.Close()
+
+	const sid = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff"
+	sidUUID := uuid.MustParse(sid)
+	gtidEvent := func(gno int64) *replication.BinlogEvent {
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: replication.GTID_EVENT},
+			Event:  &replication.GTIDEvent{SID: sidUUID[:], GNO: gno},
+		}
+	}
+	queryEvent := func(q string) *replication.BinlogEvent {
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: replication.QUERY_EVENT},
+			Event:  &replication.QueryEvent{Schema: []byte("test"), Query: []byte(q)},
+		}
+	}
+	rowEvent := func(pk int32) *replication.BinlogEvent {
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: replication.WRITE_ROWS_EVENTv2},
+			Event: &replication.RowsEvent{
+				Table: &replication.TableMapEvent{Schema: []byte("test"), Table: []byte("gtidspsyn1")},
+				Rows:  [][]any{{pk, int32(0), int32(0)}},
+			},
+		}
+	}
+	inject := func(evs ...*replication.BinlogEvent) {
+		t.Helper()
+		for _, ev := range evs {
+			require.NoError(t, streamer.AddEventToStreamer(ev))
+		}
+	}
+	buffered := func(gno int64) bool {
+		target, err := mysql.ParseMysqlGTIDSet(fmt.Sprintf("%s:%d", sid, gno))
+		require.NoError(t, err)
+		return client.getBufferedGTID().Contain(target)
+	}
+
+	// Open the group as the server writes it. The row event doubles as
+	// the ordering barrier for the QueryEvents before it.
+	inject(gtidEvent(200), queryEvent("BEGIN"), rowEvent(1))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 1 },
+		5*time.Second, 5*time.Millisecond, "row event after BEGIN was not processed")
+	require.False(t, buffered(200),
+		"the GTID must not be promoted at BEGIN: the transaction's row events are not buffered yet")
+
+	// The savepoint QueryEvent, with the backtick-quoted identifier the
+	// server writes. The row event after it is the transaction tail the
+	// premature promotion used to put at risk.
+	inject(queryEvent("SAVEPOINT `sp1`"), rowEvent(2))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 2 },
+		5*time.Second, 5*time.Millisecond, "row event after SAVEPOINT was not processed")
+	require.False(t, buffered(200),
+		"the GTID must not be promoted at SAVEPOINT: the transaction's remaining row events are not buffered yet")
+
+	// "ROLLBACK TO `sp1`" (no SAVEPOINT keyword) is the mixed-engine
+	// mid-group form. It must be treated neither as a terminating
+	// ROLLBACK nor as a promoting parser fallthrough.
+	inject(queryEvent("ROLLBACK TO `sp1`"), rowEvent(3))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 3 },
+		5*time.Second, 5*time.Millisecond, "row event after ROLLBACK TO was not processed")
+	require.False(t, buffered(200),
+		"the GTID must not be promoted at ROLLBACK TO SAVEPOINT: the transaction is still open")
+
+	// RELEASE SAVEPOINT is matched defensively (MySQL does not binlog it
+	// today); it never ends a transaction, so it must not promote either.
+	inject(queryEvent("RELEASE SAVEPOINT `sp1`"), rowEvent(4))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 4 },
+		5*time.Second, 5*time.Millisecond, "row event after RELEASE SAVEPOINT was not processed")
+	require.False(t, buffered(200),
+		"the GTID must not be promoted at RELEASE SAVEPOINT: the transaction is still open")
+
+	client.mu.Lock()
+	pendingGNO := client.pendingGNO
+	client.mu.Unlock()
+	require.EqualValues(t, 200, pendingGNO,
+		"the transaction's GTID must still be pending after the SAVEPOINT-family statements")
+
+	// The XIDEvent terminates the group; only now may the GTID enter the
+	// buffered (resume) set.
+	inject(&replication.BinlogEvent{
+		Header: &replication.EventHeader{EventType: replication.XID_EVENT},
+		Event:  &replication.XIDEvent{XID: 1},
+	})
+	require.Eventually(t, func() bool { return buffered(200) },
+		5*time.Second, 5*time.Millisecond, "the XIDEvent must promote the pending GTID")
+}
+
+// TestGTIDClientSavepointTransaction drives a real transaction containing
+// SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT through the feed
+// end-to-end. On a pure-InnoDB transaction the server logs the SAVEPOINT
+// statements as mid-group QueryEvents, silently truncates the rolled-back
+// span out of its binlog cache (so neither the ROLLBACK TO statement nor
+// the rolled-back row events appear), and does not log RELEASE SAVEPOINT
+// at all.
+//
+// The premature-promotion window itself cannot be observed here (the
+// server writes the whole group in one burst at COMMIT; that is what
+// TestGTIDClientSavepointPromotionOrdering covers deterministically).
+// What this test pins is the opposite direction plus the real binlog
+// shape: treating the SAVEPOINT-family QueryEvents as non-promoting
+// no-ops must not suppress a promotion the group actually needs — if it
+// did, bufferedGTID would fall permanently behind gtid_executed and the
+// BlockWait below would time out — and the transaction tail written
+// after the savepoints must replicate, while the rolled-back row must
+// not.
+func TestGTIDClientSavepointTransaction(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidsavept1, gtidsavept2")
+	testutils.RunSQL(t, "CREATE TABLE gtidsavept1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidsavept2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "gtidsavept1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidsavept2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// Savepoints are session-scoped: pin a single connection for the
+	// whole transaction.
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(conn)
+	txExec := func(stmt string) {
+		t.Helper()
+		_, err := conn.ExecContext(t.Context(), stmt)
+		require.NoError(t, err)
+	}
+
+	txExec("BEGIN")
+	txExec("INSERT INTO gtidsavept1 (a, b, c) VALUES (1, 2, 3)")
+	txExec("SAVEPOINT sp1")
+	txExec("INSERT INTO gtidsavept1 (a, b, c) VALUES (2, 3, 4)")
+	txExec("SAVEPOINT sp2")
+	txExec("INSERT INTO gtidsavept1 (a, b, c) VALUES (3, 4, 5)")
+	txExec("ROLLBACK TO SAVEPOINT sp2")
+	txExec("RELEASE SAVEPOINT sp1")
+	// The transaction tail after the savepoint bookkeeping — the rows a
+	// premature promotion would have put at risk of being skipped on
+	// resume.
+	txExec("INSERT INTO gtidsavept1 (a, b, c) VALUES (4, 5, 6)")
+	txExec("COMMIT")
+
+	// Capture gtid_executed right after the commit, before BlockWait, so
+	// the containment assertion below is deterministic even with
+	// unrelated concurrent load advancing gtid_executed on a shared
+	// server.
+	var executed string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@GLOBAL.gtid_executed").Scan(&executed))
+	executedSet, err := mysql.ParseMysqlGTIDSet(normalizeGTIDString(executed))
+	require.NoError(t, err)
+
+	// A handler that mistook a SAVEPOINT-family QueryEvent for a group
+	// terminator-or-not in the wrong direction (i.e. never promoted the
+	// group at its XIDEvent) would time out here.
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 3, client.GetDeltaLen(),
+		"the two rows before the savepoints and the tail row must be buffered; the rolled-back row must not")
+	require.NoError(t, client.Flush(t.Context()))
+
+	// The resume coordinate must cover the savepoint transaction's GTID.
+	flushedSet, err := mysql.ParseMysqlGTIDSet(normalizeGTIDString(client.Position()))
+	require.NoError(t, err)
+	require.True(t, flushedSet.Contain(executedSet),
+		"flushed position %s must cover the executed set %s", flushedSet.String(), executedSet.String())
+
+	var pks string
+	err = db.QueryRowContext(t.Context(), "SELECT GROUP_CONCAT(a ORDER BY a) FROM gtidsavept2").Scan(&pks)
+	require.NoError(t, err)
+	require.Equal(t, "1,2,4", pks,
+		"the row inserted between SAVEPOINT and ROLLBACK TO SAVEPOINT must not replicate; the rows before and after must")
+}
+
 // TestGTIDPromotePendingGTID unit-tests the promotion helper directly
 // (no MySQL required beyond package setup). This documents the ROLLBACK
 // design decision: any GTID the server streams — even for a transaction
