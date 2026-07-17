@@ -3,6 +3,7 @@ package change
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -167,6 +168,97 @@ func TestReplClientComplex(t *testing.T) {
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM replcomplext2").Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 431, count) // 441 - 10
+}
+
+// compressedConn returns a *sql.Conn pinned to a session with
+// binlog_transaction_compression=ON, so every transaction it writes is
+// binlogged as a single ZSTD Transaction_payload event. Session-scoped on
+// purpose: the server default stays OFF, so this cannot race with other
+// test binaries' preflight configuration checks. Skips the test on servers
+// that predate the variable (< 8.0.20).
+func compressedConn(t *testing.T, db *sql.DB) *sql.Conn {
+	t.Helper()
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	_, err = conn.ExecContext(t.Context(), "SET SESSION binlog_transaction_compression = ON")
+	if myErr, ok := errors.AsType[*mysql2.MySQLError](err); ok && myErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
+		t.Skip("server does not support binlog_transaction_compression (requires MySQL 8.0.20+)")
+	}
+	require.NoError(t, err)
+	return conn
+}
+
+// TestReplClientTransactionCompression verifies that transactions written
+// with binlog_transaction_compression=ON are decoded and buffered rather
+// than silently dropped. The server wraps each such transaction — BEGIN
+// QueryEvent, TableMaps, row events and the XIDEvent — in one compressed
+// Transaction_payload event (only the GTID event stays outside), which the
+// raw BinlogSyncer does not unwrap for us. The preflight check rejects a
+// global ON, but any application session can still enable it for its own
+// transactions mid-migration, so the stream must handle these events; a
+// client that skips them loses every delta and fails the checksum.
+func TestReplClientTransactionCompression(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS replcompresst1, replcompresst2")
+	testutils.RunSQL(t, "CREATE TABLE replcompresst1 (a INT NOT NULL, b INT, c VARCHAR(255), PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE replcompresst2 (a INT NOT NULL, b INT, c VARCHAR(255), PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "replcompresst1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "replcompresst2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	conn := compressedConn(t, db)
+
+	// Even a single-row autocommit INSERT is wrapped in a payload event.
+	_, err = conn.ExecContext(t.Context(), "INSERT INTO replcompresst1 (a, b, c) VALUES (1, 2, 'compressed')")
+	require.NoError(t, err)
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 1, client.GetDeltaLen(), "changes from a compressed transaction must be buffered, not dropped")
+
+	// A multi-statement transaction produces one payload containing several
+	// TableMap/RowsEvents plus the XID terminator.
+	tx, err := conn.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), "INSERT INTO replcompresst1 (a, b, c) VALUES (2, 2, REPEAT('x', 200)), (3, 3, REPEAT('y', 200))")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), "UPDATE replcompresst1 SET b = 20 WHERE a = 1")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(t.Context(), "DELETE FROM replcompresst1 WHERE a = 2")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	// Interleave an uncompressed change from another connection to show both
+	// formats coexist on the same stream.
+	testutils.RunSQL(t, "INSERT INTO replcompresst1 (a, b, c) VALUES (4, 4, 'plain')")
+
+	require.NoError(t, client.BlockWait(t.Context()))
+	// Keys pending: 1 (insert+update), 2 (insert+delete), 3 (insert), 4 (insert).
+	require.Equal(t, 4, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+	require.True(t, client.AllChangesFlushed())
+
+	// The new table must match: a=1 (with the in-transaction update applied),
+	// a=3, a=4; a=2 was deleted in the same compressed transaction.
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM replcompresst2").Scan(&count))
+	require.Equal(t, 3, count)
+	var b int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM replcompresst2 WHERE a = 1").Scan(&b))
+	require.Equal(t, 20, b)
 }
 
 func TestReplClientResumeFromImpossible(t *testing.T) {
@@ -567,6 +659,53 @@ func TestDDLNotification(t *testing.T) {
 
 	// CancelFunc was called, and DDL must be reported as a schema change so
 	// callers know to invalidate their checkpoints.
+	require.Equal(t, FatalReasonSchemaChange, <-cancelled)
+}
+
+// TestDDLNotificationTransactionCompression is TestDDLNotification with the
+// DDL issued from a session that has binlog_transaction_compression=ON. On
+// current MySQL versions DDL statements are excluded from compression and
+// arrive as plain QueryEvents, but the notification contract must hold either
+// way — the payload-unwrapping path also runs QueryEvents through DDL
+// detection in case a future server version wraps them.
+func TestDDLNotificationTransactionCompression(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS ddl_compress_t1, ddl_compress_t2")
+	testutils.RunSQL(t, "CREATE TABLE ddl_compress_t1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE ddl_compress_t2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "ddl_compress_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "ddl_compress_t2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	cancelled := make(chan FatalReason, 1)
+	clientConfig := NewClientDefaultConfig()
+	clientConfig.CancelFunc = func(reason FatalReason) bool {
+		cancelled <- reason
+		return true
+	}
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), clientConfig).(*binlogClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	conn := compressedConn(t, db)
+	// A compressed DML transaction on the watched table first, so the DDL is
+	// observed after at least one payload event has been processed.
+	_, err = conn.ExecContext(t.Context(), "INSERT INTO ddl_compress_t1 (a, b, c) VALUES (1, 2, 3)")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(), "ALTER TABLE ddl_compress_t1 ADD COLUMN d INT")
+	require.NoError(t, err)
+
 	require.Equal(t, FatalReasonSchemaChange, <-cancelled)
 }
 

@@ -578,7 +578,7 @@ The advantages of buffered copy are:
 
 Setting `--unbuffered` opts back into the **legacy** mechanism of using `INSERT IGNORE .. SELECT` directly in MySQL. This was the default in older versions of Spirit and is still supported for now, but it has the downside of requiring more locking on the source table: the `SELECT` side of `INSERT .. SELECT` takes shared row locks rather than using MVCC, so it can contend with production workloads touching the same rows. (Smaller `--target-chunk-time` values mitigate this by holding those locks for less time per chunk.)
 
-Both copiers require `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since Spirit's replication subscription reads all column values from the binary log.
+Both copiers require `binlog_row_image=FULL` and an empty `binlog_row_value_options`, since Spirit's replication subscription reads all column values from the binary log. Spirit also requires `@@global.binlog_transaction_compression=OFF` (a global ON default is not a supported configuration).
 
 ### username
 
