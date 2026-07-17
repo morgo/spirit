@@ -471,8 +471,11 @@ func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
 			require.Equal(t, newUpdatedAt, dstUpdatedAt,
 				"binlog UPDATE event did not propagate to _new; JSON CRC equality below is vacuous")
 
-			// pkg/checksum compares JSON columns via the CRC32 of
-			// CAST(j AS json), so use exactly that comparison here.
+			// Compare via the CRC32 of a strict CAST(j AS json). This is
+			// deliberately STRICTER than pkg/checksum, which normalizes
+			// JSON through a text round-trip (see table.castExpr): this
+			// test pins the renderer's text fidelity for values that ARE
+			// text-expressible, independent of the checksum's relaxation.
 			srcCk := fetchJSONColumnCRC(t, "j", srcTable)
 			dstCk := fetchJSONColumnCRC(t, "j", dstTable)
 			if srcCk != dstCk {
@@ -492,8 +495,9 @@ func TestBufferedMapJSONNumberRoundTrip(t *testing.T) {
 
 // fetchJSONColumnCRC returns the table-aggregate CRC32 of a JSON column
 // (BIT_XOR of CRC32(CAST(col AS json)) across all rows), using the same
-// IFNULL / ISNULL / CAST expression that pkg/checksum builds. Used by
-// TestBufferedMapJSONNumberRoundTrip.
+// IFNULL / ISNULL structure as pkg/checksum but a strict CAST(col AS json)
+// — stricter than the text-round-trip cast pkg/checksum uses (see
+// table.castExpr). Used by TestBufferedMapJSONNumberRoundTrip.
 func fetchJSONColumnCRC(t *testing.T, col string, tbl *table.TableInfo) int64 {
 	t.Helper()
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
