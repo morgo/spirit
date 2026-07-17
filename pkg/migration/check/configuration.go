@@ -4,7 +4,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+
+	"github.com/go-sql-driver/mysql"
 )
+
+// erUnknownSystemVariable is MySQL error 1193 (ER_UNKNOWN_SYSTEM_VARIABLE),
+// returned when selecting a system variable the server predates.
+const erUnknownSystemVariable = 1193
 
 func init() {
 	registerCheck("configuration", configurationCheck, ScopePreflight)
@@ -55,6 +61,23 @@ func configurationCheck(ctx context.Context, r Resources, logger *slog.Logger) e
 	}
 	if binlogRowValueOptions != "" {
 		return errors.New("binlog_row_value_options must be empty: spirit does not support non-empty values")
+	}
+	// binlog_transaction_compression=ON delivers every transaction wrapped in
+	// a compressed Transaction_payload event. The change client can decode
+	// these — it has to, because any session can enable the setting for its
+	// own transactions regardless of the global value — but as a server-wide
+	// default it is not a supported configuration, so reject it up front with
+	// a clear message. Queried separately from the batch above because the
+	// variable only exists on MySQL 8.0.20+; on older servers compression
+	// cannot be enabled at all, so unknown-variable passes the check.
+	var binlogTransactionCompression string
+	err = r.DB.QueryRowContext(ctx, `SELECT @@global.binlog_transaction_compression`).Scan(&binlogTransactionCompression)
+	if err != nil {
+		if myErr, ok := errors.AsType[*mysql.MySQLError](err); !ok || myErr.Number != erUnknownSystemVariable {
+			return err
+		}
+	} else if binlogTransactionCompression != "0" {
+		return errors.New("binlog_transaction_compression must be OFF: spirit does not support compressed transactions in the binary log")
 	}
 
 	if logBin != "1" {
