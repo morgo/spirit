@@ -14,65 +14,80 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestThreadsRunning(t *testing.T, vCPUs int64) *ThreadsRunning {
+func newTestAuroraThreads(t *testing.T, vCPUs int64, mode threadsMode) *AuroraThreads {
 	t.Helper()
-	return &ThreadsRunning{
+	return &AuroraThreads{
 		vCPUs:  vCPUs,
+		mode:   mode,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
-func TestThreadsRunning_BelowVCPUs(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_BelowVCPUs(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	a.applySample(4)
 	require.False(t, a.IsThrottled())
-	require.Equal(t, int64(4), a.lastThreadsRunning.Load())
+	require.Equal(t, int64(4), a.lastSample.Load())
 }
 
-func TestThreadsRunning_AtThresholdIsNotThrottled(t *testing.T) {
-	// The hard-stop trips strictly above vCPUs + selfMonitoringHeadroom, so
-	// sitting exactly at the threshold (here 8+2=10) is not over-subscribed and
-	// must not throttle. The headroom absorbs spirit's own monitoring threads.
-	a := newTestThreadsRunning(t, 8)
-	a.applySample(a.vCPUs + selfMonitoringHeadroom)
-	require.False(t, a.IsThrottled())
+func TestAuroraThreads_GlobalStatusHeadroom(t *testing.T) {
+	// globalStatusMode cannot exclude any of spirit's monitoring threads, so its
+	// hard-stop trips strictly above vCPUs + selfMonitoringHeadroom (here
+	// 8+2=10). Sitting exactly at the threshold is not over-subscribed and must
+	// not throttle; one over must.
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
+	require.Equal(t, int64(8+selfMonitoringHeadroom), a.throttleThreshold())
+
+	a.applySample(a.throttleThreshold())
+	require.False(t, a.IsThrottled(), "sitting at the threshold must not throttle")
+
+	a.applySample(a.throttleThreshold() + 1)
+	require.True(t, a.IsThrottled(), "one over the threshold must throttle")
 }
 
-func TestThreadsRunning_AboveThresholdThrottles(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
-	sample := a.vCPUs + selfMonitoringHeadroom + 1 // one over the threshold
-	a.applySample(sample)
-	require.True(t, a.IsThrottled())
-	require.Equal(t, sample, a.lastThreadsRunning.Load())
+func TestAuroraThreads_RedoAwareHeadroom(t *testing.T) {
+	// redoAwareMode excludes its own sampling connection inside the query, so it
+	// carries only 1 of headroom (for the sibling commit-latency poller). The
+	// hard-stop trips above vCPUs + 1 (here 8+1=9), tighter than globalStatusMode
+	// — closer to the raw vCPU threshold the #971 A/B validated.
+	a := newTestAuroraThreads(t, 8, redoAwareMode)
+	require.Equal(t, int64(8+1), a.throttleThreshold())
+
+	a.applySample(a.throttleThreshold())
+	require.False(t, a.IsThrottled(), "sitting at the threshold must not throttle")
+
+	a.applySample(a.throttleThreshold() + 1)
+	require.True(t, a.IsThrottled(), "one over the threshold must throttle")
 }
 
-func TestThreadsRunning_HeadroomSparesSmallInstance(t *testing.T) {
+func TestAuroraThreads_HeadroomSparesSmallInstance(t *testing.T) {
 	// Regression for the "allowing one copy loop to make progress" flood on small
-	// Aurora instances: at vCPUs=2 spirit's own monitoring footprint pushes
-	// Threads_running to ~3-4 with zero production load. The headroom must keep
-	// those samples from tripping the hard-stop (else the copy throttles against
+	// Aurora instances: at vCPUs=2 spirit's own monitoring footprint pushes the
+	// count to ~3-4 with zero production load. The headroom must keep those
+	// samples from tripping the hard-stop (else the copy throttles against
 	// itself and only advances via BlockWait's 60s backoff), while genuine
-	// production load on top still throttles.
-	a := newTestThreadsRunning(t, 2) // threshold = 2 + 2 = 4
+	// production load on top still throttles. globalStatusMode carries the full
+	// headroom because it cannot exclude any spirit thread.
+	a := newTestAuroraThreads(t, 2, globalStatusMode) // threshold = 2 + 2 = 4
 	for _, spiritOnly := range []int64{2, 3, 4} {
 		a.applySample(spiritOnly)
 		require.Falsef(t, a.IsThrottled(),
-			"Threads_running=%d (spirit's own baseline) must not throttle on a 2-vCPU box", spiritOnly)
+			"count=%d (spirit's own baseline) must not throttle on a 2-vCPU box", spiritOnly)
 	}
 	a.applySample(5) // production work piled on top of spirit's baseline
 	require.True(t, a.IsThrottled(), "real load above the threshold must still throttle")
 }
 
-func TestThreadsRunning_RecoversBelowVCPUs(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_RecoversBelowVCPUs(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	a.applySample(20)
 	require.True(t, a.IsThrottled())
 	a.applySample(3)
 	require.False(t, a.IsThrottled())
 }
 
-func TestThreadsRunning_Utilization(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_Utilization(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	// The first sample seeds the EWMA directly.
 	a.applySample(4)
 	require.InDelta(t, 0.5, a.Utilization(), 1e-9)
@@ -91,11 +106,11 @@ func TestThreadsRunning_Utilization(t *testing.T) {
 	require.InDelta(t, 1.5, a.Utilization(), 1e-6)
 }
 
-func TestThreadsRunning_HardStopIsRawWhileUtilizationIsSmoothed(t *testing.T) {
+func TestAuroraThreads_HardStopIsRawWhileUtilizationIsSmoothed(t *testing.T) {
 	// A single spike must trip the binary hard-stop within one sample — it
 	// protects the production workload — while the autoscaler's utilization
 	// view absorbs it, so one noisy reading cannot trigger scaling.
-	a := newTestThreadsRunning(t, 8)
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	a.applySample(2) // seed: util 0.25
 	a.applySample(20)
 	require.True(t, a.IsThrottled(), "hard-stop must react to the raw sample")
@@ -106,15 +121,15 @@ func TestThreadsRunning_HardStopIsRawWhileUtilizationIsSmoothed(t *testing.T) {
 	require.False(t, a.IsThrottled())
 }
 
-func TestThreadsRunning_UtilizationZeroVCPUs(t *testing.T) {
+func TestAuroraThreads_UtilizationZeroVCPUs(t *testing.T) {
 	// vCPUs unknown (Open not yet called) must not divide by zero.
-	a := newTestThreadsRunning(t, 0)
+	a := newTestAuroraThreads(t, 0, globalStatusMode)
 	a.applySample(4)
 	require.Zero(t, a.Utilization())
 }
 
-func TestThreadsRunning_StaleSignalReportsHold(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_StaleSignalReportsHold(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 
 	a.applySample(2) // util 0.25
 	require.InDelta(t, 0.25, a.Utilization(), 1e-9)
@@ -131,8 +146,8 @@ func TestThreadsRunning_StaleSignalReportsHold(t *testing.T) {
 	require.InDelta(t, 0.25, a.Utilization(), 1e-9)
 }
 
-func TestThreadsRunning_EWMAReseedsAfterStaleGap(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_EWMAReseedsAfterStaleGap(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	a.applySample(2) // seed: util 0.25
 
 	// Samples stop arriving for longer than the staleness threshold. The
@@ -144,8 +159,8 @@ func TestThreadsRunning_EWMAReseedsAfterStaleGap(t *testing.T) {
 	require.InDelta(t, 0.75, a.Utilization(), 1e-9)
 }
 
-func TestThreadsRunning_StaleSignalKeepsThrottledHardStop(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_StaleSignalKeepsThrottledHardStop(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 
 	a.applySample(20) // over vCPUs → throttled
 	require.True(t, a.IsThrottled())
@@ -155,20 +170,20 @@ func TestThreadsRunning_StaleSignalKeepsThrottledHardStop(t *testing.T) {
 	require.InDelta(t, StaleUtilizationHold, a.Utilization(), 1e-9)
 }
 
-func TestThreadsRunning_NeverSampledIsNotStale(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_NeverSampledIsNotStale(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	require.Zero(t, a.Utilization(), "pre-Open must read as idle, not as a stale hold")
 }
 
-func TestThreadsRunning_BlockWaitReturnsImmediatelyWhenUnthrottled(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_BlockWaitReturnsImmediatelyWhenUnthrottled(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	start := time.Now()
 	a.BlockWait(t.Context())
 	require.Less(t, time.Since(start), 50*time.Millisecond)
 }
 
-func TestThreadsRunning_BlockWaitRespectsContext(t *testing.T) {
-	a := newTestThreadsRunning(t, 8)
+func TestAuroraThreads_BlockWaitRespectsContext(t *testing.T) {
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	a.isThrottled.Store(true)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -179,12 +194,12 @@ func TestThreadsRunning_BlockWaitRespectsContext(t *testing.T) {
 	require.Less(t, time.Since(start), 200*time.Millisecond)
 }
 
-func TestThreadsRunning_BlockWaitReturnsWhenThrottlingClears(t *testing.T) {
+func TestAuroraThreads_BlockWaitReturnsWhenThrottlingClears(t *testing.T) {
 	prev := blockWaitInterval
 	blockWaitInterval = 10 * time.Millisecond
 	t.Cleanup(func() { blockWaitInterval = prev })
 
-	a := newTestThreadsRunning(t, 8)
+	a := newTestAuroraThreads(t, 8, globalStatusMode)
 	a.isThrottled.Store(true)
 
 	go func() {
@@ -199,9 +214,9 @@ func TestThreadsRunning_BlockWaitReturnsWhenThrottlingClears(t *testing.T) {
 	require.Less(t, elapsed, 500*time.Millisecond)
 }
 
-func TestNewThreadsRunningThrottler_RejectsNilDB(t *testing.T) {
+func TestNewAuroraThreadsThrottler_RejectsNilDB(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, err := NewThreadsRunningThrottler(nil, logger)
+	_, err := newAuroraThreadsThrottler(nil, redoAwareMode, logger)
 	require.ErrorContains(t, err, "non-nil DB")
 }
 
@@ -217,6 +232,31 @@ func TestThreadsRunningQuery_LocalMySQL(t *testing.T) {
 	var running int64
 	require.NoError(t, db.QueryRowContext(t.Context(), threadsRunningQuery).Scan(&running))
 	require.GreaterOrEqual(t, running, int64(1), "the sampling query itself is a running thread")
+}
+
+func TestRedoAwareThreadsQuery_LocalMySQL(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// The redo-aware join reads performance_schema.threads and
+	// events_waits_current, which exist on stock MySQL 8 too. The Aurora
+	// redo-flush wait event never matches there, but the LEFT JOIN + GREATEST
+	// clamp still return a non-negative count — this verifies the SQL and its
+	// CAST/aggregate are valid wherever the test user has perf-schema SELECT.
+	var active int64
+	require.NoError(t, db.QueryRowContext(t.Context(), redoAwareThreadsQuery).Scan(&active))
+	require.GreaterOrEqual(t, active, int64(0))
+}
+
+func TestCanReadRedoAwareThreads_LocalMySQL(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// The test user has SELECT on performance_schema.*, so the probe succeeds —
+	// this is the path AuroraSetup.Build takes to pick the redo-aware signal.
+	require.NoError(t, CanReadRedoAwareThreads(t.Context(), db))
 }
 
 func TestResolveWriteThreads_PassThroughPositive(t *testing.T) {
@@ -252,12 +292,22 @@ func TestResolveWriteThreads_NonAuroraUsesDefault_LocalMySQL(t *testing.T) {
 }
 
 func TestResolveMaxWriteThreads(t *testing.T) {
-	// Disabled: cap equals start so the count cannot move.
-	require.Equal(t, 4, ResolveMaxWriteThreads(4, false))
+	// Autoscaling disabled: the cap equals start so the count cannot move,
+	// regardless of mode or the commit-latency backstop.
+	require.Equal(t, 4, ResolveMaxWriteThreads(4, false, false, false))
+	require.Equal(t, 4, ResolveMaxWriteThreads(4, false, true, true))
 
-	// Enabled: the cap is fixed at 2x the start value (not configurable).
-	require.Equal(t, 8, ResolveMaxWriteThreads(4, true))
-	require.Equal(t, 10, ResolveMaxWriteThreads(5, true))
+	// Fallback (Threads_running) mode counts redo-log waiters as load, so it
+	// self-limits and grows to 2x start with or without commit-latency.
+	require.Equal(t, 8, ResolveMaxWriteThreads(4, true, false, false))
+	require.Equal(t, 8, ResolveMaxWriteThreads(4, true, false, true))
+
+	// Redo-aware mode ignores redo-log waiters, so growing above start needs the
+	// commit-latency throttler as the log-saturation backstop; without it the
+	// cap stays at start (shed-only).
+	require.Equal(t, 4, ResolveMaxWriteThreads(4, true, true, false))
+	require.Equal(t, 8, ResolveMaxWriteThreads(4, true, true, true))
+	require.Equal(t, 10, ResolveMaxWriteThreads(5, true, true, true))
 }
 
 func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
@@ -268,7 +318,7 @@ func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
 	// @@innodb_buffer_pool_instances exists on stock MySQL too (it just isn't
 	// pinned to the vCPU count there). The query and positive-value check should
 	// still succeed — this guards the shared helper used by both the
-	// threads-running throttler and write-thread auto-sizing.
+	// threads throttler and write-thread auto-sizing.
 	vCPUs, err := AuroraVCPUs(t.Context(), db)
 	require.NoError(t, err)
 	require.Positive(t, vCPUs)

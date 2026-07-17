@@ -16,7 +16,7 @@ In practice, throttlers haven't been used as extensively as originally envisione
 
 However, it remains available and maintained for community use, particularly for users running traditional MySQL replication topologies. We are open to contributions to throttler improvements, such as being able to throttle on multiple replicas at once ([issue #220](https://github.com/block/spirit/issues/220)).
 
-Two **Aurora-specific throttlers** were added later: a threads-running throttler ([#831](https://github.com/block/spirit/issues/831)) and a commit-latency throttler ([#468](https://github.com/block/spirit/issues/468)). On Aurora the threads-running throttler is **always enabled**, while commit-latency is enabled **by default** but gated on a positive `--max-commit-latency` (default `100ms`; set `--max-commit-latency=0` to disable it). These are the throttlers most Block migrations actually run, and they double as the continuous load signal that drives the copier's experimental write-thread autoscaler (see [`GradualThrottler`](#gradualthrottler-optional-extension) below).
+Two **Aurora-specific throttlers** were added later: an Aurora threads throttler ([#831](https://github.com/block/spirit/issues/831)) and a commit-latency throttler ([#468](https://github.com/block/spirit/issues/468)). On Aurora the threads throttler is **always enabled**, while commit-latency is enabled **by default** but gated on a positive `--max-commit-latency` (default `100ms`; set `--max-commit-latency=0` to disable it). These are the throttlers most Block migrations actually run, and they double as the continuous load signal that drives the copier's experimental write-thread autoscaler (see [`GradualThrottler`](#gradualthrottler-optional-extension) below).
 
 ## Interface
 
@@ -93,15 +93,18 @@ throttler, err := throttler.NewCommitLatencyThrottler(
 
 Polls Aurora's cumulative commit counters (`AuroraDb_commits` and `AuroraDb_commit_latency`, from `performance_schema.global_status`) every 5 seconds and throttles when the **window-averaged** commit latency reaches the threshold. Watching commit latency lets it react to storage-layer saturation directly. It implements `GradualThrottler`, reporting `Utilization()` as `avg_latency / threshold`. Aurora-only; see [issue #468](https://github.com/block/spirit/issues/468).
 
-### Aurora Threads-Running Throttler
+### Aurora Threads Throttler
 
-```go
-throttler, err := throttler.NewThreadsRunningThrottler(db, logger)
-```
+Assembled internally by `throttler.AuroraSetup.Build`, not constructed directly: the sampling mode is chosen by a privilege probe rather than supplied by the caller (see below).
 
-Polls the `Threads_running` status variable every 5 seconds and compares it to the instance vCPU count (read from `@@innodb_buffer_pool_instances`, which Aurora pins to the vCPU count). The binary hard-stop trips when the raw count exceeds `vCPUs + 2` — a small headroom for Spirit's own monitoring connections — while `Utilization()` reports an EWMA-smoothed `Threads_running / vCPUs`, so the autoscaler tracks sustained load rather than instantaneous spikes. Aurora-only; see [issue #831](https://github.com/block/spirit/issues/831).
+Polls a running-thread count every 5 seconds and compares it to the instance vCPU count (read from `@@innodb_buffer_pool_instances`, which Aurora pins to the vCPU count). `Utilization()` reports an EWMA-smoothed `count / vCPUs`, so the autoscaler tracks sustained load rather than instantaneous spikes. It runs in one of two modes, chosen once at setup by a privilege probe (`CanReadRedoAwareThreads`):
 
-Both throttlers require an `IsAurora()` probe — which confirms `performance_schema.global_status` is readable and the Aurora status variables are present. When it succeeds, `throttler.AuroraSetup.Build` assembles them: the threads-running throttler is **always** built, while commit-latency is added only when `CommitLatencyThreshold > 0` (wired from `--max-commit-latency`). Whichever are enabled run together, and the highest utilization across them drives the autoscaler.
+- **redo-aware** (preferred) — counts `Query`-state threads from `performance_schema.threads`, **subtracting** those parked on redo-log flush (via `events_waits_current`). Those waiters are IO-bound and Aurora group-commits them to storage, so excluding them lets the copy safely oversubscribe the redo log — a staging A/B measured ~18% more copy throughput ([#971](https://github.com/block/spirit/issues/971)). Requires `SELECT` on `performance_schema.threads` and `performance_schema.events_waits_current`. The query excludes its own sampling connection, so the hard-stop trips when the raw count exceeds `vCPUs + 1`.
+- **Threads_running** (fallback) — counts all running threads via the `Threads_running` status variable from `global_status`; needs no grant beyond what `IsAurora` already proves. Redo-log waiters count as load here, so it is more conservative (caps concurrency near vCPUs). The hard-stop trips when the raw count exceeds `vCPUs + 2` — a small headroom for Spirit's own monitoring connections, which this mode cannot exclude.
+
+Aurora-only; see [issue #831](https://github.com/block/spirit/issues/831).
+
+Both throttlers require an `IsAurora()` probe — which confirms `performance_schema.global_status` is readable and the Aurora status variables are present. When it succeeds, `throttler.AuroraSetup.Build` assembles them: the Aurora threads throttler is **always** built (its mode chosen by the perf-schema probe above), while commit-latency is added only when `CommitLatencyThreshold > 0` (wired from `--max-commit-latency`). Whichever are enabled run together, and the highest utilization across them drives the autoscaler.
 
 ## Usage
 
