@@ -228,7 +228,9 @@ func (c *gtidClient) getBufferedGTID() mysql.GTIDSet {
 // the GTID as a resume coordinate too early; a crash then resumes past it
 // and its row events are silently lost. This is why a mid-group QueryEvent
 // must not promote. Regular transactions have no mid-group QueryEvents
-// besides BEGIN, but XA transactions do — their first group is written to
+// besides BEGIN and the SAVEPOINT family ("SAVEPOINT `x`", plus
+// "ROLLBACK TO `x`" in mixed-engine transactions), but XA transactions
+// do — their first group is written to
 // the binlog in one piece at XA PREPARE time, shaped as (verified against
 // MySQL 8.0):
 //
@@ -577,6 +579,32 @@ func (c *gtidClient) readStream(ctx context.Context) {
 			// been buffered yet.
 			q := strings.TrimSpace(string(event.Query))
 			if strings.EqualFold(q, "BEGIN") {
+				continue
+			}
+			// MySQL also logs SAVEPOINT statements as QueryEvents in the
+			// *middle* of a row-format transaction (verified against MySQL
+			// 8.0: GTIDEvent → Query(BEGIN) → row events →
+			// Query("SAVEPOINT `sp1`") → more row events → XIDEvent).
+			// "ROLLBACK TO `sp1`" appears mid-group the same way when
+			// non-transactional writes after the savepoint prevent the
+			// server from simply truncating its binlog cache. Neither
+			// terminates the group — it still ends at the XIDEvent or
+			// COMMIT/ROLLBACK QueryEvent that follows — so, exactly like
+			// BEGIN and "XA START"/"XA END", the pending GTID must stay
+			// pending: falling through to the parser path below would
+			// promote on both of its branches, letting a concurrent flush
+			// publish the GTID as a resume coordinate before the rest of
+			// the transaction's row events are buffered. A crash before the
+			// next flush would then resume past the transaction and
+			// silently lose its tail. The server rewrites these statements
+			// with backtick-quoted identifiers ("ROLLBACK TO `sp1`" — no
+			// SAVEPOINT keyword), so keyword prefix matches are exact.
+			// "ROLLBACK TO " is matched here, above the terminator check
+			// below, so it can never be taken for a transaction-ending
+			// ROLLBACK; "RELEASE SAVEPOINT " is matched defensively (MySQL
+			// does not binlog it today) since releasing a savepoint never
+			// ends a transaction either.
+			if hasPrefixFold(q, "SAVEPOINT ") || hasPrefixFold(q, "ROLLBACK TO ") || hasPrefixFold(q, "RELEASE SAVEPOINT ") {
 				continue
 			}
 			// COMMIT/ROLLBACK QueryEvents end a transaction that involved a
