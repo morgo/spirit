@@ -54,6 +54,8 @@ func castableTp(tp string) string {
 	case "float", "double": // required for MySQL 5.7
 		return "char"
 	case "json":
+		// castExpr wraps json in a text round-trip rather than a plain
+		// CAST; see the comment there.
 		return "json"
 	case "decimal":
 		return tp
@@ -63,6 +65,34 @@ func castableTp(tp string) string {
 		// convert to utf8mb4 which should be the superset, and can do all comparisons.
 		return "char CHARACTER SET utf8mb4"
 	}
+}
+
+// castExpr builds the CAST expression that the checksum uses for a single
+// column (see ColumnMapping.ChecksumExprs). col is the column referenced in
+// SQL (escaped here); tp is the MySQL column type the cast is derived from.
+//
+// JSON columns are checksummed through a text round-trip — render to text,
+// re-parse as JSON — rather than a plain CAST(col AS json). A JSON document
+// can hold scalar types that JSON text cannot express: DECIMAL (e.g. from
+// JSON_OBJECT('a', CAST(169.09 AS DECIMAL(12,6)))) and temporal/binary
+// opaques. Spirit's buffered copier and binlog applier write JSON values as
+// text, so on the target those degrade to DOUBLE/strings. The values are
+// still equal under JSON comparison, but their canonical text can differ —
+// a DECIMAL renders at its declared scale ("169.090000") while the
+// re-parsed DOUBLE renders shortest ("169.09") — so a strict checksum
+// flags every applier-written row, and under concurrent DML re-flags rows
+// faster than repairs fix them, failing all attempts. Round-tripping BOTH
+// sides collapses each document to its text-expressible form: exactly the
+// fidelity the text-based copy/replication pipeline can deliver, and no
+// less — genuine value differences still hash differently, and int vs
+// double (which text does preserve) stays distinct.
+func castExpr(col, tp string) string {
+	quotedCol := sqlescape.EscapeIdentifier(col)
+	castTp := castableTp(tp)
+	if castTp == "json" {
+		return "CAST(CAST(" + quotedCol + " AS char CHARACTER SET utf8mb4) AS json)"
+	}
+	return "CAST(" + quotedCol + " AS " + castTp + ")"
 }
 
 func removeWidth(s string) string {
