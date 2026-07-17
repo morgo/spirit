@@ -485,7 +485,7 @@ func (t *TableInfo) wrapCastType(col string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("column %q not found in table %s", col, t.TableName)
 	}
-	return fmt.Sprintf("CAST(%s AS %s)", sqlescape.EscapeIdentifier(col), castableTp(tp)), nil
+	return castExpr(col, tp), nil
 }
 
 // wrapCastTypeAs generates a CAST expression using sqlCol as the column reference
@@ -498,7 +498,7 @@ func (t *TableInfo) wrapCastTypeAs(sqlCol, typeCol string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("column %q not found for type lookup in table %s", typeCol, t.TableName)
 	}
-	return fmt.Sprintf("CAST(%s AS %s)", sqlescape.EscapeIdentifier(sqlCol), castableTp(tp)), nil
+	return castExpr(sqlCol, tp), nil
 }
 
 func (t *TableInfo) datumTp(col string) (datumTp, error) {
