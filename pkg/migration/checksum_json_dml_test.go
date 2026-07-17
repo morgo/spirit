@@ -322,7 +322,9 @@ func dumpJSONDivergence(t *testing.T, tt *testutils.TestTable, tableName string,
 		   OR s.score <> n.score
 		ORDER BY (%[1]s = n.score_data) DESC, s.id
 		LIMIT 3`, srcExpr, tableName, "_"+tableName+"_new")
-	rows, err := tt.DB.QueryContext(context.Background(), query)
+ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+defer cancel()
+rows, err := tt.DB.QueryContext(ctx, query)
 	if err != nil {
 		t.Logf("divergence dump failed: %v", err)
 		return
