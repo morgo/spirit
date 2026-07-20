@@ -349,7 +349,7 @@ func TestSecondaryEngineAttribute(t *testing.T) {
 }
 
 // TestLargeNumberOfMultiChanges tests the interaction between force kill and multiple table changes.
-// and supporting a large number of changes in general. Apart from the MDL locks (currently 1 per table),
+// and supporting a large number of changes in general. Apart from the advisory locks (currently 1 per table),
 // this shouldn't require more connections than regular single table changes.
 // https://github.com/block/spirit/issues/502
 func TestLargeNumberOfMultiChanges(t *testing.T) {

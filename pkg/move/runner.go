@@ -512,7 +512,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 // setupDiscovery is the read-only first phase of setup: it runs the
 // preflight checks and populates the table lists (r.sourceTables and each
 // r.sources[i].tables). Run() calls it before acquiring the per-source
-// metadata locks — the lock names are derived from the table lists, so
+// advisory locks — the lock names are derived from the table lists, so
 // discovery has to happen first — and nothing in here may modify the source
 // or the target. All potentially destructive setup lives in setupUnderLocks.
 func (r *Runner) setupDiscovery(ctx context.Context) error {
@@ -551,7 +551,7 @@ func (r *Runner) setupDiscovery(ctx context.Context) error {
 // can modify the source or the target — the resume path's
 // delete-above-watermark, --force's target wipe, target table and checkpoint
 // creation, and starting the replication clients — so Run() only calls it
-// after the per-source metadata locks are held. That ordering guarantees a
+// after the per-source advisory locks are held. That ordering guarantees a
 // concurrent second spirit invocation against the same sources fails on the
 // lock before it can destroy the first run's target data.
 func (r *Runner) setupUnderLocks(ctx context.Context) error {
@@ -770,7 +770,7 @@ func (r *Runner) maybeResumeReverseWindow(ctx context.Context) (bool, error) {
 // re-enters the window. The reverse feeds restart from the checkpointed
 // positions and catch up whatever the source missed while the process was down.
 //
-// v1 note: no metadata locks are re-acquired here (a concurrent second restart
+// v1 note: no advisory locks are re-acquired here (a concurrent second restart
 // of the same move is an operator error), and the feed always resumes from the
 // original cutover position — correct via idempotent apply, at the cost of
 // re-reading the window's binlog.
@@ -1059,7 +1059,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	// Discovery is read-only: preflight checks plus building the per-source
-	// table lists (which the metadata lock names below are derived from).
+	// table lists (which the advisory lock names below are derived from).
 	if err := r.setupDiscovery(ctx); err != nil {
 		return err
 	}
@@ -1069,7 +1069,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// it is asked to move *no tables*. Since there are no tables,
 		// there is no:
 		// - copier, replication changes
-		// - metadata lock
+		// - advisory lock
 		// - cutover step
 		//
 		// But the caller will still want their cutoverFunc called. So we do that
@@ -1085,22 +1085,22 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 
-	// Take a metadata lock on each source to prevent concurrent DDL.
-	var metadataLocks []*dbconn.MetadataLock
+	// Take an advisory lock on each source to prevent concurrent DDL.
+	var advisoryLocks []*dbconn.AdvisoryLock
 	for i := range r.sources {
-		lock, err := dbconn.NewMetadataLock(ctx, r.sources[i].dsn, r.sources[i].tables, r.dbConfig, r.logger)
+		lock, err := dbconn.NewAdvisoryLock(ctx, r.sources[i].dsn, r.sources[i].tables, r.dbConfig, r.logger)
 		if err != nil {
-			for _, acquiredLock := range metadataLocks {
+			for _, acquiredLock := range advisoryLocks {
 				if closeErr := acquiredLock.Close(); closeErr != nil {
 					r.logger.Error("failed to release advisory lock after acquisition failure", "error", closeErr)
 				}
 			}
 			return fmt.Errorf("failed to acquire advisory lock on source %d: %w", i, err)
 		}
-		metadataLocks = append(metadataLocks, lock)
+		advisoryLocks = append(advisoryLocks, lock)
 	}
 	defer func() {
-		for _, lock := range metadataLocks {
+		for _, lock := range advisoryLocks {
 			if err := lock.Close(); err != nil {
 				r.logger.Error("failed to release advisory lock", "error", err)
 			}

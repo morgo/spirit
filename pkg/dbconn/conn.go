@@ -30,8 +30,8 @@ const (
 // maxConnLifetime is the default maximum lifetime for pooled connections.
 // It is a var (not a const) only so tests can shorten it; production code
 // must not modify it. Note that pools holding session-scoped state (such as
-// the metadata lock's GET_LOCK) are deliberately exempted from this limit —
-// see NewMetadataLock.
+// the advisory lock's GET_LOCK) are deliberately exempted from this limit —
+// see NewAdvisoryLock.
 var maxConnLifetime = time.Minute * 3
 
 // rdsAddr matches Amazon RDS hostnames with optional :port suffix.

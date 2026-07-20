@@ -70,7 +70,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Cancel first, wait for Run to return (so deferred MDL release runs and
+	// Cancel first, wait for Run to return (so deferred advisory lock release runs and
 	// no in-flight goroutine can trip fatalError → dropCheckpoint), then Close
 	// to tear down the remaining resources.
 	cancel()
@@ -769,9 +769,9 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 
 	waitForCheckpoint(t, runner)
 
-	// Test that it's not possible to acquire metadata lock with name
+	// Test that it's not possible to acquire advisory lock with name
 	// as tablename while the migration is running.
-	lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
+	lock, err := dbconn.NewAdvisoryLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
 	require.Error(t, err)
 	require.Nil(t, lock)
 

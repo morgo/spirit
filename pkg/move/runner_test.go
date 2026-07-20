@@ -661,7 +661,7 @@ func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
 }
 
 // TestConcurrentMoveDoesNotWipeTarget is a regression test for the ordering of
-// Run(): the per-source metadata locks must be acquired before any setup step
+// Run(): the per-source advisory locks must be acquired before any setup step
 // that can modify the target. A second spirit invocation against the same
 // source (orchestrator retry, operator error) has to die on the lock while the
 // first run's target is still untouched. Before the reorder, the second run
@@ -687,11 +687,11 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (999, 'precious')")
 
-	// Simulate run A holding the source metadata lock: acquire the same lock
-	// name Run() derives (schema + table) via dbconn.NewMetadataLock directly.
+	// Simulate run A holding the source advisory lock: acquire the same lock
+	// name Run() derives (schema + table) via dbconn.NewAdvisoryLock directly.
 	// This stands in for a real in-flight move without needing to pause one.
 	lockTables := []*table.TableInfo{{SchemaName: srcDB, TableName: "t1"}}
-	lock, err := dbconn.NewMetadataLock(t.Context(), sourceDSN, lockTables, dbconn.NewDBConfig(), slog.Default())
+	lock, err := dbconn.NewAdvisoryLock(t.Context(), sourceDSN, lockTables, dbconn.NewDBConfig(), slog.Default())
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, lock.Close())
@@ -699,7 +699,7 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 
 	// Run B: --force against the same source. The non-empty, unresumable
 	// target is exactly the state --force wipes — but B must fail on the
-	// metadata lock before it gets the chance.
+	// advisory lock before it gets the chance.
 	move := &Move{
 		SourceDSN:       sourceDSN,
 		TargetDSN:       targetDSN,

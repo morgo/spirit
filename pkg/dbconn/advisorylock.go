@@ -23,14 +23,11 @@ var (
 	refreshInterval = 1 * time.Minute
 )
 
-// MetadataLock ensures that only one spirit migration operates on a table at
-// a time. Despite the name, this is *not* a MySQL table metadata lock (MDL):
-// it is a user-level advisory lock (GET_LOCK) held on a dedicated connection,
-// so it is invisible to application traffic and never blocks queries or DDL.
-// Log and error messages refer to it as an "advisory lock" to avoid confusion
-// with the server-side MDL that every ALTER TABLE briefly acquires.
-// TODO: rename the type (and this file) to AdvisoryLock in a follow-up.
-type MetadataLock struct {
+// AdvisoryLock ensures that only one spirit migration operates on a table at
+// a time. It is a user-level advisory lock (GET_LOCK) held on a dedicated
+// connection, so it is invisible to application traffic and never blocks
+// queries or DDL. It may be confused for a table lock, which it is not.
+type AdvisoryLock struct {
 	cancel          context.CancelFunc
 	closeCh         chan error
 	refreshInterval time.Duration
@@ -39,28 +36,28 @@ type MetadataLock struct {
 	// newDBConn optionally overrides how the dedicated pool is established.
 	// It is a test seam (set via an option func) so tests can simulate
 	// reconnection failures deterministically; production leaves it nil.
-	// NewMetadataLock enforces the dedicated-pool invariants on whatever
+	// NewAdvisoryLock enforces the dedicated-pool invariants on whatever
 	// the factory returns, so the seam cannot weaken the lock semantics.
 	newDBConn func() (*sql.DB, error)
 }
 
-func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, optionFns ...func(*MetadataLock)) (*MetadataLock, error) {
+func NewAdvisoryLock(ctx context.Context, dsn string, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, optionFns ...func(*AdvisoryLock)) (*AdvisoryLock, error) {
 	if len(tables) == 0 {
 		return nil, errors.New("no tables provided for advisory lock")
 	}
-	mdl := &MetadataLock{
+	lock := &AdvisoryLock{
 		refreshInterval: refreshInterval,
 		lockNames:       make([]string, 0, len(tables)),
 	}
 
 	// Apply option functions
 	for _, optionFn := range optionFns {
-		optionFn(mdl)
+		optionFn(lock)
 	}
 
 	// Compute lock names for all tables
 	for _, tbl := range tables {
-		mdl.lockNames = append(mdl.lockNames, computeLockName(tbl))
+		lock.lockNames = append(lock.lockNames, computeLockName(tbl))
 	}
 
 	// Setup the dedicated connection for this lock
@@ -92,8 +89,8 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	dial := func() (*sql.DB, error) {
 		return New(dsn, &dbConfig)
 	}
-	if mdl.newDBConn != nil {
-		dial = mdl.newDBConn // test seam, see MetadataLock.newDBConn
+	if lock.newDBConn != nil {
+		dial = lock.newDBConn // test seam, see AdvisoryLock.newDBConn
 	}
 	newConnection := func() (*sql.DB, error) {
 		db, err := dial()
@@ -111,36 +108,36 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 		return db, nil
 	}
 	var err error
-	mdl.db, err = newConnection()
+	lock.db, err = newConnection()
 	if err != nil {
 		return nil, err
 	}
 
 	// Acquire all locks or return an error immediately
 	logger.Info("attempting to acquire advisory lock (GET_LOCK) to prevent concurrent migrations")
-	if err = mdl.getLocks(ctx, logger); err != nil {
-		_ = mdl.db.Close() // close if we are not returning an advisory lock.
+	if err = lock.getLocks(ctx, logger); err != nil {
+		_ = lock.db.Close() // close if we are not returning an advisory lock.
 		return nil, err
 	}
-	for _, lockName := range mdl.lockNames {
+	for _, lockName := range lock.lockNames {
 		logger.Info("acquired advisory lock", "lock_name", lockName)
 	}
 
 	// Setup background refresh runner
-	ctx, mdl.cancel = context.WithCancel(ctx)
-	mdl.closeCh = make(chan error, 1) // Make it buffered to prevent blocking
+	ctx, lock.cancel = context.WithCancel(ctx)
+	lock.closeCh = make(chan error, 1) // Make it buffered to prevent blocking
 	go func() {
-		ticker := time.NewTicker(mdl.refreshInterval)
+		ticker := time.NewTicker(lock.refreshInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				// mdl.db is nil if the connection was torn down on a failed
+				// lock.db is nil if the connection was torn down on a failed
 				// refresh and every reconnect attempt since has failed: there
 				// is no session left to release locks on and no pool to close.
-				if mdl.db == nil {
+				if lock.db == nil {
 					select {
-					case mdl.closeCh <- nil:
+					case lock.closeCh <- nil:
 					default:
 					}
 					return
@@ -150,18 +147,18 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 				// MySQL has not yet finished tearing down the session, so a
 				// rapid reacquire on a new connection can see the lock as still
 				// held. RELEASE_LOCK on the same session avoids that race.
-				mdl.releaseLocks(logger)
+				lock.releaseLocks(logger)
 				// Use select with default to avoid blocking if Close() isn't called
 				select {
-				case mdl.closeCh <- mdl.db.Close():
+				case lock.closeCh <- lock.db.Close():
 				default:
 					// If no one is listening, just close the connection anyway
-					_ = mdl.db.Close()
+					_ = lock.db.Close()
 				}
 				return
 			case <-ticker.C:
-				if mdl.db != nil {
-					if err = mdl.getLocks(ctx, logger); err == nil {
+				if lock.db != nil {
+					if err = lock.getLocks(ctx, logger); err == nil {
 						logger.Debug("refreshed advisory locks")
 						continue
 					}
@@ -176,23 +173,23 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 					// when Close() returns an error the pool is already marked
 					// as closed and unusable, so don't keep it: log, abandon
 					// it, and proceed straight to reconnection below.
-					if closeErr := mdl.db.Close(); closeErr != nil {
+					if closeErr := lock.db.Close(); closeErr != nil {
 						logger.Warn("could not close database connection", "error", closeErr)
 					}
 				}
 
 				// try to (re-)establish the connection. newConnection pings
 				// the server, so while the outage persists it keeps returning
-				// (nil, err) and mdl.db stays nil; the next tick then lands
+				// (nil, err) and lock.db stays nil; the next tick then lands
 				// back here and retries the connection first, instead of
 				// dereferencing the nil pool in getLocks.
-				if mdl.db, err = newConnection(); err != nil {
+				if lock.db, err = newConnection(); err != nil {
 					logger.Warn("could not re-establish database connection", "error", err)
 					continue
 				}
 
 				// try to acquire the locks again with the new connection
-				if err = mdl.getLocks(ctx, logger); err != nil {
+				if err = lock.getLocks(ctx, logger); err != nil {
 					logger.Warn("could not acquire advisory locks after re-establishing connection", "error", err)
 					continue
 				}
@@ -202,7 +199,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 		}
 	}()
 
-	return mdl, nil
+	return lock, nil
 }
 
 // getLocks acquires (or renews) all locks on the dedicated session.
@@ -217,7 +214,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 // 5.7, so this stacks a reference per tick — that is harmless because
 // Close() releases the lock with a single RELEASE_ALL_LOCKS() (see
 // releaseLocks), which clears every stacked reference at once.
-func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error {
+func (m *AdvisoryLock) getLocks(ctx context.Context, logger *slog.Logger) error {
 	for _, lockName := range m.lockNames {
 		var answer int
 		stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
@@ -244,7 +241,7 @@ func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error 
 // once, so the lock is genuinely free when Close() returns. (A single
 // RELEASE_LOCK per name would leave the lock held whenever more than one
 // reference had stacked, which is the steady state here.)
-func (m *MetadataLock) releaseLocks(logger *slog.Logger) {
+func (m *AdvisoryLock) releaseLocks(logger *slog.Logger) {
 	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer releaseCancel()
 	logger.Info("releasing advisory locks", "lock_names", m.lockNames)
@@ -254,7 +251,7 @@ func (m *MetadataLock) releaseLocks(logger *slog.Logger) {
 	}
 }
 
-func (m *MetadataLock) Close() error {
+func (m *AdvisoryLock) Close() error {
 	// Cancel the background refresh runner
 	m.cancel()
 
@@ -262,8 +259,8 @@ func (m *MetadataLock) Close() error {
 	return <-m.closeCh
 }
 
-func (m *MetadataLock) CloseDBConnection(logger *slog.Logger) error {
-	// Closes the database connection for the MetadataLock
+func (m *AdvisoryLock) CloseDBConnection(logger *slog.Logger) error {
+	// Closes the database connection for the AdvisoryLock
 	logger.Info("about to close advisory lock database connection")
 	if m.db != nil {
 		return m.db.Close()
@@ -271,7 +268,7 @@ func (m *MetadataLock) CloseDBConnection(logger *slog.Logger) error {
 	return nil
 }
 
-// WithMultiTableSchemaLock adds a schema-scoped lock to the MetadataLock so that
+// WithMultiTableSchemaLock adds a schema-scoped lock to the AdvisoryLock so that
 // only one atomic multi-table migration runs per schema at a time. Multi-table
 // migrations all coordinate through a single shared _spirit_checkpoint (and
 // _spirit_sentinel), so they must not overlap; a second one fails to acquire
@@ -280,8 +277,8 @@ func (m *MetadataLock) CloseDBConnection(logger *slog.Logger) error {
 //
 // Applied as an option so the lock name is prepended before the per-table
 // names; it is held and released on the same dedicated session as the rest.
-func WithMultiTableSchemaLock(schemaName string) func(*MetadataLock) {
-	return func(m *MetadataLock) {
+func WithMultiTableSchemaLock(schemaName string) func(*AdvisoryLock) {
+	return func(m *AdvisoryLock) {
 		m.lockNames = append(m.lockNames, computeMultiTableLockName(schemaName))
 	}
 }
