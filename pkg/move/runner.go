@@ -1092,17 +1092,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err != nil {
 			for _, acquiredLock := range metadataLocks {
 				if closeErr := acquiredLock.Close(); closeErr != nil {
-					r.logger.Error("failed to release metadata lock after acquisition failure", "error", closeErr)
+					r.logger.Error("failed to release advisory lock after acquisition failure", "error", closeErr)
 				}
 			}
-			return fmt.Errorf("failed to acquire metadata lock on source %d: %w", i, err)
+			return fmt.Errorf("failed to acquire advisory lock on source %d: %w", i, err)
 		}
 		metadataLocks = append(metadataLocks, lock)
 	}
 	defer func() {
 		for _, lock := range metadataLocks {
 			if err := lock.Close(); err != nil {
-				r.logger.Error("failed to release metadata lock", "error", err)
+				r.logger.Error("failed to release advisory lock", "error", err)
 			}
 		}
 	}()

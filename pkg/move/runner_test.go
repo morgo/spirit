@@ -710,7 +710,7 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 	}
 	err = move.Run()
 	require.Error(t, err)
-	require.ErrorContains(t, err, "failed to acquire metadata lock")
+	require.ErrorContains(t, err, "failed to acquire advisory lock")
 
 	// The target must be untouched: the pre-existing row is intact and run B
 	// left no artifacts of a restarted copy (no checkpoint table).

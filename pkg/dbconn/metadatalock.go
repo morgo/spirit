@@ -23,6 +23,13 @@ var (
 	refreshInterval = 1 * time.Minute
 )
 
+// MetadataLock ensures that only one spirit migration operates on a table at
+// a time. Despite the name, this is *not* a MySQL table metadata lock (MDL):
+// it is a user-level advisory lock (GET_LOCK) held on a dedicated connection,
+// so it is invisible to application traffic and never blocks queries or DDL.
+// Log and error messages refer to it as an "advisory lock" to avoid confusion
+// with the server-side MDL that every ALTER TABLE briefly acquires.
+// TODO: rename the type (and this file) to AdvisoryLock in a follow-up.
 type MetadataLock struct {
 	cancel          context.CancelFunc
 	closeCh         chan error
@@ -39,7 +46,7 @@ type MetadataLock struct {
 
 func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo, config *DBConfig, logger *slog.Logger, optionFns ...func(*MetadataLock)) (*MetadataLock, error) {
 	if len(tables) == 0 {
-		return nil, errors.New("no tables provided for metadata lock")
+		return nil, errors.New("no tables provided for advisory lock")
 	}
 	mdl := &MetadataLock{
 		refreshInterval: refreshInterval,
@@ -57,7 +64,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	}
 
 	// Setup the dedicated connection for this lock
-	// Use the provided config but ensure MaxOpenConnections is 1 for metadata locks
+	// Use the provided config but ensure MaxOpenConnections is 1 for advisory locks
 	dbConfig := *config // Copy the config
 	dbConfig.MaxOpenConnections = 1
 	// newConnection opens the dedicated pool for this lock. GET_LOCK is
@@ -110,13 +117,13 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 	}
 
 	// Acquire all locks or return an error immediately
-	logger.Info("attempting to acquire metadata lock")
+	logger.Info("attempting to acquire advisory lock (GET_LOCK) to prevent concurrent migrations")
 	if err = mdl.getLocks(ctx, logger); err != nil {
-		_ = mdl.db.Close() // close if we are not returning an MDL.
+		_ = mdl.db.Close() // close if we are not returning an advisory lock.
 		return nil, err
 	}
 	for _, lockName := range mdl.lockNames {
-		logger.Info("acquired metadata lock", "lock_name", lockName)
+		logger.Info("acquired advisory lock", "lock_name", lockName)
 	}
 
 	// Setup background refresh runner
@@ -155,7 +162,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 			case <-ticker.C:
 				if mdl.db != nil {
 					if err = mdl.getLocks(ctx, logger); err == nil {
-						logger.Debug("refreshed metadata locks")
+						logger.Debug("refreshed advisory locks")
 						continue
 					}
 					// if we can't refresh the lock, it's okay.
@@ -163,7 +170,7 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 					// for example, we watch the binary log to see metadata changes
 					// that we did not make. This makes it a warning, not an error,
 					// and we can try again on the next tick interval.
-					logger.Warn("could not refresh metadata locks", "error", err)
+					logger.Warn("could not refresh advisory locks", "error", err)
 
 					// close the existing connection before replacing it. Even
 					// when Close() returns an error the pool is already marked
@@ -186,11 +193,11 @@ func NewMetadataLock(ctx context.Context, dsn string, tables []*table.TableInfo,
 
 				// try to acquire the locks again with the new connection
 				if err = mdl.getLocks(ctx, logger); err != nil {
-					logger.Warn("could not acquire metadata locks after re-establishing connection", "error", err)
+					logger.Warn("could not acquire advisory locks after re-establishing connection", "error", err)
 					continue
 				}
 
-				logger.Info("re-acquired metadata locks after re-establishing connection")
+				logger.Info("re-acquired advisory locks after re-establishing connection")
 			}
 		}
 	}()
@@ -215,15 +222,15 @@ func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error 
 		var answer int
 		stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
 		if err := m.db.QueryRowContext(ctx, stmt).Scan(&answer); err != nil {
-			return fmt.Errorf("could not acquire metadata lock for %s: %w", lockName, err)
+			return fmt.Errorf("could not acquire advisory lock for %s: %w", lockName, err)
 		}
 		if answer == 0 {
 			// 0 means the lock is held by another connection
-			logger.Warn("could not acquire metadata lock, lock is held by another connection", "lock_name", lockName)
-			return fmt.Errorf("could not acquire metadata lock for %s, lock is held by another connection", lockName)
+			logger.Warn("could not acquire advisory lock, lock is held by another connection", "lock_name", lockName)
+			return fmt.Errorf("could not acquire advisory lock for %s, lock is held by another connection", lockName)
 		} else if answer != 1 {
 			// probably we never get here, but just in case
-			return fmt.Errorf("could not acquire metadata lock %s, GET_LOCK returned: %d", lockName, answer)
+			return fmt.Errorf("could not acquire advisory lock %s, GET_LOCK returned: %d", lockName, answer)
 		}
 	}
 	return nil
@@ -240,10 +247,10 @@ func (m *MetadataLock) getLocks(ctx context.Context, logger *slog.Logger) error 
 func (m *MetadataLock) releaseLocks(logger *slog.Logger) {
 	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer releaseCancel()
-	logger.Info("releasing metadata locks", "lock_names", m.lockNames)
+	logger.Info("releasing advisory locks", "lock_names", m.lockNames)
 	var released sql.NullInt64
 	if err := m.db.QueryRowContext(releaseCtx, "SELECT RELEASE_ALL_LOCKS()").Scan(&released); err != nil {
-		logger.Warn("could not release metadata locks", "error", err)
+		logger.Warn("could not release advisory locks", "error", err)
 	}
 }
 
@@ -257,7 +264,7 @@ func (m *MetadataLock) Close() error {
 
 func (m *MetadataLock) CloseDBConnection(logger *slog.Logger) error {
 	// Closes the database connection for the MetadataLock
-	logger.Info("about to close MetadataLock database connection")
+	logger.Info("about to close advisory lock database connection")
 	if m.db != nil {
 		return m.db.Close()
 	}

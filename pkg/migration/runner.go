@@ -328,7 +328,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Release the lock
 	defer func() {
 		if err := lock.Close(); err != nil {
-			r.logger.Error("failed to release metadata lock", "error", err)
+			r.logger.Error("failed to release advisory lock", "error", err)
 		}
 	}()
 	// This step is technically optional, but first we attempt to

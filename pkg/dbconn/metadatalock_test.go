@@ -175,7 +175,7 @@ func TestMetadataLockLength(t *testing.T) {
 	defer utils.CloseAndLog(mdl)
 
 	_, err = NewMetadataLock(t.Context(), testutils.DSN(), empty, NewDBConfig(), logger)
-	require.ErrorContains(t, err, "no tables provided for metadata lock")
+	require.ErrorContains(t, err, "no tables provided for advisory lock")
 }
 
 // simulateConnectionClose simulates a temporary network issue by closing the connection
