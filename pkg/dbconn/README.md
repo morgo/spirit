@@ -27,7 +27,7 @@ There are two important safety constraints:
 
 ## Metadata Lock
 
-`MetadataLock` provides an advisory locking mechanism using MySQL's `GET_LOCK()` function. It runs on a dedicated single-connection database pool with a background goroutine that periodically refreshes the lock. If the connection drops, it automatically reconnects and re-acquires locks.
+`AdvisoryLock` provides an advisory locking mechanism using MySQL's `GET_LOCK()` function. It runs on a dedicated single-connection database pool with a background goroutine that periodically refreshes the lock. If the connection drops, it automatically reconnects and re-acquires locks.
 
 Lock names are deterministic hashes of `schema.table`, truncated with a SHA1 suffix to fit MySQL's 64-character limit for lock names. This is used to prevent concurrent Spirit migrations on the same table.
 

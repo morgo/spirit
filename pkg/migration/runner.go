@@ -284,7 +284,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// preflight illegalClause check also rejects these clauses, but it
 	// only runs after the direct DDL attempt has already failed, which is
 	// too late to protect this path. This is a pure parse-level check, so
-	// it runs before any table introspection or metadata locking.
+	// it runs before any table introspection or advisory locking.
 	for _, change := range r.changes {
 		if !change.stmt.IsAlterTable() {
 			continue // the check only applies to ALTER TABLE statements
@@ -303,7 +303,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		tables = append(tables, change.table)
 	}
 
-	// Take a single metadata lock for all tables to prevent concurrent DDL.
+	// Take a single advisory lock for all tables to prevent concurrent DDL.
 	// This uses a single DB connection instead of one per table.
 	// We release the lock when this function finishes executing.
 	//
@@ -313,11 +313,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	// one _spirit_checkpoint/_spirit_sentinel per schema, so only one may run
 	// per schema at a time. Single-table migrations skip it and may run
 	// concurrently (serialized per-table by the table locks above).
-	var mdlOpts []func(*dbconn.MetadataLock)
+	var lockOpts []func(*dbconn.AdvisoryLock)
 	if len(r.changes) > 1 {
-		mdlOpts = append(mdlOpts, dbconn.WithMultiTableSchemaLock(r.changes[0].table.SchemaName))
+		lockOpts = append(lockOpts, dbconn.WithMultiTableSchemaLock(r.changes[0].table.SchemaName))
 	}
-	lock, err := dbconn.NewMetadataLock(ctx, r.dsn(), tables, r.dbConfig, r.logger, mdlOpts...)
+	lock, err := dbconn.NewAdvisoryLock(ctx, r.dsn(), tables, r.dbConfig, r.logger, lockOpts...)
 	if err != nil {
 		if len(r.changes) > 1 {
 			return fmt.Errorf("could not start atomic multi-table migration (another one may already be running in schema %q, or one of its tables is busy): %w", r.changes[0].table.SchemaName, err)
@@ -328,7 +328,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Release the lock
 	defer func() {
 		if err := lock.Close(); err != nil {
-			r.logger.Error("failed to release metadata lock", "error", err)
+			r.logger.Error("failed to release advisory lock", "error", err)
 		}
 	}()
 	// This step is technically optional, but first we attempt to

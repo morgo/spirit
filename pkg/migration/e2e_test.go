@@ -360,7 +360,7 @@ func TestPreventConcurrentRuns(t *testing.T) {
 	err := m2.Run(t.Context())
 	defer utils.CloseAndLog(m2)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "could not acquire metadata lock")
+	require.ErrorContains(t, err, "could not acquire advisory lock")
 
 	m.Cancel()
 	wg.Wait()
