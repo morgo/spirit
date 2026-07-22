@@ -355,15 +355,7 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 	// If any copyRows tasks take 5x the target size we reduce immediately
 	// and don't wait for more feedback.
 	if d > t.ChunkerTarget*DynamicPanicFactor {
-		newTarget := uint64(float64(t.chunkSize) / float64(DynamicPanicFactor*2))
-		t.logger.Info("high chunk processing time",
-			"time", d,
-			"threshold", t.ChunkerTarget*DynamicPanicFactor,
-			"target-rows", t.chunkSize,
-			"target-ms", t.ChunkerTarget,
-			"new-target-rows", newTarget,
-		)
-		t.updateChunkerTarget(newTarget)
+		t.panicShrink(t.logger, d)
 		return
 	}
 
