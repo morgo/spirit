@@ -1213,26 +1213,26 @@ func TestPrimaryKeyLinter_ExistingTable_Warning(t *testing.T) {
 	require.Equal(t, "legacy_table", violations[0].Location.Table)
 }
 
-// TestPrimaryKeyLinter_AlterFixesLegacyVarcharPK reproduces the app_slugs case:
-// an existing table has a VARCHAR primary key, and the ALTER introduces a new
-// BIGINT AUTO_INCREMENT id, drops the old PK, and promotes id to PRIMARY KEY.
-// The linter evaluates the post-state (PK is now id BIGINT), so it must NOT
-// emit a false positive against the pre-state VARCHAR PK.
+// TestPrimaryKeyLinter_AlterFixesLegacyVarcharPK covers a common "add a
+// surrogate key" migration: an existing table has a VARCHAR primary key, and
+// the ALTER introduces a new BIGINT AUTO_INCREMENT id, drops the old PK, and
+// promotes id to PRIMARY KEY. The linter evaluates the post-state (PK is now id
+// BIGINT), so it must NOT emit a false positive against the pre-state VARCHAR PK.
 func TestPrimaryKeyLinter_AlterFixesLegacyVarcharPK(t *testing.T) {
-	existing := `CREATE TABLE app_slugs (
+	existing := `CREATE TABLE slugs (
 		slug varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
-		app_id bigint NOT NULL,
+		owner_id bigint NOT NULL,
 		PRIMARY KEY (slug),
-		UNIQUE KEY unq_app_slugs_app_id (app_id)
+		UNIQUE KEY unq_slugs_owner_id (owner_id)
 	)`
 	ct, err := statement.ParseCreateTable(existing)
 	require.NoError(t, err)
 
-	alter := "ALTER TABLE app_slugs " +
+	alter := "ALTER TABLE slugs " +
 		"ADD COLUMN id bigint NOT NULL AUTO_INCREMENT FIRST, " +
 		"DROP PRIMARY KEY, " +
 		"ADD PRIMARY KEY(id), " +
-		"ADD UNIQUE unq_app_slugs_slug(slug)"
+		"ADD UNIQUE unq_slugs_slug(slug)"
 	stmts, err := statement.New(alter)
 	require.NoError(t, err)
 
