@@ -1212,3 +1212,56 @@ func TestPrimaryKeyLinter_ExistingTable_Warning(t *testing.T) {
 	require.Contains(t, violations[0].Message, "Primary key column")
 	require.Equal(t, "legacy_table", violations[0].Location.Table)
 }
+
+// TestPrimaryKeyLinter_AlterFixesLegacyVarcharPK reproduces the app_slugs case:
+// an existing table has a VARCHAR primary key, and the ALTER introduces a new
+// BIGINT AUTO_INCREMENT id, drops the old PK, and promotes id to PRIMARY KEY.
+// The linter evaluates the post-state (PK is now id BIGINT), so it must NOT
+// emit a false positive against the pre-state VARCHAR PK.
+func TestPrimaryKeyLinter_AlterFixesLegacyVarcharPK(t *testing.T) {
+	existing := `CREATE TABLE app_slugs (
+		slug varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+		app_id bigint NOT NULL,
+		PRIMARY KEY (slug),
+		UNIQUE KEY unq_app_slugs_app_id (app_id)
+	)`
+	ct, err := statement.ParseCreateTable(existing)
+	require.NoError(t, err)
+
+	alter := "ALTER TABLE app_slugs " +
+		"ADD COLUMN id bigint NOT NULL AUTO_INCREMENT FIRST, " +
+		"DROP PRIMARY KEY, " +
+		"ADD PRIMARY KEY(id), " +
+		"ADD UNIQUE unq_app_slugs_slug(slug)"
+	stmts, err := statement.New(alter)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	require.Empty(t, violations)
+}
+
+// TestPrimaryKeyLinter_AlterToBadPKType is the inverse: an ALTER that swaps the
+// PK to a newly added VARCHAR column is a violation, and because the column is
+// added by the changeset it carries Error severity (not the legacy Warning).
+func TestPrimaryKeyLinter_AlterToBadPKType(t *testing.T) {
+	existing := `CREATE TABLE t (id bigint NOT NULL, PRIMARY KEY (id))`
+	ct, err := statement.ParseCreateTable(existing)
+	require.NoError(t, err)
+
+	alter := "ALTER TABLE t " +
+		"ADD COLUMN code varchar(64) NOT NULL, " +
+		"DROP PRIMARY KEY, " +
+		"ADD PRIMARY KEY(code)"
+	stmts, err := statement.New(alter)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyLinter{}
+	violations := linter.Lint([]*statement.CreateTable{ct}, stmts)
+
+	require.Len(t, violations, 1)
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, `Primary key column "code" has type "varchar"`)
+	require.Equal(t, "t", violations[0].Location.Table)
+}
