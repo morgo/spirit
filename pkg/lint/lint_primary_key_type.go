@@ -129,7 +129,12 @@ func (l *PrimaryKeyLinter) checkTable(ct *statement.CreateTable, pre map[string]
 
 	// Check each primary key column's type
 	for _, pkCol := range pkColumns {
-		column := ct.GetColumns().ByName(pkCol)
+		// MySQL column identifiers are case-insensitive, and the PK column
+		// name here can come from a source (a table-level PRIMARY KEY(...)
+		// clause, or an ALTER spec in post-state) whose letter-case differs
+		// from the column definition. Resolve case-insensitively so the type
+		// check isn't silently skipped (false negative).
+		column := columnByNameFold(ct.GetColumns(), pkCol)
 		if column == nil {
 			continue
 		}
@@ -175,6 +180,18 @@ func (l *PrimaryKeyLinter) getPrimaryKeyColumnsFromIndexes(ct *statement.CreateT
 	}
 
 	return pkColumns
+}
+
+// columnByNameFold resolves a column by name case-insensitively, matching
+// MySQL's case-insensitive column identifiers. It returns nil if no column
+// matches.
+func columnByNameFold(columns statement.Columns, name string) *statement.Column {
+	for i := range columns {
+		if strings.EqualFold(columns[i].Name, name) {
+			return &columns[i]
+		}
+	}
+	return nil
 }
 
 // checkColumnType checks if a primary key column has an appropriate type

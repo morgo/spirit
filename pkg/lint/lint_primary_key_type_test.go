@@ -1265,3 +1265,21 @@ func TestPrimaryKeyLinter_AlterToBadPKType(t *testing.T) {
 	require.Contains(t, violations[0].Message, `Primary key column "code" has type "varchar"`)
 	require.Equal(t, "t", violations[0].Location.Table)
 }
+
+// TestPrimaryKeyLinter_PKColumnCaseMismatch verifies that a PK column is
+// resolved case-insensitively: the column is defined as `Slug` but the
+// table-level PRIMARY KEY() clause references `slug`. MySQL accepts this, so the
+// varchar PK type must still be flagged rather than silently skipped.
+func TestPrimaryKeyLinter_PKColumnCaseMismatch(t *testing.T) {
+	sql := "CREATE TABLE t (Slug varchar(255) NOT NULL, PRIMARY KEY(slug))"
+	stmts, err := statement.New(sql)
+	require.NoError(t, err)
+
+	linter := &PrimaryKeyLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	require.Equal(t, SeverityError, violations[0].Severity)
+	require.Contains(t, violations[0].Message, "has type")
+	require.Equal(t, "t", violations[0].Location.Table)
+}
