@@ -1,6 +1,9 @@
 package table
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // dynamicChunkSizer holds the time-based chunk-sizing state shared by the
 // optimistic and composite chunkers. The chunker target is "spend
@@ -15,6 +18,49 @@ type dynamicChunkSizer struct {
 	chunkTimingInfo       []time.Duration
 	ChunkerTarget         time.Duration // e.g. 500ms target per chunk
 	disableDynamicChunker bool          // only used by the test suite
+	// pinnedAtFloor records that we have already warned about the chunk size
+	// being stuck at MinDynamicRowSize. It suppresses the per-chunk
+	// "high chunk processing time" log once shrinking is no longer possible,
+	// and is re-armed by updateChunkerTarget once the chunk size climbs back
+	// above the floor. See panicShrink.
+	pinnedAtFloor bool
+}
+
+// panicShrink reacts to a chunk whose processing time blew past the panic
+// threshold (ChunkerTarget*DynamicPanicFactor) by shrinking the chunk size
+// immediately, without waiting to accumulate more feedback.
+//
+// The per-chunk "high chunk processing time" line is only emitted while the
+// chunk size can still shrink. Once the chunk size is already at
+// MinDynamicRowSize, the recalculated target clamps straight back to the floor
+// and the message becomes unactionable — yet copiers call Feedback once per
+// chunk, so it would otherwise repeat for every chunk of the table (tens of
+// millions of identical lines on a wide-row table, enough to overflow a
+// downstream log store). At the floor we instead emit a single Warn describing
+// the real condition and suppress further lines until we climb back off the
+// floor. Caller must hold the chunker's mutex.
+func (d *dynamicChunkSizer) panicShrink(logger *slog.Logger, dur time.Duration) {
+	newTarget := uint64(float64(d.chunkSize) / float64(DynamicPanicFactor*2))
+	if d.chunkSize <= MinDynamicRowSize {
+		if !d.pinnedAtFloor {
+			logger.Warn("chunk size pinned at minimum; rows may be too wide to meet target-chunk-time",
+				"time", dur,
+				"threshold", d.ChunkerTarget*DynamicPanicFactor,
+				"min-rows", MinDynamicRowSize,
+				"target-ms", d.ChunkerTarget,
+			)
+			d.pinnedAtFloor = true
+		}
+	} else {
+		logger.Info("high chunk processing time",
+			"time", dur,
+			"threshold", d.ChunkerTarget*DynamicPanicFactor,
+			"target-rows", d.chunkSize,
+			"target-ms", d.ChunkerTarget,
+			"new-target-rows", newTarget,
+		)
+	}
+	d.updateChunkerTarget(newTarget)
 }
 
 // updateChunkerTarget applies a recalculated row target after clamping
@@ -24,6 +70,11 @@ type dynamicChunkSizer struct {
 // the chunker's mutex.
 func (d *dynamicChunkSizer) updateChunkerTarget(newTarget uint64) {
 	d.chunkSize = d.boundaryCheckTargetChunkSize(newTarget)
+	// Re-arm the pinned-at-floor warning once we successfully climb back above
+	// the minimum, so a later relapse is reported again. See panicShrink.
+	if d.chunkSize > MinDynamicRowSize {
+		d.pinnedAtFloor = false
+	}
 	d.chunkTimingInfo = []time.Duration{}
 }
 
