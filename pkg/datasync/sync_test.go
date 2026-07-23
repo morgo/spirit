@@ -76,7 +76,7 @@ func TestNewRunnerValidation(t *testing.T) {
 // --target-chunk-size to table.DefaultTargetChunkBytes (the Kong tag must be a
 // literal, so this guards against drift from the constant).
 func TestSyncTargetChunkSizeKongDefault(t *testing.T) {
-	field, ok := reflect.TypeOf(Sync{}).FieldByName("TargetChunkSize")
+	field, ok := reflect.TypeFor[Sync]().FieldByName("TargetChunkSize")
 	require.True(t, ok)
 	require.Equal(t,
 		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),

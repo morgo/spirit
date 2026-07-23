@@ -431,7 +431,7 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 // backs the zero-value default in normalizeOptions).
 func TestTargetChunkSizeKongDefault(t *testing.T) {
 	t.Parallel()
-	field, ok := reflect.TypeOf(Migration{}).FieldByName("TargetChunkSize")
+	field, ok := reflect.TypeFor[Migration]().FieldByName("TargetChunkSize")
 	require.True(t, ok)
 	require.Equal(t,
 		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),

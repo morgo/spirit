@@ -49,8 +49,8 @@ type Sync struct {
 	// buffered copier. A zero value means "use the default" (the runner fills it
 	// in). The Kong default below must stay equal to table.DefaultTargetChunkBytes.
 	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes)." default:"16777216"`
-	Threads         int           `name:"threads" help:"How many chunks to copy in parallel during the initial copy." default:"4"`
-	WriteThreads    int           `name:"write-threads" help:"How many concurrent write threads to use on the target." default:"4"`
+	Threads         int    `name:"threads" help:"How many chunks to copy in parallel during the initial copy." default:"4"`
+	WriteThreads    int    `name:"write-threads" help:"How many concurrent write threads to use on the target." default:"4"`
 	// FlushInterval controls how often buffered changes are applied to the
 	// target during continuous sync — i.e. the replication latency vs.
 	// batching trade-off. Defaults to change.DefaultFlushInterval.

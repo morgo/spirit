@@ -44,7 +44,7 @@ func TestMoveTargetChunkSizeDefault(t *testing.T) {
 // literal, so this guards against drift from the constant).
 func TestMoveTargetChunkSizeKongDefault(t *testing.T) {
 	t.Parallel()
-	field, ok := reflect.TypeOf(Move{}).FieldByName("TargetChunkSize")
+	field, ok := reflect.TypeFor[Move]().FieldByName("TargetChunkSize")
 	require.True(t, ok)
 	require.Equal(t,
 		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
