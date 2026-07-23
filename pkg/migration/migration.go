@@ -49,6 +49,14 @@ type Migration struct {
 	// read + applier-queue-wait + write/commit — a signal that is
 	// size-independent under backpressure and collapses the chunk size.
 	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"Target time per chunk for the checksum and the legacy --unbuffered copier. The default buffered copier ignores it and sizes chunks by memory." optional:"" default:"500ms"`
+	// TargetChunkSize is the in-memory byte budget the default buffered copier
+	// sizes each copy chunk against (the memory signal; see
+	// table.DefaultTargetChunkBytes and pkg/table/README.md). It has no effect
+	// with --unbuffered, which sizes copy chunks by --target-chunk-time. A zero
+	// value means "use the default" (normalizeOptions fills it in), so callers
+	// that construct Migration programmatically don't have to set it.
+	// The Kong default below must stay equal to table.DefaultTargetChunkBytes.
+	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk for the default buffered copier (in bytes). No effect with --unbuffered." optional:"" default:"16777216"`
 	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
 	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles. If lag becomes unobservable (lag polling keeps failing) the migration pauses (fails closed) until polling recovers; remove --replica-dsn to proceed without lag protection." optional:"" default:"120s"`
 	LockWaitTimeout      time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
@@ -145,6 +153,9 @@ func (m *Migration) Run() error {
 func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, err error) {
 	if m.TargetChunkTime == 0 {
 		m.TargetChunkTime = table.ChunkerDefaultTarget
+	}
+	if m.TargetChunkSize == 0 {
+		m.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
 	if m.Threads == 0 {
 		m.Threads = 4

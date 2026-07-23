@@ -1458,7 +1458,7 @@ func (r *Runner) initChunkers() error {
 		// --unbuffered copier keeps the time signal (TargetChunkBytes == 0).
 		copyChunkerCfg := chunkerCfg
 		if !r.migration.Unbuffered {
-			copyChunkerCfg.TargetChunkBytes = table.DefaultTargetChunkBytes
+			copyChunkerCfg.TargetChunkBytes = r.migration.TargetChunkSize
 		}
 		var err error
 		change.chunker, err = table.NewChunker(change.table, copyChunkerCfg)

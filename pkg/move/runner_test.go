@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +27,30 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMoveTargetChunkSizeDefault verifies that a zero TargetChunkSize (callers
+// that construct Move programmatically, bypassing the Kong default) is filled
+// in by NewRunner with the buffered-copier byte budget, so the copy chunker is
+// never accidentally left on the time signal.
+func TestMoveTargetChunkSizeDefault(t *testing.T) {
+	t.Parallel()
+	r, err := NewRunner(&Move{})
+	require.NoError(t, err)
+	require.Equal(t, uint64(table.DefaultTargetChunkBytes), r.move.TargetChunkSize)
+}
+
+// TestMoveTargetChunkSizeKongDefault pins the hardcoded Kong default on
+// --target-chunk-size to table.DefaultTargetChunkBytes (the Kong tag must be a
+// literal, so this guards against drift from the constant).
+func TestMoveTargetChunkSizeKongDefault(t *testing.T) {
+	t.Parallel()
+	field, ok := reflect.TypeOf(Move{}).FieldByName("TargetChunkSize")
+	require.True(t, ok)
+	require.Equal(t,
+		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
+		field.Tag.Get("default"),
+		"Kong default for --target-chunk-size must equal table.DefaultTargetChunkBytes")
+}
 
 // TestMoveWithConcurrentWrites verifies move behavior under lots of concurrent
 // writes, exercising both deferred and non-deferred secondary indexes and

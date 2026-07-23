@@ -14,6 +14,11 @@ type Move struct {
 	SourceDSN             string        `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
 	TargetDSN             string        `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
 	TargetChunkTime       time.Duration `name:"target-chunk-time" help:"Target time for each checksum chunk. The copy phase is sized by an in-memory byte budget and does not use this." default:"5s"`
+	// TargetChunkSize is the in-memory byte budget the buffered copier sizes each
+	// copy chunk against (see table.DefaultTargetChunkBytes). Move always uses the
+	// buffered copier. A zero value means "use the default" (NewRunner fills it
+	// in). The Kong default below must stay equal to table.DefaultTargetChunkBytes.
+	TargetChunkSize uint64 `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes)." default:"16777216"`
 	Threads               int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
 	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" default:"4"`
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the first target database to block after table copy" default:"false"`

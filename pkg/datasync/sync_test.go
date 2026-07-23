@@ -3,6 +3,8 @@ package datasync
 import (
 	"context"
 	"database/sql"
+	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/status"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
@@ -65,7 +68,20 @@ func TestNewRunnerValidation(t *testing.T) {
 	require.Equal(t, 4, r.sync.Threads)
 	require.Equal(t, 4, r.sync.WriteThreads)
 	require.Equal(t, 5*time.Second, r.sync.TargetChunkTime)
+	require.Equal(t, uint64(table.DefaultTargetChunkBytes), r.sync.TargetChunkSize)
 	require.Positive(t, r.sync.FlushInterval)
+}
+
+// TestSyncTargetChunkSizeKongDefault pins the hardcoded Kong default on
+// --target-chunk-size to table.DefaultTargetChunkBytes (the Kong tag must be a
+// literal, so this guards against drift from the constant).
+func TestSyncTargetChunkSizeKongDefault(t *testing.T) {
+	field, ok := reflect.TypeOf(Sync{}).FieldByName("TargetChunkSize")
+	require.True(t, ok)
+	require.Equal(t,
+		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
+		field.Tag.Get("default"),
+		"Kong default for --target-chunk-size must equal table.DefaultTargetChunkBytes")
 }
 
 // TestSyncE2E drives the full sync lifecycle against a local MySQL using

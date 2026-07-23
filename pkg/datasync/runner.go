@@ -149,6 +149,9 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.TargetChunkTime <= 0 {
 		s.TargetChunkTime = 5 * time.Second
 	}
+	if s.TargetChunkSize == 0 {
+		s.TargetChunkSize = table.DefaultTargetChunkBytes
+	}
 	if s.FlushInterval <= 0 {
 		s.FlushInterval = change.DefaultFlushInterval
 	}
@@ -1045,7 +1048,7 @@ func (r *Runner) buildChunkers() ([]table.Chunker, error) {
 		// continuous checksum runs server-side and keeps the time signal.
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
 			TargetChunkTime:  r.sync.TargetChunkTime,
-			TargetChunkBytes: table.DefaultTargetChunkBytes,
+			TargetChunkBytes: r.sync.TargetChunkSize,
 			Logger:           r.logger,
 		})
 		if err != nil {

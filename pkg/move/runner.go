@@ -170,6 +170,9 @@ func NewRunner(m *Move) (*Runner, error) {
 	if m.CheckpointMaxAge == 0 {
 		m.CheckpointMaxAge = 7 * 24 * time.Hour // 7 days, same as migrate
 	}
+	if m.TargetChunkSize == 0 {
+		m.TargetChunkSize = table.DefaultTargetChunkBytes
+	}
 	r := &Runner{
 		move:   m,
 		logger: slog.Default(),
@@ -363,7 +366,7 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 			// copy time, whose signal collapses under write-side backpressure. The
 			// checksum runs server-side and keeps the time signal.
 			copyChunkerCfg := chunkerCfg
-			copyChunkerCfg.TargetChunkBytes = table.DefaultTargetChunkBytes
+			copyChunkerCfg.TargetChunkBytes = r.move.TargetChunkSize
 			copyChunker, err := table.NewChunker(tbl, copyChunkerCfg)
 			if err != nil {
 				return err
@@ -884,7 +887,7 @@ func (r *Runner) newCopy(ctx context.Context) error {
 			// copy time, whose signal collapses under write-side backpressure. The
 			// checksum runs server-side and keeps the time signal.
 			copyChunkerCfg := chunkerCfg
-			copyChunkerCfg.TargetChunkBytes = table.DefaultTargetChunkBytes
+			copyChunkerCfg.TargetChunkBytes = r.move.TargetChunkSize
 			copyChunker, err := table.NewChunker(tbl, copyChunkerCfg)
 			if err != nil {
 				return err
