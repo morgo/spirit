@@ -25,6 +25,17 @@ const (
 
 	// ChunkerDefaultTarget is the default chunker target
 	ChunkerDefaultTarget = 100 * time.Millisecond
+
+	// DefaultTargetChunkBytes is the in-memory byte budget the buffered copier
+	// sizes each chunk against (see dynamicChunkSizer.TargetChunkBytes). The
+	// buffered copier reads a whole chunk into client memory before the applier
+	// flushes it, so this bounds that footprint while the servo keeps chunks
+	// large enough to amortize per-chunk overhead. 2 MiB reproduces roughly the
+	// chunk sizes the pre-buffered (v0.11) copier settled on for a typical wide
+	// table (~1-2k rows), while adapting the row count to the table's row width.
+	// Unlike the time budget, this is load-independent, so it does not collapse
+	// under write-side backpressure. Tunable; a real-workload sweep may revise it.
+	DefaultTargetChunkBytes = 2 * 1024 * 1024
 )
 
 type Chunker interface {
@@ -69,6 +80,13 @@ type ChunkerConfig struct {
 	NewTable *TableInfo
 	// TargetChunkTime is the target duration for each chunk. Defaults to ChunkerDefaultTarget.
 	TargetChunkTime time.Duration
+	// TargetChunkBytes, when non-zero, switches the dynamic chunker from the
+	// wall-clock signal to an in-memory byte-budget signal (the buffered-copier
+	// default, table.DefaultTargetChunkBytes). Only meaningful for the buffered
+	// copier, which reads full rows into memory; the unbuffered and checksum
+	// paths never see row bytes and keep the time signal. See
+	// dynamicChunkSizer.TargetChunkBytes.
+	TargetChunkBytes uint64
 	// Logger is the structured logger. Defaults to slog.Default().
 	Logger *slog.Logger
 	// ColumnMapping describes the column relationship between source and target tables,
@@ -108,7 +126,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 			Ti:                t,
 			NewTi:             newTable,
 			columnMapping:     config.ColumnMapping,
-			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, TargetChunkBytes: config.TargetChunkBytes},
 			watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 			logger:            config.Logger,
 		}, nil

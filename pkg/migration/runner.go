@@ -1450,8 +1450,18 @@ func (r *Runner) initChunkers() error {
 			Logger:          r.logger,
 			ColumnMapping:   columnMapping,
 		}
+		// The buffered copier (the default) sizes chunks by an in-memory byte
+		// budget rather than copy time — the only path that reads rows into
+		// client memory, and the one whose time signal collapses under
+		// backpressure. This applies to the copy chunker only: the checksum
+		// runs server-side CRC and keeps the time signal. The legacy
+		// --unbuffered copier keeps the time signal (TargetChunkBytes == 0).
+		copyChunkerCfg := chunkerCfg
+		if !r.migration.Unbuffered {
+			copyChunkerCfg.TargetChunkBytes = table.DefaultTargetChunkBytes
+		}
 		var err error
-		change.chunker, err = table.NewChunker(change.table, chunkerCfg)
+		change.chunker, err = table.NewChunker(change.table, copyChunkerCfg)
 		if err != nil {
 			return err
 		}

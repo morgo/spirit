@@ -147,3 +147,108 @@ func TestPanicShrinkReArmsAfterRecovery(t *testing.T) {
 
 	require.Equal(t, 2, h.counts[pinnedMsg], "relapse must warn again")
 }
+
+// TestFeedbackBytesConverges shows the memory signal doing what the time
+// signal cannot under buffered-copier backpressure: converge. bytes/row is a
+// stable property of the data, so feeding a constant per-row size drives the
+// row-count toward TargetChunkBytes/bytesPerRow (here 1MiB / ~200B ≈ 5000),
+// clamped by the 1.5x-per-step growth cap.
+func TestFeedbackBytesConverges(t *testing.T) {
+	logger := slog.New(newCountingHandler())
+	const bytesPerRow = 200
+	const targetBytes = 1 << 20 // 1 MiB
+	d := &dynamicChunkSizer{
+		chunkSize:        StartingChunkSize,
+		ChunkerTarget:    500 * time.Millisecond,
+		TargetChunkBytes: targetBytes,
+	}
+	for range 200 {
+		// A chunk of chunkSize rows weighs chunkSize*bytesPerRow, independent of
+		// any load on the server — that is the whole point.
+		d.feedbackBytes(logger, d.chunkSize*bytesPerRow)
+	}
+	want := uint64(targetBytes / bytesPerRow)
+	require.InEpsilon(t, want, d.chunkSize, 0.2,
+		"row-count should converge to the byte budget divided by bytes/row")
+	require.False(t, d.pinnedAtFloor, "a healthy byte signal must never pin at the floor")
+}
+
+// TestByteSignalIgnoresInflatedTime is the RCA thesis in a unit test. The same
+// stream of chunks is fed to two sizers. Both see wildly inflated, size-
+// INDEPENDENT wall-clock times (as the buffered copier does when write workers
+// back up). The time sizer panics to the row floor; the byte sizer, fed the
+// real per-row size, holds a healthy chunk size — because the inflated time
+// never reaches it.
+func TestByteSignalIgnoresInflatedTime(t *testing.T) {
+	logger := slog.New(newCountingHandler())
+	const target = 500 * time.Millisecond
+	// A queue-wait-dominated time, well past the 2.5s panic threshold, that does
+	// NOT shrink when the chunk shrinks (size-independent).
+	inflated := 3 * time.Second
+
+	timeSizer := &dynamicChunkSizer{chunkSize: StartingChunkSize, ChunkerTarget: target}
+	byteSizer := &dynamicChunkSizer{chunkSize: StartingChunkSize, ChunkerTarget: target, TargetChunkBytes: 1 << 20}
+	for range 20 {
+		timeSizer.feedbackTime(logger, inflated, nil)
+		byteSizer.feedbackBytes(logger, byteSizer.chunkSize*200) // ~200B/row, well under the byte panic threshold
+	}
+
+	require.Equal(t, uint64(MinDynamicRowSize), timeSizer.chunkSize,
+		"inflated size-independent time collapses the time sizer to the floor (the bug)")
+	require.Greater(t, byteSizer.chunkSize, uint64(StartingChunkSize),
+		"the byte sizer never sees the inflated time, so it stays healthy")
+}
+
+const highBytesMsg = "INFO:high chunk memory size"
+const pinnedBytesMsg = "WARN:chunk size pinned at minimum; rows may be too wide to meet target-chunk-bytes"
+
+// TestFeedbackBytesSkipsEmptyChunks verifies that an empty (gap) chunk, which
+// reports zero bytes, is not fed to the byte p90 — it carries no size signal
+// and must not perturb the chunk size or the history.
+func TestFeedbackBytesSkipsEmptyChunks(t *testing.T) {
+	logger := slog.New(newCountingHandler())
+	d := &dynamicChunkSizer{chunkSize: 1000, ChunkerTarget: 500 * time.Millisecond, TargetChunkBytes: 1 << 20}
+
+	for range 50 {
+		d.feedbackBytes(logger, 0)
+	}
+	require.Equal(t, uint64(1000), d.chunkSize, "empty chunks must not move the chunk size")
+	require.Empty(t, d.chunkByteInfo, "empty chunks must not accumulate byte history")
+}
+
+// TestPanicShrinkBytesAboveFloorLogs verifies the byte panic path: a single
+// chunk whose in-memory size blows past TargetChunkBytes*DynamicPanicFactor
+// shrinks the chunk size immediately and logs the per-shrink line, mirroring
+// the time-signal panicShrink.
+func TestPanicShrinkBytesAboveFloorLogs(t *testing.T) {
+	h := newCountingHandler()
+	const targetBytes = 1 << 20
+	d := &dynamicChunkSizer{chunkSize: 1000, ChunkerTarget: 500 * time.Millisecond, TargetChunkBytes: targetBytes}
+
+	// A chunk 6x the byte budget (> DynamicPanicFactor) trips the panic path.
+	d.feedbackBytes(slog.New(h), targetBytes*6)
+
+	require.Equal(t, uint64(100), d.chunkSize,
+		"newTarget = 1000/(DynamicPanicFactor*2) = 100, still above the floor")
+	require.Equal(t, 1, h.counts[highBytesMsg], "should log the byte shrink once")
+	require.Zero(t, h.counts[pinnedBytesMsg], "not at the floor yet")
+	require.False(t, d.pinnedAtFloor)
+}
+
+// TestPanicShrinkBytesAtFloorSuppressesFlood is the byte-signal twin of the
+// log-flood regression test: once pinned at MinDynamicRowSize, repeated
+// oversized-byte feedback must emit exactly one Warn, not one per chunk.
+func TestPanicShrinkBytesAtFloorSuppressesFlood(t *testing.T) {
+	h := newCountingHandler()
+	logger := slog.New(h)
+	const targetBytes = 1 << 20
+	d := &dynamicChunkSizer{chunkSize: MinDynamicRowSize, ChunkerTarget: 500 * time.Millisecond, TargetChunkBytes: targetBytes}
+
+	for range 10_000 {
+		d.feedbackBytes(logger, targetBytes*6)
+	}
+
+	require.Equal(t, uint64(MinDynamicRowSize), d.chunkSize, "stays pinned at the floor")
+	require.Zero(t, h.counts[highBytesMsg], "no per-chunk Info line once at the floor")
+	require.Equal(t, 1, h.counts[pinnedBytesMsg], "exactly one Warn for the whole stuck period")
+}

@@ -378,36 +378,36 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 		return
 	}
 
-	// If any copyRows tasks take 5x the target size we reduce immediately
-	// and don't wait for more feedback.
-	if d > t.ChunkerTarget*DynamicPanicFactor {
-		t.panicShrink(t.logger, d)
+	// Size the next chunk against a byte budget when configured (buffered
+	// copier). The byte path has no analogue to the prefetch-mode switch,
+	// which is a property of the auto-increment key space, not the signal.
+	if t.TargetChunkBytes > 0 {
+		t.feedbackBytes(t.logger, chunk.ActualBytes)
 		return
 	}
+	// Otherwise use the shared time-based sizer, injecting the optimistic
+	// chunker's prefetch-mode switch as the pre-update hook.
+	t.feedbackTime(t.logger, d, t.maybeSwitchToPrefetch)
+}
 
-	// Add feedback to the list.
-	t.chunkTimingInfo = append(t.chunkTimingInfo, d)
-
-	// We have enough feedback to re-evaluate the chunk size.
-	if len(t.chunkTimingInfo) > 10 {
-		newTarget, p90 := t.calculateNewTargetChunkSize()
-		// Optimistic-specific: switch to prefetch chunking if we're already at
-		// the max chunk size, the next target wants to go higher still, and
-		// the p90 is only a fraction of our target time. The composite
-		// chunker has no analogous mode so this lives at the chunker rather
-		// than in dynamicChunkSizer.
-		if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90*5 < t.ChunkerTarget {
-			t.logger.Warn("dynamic chunking is not working as expected",
-				"target-time", t.ChunkerTarget,
-				"p90-time", p90,
-				"new-target-rows", newTarget,
-				"max-dynamic-row-size", MaxDynamicRowSize,
-			)
-			t.logger.Warn("switching to prefetch algorithm")
-			t.chunkSize = StartingChunkSize // reset
-			t.chunkPrefetchingEnabled = true
-		}
-		t.updateChunkerTarget(newTarget)
+// maybeSwitchToPrefetch is the optimistic chunker's pre-update hook for the
+// shared time-based sizer (dynamicChunkSizer.feedbackTime). When the sizer is
+// already at the max chunk size and still wants to grow while the p90 is only a
+// small fraction of the target time, the auto-increment key space has large
+// gaps — so switch to the prefetch algorithm (which finds boundaries by query)
+// instead of growing the row target further. The composite chunker has no
+// analogous mode. Caller (feedbackTime) holds the chunker's mutex.
+func (t *chunkerOptimistic) maybeSwitchToPrefetch(newTarget uint64, p90 time.Duration) {
+	if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90*5 < t.ChunkerTarget {
+		t.logger.Warn("dynamic chunking is not working as expected",
+			"target-time", t.ChunkerTarget,
+			"p90-time", p90,
+			"new-target-rows", newTarget,
+			"max-dynamic-row-size", MaxDynamicRowSize,
+		)
+		t.logger.Warn("switching to prefetch algorithm")
+		t.chunkSize = StartingChunkSize // reset
+		t.chunkPrefetchingEnabled = true
 	}
 }
 

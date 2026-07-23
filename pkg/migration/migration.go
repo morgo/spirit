@@ -41,17 +41,22 @@ type Migration struct {
 	// by throttler feedback; WriteThreads becomes the starting value and the
 	// cap is fixed at 2x that (deliberately not configurable for now, to keep
 	// the experimental surface small). See issue #831.
-	EnableExperimentalAutoscaling bool          `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
-	TargetChunkTime               time.Duration `name:"target-chunk-time" help:"The target copy time for each chunk" optional:"" default:"500ms"`
-	ReplicaDSN                    string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
-	ReplicaMaxLag                 time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles. If lag becomes unobservable (lag polling keeps failing) the migration pauses (fails closed) until polling recovers; remove --replica-dsn to proceed without lag protection." optional:"" default:"120s"`
-	LockWaitTimeout               time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
-	SkipDropAfterCutover          bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
-	DeferCutOver                  bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
-	SkipForceKill                 bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
-	Statement                     string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
-	Lint                          bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
-	LintOnly                      bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
+	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
+	// TargetChunkTime sizes chunks for the legacy --unbuffered copier only.
+	// The default buffered copier ignores it and sizes chunks by an in-memory
+	// byte budget (table.DefaultTargetChunkBytes), because its fed-back time
+	// measures read + applier-queue-wait + write/commit — a signal that is
+	// size-independent under backpressure and collapses the chunk size.
+	TargetChunkTime      time.Duration `name:"target-chunk-time" help:"Target copy time per chunk. Applies to the legacy --unbuffered copier only; the default buffered copier sizes chunks by memory." optional:"" default:"500ms"`
+	ReplicaDSN           string        `name:"replica-dsn" help:"DSN(s) for replica(s) used for lag checking. Multiple replicas can be comma-separated; Spirit throttles on the slowest." optional:""`
+	ReplicaMaxLag        time.Duration `name:"replica-max-lag" help:"The maximum lag allowed on the replica before the migration throttles. If lag becomes unobservable (lag polling keeps failing) the migration pauses (fails closed) until polling recovers; remove --replica-dsn to proceed without lag protection." optional:"" default:"120s"`
+	LockWaitTimeout      time.Duration `name:"lock-wait-timeout" help:"The DDL lock_wait_timeout required for checksum and cutover" optional:"" default:"30s"`
+	SkipDropAfterCutover bool          `name:"skip-drop-after-cutover" help:"Keep old table after completing cutover" optional:"" default:"false"`
+	DeferCutOver         bool          `name:"defer-cutover" help:"Defer cutover (and checksum) until sentinel table is dropped" optional:"" default:"false"`
+	SkipForceKill        bool          `name:"skip-force-kill" help:"Disable killing long-running transactions in order to acquire metadata lock (MDL) at checksum and cutover time" optional:"" default:"false"`
+	Statement            string        `name:"statement" help:"The SQL statement to run (replaces --table and --alter)" optional:"" default:""`
+	Lint                 bool          `name:"lint" help:"Run lint checks before running migration" optional:""`
+	LintOnly             bool          `name:"lint-only" help:"Run lint checks and exit without performing migration" optional:""`
 
 	// TLS Configuration
 	TLSMode            string `name:"tls-mode" help:"TLS connection mode (case insensitive): DISABLED, PREFERRED (default), REQUIRED, VERIFY_CA, VERIFY_IDENTITY" optional:""`

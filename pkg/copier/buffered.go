@@ -101,6 +101,43 @@ func (c *buffered) readChunkData(ctx context.Context, chunk *table.Chunk) ([][]a
 	return rowDataList, nil
 }
 
+// rowsByteSize estimates the in-memory footprint of a chunk's rows, for the
+// memory-based dynamic chunker. It is an approximation of payload size (the
+// scanned column values), not exact Go heap accounting — good enough to servo
+// chunk row-count toward a byte budget, and cheap because the rows are already
+// in hand. database/sql scans into `any`, so the concrete types are whatever
+// the driver yields (go-sql-driver/mysql: []byte, string, int64, float64,
+// bool, time.Time, or nil).
+func rowsByteSize(rows [][]any) uint64 {
+	var total uint64
+	for _, row := range rows {
+		for _, v := range row {
+			total += datumByteSize(v)
+		}
+	}
+	return total
+}
+
+// datumByteSize returns the approximate byte size of a single scanned value.
+// Variable-length values are sized by their contents; fixed-width scalars use a
+// nominal width. The exact constants matter little: the servo cares about the
+// relative size of chunks, and any consistent measure converges.
+func datumByteSize(v any) uint64 {
+	switch t := v.(type) {
+	case nil:
+		return 1
+	case []byte:
+		return uint64(len(t))
+	case string:
+		return uint64(len(t))
+	case time.Time:
+		return 16
+	default:
+		// int64, float64, bool, and other fixed-width scalars.
+		return 8
+	}
+}
+
 func (c *buffered) isHealthy(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
@@ -229,6 +266,11 @@ func (c *buffered) readWorker(ctx context.Context) error {
 			c.setInvalid(readErr)
 			return readErr
 		}
+
+		// Record the in-memory size of the rows we just read so the chunker can
+		// size the next chunk against a byte budget (memory-based dynamic
+		// chunking). Harmless when the chunker is in time mode — it ignores it.
+		chunk.ActualBytes = rowsByteSize(rows)
 
 		// Handle empty chunks immediately
 		if len(rows) == 0 {
