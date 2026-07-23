@@ -27,15 +27,23 @@ const (
 	ChunkerDefaultTarget = 100 * time.Millisecond
 
 	// DefaultTargetChunkBytes is the in-memory byte budget the buffered copier
-	// sizes each chunk against (see dynamicChunkSizer.TargetChunkBytes). The
-	// buffered copier reads a whole chunk into client memory before the applier
-	// flushes it, so this bounds that footprint while the servo keeps chunks
-	// large enough to amortize per-chunk overhead. 2 MiB reproduces roughly the
-	// chunk sizes the pre-buffered (v0.11) copier settled on for a typical wide
-	// table (~1-2k rows), while adapting the row count to the table's row width.
-	// Unlike the time budget, this is load-independent, so it does not collapse
-	// under write-side backpressure. Tunable; a real-workload sweep may revise it.
-	DefaultTargetChunkBytes = 2 * 1024 * 1024
+	// sizes each chunk against (see dynamicChunkSizer.TargetChunkBytes). Because
+	// it is a byte budget, it maps almost directly to pages read per chunk
+	// (bytes / innodb_page_size) regardless of row width — the natural unit for
+	// read-ahead. At 16 MiB a chunk is ~1024 16KB pages (~16 InnoDB extents),
+	// which sits solidly inside InnoDB linear read-ahead (innodb_read_ahead_-
+	// threshold, ~56 of 64 sequential pages per extent) and keeps Aurora's
+	// batched logical prefetch continuously engaged across the scan; a smaller
+	// budget barely warms the prefetcher before the chunk ends.
+	//
+	// Memory is not the binding constraint on this value. The hard per-read
+	// ceiling is MaxDynamicRowSize (100k rows), and the dominant steady-state
+	// term is the applier's 128-deep chunklet buffer (~128 MiB) — both
+	// independent of this budget. Raising it costs only ~concurrency × delta on
+	// the read side. Unlike the time budget, it is load-independent, so it does
+	// not collapse under write-side backpressure. Tunable; a real-workload sweep
+	// may revise it.
+	DefaultTargetChunkBytes = 16 * 1024 * 1024
 )
 
 type Chunker interface {
