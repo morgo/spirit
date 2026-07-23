@@ -13,7 +13,7 @@ import (
 type Move struct {
 	SourceDSN             string        `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
 	TargetDSN             string        `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
-	TargetChunkTime       time.Duration `name:"target-chunk-time" help:"How long each chunk should take to copy" default:"5s"`
+	TargetChunkTime       time.Duration `name:"target-chunk-time" help:"Target time for each checksum chunk. The copy phase is sized by an in-memory byte budget and does not use this." default:"5s"`
 	Threads               int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
 	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" default:"4"`
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the first target database to block after table copy" default:"false"`

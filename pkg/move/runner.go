@@ -358,7 +358,13 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 				TargetChunkTime: r.move.TargetChunkTime,
 				Logger:          r.logger,
 			}
-			copyChunker, err := table.NewChunker(tbl, chunkerCfg)
+			// Move always uses the buffered copier, which reads rows into client
+			// memory; size the copy chunker by an in-memory byte budget rather than
+			// copy time, whose signal collapses under write-side backpressure. The
+			// checksum runs server-side and keeps the time signal.
+			copyChunkerCfg := chunkerCfg
+			copyChunkerCfg.TargetChunkBytes = table.DefaultTargetChunkBytes
+			copyChunker, err := table.NewChunker(tbl, copyChunkerCfg)
 			if err != nil {
 				return err
 			}
@@ -873,7 +879,13 @@ func (r *Runner) newCopy(ctx context.Context) error {
 				TargetChunkTime: r.move.TargetChunkTime,
 				Logger:          r.logger,
 			}
-			copyChunker, err := table.NewChunker(tbl, chunkerCfg)
+			// Move always uses the buffered copier, which reads rows into client
+			// memory; size the copy chunker by an in-memory byte budget rather than
+			// copy time, whose signal collapses under write-side backpressure. The
+			// checksum runs server-side and keeps the time signal.
+			copyChunkerCfg := chunkerCfg
+			copyChunkerCfg.TargetChunkBytes = table.DefaultTargetChunkBytes
+			copyChunker, err := table.NewChunker(tbl, copyChunkerCfg)
 			if err != nil {
 				return err
 			}

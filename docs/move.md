@@ -155,7 +155,7 @@ A Go MySQL DSN for the source database. All tables in this database will be copi
 - Type: Duration
 - Default value: `5s`
 
-The target time for each chunk of rows to be copied. See the [migrate documentation](migrate.md#target-chunk-time) for a detailed explanation of how chunk timing works.
+The target time for each **checksum** chunk. The copy phase always uses the buffered copier, which sizes its chunks against an in-memory byte budget rather than a target time, so this flag does not affect the copy. See the [migrate documentation](migrate.md#target-chunk-time) for a detailed explanation of how chunk timing (and the buffered copier's byte budget) works.
 
 ### target-dsn
 

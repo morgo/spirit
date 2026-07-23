@@ -299,7 +299,7 @@ The replication throttler only affects the copy-rows operation, and does not app
 
 #### Tuning parallel replication for Spirit workloads
 
-Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each sized to a `--target-chunk-time` of 500ms), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are _disjoint_ the chunks have no row-level write conflicts with each other.
+Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each dynamically sized against an in-memory byte budget), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are _disjoint_ the chunks have no row-level write conflicts with each other.
 
 This workload is exactly the right shape to execute in parallel on replicas, but under MySQL 8.0 defaults (`COMMIT_ORDER` scheduling) there is minimum parallelism, and it requires the following configuration changes:
 
@@ -361,9 +361,11 @@ The table that the schema change will be performed on.
 - Range: `100ms-5s`
 - Typical safe values: `100ms-1s`
 
-The target time for each copy or checksum operation. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
+The target time for each chunk of the **checksum** and the legacy [`--unbuffered`](#unbuffered) copier. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
 
-The target is not a hard limit, but rather a guideline which is recalculated based on a 90th percentile from the last 10 chunks that were copied. You should expect some outliers where the copy time is higher than the target. Outliers >5x the target will print to the log, and force an immediate reduction in how many rows are copied per chunk without waiting for the next recalculation.
+> **The default buffered copier does not use `--target-chunk-time`.** It reads full rows into memory, so it sizes each copy chunk against an in-memory _byte budget_ instead. Time is a poor signal for the buffered copier: its measured chunk time includes the wait behind the write queue, which inflates under load independently of chunk size and would collapse the chunk size to the row floor. A byte budget is a stable property of the data and keeps chunks large enough to engage InnoDB/Aurora read-ahead. This budget is a fixed internal value and is not tunable via a flag.
+
+The target is not a hard limit, but rather a guideline which is recalculated based on a 90th percentile from the last 10 chunks that were copied (the same servo drives the buffered copier's byte budget). You should expect some outliers where the copy time is higher than the target. Outliers >5x the target will print to the log, and force an immediate reduction in how many rows are copied per chunk without waiting for the next recalculation.
 
 Larger values generally yield better performance, but have consequences:
 

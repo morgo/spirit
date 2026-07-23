@@ -90,9 +90,11 @@ automatically from the source schema if they do not already exist.
 - Type: Duration
 - Default value: `5s`
 
-The target time for each chunk of rows to be copied during the initial copy.
-See the [migrate documentation](migrate.md#target-chunk-time) for how chunk
-timing adapts.
+The target time for each **checksum** chunk. The initial copy always uses the
+buffered copier, which sizes its chunks against an in-memory byte budget rather
+than a target time, so this flag does not affect the copy. See the [migrate
+documentation](migrate.md#target-chunk-time) for how chunk timing (and the
+buffered copier's byte budget) works.
 
 ### threads
 
