@@ -59,6 +59,20 @@ func tableExists(t *testing.T, db *sql.DB, schema, name string) bool {
 	return true
 }
 
+// waitForTable polls until a table exists (or the deadline passes). Used to
+// synchronize on a rename that lands shortly after another observable signal.
+func waitForTable(t *testing.T, db *sql.DB, schema, name string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if tableExists(t, db, schema, name) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s.%s to exist", schema, name)
+}
+
 // waitForReverseWindow polls the checkpoint until the move has entered its
 // reverse window (move_phase = reverse_window), i.e. cutover has happened.
 func waitForReverseWindow(t *testing.T, db *sql.DB, dstDBName string) {
@@ -248,6 +262,12 @@ func TestMoveReverseWindowResumesAfterKill(t *testing.T) {
 	go func() { _ = run1.Run(ctx1); close(run1Done) }()
 
 	waitForReverseWindow(t, ctl, "rwrk_dst")
+	// The checkpoint (phase=reverse_window) is written under the source lock
+	// just BEFORE the source rename to _old, so observing the phase alone races
+	// the rename. Wait for the retire to actually land before "killing" the
+	// process, so run 1 is interrupted in the state this test means to resume
+	// from: source retired to _old, target serving.
+	waitForTable(t, ctl, "rwrk_src", "t1_old")
 	cancel1() // "kill" the process mid-window
 	<-run1Done
 	utils.CloseAndLog(run1)
