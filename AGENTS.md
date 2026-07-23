@@ -191,7 +191,7 @@ scripts/      → Build and run helper scripts
 
 ### Key design decisions
 
-- **Dynamic chunking**: chunk size is specified as a *target time* (default 500ms), not a row count. The chunk size auto-adjusts based on the 90th percentile of the last 10 chunks.
+- **Dynamic chunking**: chunk size auto-adjusts against a target based on the 90th percentile of the last 10 chunks, rather than a fixed row count. The default buffered copier targets an in-memory *byte budget* (`--target-chunk-size`, default `table.DefaultTargetChunkBytes` = 16 MiB); the checksum and legacy `--unbuffered` copier target a *chunk time* (`--target-chunk-time`, default 500ms for migrate).
 - **Change row map**: binlog changes are deduplicated in a map before flushing, so a row updated 10 times is only copied once.
 - **High watermark optimization**: binlog changes above the copier's current position are discarded (only for auto-increment PKs).
 - **Checkpoint/resume**: progress is saved periodically; interrupted migrations resume automatically with ~1 minute of lost progress.

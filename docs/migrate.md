@@ -35,6 +35,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 - [statement](#statement)
 - [table](#table)
 - [target-chunk-time](#target-chunk-time)
+- [target-chunk-size](#target-chunk-size)
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [tls-ca](#tls-ca)
@@ -299,7 +300,7 @@ The replication throttler only affects the copy-rows operation, and does not app
 
 #### Tuning parallel replication for Spirit workloads
 
-Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each sized to a `--target-chunk-time` of 500ms), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are _disjoint_ the chunks have no row-level write conflicts with each other.
+Spirit's row-copier runs multiple chunks in parallel (default up to 4 in flight, each dynamically sized against an in-memory byte budget set by [`--target-chunk-size`](#target-chunk-size)), and each chunk covers a **disjoint primary-key range** of the source table. Every chunk lands in the binlog as its own multi-row transaction, and because the ranges are _disjoint_ the chunks have no row-level write conflicts with each other.
 
 This workload is exactly the right shape to execute in parallel on replicas, but under MySQL 8.0 defaults (`COMMIT_ORDER` scheduling) there is minimum parallelism, and it requires the following configuration changes:
 
@@ -361,9 +362,11 @@ The table that the schema change will be performed on.
 - Range: `100ms-5s`
 - Typical safe values: `100ms-1s`
 
-The target time for each copy or checksum operation. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
+The target time for each chunk of the **checksum** and the legacy [`--unbuffered`](#unbuffered) copier. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
 
-The target is not a hard limit, but rather a guideline which is recalculated based on a 90th percentile from the last 10 chunks that were copied. You should expect some outliers where the copy time is higher than the target. Outliers >5x the target will print to the log, and force an immediate reduction in how many rows are copied per chunk without waiting for the next recalculation.
+> **The default buffered copier does not use `--target-chunk-time`.** It reads full rows into memory, so it sizes each copy chunk against an in-memory _byte budget_ ([`--target-chunk-size`](#target-chunk-size)) instead. Time is a poor signal for the buffered copier: its measured chunk time includes the wait behind the write queue, which inflates under load independently of chunk size and would collapse the chunk size to the row floor. A byte budget is a stable property of the data and keeps chunks large enough to engage InnoDB/Aurora read-ahead. The budget defaults to 16 MiB and can be tuned with [`--target-chunk-size`](#target-chunk-size).
+
+The target is not a hard limit, but rather a guideline which is recalculated based on a 90th percentile from the last 10 chunks that were copied (the same servo drives the buffered copier's byte budget). You should expect some outliers where the copy time is higher than the target. Outliers >5x the target will print to the log, and force an immediate reduction in how many rows are copied per chunk without waiting for the next recalculation.
 
 Larger values generally yield better performance, but have consequences:
 
@@ -372,6 +375,15 @@ Larger values generally yield better performance, but have consequences:
 - It is recommended to set the target chunk time to a value for which if queries increased by this much, user experience would still be acceptable even if a little frustrating. In some of our systems this means up to `2s`. We do not know of scenarios where values should ever exceed `5s`. If you can tolerate more unavailability, consider running DDL directly on the MySQL server.
 
 Note that Spirit does not support dynamically adjusting the target-chunk-time while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of [threads](#threads) or target-chunk-time, you can simply kill the Spirit process and start it again with different values.
+
+### target-chunk-size
+
+- Type: Integer (bytes)
+- Default value: `16777216` (16 MiB)
+
+The in-memory byte budget the default buffered copier sizes each copy chunk against. Unlike [target-chunk-time](#target-chunk-time), this is a _byte_ target, not a time target: the buffered copier reads full rows into memory, and its measured chunk time is a poor sizing signal (it includes the wait behind the write queue, which inflates under load independently of chunk size). Bytes-per-row is a stable property of the data, so a byte budget keeps chunks convergent under load and large enough to engage InnoDB/Aurora read-ahead.
+
+The chunker adjusts the row count per chunk so that the in-memory size of each chunk trends toward this budget, using the same 90th-percentile servo as target-chunk-time (with the same `100,000`-row ceiling and `10`-row floor). The default of 16 MiB is roughly 1024 16KB InnoDB pages per chunk; most users should not need to change it. It has **no effect** with the legacy [`--unbuffered`](#unbuffered) copier, which sizes by target-chunk-time.
 
 ### threads
 

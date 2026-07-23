@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/sentinel"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/status"
+	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 
 	"github.com/go-sql-driver/mysql"
@@ -416,6 +419,24 @@ func TestMigrationParamsDefaultsUsed(t *testing.T) {
 	require.Equal(t, defaultDatabase, migration.Database)
 	require.Equal(t, defaultTLSMode, migration.TLSMode)
 	require.Empty(t, migration.TLSCertificatePath)
+	// A zero TargetChunkSize (programmatic callers that bypass the Kong default)
+	// is filled in with the buffered-copier byte budget, so the copy chunker is
+	// never accidentally left on the time signal.
+	require.Equal(t, uint64(table.DefaultTargetChunkBytes), migration.TargetChunkSize)
+}
+
+// TestTargetChunkSizeKongDefault pins the hardcoded Kong default on
+// --target-chunk-size to table.DefaultTargetChunkBytes. The Kong tag must be a
+// literal, so this guards against it drifting from the constant (which also
+// backs the zero-value default in normalizeOptions).
+func TestTargetChunkSizeKongDefault(t *testing.T) {
+	t.Parallel()
+	field, ok := reflect.TypeFor[Migration]().FieldByName("TargetChunkSize")
+	require.True(t, ok)
+	require.Equal(t,
+		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
+		field.Tag.Get("default"),
+		"Kong default for --target-chunk-size must equal table.DefaultTargetChunkBytes")
 }
 
 func TestMigrationParamsCLIUsed(t *testing.T) {

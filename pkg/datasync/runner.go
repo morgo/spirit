@@ -149,6 +149,9 @@ func NewRunner(s *Sync) (*Runner, error) {
 	if s.TargetChunkTime <= 0 {
 		s.TargetChunkTime = 5 * time.Second
 	}
+	if s.TargetChunkSize == 0 {
+		s.TargetChunkSize = table.DefaultTargetChunkBytes
+	}
 	if s.FlushInterval <= 0 {
 		s.FlushInterval = change.DefaultFlushInterval
 	}
@@ -1039,9 +1042,14 @@ func (r *Runner) restoreSecondaryIndexes(ctx context.Context) error {
 func (r *Runner) buildChunkers() ([]table.Chunker, error) {
 	chunkers := make([]table.Chunker, 0, len(r.sourceTables))
 	for _, tbl := range r.sourceTables {
+		// Sync always uses the buffered copier, which reads rows into client
+		// memory; size the copy chunker by an in-memory byte budget rather than
+		// copy time, whose signal collapses under write-side backpressure. The
+		// continuous checksum runs server-side and keeps the time signal.
 		cc, err := table.NewChunker(tbl, table.ChunkerConfig{
-			TargetChunkTime: r.sync.TargetChunkTime,
-			Logger:          r.logger,
+			TargetChunkTime:  r.sync.TargetChunkTime,
+			TargetChunkBytes: r.sync.TargetChunkSize,
+			Logger:           r.logger,
 		})
 		if err != nil {
 			return nil, err

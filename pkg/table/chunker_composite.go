@@ -332,9 +332,9 @@ func (t *chunkerComposite) Reset() error {
 	return nil
 }
 
-// Feedback is a way for consumers of chunks to give feedback on how long
-// processing the chunk took. It is incorporated into the calculation of future
-// chunk sizes.
+// Feedback is a way for consumers of chunks to give feedback on either
+// how long, or how large the chunks were. It is then incorporated into
+// the calculation of future chunk sizes.
 func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows uint64) {
 	t.Lock()
 	defer t.Unlock()
@@ -352,21 +352,16 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 		return
 	}
 
-	// If any copyRows tasks take 5x the target size we reduce immediately
-	// and don't wait for more feedback.
-	if d > t.ChunkerTarget*DynamicPanicFactor {
-		t.panicShrink(t.logger, d)
+	// Size the next chunk against a byte budget when configured (buffered
+	// copier), otherwise against the wall-clock budget.
+	// The composite chunker has no prefetch-mode switch (it always pre-reads an
+	// exact row count via OFFSET, so it never sees empty gap chunks), so it
+	// passes no pre-update hook to either sizer.
+	if t.TargetChunkBytes > 0 {
+		t.feedbackBytes(t.logger, chunk.ActualBytes, nil)
 		return
 	}
-
-	// Add feedback to the list.
-	t.chunkTimingInfo = append(t.chunkTimingInfo, d)
-
-	// If we have enough feedback, re-evaluate the chunk size.
-	if len(t.chunkTimingInfo) > 10 {
-		newTarget, _ := t.calculateNewTargetChunkSize()
-		t.updateChunkerTarget(newTarget)
-	}
+	t.feedbackTime(t.logger, d, nil)
 }
 
 // GetLowWatermark returns the highest known value that has been safely copied,

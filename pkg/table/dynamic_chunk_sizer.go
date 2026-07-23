@@ -14,10 +14,22 @@ import (
 // Embed into a chunker struct so call sites can continue to read fields
 // as t.chunkSize / t.chunkTimingInfo / t.ChunkerTarget without changing.
 type dynamicChunkSizer struct {
-	chunkSize             uint64
-	chunkTimingInfo       []time.Duration
-	ChunkerTarget         time.Duration // e.g. 500ms target per chunk
-	disableDynamicChunker bool          // only used by the test suite
+	chunkSize       uint64
+	chunkTimingInfo []time.Duration
+	ChunkerTarget   time.Duration // e.g. 500ms target per chunk
+
+	// TargetChunkBytes, when non-zero, switches the sizer from the wall-clock
+	// signal to a memory (bytes-per-chunk) signal. This is the default for the
+	// buffered copier — it reads full rows into client memory and reports their
+	// size via Chunk.ActualBytes. The servo math is identical, but bytes/row is
+	// a stable property of the data whereas time/row is load-dependent: under
+	// write-side backpressure the fed-back time inflates with no change in row
+	// size, so the time loop diverges to the row floor (the buffered-copier
+	// collapse), while the byte loop stays convergent.
+	TargetChunkBytes uint64
+	chunkByteInfo    []uint64
+
+	disableDynamicChunker bool // only used by the test suite
 	// pinnedAtFloor records that we have already warned about the chunk size
 	// being stuck at MinDynamicRowSize. It suppresses the per-chunk
 	// "high chunk processing time" log once shrinking is no longer possible,
@@ -63,6 +75,115 @@ func (d *dynamicChunkSizer) panicShrink(logger *slog.Logger, dur time.Duration) 
 	d.updateChunkerTarget(newTarget)
 }
 
+// feedbackTime incorporates a wall-clock duration for one completed chunk. It
+// is the time-signal path (unbuffered copier, checksum, and the buffered copier
+// when TargetChunkBytes is unset), shared by both the composite and optimistic
+// chunkers.
+//
+// beforeUpdate, if non-nil, is called with the freshly computed target and p90
+// just before the new chunk size is applied — a seam for chunker-specific
+// behavior. The optimistic chunker uses it to switch to prefetch mode (see
+// chunkerOptimistic.maybeSwitchToPrefetch); the composite chunker passes nil.
+//
+// Caller must hold the chunker's mutex and have already screened stale/disabled
+// feedback.
+func (d *dynamicChunkSizer) feedbackTime(logger *slog.Logger, dur time.Duration, beforeUpdate func(newTarget uint64, p90 time.Duration)) {
+	// If any chunk takes 5x the target we reduce immediately and don't wait
+	// for more feedback.
+	if dur > d.ChunkerTarget*DynamicPanicFactor {
+		d.panicShrink(logger, dur)
+		return
+	}
+	d.chunkTimingInfo = append(d.chunkTimingInfo, dur)
+	if len(d.chunkTimingInfo) > 10 {
+		newTarget, p90 := d.calculateNewTargetChunkSize()
+		if beforeUpdate != nil {
+			beforeUpdate(newTarget, p90)
+		}
+		d.updateChunkerTarget(newTarget)
+	}
+}
+
+// feedbackBytes incorporates the in-memory byte size of one completed chunk. It
+// is the memory-signal path, used only by the buffered copier when
+// TargetChunkBytes is set. It mirrors feedbackTime exactly, servoing row-count
+// against a byte budget rather than a time budget.
+//
+// Empty (gap) chunks report zero bytes and ARE fed to the history — like the
+// near-zero durations the time path sees over a gap, they drive the row target
+// up (see calculateNewTargetChunkBytes) so the chunker walks toward the row
+// ceiling. This is essential for the optimistic chunker: it is how the chunk
+// size climbs to MaxDynamicRowSize over a large auto-increment gap so the
+// prefetch switch can fire (via beforeUpdate). Skipping empty chunks would
+// freeze the chunk size mid-gap and make the copier crawl the gap row-by-row.
+//
+// beforeUpdate, if non-nil, is called with the freshly computed target and the
+// p90 byte size just before the new chunk size is applied — the byte-signal
+// twin of feedbackTime's hook. Caller must hold the chunker's mutex and have
+// already screened stale/disabled feedback.
+func (d *dynamicChunkSizer) feedbackBytes(logger *slog.Logger, bytes uint64, beforeUpdate func(newTarget uint64, p90Bytes uint64)) {
+	if bytes > d.TargetChunkBytes*DynamicPanicFactor {
+		d.panicShrinkBytes(logger, bytes)
+		return
+	}
+	d.chunkByteInfo = append(d.chunkByteInfo, bytes)
+	if len(d.chunkByteInfo) > 10 {
+		newTarget, p90 := d.calculateNewTargetChunkBytes()
+		if beforeUpdate != nil {
+			beforeUpdate(newTarget, p90)
+		}
+		d.updateChunkerTarget(newTarget)
+	}
+}
+
+// calculateNewTargetChunkBytes returns the row target derived from the p90 of
+// the chunkByteInfo history vs TargetChunkBytes, plus the raw p90 so a caller
+// can react to extreme cases (the optimistic chunker uses it to switch to
+// prefetch mode). Caller must hold the chunker's mutex.
+//
+// A p90 of zero means the window is dominated by empty (gap) chunks. There is
+// no byte weight to divide by, so — mirroring the time path, where near-zero
+// durations blow the target up — we return a value above MaxDynamicRowSize.
+// updateChunkerTarget's 1.5x-per-step cap still applies, so the row target
+// climbs gradually toward the ceiling rather than jumping; once pinned at the
+// ceiling the >MaxDynamicRowSize signal lets the optimistic chunker's prefetch
+// switch fire.
+func (d *dynamicChunkSizer) calculateNewTargetChunkBytes() (newTargetRows uint64, p90 uint64) {
+	p90 = lazyFindP90Uint64(d.chunkByteInfo)
+	if p90 == 0 {
+		return MaxDynamicRowSize + 1, 0
+	}
+	return uint64(float64(d.chunkSize) * float64(d.TargetChunkBytes) / float64(p90)), p90
+}
+
+// panicShrinkBytes is the byte-signal twin of panicShrink: a single chunk whose
+// in-memory size blew past TargetChunkBytes*DynamicPanicFactor shrinks the row
+// count immediately to protect client memory. Caller must hold the chunker's
+// mutex.
+func (d *dynamicChunkSizer) panicShrinkBytes(logger *slog.Logger, bytes uint64) {
+	newTarget := uint64(float64(d.chunkSize) / float64(DynamicPanicFactor*2))
+	if d.chunkSize <= MinDynamicRowSize {
+		if !d.pinnedAtFloor {
+			logger.Warn("chunk size pinned at minimum; rows may be too wide to meet target-chunk-bytes",
+				"bytes", bytes,
+				"threshold", d.TargetChunkBytes*DynamicPanicFactor,
+				"min-rows", MinDynamicRowSize,
+				"target-bytes", d.TargetChunkBytes,
+			)
+			d.pinnedAtFloor = true
+		}
+	} else {
+		logger.Info("high chunk memory size",
+			"bytes", bytes,
+			"threshold", d.TargetChunkBytes*DynamicPanicFactor,
+			"target-rows", d.chunkSize,
+			"target-bytes", d.TargetChunkBytes,
+			"new-target-rows", newTarget,
+		)
+	}
+	d.updateChunkerTarget(newTarget)
+}
+
 // updateChunkerTarget applies a recalculated row target after clamping
 // it to safe bounds (no more than 1.5x growth per step, capped at
 // MaxDynamicRowSize, floored at MinDynamicRowSize). Resets the timing
@@ -75,7 +196,10 @@ func (d *dynamicChunkSizer) updateChunkerTarget(newTarget uint64) {
 	if d.chunkSize > MinDynamicRowSize {
 		d.pinnedAtFloor = false
 	}
+	// Reset whichever history feeds the active signal. Clearing both is safe:
+	// the inactive slice is always already empty.
 	d.chunkTimingInfo = []time.Duration{}
+	d.chunkByteInfo = []uint64{}
 }
 
 // boundaryCheckTargetChunkSize clamps a proposed row count to the

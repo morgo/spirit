@@ -378,37 +378,63 @@ func (t *chunkerOptimistic) Feedback(chunk *Chunk, d time.Duration, _ uint64) {
 		return
 	}
 
-	// If any copyRows tasks take 5x the target size we reduce immediately
-	// and don't wait for more feedback.
-	if d > t.ChunkerTarget*DynamicPanicFactor {
-		t.panicShrink(t.logger, d)
+	// Size the next chunk against a byte budget when configured (buffered
+	// copier), otherwise the shared time-based sizer. Either way we inject the
+	// prefetch-mode switch as the pre-update hook: gaps in the auto-increment
+	// key space are detected the same way under both signals (chunk pinned at
+	// the row ceiling but still well under the per-chunk budget), so prefetch
+	// must work regardless of which signal is driving the size.
+	if t.TargetChunkBytes > 0 {
+		t.feedbackBytes(t.logger, chunk.ActualBytes, t.maybeSwitchToPrefetchBytes)
 		return
 	}
+	t.feedbackTime(t.logger, d, t.maybeSwitchToPrefetch)
+}
 
-	// Add feedback to the list.
-	t.chunkTimingInfo = append(t.chunkTimingInfo, d)
-
-	// We have enough feedback to re-evaluate the chunk size.
-	if len(t.chunkTimingInfo) > 10 {
-		newTarget, p90 := t.calculateNewTargetChunkSize()
-		// Optimistic-specific: switch to prefetch chunking if we're already at
-		// the max chunk size, the next target wants to go higher still, and
-		// the p90 is only a fraction of our target time. The composite
-		// chunker has no analogous mode so this lives at the chunker rather
-		// than in dynamicChunkSizer.
-		if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90*5 < t.ChunkerTarget {
-			t.logger.Warn("dynamic chunking is not working as expected",
-				"target-time", t.ChunkerTarget,
-				"p90-time", p90,
-				"new-target-rows", newTarget,
-				"max-dynamic-row-size", MaxDynamicRowSize,
-			)
-			t.logger.Warn("switching to prefetch algorithm")
-			t.chunkSize = StartingChunkSize // reset
-			t.chunkPrefetchingEnabled = true
-		}
-		t.updateChunkerTarget(newTarget)
+// maybeSwitchToPrefetch is the optimistic chunker's pre-update hook for the
+// shared time-based sizer (dynamicChunkSizer.feedbackTime). When the sizer is
+// already at the max chunk size and still wants to grow while the p90 is only a
+// small fraction of the target time, the auto-increment key space has large
+// gaps — so switch to the prefetch algorithm (which finds boundaries by query)
+// instead of growing the row target further. The composite chunker has no
+// analogous mode. Caller (feedbackTime) holds the chunker's mutex.
+func (t *chunkerOptimistic) maybeSwitchToPrefetch(newTarget uint64, p90 time.Duration) {
+	if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90*5 < t.ChunkerTarget {
+		t.logger.Warn("dynamic chunking is not working as expected",
+			"target-time", t.ChunkerTarget,
+			"p90-time", p90,
+			"new-target-rows", newTarget,
+			"max-dynamic-row-size", MaxDynamicRowSize,
+		)
+		t.switchToPrefetch()
 	}
+}
+
+// maybeSwitchToPrefetchBytes is the byte-signal twin of maybeSwitchToPrefetch,
+// used as feedbackBytes's pre-update hook. The condition mirrors the time one:
+// the chunk is pinned at the row ceiling but the p90 in-memory size is still
+// under a fifth of the byte budget, which over a large auto-increment gap means
+// chunks keep coming back near-empty. Caller (feedbackBytes) holds the mutex.
+func (t *chunkerOptimistic) maybeSwitchToPrefetchBytes(newTarget uint64, p90Bytes uint64) {
+	if t.chunkSize == MaxDynamicRowSize && newTarget > MaxDynamicRowSize && p90Bytes*5 < t.TargetChunkBytes {
+		t.logger.Warn("dynamic chunking is not working as expected",
+			"target-bytes", t.TargetChunkBytes,
+			"p90-bytes", p90Bytes,
+			"new-target-rows", newTarget,
+			"max-dynamic-row-size", MaxDynamicRowSize,
+		)
+		t.switchToPrefetch()
+	}
+}
+
+// switchToPrefetch flips the optimistic chunker into prefetch mode, where the
+// next boundary is found by query rather than by advancing a fixed row count —
+// the only efficient way to cross a large gap in the key space. Caller holds
+// the mutex.
+func (t *chunkerOptimistic) switchToPrefetch() {
+	t.logger.Warn("switching to prefetch algorithm")
+	t.chunkSize = StartingChunkSize // reset
+	t.chunkPrefetchingEnabled = true
 }
 
 // GetLowWatermark returns the highest known value that has been safely copied,

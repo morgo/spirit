@@ -25,6 +25,25 @@ const (
 
 	// ChunkerDefaultTarget is the default chunker target
 	ChunkerDefaultTarget = 100 * time.Millisecond
+
+	// DefaultTargetChunkBytes is the in-memory byte budget the buffered copier
+	// sizes each chunk against (see dynamicChunkSizer.TargetChunkBytes). Because
+	// it is a byte budget, it maps almost directly to pages read per chunk
+	// (bytes / innodb_page_size) regardless of row width — the natural unit for
+	// read-ahead. At 16 MiB a chunk is ~1024 16KB pages (~16 InnoDB extents),
+	// which sits solidly inside InnoDB linear read-ahead (the
+	// innodb_read_ahead_threshold, ~56 of 64 sequential pages per extent) and
+	// keeps Aurora's batched logical prefetch continuously engaged across the
+	// scan; a smaller budget barely warms the prefetcher before the chunk ends.
+	//
+	// Memory is not the binding constraint on this value. The hard per-read
+	// ceiling is MaxDynamicRowSize (100k rows), and the dominant steady-state
+	// term is the applier's 128-deep chunklet buffer (~128 MiB) — both
+	// independent of this budget. Raising it costs only ~concurrency × delta on
+	// the read side. Unlike the time budget, it is load-independent, so it does
+	// not collapse under write-side backpressure. Tunable; a real-workload sweep
+	// may revise it.
+	DefaultTargetChunkBytes = 16 * 1024 * 1024
 )
 
 type Chunker interface {
@@ -69,6 +88,13 @@ type ChunkerConfig struct {
 	NewTable *TableInfo
 	// TargetChunkTime is the target duration for each chunk. Defaults to ChunkerDefaultTarget.
 	TargetChunkTime time.Duration
+	// TargetChunkBytes, when non-zero, switches the dynamic chunker from the
+	// wall-clock signal to an in-memory byte-budget signal (the buffered-copier
+	// default, table.DefaultTargetChunkBytes). Only meaningful for the buffered
+	// copier, which reads full rows into memory; the unbuffered and checksum
+	// paths never see row bytes and keep the time signal. See
+	// dynamicChunkSizer.TargetChunkBytes.
+	TargetChunkBytes uint64
 	// Logger is the structured logger. Defaults to slog.Default().
 	Logger *slog.Logger
 	// ColumnMapping describes the column relationship between source and target tables,
@@ -108,7 +134,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 			Ti:                t,
 			NewTi:             newTable,
 			columnMapping:     config.ColumnMapping,
-			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, TargetChunkBytes: config.TargetChunkBytes},
 			watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 			logger:            config.Logger,
 		}, nil

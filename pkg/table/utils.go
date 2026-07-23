@@ -21,6 +21,15 @@ func LazyFindP90(a []time.Duration) time.Duration {
 	return a[len(a)/10]
 }
 
+// lazyFindP90Uint64 is the byte-signal twin of LazyFindP90, used by the
+// memory-based dynamic chunker (see dynamicChunkSizer.TargetChunkBytes).
+func lazyFindP90Uint64(a []uint64) uint64 {
+	slices.SortFunc(a, func(x, y uint64) int {
+		return cmp.Compare(y, x) // descending
+	})
+	return a[len(a)/10]
+}
+
 // castableTp returns an approximate type that tp can be casted to.
 // This is because in the context of CAST()/CONVERT() MySQL will
 // not allow all of the built-in types, but instead follows SQL standard
