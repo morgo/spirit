@@ -291,6 +291,25 @@ func TestResolveWriteThreads_NonAuroraUsesDefault_LocalMySQL(t *testing.T) {
 	require.Equal(t, DefaultWriteThreads, n)
 }
 
+func TestWriteThreadVCPUReserve(t *testing.T) {
+	// Auto-sizing on Aurora resolves to max(1, vCPUs - WriteThreadVCPUReserve).
+	// The Aurora probe needs a real Aurora instance, so this pins the reserve
+	// and the resulting vCPU->threads mapping (including the floor at 1) that the
+	// auto-size branch of ResolveWriteThreads applies.
+	require.Equal(t, 2, WriteThreadVCPUReserve, "reserve is documented as 2 vCPUs in migrate.md/move.md and the flag help")
+	for _, tc := range []struct {
+		vCPUs, want int
+	}{
+		{1, 1}, // floors at 1
+		{2, 1}, // r6g.large: 2 vCPUs -> 1 applier
+		{3, 1},
+		{4, 2},
+		{8, 6},
+	} {
+		require.Equalf(t, tc.want, max(1, tc.vCPUs-WriteThreadVCPUReserve), "vCPUs=%d", tc.vCPUs)
+	}
+}
+
 func TestResolveMaxWriteThreads(t *testing.T) {
 	// Autoscaling disabled: the cap equals start so the count cannot move,
 	// regardless of mode or the commit-latency backstop.

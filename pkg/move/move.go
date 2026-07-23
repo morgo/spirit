@@ -20,7 +20,7 @@ type Move struct {
 	// in). The Kong default below must stay equal to table.DefaultTargetChunkBytes.
 	TargetChunkSize       uint64        `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes)." default:"16777216"`
 	Threads               int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
-	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target. 0 = auto: on Aurora this is set to the instance vCPU count; on non-Aurora targets it falls back to the default" default:"4"`
+	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target. 0 = auto: on Aurora this is set to the instance vCPU count minus 2 (min 1), leaving CPU headroom; on non-Aurora targets it falls back to the default" default:"4"`
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the first target database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 	CheckpointMaxAge      time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`

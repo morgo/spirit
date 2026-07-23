@@ -186,6 +186,6 @@ How many chunks to copy in parallel from the source.
 
 How many concurrent write threads to use per target when inserting rows. This controls the fan-out parallelism of the buffered copier's write side.
 
-A value of `0` means **auto**: on Aurora, the value is set to the target instance's vCPU count (read from `@@innodb_buffer_pool_instances`). On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
+A value of `0` means **auto**: on Aurora, the value is set to the target instance's vCPU count minus 2 (minimum 1), read from `@@innodb_buffer_pool_instances`. The reserved vCPUs leave headroom for the read side and the server's own work. On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
 
 Move does not support the experimental write-thread autoscaling available in [`spirit migrate`](migrate.md#enable-experimental-autoscaling).
