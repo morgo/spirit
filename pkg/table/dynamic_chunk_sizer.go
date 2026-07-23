@@ -107,25 +107,53 @@ func (d *dynamicChunkSizer) feedbackTime(logger *slog.Logger, dur time.Duration,
 // feedbackBytes incorporates the in-memory byte size of one completed chunk. It
 // is the memory-signal path, used only by the buffered copier when
 // TargetChunkBytes is set. It mirrors feedbackTime exactly, servoing row-count
-// against a byte budget rather than a time budget. Empty (gap) chunks report
-// zero bytes and are not fed to the p90 — they carry no size signal, and the
-// existing gap-skipping growth still applies via the normal path once real rows
-// resume. Caller must hold the chunker's mutex and have already screened
-// stale/disabled feedback.
-func (d *dynamicChunkSizer) feedbackBytes(logger *slog.Logger, bytes uint64) {
-	if bytes == 0 {
-		return
-	}
+// against a byte budget rather than a time budget.
+//
+// Empty (gap) chunks report zero bytes and ARE fed to the history — like the
+// near-zero durations the time path sees over a gap, they drive the row target
+// up (see calculateNewTargetChunkBytes) so the chunker walks toward the row
+// ceiling. This is essential for the optimistic chunker: it is how the chunk
+// size climbs to MaxDynamicRowSize over a large auto-increment gap so the
+// prefetch switch can fire (via beforeUpdate). Skipping empty chunks would
+// freeze the chunk size mid-gap and make the copier crawl the gap row-by-row.
+//
+// beforeUpdate, if non-nil, is called with the freshly computed target and the
+// p90 byte size just before the new chunk size is applied — the byte-signal
+// twin of feedbackTime's hook. Caller must hold the chunker's mutex and have
+// already screened stale/disabled feedback.
+func (d *dynamicChunkSizer) feedbackBytes(logger *slog.Logger, bytes uint64, beforeUpdate func(newTarget uint64, p90Bytes uint64)) {
 	if bytes > d.TargetChunkBytes*DynamicPanicFactor {
 		d.panicShrinkBytes(logger, bytes)
 		return
 	}
 	d.chunkByteInfo = append(d.chunkByteInfo, bytes)
 	if len(d.chunkByteInfo) > 10 {
-		p90 := lazyFindP90Uint64(d.chunkByteInfo)
-		newTarget := uint64(float64(d.chunkSize) * float64(d.TargetChunkBytes) / float64(p90))
+		newTarget, p90 := d.calculateNewTargetChunkBytes()
+		if beforeUpdate != nil {
+			beforeUpdate(newTarget, p90)
+		}
 		d.updateChunkerTarget(newTarget)
 	}
+}
+
+// calculateNewTargetChunkBytes returns the row target derived from the p90 of
+// the chunkByteInfo history vs TargetChunkBytes, plus the raw p90 so a caller
+// can react to extreme cases (the optimistic chunker uses it to switch to
+// prefetch mode). Caller must hold the chunker's mutex.
+//
+// A p90 of zero means the window is dominated by empty (gap) chunks. There is
+// no byte weight to divide by, so — mirroring the time path, where near-zero
+// durations blow the target up — we return a value above MaxDynamicRowSize.
+// updateChunkerTarget's 1.5x-per-step cap still applies, so the row target
+// climbs gradually toward the ceiling rather than jumping; once pinned at the
+// ceiling the >MaxDynamicRowSize signal lets the optimistic chunker's prefetch
+// switch fire.
+func (d *dynamicChunkSizer) calculateNewTargetChunkBytes() (newTargetRows uint64, p90 uint64) {
+	p90 = lazyFindP90Uint64(d.chunkByteInfo)
+	if p90 == 0 {
+		return MaxDynamicRowSize + 1, 0
+	}
+	return uint64(float64(d.chunkSize) * float64(d.TargetChunkBytes) / float64(p90)), p90
 }
 
 // panicShrinkBytes is the byte-signal twin of panicShrink: a single chunk whose

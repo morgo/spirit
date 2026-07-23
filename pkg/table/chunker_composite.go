@@ -354,12 +354,13 @@ func (t *chunkerComposite) Feedback(chunk *Chunk, d time.Duration, actualRows ui
 
 	// Size the next chunk against a byte budget when configured (buffered
 	// copier), otherwise against the wall-clock budget.
+	// The composite chunker has no prefetch-mode switch (it always pre-reads an
+	// exact row count via OFFSET, so it never sees empty gap chunks), so it
+	// passes no pre-update hook to either sizer.
 	if t.TargetChunkBytes > 0 {
-		t.feedbackBytes(t.logger, chunk.ActualBytes)
+		t.feedbackBytes(t.logger, chunk.ActualBytes, nil)
 		return
 	}
-	// The composite chunker has no prefetch-mode switch (it always pre-reads an
-	// exact row count via OFFSET), so it passes no pre-update hook.
 	t.feedbackTime(t.logger, d, nil)
 }
 

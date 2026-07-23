@@ -165,7 +165,7 @@ func TestFeedbackBytesConverges(t *testing.T) {
 	for range 200 {
 		// A chunk of chunkSize rows weighs chunkSize*bytesPerRow, independent of
 		// any load on the server — that is the whole point.
-		d.feedbackBytes(logger, d.chunkSize*bytesPerRow)
+		d.feedbackBytes(logger, d.chunkSize*bytesPerRow, nil)
 	}
 	want := uint64(targetBytes / bytesPerRow)
 	require.InEpsilon(t, want, d.chunkSize, 0.2,
@@ -190,7 +190,7 @@ func TestByteSignalIgnoresInflatedTime(t *testing.T) {
 	byteSizer := &dynamicChunkSizer{chunkSize: StartingChunkSize, ChunkerTarget: target, TargetChunkBytes: 1 << 20}
 	for range 20 {
 		timeSizer.feedbackTime(logger, inflated, nil)
-		byteSizer.feedbackBytes(logger, byteSizer.chunkSize*200) // ~200B/row, well under the byte panic threshold
+		byteSizer.feedbackBytes(logger, byteSizer.chunkSize*200, nil) // ~200B/row, well under the byte panic threshold
 	}
 
 	require.Equal(t, uint64(MinDynamicRowSize), timeSizer.chunkSize,
@@ -202,18 +202,38 @@ func TestByteSignalIgnoresInflatedTime(t *testing.T) {
 const highBytesMsg = "INFO:high chunk memory size"
 const pinnedBytesMsg = "WARN:chunk size pinned at minimum; rows may be too wide to meet target-chunk-bytes"
 
-// TestFeedbackBytesSkipsEmptyChunks verifies that an empty (gap) chunk, which
-// reports zero bytes, is not fed to the byte p90 — it carries no size signal
-// and must not perturb the chunk size or the history.
-func TestFeedbackBytesSkipsEmptyChunks(t *testing.T) {
+// TestFeedbackBytesEmptyChunksGrowToCeiling verifies that empty (gap) chunks,
+// which report zero bytes, DRIVE the chunk size up rather than being ignored.
+// A window dominated by zero-byte chunks has a p90 of zero, which
+// calculateNewTargetChunkBytes maps to a target above MaxDynamicRowSize; the
+// 1.5x-per-step cap then walks the chunk size up to the ceiling. This is how
+// the optimistic chunker crosses a large auto-increment gap: without it the
+// chunk size freezes mid-gap and the copier crawls the gap row-by-row (the CI
+// hang this fixes).
+func TestFeedbackBytesEmptyChunksGrowToCeiling(t *testing.T) {
 	logger := slog.New(newCountingHandler())
 	d := &dynamicChunkSizer{chunkSize: 1000, ChunkerTarget: 500 * time.Millisecond, TargetChunkBytes: 1 << 20}
 
-	for range 50 {
-		d.feedbackBytes(logger, 0)
+	// Growth is capped at 1.5x per recalculation and a recalculation happens
+	// only every 11 chunks, so reaching the ceiling from 1000 takes ~125 chunks.
+	for range 200 {
+		d.feedbackBytes(logger, 0, nil)
 	}
-	require.Equal(t, uint64(1000), d.chunkSize, "empty chunks must not move the chunk size")
-	require.Empty(t, d.chunkByteInfo, "empty chunks must not accumulate byte history")
+	require.Equal(t, uint64(MaxDynamicRowSize), d.chunkSize,
+		"a stream of empty gap chunks must grow the chunk size to the ceiling")
+	require.False(t, d.pinnedAtFloor)
+}
+
+// TestCalculateNewTargetChunkBytesZeroP90 pins the empty-window contract: a p90
+// of zero (all-empty history) returns a target above MaxDynamicRowSize so the
+// chunk size climbs toward the ceiling, and a zero p90 so a caller can detect
+// the gap.
+func TestCalculateNewTargetChunkBytesZeroP90(t *testing.T) {
+	d := &dynamicChunkSizer{chunkSize: 1000, TargetChunkBytes: 1 << 20}
+	d.chunkByteInfo = []uint64{0, 0, 0, 0, 0}
+	newTarget, p90 := d.calculateNewTargetChunkBytes()
+	require.Zero(t, p90)
+	require.Greater(t, newTarget, uint64(MaxDynamicRowSize))
 }
 
 // TestPanicShrinkBytesAboveFloorLogs verifies the byte panic path: a single
@@ -226,7 +246,7 @@ func TestPanicShrinkBytesAboveFloorLogs(t *testing.T) {
 	d := &dynamicChunkSizer{chunkSize: 1000, ChunkerTarget: 500 * time.Millisecond, TargetChunkBytes: targetBytes}
 
 	// A chunk 6x the byte budget (> DynamicPanicFactor) trips the panic path.
-	d.feedbackBytes(slog.New(h), targetBytes*6)
+	d.feedbackBytes(slog.New(h), targetBytes*6, nil)
 
 	require.Equal(t, uint64(100), d.chunkSize,
 		"newTarget = 1000/(DynamicPanicFactor*2) = 100, still above the floor")
@@ -245,7 +265,7 @@ func TestPanicShrinkBytesAtFloorSuppressesFlood(t *testing.T) {
 	d := &dynamicChunkSizer{chunkSize: MinDynamicRowSize, ChunkerTarget: 500 * time.Millisecond, TargetChunkBytes: targetBytes}
 
 	for range 10_000 {
-		d.feedbackBytes(logger, targetBytes*6)
+		d.feedbackBytes(logger, targetBytes*6, nil)
 	}
 
 	require.Equal(t, uint64(MinDynamicRowSize), d.chunkSize, "stays pinned at the floor")
