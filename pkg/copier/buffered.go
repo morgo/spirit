@@ -122,14 +122,21 @@ func rowsByteSize(rows [][]any) uint64 {
 // Variable-length values are sized by their contents; fixed-width scalars use a
 // nominal width. The exact constants matter little: the servo cares about the
 // relative size of chunks, and any consistent measure converges.
+//
+// Every value counts as at least 1 byte, even an empty string or []byte. This
+// keeps the whole-chunk sum non-zero for any chunk that has rows, so a
+// zero-byte total unambiguously means an empty (gap) chunk — which is how the
+// byte sizer detects and skips gaps (see dynamicChunkSizer.feedbackBytes).
+// Without the floor, a chunk of entirely empty variable-length values would sum
+// to zero and be misread as a gap.
 func datumByteSize(v any) uint64 {
 	switch t := v.(type) {
 	case nil:
 		return 1
 	case []byte:
-		return uint64(len(t))
+		return max(1, uint64(len(t)))
 	case string:
-		return uint64(len(t))
+		return max(1, uint64(len(t)))
 	case time.Time:
 		return 16
 	default:

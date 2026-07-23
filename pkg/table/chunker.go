@@ -31,10 +31,10 @@ const (
 	// it is a byte budget, it maps almost directly to pages read per chunk
 	// (bytes / innodb_page_size) regardless of row width — the natural unit for
 	// read-ahead. At 16 MiB a chunk is ~1024 16KB pages (~16 InnoDB extents),
-	// which sits solidly inside InnoDB linear read-ahead (innodb_read_ahead_-
-	// threshold, ~56 of 64 sequential pages per extent) and keeps Aurora's
-	// batched logical prefetch continuously engaged across the scan; a smaller
-	// budget barely warms the prefetcher before the chunk ends.
+	// which sits solidly inside InnoDB linear read-ahead (the
+	// innodb_read_ahead_threshold, ~56 of 64 sequential pages per extent) and
+	// keeps Aurora's batched logical prefetch continuously engaged across the
+	// scan; a smaller budget barely warms the prefetcher before the chunk ends.
 	//
 	// Memory is not the binding constraint on this value. The hard per-read
 	// ceiling is MaxDynamicRowSize (100k rows), and the dominant steady-state

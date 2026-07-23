@@ -12,7 +12,8 @@ import (
 func TestDatumByteSize(t *testing.T) {
 	require.Equal(t, uint64(1), datumByteSize(nil), "nil is counted as 1 byte")
 	require.Equal(t, uint64(5), datumByteSize([]byte("hello")), "[]byte sized by length")
-	require.Equal(t, uint64(0), datumByteSize([]byte{}), "empty []byte is zero")
+	require.Equal(t, uint64(1), datumByteSize([]byte{}), "empty []byte floors at 1 byte")
+	require.Equal(t, uint64(1), datumByteSize(""), "empty string floors at 1 byte")
 	require.Equal(t, uint64(3), datumByteSize("abc"), "string sized by length")
 	require.Equal(t, uint64(16), datumByteSize(time.Now()), "time.Time is a fixed nominal width")
 	require.Equal(t, uint64(8), datumByteSize(int64(42)), "scalars fall back to 8 bytes")
@@ -31,4 +32,14 @@ func TestRowsByteSize(t *testing.T) {
 		{int64(2), []byte("bob"), "extra"}, // 8 + 3 + 5 = 16
 	}
 	require.Equal(t, uint64(30), rowsByteSize(rows), "sum across all values of all rows")
+
+	// A non-empty chunk whose values are all empty var-length still sizes > 0,
+	// so it is never mistaken for a gap chunk by the byte sizer (each value
+	// floors at 1 byte).
+	allEmpty := [][]any{
+		{[]byte{}, ""},
+		{"", []byte{}},
+	}
+	require.Equal(t, uint64(4), rowsByteSize(allEmpty),
+		"rows of all-empty values still count 1 byte each, so the chunk is not a gap")
 }
