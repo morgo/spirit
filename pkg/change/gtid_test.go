@@ -191,6 +191,154 @@ func TestGTIDStartFromMalformedPosition(t *testing.T) {
 	require.ErrorIs(t, err, ErrPositionNotFound)
 }
 
+// TestValidateResumeGTIDSet pins the set algebra of the resume-time GTID
+// validation with synthetic sets, including multi-UUID sets, without
+// touching the shared server's global GTID state (which is why the
+// gtid_purged direction has no live-server test — see the note on
+// TestGTIDStartFromMalformedPosition). The executed direction does have
+// live-server coverage: TestGTIDResumeAfterGTIDHistoryRegression.
+//
+// The empty-flushed edge (a checkpoint written before any position was
+// observed) never reaches this validation: Position() returns "" then,
+// StartFromPosition rejects "", and a position that parses to an empty
+// set takes Start's fresh-start branch via IsEmpty.
+func TestValidateResumeGTIDSet(t *testing.T) {
+	const (
+		sidA = "11111111-2222-3333-4444-555555555555"
+		sidB = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+	)
+	tests := []struct {
+		name     string
+		flushed  string
+		executed string
+		purged   string
+		wantErr  string // required error substring; "" means the validation passes
+	}{
+		{
+			name:     "flushed strictly inside executed",
+			flushed:  sidA + ":1-5",
+			executed: sidA + ":1-10",
+		},
+		{
+			name:     "flushed equals executed",
+			flushed:  sidA + ":1-10",
+			executed: sidA + ":1-10",
+		},
+		{
+			name:     "multi-UUID flushed inside multi-UUID executed",
+			flushed:  sidA + ":1-5," + sidB + ":1-3",
+			executed: sidA + ":1-10," + sidB + ":1-3",
+			purged:   sidA + ":1-2",
+		},
+		{
+			name: "empty flushed passes trivially (defensive; Start never routes it here)",
+		},
+		{
+			name:     "flushed extends past executed on the same UUID",
+			flushed:  sidA + ":1-20",
+			executed: sidA + ":1-10",
+			wantErr:  "@@GLOBAL.gtid_executed does not contain",
+		},
+		{
+			name:     "flushed holds a UUID the server never executed",
+			flushed:  sidA + ":1-5," + sidB + ":1-3",
+			executed: sidA + ":1-10",
+			wantErr:  "@@GLOBAL.gtid_executed does not contain",
+		},
+		{
+			name:    "executed empty but flushed is not",
+			flushed: sidA + ":1-5",
+			wantErr: "@@GLOBAL.gtid_executed does not contain",
+		},
+		{
+			name:     "flushed does not cover purged",
+			flushed:  sidA + ":1-100",
+			executed: sidA + ":1-200",
+			purged:   sidA + ":1-105",
+			wantErr:  "does not cover @@GLOBAL.gtid_purged",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flushed, err := mysql.ParseMysqlGTIDSet(tt.flushed)
+			require.NoError(t, err)
+			executed, err := mysql.ParseMysqlGTIDSet(tt.executed)
+			require.NoError(t, err)
+			purged, err := mysql.ParseMysqlGTIDSet(tt.purged)
+			require.NoError(t, err)
+			err = validateResumeGTIDSet(flushed, executed, purged)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrPositionNotFound,
+				"validation failures must classify as definitive so the caller restarts fresh instead of failing the run")
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// TestGTIDResumeAfterGTIDHistoryRegression covers the executed direction
+// of the resume validation against a live server: a checkpointed flushed
+// set containing GTIDs beyond @@GLOBAL.gtid_executed is exactly what a
+// checkpoint looks like after the server is restored from an earlier
+// backup/PITR or fails over to a replica that lagged the checkpointed
+// server. StartFromPosition must refuse it — the server itself would
+// not: COM_BINLOG_DUMP_GTID simply never streams transactions it does
+// not know about, so before this validation the resume proceeded and
+// silently skipped every change the checkpoint wrongly recorded as
+// applied. Unlike the gtid_purged direction this needs no global-state
+// mutation: gtid_executed only ever grows, so a synthetic future GTID
+// stays unexecuted no matter what concurrent tests commit.
+func TestGTIDResumeAfterGTIDHistoryRegression(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidregresst1, gtidregresst2")
+	testutils.RunSQL(t, "CREATE TABLE gtidregresst1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidregresst2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "gtidregresst1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidregresst2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	// Read gtid_executed after the DDL above so the server's own UUID is
+	// guaranteed to appear in it, and @@server_uuid for the same-UUID case.
+	var executedStr, serverUUID string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@GLOBAL.gtid_executed").Scan(&executedStr))
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@server_uuid").Scan(&serverUUID))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	regressions := map[string]string{
+		// The checkpointed server had executed further than this
+		// (post-restore) server under the same UUID.
+		"same uuid, interval past executed": serverUUID + ":999999999999",
+		// The checkpoint was written against a different server entirely
+		// (failover to a peer that never replicated from it).
+		"uuid absent from executed": "abcdefab-1234-5678-9abc-def012345678:1",
+	}
+	for name, extra := range regressions {
+		t.Run(name, func(t *testing.T) {
+			flushed, err := mysql.ParseMysqlGTIDSet(normalizeGTIDString(executedStr))
+			require.NoError(t, err)
+			require.NoError(t, flushed.Update(extra))
+
+			client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+			chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+			require.NoError(t, err)
+			require.NoError(t, client.AddSubscription(t1, t2, chunker))
+
+			err = client.StartFromPosition(t.Context(), flushed.String())
+			require.ErrorIs(t, err, ErrPositionNotFound)
+			require.ErrorContains(t, err, "@@GLOBAL.gtid_executed does not contain")
+		})
+	}
+}
+
 // TestGTIDClientUnparseableDDL is a regression test: a QueryEvent the
 // TiDB parser cannot parse (CREATE TRIGGER, stored procedure bodies,
 // certain ALTER USER variants, ...) must still get the transaction's

@@ -168,6 +168,32 @@ func (c *gtidClient) getPurgedGTIDSet(ctx context.Context) (mysql.GTIDSet, error
 	return gset, nil
 }
 
+// validateResumeGTIDSet checks that a checkpointed GTID set is still a
+// usable resume coordinate on this server, wrapping failures with
+// ErrPositionNotFound so callers discard the checkpoint and start fresh.
+// Two containments must hold. flushed must cover purged: any purged GTID
+// missing from flushed is a change we still need whose binary log the
+// server has dropped. executed must contain flushed: any flushed GTID
+// missing from executed is a transaction this server never executed —
+// the server's GTID history has regressed relative to the checkpoint
+// (restore from an earlier backup/PITR, or failover to a replica that
+// lagged the server the checkpoint was written against). The protocol
+// does not catch the regression case for us: COM_BINLOG_DUMP_GTID treats
+// the requested set as "already applied" and never streams transactions
+// it does not know about, so resuming would silently skip every change
+// the checkpoint wrongly records as applied.
+func validateResumeGTIDSet(flushed, executed, purged mysql.GTIDSet) error {
+	if !flushed.Contain(purged) {
+		return fmt.Errorf("%w: requested GTID set does not cover @@GLOBAL.gtid_purged (purged=%s, requested=%s)",
+			ErrPositionNotFound, purged.String(), flushed.String())
+	}
+	if !executed.Contain(flushed) {
+		return fmt.Errorf("%w: @@GLOBAL.gtid_executed does not contain the requested GTID set; the server never executed transactions the checkpoint records as applied (failover or restore from backup?), so the migration must restart fresh (executed=%s, requested=%s)",
+			ErrPositionNotFound, executed.String(), flushed.String())
+	}
+	return nil
+}
+
 // normalizeGTIDString strips whitespace (including embedded newlines, which
 // MySQL injects when gtid_executed contains many UUID groups) before parse.
 func normalizeGTIDString(s string) string {
@@ -304,7 +330,8 @@ func (c *gtidClient) CurrentPosition(ctx context.Context) (string, error) {
 
 // StartFromPosition satisfies Source. It primes flushedGTID from the
 // previously-returned opaque string, validates it is still resumable
-// against gtid_purged, then begins streaming as Start would.
+// against the server's GTID state (see validateResumeGTIDSet), then
+// begins streaming as Start would.
 //
 // Parse failures are wrapped with ErrPositionNotFound. This matters
 // because the most likely real-world parse failure is an operator
@@ -354,8 +381,8 @@ func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.Bin
 
 // Start satisfies Source. On a fresh start it reads @@GLOBAL.gtid_executed
 // and begins streaming from there; on a resume (flushedGTID already
-// primed by StartFromPosition) it validates the position covers
-// gtid_purged before connecting.
+// primed by StartFromPosition) it validates the position against the
+// server's GTID state (see validateResumeGTIDSet) before connecting.
 func (c *gtidClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -379,22 +406,24 @@ func (c *gtidClient) Start(ctx context.Context) error {
 
 	// Determine the starting GTID set. On fresh start, this is
 	// gtid_executed; on resume, the caller has primed flushedGTID and
-	// we just validate that the source still has the data after it.
+	// we validate it against the server's current GTID state before
+	// connecting.
 	if c.flushedGTID == nil || c.flushedGTID.IsEmpty() {
 		c.flushedGTID, err = c.getCurrentGTIDSet(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to read current GTID set, is gtid_mode=ON?: %w", err)
 		}
 	} else {
+		executed, err := c.getCurrentGTIDSet(ctx)
+		if err != nil {
+			return fmt.Errorf("could not verify GTID position: %w", err)
+		}
 		purged, err := c.getPurgedGTIDSet(ctx)
 		if err != nil {
 			return fmt.Errorf("could not verify GTID position: %w", err)
 		}
-		// If any GTID in purged is missing from our requested set, the
-		// source has dropped binlogs we'd need to apply.
-		if !c.flushedGTID.Contain(purged) {
-			return fmt.Errorf("%w: requested GTID set does not cover @@GLOBAL.gtid_purged (purged=%s, requested=%s)",
-				ErrPositionNotFound, purged.String(), c.flushedGTID.String())
+		if err := validateResumeGTIDSet(c.flushedGTID, executed, purged); err != nil {
+			return err
 		}
 	}
 	c.bufferedGTID = c.flushedGTID.Clone()
