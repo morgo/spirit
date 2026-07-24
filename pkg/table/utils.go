@@ -120,6 +120,10 @@ const (
 //     unfixed through 8.0.45), so parse(render(x)) can differ from x — and
 //     for some values repeated parse/render cycles never converge (each
 //     cycle drifts a further ulp, or oscillates between two neighbors).
+//     MySQL 9.x parses the regression tests' probe values correctly (they
+//     are parse/render fixed points there), so the 8.0.x/8.4 CI legs —
+//     not the 9.x leg — carry the regression coverage for this class;
+//     don't trim them thinking the coverage is redundant.
 //
 // The previous symmetric form round-tripped BOTH sides, which handled the
 // scalar degradation but re-parsed the target's already-degraded text: for

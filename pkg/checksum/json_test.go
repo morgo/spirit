@@ -71,7 +71,8 @@ func TestJSONChecksumDecimalTypeDegradation(t *testing.T) {
 // attempt. Under the previous symmetric casts this population fails:
 // the target side's extra re-parse lands a drifting value on yet another
 // neighbor, a self-minted mismatch that no number of retries or recopies
-// could clear (verified: BIT_XOR CRCs 790255375 vs 3468554960 on 8.0.45).
+// could clear (verified on 8.0.45 by reverting to symmetric casts: the
+// misparse-affected rows 1, 2 and 4 flag on every attempt).
 func TestJSONChecksumFullMantissaTextImage(t *testing.T) {
 	testutils.RunSQL(t, "DROP TABLE IF EXISTS chkjsonasym1, _chkjsonasym1_new, _chkjsonasym1_chkpnt")
 	testutils.RunSQL(t, "CREATE TABLE chkjsonasym1 (a INT NOT NULL, j JSON, PRIMARY KEY (a))")
@@ -118,6 +119,87 @@ func TestJSONChecksumFullMantissaTextImage(t *testing.T) {
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	require.NoError(t, singleChecker.runChecksum(t.Context()))
 	require.Equal(t, uint64(0), singleChecker.differencesFound.Load())
+}
+
+// TestDistributedJSONChecksumTextImage is the distributed (move/sync) twin
+// of TestJSONChecksumFullMantissaTextImage. The DistributedChecker builds
+// its checksum SQL independently of the single-server checker (see
+// ChecksumChunk), so the side-dependent JSON casts need their own
+// end-to-end pin: without it, reverting distributed.go's target side to the
+// source expression leaves every JSON test green. The target table here
+// lives in a separate database and holds exactly the one-text-round-trip
+// image that the move applier's text-mediated writes produce, over the same
+// misparse-affected population (17-significant-digit doubles that never
+// converge under repeated parse/render). The asymmetric checksum — source
+// round-trips, target renders strictly — must pass on the first attempt
+// with zero differences. With symmetric casts the target side's extra
+// re-parse lands the drifting values on yet another neighbor, self-minting
+// mismatches (verified on 8.0.45 by reverting targetChecksumCols to
+// sourceChecksumCols in ChecksumChunk: this test fails on rows 1, 2 and 4).
+func TestDistributedJSONChecksumTextImage(t *testing.T) {
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	newDBName, _ := testutils.CreateUniqueTestDatabase(t)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS chkjsonasym_dist1")
+	testutils.RunSQL(t, "CREATE TABLE chkjsonasym_dist1 (a INT NOT NULL, j JSON, PRIMARY KEY (a))")
+	// Same population as TestJSONChecksumFullMantissaTextImage: the
+	// misparse-affected doubles built via strtod (correct parsing, the same
+	// binary values an application would have stored), plus nested, array,
+	// NULL and integer-boundary shapes.
+	testutils.RunSQL(t, `INSERT INTO chkjsonasym_dist1 VALUES
+		(1, CAST(CAST('4.3319172962174079e299' AS DOUBLE) AS JSON)),
+		(2, CAST(CAST('1.5709949153046066e-55' AS DOUBLE) AS JSON)),
+		(3, CAST(CAST('1.2345678901234567e34' AS DOUBLE) AS JSON)),
+		(4, JSON_OBJECT('nested', CAST(CAST('4.3319172962174079e299' AS DOUBLE) AS JSON), 'ok', 42)),
+		(5, JSON_ARRAY(1, 'two', true, NULL)),
+		(6, NULL),
+		(7, CAST('9.007199254740992e15' AS JSON))`)
+	// The target holds the one-text-round-trip image: what the move
+	// applier's writes leave on the target server, since they transfer each
+	// document as rendered text that the target re-parses.
+	testutils.RunSQL(t, "CREATE TABLE "+newDBName+".chkjsonasym_dist1 LIKE chkjsonasym_dist1")
+	testutils.RunSQL(t, "INSERT INTO "+newDBName+".chkjsonasym_dist1 SELECT a, CAST(CAST(j AS CHAR CHARACTER SET utf8mb4) AS JSON) FROM chkjsonasym_dist1")
+
+	destCfg := cfg.Clone()
+	destCfg.DBName = newDBName
+
+	src, err := dbconn.New(cfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(src)
+	dest, err := dbconn.New(destCfg.FormatDSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(dest)
+
+	t1 := table.NewTableInfo(src, "test", "chkjsonasym_dist1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(dest, newDBName, "chkjsonasym_dist1")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	target := applier.Target{DB: dest, KeyRange: "0", Config: destCfg}
+	app, err := applier.NewSingleTargetApplier(target, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+
+	feed := change.NewBinlogClient(src, cfg.Addr, cfg.User, cfg.Passwd, app, change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	// Setting an Applier selects the DistributedChecker. FixDifferences is
+	// left false (the default): a single pass must find zero differences,
+	// i.e. this passes on the first attempt with no repair.
+	config := NewCheckerDefaultConfig()
+	config.Applier = app
+
+	checker, err := NewChecker([]*sql.DB{src}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+	distChecker, ok := checker.(*DistributedChecker)
+	require.True(t, ok, "checker is not of type *DistributedChecker")
+	require.NoError(t, checker.Run(t.Context()))
+	require.Equal(t, uint64(0), distChecker.differencesFound.Load())
 }
 
 // TestJSONChecksumMisparsedDoubleRepairConverges proves the repair side of
