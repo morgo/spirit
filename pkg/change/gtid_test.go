@@ -193,8 +193,11 @@ func TestGTIDStartFromMalformedPosition(t *testing.T) {
 
 // TestGTIDClientUnparseableDDL is a regression test: a QueryEvent the
 // TiDB parser cannot parse (CREATE TRIGGER, stored procedure bodies,
-// certain ALTER USER variants, ...) must still promote the
-// transaction's pending GTID into bufferedGTID. (XA statements are also
+// certain ALTER USER variants, ...) must still get the transaction's
+// pending GTID into bufferedGTID — not at the QueryEvent itself (it
+// could sit mid-group; see
+// TestGTIDClientUnparseableQueryPromotionOrdering), but at the next
+// GTIDEvent, which proves the group ended. (XA statements are also
 // unparseable but never reach the parser — they get explicit handling
 // in readStream because promoting mid-XA-group would be incorrect; see
 // TestGTIDClientXAPromotionOrdering.) Every QueryEvent on
@@ -203,7 +206,8 @@ func TestGTIDStartFromMalformedPosition(t *testing.T) {
 // statement in a *completely unrelated schema* left bufferedGTID
 // permanently behind gtid_executed: BlockWait timed out forever, Flush
 // looped indefinitely, and a GTID-mode migration was wedged until
-// cancelled.
+// cancelled. The INSERT below doubles as the next-GTIDEvent promotion
+// trigger for the trigger-DDL's deferred GTID.
 func TestGTIDClientUnparseableDDL(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
@@ -989,6 +993,242 @@ func TestGTIDClientSavepointTransaction(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "1,2,4", pks,
 		"the row inserted between SAVEPOINT and ROLLBACK TO SAVEPOINT must not replicate; the rows before and after must")
+}
+
+// TestGTIDClientUnparseableQueryPromotionOrdering is the parser-failure
+// twin of TestGTIDClientSavepointPromotionOrdering. A QueryEvent the TiDB
+// parser cannot parse used to promote the pending GTID unconditionally,
+// on the assumption that an unparseable statement is always a standalone
+// single-statement transaction. It is not: since 8.0.21 the server logs
+// CREATE TABLE ... SELECT as GTIDEvent → Query(BEGIN) → Query("CREATE
+// TABLE ... START TRANSACTION") → row events → XIDEvent (shape verified
+// against MySQL 8.0.45), and the TiDB parser rejects the START
+// TRANSACTION suffix — so the promotion fired mid-group, before the
+// group's row events had been buffered. A flush in that window published
+// a resume coordinate that already covered the transaction (and
+// recreateStreamer resumed past it after a mere stream hiccup), so its
+// remaining events were silently lost.
+//
+// The fix defers instead: an unparseable QueryEvent never promotes, and
+// the pending GTID advances at the group's own terminator (the XIDEvent
+// here) or — for genuinely standalone statements such as CREATE TRIGGER,
+// which have no terminator we can recognize — at the next GTIDEvent,
+// which proves the group ended. Both shapes are covered below.
+//
+// Events are injected through a synthetic go-mysql BinlogStreamer for the
+// same reason as in the XA and savepoint tests: the server writes the
+// whole group to the binlog in one burst at commit, so wall-clock timing
+// cannot reliably observe the stream state between the unparseable
+// QueryEvent and the group terminator of the same burst. Row events for a
+// subscribed table are inert to the promotion logic and serve as ordering
+// barriers: events are consumed strictly in order, so once GetDeltaLen
+// reflects a row event, every event injected before it has been
+// processed. (In a real CTAS group the row events target the created —
+// unsubscribed — table; a subscribed table stands in for any group tail.)
+func TestGTIDClientUnparseableQueryPromotionOrdering(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// Real tables so TableInfo has genuine column/PK metadata; the event
+	// stream itself is synthetic and never touches the server.
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidunpsyn1, gtidunpsyn2")
+	testutils.RunSQL(t, "CREATE TABLE gtidunpsyn1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidunpsyn2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "gtidunpsyn1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidunpsyn2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+
+	// Wire readStream to a synthetic streamer instead of client.Start().
+	empty, err := mysql.ParseMysqlGTIDSet("")
+	require.NoError(t, err)
+	streamer := replication.NewBinlogStreamer()
+	ctx, cancel := context.WithCancel(t.Context())
+	client.streamer = streamer
+	client.bufferedGTID = empty
+	client.flushedGTID = empty.Clone()
+	client.cancelFunc = cancel
+	client.streamWG.Add(1)
+	go client.readStream(ctx)
+	defer client.Close()
+
+	const sid = "aaaaaaaa-bbbb-cccc-dddd-000000000000"
+	sidUUID := uuid.MustParse(sid)
+	gtidEvent := func(gno int64) *replication.BinlogEvent {
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: replication.GTID_EVENT},
+			Event:  &replication.GTIDEvent{SID: sidUUID[:], GNO: gno},
+		}
+	}
+	queryEvent := func(q string) *replication.BinlogEvent {
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: replication.QUERY_EVENT},
+			Event:  &replication.QueryEvent{Schema: []byte("test"), Query: []byte(q)},
+		}
+	}
+	rowEvent := func(pk int32) *replication.BinlogEvent {
+		return &replication.BinlogEvent{
+			Header: &replication.EventHeader{EventType: replication.WRITE_ROWS_EVENTv2},
+			Event: &replication.RowsEvent{
+				Table: &replication.TableMapEvent{Schema: []byte("test"), Table: []byte("gtidunpsyn1")},
+				Rows:  [][]any{{pk, int32(0), int32(0)}},
+			},
+		}
+	}
+	inject := func(evs ...*replication.BinlogEvent) {
+		t.Helper()
+		for _, ev := range evs {
+			require.NoError(t, streamer.AddEventToStreamer(ev))
+		}
+	}
+	buffered := func(gno int64) bool {
+		target, err := mysql.ParseMysqlGTIDSet(fmt.Sprintf("%s:%d", sid, gno))
+		require.NoError(t, err)
+		return client.getBufferedGTID().Contain(target)
+	}
+
+	// Group 1: the CREATE TABLE ... SELECT shape, exactly as the server
+	// writes it (query text taken verbatim from a MySQL 8.0.45 binlog).
+	// The row event after the unparseable statement is the group tail the
+	// premature promotion used to put at risk.
+	inject(gtidEvent(300), queryEvent("BEGIN"),
+		queryEvent("CREATE TABLE `ctas1` (\n  `a` int NOT NULL,\n  `b` int DEFAULT NULL\n) START TRANSACTION"),
+		rowEvent(1))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 1 },
+		5*time.Second, 5*time.Millisecond, "row event after the unparseable statement was not processed")
+	require.False(t, buffered(300),
+		"the GTID must not be promoted at an unparseable QueryEvent: the group's remaining events are not buffered yet")
+	client.mu.Lock()
+	pendingGNO := client.pendingGNO
+	client.mu.Unlock()
+	require.EqualValues(t, 300, pendingGNO, "the CTAS transaction's GTID must still be pending after the unparseable statement")
+
+	// The XIDEvent terminates the group; only now may the GTID enter the
+	// buffered (resume) set.
+	inject(&replication.BinlogEvent{
+		Header: &replication.EventHeader{EventType: replication.XID_EVENT},
+		Event:  &replication.XIDEvent{XID: 1},
+	})
+	require.Eventually(t, func() bool { return buffered(300) },
+		5*time.Second, 5*time.Millisecond, "the XIDEvent must promote the pending GTID")
+
+	// Group 2: a genuinely standalone unparseable statement (CREATE
+	// TRIGGER). Its QueryEvent is its group terminator, but we cannot
+	// distinguish it from the CTAS shape above, so it must not promote
+	// either. (The row event is purely an ordering barrier — a real
+	// standalone-DDL group has none.)
+	inject(gtidEvent(301),
+		queryEvent("CREATE DEFINER=`root`@`localhost` TRIGGER trg BEFORE INSERT ON gtidunpsyn1 FOR EACH ROW SET @x = 1"),
+		rowEvent(2))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 2 },
+		5*time.Second, 5*time.Millisecond, "row event after the trigger DDL was not processed")
+	require.False(t, buffered(301),
+		"a standalone unparseable statement must not promote at the QueryEvent: it is indistinguishable from a mid-group one")
+
+	// Liveness: the next GTIDEvent proves group 301 ended and must
+	// promote it before stashing its own — dropping it instead would
+	// leave bufferedGTID permanently behind gtid_executed.
+	inject(gtidEvent(302))
+	require.Eventually(t, func() bool { return buffered(301) },
+		5*time.Second, 5*time.Millisecond, "the next GTIDEvent must promote the deferred standalone statement's GTID")
+
+	// And the new group's own lifecycle is undisturbed by the leftover
+	// promotion: it still promotes at its XIDEvent, not before.
+	inject(queryEvent("BEGIN"), rowEvent(3))
+	require.Eventually(t, func() bool { return client.GetDeltaLen() == 3 },
+		5*time.Second, 5*time.Millisecond, "row event in the follow-up transaction was not processed")
+	require.False(t, buffered(302), "the follow-up transaction must not be promoted before its XIDEvent")
+	inject(&replication.BinlogEvent{
+		Header: &replication.EventHeader{EventType: replication.XID_EVENT},
+		Event:  &replication.XIDEvent{XID: 2},
+	})
+	require.Eventually(t, func() bool { return buffered(302) },
+		5*time.Second, 5*time.Millisecond, "the follow-up transaction's XIDEvent must promote its GTID")
+}
+
+// TestGTIDClientCreateTableAsSelect drives a real CREATE TABLE ... SELECT
+// through the feed end-to-end. Since 8.0.21 the server logs it as a
+// single transaction — GTIDEvent → Query(BEGIN) → Query("CREATE TABLE ...
+// START TRANSACTION") → row events → XIDEvent — whose CREATE TABLE
+// statement the TiDB parser rejects mid-group.
+//
+// The premature-promotion window itself cannot be observed end-to-end
+// (the server writes the whole group in one burst at commit; that is what
+// TestGTIDClientUnparseableQueryPromotionOrdering covers
+// deterministically). What this test pins is liveness with the real
+// binlog shape: deferring promotion at the unparseable statement must not
+// suppress the promotion the group gets from its own XIDEvent — if it
+// did, bufferedGTID would fall permanently behind gtid_executed and the
+// BlockWait right after the CTAS would time out, with no later traffic to
+// bail it out.
+func TestGTIDClientCreateTableAsSelect(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS gtidctast1, gtidctast2")
+	testutils.RunSQL(t, "CREATE TABLE gtidctast1 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE gtidctast2 (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+
+	// A separate schema for the CTAS, as for the unparseable-DDL test:
+	// the parse happens before any schema filtering.
+	otherSchema, _ := testutils.CreateUniqueTestDatabase(t)
+	testutils.RunSQLInDatabase(t, otherSchema, "CREATE TABLE ctas_src (a INT NOT NULL PRIMARY KEY, b INT)")
+	testutils.RunSQLInDatabase(t, otherSchema, "INSERT INTO ctas_src VALUES (1, 1), (2, 2)")
+
+	t1 := table.NewTableInfo(db, "test", "gtidctast1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "gtidctast2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	client := NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*gtidClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	testutils.RunSQLInDatabase(t, otherSchema, "CREATE TABLE ctas_dst AS SELECT * FROM ctas_src")
+
+	// Captured right after the CTAS (and before BlockWait) so the
+	// containment assertion below is deterministic even with unrelated
+	// concurrent load advancing gtid_executed on a shared server.
+	var executed string
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT @@GLOBAL.gtid_executed").Scan(&executed))
+	executedSet, err := mysql.ParseMysqlGTIDSet(normalizeGTIDString(executed))
+	require.NoError(t, err)
+
+	// The CTAS group's own XIDEvent must promote its (deferred) GTID.
+	require.NoError(t, client.BlockWait(t.Context()))
+
+	// A normal tracked-table write still replicates afterwards.
+	testutils.RunSQL(t, "INSERT INTO gtidctast1 (a, b, c) VALUES (1, 2, 3)")
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 1, client.GetDeltaLen())
+	require.NoError(t, client.Flush(t.Context()))
+
+	// The resume coordinate must cover the CTAS transaction: resuming
+	// from it must not re-request (or skip) any part of it.
+	flushedSet, err := mysql.ParseMysqlGTIDSet(normalizeGTIDString(client.Position()))
+	require.NoError(t, err)
+	require.True(t, flushedSet.Contain(executedSet),
+		"flushed position %s must cover the executed set %s (including the CTAS GTID)", flushedSet.String(), executedSet.String())
+
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM gtidctast2").Scan(&count))
+	require.Equal(t, 1, count)
 }
 
 // TestGTIDPromotePendingGTID unit-tests the promotion helper directly
