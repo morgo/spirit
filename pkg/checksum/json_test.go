@@ -64,10 +64,11 @@ func TestJSONChecksumDecimalTypeDegradation(t *testing.T) {
 // cycles never converge — each cycle drifts a further ulp (verified on
 // 8.0.45: 4.3319172962174079e299 renders → re-parses → re-renders as
 // ...408, ...409, ...4094, never stabilizing). The target here is built with
-// exactly one text round-trip (CAST(CAST(j AS CHAR) AS JSON)), the same
-// image the buffered copier and binlog applier produce, so the asymmetric
-// checksum (source round-trips, target renders strictly) must pass on the
-// first attempt. Under the previous symmetric casts this population fails:
+// exactly one text round-trip (CAST(CAST(j AS CHAR CHARACTER SET utf8mb4)
+// AS JSON)), matching the production contract expression and the image the
+// buffered copier and binlog applier produce, so the asymmetric checksum
+// (source round-trips, target renders strictly) must pass on the first
+// attempt. Under the previous symmetric casts this population fails:
 // the target side's extra re-parse lands a drifting value on yet another
 // neighbor, a self-minted mismatch that no number of retries or recopies
 // could clear (verified: BIT_XOR CRCs 790255375 vs 3468554960 on 8.0.45).
@@ -88,7 +89,7 @@ func TestJSONChecksumFullMantissaTextImage(t *testing.T) {
 		(6, NULL),
 		(7, CAST('9.007199254740992e15' AS JSON))`)
 	// One text round-trip: the image every text-mediated write path stores.
-	testutils.RunSQL(t, `INSERT INTO _chkjsonasym1_new SELECT a, CAST(CAST(j AS CHAR) AS JSON) FROM chkjsonasym1`)
+	testutils.RunSQL(t, `INSERT INTO _chkjsonasym1_new SELECT a, CAST(CAST(j AS CHAR CHARACTER SET utf8mb4) AS JSON) FROM chkjsonasym1`)
 
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)
@@ -191,7 +192,8 @@ func TestJSONChecksumMisparsedDoubleRepairConverges(t *testing.T) {
 	// fails this for rows 1 and 2, so this also proves rows were rewritten.
 	var notTextImage int
 	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM chkjsonasym2 s JOIN _chkjsonasym2_new t USING (a)
-		WHERE CAST(t.j AS CHAR) <> CAST(CAST(CAST(s.j AS CHAR) AS JSON) AS CHAR)`).Scan(&notTextImage)
+		WHERE CAST(t.j AS CHAR CHARACTER SET utf8mb4) <>
+		      CAST(CAST(CAST(s.j AS CHAR CHARACTER SET utf8mb4) AS JSON) AS CHAR CHARACTER SET utf8mb4)`).Scan(&notTextImage)
 	require.NoError(t, err)
 	require.Equal(t, 0, notTextImage)
 }
