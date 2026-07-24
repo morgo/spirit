@@ -36,4 +36,5 @@ require (
 
 replace github.com/pingcap/tidb/pkg/parser => github.com/block/tidb/pkg/parser v0.0.0-20260506200501-e528fd979fc8
 
+// TEMP(2026-07): pin fork for JSON render-fidelity fixes; remove once upstream go-mysql includes the formatMySQLDouble + zero-temporal opaque fixes.
 replace github.com/go-mysql-org/go-mysql => github.com/morgo/go-mysql v1.16.1-0.20260723231236-3aced1dddcf4
