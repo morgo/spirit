@@ -240,7 +240,7 @@ Both copier implementations use goroutines for parallel chunk processing:
 - Stops on first error
 
 **Buffered:**
-- Fixed number of reader goroutines (equal to concurrency)
+- A pool of reader goroutines, starting at `concurrency` and resizable at runtime via `SetReadWorkers`
 - Each reader goroutine reads chunks and sends rows to the applier
 - The applier has its own internal parallelism for writing
 - Callbacks notify readers when writes complete

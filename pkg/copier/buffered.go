@@ -174,6 +174,11 @@ func (c *buffered) StartTime() time.Time {
 	return c.startTime
 }
 
+// Run copies all rows from the source to the target table, blocking until
+// the copy completes or fails. Run must not be called more than once per
+// copier instance: it resets the read-worker pool state that SetReadWorkers
+// reconciles against, so a second concurrent Run would corrupt the first's
+// pool accounting.
 func (c *buffered) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -404,6 +409,15 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 // Parking is cooperative: closing a reader's quit channel makes it exit right
 // after its next BlockWait returns, so a chunk already claimed is always read
 // and submitted to the applier — no chunk is ever lost.
+//
+// Parking latency differs from the write pool: write workers observe quit
+// inside their blocking select and park immediately, but a parked reader
+// stays live (and counted by ActiveReadWorkers) until its in-flight
+// BlockWait returns — up to the throttler's full block duration (~60s for
+// the replica throttler). Scaling down and back up within that window
+// briefly overlaps parked readers with their replacements: the overlap is
+// bounded by the previous pool size, self-drains, and parked readers do no
+// chunk work.
 func (c *buffered) SetReadWorkers(n int) {
 	if n < 1 {
 		n = 1
@@ -436,7 +450,10 @@ func (c *buffered) SetReadWorkers(n int) {
 	}
 }
 
-// ActiveReadWorkers returns the current number of live read workers.
+// ActiveReadWorkers returns the current number of live read workers. This
+// includes readers parked by SetReadWorkers that are still waiting for their
+// in-flight BlockWait to return (see SetReadWorkers), so it can briefly
+// exceed the requested worker count after a scale-down.
 func (c *buffered) ActiveReadWorkers() int {
 	c.readScaleMu.Lock()
 	defer c.readScaleMu.Unlock()

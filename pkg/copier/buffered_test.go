@@ -512,10 +512,23 @@ func TestBufferedCopierReadWorkerScaling(t *testing.T) {
 		runErr <- b.Run(t.Context())
 	}()
 
-	// The initial pool comes up at Concurrency and parks at the gate.
+	// The initial pool comes up at Concurrency and parks at the gate. Drain
+	// runErr while polling so an early Run failure surfaces as its real error
+	// instead of an opaque Eventually timeout.
+	var earlyRunErr error
+	runReturnedEarly := false
 	require.Eventually(t, func() bool {
+		select {
+		case earlyRunErr = <-runErr:
+			runReturnedEarly = true
+			return true // fail fast below; Run should still be copying
+		default:
+		}
 		return b.ActiveReadWorkers() == 4
 	}, 10*time.Second, 10*time.Millisecond)
+	require.NoError(t, earlyRunErr)
+	require.False(t, runReturnedEarly, "Run returned before the gate released the copy")
+	require.Equal(t, 4, b.ActiveReadWorkers())
 
 	// Scale up: spawning is synchronous, the new readers park at the gate too.
 	b.SetReadWorkers(6)
