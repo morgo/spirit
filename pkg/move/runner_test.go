@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +27,30 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMoveTargetChunkSizeDefault verifies that a zero TargetChunkSize (callers
+// that construct Move programmatically, bypassing the Kong default) is filled
+// in by NewRunner with the buffered-copier byte budget, so the copy chunker is
+// never accidentally left on the time signal.
+func TestMoveTargetChunkSizeDefault(t *testing.T) {
+	t.Parallel()
+	r, err := NewRunner(&Move{})
+	require.NoError(t, err)
+	require.Equal(t, uint64(table.DefaultTargetChunkBytes), r.move.TargetChunkSize)
+}
+
+// TestMoveTargetChunkSizeKongDefault pins the hardcoded Kong default on
+// --target-chunk-size to table.DefaultTargetChunkBytes (the Kong tag must be a
+// literal, so this guards against drift from the constant).
+func TestMoveTargetChunkSizeKongDefault(t *testing.T) {
+	t.Parallel()
+	field, ok := reflect.TypeFor[Move]().FieldByName("TargetChunkSize")
+	require.True(t, ok)
+	require.Equal(t,
+		strconv.FormatUint(table.DefaultTargetChunkBytes, 10),
+		field.Tag.Get("default"),
+		"Kong default for --target-chunk-size must equal table.DefaultTargetChunkBytes")
+}
 
 // TestMoveWithConcurrentWrites verifies move behavior under lots of concurrent
 // writes, exercising both deferred and non-deferred secondary indexes and
@@ -661,7 +686,7 @@ func TestMoveRetryBeforeFirstCheckpointStartsFresh(t *testing.T) {
 }
 
 // TestConcurrentMoveDoesNotWipeTarget is a regression test for the ordering of
-// Run(): the per-source metadata locks must be acquired before any setup step
+// Run(): the per-source advisory locks must be acquired before any setup step
 // that can modify the target. A second spirit invocation against the same
 // source (orchestrator retry, operator error) has to die on the lock while the
 // first run's target is still untouched. Before the reorder, the second run
@@ -687,11 +712,11 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 	testutils.RunSQL(t, "CREATE TABLE "+dstDB+".t1 (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50) NOT NULL)")
 	testutils.RunSQL(t, "INSERT INTO "+dstDB+".t1 (id, name) VALUES (999, 'precious')")
 
-	// Simulate run A holding the source metadata lock: acquire the same lock
-	// name Run() derives (schema + table) via dbconn.NewMetadataLock directly.
+	// Simulate run A holding the source advisory lock: acquire the same lock
+	// name Run() derives (schema + table) via dbconn.NewAdvisoryLock directly.
 	// This stands in for a real in-flight move without needing to pause one.
 	lockTables := []*table.TableInfo{{SchemaName: srcDB, TableName: "t1"}}
-	lock, err := dbconn.NewMetadataLock(t.Context(), sourceDSN, lockTables, dbconn.NewDBConfig(), slog.Default())
+	lock, err := dbconn.NewAdvisoryLock(t.Context(), sourceDSN, lockTables, dbconn.NewDBConfig(), slog.Default())
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, lock.Close())
@@ -699,7 +724,7 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 
 	// Run B: --force against the same source. The non-empty, unresumable
 	// target is exactly the state --force wipes — but B must fail on the
-	// metadata lock before it gets the chance.
+	// advisory lock before it gets the chance.
 	move := &Move{
 		SourceDSN:       sourceDSN,
 		TargetDSN:       targetDSN,
@@ -710,7 +735,7 @@ func TestConcurrentMoveDoesNotWipeTarget(t *testing.T) {
 	}
 	err = move.Run()
 	require.Error(t, err)
-	require.ErrorContains(t, err, "failed to acquire metadata lock")
+	require.ErrorContains(t, err, "failed to acquire advisory lock")
 
 	// The target must be untouched: the pre-existing row is intact and run B
 	// left no artifacts of a restarted copy (no checkpoint table).

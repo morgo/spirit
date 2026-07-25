@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -26,10 +27,11 @@ import (
 type ShardedApplier struct {
 	sync.Mutex
 
-	shards   []*shardTarget
-	targets  []Target // Original target configurations
-	dbConfig *dbconn.DBConfig
-	logger   *slog.Logger
+	shards      []*shardTarget
+	targets     []Target // Original target configurations
+	dbConfig    *dbconn.DBConfig
+	logger      *slog.Logger
+	metricsSink metrics.Sink // nil disables the stats emitter
 
 	// Pending work tracking (shared across all shards).
 	//
@@ -52,6 +54,12 @@ type ShardedApplier struct {
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
 
+	// timings is a rolling window of per-chunklet queue-wait and write
+	// durations across all shards, reported by Stats(). A single shared ring
+	// is deliberate: the bottleneck question ("is the write side saturated?")
+	// does not need per-shard attribution.
+	timings timingRing
+
 	// State management to make Start/Stop idempotent
 	stopped bool
 	started bool
@@ -73,10 +81,11 @@ type shardTarget struct {
 
 // shardedChunklet represents a chunklet destined for a specific shard
 type shardedChunklet struct {
-	workID  int64        // ID of the parent work
-	shardID int          // Which shard this belongs to
-	chunk   *table.Chunk // Original chunk for column info
-	rows    []rowData    // Rows for this shard
+	workID     int64        // ID of the parent work
+	shardID    int          // Which shard this belongs to
+	chunk      *table.Chunk // Original chunk for column info
+	rows       []rowData    // Rows for this shard
+	enqueuedAt time.Time    // when Apply() offered this chunklet to the shard buffer; queue wait = dequeue - enqueuedAt
 }
 
 // shardedChunkletCompletion represents a completed sharded chunklet
@@ -141,6 +150,7 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 		targets:     targets,
 		dbConfig:    cfg.DBConfig,
 		logger:      cfg.Logger,
+		metricsSink: cfg.MetricsSink,
 		pendingWork: make(map[int64]*pendingWork),
 	}, nil
 }
@@ -194,6 +204,14 @@ func (a *ShardedApplier) Start(ctx context.Context) error {
 	// Start a single feedback coordinator for all shards
 	a.wg.Add(1)
 	go a.feedbackCoordinator(workerCtx)
+
+	// Report pipeline gauges (aggregated across shards) for the applier's
+	// lifetime. Exits on Stop()'s context cancellation; joined via a.wg.
+	if a.metricsSink != nil {
+		a.wg.Go(func() {
+			emitStatsLoop(workerCtx, a, a.metricsSink, a.logger)
+		})
+	}
 
 	return nil
 }
@@ -309,6 +327,10 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 	// coordinator already claimed the work (e.g. an error completion raced
 	// this cancellation), `exists` is false and we return without invoking.
 	for _, chunkletData := range allChunklets {
+		// Stamp before the send so queue wait includes send-side
+		// backpressure: when the shard buffer is full, time blocked here is
+		// exactly "waiting for a write worker".
+		chunkletData.enqueuedAt = time.Now()
 		select {
 		case a.shards[chunkletData.shardID].chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
@@ -411,6 +433,40 @@ func (a *ShardedApplier) Stop() error {
 	return nil
 }
 
+// Stats returns a point-in-time snapshot of the write pipeline, aggregated
+// across shards: queue depth/cap are summed, and active workers is the sum of
+// each shard's live (started minus finished) workers. The embedded mutex is
+// held so the buffer reads cannot race Start()'s channel reinitialization on
+// restart; len/cap on a closed channel are safe.
+func (a *ShardedApplier) Stats() Stats {
+	a.Lock()
+	var queueDepth, queueCap, activeWorkers int
+	for _, shard := range a.shards {
+		queueDepth += len(shard.chunkletBuffer)
+		queueCap += cap(shard.chunkletBuffer)
+		if a.started {
+			activeWorkers += int(shard.writeWorkersCount - atomic.LoadInt32(&shard.writeWorkersFinished))
+		}
+	}
+	a.Unlock()
+
+	a.pendingMutex.Lock()
+	pending := len(a.pendingWork)
+	a.pendingMutex.Unlock()
+
+	queueWaitP50, queueWaitP90, writeTimeP50, writeTimeP90 := a.timings.percentiles()
+	return Stats{
+		QueueDepth:    queueDepth,
+		QueueCap:      queueCap,
+		PendingWork:   pending,
+		ActiveWorkers: activeWorkers,
+		QueueWaitP50:  queueWaitP50,
+		QueueWaitP90:  queueWaitP90,
+		WriteTimeP50:  writeTimeP50,
+		WriteTimeP90:  writeTimeP90,
+	}
+}
+
 // writeWorker processes chunklets for a specific shard
 func (a *ShardedApplier) writeWorker(ctx context.Context, shard *shardTarget) {
 	defer a.wg.Done()
@@ -441,7 +497,10 @@ func (a *ShardedApplier) writeWorker(ctx context.Context, shard *shardTarget) {
 		a.logger.Debug("writeWorker processing chunklet", "shardID", shard.shardID,
 			"workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
 
+		queueWait := time.Since(chunkletData.enqueuedAt)
+		writeStart := time.Now()
 		affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
+		a.timings.record(queueWait, time.Since(writeStart))
 
 		shard.chunkletCompletions <- shardedChunkletCompletion{
 			workID:       chunkletData.workID,

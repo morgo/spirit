@@ -70,9 +70,17 @@ func (l *PrimaryKeyLinter) DefaultConfig() map[string]string {
 	}
 }
 
+// Lint operates on a post-state view of the schema, so an ALTER that fixes a
+// legacy primary key (e.g. swapping a VARCHAR PK for a new BIGINT id, as in
+// `ADD COLUMN id BIGINT AUTO_INCREMENT, DROP PRIMARY KEY, ADD PRIMARY KEY(id)`)
+// doesn't produce a false positive against the pre-state. Severity is scoped by
+// source:
+//
+//   - Error, if the table is created in this changeset, or the PK column is
+//     added/modified by this changeset — enforce standards on new schema.
+//   - Warning, if the PK column pre-existed on a legacy table and no incoming
+//     change touches it — don't block ALTERs on legacy schemas.
 func (l *PrimaryKeyLinter) Lint(existingTables []*statement.CreateTable, changes []*statement.AbstractStatement) (violations []Violation) {
-	// TODO: add support for ALTER TABLE statements that try to modify a primary key to an unsupported type
-
 	// If the linter is run without a default allowedTypes configuration, set it to the default value
 	if len(l.allowedTypes) == 0 {
 		err := l.Configure(l.DefaultConfig())
@@ -81,34 +89,34 @@ func (l *PrimaryKeyLinter) Lint(existingTables []*statement.CreateTable, changes
 		}
 	}
 
-	// Existing tables get Warning severity — don't block ALTERs on legacy schemas.
-	for _, ct := range existingTables {
-		violations = append(violations, l.checkTable(ct, SeverityWarning)...)
-	}
+	pre := PreStateColumns(existingTables)
+	createdInChanges := newTablesInChanges(changes)
+	addedOrModified := columnsAddedOrModifiedInChanges(changes)
 
-	// CREATE TABLE statements in changes get Error severity — enforce standards on new tables.
-	for _, change := range changes {
-		if !change.IsCreateTable() {
-			continue
-		}
-		ct, err := change.ParseCreateTable()
-		if err != nil {
-			continue
-		}
-		violations = append(violations, l.checkTable(ct, SeverityError)...)
+	for _, ct := range PostState(existingTables, changes) {
+		violations = append(violations, l.checkTable(ct, pre, createdInChanges, addedOrModified)...)
 	}
 
 	return violations
 }
 
-// checkTable checks a single table's primary key and returns violations with the given severity.
-func (l *PrimaryKeyLinter) checkTable(ct *statement.CreateTable, severity Severity) []Violation {
+// checkTable checks a single post-state table's primary key, scoping the
+// severity of each violation to whether the offending column is new/modified
+// (Error) or pre-existing legacy schema (Warning).
+func (l *PrimaryKeyLinter) checkTable(ct *statement.CreateTable, pre map[string]map[string]*statement.Column, createdTables map[string]bool, addedOrModified map[string]map[string]bool) []Violation {
 	var violations []Violation
 	tableName := ct.GetTableName()
+	tKey := strings.ToLower(tableName)
 
 	// Get primary key columns from indexes (this includes both table-level and column-level PRIMARY KEY)
 	pkColumns := l.getPrimaryKeyColumnsFromIndexes(ct)
 	if len(pkColumns) == 0 {
+		// A newly created table with no PK is an Error; a pre-existing table
+		// missing a PK is a legacy Warning.
+		severity := SeverityWarning
+		if createdTables[tKey] {
+			severity = SeverityError
+		}
 		violations = append(violations, Violation{
 			Linter:     l,
 			Location:   &Location{Table: tableName},
@@ -121,11 +129,17 @@ func (l *PrimaryKeyLinter) checkTable(ct *statement.CreateTable, severity Severi
 
 	// Check each primary key column's type
 	for _, pkCol := range pkColumns {
-		column := ct.GetColumns().ByName(pkCol)
+		// MySQL column identifiers are case-insensitive, and the PK column
+		// name here can come from a source (a table-level PRIMARY KEY(...)
+		// clause, or an ALTER spec in post-state) whose letter-case differs
+		// from the column definition. Resolve case-insensitively so the type
+		// check isn't silently skipped (false negative).
+		column := columnByNameFold(ct.GetColumns(), pkCol)
 		if column == nil {
 			continue
 		}
 
+		severity := l.severityForColumn(tKey, pkCol, pre, createdTables, addedOrModified)
 		violation := l.checkColumnType(tableName, column, severity)
 		if violation != nil {
 			violations = append(violations, *violation)
@@ -133,6 +147,23 @@ func (l *PrimaryKeyLinter) checkTable(ct *statement.CreateTable, severity Severi
 	}
 
 	return violations
+}
+
+// severityForColumn returns Error for PK columns that are new (in a created
+// table, or added/modified by the changeset) and Warning for PK columns that
+// pre-existed on a legacy table untouched by the changeset.
+func (l *PrimaryKeyLinter) severityForColumn(tableKey, colName string, pre map[string]map[string]*statement.Column, createdTables map[string]bool, addedOrModified map[string]map[string]bool) Severity {
+	if createdTables[tableKey] {
+		return SeverityError
+	}
+	colKey := strings.ToLower(colName)
+	if addedOrModified[tableKey][colKey] {
+		return SeverityError
+	}
+	if _, ok := pre[tableKey][colKey]; ok {
+		return SeverityWarning
+	}
+	return SeverityError
 }
 
 // getPrimaryKeyColumnsFromIndexes returns the names of columns that are part of the primary key
@@ -149,6 +180,18 @@ func (l *PrimaryKeyLinter) getPrimaryKeyColumnsFromIndexes(ct *statement.CreateT
 	}
 
 	return pkColumns
+}
+
+// columnByNameFold resolves a column by name case-insensitively, matching
+// MySQL's case-insensitive column identifiers. It returns nil if no column
+// matches.
+func columnByNameFold(columns statement.Columns, name string) *statement.Column {
+	for i := range columns {
+		if strings.EqualFold(columns[i].Name, name) {
+			return &columns[i]
+		}
+	}
+	return nil
 }
 
 // checkColumnType checks if a primary key column has an appropriate type

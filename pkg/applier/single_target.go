@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
 )
 
@@ -20,9 +21,10 @@ import (
 type SingleTargetApplier struct {
 	sync.Mutex
 
-	target   Target
-	dbConfig *dbconn.DBConfig
-	logger   *slog.Logger
+	target      Target
+	dbConfig    *dbconn.DBConfig
+	logger      *slog.Logger
+	metricsSink metrics.Sink // nil disables the stats emitter
 
 	// Internal chunklet processing
 	chunkletBuffer      chan chunklet
@@ -59,9 +61,13 @@ type SingleTargetApplier struct {
 	scalingClosed bool            // set true when Stop begins, to block new spawns
 	workersWg     sync.WaitGroup  // tracks write workers only
 
+	// timings is a rolling window of per-chunklet queue-wait and write
+	// durations, reported by Stats().
+	timings timingRing
+
 	// Context management
 	cancelFunc context.CancelFunc
-	wg         sync.WaitGroup // tracks the feedbackCoordinator goroutine only
+	wg         sync.WaitGroup // tracks the feedbackCoordinator and stats-emitter goroutines
 
 	// State management to make Start/Stop idempotent
 	started bool
@@ -71,9 +77,10 @@ type SingleTargetApplier struct {
 // chunklet represents a small batch of rows for internal processing
 // Limited by either chunkletMaxRows or MaxStatementSizeBytes, whichever is reached first
 type chunklet struct {
-	workID int64        // ID of the parent work
-	chunk  *table.Chunk // Original chunk for column info
-	rows   []rowData    // Batch of rows limited by row count or size
+	workID     int64        // ID of the parent work
+	chunk      *table.Chunk // Original chunk for column info
+	rows       []rowData    // Batch of rows limited by row count or size
+	enqueuedAt time.Time    // when Apply() offered this chunklet to the buffer; queue wait = dequeue - enqueuedAt
 }
 
 // chunkletCompletion represents a completed chunklet
@@ -100,6 +107,7 @@ func NewSingleTargetApplier(target Target, cfg *ApplierConfig) (*SingleTargetApp
 		target:              target,
 		dbConfig:            cfg.DBConfig,
 		logger:              cfg.Logger,
+		metricsSink:         cfg.MetricsSink,
 		chunkletBuffer:      make(chan chunklet, defaultBufferSize),
 		chunkletCompletions: make(chan chunkletCompletion, defaultBufferSize),
 		pendingWork:         make(map[int64]*pendingWork),
@@ -156,6 +164,14 @@ func (a *SingleTargetApplier) Start(ctx context.Context) error {
 	// drained.
 	a.wg.Add(1)
 	go a.feedbackCoordinator(workerCtx)
+
+	// Report pipeline gauges for the applier's lifetime. Exits on Stop()'s
+	// context cancellation; joined via a.wg like the coordinator.
+	if a.metricsSink != nil {
+		a.wg.Go(func() {
+			emitStatsLoop(workerCtx, a, a.metricsSink, a.logger)
+		})
+	}
 
 	// Spawn the initial worker pool. SetWriteWorkers only takes scaleMu, so
 	// calling it while holding the main lock is safe (no lock nesting on the
@@ -217,6 +233,10 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	// coordinator already claimed the work (e.g. an error completion raced
 	// this cancellation), `exists` is false and we return without invoking.
 	for _, chunkletData := range chunklets {
+		// Stamp before the send so queue wait includes send-side
+		// backpressure: when the buffer is full, time blocked here is
+		// exactly "waiting for a write worker".
+		chunkletData.enqueuedAt = time.Now()
 		select {
 		case a.chunkletBuffer <- chunkletData:
 		case <-ctx.Done():
@@ -389,6 +409,32 @@ func (a *SingleTargetApplier) ActiveWriteWorkers() int {
 	return int(a.activeWorkers.Load())
 }
 
+// Stats returns a point-in-time snapshot of the write pipeline. The embedded
+// mutex is held so the buffer read cannot race Start()'s channel
+// reinitialization on restart; len/cap on a closed channel are safe.
+func (a *SingleTargetApplier) Stats() Stats {
+	a.Lock()
+	queueDepth := len(a.chunkletBuffer)
+	queueCap := cap(a.chunkletBuffer)
+	a.Unlock()
+
+	a.pendingMutex.Lock()
+	pending := len(a.pendingWork)
+	a.pendingMutex.Unlock()
+
+	queueWaitP50, queueWaitP90, writeTimeP50, writeTimeP90 := a.timings.percentiles()
+	return Stats{
+		QueueDepth:    queueDepth,
+		QueueCap:      queueCap,
+		PendingWork:   pending,
+		ActiveWorkers: int(a.activeWorkers.Load()),
+		QueueWaitP50:  queueWaitP50,
+		QueueWaitP90:  queueWaitP90,
+		WriteTimeP50:  writeTimeP50,
+		WriteTimeP90:  writeTimeP90,
+	}
+}
+
 // writeWorker processes chunklets from the buffer until either its quit channel
 // is closed (scale-down) or the buffer is closed by Stop().
 func (a *SingleTargetApplier) writeWorker(ctx context.Context, quit <-chan struct{}) {
@@ -417,7 +463,10 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context, quit <-chan struc
 			}
 			a.logger.Debug("writeWorker processing chunklet", "workerID", workerID, "workID", chunkletData.workID, "rowCount", len(chunkletData.rows))
 
+			queueWait := time.Since(chunkletData.enqueuedAt)
+			writeStart := time.Now()
 			affectedRows, err := a.writeChunklet(ctx, chunkletData)
+			a.timings.record(queueWait, time.Since(writeStart))
 
 			a.chunkletCompletions <- chunkletCompletion{
 				workID:       chunkletData.workID,

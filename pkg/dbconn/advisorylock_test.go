@@ -17,90 +17,90 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// closeOnce wraps MetadataLock.Close in a sync.Once. MetadataLock.Close is not
+// closeOnce wraps AdvisoryLock.Close in a sync.Once. AdvisoryLock.Close is not
 // idempotent — it blocks on closeCh, so calling it twice deadlocks. Tests that
 // close the lock mid-flow still want a t.Cleanup safety net so that an earlier
 // assertion failure (which aborts the test before the explicit Close) cannot
-// leak a live MDL session holding GET_LOCK into later integration tests. This
+// leak a live advisory lock session holding GET_LOCK into later integration tests. This
 // helper returns a func that closes exactly once: register it via t.Cleanup
-// immediately after NewMetadataLock and call it wherever the test would
-// otherwise call mdl.Close() directly.
-func closeOnce(mdl *MetadataLock) func() error {
+// immediately after NewAdvisoryLock and call it wherever the test would
+// otherwise call lock.Close() directly.
+func closeOnce(lock *AdvisoryLock) func() error {
 	var (
 		once sync.Once
 		err  error
 	)
 	return func() error {
-		once.Do(func() { err = mdl.Close() })
+		once.Do(func() { err = lock.Close() })
 		return err
 	}
 }
 
-func TestMetadataLock(t *testing.T) {
+func TestAdvisoryLock(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "test"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
+	require.NotNil(t, lock)
 
 	// Confirm a second lock cannot be acquired
-	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	_, err = NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.ErrorContains(t, err, "lock is held by another connection")
 
-	// Close the original mdl
-	require.NoError(t, mdl.Close())
+	// Close the original lock
+	require.NoError(t, lock.Close())
 
 	// Confirm a new lock can be acquired
-	mdl3, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	lock3, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	require.NoError(t, mdl3.Close())
+	require.NoError(t, lock3.Close())
 }
 
-func TestMetadataLockContextCancel(t *testing.T) {
+func TestAdvisoryLockContextCancel(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "test-cancel"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 
 	logger := slog.Default()
 	ctx, cancel := context.WithCancel(t.Context())
-	mdl, err := NewMetadataLock(ctx, testutils.DSN(), lockTables, NewDBConfig(), logger)
+	lock, err := NewAdvisoryLock(ctx, testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
+	require.NotNil(t, lock)
 
 	// Cancel the context
 	cancel()
 
 	// Wait for the lock to be released
-	<-mdl.closeCh
+	<-lock.closeCh
 
 	// Confirm the lock is released by acquiring a new one
-	mdl2, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	lock2, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	require.NotNil(t, mdl2)
-	require.NoError(t, mdl2.Close())
+	require.NotNil(t, lock2)
+	require.NoError(t, lock2.Close())
 }
 
-func TestMetadataLockRefresh(t *testing.T) {
+func TestAdvisoryLockRefresh(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "test-refresh"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(mdl *MetadataLock) {
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(lock *AdvisoryLock) {
 		// override the refresh interval for faster testing
-		mdl.refreshInterval = 1 * time.Second
+		lock.refreshInterval = 1 * time.Second
 	})
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
+	require.NotNil(t, lock)
 
 	// wait for the refresh to happen
 	time.Sleep(2 * time.Second)
 
 	// Confirm the lock is still held
-	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	_, err = NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.ErrorContains(t, err, "lock is held by another connection")
 
 	// Close the lock
-	require.NoError(t, mdl.Close())
+	require.NoError(t, lock.Close())
 }
 
 func TestComputeLockName(t *testing.T) {
@@ -127,7 +127,7 @@ func TestComputeLockName(t *testing.T) {
 
 // TestComputeLockNameAuxPrefixCollision pins the safety contract that two
 // distinct long table names whose auxiliary table names would collide under
-// truncation also share the same MDL lock name. This is what causes a second
+// truncation also share the same advisory lock name. This is what causes a second
 // concurrent migration on a colliding table to fail fast on GET_LOCK instead
 // of silently clobbering the first migration's _new / _chkpnt.
 func TestComputeLockNameAuxPrefixCollision(t *testing.T) {
@@ -137,59 +137,59 @@ func TestComputeLockNameAuxPrefixCollision(t *testing.T) {
 	a := &table.TableInfo{SchemaName: "test", TableName: common + "_one"}
 	b := &table.TableInfo{SchemaName: "test", TableName: common + "_two"}
 	require.Equal(t, computeLockName(a), computeLockName(b),
-		"truncation-colliding tables must share an MDL lock name")
+		"truncation-colliding tables must share an advisory lock name")
 
 	// Tables that diverge before the 56-char boundary must not collide.
 	c := &table.TableInfo{SchemaName: "test", TableName: "first_" + common}
 	d := &table.TableInfo{SchemaName: "test", TableName: "second" + common}
 	require.NotEqual(t, computeLockName(c), computeLockName(d),
-		"non-colliding tables must keep distinct MDL lock names")
+		"non-colliding tables must keep distinct advisory lock names")
 }
 
-// TestMetadataLockAuxPrefixCollision verifies the contention behavior end-to-end:
+// TestAdvisoryLockAuxPrefixCollision verifies the contention behavior end-to-end:
 // concurrent attempts on truncation-colliding tables fail with the standard
 // "lock is held" error rather than racing through to aux-table creation.
-func TestMetadataLockAuxPrefixCollision(t *testing.T) {
+func TestAdvisoryLockAuxPrefixCollision(t *testing.T) {
 	common := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 56 'a'
 	tablesA := []*table.TableInfo{{SchemaName: "test", TableName: common + "_one"}}
 	tablesB := []*table.TableInfo{{SchemaName: "test", TableName: common + "_two"}}
 	logger := slog.Default()
 
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), tablesA, NewDBConfig(), logger)
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), tablesA, NewDBConfig(), logger)
 	require.NoError(t, err)
-	defer utils.CloseAndLog(mdl)
+	defer utils.CloseAndLog(lock)
 
-	_, err = NewMetadataLock(t.Context(), testutils.DSN(), tablesB, NewDBConfig(), logger)
+	_, err = NewAdvisoryLock(t.Context(), testutils.DSN(), tablesB, NewDBConfig(), logger)
 	require.ErrorContains(t, err, "lock is held by another connection")
 }
 
-func TestMetadataLockLength(t *testing.T) {
+func TestAdvisoryLockLength(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "thisisareallylongtablenamethisisareallylongtablenamethisisareallylongtablename"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	empty := []*table.TableInfo{}
 
 	logger := slog.Default()
 
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	defer utils.CloseAndLog(mdl)
+	defer utils.CloseAndLog(lock)
 
-	_, err = NewMetadataLock(t.Context(), testutils.DSN(), empty, NewDBConfig(), logger)
-	require.ErrorContains(t, err, "no tables provided for metadata lock")
+	_, err = NewAdvisoryLock(t.Context(), testutils.DSN(), empty, NewDBConfig(), logger)
+	require.ErrorContains(t, err, "no tables provided for advisory lock")
 }
 
 // simulateConnectionClose simulates a temporary network issue by closing the connection
-func simulateConnectionClose(t *testing.T, mdl *MetadataLock, logger *slog.Logger) {
+func simulateConnectionClose(t *testing.T, lock *AdvisoryLock, logger *slog.Logger) {
 	// close the existing connection to simulate a network issue
-	err := mdl.CloseDBConnection(logger)
+	err := lock.CloseDBConnection(logger)
 	require.NoError(t, err)
 
 	// wait a bit to ensure the connection is closed
 	time.Sleep(1 * time.Second)
 }
 
-// TestMetadataLockSurvivesConnMaxLifetime pins the fix for the silent lock
-// drop bug: the MDL pool must be exempt from the pool-wide ConnMaxLifetime
+// TestAdvisoryLockSurvivesConnMaxLifetime pins the fix for the silent lock
+// drop bug: the advisory lock pool must be exempt from the pool-wide ConnMaxLifetime
 // (it calls SetConnMaxLifetime(0) after New). GET_LOCK is session scoped and
 // database/sql's connection cleaner proactively closes expired *idle*
 // connections (no query required), so before the fix the lock was silently
@@ -205,7 +205,7 @@ func simulateConnectionClose(t *testing.T, mdl *MetadataLock, logger *slog.Logge
 // a few seconds of idleness an expired connection is guaranteed to have been
 // closed. A second connection then verifies via IS_USED_LOCK that the lock
 // is still owned.
-func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
+func TestAdvisoryLockSurvivesConnMaxLifetime(t *testing.T) {
 	// maxConnLifetime is shortened to a few seconds for the whole package in
 	// TestMain (not mutated here — that would race with other tests' New()
 	// calls). This test waits past that lifetime, so run it in parallel.
@@ -215,15 +215,15 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(mdl *MetadataLock) {
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(lock *AdvisoryLock) {
 		// The refresh would re-acquire a dropped lock and hide the bug;
 		// keep it out of the picture for the duration of the test.
-		mdl.refreshInterval = time.Hour
+		lock.refreshInterval = time.Hour
 	})
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
-	closeMDL := closeOnce(mdl)
-	t.Cleanup(func() { _ = closeMDL() })
+	require.NotNil(t, lock)
+	closeLock := closeOnce(lock)
+	t.Cleanup(func() { _ = closeLock() })
 
 	// Observe lock ownership from a separate connection.
 	observer, err := New(testutils.DSN(), NewDBConfig())
@@ -233,7 +233,7 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 	lockName := computeLockName(&lockTableInfo)
 	stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?)", lockName)
 
-	// The MDL connection stays idle (refresh is parked an hour out), so once it
+	// The advisory lock connection stays idle (refresh is parked an hour out), so once it
 	// ages past maxConnLifetime the database/sql connection cleaner is free to
 	// close it on its next cycle. Without the SetConnMaxLifetime(0) fix that
 	// idle close silently drops the session-scoped GET_LOCK. Poll IS_USED_LOCK
@@ -244,14 +244,14 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 		var owner sql.NullInt64
 		require.NoError(t, observer.QueryRowContext(t.Context(), stmt).Scan(&owner))
 		require.True(t, owner.Valid,
-			"metadata lock was silently dropped: the MDL connection must be exempt from ConnMaxLifetime")
+			"advisory lock was silently dropped: the lock connection must be exempt from ConnMaxLifetime")
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	require.NoError(t, closeMDL())
+	require.NoError(t, closeLock())
 }
 
-// TestMetadataLockRefreshRenewsLock pins the refresh/release design. Each
+// TestAdvisoryLockRefreshRenewsLock pins the refresh/release design. Each
 // refresh tick re-runs GET_LOCK, which renews the lock and serves as the
 // wait_timeout keepalive but, because GET_LOCK is reference counted since
 // MySQL 5.7, intentionally stacks a reference on the single-connection
@@ -263,29 +263,29 @@ func TestMetadataLockSurvivesConnMaxLifetime(t *testing.T) {
 //
 // Refresh ticks are simulated deterministically by calling getLocks (the
 // exact function the ticker runs) instead of sleeping through real ticks.
-func TestMetadataLockRefreshRenewsLock(t *testing.T) {
+func TestAdvisoryLockRefreshRenewsLock(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "w2a-refresh-renew"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(mdl *MetadataLock) {
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(lock *AdvisoryLock) {
 		// Keep the background ticker from racing the simulated refreshes below.
-		mdl.refreshInterval = time.Hour
+		lock.refreshInterval = time.Hour
 	})
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
-	closeMDL := closeOnce(mdl)
-	t.Cleanup(func() { _ = closeMDL() })
+	require.NotNil(t, lock)
+	closeLock := closeOnce(lock)
+	t.Cleanup(func() { _ = closeLock() })
 
 	lockName := computeLockName(&lockTableInfo)
 
 	// Simulate three refresh ticks on the same session. Each renews the lock
 	// (and, by design, stacks a reference); the session must stay the holder.
 	for range 3 {
-		require.NoError(t, mdl.getLocks(t.Context(), logger))
+		require.NoError(t, lock.getLocks(t.Context(), logger))
 		var heldByMe sql.NullInt64
 		stmt := sqlescape.MustEscapeSQL("SELECT IS_USED_LOCK(%?) = CONNECTION_ID()", lockName)
-		require.NoError(t, mdl.db.QueryRowContext(t.Context(), stmt).Scan(&heldByMe))
+		require.NoError(t, lock.db.QueryRowContext(t.Context(), stmt).Scan(&heldByMe))
 		require.True(t, heldByMe.Valid && heldByMe.Int64 == 1, "refresh must keep the lock held by this session")
 	}
 
@@ -293,39 +293,39 @@ func TestMetadataLockRefreshRenewsLock(t *testing.T) {
 	// leaving the lock free — the property Close()'s single release relies on.
 	// The pool has MaxOpenConnections=1, so this runs on the holding session.
 	var releasedCount sql.NullInt64
-	require.NoError(t, mdl.db.QueryRowContext(t.Context(), "SELECT RELEASE_ALL_LOCKS()").Scan(&releasedCount))
+	require.NoError(t, lock.db.QueryRowContext(t.Context(), "SELECT RELEASE_ALL_LOCKS()").Scan(&releasedCount))
 	require.True(t, releasedCount.Valid && releasedCount.Int64 >= 1,
 		"RELEASE_ALL_LOCKS should report the stacked references it dropped")
 
 	var free sql.NullInt64
 	stmt := sqlescape.MustEscapeSQL("SELECT IS_FREE_LOCK(%?)", lockName)
-	require.NoError(t, mdl.db.QueryRowContext(t.Context(), stmt).Scan(&free))
+	require.NoError(t, lock.db.QueryRowContext(t.Context(), stmt).Scan(&free))
 	require.True(t, free.Valid && free.Int64 == 1,
 		"one RELEASE_ALL_LOCKS() must fully free the lock despite stacked references")
 
-	require.NoError(t, closeMDL())
+	require.NoError(t, closeLock())
 }
 
-// TestMetadataLockCloseReleasesStackedLock pins Close()'s half of the
+// TestAdvisoryLockCloseReleasesStackedLock pins Close()'s half of the
 // reference counting fix: even if multiple GET_LOCK references were somehow
 // stacked on the dedicated session, Close() must drain them all via
 // RELEASE_LOCK *before* tearing down the connection, so that the lock is
 // immediately acquirable by another session (the back-to-back migration
 // case). Relying on session teardown alone is racy: a rapid GET_LOCK(..., 0)
 // from a new connection can still see the lock as held.
-func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
+func TestAdvisoryLockCloseReleasesStackedLock(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "w2a-stacked-close"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
+	require.NotNil(t, lock)
 	// Close() is exercised mid-test below; the once-wrapper lets the cleanup
 	// double as a safety net if an earlier assertion aborts the test before
 	// that explicit Close runs, without risking a non-idempotent double Close.
-	closeMDL := closeOnce(mdl)
-	t.Cleanup(func() { _ = closeMDL() })
+	closeLock := closeOnce(lock)
+	t.Cleanup(func() { _ = closeLock() })
 
 	// Manually stack two extra references on the dedicated session
 	// (MaxOpenConnections=1 guarantees the same session), simulating what
@@ -334,7 +334,7 @@ func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
 	for range 2 {
 		var answer int
 		stmt := sqlescape.MustEscapeSQL("SELECT GET_LOCK(%?, %?)", lockName, getLockTimeout.Seconds())
-		require.NoError(t, mdl.db.QueryRowContext(t.Context(), stmt).Scan(&answer))
+		require.NoError(t, lock.db.QueryRowContext(t.Context(), stmt).Scan(&answer))
 		require.Equal(t, 1, answer)
 	}
 
@@ -345,7 +345,7 @@ func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
 	require.NoError(t, err)
 	defer utils.CloseAndLog(observer)
 
-	require.NoError(t, closeMDL())
+	require.NoError(t, closeLock())
 
 	// The lock must be immediately acquirable from another connection with a
 	// zero timeout — exactly what a back-to-back migration does on startup.
@@ -360,23 +360,23 @@ func TestMetadataLockCloseReleasesStackedLock(t *testing.T) {
 	require.NoError(t, observer.QueryRowContext(t.Context(), stmt).Scan(&released))
 }
 
-// failableConnFactory returns an option for NewMetadataLock that installs a
+// failableConnFactory returns an option for NewAdvisoryLock that installs a
 // connection factory under test control, plus the knobs to drive it: set fail
 // to true and every (re-)connection attempt errors — exactly what the real
 // factory does during a server outage, since it pings before returning —
 // and failedAttempts counts how many attempts were denied.
-func failableConnFactory(refresh time.Duration) (option func(*MetadataLock), fail *atomic.Bool, failedAttempts *atomic.Int64) {
+func failableConnFactory(refresh time.Duration) (option func(*AdvisoryLock), fail *atomic.Bool, failedAttempts *atomic.Int64) {
 	fail = &atomic.Bool{}
 	failedAttempts = &atomic.Int64{}
-	option = func(mdl *MetadataLock) {
-		mdl.refreshInterval = refresh
-		mdl.newDBConn = func() (*sql.DB, error) {
+	option = func(lock *AdvisoryLock) {
+		lock.refreshInterval = refresh
+		lock.newDBConn = func() (*sql.DB, error) {
 			if fail.Load() {
 				failedAttempts.Add(1)
 				return nil, errors.New("simulated connection failure")
 			}
 			// The dedicated-pool invariants (single connection, no
-			// client-side recycling) are enforced by NewMetadataLock's
+			// client-side recycling) are enforced by NewAdvisoryLock's
 			// wrapper around this factory, so a plain New suffices here.
 			return New(testutils.DSN(), NewDBConfig())
 		}
@@ -384,37 +384,37 @@ func failableConnFactory(refresh time.Duration) (option func(*MetadataLock), fai
 	return option, fail, failedAttempts
 }
 
-// TestMetadataLockRefreshSurvivesReconnectFailure pins the fix for a crash
+// TestAdvisoryLockRefreshSurvivesReconnectFailure pins the fix for a crash
 // during exactly the outage the refresh loop exists to survive. When a
 // refresh fails, the loop tears down the pool and reconnects; newConnection
 // pings the server, so while the outage persists it returns (nil, err) and
-// leaves mdl.db nil. Before the fix, the next tick dereferenced the nil pool
+// leaves lock.db nil. Before the fix, the next tick dereferenced the nil pool
 // in getLocks and panicked in a goroutine with no recover, crashing the whole
 // process mid-migration. The loop must instead keep retrying the connection
 // and re-acquire the locks once the server is reachable again.
-func TestMetadataLockRefreshSurvivesReconnectFailure(t *testing.T) {
+func TestAdvisoryLockRefreshSurvivesReconnectFailure(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "reconnect-fail-retry"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
 	option, fail, failedAttempts := failableConnFactory(100 * time.Millisecond)
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
-	closeMDL := closeOnce(mdl)
-	t.Cleanup(func() { _ = closeMDL() })
+	require.NotNil(t, lock)
+	closeLock := closeOnce(lock)
+	t.Cleanup(func() { _ = closeLock() })
 
-	// Start the outage. Reading mdl.db here is safe (not a data race): the
+	// Start the outage. Reading lock.db here is safe (not a data race): the
 	// refresh goroutine only reassigns it after a refresh failure, and the
 	// first failure is only induced below, by closing the pool. The fail
 	// switch is flipped before the Close so that when the failing tick
 	// fires, its reconnect attempt is already set up to be denied.
-	db := mdl.db
+	db := lock.db
 	fail.Store(true)
 	require.NoError(t, db.Close())
 
 	// Survive several ticks with no usable pool: attempt 1 is the tick that
-	// lost the connection, attempts 2+ are ticks that started with mdl.db
+	// lost the connection, attempts 2+ are ticks that started with lock.db
 	// nil — the ticks that panicked the process before the fix.
 	require.Eventually(t, func() bool {
 		return failedAttempts.Load() >= 3
@@ -435,28 +435,28 @@ func TestMetadataLockRefreshSurvivesReconnectFailure(t *testing.T) {
 			return false
 		}
 		return owner.Valid
-	}, 30*time.Second, 50*time.Millisecond, "metadata lock was not re-acquired after the outage ended")
+	}, 30*time.Second, 50*time.Millisecond, "advisory lock was not re-acquired after the outage ended")
 
-	require.NoError(t, closeMDL())
+	require.NoError(t, closeLock())
 }
 
-// TestMetadataLockCloseDuringOutage pins the shutdown half of the same fix:
+// TestAdvisoryLockCloseDuringOutage pins the shutdown half of the same fix:
 // if the migration finishes (context canceled / Close called) while the
 // connection is down and could not be re-established, Close must return
 // cleanly instead of panicking on the nil pool in releaseLocks/db.Close.
-func TestMetadataLockCloseDuringOutage(t *testing.T) {
+func TestAdvisoryLockCloseDuringOutage(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "reconnect-fail-close"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
 	option, fail, failedAttempts := failableConnFactory(100 * time.Millisecond)
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, option)
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
+	require.NotNil(t, lock)
 
-	// Start the outage (see TestMetadataLockRefreshSurvivesReconnectFailure:
-	// reading mdl.db is safe until the first induced refresh failure below).
-	db := mdl.db
+	// Start the outage (see TestAdvisoryLockRefreshSurvivesReconnectFailure:
+	// reading lock.db is safe until the first induced refresh failure below).
+	db := lock.db
 	fail.Store(true)
 	require.NoError(t, db.Close())
 
@@ -470,39 +470,39 @@ func TestMetadataLockCloseDuringOutage(t *testing.T) {
 	// no connection left, so there are no locks to release and nothing to
 	// close; the refresh goroutine reports a clean shutdown.
 	closed := make(chan error, 1)
-	go func() { closed <- mdl.Close() }()
+	go func() { closed <- lock.Close() }()
 	select {
 	case err := <-closed:
 		require.NoError(t, err)
 	case <-time.After(30 * time.Second):
-		t.Fatal("MetadataLock.Close did not return during a connection outage")
+		t.Fatal("AdvisoryLock.Close did not return during a connection outage")
 	}
 }
 
-func TestMetadataLockRefreshWithConnIssueSimulation(t *testing.T) {
+func TestAdvisoryLockRefreshWithConnIssueSimulation(t *testing.T) {
 	lockTableInfo := table.TableInfo{SchemaName: "test", TableName: "test-refresh"}
 	lockTables := []*table.TableInfo{&lockTableInfo}
 	logger := slog.Default()
 
-	// create a new MetadataLock with a short refresh interval for testing
-	mdl, err := NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(mdl *MetadataLock) {
-		mdl.refreshInterval = 2 * time.Second
+	// create a new AdvisoryLock with a short refresh interval for testing
+	lock, err := NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger, func(lock *AdvisoryLock) {
+		lock.refreshInterval = 2 * time.Second
 	})
 	require.NoError(t, err)
-	require.NotNil(t, mdl)
+	require.NotNil(t, lock)
 
 	time.Sleep(4 * time.Second)
 
 	// simulate a temporary network issue by closing the connection
-	simulateConnectionClose(t, mdl, logger)
+	simulateConnectionClose(t, lock, logger)
 
 	// wait for the refresh interval to trigger the connection failure and recovery
 	time.Sleep(4 * time.Second)
 
 	// confirm the lock is still held by attempting to acquire it with a new connection
-	_, err = NewMetadataLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
+	_, err = NewAdvisoryLock(t.Context(), testutils.DSN(), lockTables, NewDBConfig(), logger)
 	require.ErrorContains(t, err, "lock is held by another connection")
 
 	// close the lock
-	require.NoError(t, mdl.Close())
+	require.NoError(t, lock.Close())
 }

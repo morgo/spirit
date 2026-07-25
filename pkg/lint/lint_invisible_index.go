@@ -2,6 +2,7 @@ package lint
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -84,17 +85,20 @@ func (l *InvisibleIndexBeforeDropLinter) Lint(existingTables []*statement.Create
 
 			indexName := spec.Name
 
+			// Check whether the index is already invisible in the pre-state.
+			// MySQL treats table and index identifiers case-insensitively, so
+			// match with EqualFold — otherwise a DROP INDEX whose letter-case
+			// differs from the CREATE TABLE definition would falsely flag an
+			// index that is already invisible.
 			madeInvisible := false
-			// If not made invisible in this ALTER, check if it's invisible in the CREATE TABLE
-			if len(existingTables) > 0 {
-				for _, ct := range existingTables {
-					if ct.GetTableName() == tableName {
-						for _, idx := range ct.GetIndexes() {
-							if idx.Name == indexName && idx.Invisible != nil && *idx.Invisible {
-								madeInvisible = true
-								break
-							}
-						}
+			for _, ct := range existingTables {
+				if !strings.EqualFold(ct.GetTableName(), tableName) {
+					continue
+				}
+				for _, idx := range ct.GetIndexes() {
+					if strings.EqualFold(idx.Name, indexName) && idx.Invisible != nil && *idx.Invisible {
+						madeInvisible = true
+						break
 					}
 				}
 			}

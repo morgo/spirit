@@ -97,7 +97,7 @@ type CopierConfig struct {
 ### Configuration Options
 
 - **`Concurrency`** (default: 4): Number of parallel workers copying chunks. Higher values increase throughput but also increase load on MySQL.
-- **`TargetChunkTime`** (default: 1000ms): Recommended target time for processing each chunk. This field is not read by `NewCopier` directly; instead, pass it to `table.NewChunker(...)` (or your chunker implementation) so the chunker can use feedback to dynamically adjust chunk sizes.
+- **`TargetChunkTime`** (default: 1000ms): Vestigial — this field is **not read by any copier**. Chunk sizing lives entirely in the chunker: configure it via `table.ChunkerConfig` when you build the chunker (`TargetChunkTime` for the time signal, `TargetChunkBytes` for the buffered copier's memory signal). The buffered copier sizes chunks by an in-memory byte budget; the unbuffered copier and checksum use the time signal.
 - **`Throttler`** (default: `Noop`): Controls when copying should pause to protect system health. See `pkg/throttler` for implementations.
 - **`Logger`** (default: `slog.Default()`): Structured logger for debugging and monitoring.
 - **`MetricsSink`** (default: `NoopSink`): Destination for metrics like chunk processing time and row counts.
@@ -121,9 +121,14 @@ if err := targetTable.SetInfo(ctx); err != nil {
     return err
 }
 
-// Create a chunker for the table
-targetChunkTime := 30 * time.Second
-chunker, err := table.NewChunker(sourceTable, targetTable, targetChunkTime, slog.Default())
+// Create a chunker for the table. This example uses the unbuffered copier, so
+// the chunker sizes by target time. For a buffered copy, set
+// TargetChunkBytes: table.DefaultTargetChunkBytes instead (the memory signal).
+chunker, err := table.NewChunker(sourceTable, table.ChunkerConfig{
+    NewTable:        targetTable,
+    TargetChunkTime: 30 * time.Second,
+    Logger:          slog.Default(),
+})
 if err != nil {
     return err
 }
@@ -219,8 +224,8 @@ if err := copier.Run(ctx); err != nil {
 The copier is tightly integrated with the chunker in `pkg/table` (see `pkg/table/chunker.go` and related files):
 
 1. **Chunk Requests**: The copier calls `chunker.Next()` to get the next chunk to process.
-2. **Feedback Loop**: After processing each chunk, the copier calls `chunker.Feedback(chunk, processingTime, affectedRows)`.
-3. **Dynamic Sizing**: The chunker uses feedback to adjust chunk sizes, aiming for the target chunk time.
+2. **Feedback Loop**: After a chunk is committed, the copier calls `chunker.Feedback(chunk, processingTime, affectedRows)`. The buffered copier also records the in-memory size of the rows it read on `chunk.ActualBytes`, which the chunker reads when it is sizing by memory.
+3. **Dynamic Sizing**: The chunker uses feedback to adjust chunk sizes, aiming for either the target chunk time (unbuffered copier, checksum) or an in-memory byte budget (the default buffered copier). See [`pkg/table`](../table/README.md#about-chunkers).
 4. **Progress Tracking**: The copier delegates progress calculation to the chunker via `chunker.Progress()`.
 
 This design allows the chunker to optimize chunk sizes based on actual performance, adapting to table characteristics and system load.

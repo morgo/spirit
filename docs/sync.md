@@ -61,6 +61,7 @@ source privileges depend on the change feed:
 - [source-dsn](#source-dsn)
 - [target-dsn](#target-dsn)
 - [target-chunk-time](#target-chunk-time)
+- [target-chunk-size](#target-chunk-size)
 - [threads](#threads)
 - [write-threads](#write-threads)
 - [flush-interval](#flush-interval)
@@ -90,9 +91,22 @@ automatically from the source schema if they do not already exist.
 - Type: Duration
 - Default value: `5s`
 
-The target time for each chunk of rows to be copied during the initial copy.
-See the [migrate documentation](migrate.md#target-chunk-time) for how chunk
-timing adapts.
+The target time for each **checksum** chunk. The initial copy always uses the
+buffered copier, which sizes its chunks against an in-memory byte budget rather
+than a target time, so this flag does not affect the copy. See the [migrate
+documentation](migrate.md#target-chunk-time) for how chunk timing (and the
+buffered copier's byte budget) works.
+
+### target-chunk-size
+
+- Type: Integer (bytes)
+- Default value: `16777216` (16 MiB)
+
+The in-memory byte budget the buffered copier sizes each copy chunk against.
+Sync always uses the buffered copier, so this is the knob that governs copy
+chunk sizing (the copy phase does not use [target-chunk-time](#target-chunk-time)).
+See the [migrate documentation](migrate.md#target-chunk-size) for details. Most
+users should not need to change it.
 
 ### threads
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/types"
 )
 
 // PostState returns a deterministic post-state view of the schema: the existing
@@ -346,12 +347,19 @@ func removeConstraint(cs statement.Constraints, name, typeMatch string) statemen
 }
 
 // columnFromAst constructs a minimal statement.Column from an AST column def.
-// Only Raw (for type information), Name, and inline PrimaryKey/Unique flags
-// are populated — that's enough for the linters that need post-state.
+// Raw (for type information), Name, the base Type string, and inline
+// PrimaryKey/Unique flags are populated — that's enough for the linters that
+// need post-state. The base Type mirrors CreateTable.parseColumn so that
+// linters comparing against Column.Type (e.g. primary_key) work on
+// ADD/MODIFY/CHANGE COLUMN specs, not just fully-parsed existing tables.
+// Binary/spatial nuances aren't recovered here; linters that care read Raw.
 func columnFromAst(colDef *ast.ColumnDef) statement.Column {
 	col := statement.Column{
 		Raw:  colDef,
 		Name: colDef.Name.Name.O,
+	}
+	if colDef.Tp != nil {
+		col.Type = types.TypeStr(colDef.Tp.GetType())
 	}
 	for _, opt := range colDef.Options {
 		switch opt.Tp { //nolint:exhaustive

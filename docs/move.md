@@ -21,6 +21,7 @@ This will copy all tables from the source database to the target database, verif
 - [reverse-window](#reverse-window)
 - [source-dsn](#source-dsn)
 - [target-chunk-time](#target-chunk-time)
+- [target-chunk-size](#target-chunk-size)
 - [target-dsn](#target-dsn)
 - [threads](#threads)
 - [write-threads](#write-threads)
@@ -155,7 +156,14 @@ A Go MySQL DSN for the source database. All tables in this database will be copi
 - Type: Duration
 - Default value: `5s`
 
-The target time for each chunk of rows to be copied. See the [migrate documentation](migrate.md#target-chunk-time) for a detailed explanation of how chunk timing works.
+The target time for each **checksum** chunk. The copy phase always uses the buffered copier, which sizes its chunks against an in-memory byte budget rather than a target time, so this flag does not affect the copy. See the [migrate documentation](migrate.md#target-chunk-time) for a detailed explanation of how chunk timing (and the buffered copier's byte budget) works.
+
+### target-chunk-size
+
+- Type: Integer (bytes)
+- Default value: `16777216` (16 MiB)
+
+The in-memory byte budget the buffered copier sizes each copy chunk against. Move always uses the buffered copier, so this is the knob that governs copy chunk sizing (the copy phase does not use [target-chunk-time](#target-chunk-time)). See the [migrate documentation](migrate.md#target-chunk-size) for details. Most users should not need to change it.
 
 ### target-dsn
 
@@ -178,6 +186,6 @@ How many chunks to copy in parallel from the source.
 
 How many concurrent write threads to use per target when inserting rows. This controls the fan-out parallelism of the buffered copier's write side.
 
-A value of `0` means **auto**: on Aurora, the value is set to the target instance's vCPU count (read from `@@innodb_buffer_pool_instances`). On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
+A value of `0` means **auto**: on Aurora, the value is set to the target instance's vCPU count minus 2 (minimum 1), read from `@@innodb_buffer_pool_instances`. The reserved vCPUs leave headroom for the read side and the server's own work. On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
 
 Move does not support the experimental write-thread autoscaling available in [`spirit migrate`](migrate.md#enable-experimental-autoscaling).

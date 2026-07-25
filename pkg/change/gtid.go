@@ -168,6 +168,32 @@ func (c *gtidClient) getPurgedGTIDSet(ctx context.Context) (mysql.GTIDSet, error
 	return gset, nil
 }
 
+// validateResumeGTIDSet checks that a checkpointed GTID set is still a
+// usable resume coordinate on this server, wrapping failures with
+// ErrPositionNotFound so callers discard the checkpoint and start fresh.
+// Two containments must hold. flushed must cover purged: any purged GTID
+// missing from flushed is a change we still need whose binary log the
+// server has dropped. executed must contain flushed: any flushed GTID
+// missing from executed is a transaction this server never executed —
+// the server's GTID history has regressed relative to the checkpoint
+// (restore from an earlier backup/PITR, or failover to a replica that
+// lagged the server the checkpoint was written against). The protocol
+// does not catch the regression case for us: COM_BINLOG_DUMP_GTID treats
+// the requested set as "already applied" and never streams transactions
+// it does not know about, so resuming would silently skip every change
+// the checkpoint wrongly records as applied.
+func validateResumeGTIDSet(flushed, executed, purged mysql.GTIDSet) error {
+	if !flushed.Contain(purged) {
+		return fmt.Errorf("%w: requested GTID set does not cover @@GLOBAL.gtid_purged (purged=%s, requested=%s)",
+			ErrPositionNotFound, purged.String(), flushed.String())
+	}
+	if !executed.Contain(flushed) {
+		return fmt.Errorf("%w: @@GLOBAL.gtid_executed does not contain the requested GTID set; the server never executed transactions the checkpoint records as applied (failover or restore from backup?), so the migration must restart fresh (executed=%s, requested=%s)",
+			ErrPositionNotFound, executed.String(), flushed.String())
+	}
+	return nil
+}
+
 // normalizeGTIDString strips whitespace (including embedded newlines, which
 // MySQL injects when gtid_executed contains many UUID groups) before parse.
 func normalizeGTIDString(s string) string {
@@ -213,11 +239,13 @@ func (c *gtidClient) getBufferedGTID() mysql.GTIDSet {
 // a no-op when there is no pending GTID (e.g. right after a reconnect).
 //
 // This must be called when — and only when — the current transaction's
-// binlog group ends: XIDEvent (InnoDB commit), a COMMIT or ROLLBACK
+// binlog group has ended: XIDEvent (InnoDB commit), a COMMIT or ROLLBACK
 // QueryEvent (non-transactional engines / mixed-engine rollbacks), a
-// standalone statement that is its own transaction (DDL, statements the
-// TiDB parser cannot parse such as CREATE TRIGGER or stored procedures),
-// an XA_PREPARE_LOG_EVENT, or an XA COMMIT / XA ROLLBACK QueryEvent.
+// parsed standalone statement that is its own transaction (DDL), an
+// XA_PREPARE_LOG_EVENT, an XA COMMIT / XA ROLLBACK QueryEvent, or the
+// next group's GTIDEvent — which proves the previous group ended, and is
+// what advances statements with no terminator we can recognize, such as
+// those the TiDB parser cannot parse (see processQueryEvent).
 // Every GTIDEvent the server streams corresponds to an entry in its
 // gtid_executed, so any path that drops a pending GTID instead of
 // promoting it leaves bufferedGTID permanently behind gtid_executed and
@@ -229,8 +257,10 @@ func (c *gtidClient) getBufferedGTID() mysql.GTIDSet {
 // and its row events are silently lost. This is why a mid-group QueryEvent
 // must not promote. Regular transactions have no mid-group QueryEvents
 // besides BEGIN and the SAVEPOINT family ("SAVEPOINT `x`", plus
-// "ROLLBACK TO `x`" in mixed-engine transactions), but XA transactions
-// do — their first group is written to
+// "ROLLBACK TO `x`" in mixed-engine transactions), but two group shapes
+// do: CREATE TABLE ... SELECT carries its unparseable CREATE TABLE
+// statement mid-group (see processQueryEvent), and XA transactions —
+// their first group is written to
 // the binlog in one piece at XA PREPARE time, shaped as (verified against
 // MySQL 8.0):
 //
@@ -300,7 +330,8 @@ func (c *gtidClient) CurrentPosition(ctx context.Context) (string, error) {
 
 // StartFromPosition satisfies Source. It primes flushedGTID from the
 // previously-returned opaque string, validates it is still resumable
-// against gtid_purged, then begins streaming as Start would.
+// against the server's GTID state (see validateResumeGTIDSet), then
+// begins streaming as Start would.
 //
 // Parse failures are wrapped with ErrPositionNotFound. This matters
 // because the most likely real-world parse failure is an operator
@@ -350,8 +381,8 @@ func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.Bin
 
 // Start satisfies Source. On a fresh start it reads @@GLOBAL.gtid_executed
 // and begins streaming from there; on a resume (flushedGTID already
-// primed by StartFromPosition) it validates the position covers
-// gtid_purged before connecting.
+// primed by StartFromPosition) it validates the position against the
+// server's GTID state (see validateResumeGTIDSet) before connecting.
 func (c *gtidClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -375,22 +406,24 @@ func (c *gtidClient) Start(ctx context.Context) error {
 
 	// Determine the starting GTID set. On fresh start, this is
 	// gtid_executed; on resume, the caller has primed flushedGTID and
-	// we just validate that the source still has the data after it.
+	// we validate it against the server's current GTID state before
+	// connecting.
 	if c.flushedGTID == nil || c.flushedGTID.IsEmpty() {
 		c.flushedGTID, err = c.getCurrentGTIDSet(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to read current GTID set, is gtid_mode=ON?: %w", err)
 		}
 	} else {
+		executed, err := c.getCurrentGTIDSet(ctx)
+		if err != nil {
+			return fmt.Errorf("could not verify GTID position: %w", err)
+		}
 		purged, err := c.getPurgedGTIDSet(ctx)
 		if err != nil {
 			return fmt.Errorf("could not verify GTID position: %w", err)
 		}
-		// If any GTID in purged is missing from our requested set, the
-		// source has dropped binlogs we'd need to apply.
-		if !c.flushedGTID.Contain(purged) {
-			return fmt.Errorf("%w: requested GTID set does not cover @@GLOBAL.gtid_purged (purged=%s, requested=%s)",
-				ErrPositionNotFound, purged.String(), c.flushedGTID.String())
+		if err := validateResumeGTIDSet(c.flushedGTID, executed, purged); err != nil {
+			return err
 		}
 	}
 	c.bufferedGTID = c.flushedGTID.Clone()
@@ -556,8 +589,18 @@ func (c *gtidClient) readStream(ctx context.Context) {
 		switch event := ev.Event.(type) {
 		case *replication.GTIDEvent:
 			// The server emits a GTIDEvent at the start of every
-			// transaction. Stash its {SID,GNO} so we can promote it to
-			// bufferedGTID only after the matching XIDEvent.
+			// transaction, which also proves the previous group ended:
+			// groups never interleave within a binlog stream. A GTID
+			// still pending here belongs to that finished group — its
+			// terminator was not one we recognize (the QueryEvent of a
+			// standalone statement the parser cannot parse; see
+			// processQueryEvent) — and every one of its events has been
+			// processed by now, so promote it rather than dropping it,
+			// which would leave bufferedGTID permanently behind
+			// gtid_executed and wedge BlockWait/Flush forever. Then
+			// stash the new {SID,GNO} so the matching group terminator
+			// can promote it.
+			c.promotePendingGTID()
 			c.mu.Lock()
 			c.pendingSID = append(c.pendingSID[:0], event.SID...)
 			c.pendingGNO = event.GNO
@@ -707,14 +750,31 @@ func (c *gtidClient) processQueryEvent(event *replication.QueryEvent) {
 			"error", err,
 			"schema", string(event.Schema),
 			"gtid", c.getBufferedGTID().String())
-		// The statement was still a complete server transaction with
-		// its own GTID — promote it even though we could not parse
-		// it, otherwise bufferedGTID falls permanently behind
-		// gtid_executed and BlockWait/Flush never complete. Note the
-		// schema filter only applies after parsing, so *any*
-		// unparseable statement on the server (e.g. a stored
-		// procedure deploy in an unrelated schema) takes this path.
-		c.promotePendingGTID()
+		// An unparseable statement is usually a standalone
+		// single-statement transaction (CREATE TRIGGER, a stored
+		// procedure deploy) whose QueryEvent is also its group
+		// terminator — but not always: since 8.0.21 the server logs
+		// CREATE TABLE ... SELECT as GTIDEvent → Query(BEGIN) →
+		// Query("CREATE TABLE ... START TRANSACTION") → row events →
+		// XIDEvent (verified against MySQL 8.0.45), putting the
+		// unparseable statement mid-group with its row events still
+		// to come. We cannot tell the two shapes apart, so treat it
+		// like the other mid-group statements above and leave the
+		// pending GTID pending: promoting it here would let a
+		// concurrent flush publish it as a resume coordinate (and
+		// recreateStreamer resume past it after a stream hiccup)
+		// before the group's remaining events are buffered, silently
+		// losing them. The GTID is promoted by the group's own
+		// terminator if one follows (the XIDEvent, in the CTAS shape)
+		// or by the next GTIDEvent, which proves the group ended (see
+		// readStream). If such a statement is the very last thing the
+		// server executes, bufferedGTID trails gtid_executed by that
+		// one GTID until the next transaction arrives, so BlockWait
+		// can time out — loud and retryable, unlike a corrupted
+		// resume coordinate. Note the schema filter only applies
+		// after parsing, so *any* unparseable statement on the server
+		// (e.g. a stored procedure deploy in an unrelated schema)
+		// takes this path.
 		return
 	}
 	// MySQL emits a synthetic GTID for DDL statements too, but the

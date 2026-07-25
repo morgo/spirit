@@ -70,7 +70,7 @@ func TestChangeIntToBigIntPKResumeFromChkPt(t *testing.T) {
 
 	waitForCheckpoint(t, m)
 
-	// Cancel first, wait for Run to return (so deferred MDL release runs and
+	// Cancel first, wait for Run to return (so deferred advisory lock release runs and
 	// no in-flight goroutine can trip fatalError → dropCheckpoint), then Close
 	// to tear down the remaining resources.
 	cancel()
@@ -162,6 +162,9 @@ func TestCheckpoint(t *testing.T) {
 	require.Equal(t, "copyRows", r.status.Get().String())
 
 	require.Contains(t, r.Status(), `migration status: state=copyRows copy-progress=0/11040 0.00% binlog-deltas=0`)
+	// The status line also reports the applier pipeline snapshot.
+	require.Contains(t, r.Status(), `applier-queue=`)
+	require.Contains(t, r.Status(), `applier-queue-wait-p90=`)
 
 	// first chunk.
 	chunk1, err := r.copyChunker.Next()
@@ -769,9 +772,9 @@ func TestResumeFromCheckpointE2EWithManualSentinel(t *testing.T) {
 
 	waitForCheckpoint(t, runner)
 
-	// Test that it's not possible to acquire metadata lock with name
+	// Test that it's not possible to acquire advisory lock with name
 	// as tablename while the migration is running.
-	lock, err := dbconn.NewMetadataLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
+	lock, err := dbconn.NewAdvisoryLock(ctx, testutils.DSN(), lockTables, dbconn.NewDBConfig(), slog.Default())
 	require.Error(t, err)
 	require.Nil(t, lock)
 
