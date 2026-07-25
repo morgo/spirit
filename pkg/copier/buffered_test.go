@@ -432,3 +432,129 @@ func TestBufferedCopierGeometry(t *testing.T) {
 		"SELECT BIT_XOR(CRC32(CONCAT(id, name, ST_AsText(location)))) FROM geomdst").Scan(&checksumDst))
 	require.Equal(t, checksumSrc, checksumDst, "geometry data checksum mismatch after buffered copy")
 }
+
+// gateThrottler gives tests deterministic control over where read workers
+// park. BlockWait blocks until either one token is received on allow (waking
+// exactly one reader for one loop iteration) or open is closed (the gate is
+// permanently open and BlockWait returns immediately from then on).
+type gateThrottler struct {
+	allow chan struct{}
+	open  chan struct{}
+}
+
+func (g *gateThrottler) Open(_ context.Context) error      { return nil }
+func (g *gateThrottler) Close() error                      { return nil }
+func (g *gateThrottler) IsThrottled() bool                 { return false }
+func (g *gateThrottler) UpdateLag(_ context.Context) error { return nil }
+func (g *gateThrottler) BlockWait(ctx context.Context) {
+	select {
+	case <-g.allow:
+	case <-g.open:
+	case <-ctx.Done():
+	}
+}
+
+// TestBufferedCopierReadWorkerScaling exercises SetReadWorkers /
+// ActiveReadWorkers: the runtime read-side counterpart of the applier's
+// SetWriteWorkers. Readers idle inside throttler.BlockWait, so the gate
+// throttler holds them parked while we scale the pool and releases them
+// one loop iteration at a time to observe parking deterministically.
+func TestBufferedCopierReadWorkerScaling(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS readscalesrc, readscaledst")
+	testutils.RunSQL(t, "CREATE TABLE readscalesrc (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, pad VARBINARY(1024) NOT NULL)")
+	testutils.RunSQL(t, "CREATE TABLE readscaledst (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, pad VARBINARY(1024) NOT NULL)")
+
+	// Seed ~16k rows of ~1KiB each by doubling, so with a small chunk byte
+	// budget the copy has hundreds of chunks — the token phase below consumes
+	// a handful and must not exhaust the chunker.
+	testutils.RunSQL(t, "INSERT INTO readscalesrc (pad) VALUES (RANDOM_BYTES(1024))")
+	for range 14 {
+		testutils.RunSQL(t, "INSERT INTO readscalesrc (pad) SELECT RANDOM_BYTES(1024) FROM readscalesrc")
+	}
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "readscalesrc")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "readscaledst")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	gate := &gateThrottler{
+		allow: make(chan struct{}),
+		open:  make(chan struct{}),
+	}
+	cfg := NewCopierDefaultConfig()
+	cfg.Concurrency = 4
+	cfg.Throttler = gate
+	cfg.Applier, err = applier.NewSingleTargetApplier(applier.Target{DB: db}, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{
+		NewTable:         t2,
+		TargetChunkTime:  cfg.TargetChunkTime,
+		TargetChunkBytes: 64 * 1024, // keep chunks small so the copy has many
+		Logger:           cfg.Logger,
+	})
+	require.NoError(t, err)
+	require.NoError(t, chunker.Open())
+
+	copier, err := NewCopier(db, chunker, cfg)
+	require.NoError(t, err)
+	b := copier.(*buffered)
+
+	// Before Run the pool does not exist: the setter is a no-op.
+	b.SetReadWorkers(8)
+	require.Equal(t, 0, b.ActiveReadWorkers())
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- b.Run(t.Context())
+	}()
+
+	// The initial pool comes up at Concurrency and parks at the gate.
+	require.Eventually(t, func() bool {
+		return b.ActiveReadWorkers() == 4
+	}, 10*time.Second, 10*time.Millisecond)
+
+	// Scale up: spawning is synchronous, the new readers park at the gate too.
+	b.SetReadWorkers(6)
+	require.Equal(t, 6, b.ActiveReadWorkers())
+
+	// Scale down to 0, which clamps to 1: five quit channels close, but a
+	// parked reader only observes quit once BlockWait releases it. Feed one
+	// token at a time; each wakes one reader — a parked one exits without
+	// claiming a chunk, the survivor copies one chunk and re-parks.
+	b.SetReadWorkers(0)
+	require.Eventually(t, func() bool {
+		select {
+		case gate.allow <- struct{}{}:
+		default:
+		}
+		return b.ActiveReadWorkers() == 1
+	}, 10*time.Second, 10*time.Millisecond)
+
+	// Scale back up mid-copy.
+	b.SetReadWorkers(3)
+	require.Equal(t, 3, b.ActiveReadWorkers())
+
+	// Open the gate permanently and let the copy finish.
+	close(gate.open)
+	select {
+	case err := <-runErr:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Minute):
+		t.Fatal("copy did not complete in time")
+	}
+
+	// The pool has drained and scaling is closed: the setter is a no-op again.
+	require.Equal(t, 0, b.ActiveReadWorkers())
+	b.SetReadWorkers(5)
+	require.Equal(t, 0, b.ActiveReadWorkers())
+
+	// All rows made it across.
+	var srcRows, dstRows int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM readscalesrc").Scan(&srcRows))
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM readscaledst").Scan(&dstRows))
+	require.Equal(t, srcRows, dstRows)
+}

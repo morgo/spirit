@@ -17,7 +17,6 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
-	"golang.org/x/sync/errgroup"
 )
 
 // The buffered copier implements a producer/consumer pattern
@@ -44,6 +43,23 @@ type buffered struct {
 	metricsSink      metrics.Sink
 	copierEtaHistory *copierEtaHistory
 	autoscale        AutoscaleConfig
+
+	// Read-worker pool management, symmetric with the applier's write-worker
+	// pool (SetWriteWorkers/ActiveWriteWorkers). concurrency above is the
+	// initial reader count; the *live* count can change at runtime via
+	// SetReadWorkers. Unlike write workers, readers also exit naturally when
+	// the chunker is exhausted, so instead of a WaitGroup (whose Add would
+	// race Wait once the count hits zero) the pool is a mutex-guarded count
+	// with a condition variable: Run waits for liveReaders to reach zero and
+	// closes scaling under the same mutex, so no reader can be spawned after
+	// the drain has been observed.
+	readScaleMu       sync.Mutex         // guards the fields below and spawn/park
+	readersDone       *sync.Cond         // signalled on every reader exit; created in Run
+	readerCtx         context.Context    // ctx readers run under; set in Run
+	readerCancel      context.CancelFunc // cancels readerCtx; used to abort siblings on reader error
+	readerQuits       []chan struct{}    // one quit channel per live reader — closing one parks (exits) that reader
+	liveReaders       int                // current live reader count
+	readScalingClosed bool               // set true when the pool has drained, to block new spawns
 }
 
 // Assert that buffered implements the Copier interface
@@ -180,17 +196,41 @@ func (c *buffered) Run(ctx context.Context) error {
 		go as.run(ctx)
 	}
 
-	// Start read workers
-	g, errGrpCtx := errgroup.WithContext(ctx)
-	c.logger.Debug("starting read workers", "count", c.concurrency)
-	for range c.concurrency {
-		g.Go(func() error {
-			return c.readWorker(errGrpCtx)
-		})
+	// Start the read-worker pool. It starts at c.concurrency and can be
+	// resized at runtime via SetReadWorkers. readerCtx replaces the old
+	// errgroup context: a reader that fails cancels it so sibling readers
+	// abort their in-flight reads promptly.
+	readerCtx, readerCancel := context.WithCancel(ctx)
+	defer readerCancel()
+	c.readScaleMu.Lock()
+	if c.readersDone == nil {
+		c.readersDone = sync.NewCond(&c.readScaleMu)
 	}
+	c.readerCtx = readerCtx
+	c.readerCancel = readerCancel
+	c.readerQuits = nil
+	c.liveReaders = 0
+	c.readScalingClosed = false
+	c.readScaleMu.Unlock()
+	c.logger.Debug("starting read workers", "count", c.concurrency)
+	c.SetReadWorkers(c.concurrency)
 
-	// Wait for all read workers to finish
-	err := g.Wait()
+	// Wait for the reader pool to drain (chunker exhausted, error, or ctx
+	// cancelled). Observing zero and closing scaling happen under the same
+	// mutex, so a concurrent SetReadWorkers cannot spawn a reader after the
+	// drain has been observed.
+	c.readScaleMu.Lock()
+	for c.liveReaders > 0 {
+		c.readersDone.Wait()
+	}
+	c.readScalingClosed = true
+	c.readerQuits = nil
+	c.readScaleMu.Unlock()
+
+	// Reader errors are recorded via setInvalid (first error wins) rather
+	// than returned through an errgroup, so pick them up here. They take
+	// precedence over applier.Wait/Stop errors below, as before.
+	err := c.getFirstErr()
 
 	// Wait for the applier to finish processing all pending work
 	// This ensures all callbacks have been invoked before we return
@@ -206,11 +246,10 @@ func (c *buffered) Run(ctx context.Context) error {
 
 	// A failure inside an async applier callback (e.g. a chunklet the target
 	// rejected with a warning) is reported to the callback in the applier's own
-	// goroutine — it never flows through errGrp or applier.Wait, both of which
-	// return nil in that case. Surface the first captured error so callers get
-	// the real root cause instead of a generic "copy failed" message (or, worse,
-	// a nil error that looks like success). Read/apply errors that already came
-	// back through errGrp take precedence and leave this untouched.
+	// goroutine, which may run after the reader pool drained — too late for the
+	// getFirstErr read above — and applier.Wait returns nil in that case.
+	// Re-check so callers get the real root cause instead of a generic "copy
+	// failed" message (or, worse, a nil error that looks like success).
 	if err == nil {
 		err = c.getFirstErr()
 	}
@@ -245,12 +284,23 @@ func (c *buffered) autoscalerIfEnabled() *autoScaler {
 	return newAutoScaler(gradual, scaler, c.autoscale.StartThreads, c.autoscale.MaxThreads, c.logger, c.metricsSink)
 }
 
-// readWorker reads chunks and sends them to the applier
-func (c *buffered) readWorker(ctx context.Context) error {
+// readWorker reads chunks and sends them to the applier. It exits when the
+// chunker is exhausted, the copy is invalidated, or its quit channel is closed
+// (scale-down via SetReadWorkers). The quit check sits right after BlockWait —
+// the spot where an idle reader parks — so a parked reader exits as soon as
+// the throttler releases it, without claiming another chunk.
+func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 	c.logger.Debug("readWorker started", "isRead", c.chunker.IsRead())
 
 	for !c.chunker.IsRead() && c.isHealthy(ctx) {
 		c.throttler.BlockWait(ctx)
+
+		select {
+		case <-quit:
+			c.logger.Debug("readWorker parked (scale-down), exiting")
+			return nil
+		default:
+		}
 
 		c.logger.Debug("readWorker calling chunker.Next()")
 		chunk, err := c.chunker.Next()
@@ -343,6 +393,90 @@ func (c *buffered) readWorker(ctx context.Context) error {
 
 	c.logger.Debug("readWorker exiting main loop")
 	return nil
+}
+
+// SetReadWorkers reconciles the live read-worker count to n, spawning new
+// readers or parking existing ones as needed. It is the read-side counterpart
+// of SingleTargetApplier.SetWriteWorkers: idempotent, safe to call repeatedly,
+// and n is clamped to a minimum of 1 so the copy always makes progress. Calls
+// before Run has started the pool or after it has drained are no-ops.
+//
+// Parking is cooperative: closing a reader's quit channel makes it exit right
+// after its next BlockWait returns, so a chunk already claimed is always read
+// and submitted to the applier — no chunk is ever lost.
+func (c *buffered) SetReadWorkers(n int) {
+	if n < 1 {
+		n = 1
+	}
+	c.readScaleMu.Lock()
+	defer c.readScaleMu.Unlock()
+
+	// No-op before Run has recorded the reader context or once the pool has
+	// drained. In both states we must not spawn: before Run a nil readerCtx
+	// would panic the reader, and post-drain spawns would race Run's
+	// drain-wait, which has already observed zero.
+	if c.readerCtx == nil || c.readScalingClosed {
+		return
+	}
+
+	cur := len(c.readerQuits)
+	switch {
+	case n > cur:
+		for range n - cur {
+			c.spawnReadWorkerLocked()
+		}
+		c.logger.Info("scaled read workers up", "from", cur, "to", n)
+	case n < cur:
+		// Park the most-recently-added readers by closing their quit channels.
+		for i := cur - 1; i >= n; i-- {
+			close(c.readerQuits[i])
+		}
+		c.readerQuits = c.readerQuits[:n]
+		c.logger.Info("scaled read workers down", "from", cur, "to", n)
+	}
+}
+
+// ActiveReadWorkers returns the current number of live read workers.
+func (c *buffered) ActiveReadWorkers() int {
+	c.readScaleMu.Lock()
+	defer c.readScaleMu.Unlock()
+	return c.liveReaders
+}
+
+// spawnReadWorkerLocked starts one read worker. Callers must hold readScaleMu.
+func (c *buffered) spawnReadWorkerLocked() {
+	quit := make(chan struct{})
+	c.readerQuits = append(c.readerQuits, quit)
+	c.liveReaders++
+	ctx := c.readerCtx
+	cancel := c.readerCancel
+	go func() {
+		defer c.readerExited(quit)
+		if err := c.readWorker(ctx, quit); err != nil {
+			// The error itself was already recorded by setInvalid inside
+			// readWorker; cancelling the shared reader context aborts sibling
+			// readers' in-flight reads promptly (errgroup parity).
+			cancel()
+		}
+	}()
+}
+
+// readerExited is the bookkeeping counterpart of spawnReadWorkerLocked, run as
+// every reader's exit path. It removes the reader's quit channel from the pool
+// (present only when the reader exited naturally — a parked reader's entry was
+// already trimmed by SetReadWorkers), decrements the live count, and wakes
+// Run's drain-wait.
+func (c *buffered) readerExited(quit chan struct{}) {
+	c.readScaleMu.Lock()
+	defer c.readScaleMu.Unlock()
+	for i, q := range c.readerQuits {
+		if q == quit {
+			c.readerQuits = append(c.readerQuits[:i], c.readerQuits[i+1:]...)
+			break
+		}
+	}
+	c.liveReaders--
+	c.readersDone.Broadcast()
 }
 
 // setInvalid marks the copy as failed and records the first error that caused
