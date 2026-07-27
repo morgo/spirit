@@ -173,6 +173,31 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 		targetTables[t.TableName] = oldTbl
 	}
 
+	// Reverse rows are routed to a source shard by the SOURCE keyspace's vindex,
+	// so the provider is asked about the source schema (the canonical
+	// sources[0]) — NOT the target shard whose binlog carries the row. The
+	// answer is per-table, not per-shard, so resolve it once here. No metadata
+	// for a moved table means its rows cannot be routed — fail loudly rather
+	// than let the window open with an unroutable feed.
+	type shardingMeta struct {
+		column string
+		hash   table.HashFunc
+	}
+	var sharding map[string]shardingMeta
+	if sharded {
+		sharding = make(map[string]shardingMeta, len(src.tables))
+		for _, t := range src.tables {
+			col, hashFn, err := r.move.ReverseShardingProvider.GetShardingMetadata(src.config.DBName, t.TableName)
+			if err != nil {
+				return fmt.Errorf("reverse window: sharding metadata for table %q: %w", t.TableName, err)
+			}
+			if col == "" || hashFn == nil {
+				return fmt.Errorf("reverse window: no sharding metadata for table %q; a sharded source requires every moved table to have a sharding key to route reverse writes", t.TableName)
+			}
+			sharding[t.TableName] = shardingMeta{column: col, hash: hashFn}
+		}
+	}
+
 	sources := make([]ReverseSource, 0, len(r.targets))
 	w.watched = make([][]*table.TableInfo, len(r.targets))
 	for i := range r.targets {
@@ -192,19 +217,8 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 				return fmt.Errorf("reverse window: load target table %q on shard %d: %w", t.TableName, i, err)
 			}
 			if sharded {
-				// Reverse rows are routed to a source shard by the SOURCE
-				// keyspace's vindex. No metadata for a moved table means its
-				// rows cannot be routed — fail loudly rather than let the
-				// window open with an unroutable feed.
-				col, hashFn, err := r.move.ReverseShardingProvider.GetShardingMetadata(tgt.Config.DBName, t.TableName)
-				if err != nil {
-					return fmt.Errorf("reverse window: sharding metadata for table %q: %w", t.TableName, err)
-				}
-				if col == "" || hashFn == nil {
-					return fmt.Errorf("reverse window: no sharding metadata for table %q; a sharded source requires every moved table to have a sharding key to route reverse writes", t.TableName)
-				}
-				wt.ShardingColumn = col
-				wt.HashFunc = hashFn
+				wt.ShardingColumn = sharding[t.TableName].column
+				wt.HashFunc = sharding[t.TableName].hash
 			}
 			watched = append(watched, wt)
 		}

@@ -122,6 +122,11 @@ func NewReverseFeed(cfg ReverseFeedConfig) (_ *ReverseFeed, err error) {
 		return nil, errors.New("reverse feed: at least one target table is required")
 	}
 	if len(cfg.Targets) > 0 {
+		for ti := range cfg.Targets {
+			if cfg.Targets[ti].DB == nil {
+				return nil, fmt.Errorf("reverse feed: target %d DB must be non-nil", ti)
+			}
+		}
 		// Sharded reverse target: routing decisions come from the watched
 		// tables' sharding metadata, so its absence would strand every row —
 		// fail here rather than fatally at first apply.

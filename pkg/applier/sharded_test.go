@@ -1158,6 +1158,14 @@ func TestShardedApplierCallbackPanicDecrements(t *testing.T) {
 	require.NoError(t, a.Wait(ctx))
 }
 
+// A nil shard connection is otherwise only discovered when a row happens to
+// route to that shard — possibly long after construction, as a nil-pointer
+// panic in the write path.
+func TestShardedApplierRejectsNilTargetDB(t *testing.T) {
+	_, err := NewShardedApplier([]Target{{DB: nil, KeyRange: "-80"}}, NewApplierDefaultConfig())
+	require.ErrorContains(t, err, "shard 0: target DB must be non-nil")
+}
+
 // TestShardedApplierRenamedTarget covers the rename support used by the
 // reverse feed of a sharded-source move: the watched table is the (former
 // move target's) real table, but writes land on the former source shards'

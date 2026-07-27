@@ -334,4 +334,13 @@ func TestReverseFeedShardedConfigValidation(t *testing.T) {
 		TargetTables: map[string]*table.TableInfo{"t1": oldTbl},
 	})
 	require.ErrorContains(t, err, "no sharding metadata")
+
+	// A nil shard connection would otherwise only surface when a row happened
+	// to route to that shard, mid-window.
+	_, err = NewReverseFeed(ReverseFeedConfig{
+		Sources:      []ReverseSource{src},
+		Targets:      []applier.Target{{DB: u0DB, KeyRange: "-80"}, {DB: nil, KeyRange: "80-"}},
+		TargetTables: map[string]*table.TableInfo{"t1": oldTbl},
+	})
+	require.ErrorContains(t, err, "target 1 DB must be non-nil")
 }

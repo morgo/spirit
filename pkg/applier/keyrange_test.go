@@ -74,6 +74,36 @@ func TestParseKeyRange(t *testing.T) {
 			input:   "80",
 			wantErr: true,
 		},
+		{
+			name:      "full 16-hex-digit bounds",
+			input:     "4000000000000000-8000000000000000",
+			wantErr:   false,
+			wantStart: 0x4000000000000000,
+			wantEnd:   0x8000000000000000,
+		},
+		{
+			// A bound is a prefix of a 64-bit keyspace id; anything longer used
+			// to panic in the zero-padding (strings.Repeat with a negative count).
+			name:    "start longer than 16 hex digits",
+			input:   "80000000000000000-",
+			wantErr: true,
+		},
+		{
+			name:    "end longer than 16 hex digits",
+			input:   "-80000000000000000",
+			wantErr: true,
+		},
+		{
+			// [0xc0.., 0x80..) is empty: rows hashing there would have no shard.
+			name:    "end before start",
+			input:   "c0-80",
+			wantErr: true,
+		},
+		{
+			name:    "end equal to start",
+			input:   "80-80",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

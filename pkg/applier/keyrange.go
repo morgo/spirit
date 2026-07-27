@@ -15,6 +15,31 @@ type keyRange struct {
 	unbounded bool   // open upper range ("80-"): contains everything >= start
 }
 
+// keyRangeHexDigits is the number of hex digits in a 64-bit keyspace id. A
+// bound is a PREFIX of that id, so it may be shorter (right-padded with zeros)
+// but never longer.
+const keyRangeHexDigits = 16
+
+var keyRangeHexRe = regexp.MustCompile(`^[0-9a-f]+$`)
+
+// parseKeyRangeBound parses one side of a key range: a hex prefix of the 64-bit
+// keyspace id, right-padded with zeros to a full id. side is "start" or "end",
+// used only for the error message.
+func parseKeyRangeBound(side, bound string) (uint64, error) {
+	if !keyRangeHexRe.MatchString(bound) {
+		return 0, fmt.Errorf("invalid %s key range: %s (expected hex characters [0-9a-f])", side, bound)
+	}
+	if len(bound) > keyRangeHexDigits {
+		return 0, fmt.Errorf("invalid %s key range: %s (at most %d hex characters, it is a prefix of a 64-bit keyspace id)", side, bound, keyRangeHexDigits)
+	}
+	padded := bound + strings.Repeat("0", keyRangeHexDigits-len(bound))
+	v, err := strconv.ParseUint(padded, 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s key range: %s: %w", side, bound, err)
+	}
+	return v, nil
+}
+
 // parseKeyRange parses a Vitess-style key range string into a keyRange struct.
 // Examples: "-80" -> [0, 0x80...], "80-" -> [0x80..., 0xff...], "80-c0" -> [0x80..., 0xc0...]
 func parseKeyRange(kr string) (keyRange, error) {
@@ -32,18 +57,9 @@ func parseKeyRange(kr string) (keyRange, error) {
 	var err error
 
 	// Parse start
-	if parts[0] == "" {
-		start = 0
-	} else {
-		// Validate hex format [0-9a-f]+
-		if !regexp.MustCompile(`^[0-9a-f]+$`).MatchString(parts[0]) {
-			return keyRange{}, fmt.Errorf("invalid start key range: %s (expected hex characters [0-9a-f])", parts[0])
-		}
-		// Pad to 16 hex chars (64 bits) and parse
-		padded := parts[0] + strings.Repeat("0", 16-len(parts[0]))
-		start, err = strconv.ParseUint(padded, 16, 64)
-		if err != nil {
-			return keyRange{}, fmt.Errorf("invalid start key range: %s: %w", parts[0], err)
+	if parts[0] != "" {
+		if start, err = parseKeyRangeBound("start", parts[0]); err != nil {
+			return keyRange{}, err
 		}
 	}
 
@@ -55,15 +71,14 @@ func parseKeyRange(kr string) (keyRange, error) {
 	if parts[1] == "" {
 		return keyRange{start: start, unbounded: true}, nil
 	}
-	// Validate hex format [0-9a-f]+
-	if !regexp.MustCompile(`^[0-9a-f]+$`).MatchString(parts[1]) {
-		return keyRange{}, fmt.Errorf("invalid end key range: %s (expected hex characters [0-9a-f])", parts[1])
+	if end, err = parseKeyRangeBound("end", parts[1]); err != nil {
+		return keyRange{}, err
 	}
-	// Pad to 16 hex chars (64 bits) and parse
-	padded := parts[1] + strings.Repeat("0", 16-len(parts[1]))
-	end, err = strconv.ParseUint(padded, 16, 64)
-	if err != nil {
-		return keyRange{}, fmt.Errorf("invalid end key range: %s: %w", parts[1], err)
+	// A bounded range is [start, end): end <= start describes no keyspace id at
+	// all, so every row hashing into it would be stranded with "no shard found"
+	// at apply time. Reject it here instead.
+	if end <= start {
+		return keyRange{}, fmt.Errorf("invalid key range: %s (end must be greater than start; use %q for an open-ended range)", kr, parts[0]+"-")
 	}
 	return keyRange{start: start, end: end}, nil
 }

@@ -107,6 +107,12 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 	}
 	shards := make([]*shardTarget, len(targets))
 	for i, target := range targets {
+		// A nil connection is only discovered when a row routes to this shard,
+		// which may be long after construction (and never in a test that only
+		// exercises other shards) — fail here instead.
+		if target.DB == nil {
+			return nil, fmt.Errorf("shard %d: target DB must be non-nil", i)
+		}
 		// Parse the key range
 		kr, err := parseKeyRange(target.KeyRange)
 		if err != nil {
