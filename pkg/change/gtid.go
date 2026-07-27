@@ -73,6 +73,12 @@ type gtidClient struct {
 	pendingSID   []byte
 	pendingGNO   int64
 
+	// flushResidual is the pending-change count observed at the end of the
+	// most recent flush, and flushCount how many flushes have completed. Both
+	// guarded by mu. See Source.FlushResidual.
+	flushResidual int
+	flushCount    int
+
 	periodicFlushLock   sync.Mutex
 	periodicFlushCancel context.CancelFunc
 	periodicFlushDone   chan struct{}
@@ -1037,7 +1043,29 @@ func (c *gtidClient) flush(ctx context.Context, underLock bool, locks []*dbconn.
 		}
 		c.mu.Unlock()
 	}
+	c.recordFlushResidual()
 	return nil
+}
+
+// recordFlushResidual captures what this flush left behind, for
+// FlushResidual. Recorded whether or not every change could be flushed: a
+// flush that could not drain everything is exactly the case a caller watching
+// for a feed losing ground needs to see.
+//
+// GetDeltaLen takes no lock of its own, so it is called before acquiring c.mu.
+func (c *gtidClient) recordFlushResidual() {
+	residual := c.GetDeltaLen()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushResidual = residual
+	c.flushCount++
+}
+
+// FlushResidual satisfies Source.
+func (c *gtidClient) FlushResidual() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.flushResidual, c.flushCount
 }
 
 // Flush satisfies Source. Same shape as binlogClient.Flush.

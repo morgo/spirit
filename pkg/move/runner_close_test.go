@@ -177,6 +177,8 @@ func (f *fakeChangeSource) FlushUnderTableLock(_ context.Context, _ []*dbconn.Ta
 }
 func (f *fakeChangeSource) BlockWait(_ context.Context) error { return nil }
 func (f *fakeChangeSource) GetDeltaLen() int                  { return 0 }
+
+func (f *fakeChangeSource) FlushResidual() (int, int) { return 0, 0 }
 func (f *fakeChangeSource) SetWatermarkOptimization(_ context.Context, _ bool) error {
 	return nil
 }

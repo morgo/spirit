@@ -120,6 +120,28 @@ type Source interface {
 	// the backlog is small enough to consider cutover.
 	GetDeltaLen() int
 
+	// FlushResidual reports what the most recently completed flush left
+	// behind: residual is the pending-change count observed immediately
+	// after that flush, and flushes is a monotonic count of completed
+	// flushes. Both are 0 before the first flush completes.
+	//
+	// This is the quantity that says whether the feed is keeping up, and it
+	// has to be sampled here rather than polled by the caller. GetDeltaLen
+	// is a sawtooth: it climbs on every sample between flushes and drops
+	// when one lands, so a poller observes the residual plus however many
+	// writes arrived since the flush. That second term is large enough on a
+	// busy table to swamp the residual itself, and it does not average out
+	// — a polling ticker and the flush ticker hold a fixed phase
+	// relationship whenever their intervals are commensurate, which at the
+	// defaults (30s flush) they are for any poll interval that divides it.
+	//
+	// A caller watching for a feed that is losing ground should compare
+	// residuals only across distinct flushes, which is what flushes is for.
+	// A residual that stays near zero means the feed is keeping up however
+	// heavy the write load; one that climbs flush over flush means work is
+	// surviving flushes and accumulating.
+	FlushResidual() (residual, flushes int)
+
 	// SetWatermarkOptimization toggles the high/low watermark
 	// optimization across all subscriptions. Disabled before
 	// checksum/cutover to ensure all changes are flushed regardless of

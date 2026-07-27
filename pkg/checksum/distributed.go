@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,15 +131,26 @@ func (c *DistributedChecker) logChunkSummary() {
 	}
 }
 
-// totalDeltaLen sums pending changes across every feed — the backlog signal the
-// autoscaler vetoes on. With N sources the relevant quantity is the aggregate:
-// any one feed falling behind holds up cut-over.
-func (c *DistributedChecker) totalDeltaLen() int {
-	total := 0
-	for _, feed := range c.feeds {
-		total += feed.GetDeltaLen()
+// flushResidual aggregates change.Source.FlushResidual across every feed — the
+// backlog signal the autoscaler vetoes on. With N sources the relevant residual
+// is the sum, since any one feed falling behind holds up cut-over.
+//
+// The flush counter is the *minimum* across feeds, so a residual is only
+// compared once every feed has flushed again. Summing the counters instead would
+// advance N times per round of flushes and invite comparing a sum in which only
+// some terms had been refreshed.
+func (c *DistributedChecker) flushResidual() (int, int) {
+	if len(c.feeds) == 0 {
+		return 0, 0
 	}
-	return total
+	total := 0
+	flushes := math.MaxInt
+	for _, feed := range c.feeds {
+		r, f := feed.FlushResidual()
+		total += r
+		flushes = min(flushes, f)
+	}
+	return total, flushes
 }
 
 func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chunk) error {
@@ -743,7 +755,7 @@ func (c *DistributedChecker) runChecksum(ctx context.Context) error {
 	if c.autoscale {
 		scalerCtx, stopScaler := context.WithCancel(errGrpCtx)
 		defer stopScaler()
-		scaler := newChecksumScaler(thr, limiter, c.totalDeltaLen, c.concurrency, c.maxConcurrency, c.logger, c.metricsSink)
+		scaler := newChecksumScaler(thr, limiter, c.flushResidual, c.concurrency, c.maxConcurrency, c.logger, c.metricsSink)
 		go scaler.run(scalerCtx)
 	}
 

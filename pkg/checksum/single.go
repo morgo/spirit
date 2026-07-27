@@ -651,7 +651,7 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 		// rather than inheriting a stale count for a new snapshot.
 		scalerCtx, stopScaler := context.WithCancel(errGrpCtx)
 		defer stopScaler()
-		scaler := newChecksumScaler(thr, limiter, c.feed.GetDeltaLen, c.concurrency, c.maxConcurrency, c.logger, c.metricsSink)
+		scaler := newChecksumScaler(thr, limiter, c.feed.FlushResidual, c.concurrency, c.maxConcurrency, c.logger, c.metricsSink)
 		go scaler.run(scalerCtx)
 	}
 

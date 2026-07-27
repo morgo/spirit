@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/change"
@@ -25,14 +24,28 @@ func (g *gradualStub) Utilization() float64 { return g.util }
 
 var _ throttler.GradualThrottler = (*gradualStub)(nil)
 
-// newTestScaler builds a scaler over a real limiter, plus a mutable backlog
-// value the test can drive.
-func newTestScaler(t throttler.Throttler, start, maxThreads int) (*checksumScaler, *autoscale.Limiter, *int) {
-	backlog := new(int)
+// feedStub stands in for change.Source's FlushResidual: the residual the last
+// flush left behind, and a monotonic flush counter. flush() publishes a new
+// residual as if a flush had just completed.
+type feedStub struct {
+	residual, flushes int
+}
+
+func (f *feedStub) get() (int, int) { return f.residual, f.flushes }
+
+func (f *feedStub) flush(residual int) {
+	f.residual = residual
+	f.flushes++
+}
+
+// newTestScaler builds a scaler over a real limiter, plus the feed stub the
+// test drives.
+func newTestScaler(t throttler.Throttler, start, maxThreads int) (*checksumScaler, *autoscale.Limiter, *feedStub) {
+	feed := &feedStub{}
 	l := autoscale.NewLimiter(start)
-	s := newChecksumScaler(t, l, func() int { return *backlog }, start, maxThreads,
+	s := newChecksumScaler(t, l, feed.get, start, maxThreads,
 		slog.New(slog.DiscardHandler), &metrics.NoopSink{})
-	return s, l, backlog
+	return s, l, feed
 }
 
 // tickN drives n ticks, which is how the tests wait out cooldowns without real
@@ -43,28 +56,17 @@ func tickN(s *checksumScaler, n int) {
 	}
 }
 
-// flushCycles simulates n change-feed flush cycles, driving the scaler at the
-// real tick:flush ratio.
+// flushCycles simulates n change-feed flush cycles at the real tick:flush ratio
+// — the scaler ticks several times per flush, so most ticks carry no new
+// information and the controller has to behave under that.
 //
-// This is the shape the backlog signal has to survive: within a cycle the
-// pending count climbs monotonically on every sample (the feed buffers), and
-// when the flush lands it drops to residual. So "rose several ticks in a row"
-// describes a perfectly healthy feed, and only the residual distinguishes one
-// that is keeping up from one that is not.
-//
-// residual is called per cycle so a test can hold it at zero (healthy), or ramp
-// it (the feed is not finishing what it starts).
-func flushCycles(s *checksumScaler, backlog *int, n, perTickGrowth int, residual func(cycle int) int) {
+// residual is called per cycle so a test can hold it at zero (a feed that fully
+// drains), hold it flat (holding its ground at depth), or ramp it (losing).
+func flushCycles(s *checksumScaler, feed *feedStub, n int, residual func(cycle int) int) {
 	ticksPerFlush := int(change.DefaultFlushInterval / csTick)
 	for c := range n {
-		base := residual(c)
-		for i := range ticksPerFlush {
-			*backlog = base + (i+1)*perTickGrowth
-			s.tick(context.Background())
-		}
-		// The flush lands, leaving the residual behind.
-		*backlog = base
-		s.tick(context.Background())
+		feed.flush(residual(c))
+		tickN(s, ticksPerFlush)
 	}
 }
 
@@ -134,18 +136,25 @@ func TestScalerMaxNeverBelowStart(t *testing.T) {
 }
 
 func TestScalerHealthyFeedNeverVetoes(t *testing.T) {
-	// The regression this whole signal design exists for. A busy but healthy
-	// feed buffers a large backlog between flushes and fully drains at each
-	// one. Every sample within a cycle is higher than the last, and the peak is
-	// far above csBacklogVetoDeltas — so any signal keyed on "the backlog is
-	// large and rising" fires here, every cycle, forever.
+	// The regression this whole signal design exists for, and the reason it reads
+	// the residual from the feed rather than polling GetDeltaLen.
 	//
-	// On Aurora that was unrecoverable: with a mid-dead-band utilization the
-	// zone law holds, so there was no path back up and the pass ratcheted down
-	// to a single worker on a completely healthy system.
+	// A busy but healthy feed fully drains at every flush while buffering a large
+	// backlog in between, so a polled signal sees a count that is large and
+	// rising on almost every sample. Two earlier attempts at this both fired here
+	// on a completely healthy system: first by testing the raw count's slope, then
+	// by taking window minima — which do not recover the residual either, because
+	// a poll lands a fixed fraction of an interval after the flush and so reads
+	// the residual plus that fraction's worth of writes. On Aurora that was
+	// unrecoverable: with a mid-dead-band utilization the zone law holds, so there
+	// was no path back up and the pass ratcheted down to a single worker.
+	//
+	// Reading the residual at the flush removes the write rate from the signal
+	// entirely, which is why this now holds for any write rate, including a
+	// rising one.
 	g := &gradualStub{util: 0.55} // dead band: no growth to mask a wrong shed
-	s, _, backlog := newTestScaler(g, 4, 8)
-	flushCycles(s, backlog, 10, 5000, func(int) int { return 0 })
+	s, _, feed := newTestScaler(g, 4, 8)
+	flushCycles(s, feed, 30, func(int) int { return 0 })
 	assert.Equal(t, 4, s.current, "a feed that drains at every flush is keeping up")
 	assert.False(t, s.backlogLosing)
 }
@@ -157,10 +166,10 @@ func TestScalerBacklogVetoShedsWithoutGradualSignal(t *testing.T) {
 	//
 	// Here the flushes no longer drain: each one leaves more behind than the
 	// last, which is the feed reporting it cannot finish what it starts.
-	s, l, backlog := newTestScaler(&throttler.Noop{}, 4, 8)
+	s, l, feed := newTestScaler(&throttler.Noop{}, 4, 8)
 	require.Nil(t, s.gradual, "Noop must not be mistaken for a continuous signal")
 
-	flushCycles(s, backlog, 6, 5000, func(cycle int) int {
+	flushCycles(s, feed, 6, func(cycle int) int {
 		return csBacklogVetoDeltas + cycle*2000
 	})
 	assert.Less(t, s.current, 4, "a growing residual must shed")
@@ -171,8 +180,8 @@ func TestScalerResidualBelowThresholdNeverVetoes(t *testing.T) {
 	// Flushes are leaving a growing residual, but one small enough that
 	// pkg/change would already consider the feed drained enough to cut over.
 	// Not worth a worker.
-	s, _, backlog := newTestScaler(&throttler.Noop{}, 4, 8)
-	flushCycles(s, backlog, 10, 5000, func(cycle int) int { return cycle * 100 })
+	s, _, feed := newTestScaler(&throttler.Noop{}, 4, 8)
+	flushCycles(s, feed, 10, func(cycle int) int { return cycle * 100 })
 	assert.Equal(t, 4, s.current)
 }
 
@@ -180,28 +189,27 @@ func TestScalerSteadyLargeResidualNeverVetoes(t *testing.T) {
 	// A large but *flat* residual means the feed is holding its ground — it is
 	// keeping up with the write rate, just at a steady-state depth. Only a
 	// residual that keeps climbing means it is losing.
-	s, _, backlog := newTestScaler(&throttler.Noop{}, 4, 8)
-	flushCycles(s, backlog, 10, 5000, func(int) int { return csBacklogVetoDeltas * 3 })
+	s, _, feed := newTestScaler(&throttler.Noop{}, 4, 8)
+	flushCycles(s, feed, 10, func(int) int { return csBacklogVetoDeltas * 3 })
 	assert.Equal(t, 4, s.current)
 }
 
 func TestScalerRecoversToStartAfterBacklogClears(t *testing.T) {
-	s, _, backlog := newTestScaler(&throttler.Noop{}, 4, 8)
+	s, _, feed := newTestScaler(&throttler.Noop{}, 4, 8)
 
-	flushCycles(s, backlog, 6, 5000, func(cycle int) int {
+	flushCycles(s, feed, 6, func(cycle int) int {
 		return csBacklogVetoDeltas + cycle*2000
 	})
 	require.Less(t, s.current, 4, "expected the veto to have shed at least once")
 
 	// The feed catches up. Without recovery, one transient burst would
 	// permanently cost throughput for the rest of the pass.
-	*backlog = 0
-	tickN(s, 30)
+	flushCycles(s, feed, 6, func(int) int { return 0 })
 	assert.Equal(t, 4, s.current, "should recover to the configured start")
 
 	// ...but no further: with no continuous signal there is nothing to justify
 	// growing past what the operator asked for.
-	tickN(s, 30)
+	flushCycles(s, feed, 6, func(int) int { return 0 })
 	assert.Equal(t, 4, s.current)
 }
 
@@ -217,8 +225,8 @@ func TestScalerBacklogVetoOutranksIdleUtilization(t *testing.T) {
 	// feed is losing, and the count is driven all the way to the floor rather
 	// than settling somewhere the two signals cancel out.
 	g := &gradualStub{util: 0.0}
-	s, _, backlog := newTestScaler(g, 4, 8)
-	flushCycles(s, backlog, 20, 5000, func(cycle int) int {
+	s, _, feed := newTestScaler(g, 4, 8)
+	flushCycles(s, feed, 20, func(cycle int) int {
 		return csBacklogVetoDeltas + cycle*2000
 	})
 	assert.Equal(t, 1, s.current, "a persistently losing feed must beat an idle-looking server")
@@ -230,8 +238,8 @@ func TestScalerPanicZoneOutranksBacklogVeto(t *testing.T) {
 	// panic response, degrading backoff to -1 per cooldown exactly when the
 	// server is most overloaded.
 	g := &gradualStub{util: 1.4}
-	s, _, backlog := newTestScaler(g, 8, 16)
-	*backlog = csBacklogVetoDeltas * 10
+	s, _, feed := newTestScaler(g, 8, 16)
+	feed.flush(csBacklogVetoDeltas * 10)
 	s.backlogLosing = true // as if a window had just closed on a rising residual
 
 	s.tick(context.Background())
@@ -243,14 +251,13 @@ func TestScalerAuroraRecoversToStartInDeadBand(t *testing.T) {
 	// dead band must not strand a backlog-shed pool at the reduced count. It
 	// recovers to start, but growth beyond start still needs a headroom signal.
 	g := &gradualStub{util: 0.55}
-	s, _, backlog := newTestScaler(g, 4, 8)
-	flushCycles(s, backlog, 6, 5000, func(cycle int) int {
+	s, _, feed := newTestScaler(g, 4, 8)
+	flushCycles(s, feed, 6, func(cycle int) int {
 		return csBacklogVetoDeltas + cycle*2000
 	})
 	require.Less(t, s.current, 4)
 
-	*backlog = 0
-	tickN(s, 40)
+	flushCycles(s, feed, 8, func(int) int { return 0 })
 	assert.Equal(t, 4, s.current, "dead band recovers to start and stops there")
 }
 
@@ -258,25 +265,59 @@ func TestScalerAuroraGrowsPastStartAfterBacklogClears(t *testing.T) {
 	// With headroom on the continuous signal, recovery keeps going past start
 	// under the utilization law.
 	g := &gradualStub{util: 0.1}
-	s, _, backlog := newTestScaler(g, 4, 8)
-	flushCycles(s, backlog, 20, 5000, func(cycle int) int {
+	s, _, feed := newTestScaler(g, 4, 8)
+	flushCycles(s, feed, 20, func(cycle int) int {
 		return csBacklogVetoDeltas + cycle*2000
 	})
 	require.Less(t, s.current, 4, "expected the losing feed to have shed below start")
 
-	*backlog = 0
-	tickN(s, 60)
+	flushCycles(s, feed, 10, func(int) int { return 0 })
 	assert.Equal(t, 8, s.current, "should climb to MaxThreads while there is headroom")
 }
 
-func TestResidualWindowSpansAFlush(t *testing.T) {
-	// The window must contain a flush trough or the signal measures nothing but
-	// the rising edge. Two flush intervals give margin for phase misalignment.
-	assert.Equal(t, 12, residualWindowTicks(30*time.Second, 5*time.Second))
-	assert.GreaterOrEqual(t, csBacklogWindowTicks,
-		2*int(change.DefaultFlushInterval/csTick), "window must span at least two flushes")
-	assert.Equal(t, 2, residualWindowTicks(time.Second, time.Hour), "floored so a previous window exists")
-	assert.Equal(t, 2, residualWindowTicks(time.Second, 0), "must not divide by zero")
+func TestScalerBaselineFlushNeverVetoes(t *testing.T) {
+	// The first flush observed has nothing to be compared against, so it may only
+	// establish the baseline. Otherwise a pass starting while the feed happens to
+	// be deep would shed on its first evaluation.
+	s, _, feed := newTestScaler(&throttler.Noop{}, 4, 8)
+	feed.flush(csBacklogVetoDeltas * 100)
+	tickN(s, 10)
+	assert.Equal(t, 4, s.current)
+	assert.False(t, s.backlogLosing)
+	assert.Equal(t, csBacklogVetoDeltas*100, s.prevResidual, "baseline should be recorded")
+}
+
+func TestScalerHysteresisSurvivesIntermittentCleanFlush(t *testing.T) {
+	// A feed losing ground but not monotonically: the residual climbs overall,
+	// with one flush in three leaving slightly less behind than its predecessor.
+	//
+	// Without hysteresis on the *exit* condition this net-grows. Shedding is one
+	// step per flush while growth is one per two ticks, so a single clean flush
+	// clearing the verdict buys back more than the sheds took away, and the
+	// controller drifts up while the feed falls further behind.
+	s, _, feed := newTestScaler(&throttler.Noop{}, 8, 8)
+	flushCycles(s, feed, 30, func(cycle int) int {
+		r := csBacklogVetoDeltas + cycle*3000
+		if cycle%3 == 2 {
+			r -= 4000 // a favourable flush, but the trend is unchanged
+		}
+		return r
+	})
+	assert.LessOrEqual(t, s.current, 4, "an intermittently clean flush must not undo shedding")
+}
+
+func TestScalerSustainedHealthClearsTheVerdict(t *testing.T) {
+	// The other half of the hysteresis: once the feed really is draining again,
+	// the verdict must clear rather than suppressing growth for the rest of the
+	// pass.
+	s, _, feed := newTestScaler(&throttler.Noop{}, 4, 8)
+	flushCycles(s, feed, 6, func(cycle int) int {
+		return csBacklogVetoDeltas + cycle*2000
+	})
+	require.True(t, s.backlogLosing)
+
+	flushCycles(s, feed, csBacklogHysteresisFlushes, func(int) int { return 0 })
+	assert.False(t, s.backlogLosing, "sustained health must clear the verdict")
 }
 
 func TestScalerNilBacklogIsSafe(t *testing.T) {
