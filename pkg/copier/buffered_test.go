@@ -482,7 +482,10 @@ func TestBufferedCopierReadWorkerScaling(t *testing.T) {
 	require.NoError(t, t2.SetInfo(t.Context()))
 
 	gate := &gateThrottler{
-		allow: make(chan struct{}),
+		// allow is buffered so the test's non-blocking token sends don't
+		// depend on a reader being mid-receive at that exact instant (the
+		// send site has a default case, so at most one token is in flight).
+		allow: make(chan struct{}, 1),
 		open:  make(chan struct{}),
 	}
 	cfg := NewCopierDefaultConfig()
