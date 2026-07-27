@@ -307,6 +307,15 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 		default:
 		}
 
+		// Re-check health after BlockWait: a reader can sit blocked in the
+		// throttler for a long time, and the copy may have been cancelled or
+		// invalidated while it waited. Exit here rather than claiming one
+		// more chunk against a dead copy.
+		if !c.isHealthy(ctx) {
+			c.logger.Debug("readWorker unhealthy after BlockWait, exiting")
+			return nil
+		}
+
 		c.logger.Debug("readWorker calling chunker.Next()")
 		chunk, err := c.chunker.Next()
 		if err != nil {
