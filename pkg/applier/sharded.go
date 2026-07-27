@@ -733,12 +733,17 @@ func (a *ShardedApplier) resolveShardLocks(locks []*dbconn.TableLock) (map[int]*
 // the deletes to all shards. The vindex value is considered immutable, and we will
 // error if it changes on an update.
 //
-// Note: the sharded applier does not allow any transformations!
-// The targetTable argument is intentionally ignored.
-// This also means that table names between source and target must be the same.
-func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
+// Note: the sharded applier supports renaming the table (targetTable, nil =>
+// same name as sourceTable) but no column transformations. The rename exists
+// for the reverse feed of a sharded-source move, which writes back to the
+// source's retired `_old` tables.
+func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, targetTable *table.TableInfo, keys [][]any, locks []*dbconn.TableLock) (int64, error) {
 	if len(keys) == 0 {
 		return 0, nil
+	}
+	// For move operations, targetTable may be nil - use sourceTable for both
+	if targetTable == nil {
+		targetTable = sourceTable
 	}
 	// Resolve which lock belongs to which shard before executing anything,
 	// so a missing lock fails loudly instead of partially applying.
@@ -762,7 +767,7 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 	// Use just the table name, not the fully qualified name, because
 	// the database connection (shard.writeDB) already determines which database to write to
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)",
-		sourceTable.QuotedTableName,
+		targetTable.QuotedTableName,
 		table.QuoteColumns(sourceTable.KeyColumns),
 		inClause,
 	)
@@ -843,9 +848,12 @@ func (a *ShardedApplier) DeleteKeys(ctx context.Context, sourceTable, _ *table.T
 // This is likely not too big of a limitation, as Vitess itself recommends that vindex columns be immutable.
 // If it turns out to be a problem, we can revisit tracking by other columns later.
 //
-// Note: the sharded applier does not allow any transformations!
-// The targetTable argument is intentionally ignored.
-// This also means that table names between source and target must be the same.
+// Note: the sharded applier supports renaming the table (mapping's target,
+// which defaults to the source when no NewTable is set) but no column
+// transformations. The rename exists for the reverse feed of a sharded-source
+// move, which writes back to the source's retired `_old` tables. The sharding
+// column and hash always come from the mapping's SOURCE table — the watched
+// table whose row images we are routing.
 func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []LogicalRow, locks []*dbconn.TableLock) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -874,6 +882,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 	// (since RowImage from binlog contains ALL columns, including generated ones)
 	shardingOrdinal := slices.Index(sourceTable.Columns, sourceTable.ShardingColumn)
 	sourceOrdinal := mapping.SourceOrdinalIndices()
+	sourceColumnNames, _ := mapping.ColumnsSlice()
 	if shardingOrdinal == -1 {
 		return 0, fmt.Errorf("sharding column %s not found in columns", sourceTable.ShardingColumn)
 	}
@@ -921,8 +930,11 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 	results := make(chan result, shardsToCopy)
 	defer close(results)
 
-	// Build column list for the upsert statement
-	columnList := table.QuoteColumns(sourceTable.NonGeneratedColumns)
+	// Build the column list for the upsert statement from the mapping so a
+	// renamed target (e.g. the reverse feed's `_old` tables) uses its own
+	// column list. With no rename the mapping's target IS the source table,
+	// so this is identical to the previous NonGeneratedColumns list.
+	_, columnList := mapping.Columns()
 
 	for shardID, rows := range shardRows {
 		if len(rows) == 0 {
@@ -940,7 +952,7 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 						return
 					}
 					value := logicalRow.RowImage[colIdx]
-					col := sourceTable.NonGeneratedColumns[i]
+					col := sourceColumnNames[i]
 					columnType, ok := sourceTable.GetColumnMySQLType(col)
 					if !ok {
 						results <- result{err: fmt.Errorf("column %s not found in table info", col)}
@@ -965,14 +977,14 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 			// implications. Just the table name here — the per-shard DB
 			// connection already determines which database to write to.
 			upsertStmt := fmt.Sprintf("REPLACE INTO %s (%s) VALUES %s",
-				sourceTable.QuotedTableName,
+				mapping.TargetTable().QuotedTableName,
 				columnList,
 				strings.Join(valuesClauses, ", "),
 			)
 			a.logger.Debug("executing upsert on shard",
 				"shardID", sid,
 				"rowCount", len(valuesClauses),
-				"table", sourceTable.TableName,
+				"table", mapping.TargetTable().TableName,
 			)
 			var affected int64
 			var err error
