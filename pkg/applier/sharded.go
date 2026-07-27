@@ -129,9 +129,9 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 	for i := range shards {
 		for j := i + 1; j < len(shards); j++ {
 			if shards[i].keyRange.overlaps(shards[j].keyRange) {
-				return nil, fmt.Errorf("key ranges overlap: shard %d (%s: [0x%016x, 0x%016x)) and shard %d (%s: [0x%016x, 0x%016x))",
-					i, targets[i].KeyRange, shards[i].keyRange.start, shards[i].keyRange.end,
-					j, targets[j].KeyRange, shards[j].keyRange.start, shards[j].keyRange.end)
+				return nil, fmt.Errorf("key ranges overlap: shard %d (%s: %s) and shard %d (%s: %s)",
+					i, targets[i].KeyRange, shards[i].keyRange,
+					j, targets[j].KeyRange, shards[j].keyRange)
 			}
 		}
 	}
@@ -141,8 +141,7 @@ func NewShardedApplier(targets []Target, cfg *ApplierConfig) (*ShardedApplier, e
 		cfg.Logger.Info("parsed key range for shard",
 			"shardID", i,
 			"keyRange", targets[i].KeyRange,
-			"start", fmt.Sprintf("0x%016x", shard.keyRange.start),
-			"end", fmt.Sprintf("0x%016x", shard.keyRange.end))
+			"parsed", shard.keyRange.String())
 	}
 
 	return &ShardedApplier{
