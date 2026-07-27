@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-sql-driver/mysql"
@@ -541,16 +542,25 @@ func TestMoveReverseWindowNMResumesAfterKill(t *testing.T) {
 	run1 := f.newRunner(t, 30*time.Second)
 	run1.SetCutover(func(context.Context) error { return nil })
 	ctx1, cancel1 := context.WithCancel(context.Background())
-	run1Done := make(chan struct{})
-	go func() { _ = run1.Run(ctx1); close(run1Done) }()
+	run1Err := make(chan error, 1)
+	go func() { run1Err <- run1.Run(ctx1) }()
 
 	waitForReverseWindow(t, f.ctl, f.checkpointDBName)
 	// Wait for the source retire to land on BOTH source shards before killing,
 	// so run 2 resumes from the fully-cutover state.
 	waitForTable(t, f.ctl, f.srcEvenName, "users_old")
 	waitForTable(t, f.ctl, f.srcOddName, "users_old")
+	// The checkpoint phase and the renames land during cutover, before the
+	// window loop starts; wait for the runner to report ReverseWindow so the
+	// kill hits the loop itself and surfaces as a clean context.Canceled.
+	require.Eventually(t, func() bool {
+		return run1.Progress().CurrentState == status.ReverseWindow
+	}, 30*time.Second, 50*time.Millisecond, "run 1 must reach the reverse-window state")
 	cancel1()
-	<-run1Done
+	// The only acceptable outcome of the kill is our own cancellation — any
+	// other error means run 1 died on its own and the "resume" below would be
+	// testing recovery from the wrong state.
+	require.ErrorIs(t, <-run1Err, context.Canceled, "run 1 must die from the kill, not an earlier failure")
 	utils.CloseAndLog(run1)
 
 	require.True(t, tableExists(t, f.ctl, f.checkpointDBName, checkpointTableName), "checkpoint must survive the kill")

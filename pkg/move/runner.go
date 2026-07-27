@@ -1982,7 +1982,10 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		ChecksumWatermark: checksumWatermark,
 		Position:          string(positionsJSON),
 	}); err != nil {
-		return status.ErrCouldNotWriteCheckpoint
+		// Keep the cause: the WatchTask dumper distinguishes a benign
+		// canceled-mid-write (it is being stopped) from a genuinely broken
+		// checkpoint table, which is fatal.
+		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
 	return nil
 }
