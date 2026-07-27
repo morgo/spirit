@@ -281,8 +281,8 @@ func TestReverseFeedFanOutRoutesByShard(t *testing.T) {
 	require.NoError(t, feed.Start(t.Context()))
 
 	// "App writes" landing on each former target after cutover.
-	testutils.RunSQL(t, "INSERT INTO poc_rfnm_s0.t1 VALUES (7,'seven')") // odd  → u1
-	testutils.RunSQL(t, "INSERT INTO poc_rfnm_s1.t1 VALUES (8,'eight')") // even → u0
+	testutils.RunSQL(t, "INSERT INTO poc_rfnm_s0.t1 VALUES (7,'seven')")  // odd  → u1
+	testutils.RunSQL(t, "INSERT INTO poc_rfnm_s1.t1 VALUES (8,'eight')")  // even → u0
 	testutils.RunSQL(t, "UPDATE poc_rfnm_s0.t1 SET val='TWO' WHERE id=2") // even → u0
 	testutils.RunSQL(t, "DELETE FROM poc_rfnm_s1.t1 WHERE id=5")          // broadcast delete
 
