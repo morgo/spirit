@@ -158,75 +158,32 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 
-	// Build the checksum query fragments. The same WHERE clause applies to
-	// both sources and targets since all schemas are identical, but the
-	// column expressions are side-dependent: JSON columns round-trip through
-	// text on the source and render strictly on the target (see
-	// table.castExpr). Move/sync writes are text-mediated — the applier
-	// writes rendered text that the target re-parses — so the same
-	// text-image contract as the single-server checksum applies here. This
-	// does assume source and target servers parse JSON text identically; if
-	// a future server version changed parse behavior (e.g. fixed the double
-	// misrounding bugs), a cross-version move of affected values would fail
-	// the checksum safely rather than pass silently.
-	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
-	if err != nil {
-		return err
-	}
-	whereClause := chunk.String()
-
-	// Query ALL sources and aggregate results.
-	// BIT_XOR is associative/commutative, so XOR-ing per-source checksums
-	// produces the same result as checksumming all rows in one table.
-	// The count is simply summed.
-	var sourceChecksum int64
-	var sourceCount uint64
+	// Acquire every source and target snapshot up front and hold them for the
+	// whole chunk. Beyond the checksum itself, the repair path re-reads
+	// sub-ranges through these same transactions, which is what makes narrowing
+	// sound (see narrowRepair).
+	srcTrxs := make([]*sql.Tx, len(c.sourcePools))
 	for i := range c.sourcePools {
 		srcTrx, err := c.sourcePools[i].trxPool.Get()
 		if err != nil {
 			return fmt.Errorf("failed to get transaction for source %d: %w", i, err)
 		}
 		defer c.sourcePools[i].trxPool.Put(srcTrx)
-
-		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-			sourceChecksumCols,
-			chunk.Table.QuotedTableName,
-			whereClause,
-		)
-		var cs int64
-		var cnt uint64
-		if err := srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt); err != nil {
-			return fmt.Errorf("failed to query source %d: %w", i, err)
-		}
-		sourceChecksum ^= cs
-		sourceCount += cnt
-		c.logger.Debug("source checksum", "sourceID", i, "checksum", cs, "count", cnt)
+		srcTrxs[i] = srcTrx
 	}
-
-	// Query ALL targets and aggregate results.
-	// Same aggregation logic: XOR checksums, sum counts.
-	var targetChecksum int64
-	var targetCount uint64
+	tgtTrxs := make([]*sql.Tx, len(c.targetTrxPools))
 	for i, targetTrxPool := range c.targetTrxPools {
 		targetTrx, err := targetTrxPool.Get()
 		if err != nil {
 			return fmt.Errorf("failed to get transaction for target %d: %w", i, err)
 		}
 		defer targetTrxPool.Put(targetTrx)
+		tgtTrxs[i] = targetTrx
+	}
 
-		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-			targetChecksumCols,
-			chunk.Table.QuotedTableName,
-			whereClause,
-		)
-		var cs int64
-		var cnt uint64
-		if err := targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt); err != nil {
-			return fmt.Errorf("failed to query target %d: %w", i, err)
-		}
-		targetChecksum ^= cs
-		targetCount += cnt
-		c.logger.Debug("target checksum", "targetID", i, "checksum", cs, "count", cnt)
+	sourceChecksum, targetChecksum, sourceCount, targetCount, perSourceCount, err := c.checksumRange(ctx, srcTrxs, tgtTrxs, chunk)
+	if err != nil {
+		return err
 	}
 
 	c.logger.Debug("aggregated checksums",
@@ -266,14 +223,132 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		if !c.fixDifferences {
 			return errors.New("checksum mismatch")
 		}
-		// Since we can fix differences, replace the chunk.
-		if err := c.replaceChunk(ctx, chunk); err != nil {
+		// Since we can fix differences, replace the chunk — narrowed to the
+		// sub-ranges that actually differ, so a mismatch of a few rows does not
+		// delete-and-reapply an XL chunk on every target.
+		counts := rangeCounts{
+			sourceRows: sourceCount,
+			targetRows: targetCount,
+			splitter:   widestSource(srcTrxs, perSourceCount),
+		}
+		if err := c.narrowAndReplaceChunk(ctx, srcTrxs, tgtTrxs, chunk, counts); err != nil {
 			return err
 		}
 	}
 	// When we give feedback, we need to say how many rows were in the chunk.
 	c.chunker.Feedback(chunk, time.Since(startTime), targetCount)
 	return nil
+}
+
+// checksumRange checksums a key range across every source and every target,
+// inside the supplied snapshot transactions.
+//
+// BIT_XOR is associative/commutative, so XOR-ing per-shard checksums produces
+// the same result as checksumming all rows in one table; the counts are simply
+// summed. perSourceCount is returned alongside so the repair path can pick a
+// representative shard to cut split boundaries from.
+//
+// The same WHERE clause applies to both sources and targets since all schemas
+// are identical, but the column expressions are side-dependent: JSON columns
+// round-trip through text on the source and render strictly on the target (see
+// table.castExpr). Move/sync writes are text-mediated — the applier writes
+// rendered text that the target re-parses — so the same text-image contract as
+// the single-server checksum applies here. This does assume source and target
+// servers parse JSON text identically; if a future server version changed parse
+// behavior (e.g. fixed the double misrounding bugs), a cross-version move of
+// affected values would fail the checksum safely rather than pass silently.
+func (c *DistributedChecker) checksumRange(ctx context.Context, srcTrxs, tgtTrxs []*sql.Tx, chunk *table.Chunk) (sourceChecksum, targetChecksum int64, sourceCount, targetCount uint64, perSourceCount []uint64, err error) {
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
+	if err != nil {
+		return 0, 0, 0, 0, nil, err
+	}
+	whereClause := chunk.String()
+
+	perSourceCount = make([]uint64, len(srcTrxs))
+	for i, srcTrx := range srcTrxs {
+		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+			sourceChecksumCols,
+			chunk.Table.QuotedTableName,
+			whereClause,
+		)
+		var cs int64
+		var cnt uint64
+		if err := srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt); err != nil {
+			return 0, 0, 0, 0, nil, fmt.Errorf("failed to query source %d: %w", i, err)
+		}
+		sourceChecksum ^= cs
+		sourceCount += cnt
+		perSourceCount[i] = cnt
+		c.logger.Debug("source checksum", "sourceID", i, "checksum", cs, "count", cnt)
+	}
+
+	for i, targetTrx := range tgtTrxs {
+		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+			targetChecksumCols,
+			chunk.Table.QuotedTableName,
+			whereClause,
+		)
+		var cs int64
+		var cnt uint64
+		if err := targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt); err != nil {
+			return 0, 0, 0, 0, nil, fmt.Errorf("failed to query target %d: %w", i, err)
+		}
+		targetChecksum ^= cs
+		targetCount += cnt
+		c.logger.Debug("target checksum", "targetID", i, "checksum", cs, "count", cnt)
+	}
+	return sourceChecksum, targetChecksum, sourceCount, targetCount, perSourceCount, nil
+}
+
+// narrowAndReplaceChunk recopies a mismatching chunk, first narrowing it to the
+// differing sub-ranges.
+//
+// Split boundaries are cut from a single source shard, since offsets into one
+// shard's rows are the only row-position information a single query can give.
+// A chunk's key range is spread across shards by the vindex, so no shard's
+// distribution describes the whole range and the pieces come out unevenly
+// balanced. They are still an exact partition of the key *range*, which is what
+// narrowing needs — see narrowRepair, which validates that against the row
+// counts. The shard is chosen per range rather than once for the chunk: a
+// sub-range's rows can sit almost entirely on a different shard than its
+// parent's did, and cutting it with a shard that holds nothing in it would find
+// no boundaries at all and silently give up on narrowing.
+func (c *DistributedChecker) narrowAndReplaceChunk(ctx context.Context, srcTrxs, tgtTrxs []*sql.Tx, chunk *table.Chunk, counts rangeCounts) error {
+	verify := func(ctx context.Context, sub *table.Chunk) (rangeCounts, error) {
+		srcCRC, tgtCRC, srcCount, tgtCount, perSourceCount, err := c.checksumRange(ctx, srcTrxs, tgtTrxs, sub)
+		if err != nil {
+			return rangeCounts{}, err
+		}
+		return rangeCounts{
+			sourceRows: srcCount,
+			targetRows: tgtCount,
+			mismatched: compareChunk(srcCRC, tgtCRC, srcCount, tgtCount).mismatched(),
+			splitter:   widestSource(srcTrxs, perSourceCount),
+		}, nil
+	}
+	// One fix window for the whole chunk — see SingleChecker.narrowAndReplaceChunk.
+	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
+	defer fixCancel()
+	repair := func(_ context.Context, sub *table.Chunk) error {
+		return c.replaceChunk(fixCtx, sub)
+	}
+	return narrowRepair(ctx, chunk, counts, verify, repair, c.logger)
+}
+
+// widestSource returns the transaction for the shard holding the most rows of a
+// range, or nil if no shard holds any — in which case there are no boundaries to
+// cut and the range has to be repaired whole.
+func widestSource(srcTrxs []*sql.Tx, perSourceCount []uint64) table.Splitter {
+	widest, most := -1, uint64(0)
+	for i, n := range perSourceCount {
+		if i < len(srcTrxs) && n > most {
+			widest, most = i, n
+		}
+	}
+	if widest < 0 {
+		return nil
+	}
+	return srcTrxs[widest]
 }
 
 // GetProgress returns rows verified so far and the total to verify, proxied
@@ -287,7 +362,11 @@ func (c *DistributedChecker) GetProgress() status.ChecksumProgress {
 // In the distributed case, we first delete the entire chunk range from all targets,
 // then use Apply to recopy the data from the source. This handles both missing rows
 // and extra rows on the destination.
-func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) error {
+//
+// fixCtx must already carry the repair's timeout and be detached from the
+// caller's cancellation (see narrowAndReplaceChunk, which owns one such context
+// per chunk and reuses it across the narrowed sub-ranges).
+func (c *DistributedChecker) replaceChunk(fixCtx context.Context, chunk *table.Chunk) error {
 	c.logger.Warn("recopying chunk via DELETE + Apply", "chunk", chunk.String())
 
 	// We further prevent the chance of deadlocks from the recopying process by only re-copying one chunk at a time.
@@ -299,10 +378,8 @@ func (c *DistributedChecker) replaceChunk(ctx context.Context, chunk *table.Chun
 	// parent ctx is cancelled between or during these steps, the target side
 	// would be left with rows DELETEd but not yet reapplied. The
 	// continuous-checksum loop's cancellation on sentinel drop hits this race,
-	// so we run the fix under a context that ignores the parent's
-	// cancellation. The bounded timeout still protects against a hung apply.
-	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
-	defer fixCancel()
+	// which is why fixCtx ignores the parent's cancellation. Its bounded timeout
+	// still protects against a hung apply.
 
 	// Step 1: Delete all rows in the chunk range from all targets
 	// This ensures we remove any extra rows that shouldn't be there.

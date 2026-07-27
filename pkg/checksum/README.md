@@ -62,6 +62,28 @@ The actual implementation includes additional handling:
 
 The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt-table-checksum** from Percona Toolkit, which established this as a reliable method for verifying data consistency in MySQL. This same approach has since been adopted by other database tools, including TiDB's data migration and verification utilities, demonstrating its effectiveness for distributed database scenarios.
 
+## Repairing a mismatch
+
+When a chunk fails verification and `FixDifferences` is on, the checker recopies the chunk's key range: `DELETE` then `REPLACE INTO ... SELECT` for the single-server case, or `DELETE` on every target followed by a re-apply through the applier for the distributed case.
+
+Chunks are sized by how long they take to *read* while checksumming, which says nothing about how long they take to rewrite. Recopying a whole XL chunk to fix a handful of rows is a large write burst, a long lock hold, and a wide window in which the target range is deleted but not yet rewritten. So the repair is narrowed first (`subdivide.go`):
+
+1. Cut the chunk's key range into `csRepairSplitParts` contiguous pieces (`table.Chunk.Split`, using `ORDER BY key LIMIT 1 OFFSET n` boundary lookups). The first and last inherit the original's bounds — inclusivity and unboundedness included — and each interior cut is an exclusive upper bound on one piece and an inclusive lower bound on the next.
+2. Re-checksum each piece **inside the same snapshot transaction that observed the mismatch**, and keep only the pieces that differ.
+3. Recurse on each differing piece, stopping at `csRepairMaxDepth` rounds or once a piece holds fewer than `csRepairMinSplitRows` rows — below that, recopying is cheaper than analysing.
+
+Step 2 is sound because `BIT_XOR` is associative and the row counts are additive: over an exact partition read in one snapshot, the pieces must reproduce the whole-range result, so a mismatching range must contain a mismatching piece. Reading a piece from a *different* snapshot would break that — a piece could look clean because a concurrent write happened to fix it, and the repair would be skipped on the strength of an observation that never applied to the chunk being fixed.
+
+That argument needs the pieces to partition the range exactly, and `Split` cannot promise it for every key type: MySQL orders `ENUM` by declaration ordinal but compares it against a string literal lexically, a case-insensitive collation orders by weight rather than by bytes, and a `NULL` key value satisfies neither `>=` nor `<`. So exactness is *checked* rather than assumed — the pieces' row counts, read in the same snapshot as the parent's, must sum to the parent's on both sides. A gap (which would let a differing row escape repair) or an overlap (which would delete and rewrite rows twice) shows up as a shortfall or an excess, and the chunk is repaired whole instead.
+
+Everything else that makes narrowing unusable also falls back to repairing the whole range, because declining to fix a known difference is never an option: a range with too few distinct key values to cut, a failed boundary query, pieces that all verify clean, and pieces that *all* differ. The last is the systematic case — a lossy `ALTER`, a wrong column mapping, a truncated target — where narrowing has bought nothing, and one statement pair is cheaper and shorter-lived than one per piece.
+
+A verification *failure*, by contrast, is propagated: it means the snapshot is no longer usable, so the pass should fail and be retried rather than repair on stale information. `differencesFound` is incremented before narrowing begins, so a chunk left unrepaired this way cannot be reported as a pass.
+
+The repair's timeout (`fixChunkTimeout`) and its detachment from the caller's cancellation are owned once per chunk and shared by all its narrowed repairs. The narrowed repairs together rewrite no more than the single repair they replace, so one budget covers them — and giving each its own would multiply the span during which a fix ignores cancellation by the number of pieces.
+
+In the distributed case the boundaries are cut from a single source shard, since offsets into one shard's rows are the only row-position information a single query can give. A chunk's key range is spread across shards by the vindex, so no shard's distribution describes the whole range and the pieces come out unevenly balanced. The shard is chosen per range rather than once per chunk: a sub-range's rows can sit almost entirely on a different shard than its parent's did, and cutting it with a shard that holds nothing in it would find no boundaries at all and silently give up on narrowing.
+
 ## Pacing and scaling
 
 `SingleChecker` and `DistributedChecker` pace themselves against the same throttler the copier uses. Two things are separate here:

@@ -128,27 +128,7 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	}
 	defer trxPool.Put(trx)
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
-	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
-	if err != nil {
-		return err
-	}
-	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		sourceChecksumCols,
-		chunk.Table.QuotedTableName,
-		chunk.String(),
-	)
-	target := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
-		targetChecksumCols,
-		chunk.NewTable.QuotedTableName,
-		chunk.String(),
-	)
-	var sourceChecksum, targetChecksum int64
-	var sourceCount, targetCount uint64
-	err = trx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount)
-	if err != nil {
-		return err
-	}
-	err = trx.QueryRowContext(ctx, target).Scan(&targetChecksum, &targetCount)
+	sourceChecksum, targetChecksum, sourceCount, targetCount, err := c.checksumRange(ctx, trx, chunk)
 	if err != nil {
 		return err
 	}
@@ -179,14 +159,72 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		if !c.fixDifferences {
 			return errors.New("checksum mismatch")
 		}
-		// Since we can fix differences, replace the chunk.
-		if err = c.replaceChunk(ctx, chunk); err != nil {
+		// Since we can fix differences, replace the chunk — narrowed to the
+		// sub-ranges that actually differ, so a mismatch of a few rows does not
+		// rewrite an XL chunk.
+		if err = c.narrowAndReplaceChunk(ctx, trx, chunk, sourceCount, targetCount); err != nil {
 			return err
 		}
 	}
 	// When we give feedback, we need to say how many rows were in the chunk.
 	c.chunker.Feedback(chunk, time.Since(startTime), targetCount)
 	return nil
+}
+
+// checksumRange runs the source and target checksum queries for a key range
+// inside the given snapshot transaction.
+func (c *SingleChecker) checksumRange(ctx context.Context, trx *sql.Tx, chunk *table.Chunk) (sourceChecksum, targetChecksum int64, sourceCount, targetCount uint64, err error) {
+	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	source := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+		sourceChecksumCols,
+		chunk.Table.QuotedTableName,
+		chunk.String(),
+	)
+	target := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
+		targetChecksumCols,
+		chunk.NewTable.QuotedTableName,
+		chunk.String(),
+	)
+	if err := trx.QueryRowContext(ctx, source).Scan(&sourceChecksum, &sourceCount); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if err := trx.QueryRowContext(ctx, target).Scan(&targetChecksum, &targetCount); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return sourceChecksum, targetChecksum, sourceCount, targetCount, nil
+}
+
+// narrowAndReplaceChunk recopies a mismatching chunk, first narrowing it to the
+// differing sub-ranges. The narrowing reads through trx — the same snapshot the
+// mismatch was observed in — see narrowRepair.
+func (c *SingleChecker) narrowAndReplaceChunk(ctx context.Context, trx *sql.Tx, chunk *table.Chunk, sourceCount, targetCount uint64) error {
+	verify := func(ctx context.Context, sub *table.Chunk) (rangeCounts, error) {
+		srcCRC, tgtCRC, srcCount, tgtCount, err := c.checksumRange(ctx, trx, sub)
+		if err != nil {
+			return rangeCounts{}, err
+		}
+		return rangeCounts{
+			sourceRows: srcCount,
+			targetRows: tgtCount,
+			mismatched: compareChunk(srcCRC, tgtCRC, srcCount, tgtCount).mismatched(),
+			splitter:   trx,
+		}, nil
+	}
+	// One fix window for the whole chunk, not one per sub-range. The narrowed
+	// repairs together rewrite no more than the single repair they replace, so
+	// the same budget covers them; giving each its own would multiply the span
+	// during which the fix ignores the parent's cancellation by the number of
+	// pieces.
+	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
+	defer fixCancel()
+	repair := func(_ context.Context, sub *table.Chunk) error {
+		return c.replaceChunk(fixCtx, sub)
+	}
+	counts := rangeCounts{sourceRows: sourceCount, targetRows: targetCount, splitter: trx}
+	return narrowRepair(ctx, chunk, counts, verify, repair, c.logger)
 }
 
 // GetProgress returns rows verified so far and the total to verify, proxied
@@ -274,12 +312,11 @@ func (c *SingleChecker) inspectDifferences(ctx context.Context, trx *sql.Tx, chu
 
 // replaceChunk recopies the data from table to newTable for a given chunk.
 // For cross-database operations, this reads the data from the source and writes it to the target.
-// Note that the chunk is dynamically sized based on the target-time that it took
-// to *read* data in the checksum. This could be substantially longer than the time
-// that it takes to copy the data. Maybe in future we could consider splitting
-// the chunk here, but this is expected to be a very rare situation, so a small
-// stall from an XL sized chunk is considered acceptable.
-func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) error {
+//
+// fixCtx must already carry the repair's timeout and be detached from the
+// caller's cancellation (see narrowAndReplaceChunk, which owns one such context
+// per chunk and reuses it across the narrowed sub-ranges).
+func (c *SingleChecker) replaceChunk(fixCtx context.Context, chunk *table.Chunk) error {
 	c.logger.Warn("recopying chunk", "chunk", chunk.String())
 
 	// We further prevent the chance of deadlocks from the recopying process by only re-copying one chunk at a time.
@@ -372,11 +409,9 @@ func (c *SingleChecker) replaceChunk(ctx context.Context, chunk *table.Chunk) er
 	// deadlock pattern documented above). If the parent ctx is cancelled
 	// between them, the target chunk would be left with rows DELETEd but not
 	// yet REPLACEd. The continuous-checksum loop's cancellation on sentinel
-	// drop hits this race, so we run both statements under a context that
-	// ignores the parent's cancellation. The bounded timeout still protects
-	// against a hung transaction.
-	fixCtx, fixCancel := context.WithTimeout(context.WithoutCancel(ctx), fixChunkTimeout)
-	defer fixCancel()
+	// drop hits this race, which is why fixCtx ignores the parent's
+	// cancellation. Its bounded timeout still protects against a hung
+	// transaction.
 	if _, err := dbconn.RetryableTransaction(fixCtx, c.db, dbconn.ErrorOnDupKey, c.dbConfig, deleteStmt); err != nil {
 		return fmt.Errorf("failed to delete existing rows: %w", err)
 	}
