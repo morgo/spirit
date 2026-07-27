@@ -59,6 +59,11 @@ type sourceInfo struct {
 	dsn        string
 	replClient change.Source
 	tables     []*table.TableInfo // this source's TableInfo objects (bound to this source's db)
+	// keyRange is this source shard's Vitess-style key range (from
+	// Move.SourceKeyRanges, attached before the sources are sorted so it stays
+	// with its DSN). Only set — and only needed — for a reverse-window move
+	// with a sharded source, where the reverse feed routes rows back by range.
+	keyRange string
 }
 
 // sourceKey returns a stable identifier for a source, used for checkpoint
@@ -798,15 +803,19 @@ func (r *Runner) resumeReverseWindow(ctx context.Context, rec checkpoint.Record)
 	if len(logical) == 0 {
 		return fmt.Errorf("resume reverse window: found no retired (_old) source tables to resume from")
 	}
-	src := &r.sources[0] // reverse-window is single-source (guarded at cutover)
-	src.tables = make([]*table.TableInfo, 0, len(logical))
-	for _, name := range logical {
-		// Only the name is read downstream (buildFeed derives the _old source
-		// and real target TableInfos itself), so no SetInfo — the logical table
-		// no longer exists on the source under this name.
-		src.tables = append(src.tables, table.NewTableInfo(src.db, src.config.DBName, name))
+	// Rebuild every source's table list (all source shards hold the same
+	// logical tables; sources[0] was the canonical one the names came from).
+	for si := range r.sources {
+		src := &r.sources[si]
+		src.tables = make([]*table.TableInfo, 0, len(logical))
+		for _, name := range logical {
+			// Only the name is read downstream (buildFeed derives the _old source
+			// and real target TableInfos itself), so no SetInfo — the logical table
+			// no longer exists on the source under this name.
+			src.tables = append(src.tables, table.NewTableInfo(src.db, src.config.DBName, name))
+		}
 	}
-	r.sourceTables = src.tables
+	r.sourceTables = r.sources[0].tables
 
 	return newReverseWindow(r).run(ctx)
 }
@@ -974,10 +983,21 @@ func (r *Runner) Run(ctx context.Context) error {
 	)
 
 	if r.move.ReverseWindow > 0 && len(r.move.SourceDSNs) > 1 {
-		// Reverse-window is only defined for an unsharded source (1 source →
-		// M targets ⇒ an M:1 reverse). A sharded source would need an M:N
-		// reverse with a reverse sharding provider, which is out of scope.
-		return fmt.Errorf("--reverse-window requires an unsharded (single) source, got %d source shards", len(r.move.SourceDSNs))
+		// A sharded source reverses as an M:N feed: rows flowing back from the
+		// targets are routed to the source shard whose key range contains the
+		// row's hash. That routing needs the source shard layout and the source
+		// keyspace's sharding metadata, so both are required up front — failing
+		// here, before any copy, rather than after the forward cutover when the
+		// reverse feed is actually built.
+		if r.move.ReverseShardingProvider == nil {
+			return fmt.Errorf("--reverse-window with a sharded source (%d source shards) requires a ReverseShardingProvider to route reverse writes", len(r.move.SourceDSNs))
+		}
+		if len(r.move.SourceKeyRanges) != len(r.move.SourceDSNs) {
+			return fmt.Errorf("--reverse-window with a sharded source requires one SourceKeyRanges entry per source DSN, got %d ranges for %d sources", len(r.move.SourceKeyRanges), len(r.move.SourceDSNs))
+		}
+		if err := applier.ValidateKeyRanges(r.move.SourceKeyRanges); err != nil {
+			return fmt.Errorf("--reverse-window source key ranges are invalid: %w", err)
+		}
 	}
 
 	var err error
@@ -1005,6 +1025,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to parse source DSN %d: %w", i, err)
 		}
 		r.sources[i] = sourceInfo{db: db, config: cfg, dsn: dsn}
+		// Attach this shard's key range BEFORE the sort below, so it stays
+		// with its DSN (SourceKeyRanges is parallel to the caller's SourceDSNs
+		// order, not the sorted order).
+		if i < len(r.move.SourceKeyRanges) {
+			r.sources[i].keyRange = r.move.SourceKeyRanges[i]
+		}
 	}
 	// Sort sources by sourceKey (addr/dbname) for deterministic ordering.
 	// sources[0] is the canonical source we read the table list and SHOW
@@ -1956,7 +1982,10 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		ChecksumWatermark: checksumWatermark,
 		Position:          string(positionsJSON),
 	}); err != nil {
-		return status.ErrCouldNotWriteCheckpoint
+		// Keep the cause: the WatchTask dumper distinguishes a benign
+		// canceled-mid-write (it is being stopped) from a genuinely broken
+		// checkpoint table, which is fatal.
+		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
 	return nil
 }

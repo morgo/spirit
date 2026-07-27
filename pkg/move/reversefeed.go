@@ -55,13 +55,25 @@ type ReverseSource struct {
 // ReverseFeedConfig configures a ReverseFeed.
 type ReverseFeedConfig struct {
 	Sources []ReverseSource
-	// Target is the U side (single, unsharded). Target.DB's default database
-	// MUST be U's schema (see ReverseSource.DB).
+	// Target is the U side when the former move source was a single database.
+	// Target.DB's default database MUST be U's schema (see ReverseSource.DB).
+	// Mutually exclusive with Targets.
 	Target applier.Target
+	// Targets is the U side when the former move source was SHARDED: one entry
+	// per former source shard, each with its Vitess-style key range set. Rows
+	// are routed by the WATCHED table's sharding metadata, so every
+	// ReverseSource table must have ShardingColumn and HashFunc set (the source
+	// keyspace's vindex) — NewReverseFeed fails otherwise. Each Targets[i].DB's
+	// default database MUST be that shard's schema (see ReverseSource.DB).
+	// Mutually exclusive with Target.
+	Targets []applier.Target
 	// TargetTables maps each watched (reverse-source) table NAME to the U-side
-	// TableInfo it is written to, built on Target.DB. It is a map, not a slice,
-	// because the names can differ: after a forward cutover the source tables are
-	// renamed to their _old form, so a watched "t1" is written to "t1_old".
+	// TableInfo it is written to, built on Target.DB (with Targets, on any one
+	// shard: the schemas are identical and the name is unqualified, so each
+	// shard's own connection determines where the write lands). It is a map,
+	// not a slice, because the names can differ: after a forward cutover the
+	// source tables are renamed to their _old form, so a watched "t1" is
+	// written to "t1_old".
 	TargetTables map[string]*table.TableInfo
 
 	Logger        *slog.Logger
@@ -100,11 +112,31 @@ func NewReverseFeed(cfg ReverseFeedConfig) (_ *ReverseFeed, err error) {
 	if len(cfg.Sources) == 0 {
 		return nil, errors.New("reverse feed: at least one source is required")
 	}
-	if cfg.Target.DB == nil {
+	if len(cfg.Targets) > 0 && cfg.Target.DB != nil {
+		return nil, errors.New("reverse feed: Target and Targets are mutually exclusive")
+	}
+	if len(cfg.Targets) == 0 && cfg.Target.DB == nil {
 		return nil, errors.New("reverse feed: target DB must be non-nil")
 	}
 	if len(cfg.TargetTables) == 0 {
 		return nil, errors.New("reverse feed: at least one target table is required")
+	}
+	if len(cfg.Targets) > 0 {
+		for ti := range cfg.Targets {
+			if cfg.Targets[ti].DB == nil {
+				return nil, fmt.Errorf("reverse feed: target %d DB must be non-nil", ti)
+			}
+		}
+		// Sharded reverse target: routing decisions come from the watched
+		// tables' sharding metadata, so its absence would strand every row —
+		// fail here rather than fatally at first apply.
+		for si, src := range cfg.Sources {
+			for _, t := range src.Tables {
+				if t.ShardingColumn == "" || t.HashFunc == nil {
+					return nil, fmt.Errorf("reverse feed: source %d table %q has no sharding metadata; a sharded reverse target requires ShardingColumn and HashFunc on every watched table", si, t.TableName)
+				}
+			}
+		}
 	}
 
 	logger := cfg.Logger
@@ -124,12 +156,20 @@ func NewReverseFeed(cfg ReverseFeedConfig) (_ *ReverseFeed, err error) {
 		threads = 4
 	}
 
-	// One applier writing to U, shared across all source feeds.
-	appl, err := applier.NewSingleTargetApplier(cfg.Target, &applier.ApplierConfig{
+	// One applier writing to U, shared across all source feeds. With a sharded
+	// U (Targets), the applier routes each row to the shard whose key range
+	// contains its hash — the exact mirror of the forward move's fan-out.
+	applCfg := &applier.ApplierConfig{
 		DBConfig: dbCfg,
 		Logger:   logger,
 		Threads:  threads,
-	})
+	}
+	var appl applier.Applier
+	if len(cfg.Targets) > 0 {
+		appl, err = applier.NewShardedApplier(cfg.Targets, applCfg)
+	} else {
+		appl, err = applier.NewSingleTargetApplier(cfg.Target, applCfg)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reverse feed: create applier: %w", err)
 	}
