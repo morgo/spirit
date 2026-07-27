@@ -166,18 +166,24 @@ func NewRunner(m *Migration) (*Runner, error) {
 	return runner, nil
 }
 
-// checksumRepairConns is the connection the checksum's repair path needs on
-// top of its transaction pool. When a chunk mismatches, replaceChunk runs the
-// DELETE and REPLACE on r.db rather than on the pooled read-view transaction,
-// so it needs one connection that the pool does not already account for. One
-// is enough: repairs are serialized by the checker's recopyLock, and the two
-// statements run sequentially.
+// checksumOffPoolConns is the connection headroom the checksum phase needs on
+// top of its REPEATABLE READ transaction pool, for the two things it does that
+// the pool does not cover. Both are serialized, so one connection each:
 //
-// Without this reserve the checksum could saturate the pool exactly when it
-// needs to repair — the transaction pool is sized to the read ceiling and is
-// fully checked out while every worker is busy, so the repair would queue
-// behind an applier connection instead of proceeding.
-const checksumRepairConns = 1
+//   - Chunk repair. When a chunk mismatches, replaceChunk runs its DELETE and
+//     REPLACE on r.db rather than on the pooled read-view transaction, and the
+//     two statements run sequentially under the checker's recopyLock.
+//   - Chunker prefetch. chunker.Next() runs a SELECT ... LIMIT 1 OFFSET n on
+//     Ti.Db to find the next chunk boundary, also off-pool. Workers call it
+//     concurrently but the chunker's own mutex serializes them, so only one
+//     such query is ever in flight.
+//
+// This reserve matters more than it looks. The transaction pool is sized to the
+// read ceiling and every one of its transactions pins a connection for the whole
+// phase whether or not a worker has it checked out, so there is no incidental
+// slack left to absorb either query — without the reserve, chunk dispatch would
+// queue behind applier and control-plane connections.
+const checksumOffPoolConns = 2
 
 // controlPlaneConns is the connection headroom the main pool reserves above
 // the copy hot path (Threads read workers + WriteThreads applier workers) for
@@ -247,7 +253,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Size the connection pool the same way for both the buffered and
 	// unbuffered paths:
 	//
-	//	pool = threads + write-threads + controlPlaneConns() + checksumRepairConns
+	//	pool = threads + write-threads + controlPlaneConns() + checksumOffPoolConns
 	//
 	//	- threads              copier + checksum read concurrency
 	//	- write-threads        replication-applier write concurrency
@@ -256,8 +262,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	//	                       replication-flush poll, per-table stats), so they
 	//	                       don't serialize behind a single spare connection
 	//	                       once the copier + applier saturate the budget.
-	//	- checksumRepairConns  the connection a chunk repair needs on top of the
-	//	                       checksum's fully-checked-out transaction pool.
+	//	- checksumOffPoolConns the two queries the checksum runs outside its
+	//	                       fully-checked-out transaction pool (chunk repair
+	//	                       and chunker prefetch).
 	//
 	// WriteThreads may still be 0 here — that's the "auto-size on Aurora"
 	// sentinel, which can only be resolved once we have a connection to probe
@@ -265,7 +272,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// setupCopierCheckerAndReplClient grows it to the final size after
 	// resolving WriteThreads. The pool only ever grows (via SetMaxOpenConns);
 	// later phases (checksum, cutover) ratchet it further but never shrink it.
-	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumRepairConns
+	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumOffPoolConns
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", dbconn.RedactDSN(r.dsn()), err)
@@ -758,7 +765,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// construction.
 	maxRead := copier.ResolveMaxReadThreads(r.migration.Threads, autoscale)
 	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
-	// known: maxRead + maxWrite + controlPlaneConns() + checksumRepairConns
+	// known: maxRead + maxWrite + controlPlaneConns() + checksumOffPoolConns
 	// (see the MaxOpenConnections doc in Run). Sizing for the ceilings ensures a
 	// scaled-up applier or reader pool never starves on connections. This is a
 	// no-op unless WriteThreads was auto-sized up from 0 or autoscaling raised a
@@ -768,7 +775,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// transaction pool is sized to the same ceiling (see the checker's
 	// AutoscaleConfig below) and the copier's readers have finished by then, so
 	// the two phases reuse one allocation rather than each needing their own.
-	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumRepairConns; poolSize > r.dbConfig.MaxOpenConnections {
+	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		r.db.SetMaxOpenConns(poolSize)
 	}
@@ -856,8 +863,8 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		// ceiling and formula: maxRead is already in the pool sizing above, and
 		// the copier's readers have finished by the time the checksum runs, so
 		// the checksum reuses that headroom rather than adding to it. The only
-		// checksum-specific term is checksumRepairConns, for the repair path
-		// that runs off-pool.
+		// checksum-specific term is checksumOffPoolConns, for the queries that run
+		// off-pool.
 		Autoscale: checksum.AutoscaleConfig{
 			Enabled:    autoscale,
 			MaxThreads: maxRead,

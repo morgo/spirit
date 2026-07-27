@@ -3,9 +3,11 @@ package checksum
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/block/spirit/pkg/autoscale"
+	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/throttler"
 )
@@ -14,18 +16,39 @@ import (
 // tests can shorten it; production never mutates it.
 var csTick = autoscale.Tick
 
-const (
-	// csBacklogVetoDeltas is the pending-change count above which the change
-	// feed is considered to be losing ground. It matches the figure
-	// pkg/change uses to call a backlog "trivial" (binlogTrivialThreshold):
-	// below it, flushing is cheap enough that a rising count is just noise.
-	csBacklogVetoDeltas = 10000
-	// csBacklogPersistTicks is how many consecutive ticks the backlog must be
-	// both large and rising before it vetoes. A single rising sample is
-	// expected — the feed buffers between flushes, so depth naturally sawtooths
-	// on the flush interval. Sustained growth across ticks is the real signal.
-	csBacklogPersistTicks = 2
-)
+// csBacklogVetoDeltas is the post-flush residual above which the change feed
+// is considered to be losing ground. It matches the figure pkg/change uses to
+// call a backlog "trivial" (binlogTrivialThreshold), which is the mark
+// BlockWait waits for before allowing cut-over: below it, the feed is already
+// drained enough for the migration to finish, so a residual under it is not
+// worth shedding a worker over.
+const csBacklogVetoDeltas = 10000
+
+// csBacklogWindowTicks is the residual window length, in ticks. See
+// residualWindowTicks for why it is derived from the flush interval; the
+// checkers start the periodic flush at change.DefaultFlushInterval
+// (single.go, distributed.go), so that interval is known exactly rather than
+// guessed.
+var csBacklogWindowTicks = residualWindowTicks(change.DefaultFlushInterval, csTick)
+
+// residualWindowTicks sizes the residual window at two flush intervals' worth
+// of ticks, so that every window is guaranteed to contain at least one flush
+// trough no matter how the tick and flush rates line up in phase.
+//
+// Getting this wrong is what makes a backlog signal useless. The pending-change
+// count is a sawtooth: it climbs monotonically between flushes and drops when
+// one lands. At the production numbers (5s tick, 30s flush) the *rising edge
+// alone* is six samples long, so "the backlog rose N ticks in a row" is the
+// normal case for any table busy enough to matter — it says nothing about
+// whether the feed is keeping up. Only the troughs do.
+func residualWindowTicks(flush, tick time.Duration) int {
+	if tick <= 0 {
+		return 2
+	}
+	// Ceiling division, floored at 2 so there is always a previous window to
+	// compare against.
+	return max(2, int((2*flush+tick-1)/tick))
+}
 
 // checksumScaler adjusts the checksum phase's live worker count for the
 // duration of one pass.
@@ -47,10 +70,15 @@ const (
 //     checksum: whether the change feed is keeping up. The feed flushes
 //     concurrently with the checksum, and its backlog is what gates cut-over
 //     (and, if it grows unboundedly, what risks the binlogs being purged
-//     before a resume can replay them). A backlog that is both large and
-//     sustainedly rising means our reads are winning the race against the
-//     writes that actually need to finish, so we shed — on Aurora and stock
-//     MySQL alike.
+//     before a resume can replay them). If the feed is losing ground, our
+//     reads are winning a race against writes that actually have to finish,
+//     so we shed — on Aurora and stock MySQL alike.
+//
+//     "Losing ground" is specifically a rising *post-flush residual*, not a
+//     rising backlog. See observeBacklog: the raw count rises between every
+//     pair of flushes on any busy table, so its slope carries no information.
+//     What a healthy feed guarantees is that each flush returns the backlog to
+//     near zero, and that is the invariant worth watching.
 //
 // So the capability matrix is:
 //
@@ -78,10 +106,21 @@ type checksumScaler struct {
 	// likely caused it), while consecutive sheds are still spaced out enough
 	// for the signal to reflect the previous cut.
 	upCooldown, downCooldown int
-	// backlogTicks counts consecutive ticks the backlog has been large and
-	// rising; lastBacklog is the previous sample. See observeBacklog.
-	backlogTicks int
-	lastBacklog  int
+	// Residual-window state, all owned by observeBacklog. windowTicks is the
+	// window length; windowLeft the ticks remaining in the current window;
+	// windowMin the smallest backlog sampled so far within it (the trough);
+	// prevMin the previous window's trough, or -1 before any window has closed.
+	windowTicks, windowLeft int
+	windowMin, prevMin      int
+	// backlogLosing is the most recently closed window's verdict: its trough was
+	// both large and above the previous window's. It stays set for the whole of
+	// the following window, and gates recovery as well as shedding — a pass must
+	// not climb back up while the feed is still losing ground.
+	backlogLosing bool
+	// shedForWindow records that a worker has already been given up for the
+	// current verdict, so one window costs at most one worker however many ticks
+	// it spans.
+	shedForWindow bool
 
 	logger      *slog.Logger
 	metricsSink metrics.Sink
@@ -104,6 +143,10 @@ func newChecksumScaler(t throttler.Throttler, limiter *autoscale.Limiter, backlo
 		start:       start,
 		max:         maxThreads,
 		current:     start,
+		windowTicks: csBacklogWindowTicks,
+		windowLeft:  csBacklogWindowTicks,
+		windowMin:   math.MaxInt,
+		prevMin:     -1, // no window has closed yet, so nothing to compare against
 		logger:      logger,
 		metricsSink: sink,
 	}
@@ -135,43 +178,83 @@ func (s *checksumScaler) run(ctx context.Context) {
 // tick performs a single control step. Split out so tests can drive it
 // directly without real time.
 //
-// The backlog veto is evaluated first and outranks everything: utilization can
-// look like there is plenty of headroom while the feed still falls behind,
-// because the feed's writes are a small share of server load but a hard
-// prerequisite for finishing the migration.
+// Precedence, highest first:
+//
+//  1. The utilization panic zone. Both this and the backlog veto shed, and
+//     this sheds faster (multiplicatively), so it has to be evaluated first:
+//     if the veto were checked ahead of it, a tick spent inside the veto's
+//     cooldown would consume the panic response and downgrade backoff to -1
+//     per cooldown at exactly the moment the server is most overloaded.
+//  2. The backlog veto, which therefore outranks Grow, Hold and Shed.
+//     Utilization can show plenty of headroom while the feed still falls
+//     behind, because the feed's writes are a small share of server load but a
+//     hard prerequisite for finishing the migration.
+//  3. The utilization zone law.
+//
+// The Hold case doubles as the recovery path. Without it a transient backlog
+// would permanently cost throughput for the rest of the pass: on stock MySQL
+// there is no other way back up at all, and on Aurora the dead band would sit
+// on the reduced count indefinitely. Recovery stops at the configured start —
+// growing beyond what the operator asked for requires a positive headroom
+// signal, not merely the absence of a negative one.
 func (s *checksumScaler) tick(ctx context.Context) {
 	util := 0.0
+	zone := autoscale.Hold
 	if s.gradual != nil {
 		util = s.gradual.Utilization()
+		zone = autoscale.Classify(util)
 	}
+	backlogVeto := s.observeBacklog()
 
 	acted := false
 	switch {
-	case s.observeBacklog():
-		// The feed is losing ground. Shed one worker to hand read capacity
-		// back to it. This is the only lever available on stock MySQL.
+	case zone == autoscale.Halve:
+		// The hard stop is typically already firing on raw samples in this
+		// zone, so the pass is being paused anyway; halving is about resuming
+		// gently. Gated on the down cooldown only, so the first breach is
+		// never delayed by a recent increase's cooldown.
 		if s.downCooldown == 0 {
-			s.set(s.current-1, "change-feed backlog rising")
-			s.downCooldown = autoscale.CooldownTicks
+			s.set(autoscale.CeilDiv(s.current, 2), "utilization at panic threshold")
+			s.shedCooldowns()
+			acted = true
+		}
+	case backlogVeto:
+		// The feed is losing ground. Shed one worker to hand read capacity
+		// back to it. This is the only shedding lever on stock MySQL.
+		if s.downCooldown == 0 {
+			s.set(s.current-1, "change-feed backlog not draining")
+			s.shedForWindow = true
+			s.shedCooldowns()
+			acted = true
+		}
+	case zone == autoscale.Shed:
+		if s.downCooldown == 0 {
+			s.set(s.current-1, "utilization above high watermark")
+			s.shedCooldowns()
+			acted = true
+		}
+	case zone == autoscale.Grow:
+		// Also gated on backlogLosing. The veto above is deliberately one-shot
+		// per window, so without this the other ticks of a losing window would
+		// grow straight back into the shed and the two signals would cancel out.
+		if !s.backlogLosing && s.upCooldown == 0 {
+			s.set(s.current+1, "utilization below low watermark")
 			s.upCooldown = autoscale.CooldownTicks
 			acted = true
 		}
-	case s.gradual == nil:
-		// No continuous signal, so no guided growth. Recover toward the
-		// configured start once the backlog is healthy again, otherwise a
-		// single transient backlog would permanently halve checksum
-		// throughput for the rest of the pass.
-		if s.current < s.start && s.upCooldown == 0 {
-			s.set(s.current+1, "backlog recovered")
+	default: // Hold, or no continuous signal at all.
+		// Gated on backlogLosing for the same reason, not on the one-shot veto:
+		// the veto clears as soon as it is acted on, so recovering on its absence
+		// would hand the worker straight back while the feed is still behind.
+		if !s.backlogLosing && s.current < s.start && s.upCooldown == 0 {
+			s.set(s.current+1, "recovering toward configured thread count")
 			s.upCooldown = autoscale.CooldownTicks
 			acted = true
 		}
-	default:
-		acted = s.actOnUtilization(util)
 	}
 
 	if !acted {
-		// Dead band, or waiting out a cooldown after a recent change.
+		// Nothing to do, or waiting out a cooldown after a recent change.
 		if s.upCooldown > 0 {
 			s.upCooldown--
 		}
@@ -182,56 +265,47 @@ func (s *checksumScaler) tick(ctx context.Context) {
 	s.emit(ctx, util)
 }
 
-// actOnUtilization applies the zone law for one sample, returning whether it
-// changed anything. Only reached when a continuous signal exists.
-func (s *checksumScaler) actOnUtilization(util float64) bool {
-	switch autoscale.Classify(util) {
-	case autoscale.Halve:
-		// The hard stop is typically already firing on raw samples in this
-		// zone, so the pass is being paused anyway; halving is about resuming
-		// gently. Gated on the down cooldown only, so the first breach is
-		// never delayed by a recent increase's cooldown.
-		if s.downCooldown == 0 {
-			s.set(autoscale.CeilDiv(s.current, 2), "utilization at panic threshold")
-			s.downCooldown = autoscale.CooldownTicks
-			s.upCooldown = autoscale.CooldownTicks
-			return true
-		}
-	case autoscale.Shed:
-		if s.downCooldown == 0 {
-			s.set(s.current-1, "utilization above high watermark")
-			s.downCooldown = autoscale.CooldownTicks
-			s.upCooldown = autoscale.CooldownTicks
-			return true
-		}
-	case autoscale.Grow:
-		if s.upCooldown == 0 {
-			s.set(s.current+1, "utilization below low watermark")
-			s.upCooldown = autoscale.CooldownTicks
-			return true
-		}
-	case autoscale.Hold:
-	}
-	return false
+// shedCooldowns is applied after any decrease. It sets the up cooldown too, so
+// a shed is not immediately undone by a growth signal that has not yet had time
+// to reflect the cut.
+func (s *checksumScaler) shedCooldowns() {
+	s.downCooldown = autoscale.CooldownTicks
+	s.upCooldown = autoscale.CooldownTicks
 }
 
-// observeBacklog samples the change feed and folds it into the persistence
-// tracking, reporting whether the veto is in force this tick: true once the
-// backlog has been both above csBacklogVetoDeltas and rising for
-// csBacklogPersistTicks consecutive ticks.
+// observeBacklog samples the change feed and reports whether the veto is in
+// force this tick.
+//
+// The measured quantity is the trough of each window — the smallest backlog
+// seen across a span guaranteed to contain a flush. On a feed that is keeping
+// up, every flush drains the backlog to near zero, so successive troughs stay
+// near zero however heavy the write load is and however steeply the count
+// climbs in between. A trough that is both large and higher than the previous
+// window's is the feed telling us it could not finish what it started: work is
+// surviving flushes and accumulating.
+//
+// The verdict latches in backlogLosing for the whole of the following window
+// rather than firing only on the boundary tick, so a cooldown cannot swallow
+// the signal and recovery stays suppressed while the feed is still behind. The
+// separate shedForWindow flag caps the cost of one verdict at one worker.
 func (s *checksumScaler) observeBacklog() bool {
 	if s.backlog == nil {
 		return false
 	}
-	n := s.backlog()
-	rising := n > s.lastBacklog
-	s.lastBacklog = n
-	if n >= csBacklogVetoDeltas && rising {
-		s.backlogTicks++
-	} else {
-		s.backlogTicks = 0
+	s.windowMin = min(s.windowMin, s.backlog())
+	s.windowLeft--
+	if s.windowLeft > 0 {
+		return s.backlogLosing && !s.shedForWindow
 	}
-	return s.backlogTicks >= csBacklogPersistTicks
+
+	residual := s.windowMin
+	// prevMin < 0 on the first close: establish the baseline, never veto on it.
+	s.backlogLosing = residual >= csBacklogVetoDeltas && s.prevMin >= 0 && residual > s.prevMin
+	s.shedForWindow = false
+	s.prevMin = residual
+	s.windowMin = math.MaxInt
+	s.windowLeft = s.windowTicks
+	return s.backlogLosing
 }
 
 // set clamps target to [min, max] and applies it only when it actually
