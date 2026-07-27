@@ -86,6 +86,11 @@ func percentileRows(sorted []uint64, p float64) uint64 {
 // percentileIndex maps a percentile onto an index in a sorted slice of length
 // n (n must be > 0), clamped to the last element.
 func percentileIndex(n int, p float64) int {
-	idx := int(float64(n) * p)
-	return min(idx, n-1)
+	x := float64(n) * p
+	rank := int(x)
+	if float64(rank) < x {
+		rank++
+	}
+	rank = max(rank, 1)
+	return min(rank-1, n-1)
 }
