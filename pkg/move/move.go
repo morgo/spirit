@@ -36,9 +36,11 @@ type Move struct {
 	// the window the source's now-retired _old tables are kept current from the
 	// targets; an operator rolls back by creating the _spirit_move_revert table on
 	// the first target (see revertmarker.go), otherwise the window elapses and the
-	// move finalizes forward. Requires an unsharded (single) source — see the
-	// guard in Runner.Run. The data plane is ReverseFeed (reversefeed.go); the
-	// post-cutover driver is reverseWindow (reversewindow.go).
+	// move finalizes forward. A sharded (multi-DSN) source additionally requires
+	// ReverseShardingProvider and SourceKeyRanges so the reverse feed can route
+	// rows back to the correct source shard — see the guard in Runner.Run. The
+	// data plane is ReverseFeed (reversefeed.go); the post-cutover driver is
+	// reverseWindow (reversewindow.go).
 	ReverseWindow time.Duration `name:"reverse-window" help:"After cutover, reverse the move (change-only) and keep it alive for this long to allow rollback. 0 disables (normal cutover)." default:"0"`
 
 	// EnableExperimentalGTID switches the change source from binlog file+position to MySQL GTIDs.
@@ -61,8 +63,25 @@ type Move struct {
 	// table schemas. If empty, SourceDSN is used as the single source.
 	SourceDSNs []string `kong:"-"`
 
+	// SourceKeyRanges optionally specifies each source shard's Vitess-style key
+	// range ("-80", "80-", ...), parallel to SourceDSNs (SourceKeyRanges[i] is
+	// SourceDSNs[i]'s range). Required, together with ReverseShardingProvider,
+	// when ReverseWindow > 0 and the source is sharded (len(SourceDSNs) > 1):
+	// the reverse feed routes rows flowing back from the targets to the source
+	// shard whose range contains the row's hash. Unused otherwise.
+	SourceKeyRanges []string `kong:"-"`
+
 	ShardingProvider table.ShardingMetadataProvider `kong:"-"`
-	Targets          []applier.Target               `kong:"-"`
+
+	// ReverseShardingProvider provides the SOURCE keyspace's sharding metadata
+	// (vindex column + hash) for the reverse feed of a reverse-window move with
+	// a sharded source. It is consulted for each moved table when the window
+	// opens; a table without metadata is a hard error there, because reverse
+	// writes could not be routed to a source shard. Note the asymmetry with
+	// ShardingProvider, which describes the TARGET keyspace for the forward copy.
+	ReverseShardingProvider table.ShardingMetadataProvider `kong:"-"`
+
+	Targets []applier.Target `kong:"-"`
 }
 
 // Validate is called by Kong after parsing to check for invalid flag values.

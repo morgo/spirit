@@ -1706,7 +1706,10 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		Statement:         r.migration.Statement,
 		OriginalTableName: originalTableName,
 	}); err != nil {
-		return status.ErrCouldNotWriteCheckpoint
+		// Keep the cause: the WatchTask dumper distinguishes a benign
+		// canceled-mid-write (it is being stopped) from a genuinely broken
+		// checkpoint table, which is fatal.
+		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
 	return nil
 }
