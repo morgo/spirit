@@ -150,11 +150,19 @@ func (w *reverseWindow) run(ctx context.Context) error {
 
 // buildFeed constructs the reverse feed: reverse sources are the former targets
 // (watched under their real names); the reverse target is the source, written
-// to its _old tables (the forward cutover renamed source real → _old).
+// to its _old tables (the forward cutover renamed source real → _old). With a
+// sharded source (an N:M move), the reverse target is the set of source shards
+// and each row is routed by the SOURCE keyspace's sharding metadata, which is
+// attached to the watched tables here.
 func (w *reverseWindow) buildFeed(ctx context.Context) error {
 	r := w.r
-	src := &r.sources[0] // single source (guarded in Run)
+	src := &r.sources[0] // canonical source: table names and the _old TableInfos
+	sharded := len(r.sources) > 1
 
+	// The _old mapping TableInfos are built on sources[0]. Their names are
+	// unqualified, so with a sharded source the same mapping serves every
+	// shard — each shard's own connection determines the database written to
+	// (the shards' schemas are identical by the move's own invariant).
 	targetTables := make(map[string]*table.TableInfo, len(src.tables))
 	for _, t := range src.tables {
 		oldName := check.CutoverOldName(t.TableName)
@@ -183,6 +191,21 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 			if err := wt.SetInfo(ctx); err != nil {
 				return fmt.Errorf("reverse window: load target table %q on shard %d: %w", t.TableName, i, err)
 			}
+			if sharded {
+				// Reverse rows are routed to a source shard by the SOURCE
+				// keyspace's vindex. No metadata for a moved table means its
+				// rows cannot be routed — fail loudly rather than let the
+				// window open with an unroutable feed.
+				col, hashFn, err := r.move.ReverseShardingProvider.GetShardingMetadata(tgt.Config.DBName, t.TableName)
+				if err != nil {
+					return fmt.Errorf("reverse window: sharding metadata for table %q: %w", t.TableName, err)
+				}
+				if col == "" || hashFn == nil {
+					return fmt.Errorf("reverse window: no sharding metadata for table %q; a sharded source requires every moved table to have a sharding key to route reverse writes", t.TableName)
+				}
+				wt.ShardingColumn = col
+				wt.HashFunc = hashFn
+			}
 			watched = append(watched, wt)
 		}
 		w.watched[i] = watched
@@ -196,15 +219,29 @@ func (w *reverseWindow) buildFeed(ctx context.Context) error {
 		})
 	}
 
-	feed, err := NewReverseFeed(ReverseFeedConfig{
+	cfg := ReverseFeedConfig{
 		Sources:      sources,
-		Target:       applier.Target{DB: src.db},
 		TargetTables: targetTables,
 		Logger:       r.logger,
 		DBConfig:     r.dbConfig,
 		Threads:      r.move.WriteThreads,
 		GTID:         r.move.EnableExperimentalGTID,
-	})
+	}
+	if sharded {
+		revTargets := make([]applier.Target, len(r.sources))
+		for i := range r.sources {
+			revTargets[i] = applier.Target{
+				DB:       r.sources[i].db,
+				Config:   r.sources[i].config,
+				KeyRange: r.sources[i].keyRange,
+			}
+		}
+		cfg.Targets = revTargets
+	} else {
+		cfg.Target = applier.Target{DB: src.db}
+	}
+
+	feed, err := NewReverseFeed(cfg)
 	if err != nil {
 		return err
 	}
@@ -233,10 +270,10 @@ func (w *reverseWindow) completeForward(ctx context.Context) error {
 
 // reverseCutover rolls the move back to the source. It mirrors the forward
 // cutover with roles swapped, plus one asymmetry: the source tables sit under
-// their _old names and must be un-retired before traffic returns to them.
+// their _old names (on every source shard) and must be un-retired before
+// traffic returns to them.
 func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 	r := w.r
-	src := &r.sources[0]
 
 	// Record that we are rolling back (best-effort; for a future resume).
 	if err := r.checkpointTbl().Write(ctx, checkpoint.Record{Phase: phaseReverting, CutoverAt: r.cutoverAt}); err != nil {
@@ -277,11 +314,15 @@ func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 	w.feed.Close()
 
 	// 3. Un-retire the source: rename its _old tables back to their real names
-	//    so it can serve again. The feed is stopped, so nothing writes them.
-	for _, t := range src.tables {
-		oldName := check.CutoverOldName(t.TableName)
-		if err := dbconn.Exec(ctx, src.db, "RENAME TABLE %n TO %n", oldName, t.TableName); err != nil {
-			return fmt.Errorf("reverse cutover: un-retire source table %q: %w", t.TableName, err)
+	//    (on every source shard) so it can serve again. The feed is stopped, so
+	//    nothing writes them.
+	for si := range r.sources {
+		s := &r.sources[si]
+		for _, t := range r.sourceTables {
+			oldName := check.CutoverOldName(t.TableName)
+			if err := dbconn.Exec(ctx, s.db, "RENAME TABLE %n TO %n", oldName, t.TableName); err != nil {
+				return fmt.Errorf("reverse cutover: un-retire source %d table %q: %w", si, t.TableName, err)
+			}
 		}
 	}
 
@@ -297,7 +338,7 @@ func (w *reverseWindow) reverseCutover(ctx context.Context) error {
 	//    cutover's source rename. _revert (not _old) marks these as revert
 	//    artifacts, so a later move can safely drop them.
 	for i := range r.targets {
-		for _, t := range src.tables {
+		for _, t := range r.sourceTables {
 			revertName := check.RevertRetiredName(t.TableName)
 			stmt := sqlescape.MustEscapeSQL("RENAME TABLE %n TO %n", t.TableName, revertName)
 			if err := locks[i].ExecUnderLock(ctx, stmt); err != nil {

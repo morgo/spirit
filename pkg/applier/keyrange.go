@@ -69,6 +69,30 @@ func (kr keyRange) contains(hash uint64) bool {
 	return hash >= kr.start && hash < kr.end
 }
 
+// ValidateKeyRanges parses each Vitess-style key range and checks that no two
+// overlap — the same rules NewShardedApplier enforces at construction. It
+// exists so callers can fail fast on a bad shard layout before doing any work
+// (e.g. move validates reverse-window source key ranges before the copy, since
+// the sharded reverse applier is only constructed after the forward cutover).
+func ValidateKeyRanges(ranges []string) error {
+	parsed := make([]keyRange, len(ranges))
+	for i, r := range ranges {
+		kr, err := parseKeyRange(r)
+		if err != nil {
+			return fmt.Errorf("key range %d (%q): %w", i, r, err)
+		}
+		parsed[i] = kr
+	}
+	for i := range parsed {
+		for j := i + 1; j < len(parsed); j++ {
+			if parsed[i].overlaps(parsed[j]) {
+				return fmt.Errorf("key ranges overlap: %q and %q", ranges[i], ranges[j])
+			}
+		}
+	}
+	return nil
+}
+
 // overlaps checks if two key ranges overlap
 func (kr keyRange) overlaps(other keyRange) bool {
 	// Two ranges [a, b) and [c, d) overlap if:
