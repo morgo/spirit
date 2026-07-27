@@ -7,7 +7,7 @@ Checksums validate data consistency between two tables. During schema changes, t
 - **Column mapping**: The checksum uses `ColumnMapping` to determine which columns to compare between source and target tables. This handles the intersection of non-generated columns, column renames, and type casting automatically.
 - **Type normalization**: A `CAST` operation converts columns to a comparable type before comparison. This enables comparisons when data types have changed and their string representations differ (e.g., `TIMESTAMP` vs. `TIMESTAMP(6)`).
 - **Automatic repair**: When inconsistencies are detected, the checksum automatically repairs differences by recopying affected chunks.
-- **Parallel execution**: Checksums process chunks concurrently across multiple threads for efficient handling of large tables.
+- **Parallel execution**: Checksums process chunks concurrently across multiple threads for efficient handling of large tables. The worker count is resizable while a pass runs — see [Pacing and scaling](#pacing-and-scaling).
 - **Consistent snapshot**: A brief table lock establishes a consistent snapshot before being released. The checksum remains immune to concurrent modifications during execution.
 - **Server-side execution**: The checksum computation is pushed down to MySQL, with each chunk returning only a CRC32 value and row count to Spirit. This minimizes network overhead and is significantly more efficient than approaches that extract all data for client-side comparison.
 
@@ -61,6 +61,28 @@ The actual implementation includes additional handling:
 - **Type casting**: Applies `CAST` operations to convert columns to the target table's type for comparable string representations
 
 The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt-table-checksum** from Percona Toolkit, which established this as a reliable method for verifying data consistency in MySQL. This same approach has since been adopted by other database tools, including TiDB's data migration and verification utilities, demonstrating its effectiveness for distributed database scenarios.
+
+## Pacing and scaling
+
+`SingleChecker` and `DistributedChecker` pace themselves against the same throttler the copier uses. Two things are separate here:
+
+- **The hard stop** applies always. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when replica lag or Aurora load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `SetThrottler` (the `ThrottleAware` capability) — runners build the checker before their throttlers are open.
+- **Scaling** is opt-in via `AutoscaleConfig`, and adjusts the live worker count during a pass. Two signals drive it:
+  - The throttler's continuous **utilization** signal, applying the same zone law as the copier (see `pkg/autoscale`). Only the Aurora throttlers provide this signal, so this is where growth comes from and it is Aurora-only.
+  - The **change-feed backlog**, which works everywhere. The feed flushes concurrently with the checksum, and its backlog gates cut-over — if it grows unboundedly the binlogs may be purged before a resume can replay them. A backlog that is both large and sustainedly rising means the checksum's reads are winning the race against writes that have to finish, so a worker is shed. On stock MySQL this is the only lever, and recovery is capped at the configured concurrency.
+
+| | hard stop | shed on backlog | grow |
+| --- | --- | --- | --- |
+| stock MySQL | yes | yes | no (recovers to start only) |
+| Aurora + autoscaling | yes | yes | yes (utilization law) |
+
+Concurrency is gated by a resizable `autoscale.Limiter` rather than `errgroup.SetLimit`, which may not be resized while goroutines are active.
+
+One constraint shapes all of this: the `REPEATABLE READ` transaction pool **cannot grow** once the table lock is released. Every transaction takes its snapshot under that lock, so they all see one point in time; a transaction started later would read a newer snapshot and could compare a chunk against changes its siblings cannot see. The pool is therefore provisioned at the autoscale ceiling up front, whether or not scaling is enabled. Over-provisioning costs one connection per idle transaction and no extra history retention, since every read view pins from the same instant.
+
+`ContinuousChecker` is not covered by any of this: it manages its own pacing through `MinPassInterval` and its retry queue, and takes no table lock or snapshot pool.
+
+Each pass logs a `checksum chunk size distribution` line (chunk count, duration p50/p90/max, row p50/max, and how many chunks hit `table.MaxDynamicRowSize`). The row-capped count is the useful one: the checksum aggregates server-side and returns one row per chunk, so its chunks are far cheaper than the copier's, and if most are pinned at the row ceiling then that — not `--target-chunk-time` — is what bounds them.
 
 ## Continuous checksum
 

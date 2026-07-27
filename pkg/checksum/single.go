@@ -14,10 +14,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/throttler"
 	"github.com/block/spirit/pkg/utils"
 	"golang.org/x/sync/errgroup"
 )
@@ -25,7 +28,19 @@ import (
 type SingleChecker struct {
 	sync.Mutex
 
-	concurrency      int
+	concurrency int
+	// maxConcurrency is the ceiling the autoscaler may grow to. The
+	// transaction pool is provisioned at this size regardless of whether
+	// scaling is enabled — see initConnPool for why it cannot be grown later.
+	maxConcurrency int
+	// autoscale enables the control loop. Without it the pool stays at
+	// concurrency, but the throttler hard-stop below still applies.
+	autoscale   bool
+	throttler   throttler.Throttler
+	metricsSink metrics.Sink
+	// limiter gates live concurrency for the current pass; nil until Run.
+	limiter          *autoscale.Limiter
+	targetChunkTime  time.Duration
 	feed             change.Source
 	db               *sql.DB
 	trxPool          *dbconn.TrxPool // reader trx pool
@@ -41,9 +56,69 @@ type SingleChecker struct {
 	maxRetries       int
 	yieldTimeout     time.Duration
 	yieldsPerformed  atomic.Uint64 // number of yield/resume cycles performed
+	// chunks accumulates the chunk-size distribution for the pass in flight.
+	chunks *chunkObserver
 }
 
-var _ Checker = (*SingleChecker)(nil)
+// SetThrottler installs the throttler the checksum paces itself against. It
+// mirrors Copier.SetThrottler and exists for the same reason: the runner
+// builds the checker before it opens the throttlers (the throttler needs the
+// monitoring connection, which is set up later), so the wiring cannot happen
+// at construction. A nil throttler is ignored, leaving the Noop in place.
+func (c *SingleChecker) SetThrottler(t throttler.Throttler) {
+	if t == nil {
+		return
+	}
+	c.Lock()
+	defer c.Unlock()
+	c.throttler = t
+}
+
+// getThrottler reads the throttler under lock, since SetThrottler may race
+// with Run in principle.
+func (c *SingleChecker) getThrottler() throttler.Throttler {
+	c.Lock()
+	defer c.Unlock()
+	return c.throttler
+}
+
+// setLimiter publishes the limiter for the pass now starting. Guarded because
+// the autoscaler and observers read it while the pass runs, and a yield/resume
+// cycle replaces it.
+func (c *SingleChecker) setLimiter(l *autoscale.Limiter) {
+	c.Lock()
+	defer c.Unlock()
+	c.limiter = l
+}
+
+// currentLimiter returns the limiter for the pass in flight, or nil before the
+// first pass starts.
+func (c *SingleChecker) currentLimiter() *autoscale.Limiter {
+	c.Lock()
+	defer c.Unlock()
+	return c.limiter
+}
+
+var (
+	_ Checker       = (*SingleChecker)(nil)
+	_ ThrottleAware = (*SingleChecker)(nil)
+	_ Paced         = (*SingleChecker)(nil)
+)
+
+// Threads reports the live worker count: the limiter's current limit while a
+// pass is running, falling back to the configured concurrency before the first
+// pass starts.
+func (c *SingleChecker) Threads() int {
+	if l := c.currentLimiter(); l != nil {
+		return l.Limit()
+	}
+	return c.concurrency
+}
+
+// IsThrottled reports whether the throttler is currently pausing dispatch.
+func (c *SingleChecker) IsThrottled() bool {
+	return c.getThrottler().IsThrottled()
+}
 
 func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPool, chunk *table.Chunk) error {
 	startTime := time.Now()
@@ -76,6 +151,15 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	err = trx.QueryRowContext(ctx, target).Scan(&targetChecksum, &targetCount)
 	if err != nil {
 		return err
+	}
+	// Record the scan cost before the mismatch branch below, so the sizing
+	// distribution measures checksumming only. Repair is orders of magnitude
+	// more expensive and rare; folding it in would make the p90 useless for
+	// deciding chunk sizes. (The chunker's own Feedback call at the end of this
+	// method deliberately keeps its existing behaviour of timing the whole
+	// operation.)
+	if c.chunks != nil {
+		c.chunks.record(targetCount, time.Since(startTime))
 	}
 	// Compare BOTH the checksum and the row count. The row count is already
 	// returned by the query above, so comparing it is free, and it closes a
@@ -368,7 +452,17 @@ func (c *SingleChecker) initConnPool(ctx context.Context) error {
 	// The table. They MUST be created before the lock is released
 	// with REPEATABLE-READ and a consistent snapshot (or dummy read)
 	// to initialize the read-view.
-	c.trxPool, err = dbconn.NewTrxPool(ctx, c.db, c.concurrency, c.dbConfig)
+	//
+	// The pool is sized to maxConcurrency, not concurrency, because it cannot
+	// be grown afterwards: every transaction here takes its snapshot under the
+	// table lock, so they all see the same point in time. One started later,
+	// after the lock is released, would read a *newer* snapshot and could
+	// compare a chunk against changes the others cannot see — a false
+	// mismatch, or worse, a real difference masked. Over-provisioning costs a
+	// connection per idle transaction and nothing else: all of these read views
+	// pin history from the same instant, so the history list length floor is
+	// identical whether the autoscaler ends up using four of them or sixteen.
+	c.trxPool, err = dbconn.NewTrxPool(ctx, c.db, c.maxConcurrency, c.dbConfig)
 	if err != nil {
 		return err
 	}
@@ -458,6 +552,18 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	return fmt.Errorf("checksum found differences on every attempt (%d/%d). This likely indicates either a bug in Spirit, or a manual modification to the _new table outside of Spirit. Please report @ github.com/block/spirit", c.maxRetries, c.maxRetries)
 }
 
+// logChunkSummary reports the pass's chunk-size distribution. Info level: it
+// is one line per pass (or per yield segment), and it is the data any future
+// change to checksum chunk sizing has to be argued from.
+func (c *SingleChecker) logChunkSummary() {
+	if c.chunks == nil {
+		return
+	}
+	if summary := c.chunks.summary(c.targetChunkTime); summary != "" {
+		c.logger.Info("checksum chunk size distribution", "stats", summary)
+	}
+}
+
 // runChecksumWithYield runs the checksum, automatically yielding and resuming
 // when the yield timeout expires. Each yield releases the long-running
 // REPEATABLE READ transactions (reducing HLL pressure), then re-acquires a
@@ -526,9 +632,43 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	defer yieldCancel()
 
 	g, errGrpCtx := errgroup.WithContext(yieldCtx)
-	g.SetLimit(c.concurrency)
+	// Live concurrency is governed by the limiter, not errgroup.SetLimit: the
+	// errgroup contract forbids changing its limit while goroutines are
+	// active, and the autoscaler needs to resize mid-pass. Acquiring before
+	// g.Go keeps the number of live goroutines bounded by the limit just as
+	// SetLimit did.
+	limiter := autoscale.NewLimiter(c.concurrency)
+	c.setLimiter(limiter)
+	// Safe without synchronisation: assigned before any worker starts and not
+	// replaced until every worker of this pass has been joined by g.Wait().
+	c.chunks = &chunkObserver{}
+	defer c.logChunkSummary()
+
+	thr := c.getThrottler()
+	if c.autoscale {
+		// Scoped to this pass: a yield/resume re-enters runChecksum with a
+		// fresh limiter, so the controller is rebuilt at the start value
+		// rather than inheriting a stale count for a new snapshot.
+		scalerCtx, stopScaler := context.WithCancel(errGrpCtx)
+		defer stopScaler()
+		scaler := newChecksumScaler(thr, limiter, c.feed.GetDeltaLen, c.concurrency, c.maxConcurrency, c.logger, c.metricsSink)
+		go scaler.run(scalerCtx)
+	}
+
 	for !c.chunker.IsRead() && c.isHealthy(errGrpCtx) {
+		// Hard stop, checked before we take a permit so a throttled checksum
+		// holds no capacity while it waits. Chunks already in flight are never
+		// interrupted — the checksum stops *dispatching* rather than
+		// abandoning work, because an aborted chunk is wasted I/O that has to
+		// be redone from the same watermark.
+		thr.BlockWait(errGrpCtx)
+		if err := limiter.Acquire(errGrpCtx); err != nil {
+			// Context is done (yield deadline or cancellation). Stop
+			// dispatching; the checks after g.Wait() classify why.
+			break
+		}
 		g.Go(func() error {
+			defer limiter.Release()
 			chunk, err := c.chunker.Next()
 			if err != nil {
 				if errors.Is(err, table.ErrTableIsRead) {
@@ -569,6 +709,22 @@ func (c *SingleChecker) runChecksum(ctx context.Context) error {
 	if err1 != nil {
 		c.logger.Error("checksum failed")
 		return err1
+	}
+	// A pass that stopped dispatching before the chunker was exhausted has not
+	// verified the whole table, so it must never be reported as a success —
+	// Run treats a nil return as "checksum passed" and would let a cut-over
+	// proceed on a partially-checked table.
+	//
+	// This became reachable when the dispatch loop learned to stop on a done
+	// context (throttler hard-stop, then limiter.Acquire returning): a
+	// cancellation that lands while no chunk is in flight leaves err1 == nil
+	// with work outstanding. Previously an in-flight chunk query always failed
+	// first and surfaced the cancellation through err1.
+	if !c.chunker.IsRead() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("checksum stopped before the table was fully verified")
 	}
 	return nil
 }
