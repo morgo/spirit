@@ -11,9 +11,13 @@ import (
 )
 
 type Move struct {
-	SourceDSN       string        `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
-	TargetDSN       string        `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
-	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target time for each checksum chunk. The copy phase is sized by an in-memory byte budget and does not use this." default:"5s"`
+	SourceDSN string `name:"source-dsn" help:"Where to copy the tables from." default:"spirit:spirit@tcp(127.0.0.1:3306)/src"`
+	TargetDSN string `name:"target-dsn" help:"Where to copy the tables to." default:"spirit:spirit@tcp(127.0.0.1:3306)/dest"`
+	// TargetChunkTime is the checksum's target read time per chunk. The Kong
+	// default must stay equal to checksum.DefaultTargetChunkTime, which documents
+	// why it is this large and why table.MaxDynamicRowSize usually decides chunk
+	// size before it does.
+	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target read time for each checksum chunk. The copy phase is sized by an in-memory byte budget and does not use this." default:"10s"`
 	// TargetChunkSize is the in-memory byte budget the buffered copier sizes each
 	// copy chunk against (see table.DefaultTargetChunkBytes). Move always uses the
 	// buffered copier. A zero value means "use the default" (NewRunner fills it

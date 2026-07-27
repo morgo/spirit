@@ -100,6 +100,20 @@ type ChunkerConfig struct {
 	// ColumnMapping describes the column relationship between source and target tables,
 	// including any renames. If nil, a default mapping with no renames is created.
 	ColumnMapping *ColumnMapping
+	// StartingChunkSize overrides the row count the chunker starts — and resets
+	// — at. Zero means the StartingChunkSize constant.
+	//
+	// The constant is deliberately conservative because for a copier the first
+	// chunks are write transactions, so overshooting costs a long lock hold. A
+	// read-only consumer has the opposite asymmetry: overshooting costs one slow
+	// read (and the panic shrink reacts to it within a single chunk), while
+	// undershooting costs the whole pass, because growth is capped at
+	// MaxDynamicStepFactor per feedback window and a window is 10 chunks. Ramping
+	// from 1000 rows to MaxDynamicRowSize needs ~130 chunks — more than many
+	// tables have, so such a consumer can spend its entire life converging and
+	// never reach the size it measured as correct. Those consumers (the checksum)
+	// start at the ceiling and let the sizer shrink instead.
+	StartingChunkSize uint64
 	// Key and Where are used for composite chunkers to specify a non-primary key index.
 	// When Key is set, the composite chunker is always used regardless of whether the
 	// table has an auto-increment primary key.
@@ -134,7 +148,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 			Ti:                t,
 			NewTi:             newTable,
 			columnMapping:     config.ColumnMapping,
-			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, TargetChunkBytes: config.TargetChunkBytes},
+			dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, TargetChunkBytes: config.TargetChunkBytes, startSize: config.StartingChunkSize},
 			watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 			logger:            config.Logger,
 		}, nil
@@ -145,7 +159,7 @@ func NewChunker(t *TableInfo, config ChunkerConfig) (MappedChunker, error) {
 		columnMapping:     config.ColumnMapping,
 		keyName:           config.Key,
 		where:             config.Where,
-		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime},
+		dynamicChunkSizer: dynamicChunkSizer{ChunkerTarget: config.TargetChunkTime, startSize: config.StartingChunkSize},
 		watermarkTracker:  watermarkTracker{lowerBoundWatermarkMap: make(map[string]*Chunk)},
 		logger:            config.Logger,
 	}, nil

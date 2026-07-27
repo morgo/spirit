@@ -44,8 +44,11 @@ var _ MappedChunker = &chunkerOptimistic{}
 
 // nextChunkByPrefetching uses prefetching instead of feedback to determine the chunk size.
 // It is used when the chunker detects that there are very large gaps in the sequence.
-// When this mode is enabled, the chunkSize is "reset" to 1000 rows, so we know that
-// t.chunkSize is reliable. It is also expanded again based on feedback.
+// When this mode is enabled, the chunkSize is "reset" to the chunker's starting size,
+// so we know that t.chunkSize is reliable. It is also expanded again based on feedback.
+//
+// In this mode a chunk holds exactly t.chunkSize rows rather than t.chunkSize key
+// values, because the upper bound is found by offsetting into the index.
 func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 	key := QuoteColumns(t.Ti.KeyColumns[:1])
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s > ? ORDER BY %s LIMIT 1 OFFSET %d",
@@ -83,7 +86,7 @@ func (t *chunkerOptimistic) nextChunkByPrefetching() (*Chunk, error) {
 				"min-val", minVal,
 				"max-val", maxVal,
 				"max-dynamic-row-size", MaxDynamicRowSize)
-			t.chunkSize = StartingChunkSize // reset
+			t.chunkSize = t.startingChunkSize() // reset
 			t.chunkPrefetchingEnabled = false
 		}
 
@@ -335,7 +338,7 @@ func (t *chunkerOptimistic) Reset() error {
 	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])
 	t.checkpointHighPtr = NewNilDatum(t.Ti.keyDatums[0]) // reset checkpoint high pointer
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.startingChunkSize()
 	t.watermark = nil
 	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
 	t.inflightChunks = 0
@@ -433,7 +436,7 @@ func (t *chunkerOptimistic) maybeSwitchToPrefetchBytes(newTarget uint64, p90Byte
 // the mutex.
 func (t *chunkerOptimistic) switchToPrefetch() {
 	t.logger.Warn("switching to prefetch algorithm")
-	t.chunkSize = StartingChunkSize // reset
+	t.chunkSize = t.startingChunkSize() // reset
 	t.chunkPrefetchingEnabled = true
 }
 
@@ -468,7 +471,7 @@ func (t *chunkerOptimistic) open() (err error) {
 	t.isOpen = true
 	t.chunkPtr = NewNilDatum(t.Ti.keyDatums[0])
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.startingChunkSize()
 	t.inflightChunks = 0
 
 	// Initialize progress tracking

@@ -15,6 +15,7 @@ spirit migrate --host mydb:3306 --username root --password secret \
 
 - [alter](#alter)
 - [checkpoint-max-age](#checkpoint-max-age)
+- [checksum-target-chunk-time](#checksum-target-chunk-time)
 - [checksum-yield-timeout](#checksum-yield-timeout)
 - [conf](#conf)
 - [database](#database)
@@ -80,6 +81,17 @@ Operationally, this means:
 - Do not upgrade or downgrade the Spirit binary while a migration is in progress.
 - If you must change Spirit versions, let the in-flight migration finish first, or accept the lost progress and start fresh with the new version.
 - For long-running migrations that span planned binary upgrades, plan to drain the migration before the upgrade window.
+
+### checksum-target-chunk-time
+
+- Type: Duration
+- Default value: `10s`
+
+The target time to spend *reading* each chunk of the checksum. This is the checksum's equivalent of [target-chunk-time](#target-chunk-time), and it is much larger for a reason: the two are bounding different things.
+
+A copy chunk's duration is the lifetime of a write transaction, so its target is a latency budget — it decides how long a row lock is held (with [`--unbuffered`](#unbuffered)) and how far behind a replica appears. A checksum chunk's duration bounds neither. The checksum aggregates `BIT_XOR(CRC32(...))` on the server and returns **one row per chunk** however many rows the chunk covers, and it does so inside a `REPEATABLE READ` snapshot that is held for the whole pass regardless. Longer chunks are therefore close to free, and length is what keeps a scan sequential long enough for InnoDB linear read-ahead — and Aurora's batched prefetch — to stay engaged.
+
+On a healthy server this is not the value that decides the chunk size: the dynamic chunker's `100,000`-row ceiling does, and that is intended. The row cap is a bound that can be reasoned about, whereas a binding *time* target lets chunk size follow load. This flag is the safety valve for the case the row cap cannot see: rows so wide, or storage so slow, that even 100,000 rows is too much work for one chunk. Lower it if a table's `checksum chunk size distribution` log line shows chunk durations you are not comfortable with; the row-capped count in that line tells you which of the two bounds is currently in effect.
 
 ### checksum-yield-timeout
 
@@ -362,7 +374,9 @@ The table that the schema change will be performed on.
 - Range: `100ms-5s`
 - Typical safe values: `100ms-1s`
 
-The target time for each chunk of the **checksum** and the legacy [`--unbuffered`](#unbuffered) copier. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
+The target time for each chunk of the legacy [`--unbuffered`](#unbuffered) copier and of the continuous checksum that runs *during* the copy. Note that the chunk size is specified as a _target time_ and not a _target rows_. This is helpful because rows can be inconsistent when you consider some tables may have a lot of columns or secondary indexes, or copy tasks may slow down as the workload becomes IO bound.
+
+> **The cutover checksum does not use `--target-chunk-time`.** It has its own, much larger target ([`--checksum-target-chunk-time`](#checksum-target-chunk-time)), because a checksum chunk's duration bounds a server-side read rather than a write transaction. The continuous checksum stays on this flag: it shares the copy phase with the copier, so it is held to the copier's budget.
 
 > **The default buffered copier does not use `--target-chunk-time`.** It reads full rows into memory, so it sizes each copy chunk against an in-memory _byte budget_ ([`--target-chunk-size`](#target-chunk-size)) instead. Time is a poor signal for the buffered copier: its measured chunk time includes the wait behind the write queue, which inflates under load independently of chunk size and would collapse the chunk size to the row floor. A byte budget is a stable property of the data and keeps chunks large enough to engage InnoDB/Aurora read-ahead. The budget defaults to 16 MiB and can be tuned with [`--target-chunk-size`](#target-chunk-size).
 

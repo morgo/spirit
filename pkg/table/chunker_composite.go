@@ -319,7 +319,7 @@ func (t *chunkerComposite) Reset() error {
 	// Reset all state to initial values
 	t.chunkPtrs = []Datum{} // reset to empty slice (first chunk)
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.startingChunkSize()
 	t.watermark = nil
 	t.lowerBoundWatermarkMap = make(map[string]*Chunk, 0)
 	t.inflightChunks = 0
@@ -410,7 +410,7 @@ func (t *chunkerComposite) open() (err error) {
 		t.keyName = "PRIMARY"
 	}
 	t.finalChunkSent = false
-	t.chunkSize = StartingChunkSize
+	t.chunkSize = t.startingChunkSize()
 	t.inflightChunks = 0
 	t.checkpointHighPtr = Datum{} // reset checkpoint high pointer
 

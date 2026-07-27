@@ -29,6 +29,11 @@ type dynamicChunkSizer struct {
 	TargetChunkBytes uint64
 	chunkByteInfo    []uint64
 
+	// startSize is the row count the chunker starts and resets at. Zero means
+	// the StartingChunkSize constant. See ChunkerConfig.StartingChunkSize for
+	// why a read-only consumer wants a different value than a copier does.
+	startSize uint64
+
 	disableDynamicChunker bool // only used by the test suite
 	// pinnedAtFloor records that we have already warned about the chunk size
 	// being stuck at MinDynamicRowSize. It suppresses the per-chunk
@@ -36,6 +41,21 @@ type dynamicChunkSizer struct {
 	// and is re-armed by updateChunkerTarget once the chunk size climbs back
 	// above the floor. See panicShrink.
 	pinnedAtFloor bool
+}
+
+// startingChunkSize is the row count to start — or reset — at. Callers use it
+// rather than the StartingChunkSize constant so that a chunker configured with
+// its own starting size keeps it across Open, Reset and the optimistic
+// chunker's algorithm switches.
+//
+// The configured value is clamped to the dynamic bounds, but deliberately not
+// through boundaryCheckTargetChunkSize: that caps growth relative to the current
+// chunk size, which is zero (or already shrunk) at the points this is called.
+func (d *dynamicChunkSizer) startingChunkSize() uint64 {
+	if d.startSize == 0 {
+		return StartingChunkSize
+	}
+	return min(max(d.startSize, MinDynamicRowSize), MaxDynamicRowSize)
 }
 
 // panicShrink reacts to a chunk whose processing time blew past the panic

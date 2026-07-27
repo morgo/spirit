@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
@@ -337,9 +338,14 @@ func TestContinuousChecksumDivergenceClearsCheckpointWatermark(t *testing.T) {
 // chunker can carve out multiple chunks: the composite chunker won't report a
 // low-watermark until at least one fully-processed chunk has had Feedback,
 // which in practice requires more than one chunk on the runway.
+//
+// The runway is sized against the *checksum* chunker, which starts at the row
+// cap rather than ramping up from the copier's 1000 rows (see
+// checksum.ChunkStartRows). A few thousand rows is one whole checksum chunk, so
+// the table would be read out before a watermark ever appeared.
 func advanceRunnerToChecksumWatermarks(t *testing.T, r *Runner) {
 	t.Helper()
-	seedRows(t, r.db, r.migration.Table, 4096)
+	seedRows(t, r.db, r.migration.Table, 3*checksum.ChunkStartRows)
 	require.NoError(t, r.changes[0].table.SetInfo(t.Context()))
 	require.NoError(t, r.initChunkers())
 	require.NoError(t, r.copyChunker.Open())

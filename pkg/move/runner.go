@@ -173,6 +173,9 @@ func NewRunner(m *Move) (*Runner, error) {
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
+	if m.TargetChunkTime == 0 {
+		m.TargetChunkTime = checksum.DefaultTargetChunkTime
+	}
 	r := &Runner{
 		move:   m,
 		logger: slog.Default(),
@@ -364,7 +367,8 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 			// Move always uses the buffered copier, which reads rows into client
 			// memory; size the copy chunker by an in-memory byte budget rather than
 			// copy time, whose signal collapses under write-side backpressure. The
-			// checksum runs server-side and keeps the time signal.
+			// checksum runs server-side and keeps the time signal, and starts at the
+			// row cap rather than ramping up to it (see checksum.ChunkStartRows).
 			copyChunkerCfg := chunkerCfg
 			copyChunkerCfg.TargetChunkBytes = r.move.TargetChunkSize
 			copyChunker, err := table.NewChunker(tbl, copyChunkerCfg)
@@ -374,7 +378,9 @@ func (r *Runner) resumeFromCheckpoint(ctx context.Context) error {
 			if err := r.sources[i].replClient.AddSubscription(tbl, nil, copyChunker); err != nil {
 				return err
 			}
-			checksumChunker, err := table.NewChunker(tbl, chunkerCfg)
+			checksumChunkerCfg := chunkerCfg
+			checksumChunkerCfg.StartingChunkSize = checksum.ChunkStartRows
+			checksumChunker, err := table.NewChunker(tbl, checksumChunkerCfg)
 			if err != nil {
 				return err
 			}
@@ -885,7 +891,8 @@ func (r *Runner) newCopy(ctx context.Context) error {
 			// Move always uses the buffered copier, which reads rows into client
 			// memory; size the copy chunker by an in-memory byte budget rather than
 			// copy time, whose signal collapses under write-side backpressure. The
-			// checksum runs server-side and keeps the time signal.
+			// checksum runs server-side and keeps the time signal, and starts at the
+			// row cap rather than ramping up to it (see checksum.ChunkStartRows).
 			copyChunkerCfg := chunkerCfg
 			copyChunkerCfg.TargetChunkBytes = r.move.TargetChunkSize
 			copyChunker, err := table.NewChunker(tbl, copyChunkerCfg)
@@ -895,7 +902,9 @@ func (r *Runner) newCopy(ctx context.Context) error {
 			if err := r.sources[i].replClient.AddSubscription(tbl, nil, copyChunker); err != nil {
 				return err
 			}
-			checksumChunker, err := table.NewChunker(tbl, chunkerCfg)
+			checksumChunkerCfg := chunkerCfg
+			checksumChunkerCfg.StartingChunkSize = checksum.ChunkStartRows
+			checksumChunker, err := table.NewChunker(tbl, checksumChunkerCfg)
 			if err != nil {
 				return err
 			}

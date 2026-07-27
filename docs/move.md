@@ -154,9 +154,9 @@ A Go MySQL DSN for the source database. All tables in this database will be copi
 ### target-chunk-time
 
 - Type: Duration
-- Default value: `5s`
+- Default value: `10s`
 
-The target time for each **checksum** chunk. The copy phase always uses the buffered copier, which sizes its chunks against an in-memory byte budget rather than a target time, so this flag does not affect the copy. See the [migrate documentation](migrate.md#target-chunk-time) for a detailed explanation of how chunk timing (and the buffered copier's byte budget) works.
+The target time to spend *reading* each **checksum** chunk. The copy phase always uses the buffered copier, which sizes its chunks against an in-memory byte budget rather than a target time, so this flag does not affect the copy. Because move's only consumer of this flag is the checksum, it is the counterpart of migrate's [`--checksum-target-chunk-time`](migrate.md#checksum-target-chunk-time) rather than of its `--target-chunk-time` — see that section for why a checksum chunk's target is so much larger than a copy chunk's, and why the chunker's `100,000`-row ceiling usually decides the chunk size before this value does.
 
 ### target-chunk-size
 

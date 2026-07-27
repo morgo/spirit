@@ -97,6 +97,11 @@ than a target time, so this flag does not affect the copy. See the [migrate
 documentation](migrate.md#target-chunk-time) for how chunk timing (and the
 buffered copier's byte budget) works.
 
+Sync's only checksum is the *continuous* one, which runs alongside the copy and
+is therefore held to a copy-phase budget. It is not the cutover checksum that
+migrate sizes with
+[`--checksum-target-chunk-time`](migrate.md#checksum-target-chunk-time).
+
 ### target-chunk-size
 
 - Type: Integer (bytes)

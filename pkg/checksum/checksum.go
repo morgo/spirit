@@ -44,6 +44,45 @@ var (
 	fixChunkTimeout = 10 * time.Minute
 )
 
+// DefaultTargetChunkTime is the read time the checksum aims for per chunk.
+//
+// It is much larger than the copier's target because it is bounding a different
+// thing. A copy chunk's time is a write transaction's lifetime, so it is a
+// latency budget. A checksum chunk is a read-only aggregate inside a snapshot
+// that is already held for the whole pass, and only one row per chunk crosses
+// the wire no matter how many rows it covers — so a longer chunk buys longer
+// sequential scans (which is what engages InnoDB linear read-ahead and Aurora's
+// batched prefetch) at no cost in lock or memory terms.
+//
+// In practice this is not the binding constraint on a healthy server:
+// table.MaxDynamicRowSize caps a chunk at 100k rows, and 100k rows of a typical
+// table is well under 10s of read. That is deliberate — the row cap is a bound
+// we can reason about (it is what bounds a repair, and what
+// SingleChecker.inspectDifferences holds in memory on a mismatch), whereas a
+// time target that binds would let chunk size follow load. The target's job is
+// to be the safety valve for the case the cap cannot see: rows so wide, or
+// storage so slow, that even 100k rows is too much work for one chunk. At the
+// copier's 500ms that valve trips on perfectly healthy tables and shrinks chunks
+// precisely when read-ahead matters most.
+const DefaultTargetChunkTime = 10 * time.Second
+
+// ChunkStartRows is the row count a checksum chunker starts at, as opposed to
+// the copier's much smaller table.StartingChunkSize.
+//
+// The dynamic sizer converges upward slowly on purpose: growth is capped at
+// table.MaxDynamicStepFactor per feedback window, and a window is 10 chunks. From
+// 1000 rows that is ~130 chunks to reach table.MaxDynamicRowSize — more chunks
+// than many whole tables have, so the checksum could spend an entire pass
+// converging and never once use the chunk size it had measured as correct. (A
+// 1M-row table measured 126 chunks, ending at 25k rows, with p90 chunk time at
+// 6% of the 500ms target and not one chunk reaching the row cap.)
+//
+// Starting at the cap inverts that, and the asymmetry justifies it: the sizer
+// shrinks without any per-step cap and panic-shrinks on a single chunk that
+// exceeds DynamicPanicFactor × the target, so overshooting costs one slow chunk,
+// while undershooting costs the whole pass.
+const ChunkStartRows = table.MaxDynamicRowSize
+
 // chunkMismatch describes why a chunk's source and target disagreed. It is
 // returned by compareChunk so the caller can log a debuggable reason while
 // treating any mismatch (checksum OR row count) identically — same retry,
@@ -185,7 +224,7 @@ type CheckerConfig struct {
 func NewCheckerDefaultConfig() *CheckerConfig {
 	return &CheckerConfig{
 		Concurrency:     4,
-		TargetChunkTime: 1000 * time.Millisecond,
+		TargetChunkTime: DefaultTargetChunkTime,
 		DBConfig:        dbconn.NewDBConfig(),
 		Logger:          slog.Default(),
 		FixDifferences:  false,

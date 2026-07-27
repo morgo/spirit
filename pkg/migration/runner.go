@@ -852,7 +852,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 
 	r.checker, err = checksum.NewChecker([]*sql.DB{r.db}, r.checksumChunker, []change.Source{r.replClient}, &checksum.CheckerConfig{
 		Concurrency:     r.migration.Threads,
-		TargetChunkTime: r.migration.TargetChunkTime,
+		TargetChunkTime: r.migration.ChecksumTargetChunkTime,
 		DBConfig:        r.dbConfig,
 		Logger:          r.logger,
 		FixDifferences:  true,
@@ -1543,7 +1543,13 @@ func (r *Runner) initChunkers() error {
 		if err != nil {
 			return err
 		}
-		checksumChunker, err := table.NewChunker(change.table, chunkerCfg)
+		// The checksum's chunks are sized against their own, much larger target,
+		// and start at the row cap rather than ramping up to it. See
+		// checksum.DefaultTargetChunkTime and checksum.ChunkStartRows.
+		checksumChunkerCfg := chunkerCfg
+		checksumChunkerCfg.TargetChunkTime = r.migration.ChecksumTargetChunkTime
+		checksumChunkerCfg.StartingChunkSize = checksum.ChunkStartRows
+		checksumChunker, err := table.NewChunker(change.table, checksumChunkerCfg)
 		if err != nil {
 			return err
 		}

@@ -42,13 +42,23 @@ type Migration struct {
 	// cap is fixed at 2x that (deliberately not configurable for now, to keep
 	// the experimental surface small). See issue #831.
 	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
-	// TargetChunkTime sizes chunks for the time-based signal: the checksum
-	// (server-side CRC) and the legacy --unbuffered copier. The default buffered
-	// copier ignores it and sizes chunks by an in-memory byte budget
+	// TargetChunkTime sizes chunks for the time-based signal: the legacy
+	// --unbuffered copier and the continuous (during-copy) checksum. The default
+	// buffered copier ignores it and sizes chunks by an in-memory byte budget
 	// (table.DefaultTargetChunkBytes), because its fed-back time measures
 	// read + applier-queue-wait + write/commit — a signal that is
 	// size-independent under backpressure and collapses the chunk size.
-	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target time per chunk for the checksum and the legacy --unbuffered copier. The default buffered copier ignores it and sizes chunks by memory." optional:"" default:"500ms"`
+	//
+	// The cutover checksum has its own, much larger target
+	// (ChecksumTargetChunkTime). It is the one phase where the chunk time bounds
+	// nothing but a read: the continuous checksum shares the copy phase with the
+	// copier and is deliberately left on the copier's budget.
+	TargetChunkTime time.Duration `name:"target-chunk-time" help:"Target time per chunk for the legacy --unbuffered copier and the during-copy continuous checksum. The default buffered copier ignores it and sizes chunks by memory; the cutover checksum uses --checksum-target-chunk-time." optional:"" default:"500ms"`
+	// ChecksumTargetChunkTime is the target read time for one chunk of the
+	// cutover checksum. See checksum.DefaultTargetChunkTime for why it is so much
+	// larger than TargetChunkTime, and why table.MaxDynamicRowSize rather than
+	// this value is what usually decides checksum chunk size.
+	ChecksumTargetChunkTime time.Duration `name:"checksum-target-chunk-time" help:"Target read time per checksum chunk. Larger than the copier's target because a checksum chunk aggregates server-side and holds no write transaction; in practice a chunk is usually capped by rows before it reaches this." optional:"" default:"10s"`
 	// TargetChunkSize is the in-memory byte budget the default buffered copier
 	// sizes each copy chunk against (the memory signal; see
 	// table.DefaultTargetChunkBytes and pkg/table/README.md). It has no effect
@@ -121,6 +131,9 @@ func (m *Migration) Validate() error {
 	if m.TargetChunkTime < 0 {
 		return fmt.Errorf("--target-chunk-time must be non-negative, got %s", m.TargetChunkTime)
 	}
+	if m.ChecksumTargetChunkTime < 0 {
+		return fmt.Errorf("--checksum-target-chunk-time must be non-negative, got %s", m.ChecksumTargetChunkTime)
+	}
 	if m.ReplicaMaxLag < 0 {
 		return fmt.Errorf("--replica-max-lag must be non-negative, got %s", m.ReplicaMaxLag)
 	}
@@ -153,6 +166,11 @@ func (m *Migration) Run() error {
 func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, err error) {
 	if m.TargetChunkTime == 0 {
 		m.TargetChunkTime = table.ChunkerDefaultTarget
+	}
+	// Zero means "not set" for callers that construct a Migration programmatically
+	// (tests, library users) rather than through Kong.
+	if m.ChecksumTargetChunkTime == 0 {
+		m.ChecksumTargetChunkTime = checksum.DefaultTargetChunkTime
 	}
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes

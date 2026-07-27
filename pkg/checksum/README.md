@@ -62,6 +62,32 @@ The actual implementation includes additional handling:
 
 The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt-table-checksum** from Percona Toolkit, which established this as a reliable method for verifying data consistency in MySQL. This same approach has since been adopted by other database tools, including TiDB's data migration and verification utilities, demonstrating its effectiveness for distributed database scenarios.
 
+## Chunk size
+
+The checksum sizes chunks with the same dynamic sizer as the copier, but not with the same calibration, because a chunk's duration bounds different things in the two phases. A copy chunk's time is a write transaction's lifetime, so it is a latency budget. A checksum chunk's time is a read inside a snapshot that is held for the whole pass either way, and only one row crosses the wire per chunk however many rows it covers. Longer chunks are therefore nearly free, and length is what keeps a scan sequential long enough to engage InnoDB linear read-ahead and Aurora's batched prefetch.
+
+Two things are set differently:
+
+- **The target time** is `--checksum-target-chunk-time` (10s), not the copier's `--target-chunk-time` (500ms). See `DefaultTargetChunkTime`.
+- **The starting size** is `table.MaxDynamicRowSize`, not `table.StartingChunkSize`. See `ChunkStartRows`.
+
+The starting size is the one that mattered in practice. The sizer converges upward slowly on purpose — growth is capped at `table.MaxDynamicStepFactor` per feedback window, and a window is 10 chunks — so climbing from 1000 rows to the row cap takes roughly 130 chunks. That is more chunks than many whole tables have, which meant the checksum could spend an entire pass converging and never once use the size it had measured as correct. Starting at the cap inverts the asymmetry, and shrinking is what the sizer is good at: it shrinks with no per-step cap, and panic-shrinks on any single chunk exceeding `DynamicPanicFactor` × the target. Overshooting costs one slow chunk; undershooting cost the whole pass.
+
+On a healthy server neither setting decides the chunk size — `table.MaxDynamicRowSize` (100k rows) does, and that is intended. The row cap is a bound that can be reasoned about: it is what bounds a repair, and what `inspectDifferences` holds in memory when a chunk mismatches. A binding *time* target, by contrast, would let chunk size follow load. The target's job is to be the safety valve for what the row cap cannot see — rows so wide, or storage so slow, that even 100k rows is too much work for one chunk. At the copier's 500ms that valve trips on ordinary tables and shrinks chunks precisely when read-ahead matters most.
+
+Measured on a 1M-row, 6-column table (194 MB against a 128 MB buffer pool), before and after this calibration:
+
+| | chunks | rows p50 | duration p90 | at the row cap |
+| --- | --- | --- | --- | --- |
+| copier's calibration | 126 | 5,062 | 30ms | 0/126 |
+| checksum's calibration | 12 | 100,000 | 162ms | 10/12 |
+
+Per-row cost at p50 is unchanged on local SSD (~1.6µs either way) — read-ahead has little left to win when the storage is this fast, and the read-ahead argument is a claim about network-attached storage that a local box cannot demonstrate. What the numbers do show is the sizing reaching its bound in two chunks instead of never, and p90 per-row cost falling with it (5.9µs → 1.6µs) as per-chunk overhead is amortised over 20× the rows.
+
+Two costs come with the larger chunks, both bounded by the row cap. A throttle decision only takes effect between chunks (`BlockWait` is called before dispatch and chunks in flight are never abandoned), so back-off latency now tracks a chunk's duration rather than a copier's 500ms budget. And a table with fewer than `threads` × 100k rows produces fewer chunks than there are workers, so the checksum of a small table is less parallel than it was — which is affordable precisely because it is a small table.
+
+One more consequence worth knowing: on a table with an auto-increment key, starting at the row cap means the optimistic chunker's gap-prefetch switch (`maybeSwitchToPrefetch`) now fires on the first feedback window rather than never. That is a net gain — in prefetch mode a chunk holds exactly `chunkSize` *rows* rather than `chunkSize` *key values*, so chunks stay uniform across a key space pitted with deletes — at the cost of one index-only `OFFSET` query per chunk.
+
 ## Repairing a mismatch
 
 When a chunk fails verification and `FixDifferences` is on, the checker recopies the chunk's key range: `DELETE` then `REPLACE INTO ... SELECT` for the single-server case, or `DELETE` on every target followed by a re-apply through the applier for the distributed case.
@@ -110,7 +136,7 @@ One constraint shapes all of this: the `REPEATABLE READ` transaction pool **cann
 
 `ContinuousChecker` is not covered by any of this: it manages its own pacing through `MinPassInterval` and its retry queue, and takes no table lock or snapshot pool.
 
-Each pass logs a `checksum chunk size distribution` line (chunk count, duration p50/p90/max, row p50/max, and how many chunks hit `table.MaxDynamicRowSize`). The row-capped count is the useful one: the checksum aggregates server-side and returns one row per chunk, so its chunks are far cheaper than the copier's, and if most are pinned at the row ceiling then that — not `--target-chunk-time` — is what bounds them.
+Each pass logs a `checksum chunk size distribution` line (chunk count, duration p50/p90/max, row p50/max, and how many chunks hit `table.MaxDynamicRowSize`). The row-capped count is the useful one: it is what answered the sizing question above, and with the checksum's own calibration it should now read close to all of them. A pass where it reads *low* is a pass where the time target is binding instead — meaning that table's rows are wide enough, or its storage slow enough, to be worth looking at.
 
 ## Continuous checksum
 
