@@ -66,7 +66,11 @@ The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt
 
 `SingleChecker` and `DistributedChecker` pace themselves against the same throttler the copier uses. Two things are separate here:
 
-- **The hard stop** applies always. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when replica lag or Aurora load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `SetThrottler` (the `ThrottleAware` capability) — runners build the checker before their throttlers are open.
+- **The hard stop** is not opt-in, but it reacts only to *load*. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when server load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `SetThrottler` (the `ThrottleAware` capability) — runners build the checker before their throttlers are open.
+
+  Whatever throttler a checker is given is narrowed by `loadOnlyThrottler` to the children implementing `throttler.GradualThrottler` — in practice the Aurora signals. Binary signals, meaning replica lag, are dropped, and a checker given only those runs unpaced. This is not a shortcut but a correctness point: a checksum reads inside a `REPEATABLE READ` snapshot and writes nothing to the binlog, so it cannot be the cause of replica lag and pausing it cannot reduce that lag — while the pause extends the pass, holding the snapshot open and pinning undo the purge thread cannot advance past. The lag throttler also fails closed on stale polling, so an unreachable replica would stall dispatch until the yield timeout with the snapshot still held. Load is different in kind: a checksum does add read load to the primary, so backing off on load both works and is warranted.
+
+  The one part of a checksum that replicates is a chunk repair, and it is deliberately left unpaced — repairs are rare and small, and blocking one incurs exactly the snapshot-hold cost the narrowing exists to avoid.
 - **Scaling** is opt-in via `AutoscaleConfig`, and adjusts the live worker count during a pass. Two signals drive it:
   - The throttler's continuous **utilization** signal, applying the same zone law as the copier (see `pkg/autoscale`). Only the Aurora throttlers provide this signal, so this is where growth comes from and it is Aurora-only.
   - The **change-feed backlog**, whose signal is available everywhere — unlike utilization, it needs nothing from the throttler. The feed flushes concurrently with the checksum, and its backlog gates cut-over — if it grows unboundedly the binlogs may be purged before a resume can replay them. If the feed is losing ground, the checksum's reads are winning a race against writes that have to finish, so a worker is shed. On stock MySQL this is the only shedding lever, and recovery is capped at the configured concurrency.
@@ -85,11 +89,11 @@ The opt-in is the axis that matters most, so the capability table is keyed on it
 
 | | hard stop | shed on backlog | grow |
 | --- | --- | --- | --- |
-| scaling disabled (the default), any server | yes | no | no |
-| scaling enabled, stock MySQL | yes | yes | no (recovers to the configured count only) |
-| scaling enabled, Aurora | yes | yes | yes (utilization law) |
+| scaling disabled (the default), any server | on load only | no | no |
+| scaling enabled, stock MySQL | on load only | yes | no (recovers to the configured count only) |
+| scaling enabled, Aurora | on load only | yes | yes (utilization law) |
 
-Only the hard stop is unconditional. `AutoscaleConfig.Enabled` — `--enable-experimental-autoscaling` for `migrate` — is what builds the scaler, and the scaler is where both shedding and growth live.
+The hard stop is the one behavior that needs no opt-in — but "on load only" carries weight in every row: the load signal comes from the Aurora throttlers, so on stock MySQL there is nothing for the hard stop to react to and a checksum there is unpaced apart from the backlog lever. `AutoscaleConfig.Enabled` — `--enable-experimental-autoscaling` for `migrate` — is what builds the scaler, and the scaler is where both shedding and growth live.
 
 Concurrency is gated by a resizable `autoscale.Limiter` rather than `errgroup.SetLimit`, which may not be resized while goroutines are active.
 

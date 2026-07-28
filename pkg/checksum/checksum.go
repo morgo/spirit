@@ -138,6 +138,31 @@ type ThrottleAware interface {
 	SetThrottler(t throttler.Throttler)
 }
 
+// loadOnlyThrottler narrows a throttler to the signals a checksum should react
+// to, and is applied to every throttler a checker is given (at construction and
+// via SetThrottler) so the rule holds however the checker was wired. nil yields
+// a Noop.
+//
+// A checksum reacts to *load* and ignores binary budget signals — in practice,
+// replica lag. It reads inside a REPEATABLE READ snapshot and writes nothing to
+// the binlog, so it cannot be the cause of replica lag and pausing it cannot
+// reduce that lag; what the pause does do is extend the pass, holding the
+// snapshot open and pinning undo that the purge thread cannot advance past. The
+// replica-lag throttler also fails closed on stale polling, so an unreachable
+// replica would stall dispatch until the yield timeout with the snapshot still
+// held. Load is different in kind: a checksum genuinely adds read load to the
+// primary, so backing off on load both works and is warranted.
+//
+// The one part of a checksum that does replicate is a chunk repair, and it is
+// deliberately left unpaced: repairs are rare and small, and blocking one incurs
+// exactly the snapshot-hold cost this narrowing exists to avoid.
+func loadOnlyThrottler(t throttler.Throttler) throttler.Throttler {
+	if t == nil {
+		return &throttler.Noop{}
+	}
+	return throttler.GradualOnly(t)
+}
+
 // Paced is the optional capability a Checker exposes when it can report how it
 // is currently being paced. Runner status lines use it so a slow checksum can be
 // told apart from a throttled or scaled-down one — the same question
@@ -175,6 +200,9 @@ type CheckerConfig struct {
 	// Throttler paces the checksum. Optional: nil installs a Noop, and callers
 	// that build the checker before their throttlers are open should use
 	// SetThrottler instead (the migration runner does).
+	//
+	// Whatever is passed is narrowed by loadOnlyThrottler — a checksum reacts to
+	// load signals and ignores binary ones such as replica lag.
 	Throttler throttler.Throttler
 	// Autoscale configures the worker-count control loop.
 	Autoscale AutoscaleConfig
@@ -224,10 +252,7 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 	// The ceiling can never be below the start value: the pools are sized to
 	// it, and a pool smaller than the starting worker count would starve.
 	maxConcurrency := max(config.Autoscale.MaxThreads, concurrency)
-	thr := config.Throttler
-	if thr == nil {
-		thr = &throttler.Noop{}
-	}
+	thr := loadOnlyThrottler(config.Throttler)
 	if config.Applier != nil {
 		return &DistributedChecker{
 			concurrency:     concurrency,
