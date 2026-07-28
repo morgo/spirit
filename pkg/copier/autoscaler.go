@@ -247,6 +247,12 @@ func (a *autoScaler) tick(ctx context.Context) {
 	// here is apportioning the permitted move between the two pools. The copier
 	// supplies no veto — the queue is an arbiter, not a signal of its own, and it
 	// decides *where* a step lands rather than whether one is allowed.
+	//
+	// It supplies no CanRecover either, so PlanShedVeto and PlanRecover cannot
+	// occur today. They are still folded into the shed and grow arms below rather
+	// than given a no-op arm of their own: a future veto or recovery signal wired
+	// into the Inputs above should then take effect, not silently do nothing while
+	// the Gate believes the copier declined it.
 	plan := a.gate.Decide(autoscale.Inputs{Zone: autoscale.Classify(util)})
 
 	acted := true
@@ -264,7 +270,7 @@ func (a *autoScaler) tick(ctx context.Context) {
 		if a.reader != nil {
 			a.setRead(autoscale.CeilDiv(a.readCurrent, 2))
 		}
-	case autoscale.PlanShed:
+	case autoscale.PlanShed, autoscale.PlanShedVeto:
 		// Additive decrease, the mirror image of the increase path. Shedding one
 		// thread at a time avoids the halve-and-reclimb sawtooth on a signal our
 		// own workers largely produce. A starved queue means idle writers — the
@@ -279,7 +285,7 @@ func (a *autoScaler) tick(ctx context.Context) {
 		} else {
 			a.setWrite(a.current - 1)
 		}
-	case autoscale.PlanGrow:
+	case autoscale.PlanGrow, autoscale.PlanRecover:
 		// Additive increase on the pool the queue says is the bottleneck.
 		// Balanced (or unconfirmed) holds: growing either side of a balanced
 		// pipeline just moves the queue off its equilibrium without more
@@ -293,11 +299,6 @@ func (a *autoScaler) tick(ctx context.Context) {
 		default: // queueBalanced
 			acted = false
 		}
-	case autoscale.PlanRecover, autoscale.PlanShedVeto:
-		// Neither applies to the copier: it has no veto signal, and it never
-		// sheds for a reason outside the zone law, so there is nothing to recover
-		// from. Both are unreachable given the Inputs above.
-		acted = false
 	case autoscale.PlanNone:
 		acted = false
 	}
