@@ -32,6 +32,17 @@ func TestClassifyZones(t *testing.T) {
 	}
 }
 
+// TestMinVCPUsFitsTheDeadBand pins the relationship MinVCPUs exists for: on the
+// smallest instance the law engages on, one thread's worth of utilization
+// (1/vCPUs) must fit inside the dead band, or a single +1 vaults across it and
+// ping-pongs with the -1 path (the r6g.large oscillation in issue #831). If a
+// watermark moves, this says whether MinVCPUs has to move with it.
+func TestMinVCPUsFitsTheDeadBand(t *testing.T) {
+	step := 1.0 / float64(MinVCPUs)
+	assert.Less(t, step, HighWatermark-LowWatermark,
+		"one thread's utilization step must be narrower than the dead band")
+}
+
 func TestCeilDiv(t *testing.T) {
 	// The point of ceil is that halving never lands on zero, and 3 backs off
 	// to 2 rather than 1.

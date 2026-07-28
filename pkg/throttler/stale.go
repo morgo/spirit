@@ -40,7 +40,7 @@ const (
 	// a brief failover blip, one stalled status query — don't flap the guard,
 	// but the signal is declared stale before the autoscaler can take more
 	// than one blind step, since its increases are spaced
-	// (acCooldownTicks+1)*acTick = 15s apart.
+	// (autoscale.CooldownTicks+1)*autoscale.Tick = 15s apart.
 	staleSignalThreshold = 15 * time.Second
 
 	// StaleUtilizationHold is the utilization reported while the signal is

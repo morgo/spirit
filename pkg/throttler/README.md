@@ -164,6 +164,7 @@ func (t *CustomThrottler) BlockWait(ctx context.Context) {
 
 ## See Also
 
+- [pkg/autoscale](../autoscale/README.md) - What the `GradualThrottler` signal drives: the shared zone law and cooldown gate
 - [MySQL 8.0 Replication Lag Implementation](https://github.com/block/spirit/issues/286)
 - [Freno - Throttling Service](https://github.com/github/freno)
 - [Doorman - Global Distributed Client Side Rate Limiting](https://github.com/youtube/doorman)

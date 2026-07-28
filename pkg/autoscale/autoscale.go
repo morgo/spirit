@@ -1,17 +1,28 @@
 // Package autoscale holds the primitives shared by spirit's phase-level
 // thread-count controllers.
 //
-// Two things live here because more than one phase needs them and neither
-// belongs to a single phase's package:
+// Everything here is needed by more than one phase and belongs to none of them:
 //
-//   - The utilization zone law (the watermark/cooldown constants and
-//     Classify). The copier's write/read autoscaler and the checksum
-//     controller apply the same law to different pools; defining the
-//     thresholds once means they cannot silently drift apart.
+//   - The utilization zone law: the watermark/cooldown constants, Classify, and
+//     MinVCPUs (the instance size below which the signal is too coarse for the
+//     law to work at all). The copier's write/read autoscaler and the checksum
+//     controller apply the same law to different pools; defining the thresholds
+//     once means they cannot silently drift apart.
+//   - Gate (in controller.go), which turns one tick's signals into a Plan. It
+//     owns the precedence between the zones, a caller-supplied veto, and the
+//     cooldown bookkeeping — the part most likely to drift if each phase kept its
+//     own copy, and the hardest to notice when it does.
+//   - The plumbing every controller repeats: Ceiling for a scalable pool's upper
+//     bound, RunTicker for the tick loop, Emit for best-effort gauges.
 //   - Limiter, a concurrency gate whose limit can change while work is in
 //     flight. errgroup.SetLimit cannot: the errgroup contract forbids
 //     modifying the limit while any goroutine in the group is active, so a
 //     phase that wants to be resized mid-pass needs its own gate.
+//
+// What stays with each phase is what is genuinely phase-specific: how big a step
+// is, which pool it lands on, and what may veto one. The copier apportions a
+// step between its read and write pools using the applier queue; the checksum has
+// one pool and a change-feed backlog veto.
 //
 // The law's rationale — why additive steps with a multiplicative panic
 // backoff, and why the dead band has hysteresis — is documented at length on
@@ -43,6 +54,19 @@ const (
 	// it may fire again, giving the change time to register in the signal.
 	// Increases and decreases hold independent cooldowns.
 	CooldownTicks = 2
+	// MinVCPUs is the smallest instance size (in vCPUs) on which a controller is
+	// allowed to engage at all. It is a property of the law above rather than of
+	// any one phase: the utilization signal's denominator is the vCPU count, so
+	// below this one thread is half or a third of the whole scale and no dead band
+	// is wide enough to rest in — the controller can only oscillate. Observed in
+	// staging on r6g.large (2 vCPUs): the write-thread count ping-ponged 1↔2
+	// indefinitely (issue #831). At 4+ vCPUs the worst-case per-thread step (0.25)
+	// fits inside the dead band.
+	//
+	// The migration runner enforces it once, at setup, by disabling autoscaling
+	// for the whole migration; the controllers themselves never see a small
+	// instance.
+	MinVCPUs = 4
 )
 
 // Tick is how often a controller should re-evaluate. Aligned with the

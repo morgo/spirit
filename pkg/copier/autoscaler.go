@@ -32,53 +32,37 @@ import (
 //     cooldown-spaced steps let the controller track the trend instead of
 //     chasing the noise.
 //
-// Zones, evaluated each tick against the (smoothed) utilization:
+// Zones, evaluated each tick against the (smoothed) utilization by
+// autoscale.Classify:
 //
-//	util < acLowWatermark                  add one thread (cooldown-gated)
-//	[acLowWatermark, acHighWatermark)      hold
-//	[acHighWatermark, acPanicThreshold)    shed one thread (cooldown-gated)
-//	util >= acPanicThreshold               halve (first breach immediate)
+//	util < autoscale.LowWatermark                        add one thread (cooldown-gated)
+//	[autoscale.LowWatermark, autoscale.HighWatermark)    hold
+//	[autoscale.HighWatermark, autoscale.PanicThreshold)  shed one thread (cooldown-gated)
+//	util >= autoscale.PanicThreshold                     halve (first breach immediate)
+//
+// The dead band must be wider than the utilization step of a single thread (at
+// most 1/vCPUs, and >= 0.25 only when vCPUs < autoscale.MinVCPUs, where the
+// runner disables autoscaling entirely) — otherwise one +1 can vault across the
+// band and ping-pong with the -1 path.
 //
 // The band has hysteresis, so the resting point depends on which side it is
 // approached from. The auto-sized start (the vCPU count) sits above the band,
-// so on an idle server the controller sheds down and parks just under
-// acHighWatermark — the first edge it meets — and holds there; it does not
-// continue down to acLowWatermark (that is the floor it would climb up to had
-// it started below the band). Parking near 70% of vCPUs leaves headroom for
+// so on an idle server the controller sheds down and parks just under the high
+// watermark — the first edge it meets — and holds there; it does not continue
+// down to the low watermark (that is the floor it would climb up to had it
+// started below the band). Parking near 70% of vCPUs leaves headroom for
 // the primary OLTP workload, and leaving copy throughput on the table is fine.
 // Responsiveness to genuine overload is not traded away: that is the
 // BlockWait hard-stop's job, which none of this touches.
-// The thresholds themselves live in pkg/autoscale, because the checksum
-// controller applies the same law to its own pool and two copies of these
-// numbers would drift. The rationale above is the derivation; pkg/autoscale
-// holds only the values.
-const (
-	// acLowWatermark is the effective setpoint: below it there is headroom,
-	// so we may add a thread (subject to cooldown).
-	acLowWatermark = autoscale.LowWatermark
-	// acHighWatermark starts the additive back-off. The dead band between the
-	// watermarks must be wider than the utilization step of a single thread
-	// (at most 1/vCPUs, and >= 0.25 only when vCPUs < MinAutoscaleVCPUs,
-	// where the runner disables autoscaling entirely) — otherwise one +1 can
-	// vault across the band and ping-pong with the -1 path.
-	acHighWatermark = autoscale.HighWatermark
-	// acPanicThreshold is where back-off turns multiplicative. At 1.0 the
-	// smoothed signal has reached vCPUs — sustained load just below the point
-	// where the raw per-sample hard-stop trips (it fires on running > vCPUs +
-	// selfMonitoringHeadroom). By the time the average climbs here the hard-stop
-	// is typically firing on the raw samples, so the copy is already being
-	// paused; halving sheds enough that the resume is gentle. This compares the gradual
-	// (smoothed) utilization, NOT IsThrottled() — on a
-	// multi-throttler that would include binary children like replica lag,
-	// and halving on those is unguided (they already pause the copy, which
-	// makes the worker count moot while tripped).
-	acPanicThreshold = autoscale.PanicThreshold
-	// acCooldownTicks is how many ticks a direction holds after a change before
-	// it may fire again: a change at tick T allows the next at tick T+3, i.e.
-	// 15s apart at acTick, giving the change time to register in the signal
-	// first. Increases and decreases hold independent cooldowns — see tick().
-	acCooldownTicks = autoscale.CooldownTicks
-)
+//
+// The thresholds, the zone classification, and the cooldown bookkeeping all live
+// in pkg/autoscale, because the checksum controller applies the same law to its
+// own pool and two copies would drift. The rationale above is the derivation;
+// pkg/autoscale holds the mechanism. Note in particular that the panic zone
+// compares the *gradual* (smoothed) utilization and never IsThrottled(): on a
+// multi-throttler the latter would include binary children like replica lag,
+// and halving on those is unguided — they already pause the copy, which makes
+// the worker count moot while tripped.
 
 // Queue-arbitration tunables. When read scaling is engaged (see
 // enableReadScaling), utilization alone cannot decide which pool to grow:
@@ -108,9 +92,9 @@ const (
 	// chunklets essentially the moment they arrive.
 	acQueueWaitEpsilon = time.Millisecond
 	// acQueueStatePersistTicks is how many consecutive ticks a queue state
-	// must hold before it arbitrates. Matches acCooldownTicks so the
+	// must hold before it arbitrates. Matches autoscale.CooldownTicks so the
 	// anti-flap window and the action spacing describe the same timescale.
-	acQueueStatePersistTicks = 2
+	acQueueStatePersistTicks = autoscale.CooldownTicks
 )
 
 // queueState classifies the applier queue for arbitration. The zero value is
@@ -131,22 +115,13 @@ const (
 var acTick = autoscale.Tick
 
 // ResolveMaxReadThreads resolves the upper bound the read-worker pool may
-// scale to: the read-side mirror of throttler.ResolveMaxWriteThreads. When
-// autoscaling is disabled the cap equals start, so the pool cannot move; when
-// enabled it is fixed at 2 × start, for symmetry with the write scaler.
-// Exported so the migration runner sizes the connection pool from the same
-// formula the copier caps the pool with — readers scaled above the connection
-// budget would just queue on the sql.DB pool, silently buying no extra
-// parallelism.
+// scale to: the read-side mirror of throttler.ResolveMaxWriteThreads, and like
+// it a thin naming of autoscale.Ceiling. Exported so the migration runner sizes
+// the connection pool from the same formula the copier caps the pool with —
+// readers scaled above the connection budget would just queue on the sql.DB
+// pool, silently buying no extra parallelism.
 func ResolveMaxReadThreads(start int, autoscaleEnabled bool) int {
-	// The reader pool never runs below one worker (SetReadWorkers and
-	// enableReadScaling both clamp to 1), so the cap honors the same floor —
-	// a zero/invalid start would otherwise under-budget the connection pool.
-	start = max(start, 1)
-	if !autoscaleEnabled {
-		return start
-	}
-	return 2 * start
+	return autoscale.Ceiling(start, autoscaleEnabled)
 }
 
 // writeScaler is the optional capability the autoscaler drives. The
@@ -178,20 +153,17 @@ type statsProvider interface {
 // utilization parked in the [low, high) dead-band so the hard-stop is rarely
 // hit.
 type autoScaler struct {
-	throttler          throttler.GradualThrottler
-	scaler             writeScaler
-	min, max           int
-	current            int
-	low, high, panicAt float64
-	// upCooldown gates increases; downCooldown gates decreases. They are
-	// separate so a fresh overload can halve immediately even right after an
-	// increase (which likely caused it), while consecutive halvings are still
-	// spaced out enough for the signal to reflect the previous cut.
-	// When read scaling is engaged the cooldowns are shared across both
-	// pools — one action per tick, whichever side it lands on.
-	upCooldown, downCooldown int
-	logger                   *slog.Logger
-	metricsSink              metrics.Sink
+	throttler throttler.GradualThrottler
+	scaler    writeScaler
+	min, max  int
+	current   int
+	// gate holds the cooldown state and resolves the zone law into the move this
+	// tick may make (see autoscale.Gate). When read scaling is engaged the
+	// cooldowns are shared across both pools — one action per tick, whichever
+	// side it lands on.
+	gate        autoscale.Gate
+	logger      *slog.Logger
+	metricsSink metrics.Sink
 
 	// Read-side state, populated by enableReadScaling; reader == nil means
 	// the write-only law from #953 (no arbitration, no read pool).
@@ -220,9 +192,6 @@ func newAutoScaler(t throttler.GradualThrottler, s writeScaler, start, maxThread
 		min:         1,
 		max:         maxThreads,
 		current:     start,
-		low:         acLowWatermark,
-		high:        acHighWatermark,
-		panicAt:     acPanicThreshold,
 		logger:      logger,
 		metricsSink: sink,
 	}
@@ -250,16 +219,7 @@ func (a *autoScaler) enableReadScaling(r readScaler, stats statsProvider, start,
 
 // run drives the control loop until ctx is cancelled.
 func (a *autoScaler) run(ctx context.Context) {
-	ticker := time.NewTicker(acTick)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			a.tick(ctx)
-		}
-	}
+	autoscale.RunTicker(ctx, acTick, a.tick)
 }
 
 // tick performs a single control step. Split out so tests can drive it directly
@@ -283,84 +243,70 @@ func (a *autoScaler) run(ctx context.Context) {
 func (a *autoScaler) tick(ctx context.Context) {
 	util := a.throttler.Utilization()
 	queue := a.observeQueue()
+	// The zone law and the cooldown gating are autoscale.Gate's; what remains
+	// here is apportioning the permitted move between the two pools. The copier
+	// supplies no veto — the queue is an arbiter, not a signal of its own, and it
+	// decides *where* a step lands rather than whether one is allowed.
+	plan := a.gate.Decide(autoscale.Inputs{Zone: autoscale.Classify(util)})
 
-	acted := false
-	switch {
-	case util >= a.panicAt:
-		// Panic: multiplicative backoff, at most once per cooldown window.
-		// The first breach halves immediately — it is never delayed by an
-		// increase's cooldown, since the increase likely caused the overload.
-		// Consecutive halvings wait out the window: the signal updates on the
-		// same ~5s cadence we tick on, so reacting to every tick would halve
-		// repeatedly on one stale window. The BlockWait hard-stop engages in
-		// this zone too, so the copy is already paused — the halve is about
-		// resuming gently, not about stopping the bleeding. Both pools halve:
-		// at panic there is no time to apportion blame, and the queue reading
-		// is unreliable anyway while the hard-stop pauses the pipeline.
-		if a.downCooldown == 0 {
-			a.setWrite(ceilDiv(a.current, 2))
-			if a.reader != nil {
-				a.setRead(ceilDiv(a.readCurrent, 2))
-			}
-			a.downCooldown = acCooldownTicks
-			a.upCooldown = acCooldownTicks
-			acted = true
+	acted := true
+	switch plan {
+	case autoscale.PlanHalve:
+		// Multiplicative backoff, at most once per cooldown window. Consecutive
+		// halvings wait out the window: the signal updates on the same ~5s
+		// cadence we tick on, so reacting to every tick would halve repeatedly on
+		// one stale window. The BlockWait hard-stop engages in this zone too, so
+		// the copy is already paused — the halve is about resuming gently, not
+		// about stopping the bleeding. Both pools halve: at panic there is no time
+		// to apportion blame, and the queue reading is unreliable anyway while the
+		// hard-stop pauses the pipeline.
+		a.setWrite(autoscale.CeilDiv(a.current, 2))
+		if a.reader != nil {
+			a.setRead(autoscale.CeilDiv(a.readCurrent, 2))
 		}
-	case util >= a.high:
-		// Soft overload: additive decrease, the mirror image of the increase
-		// path. Like the panic path it is gated only by the down cooldown, so
-		// the first shed is never delayed by a recent increase's cooldown.
-		// Shedding one thread at a time avoids the halve-and-reclimb sawtooth
-		// on a signal our own workers largely produce. A starved queue means
-		// idle writers — the load is coming from the read side, so shed there;
-		// anything else sheds a writer (the write-only default). The read side
-		// is only blamed while it can actually shed (readCurrent > readMin):
-		// at the reader floor the blame falls through to the writer, so this
-		// zone always removes a real thread rather than clamping into a
-		// phantom no-op that still burns the cooldowns.
-		if a.downCooldown == 0 {
-			if a.reader != nil && queue == queueStarved && a.readCurrent > a.readMin {
-				a.setRead(a.readCurrent - 1)
-			} else {
-				a.setWrite(a.current - 1)
-			}
-			a.downCooldown = acCooldownTicks
-			a.upCooldown = acCooldownTicks
-			acted = true
-		}
-	case util < a.low && a.upCooldown == 0:
-		// Cautious, cooldown-gated additive increase — on the pool the queue
-		// says is the bottleneck. Balanced (or unconfirmed) holds: growing
-		// either side of a balanced pipeline just moves the queue off its
-		// equilibrium without more throughput to show for it.
-		if a.reader == nil {
-			a.setWrite(a.current + 1)
-			a.upCooldown = acCooldownTicks
-			acted = true
+	case autoscale.PlanShed:
+		// Additive decrease, the mirror image of the increase path. Shedding one
+		// thread at a time avoids the halve-and-reclimb sawtooth on a signal our
+		// own workers largely produce. A starved queue means idle writers — the
+		// load is coming from the read side, so shed there; anything else sheds a
+		// writer (the write-only default). The read side is only blamed while it
+		// can actually shed (readCurrent > readMin): at the reader floor the blame
+		// falls through to the writer, so this zone always removes a real thread
+		// rather than clamping into a phantom no-op that still burns the
+		// cooldowns.
+		if a.reader != nil && queue == queueStarved && a.readCurrent > a.readMin {
+			a.setRead(a.readCurrent - 1)
 		} else {
-			switch queue {
-			case queueStarved:
-				a.setRead(a.readCurrent + 1)
-				a.upCooldown = acCooldownTicks
-				acted = true
-			case queueFull:
-				a.setWrite(a.current + 1)
-				a.upCooldown = acCooldownTicks
-				acted = true
-			case queueBalanced:
-				// hold
-			}
+			a.setWrite(a.current - 1)
 		}
+	case autoscale.PlanGrow:
+		// Additive increase on the pool the queue says is the bottleneck.
+		// Balanced (or unconfirmed) holds: growing either side of a balanced
+		// pipeline just moves the queue off its equilibrium without more
+		// throughput to show for it. Declining here leaves the cooldown unspent,
+		// which is why the Gate is told what happened rather than assuming.
+		switch {
+		case a.reader == nil, queue == queueFull:
+			a.setWrite(a.current + 1)
+		case queue == queueStarved:
+			a.setRead(a.readCurrent + 1)
+		default: // queueBalanced
+			acted = false
+		}
+	case autoscale.PlanRecover, autoscale.PlanShedVeto:
+		// Neither applies to the copier: it has no veto signal, and it never
+		// sheds for a reason outside the zone law, so there is nothing to recover
+		// from. Both are unreachable given the Inputs above.
+		acted = false
+	case autoscale.PlanNone:
+		acted = false
 	}
-	if !acted {
+	if acted {
+		a.gate.Applied(plan)
+	} else {
 		// Dead-band, balanced hold, or waiting out a cooldown after a recent
 		// change.
-		if a.upCooldown > 0 {
-			a.upCooldown--
-		}
-		if a.downCooldown > 0 {
-			a.downCooldown--
-		}
+		a.gate.Idle()
 	}
 
 	a.emit(ctx, util)
@@ -449,28 +395,13 @@ func (a *autoScaler) setRead(target int) {
 
 // emit reports the current thread counts and observed utilization every tick.
 func (a *autoScaler) emit(ctx context.Context, util float64) {
-	if a.metricsSink == nil {
-		return
-	}
-	m := &metrics.Metrics{
-		Values: []metrics.MetricValue{
-			{Name: metrics.WriteThreadsMetricName, Type: metrics.GAUGE, Value: float64(a.current)},
-			{Name: metrics.ThrottlerUtilizationMetricName, Type: metrics.GAUGE, Value: util},
-		},
+	values := []metrics.MetricValue{
+		{Name: metrics.WriteThreadsMetricName, Type: metrics.GAUGE, Value: float64(a.current)},
+		{Name: metrics.ThrottlerUtilizationMetricName, Type: metrics.GAUGE, Value: util},
 	}
 	if a.reader != nil {
-		m.Values = append(m.Values,
+		values = append(values,
 			metrics.MetricValue{Name: metrics.ReadThreadsMetricName, Type: metrics.GAUGE, Value: float64(a.readCurrent)})
 	}
-	sendCtx, cancel := context.WithTimeout(ctx, metrics.SinkTimeout)
-	defer cancel()
-	if err := a.metricsSink.Send(sendCtx, m); err != nil {
-		a.logger.Debug("autoscaler metrics send failed", "error", err)
-	}
-}
-
-// ceilDiv returns ceil(n/d) for positive integers — used for the multiplicative
-// halving so that, e.g., 3 backs off to 2 rather than 1.
-func ceilDiv(n, d int) int {
-	return (n + d - 1) / d
+	autoscale.Emit(ctx, a.metricsSink, a.logger, values...)
 }

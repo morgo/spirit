@@ -13,6 +13,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checkpoint"
@@ -711,11 +712,11 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// Autoscaling drives the buffered copier's applier worker pool; the legacy
 	// unbuffered copier has no such pool, so the combination downgrades to a
 	// fixed thread count with a warning rather than silently doing nothing.
-	autoscale := r.migration.EnableExperimentalAutoscaling
-	if autoscale && r.migration.Unbuffered {
+	autoscaleEnabled := r.migration.EnableExperimentalAutoscaling
+	if autoscaleEnabled && r.migration.Unbuffered {
 		r.logger.Warn("--enable-experimental-autoscaling has no effect with --unbuffered; write threads stay fixed",
 			"write_threads", r.migration.WriteThreads)
-		autoscale = false
+		autoscaleEnabled = false
 	}
 	// redoAware tracks whether the Aurora threads throttler will run its
 	// redo-aware perf_schema signal (which excludes redo-log waiters). It gates
@@ -726,24 +727,24 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// (and logs it) when the throttler is built; this is an independent probe of
 	// the same source in the same setup phase, used only to size maxWrite here.
 	redoAware := false
-	// On Aurora instances below MinAutoscaleVCPUs the utilization signal is too
+	// On Aurora instances below autoscale.MinVCPUs the utilization signal is too
 	// coarse to control on — one thread is half or more of the dead band — so
 	// the controller could only oscillate; run a fixed pool instead. Aurora is
 	// the one place the autoscaler can engage at all (it needs the continuous
 	// signal only the Aurora throttlers provide); an IsAurora probe failure is
 	// benign here, matching AuroraSetup.Build, since without Aurora the
 	// autoscaler stays dormant regardless and the copier logs its own downgrade.
-	if autoscale {
+	if autoscaleEnabled {
 		if isAurora, err := throttler.IsAurora(ctx, r.db); err == nil && isAurora {
 			vCPUs, err := throttler.AuroraVCPUs(ctx, r.db)
 			if err != nil {
 				return err
 			}
-			if vCPUs < throttler.MinAutoscaleVCPUs {
+			if vCPUs < autoscale.MinVCPUs {
 				r.logger.Warn("autoscaling disabled: instance is too small for the utilization signal to guide scaling; write threads stay fixed",
-					"vcpus", vCPUs, "min_vcpus", throttler.MinAutoscaleVCPUs,
+					"vcpus", vCPUs, "min_vcpus", autoscale.MinVCPUs,
 					"write_threads", r.migration.WriteThreads)
-				autoscale = false
+				autoscaleEnabled = false
 			} else {
 				redoAware = throttler.CanReadRedoAwareThreads(ctx, r.db) == nil
 			}
@@ -756,14 +757,14 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// autoscaler can shed but not oversubscribe the redo log unguarded (see
 	// ResolveMaxWriteThreads).
 	commitLatencyEnabled := r.migration.MaxCommitLatency > 0
-	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale, redoAware, commitLatencyEnabled)
+	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscaleEnabled, redoAware, commitLatencyEnabled)
 	// The read side mirrors it: when autoscaling engages, the copier may grow
 	// its read-worker pool up to copier.ResolveMaxReadThreads (2x Threads; see
 	// autoscalerIfEnabled), so size for that ceiling too — readers scaled
 	// above the pool budget would just queue on the sql.DB pool, silently
 	// buying no extra parallelism. Same formula as the copier's cap, by
 	// construction.
-	maxRead := copier.ResolveMaxReadThreads(r.migration.Threads, autoscale)
+	maxRead := copier.ResolveMaxReadThreads(r.migration.Threads, autoscaleEnabled)
 	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
 	// known: maxRead + maxWrite + controlPlaneConns() + checksumOffPoolConns
 	// (see the MaxOpenConnections doc in Run). Sizing for the ceilings ensures a
@@ -818,7 +819,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		Applier:         appl,
 		Unbuffered:      r.migration.Unbuffered,
 		Autoscale: copier.AutoscaleConfig{
-			Enabled:      autoscale,
+			Enabled:      autoscaleEnabled,
 			StartThreads: r.migration.WriteThreads,
 			MaxThreads:   maxWrite,
 		},
@@ -866,7 +867,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		// checksum-specific term is checksumOffPoolConns, for the queries that run
 		// off-pool.
 		Autoscale: checksum.AutoscaleConfig{
-			Enabled:    autoscale,
+			Enabled:    autoscaleEnabled,
 			MaxThreads: maxRead,
 		},
 	})

@@ -9,7 +9,7 @@ import (
 )
 
 // statsEmitTick is how often an applier reports its pipeline gauges. It
-// matches the autoscaler's cadence (copier acTick) so the write-thread count
+// matches the autoscalers' cadence (autoscale.Tick) so the write-thread count
 // and the pipeline occupancy it acts on are sampled at the same rate. A var
 // so tests can shorten it.
 var statsEmitTick = 5 * time.Second

@@ -368,4 +368,5 @@ See `pkg/throttler` for details on throttler implementations.
 - [pkg/table](../table/README.md) - Chunking strategies and progress tracking
 - [pkg/applier](../applier/README.md) - Buffered copier's write layer
 - [pkg/throttler](../throttler/README.md) - Rate limiting and system protection
+- [pkg/autoscale](../autoscale/README.md) - The zone law, cooldown gate and resizable limiter shared with the checksum controller
 - [DBLog Paper](https://netflixtechblog.com/dblog-a-generic-change-data-capture-framework-69351fb9099b) - Inspiration for buffered copier
