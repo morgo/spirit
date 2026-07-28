@@ -33,6 +33,22 @@ const (
 	// grows in between, and the controller would net-grow while the feed fell
 	// further behind.
 	csBacklogHysteresisFlushes = 2
+	// csStaleFlushTicks is how many consecutive ticks with no new flush make the
+	// backlog signal stale. At the production tick (5s) and flush interval (30s)
+	// a flush lands every ~6 ticks, so this is two whole flush intervals of
+	// silence — long enough that a slow flush or a phase boundary cannot trip it.
+	//
+	// Silence is not the same as "nothing to report", because the signal is keyed
+	// on the flush counter and the counter only advances when a flush *completes*.
+	// A flush that keeps erroring returns before recording anything
+	// (binlogClient.flush), and the periodic flusher logs the error and carries on
+	// rather than failing the migration — so the counter can freeze while the
+	// backlog grows without bound. A flush that merely takes minutes freezes it
+	// too. Both mean the feed is not coping, and in both the last verdict was
+	// computed against data that has stopped arriving; without this the scaler
+	// would keep serving that stale verdict (false, by default) and Aurora growth
+	// would proceed against a backlog nothing is draining.
+	csStaleFlushTicks = 12
 )
 
 // checksumScaler adjusts the checksum phase's live worker count for the
@@ -75,6 +91,10 @@ const (
 //	stock MySQL           yes         yes               no (back to start only)
 //	Aurora + autoscaling  yes         yes               yes (utilization law)
 //
+// Both rows assume scaling is enabled, because this type is only constructed
+// then; without the opt-in a checksum has the hard stop and nothing else, and
+// never moves its worker count in either direction.
+//
 // The hard stop (throttler.BlockWait) is not this type's job — the dispatch
 // loop calls it directly, and it remains the safety net underneath whatever
 // the controller decides.
@@ -111,6 +131,11 @@ type checksumScaler struct {
 	// current flush, so one flush costs at most one worker however many ticks
 	// elapse before the next.
 	shedForFlush bool
+	// staleTicks counts consecutive ticks that saw no new flush, and staleWarned
+	// suppresses repeats of the warning within one episode (re-armed when a flush
+	// finally lands). See csStaleFlushTicks.
+	staleTicks  int
+	staleWarned bool
 
 	logger      *slog.Logger
 	metricsSink metrics.Sink
@@ -185,6 +210,10 @@ func (s *checksumScaler) run(ctx context.Context) {
 // on the reduced count indefinitely. Recovery stops at the configured start —
 // growing beyond what the operator asked for requires a positive headroom
 // signal, not merely the absence of a negative one.
+//
+// Both increase paths additionally require the backlog signal to be live rather
+// than merely quiet (see backlogStale), so a feed whose flushes have stopped
+// completing freezes the count instead of letting it climb.
 func (s *checksumScaler) tick(ctx context.Context) {
 	util := 0.0
 	zone := autoscale.Hold
@@ -193,6 +222,9 @@ func (s *checksumScaler) tick(ctx context.Context) {
 		zone = autoscale.Classify(util)
 	}
 	backlogVeto := s.observeBacklog()
+	// Growth needs a *live* absence of backlog pressure, not merely the absence
+	// of a verdict. See backlogStale.
+	growthBlocked := s.backlogLosing || s.backlogStale()
 
 	acted := false
 	switch {
@@ -225,7 +257,7 @@ func (s *checksumScaler) tick(ctx context.Context) {
 		// Also gated on backlogLosing. The veto above is deliberately one-shot
 		// per window, so without this the other ticks of a losing window would
 		// grow straight back into the shed and the two signals would cancel out.
-		if !s.backlogLosing && s.upCooldown == 0 {
+		if !growthBlocked && s.upCooldown == 0 {
 			s.set(s.current+1, "utilization below low watermark")
 			s.upCooldown = autoscale.CooldownTicks
 			acted = true
@@ -234,7 +266,7 @@ func (s *checksumScaler) tick(ctx context.Context) {
 		// Gated on backlogLosing for the same reason, not on the one-shot veto:
 		// the veto clears as soon as it is acted on, so recovering on its absence
 		// would hand the worker straight back while the feed is still behind.
-		if !s.backlogLosing && s.current < s.start && s.upCooldown == 0 {
+		if !growthBlocked && s.current < s.start && s.upCooldown == 0 {
 			s.set(s.current+1, "recovering toward configured thread count")
 			s.upCooldown = autoscale.CooldownTicks
 			acted = true
@@ -276,15 +308,41 @@ func (s *checksumScaler) shedCooldowns() {
 // information; those return the standing verdict, actionable only if it has not
 // already been paid for. Latching this way means a cooldown cannot swallow the
 // signal, while shedForFlush caps the cost of one flush at one worker.
+//
+// Latching a verdict indefinitely would be fail-open, though, so silence that
+// lasts past csStaleFlushTicks is treated as its own condition: backlogStale
+// reports it, tick stops growing on it, and it is logged once per episode.
 func (s *checksumScaler) observeBacklog() bool {
 	if s.backlog == nil {
 		return false
 	}
 	residual, flushes := s.backlog()
 	if flushes == s.lastFlushes {
+		// Staleness is "a flush was observed and then they stopped", so it is only
+		// counted once there is a baseline. Before the first observed flush there is
+		// nothing to have gone stale, and freezing growth over the opening seconds
+		// of a pass — where a feed may legitimately not have flushed yet — would be
+		// a false positive. A feed that froze *before* the pass began still trips
+		// this, because its counter is non-zero and the first tick baselines on it.
+		if s.prevResidual >= 0 {
+			s.staleTicks++
+		}
+		if s.staleTicks >= csStaleFlushTicks && !s.staleWarned {
+			s.logger.Warn("change-feed flush counter has not advanced; checksum thread growth is frozen",
+				"ticks", s.staleTicks, "tick", csTick,
+				"last-residual", s.prevResidual, "flushes", flushes,
+				"verdict-losing", s.backlogLosing)
+			s.staleWarned = true
+		}
 		return s.backlogLosing && !s.shedForFlush
 	}
 	s.lastFlushes = flushes
+	if s.staleWarned {
+		s.logger.Info("change-feed flush counter advancing again; checksum thread growth unfrozen",
+			"residual", residual, "flushes", flushes)
+	}
+	s.staleTicks = 0
+	s.staleWarned = false
 
 	// prevResidual < 0 on the first flush observed: establish the baseline only.
 	if s.prevResidual >= 0 && residual >= csBacklogVetoDeltas && residual > s.prevResidual {
@@ -303,6 +361,20 @@ func (s *checksumScaler) observeBacklog() bool {
 	}
 	s.shedForFlush = false
 	return s.backlogLosing
+}
+
+// backlogStale reports that the flush counter has been frozen long enough that
+// the verdict observeBacklog is serving can no longer be trusted. It suppresses
+// increases (growth and recovery alike) but deliberately does not shed: a frozen
+// counter says the signal stopped, not which way it was heading, and shedding on
+// no evidence would walk a healthy pass down to one worker. Utilization-driven
+// shedding is unaffected — that signal has its own freshness handling.
+//
+// For the DistributedChecker this also covers a single stuck feed: the aggregate
+// flush counter is the minimum across feeds, so one feed that stops flushing
+// freezes the whole signal — which is now visible rather than silent.
+func (s *checksumScaler) backlogStale() bool {
+	return s.backlog != nil && s.staleTicks >= csStaleFlushTicks
 }
 
 // set clamps target to [min, max] and applies it only when it actually

@@ -320,6 +320,77 @@ func TestScalerSustainedHealthClearsTheVerdict(t *testing.T) {
 	assert.False(t, s.backlogLosing, "sustained health must clear the verdict")
 }
 
+func TestScalerFrozenFlushCounterFreezesGrowth(t *testing.T) {
+	// A feed whose flushes stop *completing* stops advancing the counter, and the
+	// counter is what keys the signal: binlogClient.flush returns early on error
+	// without recording a residual, and the periodic flusher logs and carries on
+	// rather than failing the migration. Serving the last verdict forever would be
+	// fail-open — with the default verdict (false) Aurora would keep growing
+	// against a backlog nothing is draining.
+	g := &gradualStub{util: 0.1} // plenty of headroom: growth would be allowed
+	// A ceiling well above what the pre-freeze ticks can reach, so "stopped
+	// growing" is distinguishable from "ran out of room".
+	s, l, feed := newTestScaler(g, 4, 40)
+
+	// One healthy flush establishes the baseline, then silence.
+	feed.flush(0)
+	s.tick(context.Background())
+	require.False(t, s.backlogStale(), "one tick of silence is not staleness")
+
+	tickN(s, csStaleFlushTicks)
+	require.True(t, s.backlogStale())
+	frozenAt := s.current
+	require.Less(t, frozenAt, 40, "the freeze must bite before the ceiling does")
+
+	tickN(s, 30)
+	assert.Equal(t, frozenAt, s.current, "growth must not resume while the signal is frozen")
+	assert.Equal(t, frozenAt, l.Limit())
+
+	// Recovery: flushes complete again, and the utilization headroom is honoured.
+	flushCycles(s, feed, 10, func(int) int { return 0 })
+	assert.False(t, s.backlogStale())
+	assert.Greater(t, s.current, frozenAt, "growth resumes once the signal is live again")
+}
+
+func TestScalerFrozenFlushCounterDoesNotShed(t *testing.T) {
+	// The freeze suppresses increases only. A frozen counter says the signal
+	// stopped, not which way it was heading, so shedding on it would walk a
+	// healthy pass down to one worker on nothing more than a stalled flush.
+	s, l, feed := newTestScaler(&throttler.Noop{}, 4, 8)
+	feed.flush(0)
+	tickN(s, csStaleFlushTicks*4)
+	require.True(t, s.backlogStale())
+	assert.Equal(t, 4, s.current, "no evidence of direction means hold, not shed")
+	assert.Equal(t, 4, l.Limit())
+}
+
+func TestScalerFrozenFlushCounterBlocksRecoveryToStart(t *testing.T) {
+	// The recovery path (current < start) is an increase too, so it is frozen on
+	// the same condition — otherwise a feed that shed for a real reason and then
+	// stopped flushing would climb back to start with no signal saying it may.
+	s, _, feed := newTestScaler(&throttler.Noop{}, 8, 8)
+	flushCycles(s, feed, 20, func(cycle int) int {
+		return csBacklogVetoDeltas + cycle*3000
+	})
+	shedTo := s.current
+	require.Less(t, shedTo, 8, "expected the losing feed to have shed")
+
+	tickN(s, csStaleFlushTicks*4)
+	assert.True(t, s.backlogStale())
+	assert.Equal(t, shedTo, s.current, "must not recover while the signal is frozen")
+}
+
+func TestScalerNeverFlushedFeedDoesNotFreezeGrowth(t *testing.T) {
+	// Staleness is "flushes were observed and then stopped". Before the first
+	// flush there is no baseline and nothing has gone stale, so a pass over a
+	// table whose feed has not flushed yet must not be penalised.
+	g := &gradualStub{util: 0.1}
+	s, _, _ := newTestScaler(g, 4, 8)
+	tickN(s, csStaleFlushTicks*4)
+	assert.False(t, s.backlogStale())
+	assert.Equal(t, 8, s.current)
+}
+
 func TestScalerNilBacklogIsSafe(t *testing.T) {
 	// Guards the optional-signal path: a checker without a feed accessor must
 	// still scale on utilization rather than panic.

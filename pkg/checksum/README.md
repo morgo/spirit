@@ -69,18 +69,27 @@ The CRC32 + XOR aggregate technique for table checksumming was pioneered by **pt
 - **The hard stop** applies always. Before dispatching each chunk the checker calls `Throttler.BlockWait`, so a checksum pauses when replica lag or Aurora load says to. Chunks already in flight are never interrupted: the checksum stops *dispatching* rather than abandoning work, because an aborted chunk is wasted I/O that must be redone from the same watermark. Wire the throttler with `SetThrottler` (the `ThrottleAware` capability) — runners build the checker before their throttlers are open.
 - **Scaling** is opt-in via `AutoscaleConfig`, and adjusts the live worker count during a pass. Two signals drive it:
   - The throttler's continuous **utilization** signal, applying the same zone law as the copier (see `pkg/autoscale`). Only the Aurora throttlers provide this signal, so this is where growth comes from and it is Aurora-only.
-  - The **change-feed backlog**, which works everywhere. The feed flushes concurrently with the checksum, and its backlog gates cut-over — if it grows unboundedly the binlogs may be purged before a resume can replay them. If the feed is losing ground, the checksum's reads are winning a race against writes that have to finish, so a worker is shed. On stock MySQL this is the only shedding lever, and recovery is capped at the configured concurrency.
+  - The **change-feed backlog**, whose signal is available everywhere — unlike utilization, it needs nothing from the throttler. The feed flushes concurrently with the checksum, and its backlog gates cut-over — if it grows unboundedly the binlogs may be purged before a resume can replay them. If the feed is losing ground, the checksum's reads are winning a race against writes that have to finish, so a worker is shed. On stock MySQL this is the only shedding lever, and recovery is capped at the configured concurrency.
+
+    Available everywhere does not mean active everywhere: shedding lives in the scaler, and the scaler is only constructed when scaling is enabled. Without the opt-in a checksum has the hard stop and nothing else — it never moves its own worker count in either direction.
 
     What counts as "losing ground" is specifically a rising **post-flush residual**, not a rising backlog — and the residual is read from `change.Source.FlushResidual`, which the feed records at flush completion, rather than polled.
 
     Polling cannot recover this quantity. The pending count is a sawtooth: it climbs on every sample between flushes and drops when one lands, so its slope says nothing about whether the feed is coping (at 5s control tick and 30s flush interval, the rising edge alone is six samples long). Nor do window minima work, which is the subtler trap: a poll lands some offset φ after the flush and therefore reads `residual + writeRate·φ`. Because the flush interval is an exact multiple of the tick, φ is fixed for the whole pass by the arbitrary phase between two independent tickers — so on a busy table the sampling term can exceed the threshold on its own, and a *rising write rate* on a fully-draining feed produces rising apparent residuals indistinguishable from a feed falling behind.
 
+    Because the signal is keyed on the feed's flush counter, silence has to be handled explicitly rather than latched: a flush that keeps erroring returns before recording anything and the periodic flusher logs the error and carries on, so the counter can freeze while the backlog grows without bound (a flush that merely takes minutes freezes it too). After `csStaleFlushTicks` ticks with no new flush the scaler stops trusting the standing verdict and freezes *increases* — growth and recovery alike — logging once per episode. It deliberately does not shed on it: a frozen counter says the signal stopped, not which way it was heading. This also covers the `DistributedChecker`, whose aggregate counter is the minimum across feeds, so one stuck feed freezes the signal for all of them.
+
     Reading the residual where the feed defines it removes the write rate from the signal entirely. Successive residuals are then compared across distinct flushes, with hysteresis in both directions: `csBacklogHysteresisFlushes` consecutive flushes must agree before the verdict changes. The exit condition matters as much as the entry one, because shedding is one step per flush while growth is one step per two ticks — a single favourable flush clearing the verdict would let the grows outpace the sheds and the controller would drift up while the feed fell further behind. While a verdict holds it suppresses growth as well as driving shedding.
+
+The opt-in is the axis that matters most, so the capability table is keyed on it rather than on the server:
 
 | | hard stop | shed on backlog | grow |
 | --- | --- | --- | --- |
-| stock MySQL | yes | yes | no (recovers to start only) |
-| Aurora + autoscaling | yes | yes | yes (utilization law) |
+| scaling disabled (the default), any server | yes | no | no |
+| scaling enabled, stock MySQL | yes | yes | no (recovers to the configured count only) |
+| scaling enabled, Aurora | yes | yes | yes (utilization law) |
+
+Only the hard stop is unconditional. `AutoscaleConfig.Enabled` — `--enable-experimental-autoscaling` for `migrate` — is what builds the scaler, and the scaler is where both shedding and growth live.
 
 Concurrency is gated by a resizable `autoscale.Limiter` rather than `errgroup.SetLimit`, which may not be resized while goroutines are active.
 
