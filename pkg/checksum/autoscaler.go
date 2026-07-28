@@ -312,6 +312,18 @@ func (s *checksumScaler) shedCooldowns() {
 // Latching a verdict indefinitely would be fail-open, though, so silence that
 // lasts past csStaleFlushTicks is treated as its own condition: backlogStale
 // reports it, tick stops growing on it, and it is logged once per episode.
+//
+// Two classification edges are deliberate:
+//
+//   - A strict period-2 alternation (rise, dip, rise, dip, ...) never produces
+//     two consecutive rises, so a feed climbing on average would not latch. It is
+//     a measure-zero trajectory under real jitter, and the asymmetry cuts both
+//     ways: the same pattern cannot clear a latched verdict either.
+//   - A large but flat residual is classified healthy. It means the feed is
+//     holding its ground, and shedding does not help a feed that is already
+//     keeping pace; what it does mean is that cut-over's backlog gate stays out
+//     of reach until write traffic drops, which is a property of the workload
+//     rather than something worker count can fix.
 func (s *checksumScaler) observeBacklog() bool {
 	if s.backlog == nil {
 		return false

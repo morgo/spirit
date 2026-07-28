@@ -138,7 +138,18 @@ func (c *DistributedChecker) logChunkSummary() {
 // The flush counter is the *minimum* across feeds, so a residual is only
 // compared once every feed has flushed again. Summing the counters instead would
 // advance N times per round of flushes and invite comparing a sum in which only
-// some terms had been refreshed.
+// some terms had been refreshed. The cost of the minimum is that one feed which
+// stops flushing freezes the aggregate signal; the scaler detects that as
+// staleness and freezes growth rather than trusting the stale verdict (see
+// checksumScaler.backlogStale).
+//
+// One known imprecision with N > 1 feeds: each feed records its residual when
+// its own flush finishes, so a feed that flushed early in a round keeps
+// accumulating while the later ones drain, and the sum is inflated by roughly
+// writeRate × the later flushes' duration. The worst case is a spurious
+// single-worker shed that two clean rounds recover, so it is not worth
+// per-subscription residual accounting yet — but that is the fix if it ever
+// shows up in practice.
 func (c *DistributedChecker) flushResidual() (int, int) {
 	if len(c.feeds) == 0 {
 		return 0, 0
