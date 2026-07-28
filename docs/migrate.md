@@ -398,11 +398,18 @@ Spirit uses `threads` to set the parallelism of:
 
 The parallelism of the replication applier is controlled separately by [write-threads](#write-threads).
 
-Internal to Spirit, the database pool size is set to `threads + write-threads + 1`. This is intentional because the replication applier runs concurrently to the copier and checksum tasks: `threads` covers the copier/checksum work, `write-threads` covers the applier, and the trailing `+1` gives the applier a little headroom so it can always make some progress.
+Internal to Spirit, the database pool is sized as `threads + write-threads + control-plane + checksum-off-pool`. This is intentional because the replication applier runs concurrently to the copier and checksum tasks: `threads` covers the copier/checksum work and `write-threads` covers the applier, while the two headroom terms keep the periodic work from queueing behind a saturated hot path:
+
+- **control-plane** is `2 + one per changed table`, for the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater — all of which run on the same pool as the copier and applier.
+- **checksum-off-pool** is a fixed `2`, for the two things the checksum does outside its `REPEATABLE READ` transaction pool: repairing a mismatched chunk, and the chunker's `LIMIT 1 OFFSET n` boundary prefetch. Both are serialized, so one connection each. The transaction pool itself is provisioned separately and every one of its transactions pins a connection for the whole phase, so there is no incidental slack for these to borrow.
+
+Throttler polling is not counted: it runs on a dedicated monitoring pool.
 
 You may want to wrap `threads` in automation and set it to a percentage of the cores of your database server. For example, if you have a 32-core machine you may choose to set this to `8`. Approximately 25% is a good starting point, making sure you always leave plenty of free cores for regular database operations. If your migration is IO bound and/or your IO latency is high (such as Aurora) you may even go higher than 25%.
 
-By default Spirit does not dynamically adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values. The experimental [enable-experimental-autoscaling](#enable-experimental-autoscaling) flag opts into dynamic read- and write-thread scaling driven by throttler feedback.
+By default Spirit does not dynamically adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values. The experimental [enable-experimental-autoscaling](#enable-experimental-autoscaling) flag opts into dynamic read-, write- and checksum-thread scaling driven by throttler feedback.
+
+One piece of pacing is *not* opt-in: the checksum phase always waits on the throttler before dispatching a chunk, so a checksum pauses under replica lag or Aurora load on every server, with or without autoscaling. What the flag adds is movement of the checksum's own worker count.
 
 ### write-threads
 
@@ -420,7 +427,7 @@ When [autoscaling](#enable-experimental-autoscaling) is enabled, this auto-sized
 - Type: Boolean
 - Default value: `false`
 
-**Experimental.** When enabled, Spirit dynamically adjusts both the number of copy read threads and the number of replication-applier write threads while the copy is running, based on feedback from the throttlers. Each throttler reports a continuous *utilization* signal (0 = idle, 1.0 = the point at which it would hard-stop the copy); the controller takes the highest signal across all throttlers and steers the thread counts to keep it in a comfortable band. Because both pools contribute to the same signal, utilization alone cannot tell which side to move — the buffer queue between the readers and the writers arbitrates: a near-empty queue that writers drain instantly means the read side is the limiting (or, under load, the responsible) pool; a near-full queue where chunks wait as long as they take to write means the write side is.
+**Experimental.** When enabled, Spirit dynamically adjusts the number of copy read threads, the number of replication-applier write threads, and the number of checksum threads, based on feedback from the throttlers. The copy phase is described first; see [checksum scaling](#checksum-scaling) below for how the checksum differs. Each throttler reports a continuous *utilization* signal (0 = idle, 1.0 = the point at which it would hard-stop the copy); the controller takes the highest signal across all throttlers and steers the thread counts to keep it in a comfortable band. Because both pools contribute to the same signal, utilization alone cannot tell which side to move — the buffer queue between the readers and the writers arbitrates: a near-empty queue that writers drain instantly means the read side is the limiting (or, under load, the responsible) pool; a near-full queue where chunks wait as long as they take to write means the write side is.
 
 - **Below 40% utilization** it grows the limiting pool by one thread at a time (cautiously, with a ~15s cooldown between increases). If the pipeline is balanced — neither side limiting — it holds instead of growing either pool.
 - **At or above 70% utilization** it sheds one thread at a time from the side the queue blames (immediately on the first breach, then at most once per ~15s so the signal can reflect each cut).
@@ -437,7 +444,23 @@ The signal comes from the Aurora throttlers — the threads signal and commit-la
 
 If a signal stops updating mid-migration (for example the monitoring connection is partitioned, or grants are revoked), the controller does not keep scaling on the frozen value: after ~15 seconds without a successful sample the signal reports a neutral utilization inside the hold band, freezing the thread counts in place (a warning is logged). Scaling resumes automatically when sampling recovers.
 
-This flag only applies to the default buffered copier; with [unbuffered](#unbuffered) it is ignored (with a warning). Autoscaling is not yet supported by `spirit move`.
+This flag only applies to the default buffered copier; with [unbuffered](#unbuffered) it is ignored (with a warning) — which also means the checksum runs a fixed worker count in that combination. Autoscaling is not yet supported by `spirit move`.
+
+#### Checksum scaling
+
+The checksum phase is scaled by the same flag but on different signals, because it is read-only and holds a `REPEATABLE READ` snapshot rather than write transactions. Three behaviors are worth separating:
+
+- **Pausing under load is not opt-in.** The checksum calls the throttler before dispatching each chunk on every server, flag or no flag. Chunks already in flight are never abandoned — an aborted chunk is wasted I/O that has to be redone from the same watermark — so the checksum stops *dispatching* rather than cancelling work.
+- **Shedding** happens only with the flag, on any server. The signal is the change feed's post-flush residual: the feed flushes concurrently with the checksum, and if the residual is growing across flushes then the checksum's reads are winning a race against writes that have to finish (an unbounded backlog can outrun binlog retention and block cut-over). A worker is shed per flush that agrees, with hysteresis in both directions.
+- **Growth** happens only with the flag *and* only on Aurora, since it uses the same utilization band as the copy phase. On stock MySQL the checksum can therefore shed and then recover, but never exceed, the configured [threads](#threads).
+
+Without the flag the checksum has the hard stop and nothing else: it never moves its own worker count in either direction.
+
+As with the copy phase, a signal that stops updating does not keep being acted on. If the change feed's flushes stop completing — they error, or one takes minutes — the checksum's thread count is frozen where it is (a warning is logged, and another line when flushes resume). It is frozen rather than reduced: a stalled flush says the signal stopped, not which direction it was heading.
+
+One structural constraint shapes this: the checksum's snapshot transaction pool **cannot grow** once the brief table lock is released, because every transaction must take its read view at the same instant. It is therefore provisioned up front at whatever ceiling scaling could reach — `2 × threads` with this flag, plain `threads` without it — reusing the read-side connection budget, since the copier's readers have finished by the time the checksum runs. An idle pooled transaction costs one connection and no extra history retention.
+
+Chunk sizing is separate from worker count: chunks are sized by the dynamic chunker against [target-chunk-time](#target-chunk-time), and scaling only changes how many are in flight at once.
 
 ### max-commit-latency
 

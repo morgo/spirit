@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/throttler"
 )
@@ -47,16 +48,20 @@ import (
 // the primary OLTP workload, and leaving copy throughput on the table is fine.
 // Responsiveness to genuine overload is not traded away: that is the
 // BlockWait hard-stop's job, which none of this touches.
+// The thresholds themselves live in pkg/autoscale, because the checksum
+// controller applies the same law to its own pool and two copies of these
+// numbers would drift. The rationale above is the derivation; pkg/autoscale
+// holds only the values.
 const (
 	// acLowWatermark is the effective setpoint: below it there is headroom,
 	// so we may add a thread (subject to cooldown).
-	acLowWatermark = 0.4
+	acLowWatermark = autoscale.LowWatermark
 	// acHighWatermark starts the additive back-off. The dead band between the
 	// watermarks must be wider than the utilization step of a single thread
 	// (at most 1/vCPUs, and >= 0.25 only when vCPUs < MinAutoscaleVCPUs,
 	// where the runner disables autoscaling entirely) — otherwise one +1 can
 	// vault across the band and ping-pong with the -1 path.
-	acHighWatermark = 0.7
+	acHighWatermark = autoscale.HighWatermark
 	// acPanicThreshold is where back-off turns multiplicative. At 1.0 the
 	// smoothed signal has reached vCPUs — sustained load just below the point
 	// where the raw per-sample hard-stop trips (it fires on running > vCPUs +
@@ -67,12 +72,12 @@ const (
 	// multi-throttler that would include binary children like replica lag,
 	// and halving on those is unguided (they already pause the copy, which
 	// makes the worker count moot while tripped).
-	acPanicThreshold = 1.0
+	acPanicThreshold = autoscale.PanicThreshold
 	// acCooldownTicks is how many ticks a direction holds after a change before
 	// it may fire again: a change at tick T allows the next at tick T+3, i.e.
 	// 15s apart at acTick, giving the change time to register in the signal
 	// first. Increases and decreases hold independent cooldowns — see tick().
-	acCooldownTicks = 2
+	acCooldownTicks = autoscale.CooldownTicks
 )
 
 // Queue-arbitration tunables. When read scaling is engaged (see
@@ -123,7 +128,7 @@ const (
 // throttler poll interval (5s) — sampling faster than the signal updates
 // just adds noise. Var (not const) so tests can shorten it; production
 // never mutates it.
-var acTick = 5 * time.Second
+var acTick = autoscale.Tick
 
 // ResolveMaxReadThreads resolves the upper bound the read-worker pool may
 // scale to: the read-side mirror of throttler.ResolveMaxWriteThreads. When

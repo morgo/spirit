@@ -166,6 +166,25 @@ func NewRunner(m *Migration) (*Runner, error) {
 	return runner, nil
 }
 
+// checksumOffPoolConns is the connection headroom the checksum phase needs on
+// top of its REPEATABLE READ transaction pool, for the two things it does that
+// the pool does not cover. Both are serialized, so one connection each:
+//
+//   - Chunk repair. When a chunk mismatches, replaceChunk runs its DELETE and
+//     REPLACE on r.db rather than on the pooled read-view transaction, and the
+//     two statements run sequentially under the checker's recopyLock.
+//   - Chunker prefetch. chunker.Next() runs a SELECT ... LIMIT 1 OFFSET n on
+//     Ti.Db to find the next chunk boundary, also off-pool. Workers call it
+//     concurrently but the chunker's own mutex serializes them, so only one
+//     such query is ever in flight.
+//
+// This reserve matters more than it looks. The transaction pool is sized to the
+// read ceiling and every one of its transactions pins a connection for the whole
+// phase whether or not a worker has it checked out, so there is no incidental
+// slack left to absorb either query — without the reserve, chunk dispatch would
+// queue behind applier and control-plane connections.
+const checksumOffPoolConns = 2
+
 // controlPlaneConns is the connection headroom the main pool reserves above
 // the copy hot path (Threads read workers + WriteThreads applier workers) for
 // the periodic control-plane queries that also run on r.db:
@@ -234,15 +253,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Size the connection pool the same way for both the buffered and
 	// unbuffered paths:
 	//
-	//	pool = threads + write-threads + controlPlaneConns()
+	//	pool = threads + write-threads + controlPlaneConns() + checksumOffPoolConns
 	//
-	//	- threads             copier + checksum read concurrency
-	//	- write-threads       replication-applier write concurrency
-	//	- controlPlaneConns() headroom for the periodic control-plane queries
-	//	                      that also run on the main pool (checkpoint,
-	//	                      replication-flush poll, per-table stats), so they
-	//	                      don't serialize behind a single spare connection
-	//	                      once the copier + applier saturate the budget.
+	//	- threads              copier + checksum read concurrency
+	//	- write-threads        replication-applier write concurrency
+	//	- controlPlaneConns()  headroom for the periodic control-plane queries
+	//	                       that also run on the main pool (checkpoint,
+	//	                       replication-flush poll, per-table stats), so they
+	//	                       don't serialize behind a single spare connection
+	//	                       once the copier + applier saturate the budget.
+	//	- checksumOffPoolConns the two queries the checksum runs outside its
+	//	                       fully-checked-out transaction pool (chunk repair
+	//	                       and chunker prefetch).
 	//
 	// WriteThreads may still be 0 here — that's the "auto-size on Aurora"
 	// sentinel, which can only be resolved once we have a connection to probe
@@ -250,7 +272,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// setupCopierCheckerAndReplClient grows it to the final size after
 	// resolving WriteThreads. The pool only ever grows (via SetMaxOpenConns);
 	// later phases (checksum, cutover) ratchet it further but never shrink it.
-	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns()
+	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumOffPoolConns
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", dbconn.RedactDSN(r.dsn()), err)
@@ -743,12 +765,17 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// construction.
 	maxRead := copier.ResolveMaxReadThreads(r.migration.Threads, autoscale)
 	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
-	// known: maxRead + maxWrite + controlPlaneConns() (see the MaxOpenConnections
-	// doc in Run). Sizing for the ceilings ensures a scaled-up applier or reader
-	// pool never starves on connections. This is a no-op unless WriteThreads was
-	// auto-sized up from 0 or autoscaling raised a ceiling; the pool only ever
-	// grows.
-	if poolSize := maxRead + maxWrite + r.controlPlaneConns(); poolSize > r.dbConfig.MaxOpenConnections {
+	// known: maxRead + maxWrite + controlPlaneConns() + checksumOffPoolConns
+	// (see the MaxOpenConnections doc in Run). Sizing for the ceilings ensures a
+	// scaled-up applier or reader pool never starves on connections. This is a
+	// no-op unless WriteThreads was auto-sized up from 0 or autoscaling raised a
+	// ceiling; the pool only ever grows.
+	//
+	// The maxRead term covers the checksum as well as the copy: the checksum's
+	// transaction pool is sized to the same ceiling (see the checker's
+	// AutoscaleConfig below) and the copier's readers have finished by then, so
+	// the two phases reuse one allocation rather than each needing their own.
+	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		r.db.SetMaxOpenConns(poolSize)
 	}
@@ -831,6 +858,17 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		FixDifferences:  true,
 		MaxRetries:      3,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
+		MetricsSink:     r.metricsSink,
+		// The checksum reads with its own pool, so it shares the read side's
+		// ceiling and formula: maxRead is already in the pool sizing above, and
+		// the copier's readers have finished by the time the checksum runs, so
+		// the checksum reuses that headroom rather than adding to it. The only
+		// checksum-specific term is checksumOffPoolConns, for the queries that run
+		// off-pool.
+		Autoscale: checksum.AutoscaleConfig{
+			Enabled:    autoscale,
+			MaxThreads: maxRead,
+		},
 	})
 
 	return err
@@ -901,7 +939,25 @@ func (r *Runner) closeReplicas() error {
 	return errors.Join(errs...)
 }
 
-// setupThrottler sets up the throttlers used to pace the copier:
+// setThrottlerOnPhases hands the resolved throttler to every phase that paces
+// itself against it. The copier always accepts one; the checksum does so via
+// the optional checksum.ThrottleAware capability (test doubles and the
+// continuous checker do not implement it, and do not need to).
+func (r *Runner) setThrottlerOnPhases() {
+	r.copier.SetThrottler(r.throttler)
+	if aware, ok := r.checker.(checksum.ThrottleAware); ok {
+		aware.SetThrottler(r.throttler)
+	} else {
+		// Not fatal: the checksum falls back to its Noop and runs unthrottled,
+		// which is how it behaved before it learned to throttle at all. Worth a
+		// line so it is visible if a future checker type silently loses the
+		// capability.
+		r.logger.Debug("checker does not support throttling; checksum will run unpaced")
+	}
+}
+
+// setupThrottler sets up the throttlers used to pace the copier and the
+// checksum:
 //   - one replication throttler per --replica-dsn (slowest wins)
 //   - a commit-latency throttler if the source is detected as Aurora and
 //     --max-commit-latency is positive (issue #468)
@@ -914,6 +970,13 @@ func (r *Runner) closeReplicas() error {
 func (r *Runner) setupThrottler(ctx context.Context) error {
 	if r.migration.useTestThrottler {
 		// We are in tests, add a throttler that always throttles.
+		//
+		// Deliberately wired to the copier only, not through
+		// setThrottlerOnPhases. The mock is always-throttled and blocks for a
+		// second per call, so it exists to pace the copy at a known rate.
+		// Handing it to the checksum as well would add a second per checksum
+		// chunk to every test that uses it — real wall-clock cost, no extra
+		// coverage. Checksum throttling is covered directly in pkg/checksum.
 		r.throttler = &throttler.Mock{}
 		r.copier.SetThrottler(r.throttler)
 		return r.throttler.Open(ctx)
@@ -967,7 +1030,7 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	}
 
 	r.throttler = throttler.NewMultiThrottler(throttlers...)
-	r.copier.SetThrottler(r.throttler)
+	r.setThrottlerOnPhases()
 	if err := r.throttler.Open(ctx); err != nil {
 		// multiThrottler already closes child throttlers on partial Open
 		// failure, but the *sql.DB connections backing replica throttlers
@@ -1691,13 +1754,17 @@ func (r *Runner) Status() string {
 			applier.StatusSuffix(r.applier),
 		)
 	case status.Checksum:
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d",
+		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d%s",
 			r.status.Get().String(),
 			r.checker.GetProgress().String(),
 			r.replClient.GetDeltaLen(),
 			time.Since(r.startTime).Round(time.Second),
 			time.Since(r.checker.StartTime()).Round(time.Second),
 			r.db.Stats().InUse,
+			// Mirrors copier-is-throttled on the copy line: without it a
+			// checksum that is deliberately paused or scaled down looks
+			// identical to one that is simply slow.
+			checksum.StatusSuffix(r.checker),
 		)
 	}
 	return ""

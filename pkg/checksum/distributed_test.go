@@ -55,6 +55,8 @@ func (s *noopChangeSource) FlushUnderTableLock(context.Context, []*dbconn.TableL
 }
 func (s *noopChangeSource) BlockWait(context.Context) error { return nil }
 func (s *noopChangeSource) GetDeltaLen() int                { return 0 }
+
+func (s *noopChangeSource) FlushResidual() (int, int) { return 0, 0 }
 func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error {
 	return nil
 }
