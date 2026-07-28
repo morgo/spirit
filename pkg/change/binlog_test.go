@@ -1458,3 +1458,53 @@ func TestProcessDDLNotification(t *testing.T) {
 		})
 	})
 }
+
+func TestFlushResidual(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS residt1, residt2")
+	testutils.RunSQL(t, "CREATE TABLE residt1 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE residt2 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "residt1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "residt2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig()).(*binlogClient)
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, client.AddSubscription(t1, t2, chunker))
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+
+	// Nothing has been flushed yet, so there is no residual to report. The
+	// checksum autoscaler relies on this: it treats a zero flush count as "no
+	// comparison possible yet" rather than as a residual of zero.
+	residual, flushes := client.FlushResidual()
+	require.Equal(t, 0, residual)
+	require.Equal(t, 0, flushes)
+
+	testutils.RunSQL(t, "INSERT INTO residt1 (a, b) VALUES (1, 2), (3, 4)")
+	require.NoError(t, client.BlockWait(t.Context()))
+	require.Equal(t, 2, client.GetDeltaLen())
+
+	// A flush that drains everything leaves a zero residual, and this is the
+	// property the autoscaler's backlog veto keys on: a feed that is keeping up
+	// reports ~0 here no matter how large GetDeltaLen grew in between.
+	require.NoError(t, client.Flush(t.Context()))
+	residual, flushes = client.FlushResidual()
+	require.Equal(t, 0, residual)
+	require.Positive(t, flushes, "a completed flush must be counted")
+
+	// The counter is monotonic across flushes, which is what lets a caller
+	// compare residuals only once per flush rather than once per poll.
+	before := flushes
+	require.NoError(t, client.Flush(t.Context()))
+	_, flushes = client.FlushResidual()
+	require.Greater(t, flushes, before)
+}

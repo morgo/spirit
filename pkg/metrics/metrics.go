@@ -23,8 +23,12 @@ const (
 	// chosen by the autoscaler; ReadThreadsMetricName is its read-side
 	// counterpart (copier read-worker count). ThrottlerUtilizationMetricName
 	// reports the continuous load signal (0..>1) the autoscaler controls on.
-	WriteThreadsMetricName         = "write_threads"
-	ReadThreadsMetricName          = "read_threads"
+	WriteThreadsMetricName = "write_threads"
+	ReadThreadsMetricName  = "read_threads"
+	// ChecksumThreadsMetricName reports the live checksum worker count. The
+	// checksum phase scales its own pool (see pkg/checksum autoscaler), so it
+	// needs a gauge of its own rather than sharing the copier's read_threads.
+	ChecksumThreadsMetricName      = "checksum_threads"
 	ThrottlerUtilizationMetricName = "throttler_utilization"
 
 	// Applier pipeline gauges (see pkg/applier Stats). Together they

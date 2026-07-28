@@ -68,6 +68,12 @@ type binlogClient struct {
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
 
+	// flushResidual is the pending-change count observed at the end of the
+	// most recent flush, and flushCount how many flushes have completed. Both
+	// guarded by mu. See Source.FlushResidual.
+	flushResidual int
+	flushCount    int
+
 	// periodicFlushLock protects the cancel/done pair below. The cancel
 	// signals the periodic-flush goroutine to exit; the done channel is
 	// closed by the goroutine on its way out, so StopPeriodicFlush can
@@ -1023,7 +1029,29 @@ func (c *binlogClient) flush(ctx context.Context, underLock bool, locks []*dbcon
 		}
 		c.mu.Unlock()
 	}
+	c.recordFlushResidual()
 	return nil
+}
+
+// recordFlushResidual captures what this flush left behind, for
+// FlushResidual. Recorded whether or not every change could be flushed: a
+// flush that could not drain everything is exactly the case a caller watching
+// for a feed losing ground needs to see.
+//
+// GetDeltaLen takes no lock of its own, so it is called before acquiring c.mu.
+func (c *binlogClient) recordFlushResidual() {
+	residual := c.GetDeltaLen()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushResidual = residual
+	c.flushCount++
+}
+
+// FlushResidual satisfies Source.
+func (c *binlogClient) FlushResidual() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.flushResidual, c.flushCount
 }
 
 // Flush empties the changeset in a loop until the amount of changes is considered "trivial".
