@@ -222,6 +222,14 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 			}
 		}
 		if err = c.renameAllSources(ctx, sourceLocks); err == nil {
+			// Every source is renamed and the source locks are still held, so no
+			// write can be in flight. Stop the forward feeds inside that window
+			// rather than after the deferred unlock, where the first straggler
+			// write races us. A reverse window is unaffected: its feeds are
+			// separate clients (ReverseFeed) reading the targets, and its start
+			// positions were captured by postSwitch above. See change.Source's
+			// Stop.
+			c.stopSourceFeeds()
 			return nil
 		}
 		if errors.Is(err, errRenameRollbackFailed) {
@@ -231,6 +239,15 @@ func (c *CutOver) algorithmCutover(ctx context.Context) error {
 		c.logger.Warn("rename failed", "error", err.Error())
 	}
 	return fmt.Errorf("rename failed after %d attempts under lock: %w", c.dbConfig.MaxRetries, err)
+}
+
+// stopSourceFeeds tells every source feed that its subscriptions have stopped
+// describing reality. Called once the rename has fully succeeded, while the
+// source locks are still held.
+func (c *CutOver) stopSourceFeeds() {
+	for _, src := range c.sources {
+		src.ReplClient.Stop()
+	}
 }
 
 // renameAllSources renames the tables on every source to their _old names,
