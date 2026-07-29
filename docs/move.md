@@ -186,4 +186,4 @@ How many chunks to copy in parallel from the source.
 
 How many concurrent write threads to use per target when inserting rows. This controls the fan-out parallelism of the buffered copier's write side.
 
-Move does not support the experimental thread autoscaling available in [`spirit migrate`](migrate.md#enable-experimental-autoscaling), so `--threads` and `--write-threads` are always honored here as literal counts.
+Move does not support the experimental thread autoscaling available in [`spirit migrate`](migrate.md#enable-experimental-autoscaling), so `--threads` and `--write-threads` are always honored here.

@@ -420,7 +420,7 @@ One piece of pacing is *not* opt-in: the checksum phase waits on the throttler b
 
 Sets the parallelism of the **replication applier** — the number of concurrent write threads used to apply changes (read from the binlog) to the new table. Copier and checksum parallelism are controlled separately by [threads](#threads).
 
-This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes the write pool from the instance (vCPU count minus 2) and treats that as its starting point. If you want the pool sized to the instance, that flag is how to ask for it — `write-threads` itself is always the literal count.
+This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes the write pool from the instance (vCPU count minus 2) and treats that as its starting point.
 
 ### enable-experimental-autoscaling
 
