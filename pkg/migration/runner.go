@@ -267,12 +267,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	//	                       fully-checked-out transaction pool (chunk repair
 	//	                       and chunker prefetch).
 	//
-	// WriteThreads may still be 0 here — that's the "auto-size on Aurora"
-	// sentinel, which can only be resolved once we have a connection to probe
-	// the server. So this seeds the pool with what's known now, and
-	// setupCopierCheckerAndReplClient grows it to the final size after
-	// resolving WriteThreads. The pool only ever grows (via SetMaxOpenConns);
-	// later phases (checksum, cutover) ratchet it further but never shrink it.
+	// This seeds the pool from the configured thread counts. Autoscaling can
+	// replace both counts (and raise their ceilings) once there is a connection
+	// to probe the instance with, so setupCopierCheckerAndReplClient grows the
+	// pool to its final size there. The pool only ever grows (via
+	// SetMaxOpenConns); later phases (checksum, cutover) ratchet it further but
+	// never shrink it.
 	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumOffPoolConns
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
@@ -700,18 +700,6 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
 
-	// Resolve the number of apply (write) threads now that we have a
-	// connection. WriteThreads==0 means "auto-size": on Aurora it becomes the
-	// instance vCPU count; on non-Aurora there is no reliable vCPU signal to
-	// size from, so it falls back to the default. Idempotent: a resolved
-	// (non-zero) value passes through unchanged if this runs again.
-	//
-	// If autoscaling ends up engaging below, it replaces this value (and Threads)
-	// with counts derived from the instance — see the override there.
-	r.migration.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.db, r.migration.WriteThreads, r.logger)
-	if err != nil {
-		return err
-	}
 	// Autoscaling drives the buffered copier's applier worker pool; the legacy
 	// unbuffered copier has no such pool, so the combination downgrades to a
 	// fixed thread count with a warning rather than silently doing nothing.
@@ -796,11 +784,10 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	if maxRead == 0 {
 		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, autoscaleEnabled)
 	}
-	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
-	// known: maxRead + maxWrite + controlPlaneConns() + checksumOffPoolConns
-	// (see the MaxOpenConnections doc in Run). Sizing for the ceilings ensures a
-	// scaled-up applier or reader pool never starves on connections. This is a
-	// no-op unless WriteThreads was auto-sized up from 0 or autoscaling raised a
+	// Finalize the pool now that both ceilings are known: maxRead + maxWrite +
+	// controlPlaneConns() + checksumOffPoolConns (see the MaxOpenConnections doc
+	// in Run). Sizing for the ceilings ensures a scaled-up applier or reader pool
+	// never starves on connections. This is a no-op unless autoscaling raised a
 	// ceiling; the pool only ever grows.
 	//
 	// The maxRead term covers the checksum as well as the copy: the checksum's

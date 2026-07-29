@@ -46,11 +46,12 @@ import (
 // band and ping-pong with the -1 path.
 //
 // The band has hysteresis, so the resting point depends on which side it is
-// approached from. The auto-sized start (the vCPU count) sits above the band,
-// so on an idle server the controller sheds down and parks just under the high
-// watermark — the first edge it meets — and holds there; it does not continue
-// down to the low watermark (that is the floor it would climb up to had it
-// started below the band). Parking near 70% of vCPUs leaves headroom for
+// approached from. The write pool's derived start (vCPUs minus a small reserve)
+// sits above the band, so on an idle server the controller sheds down and parks
+// just under the high watermark — the first edge it meets — and holds there; it
+// does not continue down to the low watermark (that is the floor it would climb
+// up to had it started below the band, which is where the read pool begins and
+// why that side ramps instead). Parking near 70% of vCPUs leaves headroom for
 // the primary OLTP workload, and leaving copy throughput on the table is fine.
 // Responsiveness to genuine overload is not traded away: that is the
 // BlockWait hard-stop's job, which none of this touches.

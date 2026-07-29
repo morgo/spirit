@@ -623,8 +623,9 @@ func TestAnalyzeTableMissingTargetIsError(t *testing.T) {
 
 // TestMoveValidate covers the Kong Validate() hook: explicitly-negative
 // numeric/duration flags are rejected before they can flow into the copier
-// Concurrency and connection pool-size math, while zero values (meaning
-// "use the default" / auto-size) pass. Mirrors migration.Migration.Validate.
+// Concurrency and connection pool-size math, while zero values (meaning "use
+// the default", which NewRunner fills in) pass. Mirrors
+// migration.Migration.Validate.
 func TestMoveValidate(t *testing.T) {
 	tests := []struct {
 		name    string

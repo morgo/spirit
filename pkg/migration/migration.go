@@ -35,7 +35,7 @@ type Migration struct {
 	Table        string  `name:"table" help:"Table" optional:""`
 	Alter        string  `name:"alter" help:"The alter statement to run on the table" optional:""`
 	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
-	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count minus 2 (min 1), leaving CPU headroom; on non-Aurora targets it falls back to the default. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
+	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 
 	// EnableExperimentalAutoscaling turns on dynamic thread scaling driven by
 	// throttler feedback. When it engages (an Aurora target with at least
@@ -161,6 +161,9 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 	}
 	if m.Threads == 0 {
 		m.Threads = 4
+	}
+	if m.WriteThreads == 0 {
+		m.WriteThreads = 4
 	}
 	if m.ReplicaMaxLag == 0 {
 		m.ReplicaMaxLag = 120 * time.Second

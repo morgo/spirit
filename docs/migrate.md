@@ -420,9 +420,7 @@ One piece of pacing is *not* opt-in: the checksum phase waits on the throttler b
 
 Sets the parallelism of the **replication applier** — the number of concurrent write threads used to apply changes (read from the binlog) to the new table. Copier and checksum parallelism are controlled separately by [threads](#threads).
 
-A value of `0` means **auto**: on Aurora, Spirit sets `write-threads` to the instance vCPU count minus 2 (minimum 1), read from `@@innodb_buffer_pool_instances`. The reserved vCPUs leave headroom for the copier's read side, the checksum, and the server's own work. On non-Aurora targets there is no reliable vCPU signal, so the default of `4` is used instead. Because the default is already `4`, you only opt into auto-sizing by explicitly passing `--write-threads 0`.
-
-This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) engages: the autoscaler always sizes the write pool as if `--write-threads 0` had been passed (vCPUs minus 2), and that becomes its *starting* point, with room to grow back toward its ceiling when the instance has spare capacity.
+This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes the write pool from the instance (vCPU count minus 2) and treats that as its starting point. If you want the pool sized to the instance, that flag is how to ask for it — `write-threads` itself is always the literal count.
 
 ### enable-experimental-autoscaling
 

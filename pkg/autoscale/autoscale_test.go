@@ -51,6 +51,26 @@ func TestCeilDiv(t *testing.T) {
 	assert.Equal(t, 4, CeilDiv(8, 2))
 }
 
+// TestVCPUReserve pins the reserve and the write-side vCPU->threads mapping it
+// produces (including the floor at 1). The migration runner applies it as
+// max(1, vCPUs-VCPUReserve) when autoscaling engages; that path needs a real
+// Aurora instance to reach, so the arithmetic is pinned here instead.
+func TestVCPUReserve(t *testing.T) {
+	assert.Equal(t, 2, VCPUReserve, "the reserve is documented as 2 vCPUs in migrate.md and pkg/autoscale/README.md")
+	for _, tc := range []struct {
+		vCPUs, want int
+	}{
+		{1, 1}, // floors at 1
+		{2, 1}, // r6g.large: 2 vCPUs -> 1 applier
+		{3, 1},
+		{4, 2},
+		{8, 6},
+		{96, 94},
+	} {
+		assert.Equalf(t, tc.want, max(1, tc.vCPUs-VCPUReserve), "vCPUs=%d", tc.vCPUs)
+	}
+}
+
 // TestReadBounds pins the read-side sizing against the instance sizes it is
 // meant to describe. The invariant matters more than the individual numbers:
 // the ceiling must never exceed half the instance, because for the checksum the
