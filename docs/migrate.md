@@ -409,7 +409,7 @@ You may want to wrap `threads` in automation and set it to a percentage of the c
 
 By default Spirit does not dynamically adjust the number of threads while running, but it does support automatically resuming from a checkpoint if it is killed. This means that if you find that you've misjudged the number of threads (or [target-chunk-time](#target-chunk-time)), you can simply kill the Spirit process and start it again with different values. The experimental [enable-experimental-autoscaling](#enable-experimental-autoscaling) flag opts into dynamic read-, write- and checksum-thread scaling driven by throttler feedback.
 
-One piece of pacing is *not* opt-in: the checksum phase always waits on the throttler before dispatching a chunk, so a checksum pauses under replica lag or Aurora load on every server, with or without autoscaling. What the flag adds is movement of the checksum's own worker count.
+One piece of pacing is *not* opt-in: the checksum phase waits on the throttler before dispatching a chunk, with or without autoscaling. It reacts to *load* signals only — see [checksum scaling](#checksum-scaling) for why replica lag deliberately does not pause a checksum. What the flag adds is movement of the checksum's own worker count.
 
 ### write-threads
 
@@ -450,7 +450,9 @@ This flag only applies to the default buffered copier; with [unbuffered](#unbuff
 
 The checksum phase is scaled by the same flag but on different signals, because it is read-only and holds a `REPEATABLE READ` snapshot rather than write transactions. Three behaviors are worth separating:
 
-- **Pausing under load is not opt-in.** The checksum calls the throttler before dispatching each chunk on every server, flag or no flag. Chunks already in flight are never abandoned — an aborted chunk is wasted I/O that has to be redone from the same watermark — so the checksum stops *dispatching* rather than cancelling work.
+- **Pausing under load is not opt-in.** The checksum calls the throttler before dispatching each chunk, flag or no flag. Chunks already in flight are never abandoned — an aborted chunk is wasted I/O that has to be redone from the same watermark — so the checksum stops *dispatching* rather than cancelling work.
+
+  It pauses on **load** signals only. Replica lag deliberately does not pause a checksum: the phase reads inside a `REPEATABLE READ` snapshot and writes nothing to the binlog, so it cannot be the cause of the lag and pausing it cannot reduce the lag — while the pause extends the pass, holding the snapshot open and retaining undo that the purge thread cannot advance past. (The lag throttler also fails closed when it cannot poll the replica, so an unreachable replica would otherwise stall the checksum until its yield timeout with the snapshot still held.) Load signals come from the Aurora throttlers, so on a non-Aurora server there is no load signal and the checksum is not paced by the throttler at all. Chunk *repairs* do write, and are deliberately left unpaced too — they are rare and small, and blocking one costs the same snapshot hold.
 - **Shedding** happens only with the flag, on any server. The signal is the change feed's post-flush residual: the feed flushes concurrently with the checksum, and if the residual is growing across flushes then the checksum's reads are winning a race against writes that have to finish (an unbounded backlog can outrun binlog retention and block cut-over). A worker is shed per flush that agrees, with hysteresis in both directions.
 - **Growth** happens only with the flag *and* only on Aurora, since it uses the same utilization band as the copy phase. On stock MySQL the checksum can therefore shed and then recover, but never exceed, the configured [threads](#threads).
 

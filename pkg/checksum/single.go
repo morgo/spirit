@@ -65,13 +65,16 @@ type SingleChecker struct {
 // builds the checker before it opens the throttlers (the throttler needs the
 // monitoring connection, which is set up later), so the wiring cannot happen
 // at construction. A nil throttler is ignored, leaving the Noop in place.
+//
+// What is installed is the load-only narrowing of t, not t itself — see
+// loadOnlyThrottler.
 func (c *SingleChecker) SetThrottler(t throttler.Throttler) {
 	if t == nil {
 		return
 	}
 	c.Lock()
 	defer c.Unlock()
-	c.throttler = t
+	c.throttler = loadOnlyThrottler(t)
 }
 
 // getThrottler reads the throttler under lock, since SetThrottler may race
