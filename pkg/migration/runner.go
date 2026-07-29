@@ -943,6 +943,12 @@ func (r *Runner) closeReplicas() error {
 // itself against it. The copier always accepts one; the checksum does so via
 // the optional checksum.ThrottleAware capability (test doubles and the
 // continuous checker do not implement it, and do not need to).
+//
+// Both phases get the same composite, but they do not react to the same parts of
+// it: the copier writes and so honours every signal in it, while the checksum
+// narrows it to the load signals (see checksum's loadOnlyThrottler — a read-only
+// snapshot pass cannot cause replica lag, so pausing it on lag would only hold
+// the snapshot open for longer).
 func (r *Runner) setThrottlerOnPhases() {
 	r.copier.SetThrottler(r.throttler)
 	if aware, ok := r.checker.(checksum.ThrottleAware); ok {

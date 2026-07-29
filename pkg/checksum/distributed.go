@@ -86,7 +86,8 @@ func (c *DistributedChecker) IsThrottled() bool {
 	return c.getThrottler().IsThrottled()
 }
 
-// SetThrottler installs the throttler the checksum paces itself against. See
+// SetThrottler installs the throttler the checksum paces itself against — the
+// load-only narrowing of t, per loadOnlyThrottler. See
 // SingleChecker.SetThrottler for why this is not done at construction.
 func (c *DistributedChecker) SetThrottler(t throttler.Throttler) {
 	if t == nil {
@@ -94,7 +95,7 @@ func (c *DistributedChecker) SetThrottler(t throttler.Throttler) {
 	}
 	c.Lock()
 	defer c.Unlock()
-	c.throttler = t
+	c.throttler = loadOnlyThrottler(t)
 }
 
 // getThrottler reads the throttler under lock.
