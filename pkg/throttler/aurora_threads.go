@@ -9,6 +9,8 @@ import (
 	"math"
 	"sync/atomic"
 	"time"
+
+	"github.com/block/spirit/pkg/autoscale"
 )
 
 // The Aurora "threads" throttler — the second Aurora signal, from issue #831.
@@ -194,7 +196,7 @@ func AuroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 // the whole instance: the copier's read side, the checksum, and the server's
 // own work need room too. Auto-sizing resolves to max(1, vCPUs - this). On 4+
 // vCPU instances it is the autoscaler's starting value (the controller can grow
-// back up under spare capacity); below MinAutoscaleVCPUs it is the fixed size.
+// back up under spare capacity); below autoscale.MinVCPUs it is the fixed size.
 const WriteThreadVCPUReserve = 2
 
 // ResolveWriteThreads resolves the number of apply (write) threads to use
@@ -235,39 +237,23 @@ func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int, logger 
 	return max(1, vCPUs-WriteThreadVCPUReserve), nil
 }
 
-// MinAutoscaleVCPUs is the smallest instance size (in vCPUs) on which the
-// write-thread autoscaler is allowed to engage. Below this the utilization
-// signal is too coarse to control on: one thread is half or a third of the
-// whole scale, so there is no dead band wide enough to rest in and the
-// controller can only oscillate. Observed in staging on r6g.large (2 vCPUs):
-// the thread count ping-ponged 1↔2 indefinitely (issue #831). At 4+ vCPUs the
-// worst-case per-thread utilization step (0.25) fits inside the autoscaler's
-// dead band.
-const MinAutoscaleVCPUs = 4
-
 // ResolveMaxWriteThreads resolves the upper bound the write-thread autoscaler
-// may scale to. When autoscaling is disabled the cap equals start, so the
-// thread count cannot move. When enabled the cap is fixed at 2 × start —
-// deliberately not configurable for now, to keep the experimental surface
-// small. See issue #831.
+// may scale to: autoscale.Ceiling (start when scaling is off, 2 × start when on
+// — deliberately not configurable for now, to keep the experimental surface
+// small), plus one rule that is specific to the write side. See issue #831.
 //
-// Scaling above the starting value additionally requires the commit-latency
-// throttler when the redo-aware signal is in use: that signal deliberately
-// ignores threads parked on redo-log waits — which is what makes oversubscribing
-// the log safe to attempt — so it will not self-limit if the extra write threads
-// saturate the log, and commit-latency is then the only signal that would
-// notice. Without that backstop the cap stays at start (the autoscaler may
-// still shed threads under CPU pressure, but never adds any). The Threads_running
-// fallback counts redo-log waiters as load, so it self-limits and needs no such
-// backstop.
+// That rule: scaling above the starting value additionally requires the
+// commit-latency throttler when the redo-aware signal is in use. That signal
+// deliberately ignores threads parked on redo-log waits — which is what makes
+// oversubscribing the log safe to attempt — so it will not self-limit if the
+// extra write threads saturate the log, and commit-latency is then the only
+// signal that would notice. Without that backstop the cap stays at start (the
+// autoscaler may still shed threads under CPU pressure, but never adds any). The
+// Threads_running fallback counts redo-log waiters as load, so it self-limits and
+// needs no such backstop.
 func ResolveMaxWriteThreads(start int, autoscaleEnabled, redoAware, commitLatencyEnabled bool) int {
-	if !autoscaleEnabled {
-		return start
-	}
-	if redoAware && !commitLatencyEnabled {
-		return start
-	}
-	return 2 * start
+	unguardedRedo := redoAware && !commitLatencyEnabled
+	return autoscale.Ceiling(start, autoscaleEnabled && !unguardedRedo)
 }
 
 // threadsRunningPollInterval mirrors commitLatencyPollInterval — fast enough to

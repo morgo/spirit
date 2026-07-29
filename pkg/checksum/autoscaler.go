@@ -3,7 +3,6 @@ package checksum
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/metrics"
@@ -111,11 +110,9 @@ type checksumScaler struct {
 
 	min, start, max int
 	current         int
-	// upCooldown gates increases; downCooldown gates decreases. Separate so a
-	// fresh overload can shed immediately even right after an increase (which
-	// likely caused it), while consecutive sheds are still spaced out enough
-	// for the signal to reflect the previous cut.
-	upCooldown, downCooldown int
+	// gate holds the cooldown state and resolves the zone law (plus the backlog
+	// veto) into the move this tick may make. See autoscale.Gate.
+	gate autoscale.Gate
 	// Residual-tracking state, all owned by observeBacklog. lastFlushes is the
 	// flush counter at the most recent evaluation, so a residual is compared only
 	// once per flush; prevResidual the previous flush's residual, or -1 before any
@@ -176,44 +173,25 @@ func newChecksumScaler(t throttler.Throttler, limiter *autoscale.Limiter, backlo
 // run drives the control loop until ctx is cancelled. Callers start it per
 // pass, so a yield/resume cycle gets a fresh controller at start.
 func (s *checksumScaler) run(ctx context.Context) {
-	ticker := time.NewTicker(csTick)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.tick(ctx)
-		}
-	}
+	autoscale.RunTicker(ctx, csTick, s.tick)
 }
 
 // tick performs a single control step. Split out so tests can drive it
 // directly without real time.
 //
-// Precedence, highest first:
+// The precedence — panic zone, then the backlog veto, then the zone law, with
+// recovery inside the dead band — lives in autoscale.Gate, which the copier's
+// controller shares. What is specific to the checksum is the veto itself and
+// the fact that there is one pool to move rather than two:
 //
-//  1. The utilization panic zone. Both this and the backlog veto shed, and
-//     this sheds faster (multiplicatively), so it has to be evaluated first:
-//     if the veto were checked ahead of it, a tick spent inside the veto's
-//     cooldown would consume the panic response and downgrade backoff to -1
-//     per cooldown at exactly the moment the server is most overloaded.
-//  2. The backlog veto, which therefore outranks Grow, Hold and Shed.
-//     Utilization can show plenty of headroom while the feed still falls
-//     behind, because the feed's writes are a small share of server load but a
-//     hard prerequisite for finishing the migration.
-//  3. The utilization zone law.
-//
-// The Hold case doubles as the recovery path. Without it a transient backlog
-// would permanently cost throughput for the rest of the pass: on stock MySQL
-// there is no other way back up at all, and on Aurora the dead band would sit
-// on the reduced count indefinitely. Recovery stops at the configured start —
-// growing beyond what the operator asked for requires a positive headroom
-// signal, not merely the absence of a negative one.
-//
-// Both increase paths additionally require the backlog signal to be live rather
-// than merely quiet (see backlogStale), so a feed whose flushes have stopped
-// completing freezes the count instead of letting it climb.
+//   - The Grow and recovery paths additionally require the backlog signal to be
+//     live rather than merely quiet (see backlogStale), so a feed whose flushes
+//     have stopped completing freezes the count instead of letting it climb.
+//   - Recovery stops at the configured start. Growing beyond what the operator
+//     asked for requires a positive headroom signal, not merely the absence of a
+//     negative one. Without recovery at all, a transient backlog would cost
+//     throughput for the rest of the pass: on stock MySQL there is no other way
+//     back up, and on Aurora the dead band would sit on the reduced count.
 func (s *checksumScaler) tick(ctx context.Context) {
 	util := 0.0
 	zone := autoscale.Hold
@@ -221,76 +199,46 @@ func (s *checksumScaler) tick(ctx context.Context) {
 		util = s.gradual.Utilization()
 		zone = autoscale.Classify(util)
 	}
-	backlogVeto := s.observeBacklog()
-	// Growth needs a *live* absence of backlog pressure, not merely the absence
-	// of a verdict. See backlogStale.
-	growthBlocked := s.backlogLosing || s.backlogStale()
+	plan := s.gate.Decide(autoscale.Inputs{
+		Zone: zone,
+		Veto: s.observeBacklog(),
+		// Growth needs a *live* absence of backlog pressure, not merely the
+		// absence of a verdict: the veto is one-shot per flush, so without this
+		// the remaining ticks of a losing window would grow straight back into
+		// the shed and the two signals would cancel out. backlogStale covers the
+		// other case, a verdict computed from data that stopped arriving.
+		GrowthBlocked: s.backlogLosing || s.backlogStale(),
+		CanRecover:    s.current < s.start,
+	})
 
-	acted := false
-	switch {
-	case zone == autoscale.Halve:
-		// The hard stop is typically already firing on raw samples in this
-		// zone, so the pass is being paused anyway; halving is about resuming
-		// gently. Gated on the down cooldown only, so the first breach is
-		// never delayed by a recent increase's cooldown.
-		if s.downCooldown == 0 {
-			s.set(autoscale.CeilDiv(s.current, 2), "utilization at panic threshold")
-			s.shedCooldowns()
-			acted = true
-		}
-	case backlogVeto:
-		// The feed is losing ground. Shed one worker to hand read capacity
-		// back to it. This is the only shedding lever on stock MySQL.
-		if s.downCooldown == 0 {
-			s.set(s.current-1, "change-feed backlog not draining")
-			s.shedForFlush = true
-			s.shedCooldowns()
-			acted = true
-		}
-	case zone == autoscale.Shed:
-		if s.downCooldown == 0 {
-			s.set(s.current-1, "utilization above high watermark")
-			s.shedCooldowns()
-			acted = true
-		}
-	case zone == autoscale.Grow:
-		// Also gated on backlogLosing. The veto above is deliberately one-shot
-		// per window, so without this the other ticks of a losing window would
-		// grow straight back into the shed and the two signals would cancel out.
-		if !growthBlocked && s.upCooldown == 0 {
-			s.set(s.current+1, "utilization below low watermark")
-			s.upCooldown = autoscale.CooldownTicks
-			acted = true
-		}
-	default: // Hold, or no continuous signal at all.
-		// Gated on backlogLosing for the same reason, not on the one-shot veto:
-		// the veto clears as soon as it is acted on, so recovering on its absence
-		// would hand the worker straight back while the feed is still behind.
-		if !growthBlocked && s.current < s.start && s.upCooldown == 0 {
-			s.set(s.current+1, "recovering toward configured thread count")
-			s.upCooldown = autoscale.CooldownTicks
-			acted = true
-		}
+	acted := true
+	switch plan {
+	case autoscale.PlanHalve:
+		// The hard stop is typically already firing on raw samples in this zone,
+		// so the pass is being paused anyway; halving is about resuming gently.
+		s.set(autoscale.CeilDiv(s.current, 2), "utilization at panic threshold")
+	case autoscale.PlanShedVeto:
+		// The feed is losing ground. Shed one worker to hand read capacity back
+		// to it. This is the only shedding lever on stock MySQL. Recording the
+		// shed here is what caps one flush at one worker however many ticks pass
+		// before the next flush.
+		s.set(s.current-1, "change-feed backlog not draining")
+		s.shedForFlush = true
+	case autoscale.PlanShed:
+		s.set(s.current-1, "utilization above high watermark")
+	case autoscale.PlanGrow:
+		s.set(s.current+1, "utilization below low watermark")
+	case autoscale.PlanRecover:
+		s.set(s.current+1, "recovering toward configured thread count")
+	case autoscale.PlanNone:
+		acted = false
 	}
-
-	if !acted {
-		// Nothing to do, or waiting out a cooldown after a recent change.
-		if s.upCooldown > 0 {
-			s.upCooldown--
-		}
-		if s.downCooldown > 0 {
-			s.downCooldown--
-		}
+	if acted {
+		s.gate.Applied(plan)
+	} else {
+		s.gate.Idle()
 	}
 	s.emit(ctx, util)
-}
-
-// shedCooldowns is applied after any decrease. It sets the up cooldown too, so
-// a shed is not immediately undone by a growth signal that has not yet had time
-// to reflect the cut.
-func (s *checksumScaler) shedCooldowns() {
-	s.downCooldown = autoscale.CooldownTicks
-	s.upCooldown = autoscale.CooldownTicks
 }
 
 // observeBacklog samples the change feed and reports whether the veto is in
@@ -404,24 +352,15 @@ func (s *checksumScaler) set(target int, reason string) {
 
 // emit reports the live thread count and observed utilization every tick.
 func (s *checksumScaler) emit(ctx context.Context, util float64) {
-	if s.metricsSink == nil {
-		return
-	}
-	m := &metrics.Metrics{
-		Values: []metrics.MetricValue{
-			{Name: metrics.ChecksumThreadsMetricName, Type: metrics.GAUGE, Value: float64(s.current)},
-		},
+	values := []metrics.MetricValue{
+		{Name: metrics.ChecksumThreadsMetricName, Type: metrics.GAUGE, Value: float64(s.current)},
 	}
 	// Utilization is only meaningful when a continuous signal exists; emitting
 	// a hard zero on stock MySQL would read as "completely idle" on dashboards
 	// rather than "not measured".
 	if s.gradual != nil {
-		m.Values = append(m.Values,
+		values = append(values,
 			metrics.MetricValue{Name: metrics.ThrottlerUtilizationMetricName, Type: metrics.GAUGE, Value: util})
 	}
-	sendCtx, cancel := context.WithTimeout(ctx, metrics.SinkTimeout)
-	defer cancel()
-	if err := s.metricsSink.Send(sendCtx, m); err != nil {
-		s.logger.Debug("checksum autoscaler metrics send failed", "error", err)
-	}
+	autoscale.Emit(ctx, s.metricsSink, s.logger, values...)
 }

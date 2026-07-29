@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/table"
@@ -232,12 +233,12 @@ func TestAutoScaler_DeadBandBoundaries(t *testing.T) {
 		util float64
 		want int // expected current after one tick, starting from 4
 	}{
-		{"just below low increases", acLowWatermark - eps, 5},
-		{"exactly low holds", acLowWatermark, 4},
-		{"just below high holds", acHighWatermark - eps, 4},
-		{"exactly high sheds one", acHighWatermark, 3},
-		{"just below panic sheds one", acPanicThreshold - eps, 3},
-		{"exactly panic halves", acPanicThreshold, 2},
+		{"just below low increases", autoscale.LowWatermark - eps, 5},
+		{"exactly low holds", autoscale.LowWatermark, 4},
+		{"just below high holds", autoscale.HighWatermark - eps, 4},
+		{"exactly high sheds one", autoscale.HighWatermark, 3},
+		{"just below panic sheds one", autoscale.PanicThreshold - eps, 3},
+		{"exactly panic halves", autoscale.PanicThreshold, 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -256,9 +257,9 @@ func TestAutoScaler_DeadBandBoundaries(t *testing.T) {
 // than ramping it to the cap or shrinking it to 1. If either side moves and
 // breaks the relationship, this fails loudly.
 func TestAutoScaler_StaleHoldValueParksInDeadBand(t *testing.T) {
-	require.GreaterOrEqual(t, throttler.StaleUtilizationHold, acLowWatermark,
+	require.GreaterOrEqual(t, throttler.StaleUtilizationHold, autoscale.LowWatermark,
 		"stale hold below the low watermark would scale up blind on a dead signal")
-	require.Less(t, throttler.StaleUtilizationHold, acHighWatermark,
+	require.Less(t, throttler.StaleUtilizationHold, autoscale.HighWatermark,
 		"stale hold at/above the high watermark would halve on a dead signal")
 
 	as, _, ut := newTestScaler(4, 16)
@@ -298,14 +299,6 @@ func TestAutoScaler_ConvergesOnSelfInducedSignal(t *testing.T) {
 		"controller must converge once and then hold steady on a self-induced signal")
 	require.Equal(t, 4, as.current,
 		"steady state parks just above the low watermark: 4 threads / 8 vCPUs = 0.5")
-}
-
-func TestCeilDiv(t *testing.T) {
-	require.Equal(t, 1, ceilDiv(1, 2))
-	require.Equal(t, 1, ceilDiv(2, 2))
-	require.Equal(t, 2, ceilDiv(3, 2))
-	require.Equal(t, 2, ceilDiv(4, 2))
-	require.Equal(t, 3, ceilDiv(5, 2))
 }
 
 // TestResolveMaxReadThreads pins the pool-size formula the migration runner
@@ -719,7 +712,7 @@ func TestAutoScalerIntegrationEngaged(t *testing.T) {
 	// their prompt exit-on-park is pinned by the PR 1 pool tests — so the
 	// observable assertion here is on the write pool.
 	gated.setUtil(1.2)
-	require.Eventually(t, func() bool { return app.ActiveWriteWorkers() <= ceilDiv(start, 2) },
+	require.Eventually(t, func() bool { return app.ActiveWriteWorkers() <= autoscale.CeilDiv(start, 2) },
 		10*time.Second, 5*time.Millisecond,
 		"autoscaler should halve the live write-worker pool at the panic threshold")
 

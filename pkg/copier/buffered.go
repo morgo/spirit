@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/status"
@@ -285,7 +286,7 @@ func (c *buffered) autoscalerIfEnabled() *autoScaler {
 	}
 	c.logger.Info("starting experimental autoscaler: write-thread scaling engaged",
 		"start", c.autoscale.StartThreads, "max", c.autoscale.MaxThreads,
-		"low_watermark", acLowWatermark, "high_watermark", acHighWatermark)
+		"low_watermark", autoscale.LowWatermark, "high_watermark", autoscale.HighWatermark)
 	as := newAutoScaler(gradual, scaler, c.autoscale.StartThreads, c.autoscale.MaxThreads, c.logger, c.metricsSink)
 	// Read scaling engages whenever the write side does: the copier's own
 	// reader pool is runtime-resizable (SetReadWorkers) and every applier
