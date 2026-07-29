@@ -748,7 +748,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 				// sized from the instance instead. The alternative — honoring the
 				// flags as starting points — makes the outcome depend on a number
 				// the caller usually left at its default, and that default is what
-				// capped the checksum at 8 workers on a 96-vCPU instance no matter how
+				// capped the checksum at 8 workers on a 24xlarge no matter how
 				// much headroom the signal reported. A controller that is told to
 				// find the right size should not also be told where to stop.
 				var readStart int
