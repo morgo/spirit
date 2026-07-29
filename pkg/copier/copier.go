@@ -109,9 +109,9 @@ type AutoscaleConfig struct {
 	// MaxReadThreads is the cap for the read-worker pool, which scales from
 	// CopierConfig.Concurrency. Zero means "derive it from Concurrency"
 	// (ResolveMaxReadThreads) — for callers with no view of the instance size.
-	// The migration runner passes the instance vCPU count instead, because that
-	// is the point past which extra readers only compete for cores (see
-	// autoscale.ReadBounds).
+	// The migration runner passes an instance-derived ceiling instead, since a
+	// read pool sized off a flag default has no relationship to the cores it is
+	// competing for (see autoscale.ReadBounds).
 	MaxReadThreads int
 }
 

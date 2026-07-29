@@ -785,11 +785,13 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// ResolveMaxWriteThreads).
 	commitLatencyEnabled := r.migration.MaxCommitLatency > 0
 	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscaleEnabled, redoAware, commitLatencyEnabled)
-	// The read side's ceiling is the instance vCPU count when autoscaling engaged
-	// above (autoscale.ReadBounds); otherwise it is the Threads-relative formula
-	// the copier would derive on its own. Either way the pool below is sized for
-	// it — readers scaled above the connection budget would just queue on the
-	// sql.DB pool, silently buying no extra parallelism.
+	// The read side's ceiling is half the instance when autoscaling engaged above
+	// (autoscale.ReadBounds); otherwise it is the Threads-relative formula the
+	// copier would derive on its own. Either way the pool below is sized for it —
+	// readers scaled above the connection budget would just queue on the sql.DB
+	// pool, silently buying no extra parallelism. The checksum needs this number
+	// for a second reason: its snapshot transactions are all created up front,
+	// under the table lock, so its ceiling is spent whether or not it is reached.
 	maxRead := readCeiling
 	if maxRead == 0 {
 		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, autoscaleEnabled)

@@ -324,10 +324,12 @@ func TestResolveMaxReadThreads(t *testing.T) {
 // instance-derived one supplied by the migration runner, and the
 // Concurrency-relative fallback for callers that have none.
 func TestResolveReadCeiling(t *testing.T) {
-	// Supplied: honored as-is. 96 vCPUs starting at 24 is the shape
-	// autoscale.ReadBounds produces, and it is well above 2x the start — the
-	// doubling formula is exactly what this replaces.
-	require.Equal(t, 96, resolveReadCeiling(96, 24))
+	// Supplied: honored as-is, whether it is above or below what the fallback
+	// would have derived. autoscale.ReadBounds anchors the ceiling to the
+	// instance, not to the start, so the two do not track each other in general
+	// even though they coincide at most real instance sizes.
+	require.Equal(t, 48, resolveReadCeiling(48, 24))
+	require.Equal(t, 3, resolveReadCeiling(3, 2))
 	// Not supplied: the Concurrency-relative fallback (2x).
 	require.Equal(t, 8, resolveReadCeiling(0, 4))
 	require.Equal(t, 8, resolveReadCeiling(-1, 4))
