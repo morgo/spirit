@@ -5,14 +5,16 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/metrics"
 )
 
-// statsEmitTick is how often an applier reports its pipeline gauges. It
-// matches the autoscalers' cadence (autoscale.Tick) so the write-thread count
-// and the pipeline occupancy it acts on are sampled at the same rate. A var
-// so tests can shorten it.
-var statsEmitTick = 5 * time.Second
+// statsEmitTick is how often an applier reports its pipeline gauges. Matching
+// the autoscalers' cadence is the whole point — the copier's controller
+// arbitrates between its read and write pools on the queue occupancy reported
+// here, so the two must be sampled at the same rate — hence it is derived from
+// autoscale.Tick rather than restating 5s. A var so tests can shorten it.
+var statsEmitTick = autoscale.Tick
 
 // statsProvider is the narrow slice of Applier the emitter needs.
 type statsProvider interface {
