@@ -51,6 +51,37 @@ func TestCeilDiv(t *testing.T) {
 	assert.Equal(t, 4, CeilDiv(8, 2))
 }
 
+// TestReadBounds pins the read-side sizing against the instance sizes it is
+// meant to describe. The invariants matter more than the individual numbers:
+// the start must never exceed the ceiling (a pool that begins above its cap
+// cannot be controlled), and the ceiling must never exceed the vCPU count
+// (in-memory reads are CPU-bound, so scaling past the cores steals them from
+// the application).
+func TestReadBounds(t *testing.T) {
+	for _, tc := range []struct {
+		vCPUs, start, ceiling int
+	}{
+		{4, 2, 4},   // r6g.xlarge: the floor binds, the divisor would say 1
+		{8, 2, 8},   // 2xlarge: ceil(6/4) = 2, the floor is not yet binding
+		{16, 4, 16}, // 4xlarge
+		{32, 8, 32}, // 8xlarge
+		{64, 16, 64},
+		{96, 24, 96}, // 24xlarge: the case that motivated this (was capped at 8)
+	} {
+		start, ceiling := ReadBounds(tc.vCPUs)
+		assert.Equal(t, tc.start, start, "start for %d vCPUs", tc.vCPUs)
+		assert.Equal(t, tc.ceiling, ceiling, "ceiling for %d vCPUs", tc.vCPUs)
+	}
+	// Below MinVCPUs no controller engages, so these sizes are never used in
+	// production — but the function must still return something coherent rather
+	// than a start above its ceiling.
+	for vCPUs := range MinVCPUs {
+		start, ceiling := ReadBounds(vCPUs)
+		assert.LessOrEqual(t, start, ceiling, "start must not exceed ceiling at %d vCPUs", vCPUs)
+		assert.Positive(t, start, "start must be usable at %d vCPUs", vCPUs)
+	}
+}
+
 func TestLimiterFloorsAtOne(t *testing.T) {
 	// A limiter admitting nobody would deadlock its caller rather than
 	// throttle it, so both entry points clamp to 1.

@@ -29,6 +29,10 @@ The shape is "gentle in the normal regime, abrupt only in emergencies". The full
 
 - **`Ceiling`** resolves a scalable pool's upper bound: the start value when scaling is off, twice it when on. The migration runner sizes the connection pool from the same number the phases cap themselves with, so a scaled-up pool never starves on connections.
 
+- **`ReadBounds`** derives the read side's starting size and ceiling from the instance vCPU count — `max(2, ceil((vCPUs - VCPUReserve) / 4))` up to `vCPUs`. This is where the asymmetry with the write side lives: write threads mostly sit parked on a redo-log flush, so a count above the vCPU count is not oversubscription (and the redo-aware signal excludes those waiters), whereas a read thread scanning an in-buffer-pool table is pure CPU and does compete with the application for cores. The read side therefore starts at about a quarter of the instance, earns its way up through the band, and stops at the physical limit.
+
+  Both bounds come from the instance rather than from `--threads`. When autoscaling engages, the migration runner ignores `--threads` and `--write-threads` entirely: a controller told to find the right size should not also be told where to stop, and those flags are usually left at their defaults (`--threads 4` capped the checksum at 8 workers on a 96-vCPU instance).
+
 - **`RunTicker`** and **`Emit`** are the loop and the best-effort gauge send every controller repeats. A controller must never stall or fail a migration because a metrics sink is unavailable, so `Emit` bounds the send and logs failures at Debug.
 
 - **`Limiter`** is a concurrency gate whose limit can change while work is in flight. `errgroup.SetLimit` cannot: the errgroup contract forbids changing the limit while any goroutine in the group is active, so a phase that wants to be resized mid-pass needs its own gate. Shrinking never interrupts in-flight work — for the checksum a cancelled chunk is wasted I/O that has to be redone — the reduction is absorbed by subsequent releases instead.

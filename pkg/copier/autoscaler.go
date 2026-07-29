@@ -124,6 +124,20 @@ func ResolveMaxReadThreads(start int, autoscaleEnabled bool) int {
 	return autoscale.Ceiling(start, autoscaleEnabled)
 }
 
+// resolveReadCeiling picks the ceiling for the read-worker pool. A positive
+// configured value wins: the migration runner derives one from the instance
+// (autoscale.ReadBounds) and sizes its connection pool to match, so a scaled-up
+// pool never starves on connections. Callers with no view of the instance leave
+// it zero and get the Concurrency-relative formula instead. Either way the
+// ceiling is floored at the starting count, since a pool that begins above its
+// cap cannot be controlled.
+func resolveReadCeiling(configured, concurrency int) int {
+	if configured > 0 {
+		return max(configured, concurrency)
+	}
+	return ResolveMaxReadThreads(concurrency, true)
+}
+
 // writeScaler is the optional capability the autoscaler drives. The
 // SingleTargetApplier implements it; the ShardedApplier does not (yet), so the
 // copier type-asserts it and skips autoscaling when it's absent.

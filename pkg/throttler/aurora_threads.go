@@ -197,7 +197,10 @@ func AuroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 // own work need room too. Auto-sizing resolves to max(1, vCPUs - this). On 4+
 // vCPU instances it is the autoscaler's starting value (the controller can grow
 // back up under spare capacity); below autoscale.MinVCPUs it is the fixed size.
-const WriteThreadVCPUReserve = 2
+//
+// The read side reserves the same vCPUs from its own (differently shaped)
+// starting point, so the constant lives in pkg/autoscale and is named here.
+const WriteThreadVCPUReserve = autoscale.VCPUReserve
 
 // ResolveWriteThreads resolves the number of apply (write) threads to use
 // against a target. A positive requested value is returned unchanged. Zero

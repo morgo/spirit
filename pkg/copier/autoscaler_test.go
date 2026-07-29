@@ -320,6 +320,22 @@ func TestResolveMaxReadThreads(t *testing.T) {
 	require.Equal(t, 2, ResolveMaxReadThreads(-3, true))
 }
 
+// TestResolveReadCeiling covers the two sources of a read ceiling: an
+// instance-derived one supplied by the migration runner, and the
+// Concurrency-relative fallback for callers that have none.
+func TestResolveReadCeiling(t *testing.T) {
+	// Supplied: honored as-is. 96 vCPUs starting at 24 is the shape
+	// autoscale.ReadBounds produces, and it is well above 2x the start — the
+	// doubling formula is exactly what this replaces.
+	require.Equal(t, 96, resolveReadCeiling(96, 24))
+	// Not supplied: the Concurrency-relative fallback (2x).
+	require.Equal(t, 8, resolveReadCeiling(0, 4))
+	require.Equal(t, 8, resolveReadCeiling(-1, 4))
+	// A supplied ceiling below the start would leave the pool above its own cap
+	// with nowhere to go but down; floor it at the start instead.
+	require.Equal(t, 4, resolveReadCeiling(2, 4))
+}
+
 // TestEnableReadScalingClamps pins the defensive clamps: a start below 1 is
 // raised to 1 (the copy must keep making progress) and a cap below the start
 // is raised to the start (mirroring newAutoScaler's write-side clamp).

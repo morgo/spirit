@@ -34,14 +34,16 @@ type Migration struct {
 	ConfFile     string  `name:"conf" help:"MySQL conf file" optional:"" type:"existingfile"`
 	Table        string  `name:"table" help:"Table" optional:""`
 	Alter        string  `name:"alter" help:"The alter statement to run on the table" optional:""`
-	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
-	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count minus 2 (min 1), leaving CPU headroom; on non-Aurora targets it falls back to the default" optional:"" default:"4"`
+	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
+	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count minus 2 (min 1), leaving CPU headroom; on non-Aurora targets it falls back to the default. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 
-	// EnableExperimentalAutoscaling turns on dynamic write-thread scaling driven
-	// by throttler feedback; WriteThreads becomes the starting value and the
-	// cap is fixed at 2x that (deliberately not configurable for now, to keep
-	// the experimental surface small). See issue #831.
-	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
+	// EnableExperimentalAutoscaling turns on dynamic thread scaling driven by
+	// throttler feedback. When it engages (an Aurora target with at least
+	// autoscale.MinVCPUs) it takes over both thread counts: Threads and
+	// WriteThreads are ignored, and each pool's starting size and ceiling are
+	// derived from the instance instead — see the override in
+	// setupCopierCheckerAndReplClient and autoscale.ReadBounds. See issue #831.
+	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: size the copy, apply and checksum thread pools from the instance and scale them on throttler feedback. Overrides --threads and --write-threads. Requires an Aurora target" optional:"" default:"false"`
 	// TargetChunkTime sizes chunks for the time-based signal: the checksum
 	// (server-side CRC) and the legacy --unbuffered copier. The default buffered
 	// copier ignores it and sizes chunks by an in-memory byte budget
