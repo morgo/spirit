@@ -28,7 +28,7 @@ var ErrPositionNotFound = errors.New("change.Source: cannot resume from position
 //
 // Lifecycle: construct → AddSubscription(...)* → Start(ctx) OR
 // StartFromPosition(ctx, pos) → Flush / BlockWait /
-// FlushUnderTableLock as needed → Close().
+// FlushUnderTableLock as needed → Stop() → Close().
 //
 // Events flow PUSH-style: when a row event matching one of the
 // subscribed tables arrives, the source implementation looks up the
@@ -164,6 +164,20 @@ type Source interface {
 	// remain). For non-binlog implementations, this is equivalent to
 	// "have all received events been applied?".
 	AllChangesFlushed() bool
+
+	// Stop ends delivery of events to subscriptions. Everything else stays
+	// live: the source keeps reading and tracking its position, and Flush /
+	// BlockWait / AllChangesFlushed / Position keep working. Close, not Stop,
+	// releases resources. One-way and idempotent.
+	//
+	// Cutover calls it once the tables are renamed and while it still holds
+	// the exclusive lock, so no write can be in flight — after UNLOCK TABLES
+	// the first post-cutover write is a race, and those events no longer
+	// decode against the subscriptions' TableInfo (see cutover.go). Hence two
+	// requirements: Stop must not block, because every write to the table is
+	// stalled behind it, and it must leave the source flushable, because a
+	// rename that fails ambiguously is retried via Flush and BlockWait.
+	Stop()
 
 	// Close releases all resources. Safe to call more than once.
 	Close()

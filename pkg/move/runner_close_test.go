@@ -185,6 +185,7 @@ func (f *fakeChangeSource) SetWatermarkOptimization(_ context.Context, _ bool) e
 func (f *fakeChangeSource) StartPeriodicFlush(_ context.Context, _ time.Duration) {}
 func (f *fakeChangeSource) StopPeriodicFlush()                                    {}
 func (f *fakeChangeSource) AllChangesFlushed() bool                               { return true }
+func (f *fakeChangeSource) Stop()                                                 {}
 func (f *fakeChangeSource) Close()                                                { f.closed.Store(true) }
 
 // TestCloseRunsAllClosersOnError pins the Close() aggregation contract:
