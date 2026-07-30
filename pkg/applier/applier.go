@@ -80,9 +80,10 @@ type Applier interface {
 	Apply(ctx context.Context, chunk *table.Chunk, rows [][]any, callback ApplyCallback) error
 
 	// Stats returns a point-in-time snapshot of the write pipeline: queue
-	// occupancy, pending work, live workers, and rolling queue-wait /
-	// write-time percentiles. Safe to call concurrently with Apply; values
-	// are approximate. See the Stats type for field semantics.
+	// occupancy, pending work, live workers, mean rows per chunklet, and
+	// rolling percentiles of the four per-chunklet phases (queue-wait, build,
+	// write, handoff). Safe to call concurrently with Apply; values are
+	// approximate. See the Stats type for field semantics.
 	Stats() Stats
 
 	// DeleteKeys deletes rows by their key values synchronously. Each entry

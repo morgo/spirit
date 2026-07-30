@@ -43,6 +43,14 @@ const (
 	ApplierQueueWaitP90MetricName  = "applier_queue_wait_ms_p90"
 	ApplierWriteTimeP50MetricName  = "applier_write_time_ms_p50"
 	ApplierWriteTimeP90MetricName  = "applier_write_time_ms_p90"
+	// applier_build_time_* is the client-side share of applier_write_time_*
+	// (statement construction), not an addition to it. applier_handoff_* is
+	// time write workers spent publishing completions, which was previously
+	// counted in no metric at all. See applier.Stats.
+	ApplierBuildTimeP50MetricName = "applier_build_time_ms_p50"
+	ApplierBuildTimeP90MetricName = "applier_build_time_ms_p90"
+	ApplierHandoffP50MetricName   = "applier_handoff_ms_p50"
+	ApplierHandoffP90MetricName   = "applier_handoff_ms_p90"
 )
 
 // Metrics are collection of MetricValues.
