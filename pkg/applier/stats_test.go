@@ -37,21 +37,29 @@ func TestTimingRingPercentiles(t *testing.T) {
 	var r timingRing
 
 	// Empty ring: all zeros.
-	qw50, qw90, wt50, wt90 := r.percentiles()
-	require.Zero(t, qw50)
-	require.Zero(t, qw90)
-	require.Zero(t, wt50)
-	require.Zero(t, wt90)
+	require.Equal(t, timingPercentiles{}, r.percentiles())
 
-	// Partial fill: 10 entries with queueWait = i ms, writeTime = 10*i ms.
+	// Partial fill: 10 entries with queueWait = i ms, buildTime = 2*i ms,
+	// writeTime = 10*i ms, handoff = 3*i ms. Distinct multipliers so a
+	// mis-wired field cannot pass by coincidence.
 	for i := 1; i <= 10; i++ {
-		r.record(time.Duration(i)*time.Millisecond, time.Duration(10*i)*time.Millisecond)
+		r.record(
+			time.Duration(i)*time.Millisecond,
+			time.Duration(2*i)*time.Millisecond,
+			time.Duration(10*i)*time.Millisecond,
+			time.Duration(3*i)*time.Millisecond,
+		)
 	}
-	qw50, qw90, wt50, wt90 = r.percentiles()
-	require.Equal(t, 5*time.Millisecond, qw50)
-	require.Equal(t, 9*time.Millisecond, qw90)
-	require.Equal(t, 50*time.Millisecond, wt50)
-	require.Equal(t, 90*time.Millisecond, wt90)
+	require.Equal(t, timingPercentiles{
+		queueWaitP50: 5 * time.Millisecond,
+		queueWaitP90: 9 * time.Millisecond,
+		buildP50:     10 * time.Millisecond,
+		buildP90:     18 * time.Millisecond,
+		writeP50:     50 * time.Millisecond,
+		writeP90:     90 * time.Millisecond,
+		handoffP50:   15 * time.Millisecond,
+		handoffP90:   27 * time.Millisecond,
+	}, r.percentiles())
 }
 
 func TestTimingRingWraps(t *testing.T) {
@@ -60,16 +68,13 @@ func TestTimingRingWraps(t *testing.T) {
 	// Overfill: 2*timingRingSize entries. The first half records 1h (which
 	// must be evicted); the second half records 1ms.
 	for range timingRingSize {
-		r.record(time.Hour, time.Hour)
+		r.record(time.Hour, time.Hour, time.Hour, time.Hour)
 	}
 	for range timingRingSize {
-		r.record(time.Millisecond, time.Millisecond)
+		r.record(time.Millisecond, time.Millisecond, time.Millisecond, time.Millisecond)
 	}
-	qw50, qw90, wt50, wt90 := r.percentiles()
-	require.Equal(t, time.Millisecond, qw50)
-	require.Equal(t, time.Millisecond, qw90)
-	require.Equal(t, time.Millisecond, wt50)
-	require.Equal(t, time.Millisecond, wt90)
+	ms := time.Millisecond
+	require.Equal(t, timingPercentiles{ms, ms, ms, ms, ms, ms, ms, ms}, r.percentiles())
 }
 
 // TestStatsString pins the exact status-line rendering, including the
@@ -83,19 +88,25 @@ func TestStatsString(t *testing.T) {
 		ActiveWorkers: 4,
 		QueueWaitP50:  1800 * time.Millisecond,
 		QueueWaitP90:  4200 * time.Millisecond,
+		BuildTimeP50:  30 * time.Millisecond,
+		BuildTimeP90:  60 * time.Millisecond,
 		WriteTimeP50:  95 * time.Millisecond,
 		WriteTimeP90:  210 * time.Millisecond,
+		HandoffP50:    2 * time.Millisecond,
+		HandoffP90:    12 * time.Millisecond,
 	}
 	require.Equal(t,
 		"applier-queue=48/128 applier-pending=53 applier-workers=4 "+
 			"applier-queue-wait-p50=1.8s applier-queue-wait-p90=4.2s "+
-			"applier-write-p50=95ms applier-write-p90=210ms",
+			"applier-build-p50=30ms applier-write-p50=95ms applier-write-p90=210ms "+
+			"applier-handoff-p50=2ms",
 		s.String())
 
 	require.Equal(t,
 		"applier-queue=0/0 applier-pending=0 applier-workers=0 "+
 			"applier-queue-wait-p50=0s applier-queue-wait-p90=0s "+
-			"applier-write-p50=0s applier-write-p90=0s",
+			"applier-build-p50=0s applier-write-p50=0s applier-write-p90=0s "+
+			"applier-handoff-p50=0s",
 		Stats{}.String())
 
 	// Sub-millisecond noise rounds away.
@@ -282,4 +293,9 @@ func TestSingleTargetApplierStatsRoundTrip(t *testing.T) {
 	require.Positive(t, stats.WriteTimeP90, "write time should have been recorded")
 	require.GreaterOrEqual(t, stats.QueueWaitP90, stats.QueueWaitP50)
 	require.GreaterOrEqual(t, stats.WriteTimeP90, stats.WriteTimeP50)
+	// BuildTime is a component of WriteTime, not an addition to it. Asserted on
+	// p90 rather than p50 because with a single chunklet both percentiles come
+	// from the same sample, so this compares like with like.
+	require.LessOrEqual(t, stats.BuildTimeP90, stats.WriteTimeP90,
+		"statement-build time must be contained within write time")
 }
