@@ -16,17 +16,37 @@ import (
 )
 
 const (
-	chunkletMaxRows = 1000 // Maximum number of rows per chunklet
+	// chunkletMaxRows is the maximum rows per chunklet. The chunklet is the
+	// unit of nearly everything on the write path — one statement, one
+	// completion, one handoff through the single feedbackCoordinator — so this
+	// sets how much per-chunklet overhead is paid per row copied.
+	//
+	// Raised from 1000 so that MaxStatementSizeBytes is the limit that normally
+	// binds. At 1000 the row cap was cutting first for any table narrower than
+	// ~1 KiB/row (measured: ~928 rows per chunklet against a 476-660 byte row),
+	// which meant chunklet size was set by a row count that has no relationship
+	// to the cost of the statement. Sizing by bytes instead means a wide table
+	// gets fewer rows per statement and a narrow one more, which is the actual
+	// shape of the work.
+	chunkletMaxRows = 4096
 
 	// MaxStatementSizeBytes is the byte budget for the estimated rendered
-	// size of a single multi-row DML statement (1 MiB). Both write paths
+	// size of a single multi-row DML statement (2 MiB). Both write paths
 	// batch against it: the copy path splits chunks into chunklets
 	// (splitRowsIntoChunklets) and the binlog-apply path cuts flush
 	// batches (pkg/change) so a REPLACE/DELETE can't grow unbounded with
-	// wide rows. Deliberately far below the typical 64 MiB
-	// max_allowed_packet because the size estimates are rough; a single
+	// wide rows. Still far below the typical 64 MiB max_allowed_packet
+	// because the size estimates are rough — estimateRowSize measures
+	// fmt.Sprintf("%v", v) while the rendered literal is datum.String(),
+	// which is larger for anything quoted or hex-encoded — and a single
 	// row larger than the budget still goes in its own statement.
-	MaxStatementSizeBytes = 1024 * 1024
+	//
+	// One bound to respect when changing this: chunklets must keep the write
+	// pool fed, so chunks-in-flight x chunklets-per-chunk has to stay above the
+	// write worker count. With a 16 MiB target chunk and ~22 chunks in flight
+	// that leaves room for roughly 8x this budget before large pools start
+	// starving.
+	MaxStatementSizeBytes = 2 * 1024 * 1024
 
 	defaultBufferSize   = 128              // Size of the shared buffer channel for chunklets
 	defaultWriteWorkers = 2                // Number of write workers, default low for tests, but in practice we can use 40+

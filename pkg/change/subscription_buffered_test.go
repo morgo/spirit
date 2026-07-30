@@ -1918,11 +1918,13 @@ func TestBufferedMapFlushByteCapSplitsUpserts(t *testing.T) {
 	fake := &countingApplier{}
 	sub := newByteCapBufferedMap(fake, false)
 
-	// Five ~200 KiB rows estimate to ~400 KiB rendered each (strings are
-	// counted at 2x for worst-case escaping / hex expansion). Two fit under
-	// the 1 MiB budget, a third does not, so the flush must emit
-	// ceil(5/2) = 3 statements instead of one ~2 MiB REPLACE.
-	payload := strings.Repeat("x", 200*1024)
+	// Five rows sized so each estimates to ~40% of the budget rendered
+	// (strings are counted at 2x for worst-case escaping / hex expansion).
+	// Two fit under the budget, a third does not, so the flush must emit
+	// ceil(5/2) = 3 statements instead of one statement of ~2x the budget.
+	// Derived from the constant so retuning it cannot silently turn this into
+	// a single-statement case that asserts nothing.
+	payload := strings.Repeat("x", applier.MaxStatementSizeBytes/5)
 	for i := range 5 {
 		sub.HasChanged([]any{int32(i)}, []any{int32(i), payload}, false)
 	}
@@ -1933,7 +1935,7 @@ func TestBufferedMapFlushByteCapSplitsUpserts(t *testing.T) {
 	require.True(t, allFlushed)
 
 	calls := fake.upserts()
-	require.Len(t, calls, 3, "5 rows at ~400 KiB rendered each over a 1 MiB budget must split 2+2+1")
+	require.Len(t, calls, 3, "5 rows at ~40%% of the budget rendered each must split 2+2+1")
 	totalRows := 0
 	for _, call := range calls {
 		var callBytes int64
@@ -1978,14 +1980,15 @@ func TestBufferedMapFlushRowCountCapStillApplies(t *testing.T) {
 // TestBufferedMapFlushByteCapOversizedRowAlone verifies that a single row
 // whose rendered size exceeds the byte budget still flushes — alone in its
 // own statement (a row can't be split; we rely on max_allowed_packet being
-// well above the 1 MiB budget, same as the copy path's chunklet splitting).
+// well above MaxStatementSizeBytes, same as the copy path's chunklet splitting).
 // Queue mode is used for deterministic FIFO batching.
 func TestBufferedMapFlushByteCapOversizedRowAlone(t *testing.T) {
 	fake := &countingApplier{}
 	sub := newByteCapBufferedMap(fake, true)
 
 	small := strings.Repeat("s", 1024)
-	big := strings.Repeat("b", 1024*1024) // estimates to ~2 MiB rendered: over the budget by itself
+	// Estimates to ~2x the budget rendered, so it is over by itself.
+	big := strings.Repeat("b", applier.MaxStatementSizeBytes)
 	sub.HasChanged([]any{"k1"}, []any{"k1", small}, false)
 	sub.HasChanged([]any{"k2"}, []any{"k2", big}, false)
 	sub.HasChanged([]any{"k3"}, []any{"k3", small}, false)
@@ -2014,10 +2017,11 @@ func TestBufferedMapFlushByteCapSplitsDeletes(t *testing.T) {
 	fake := &countingApplier{}
 	sub := newByteCapBufferedMap(fake, false)
 
-	// 100 deletes whose ~10 KiB string PKs estimate to ~20 KiB rendered
-	// each — about 2 MiB in aggregate, so the flush must split.
+	// 100 deletes whose string PKs render to ~2x the total budget in
+	// aggregate, so the flush must split regardless of what the budget is.
+	keyLen := applier.MaxStatementSizeBytes / 100
 	for i := range 100 {
-		key := fmt.Sprintf("%03d-", i) + strings.Repeat("k", 10*1024)
+		key := fmt.Sprintf("%03d-", i) + strings.Repeat("k", keyLen)
 		sub.HasChanged([]any{key}, nil, true)
 	}
 	require.Len(t, sub.changes, 100)

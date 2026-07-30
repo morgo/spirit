@@ -48,12 +48,16 @@ A "chunklet" is an internal batching unit used by appliers. This is **different*
 
 When the copier calls `Apply()` with a batch of rows (typically from one chunk), the applier splits those rows into smaller "chunklets" for writing. Each chunklet defaults to:
 
-- **Row count**: Maximum 1,000 rows per chunklet
-- **Size**: Maximum 1 MiB of estimated data per chunklet
+- **Row count**: Maximum 4,096 rows per chunklet
+- **Size**: Maximum 2 MiB of estimated data per chunklet
 
-The size limit exists because MySQL's `max_allowed_packet` is typically 64 MiB by default, but we use a conservative 1 MiB threshold to ensure we never approach that limit even with very wide rows. The row count limit provides a reasonable upper bound for tables with narrow rows.
+The size limit exists because MySQL's `max_allowed_packet` is typically 64 MiB by default, and 2 MiB stays well clear of it even though the estimate is rough — `estimateRowSize` measures `fmt.Sprintf("%v", v)` while the rendered literal comes from `datum.String()`, which is larger for anything quoted or hex-encoded.
 
-**Important**: A single row can exceed 1 MiB by itself. In this edge case, the row will be placed in its own chunklet regardless of size, relying on `max_allowed_packet` being large enough. This is rare in practice.
+The intent is that **the byte cap is the one that normally binds**. The chunklet is the unit of nearly everything on the write path — one statement, one completion, one handoff through the single `feedbackCoordinator` — so its size sets how much per-chunklet overhead is paid per row copied. The row cap was previously 1,000, which cut first for any table narrower than about 1 KiB/row (measured: ~928 rows per chunklet against a 476–660 byte row), meaning chunklet size was decided by a row count unrelated to the cost of the statement. Sizing by bytes gives a wide table fewer rows per statement and a narrow one more, which matches the shape of the work. `Stats().RowsPerChunklet` reports which cap is actually in force — a value at the row cap means raising the byte cap alone would be a no-op, and vice versa.
+
+One bound to respect if these are retuned: chunklets have to keep the write pool fed, so `chunks-in-flight × chunklets-per-chunk` must stay above the write worker count. With a 16 MiB target chunk and ~22 chunks in flight there is room for roughly 8x the current byte budget before large pools begin starving.
+
+**Important**: A single row can exceed the byte budget by itself. In this edge case, the row will be placed in its own chunklet regardless of size, relying on `max_allowed_packet` being large enough. This is rare in practice.
 
 ### Async vs Sync Operations
 
