@@ -157,16 +157,22 @@ func textRoundTripCast(quotedCol string) string {
 	return "CAST(CAST(" + quotedCol + " AS char CHARACTER SET utf8mb4) AS json)"
 }
 
+// Compiled once at init rather than per call. These look like schema-time
+// helpers but removeWidth is reached from NewColumnType, which the copy path
+// invokes for every value of every row — compiling the pattern inside the
+// function made it the dominant cost of building an INSERT (~4.6x on a
+// 12-column row).
+var (
+	widthRegex        = regexp.MustCompile(`\([0-9]+\)`)
+	decimalWidthRegex = regexp.MustCompile(`\([0-9]+,[0-9]+\)`)
+)
+
 func removeWidth(s string) string {
-	regex := regexp.MustCompile(`\([0-9]+\)`)
-	s = regex.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(widthRegex.ReplaceAllString(s, ""))
 }
 
 func removeDecimalWidth(s string) string {
-	regex := regexp.MustCompile(`\([0-9]+,[0-9]+\)`)
-	s = regex.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(decimalWidthRegex.ReplaceAllString(s, ""))
 }
 
 func removeEnumSetOpts(s string) string {

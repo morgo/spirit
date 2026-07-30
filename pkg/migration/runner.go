@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 
@@ -781,6 +782,38 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 			var readStart int
 			readStart, readCeiling = autoscale.ReadBounds(vCPUs)
 			writeStart := autoscale.WriteStart(vCPUs)
+
+			// Both derivations above size the pools from the target. That
+			// assumes a worker is mostly waiting on the server, which stops
+			// being true when spirit's own host is small — a worker also builds
+			// its statement locally, which is pure client CPU. Take the client
+			// ceiling so a small pod cannot derive a thread count it has no
+			// cores to run: the excess would add queueing and latency, and
+			// nothing on the target side can see it (its CPU and commit latency
+			// both read idle while spirit is the one saturated).
+			//
+			// Applied to the derived numbers only. An explicitly configured
+			// --threads/--write-threads above this is the caller's decision and
+			// is warned about, not overridden, below.
+			clientCeiling := autoscale.ClientCeiling()
+			cappedRead, cappedWrite := min(readStart, clientCeiling), min(writeStart, clientCeiling)
+			if cappedRead != readStart || cappedWrite != writeStart {
+				r.logger.Warn("thread counts capped by this host's CPU count: the target would justify more workers than spirit has cores to run them on. Give spirit more CPU to use the target's full capacity",
+					"gomaxprocs", runtime.GOMAXPROCS(0),
+					"client_ceiling", clientCeiling,
+					"read_threads", cappedRead, "instance_read_threads", readStart,
+					"write_threads", cappedWrite, "instance_write_threads", writeStart)
+				readStart, writeStart = cappedRead, cappedWrite
+			}
+			// The read ceiling is capped too, so the checksum does not
+			// pre-create transactions under the table lock for workers this
+			// host cannot drive — that ceiling is paid in lock time whether or
+			// not scaling reaches it. Unconditionally, not just when a start was
+			// clipped: with today's formulas the ceiling cannot exceed the
+			// client ceiling while both starts fit (that would need vCPUs <
+			// MinVCPUs), but that invariant lives in another package, and the
+			// write side's ceiling below is capped unconditionally too.
+			readCeiling = max(min(readCeiling, clientCeiling), readStart)
 			r.logger.Info("autoscaling engaged: thread counts are derived from the instance; --threads and --write-threads are ignored",
 				"vcpus", vCPUs,
 				"read_threads", readStart, "max_read_threads", readCeiling,
@@ -797,6 +830,23 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// ResolveMaxWriteThreads).
 	commitLatencyEnabled := r.migration.MaxCommitLatency > 0
 	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscaleEnabled, redoAware, commitLatencyEnabled)
+	// The autoscaler's ceiling gets the same client-side bound as the start value:
+	// capping the start but letting growth walk past it would just re-arrive at a
+	// thread count this host cannot run, 15 seconds at a time. Never below the
+	// start value, which a pool cannot be controlled beneath.
+	if clientCeiling := autoscale.ClientCeiling(); maxWrite > clientCeiling {
+		maxWrite = max(clientCeiling, r.migration.WriteThreads)
+	}
+	// Configured counts are not overridden — an operator who names a number owns
+	// it — but the mismatch is worth saying once, since the symptom (flat
+	// throughput as threads rise, with an idle-looking target) is hard to read.
+	if configured := max(r.migration.Threads, r.migration.WriteThreads); configured > autoscale.ClientCeiling() {
+		r.logger.Warn("configured thread count is high for this host's CPU count; the extra workers may add latency without throughput",
+			"gomaxprocs", runtime.GOMAXPROCS(0),
+			"client_ceiling", autoscale.ClientCeiling(),
+			"threads", r.migration.Threads,
+			"write_threads", r.migration.WriteThreads)
+	}
 	// The read side's ceiling is half the instance when autoscaling engaged above
 	// (autoscale.ReadBounds). The pool below is sized for it, since readers scaled
 	// above the connection budget would just queue on the sql.DB pool, buying no
@@ -828,7 +878,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// the two phases reuse one allocation rather than each needing their own.
 	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
-		r.db.SetMaxOpenConns(poolSize)
+		dbconn.SetPoolSize(r.db, poolSize)
 	}
 
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
@@ -1633,7 +1683,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 	// applies, and the only thing left is cutover, which itself wants at
 	// least 5 connections. Pool size grows monotonically; see the
 	// MaxOpenConnections doc in (*Runner).Run.
-	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
+	dbconn.SetPoolSize(r.db, r.dbConfig.MaxOpenConnections+2)
 
 	// Run the checksum with internal retry logic.
 	//
