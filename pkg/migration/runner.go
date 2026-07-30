@@ -804,12 +804,16 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 					"read_threads", cappedRead, "instance_read_threads", readStart,
 					"write_threads", cappedWrite, "instance_write_threads", writeStart)
 				readStart, writeStart = cappedRead, cappedWrite
-				// The read ceiling is capped too, so the checksum does not
-				// pre-create transactions under the table lock for workers this
-				// host cannot drive — that ceiling is paid in lock time whether
-				// or not scaling reaches it.
-				readCeiling = max(min(readCeiling, clientCeiling), readStart)
 			}
+			// The read ceiling is capped too, so the checksum does not
+			// pre-create transactions under the table lock for workers this
+			// host cannot drive — that ceiling is paid in lock time whether or
+			// not scaling reaches it. Unconditionally, not just when a start was
+			// clipped: with today's formulas the ceiling cannot exceed the
+			// client ceiling while both starts fit (that would need vCPUs <
+			// MinVCPUs), but that invariant lives in another package, and the
+			// write side's ceiling below is capped unconditionally too.
+			readCeiling = max(min(readCeiling, clientCeiling), readStart)
 			r.logger.Info("autoscaling engaged: thread counts are derived from the instance; --threads and --write-threads are ignored",
 				"vcpus", vCPUs,
 				"read_threads", readStart, "max_read_threads", readCeiling,

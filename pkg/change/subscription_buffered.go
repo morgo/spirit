@@ -299,10 +299,13 @@ func sizeOfQueuedChange(c queuedChange) int64 {
 // (or key tuple) will occupy once the applier renders it into a SQL
 // statement. Binary values hex-encode at two characters per byte and quoted
 // strings can double under escaping, so variable-width values are counted at
-// twice their in-memory length; scalars render as short literals. Mirrors
-// the copy path's estimateRowSize (pkg/applier): deliberately approximate,
-// because the applier.MaxStatementSizeBytes budget it feeds is conservative
-// against the typical 64 MiB max_allowed_packet.
+// twice their in-memory length; scalars render as short literals. Feeds the
+// same applier.MaxStatementSizeBytes budget as the copy path's estimator
+// (pkg/applier estimateValueSize) but with the opposite bias: that one counts
+// variable-width values at 1x and leans on the budget's ~64x headroom below
+// max_allowed_packet, while this one stays pessimistic — a flush batch cut
+// short only costs an extra statement, and the binlog path has no throughput
+// reason to run the estimate hot.
 func estimateRenderedBytes(values []any) int64 {
 	var n int64 = 2 // parentheses around the tuple
 	for _, v := range values {

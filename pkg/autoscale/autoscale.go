@@ -161,9 +161,11 @@ func CeilDiv(n, d int) int {
 // prevent is the order-of-magnitude one: spirit on a 4-core pod deriving 94
 // write threads from a 96-vCPU target, where ~7 threads' worth of work actually
 // progressed and the other 87 only added queueing and latency. That is ~23
-// threads per core; capping it at 64 still cuts it by a third while leaving a
-// 16-core host (256) clear of every derivation for targets up to 192 vCPUs,
-// growth ceilings included.
+// threads per core; capping it at 64 still cuts it by a third, while a 16-core
+// host (256) clears every derivation for targets up to 128 vCPUs, growth
+// ceilings included. The growth ceiling is what binds, not the start: the
+// largest size in the docs' table (192 vCPUs -> 190 write threads growing to
+// 380) needs 24 cores to be fully unconstrained. TestClientCeiling pins both.
 //
 // The ratio has to sit well above the healthy operating point, not near it.
 // Measured on 16 cores: ~99 write workers, 6.2 per core, with local CPU not
