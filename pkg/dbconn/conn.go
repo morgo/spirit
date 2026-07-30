@@ -24,7 +24,6 @@ const (
 	requiredTLSConfigName = "required"
 	verifyCATLSConfigName = "verify_ca"
 	verifyIDTLSConfigName = "verify_identity"
-	maxIdleConns          = 10
 )
 
 // maxConnLifetime is the default maximum lifetime for pooled connections.
@@ -33,6 +32,30 @@ const (
 // the advisory lock's GET_LOCK) are deliberately exempted from this limit —
 // see NewAdvisoryLock.
 var maxConnLifetime = time.Minute * 3
+
+// SetPoolSize sets a pool's connection limit, keeping the idle limit equal to
+// it. Both must move together: database/sql closes a connection returned to a
+// pool whose free list already holds MaxIdleConns entries, so an idle limit
+// below the open limit turns every release past that point into a close and
+// every subsequent acquire into a fresh dial, TLS handshake and MySQL auth.
+// The copy phase is exactly that workload — up to a few hundred write and read
+// workers cycling connections continuously — and the churn is invisible in the
+// status line, which reports only Stats().InUse.
+//
+// Holding the connections idle instead costs nothing the caller has not
+// already reserved: SetMaxOpenConns is the budget, and this only stops the pool
+// from throwing away what it is entitled to keep. Note that connections are
+// still recycled on maxConnLifetime, which this does not change.
+//
+// n <= 0 means unlimited to SetMaxOpenConns; pass it through unchanged (and
+// leave the idle limit alone, since "unlimited idle" is not expressible) rather
+// than silently reinterpreting it.
+func SetPoolSize(db *sql.DB, n int) {
+	db.SetMaxOpenConns(n)
+	if n > 0 {
+		db.SetMaxIdleConns(n)
+	}
+}
 
 // rdsAddr matches Amazon RDS hostnames with optional :port suffix.
 // It's used to automatically load the Amazon RDS CA and enable TLS.
@@ -356,9 +379,8 @@ func NewWithConnectionType(inputDSN string, config *DBConfig, connectionType str
 		if db != nil && err == nil { // successful connection
 			// There are many different ways we create a DB connection.
 			// Ensure we change conn settings in all code paths.
-			db.SetMaxOpenConns(config.MaxOpenConnections)
+			SetPoolSize(db, config.MaxOpenConnections)
 			db.SetConnMaxLifetime(maxConnLifetime)
-			db.SetMaxIdleConns(maxIdleConns)
 		}
 	}()
 	// For PREFERRED mode, implement fallback behavior
