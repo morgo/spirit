@@ -878,7 +878,7 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// the two phases reuse one allocation rather than each needing their own.
 	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
-		r.db.SetMaxOpenConns(poolSize)
+		dbconn.SetPoolSize(r.db, poolSize)
 	}
 
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
@@ -1683,7 +1683,7 @@ func (r *Runner) checksum(ctx context.Context) error {
 	// applies, and the only thing left is cutover, which itself wants at
 	// least 5 connections. Pool size grows monotonically; see the
 	// MaxOpenConnections doc in (*Runner).Run.
-	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
+	dbconn.SetPoolSize(r.db, r.dbConfig.MaxOpenConnections+2)
 
 	// Run the checksum with internal retry logic.
 	//

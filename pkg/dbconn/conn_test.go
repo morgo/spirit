@@ -3,6 +3,7 @@ package dbconn
 import (
 	"context"
 	"crypto/x509"
+	"database/sql"
 	"encoding/pem"
 	"fmt"
 	"testing"
@@ -151,6 +152,59 @@ func TestNewConn(t *testing.T) {
 	db, err = New("root:wrongpassword@tcp(127.0.0.1)/doesnotexist", NewDBConfig())
 	require.Error(t, err)
 	require.Nil(t, db)
+}
+
+// TestSetPoolSizeKeepsIdleWithOpen pins the reason SetPoolSize exists: an idle
+// limit below the open limit makes database/sql close connections on release
+// and redial on the next acquire, which during the copy phase is continuous
+// churn against the target. The two limits must move together at every call
+// site, including the ones that ratchet a pool after it was created.
+func TestSetPoolSizeKeepsIdleWithOpen(t *testing.T) {
+	db, err := New(testutils.DSN(), NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// New() itself must not leave the pool churning: the default open limit is
+	// 32, so a pool that retains only the old hardcoded 10 would fail here.
+	require.Equal(t, 32, db.Stats().MaxOpenConnections)
+	require.Equal(t, 16, idleAfterCycling(t, db, 16))
+
+	SetPoolSize(db, 20)
+	require.Equal(t, 20, db.Stats().MaxOpenConnections)
+	require.Equal(t, 20, idleAfterCycling(t, db, 20),
+		"a ratcheted pool must retain everything it is allowed to open")
+
+	// Shrinking (the cutover path) applies to both, so a smaller pool does not
+	// retain more idle connections than it may open.
+	SetPoolSize(db, 5)
+	require.Equal(t, 5, db.Stats().MaxOpenConnections)
+	require.Equal(t, 5, idleAfterCycling(t, db, 5))
+
+	// Non-positive means unlimited to SetMaxOpenConns. The idle limit is left
+	// alone rather than set to a nonsense value, since database/sql has no
+	// "unlimited idle" setting.
+	SetPoolSize(db, 0)
+	require.Equal(t, 0, db.Stats().MaxOpenConnections)
+	require.Equal(t, 5, idleAfterCycling(t, db, 8),
+		"a non-positive size must leave the idle limit untouched")
+}
+
+// idleAfterCycling opens n connections, returns them all, and reports how many
+// the pool kept. database/sql does not expose MaxIdleConns, but it discards
+// anything returned beyond that limit, so the retained count is min(n,
+// MaxIdleConns) — which is exactly the churn behaviour under test.
+func idleAfterCycling(t *testing.T, db *sql.DB, n int) int {
+	t.Helper()
+	conns := make([]*sql.Conn, 0, n)
+	for range n {
+		c, err := db.Conn(t.Context())
+		require.NoError(t, err)
+		conns = append(conns, c)
+	}
+	for _, c := range conns {
+		require.NoError(t, c.Close())
+	}
+	return db.Stats().Idle
 }
 
 func TestNewConnRejectsReadOnlyConnections(t *testing.T) {
