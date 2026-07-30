@@ -594,10 +594,10 @@ func (r *Runner) setupUnderLocks(ctx context.Context) error {
 	if poolSize := r.move.Threads + r.move.WriteThreads + 2; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		for i := range r.sources {
-			r.sources[i].db.SetMaxOpenConns(poolSize)
+			dbconn.SetPoolSize(r.sources[i].db, poolSize)
 		}
 		for i := range r.targets {
-			r.targets[i].DB.SetMaxOpenConns(poolSize)
+			dbconn.SetPoolSize(r.targets[i].DB, poolSize)
 		}
 	}
 

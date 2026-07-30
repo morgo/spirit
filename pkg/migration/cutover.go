@@ -86,7 +86,7 @@ func (c *CutOver) Run(ctx context.Context) error {
 		// Pool size grows monotonically and is not restored — the
 		// migration ends after cutover, so there is nothing to shrink
 		// back for. See the MaxOpenConnections doc in (*Runner).Run.
-		c.db.SetMaxOpenConns(5)
+		dbconn.SetPoolSize(c.db, 5)
 	}
 	// Collect every attempt's error and join them on exit, so an operator
 	// debugging a flapping cutover sees the full failure history rather
