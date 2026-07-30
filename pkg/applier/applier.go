@@ -21,17 +21,19 @@ const (
 	// completion, one handoff through the single feedbackCoordinator — so this
 	// sets how much per-chunklet overhead is paid per row copied.
 	//
-	// Raised from 1000 so that MaxStatementSizeBytes is the limit that normally
-	// binds. At 1000 the row cap was cutting first for any table narrower than
-	// ~1 KiB/row (measured: ~928 rows per chunklet against a 476-660 byte row),
-	// which meant chunklet size was set by a row count that has no relationship
-	// to the cost of the statement. Sizing by bytes instead means a wide table
-	// gets fewer rows per statement and a narrow one more, which is the actual
-	// shape of the work.
-	chunkletMaxRows = 4096
+	// This was briefly raised to 4096 (with a 2 MiB byte budget) on the theory
+	// that the row cap was binding and per-chunklet overhead was worth
+	// amortizing further. Stats().RowsPerChunklet settled both halves against
+	// it: the byte cap was already the one binding (~700 rows on a ~1500-byte
+	// estimated row, well under 1000), and per-chunklet overhead is only ~11%
+	// of a write worker's cycle — the other 89% is per-*row* statement
+	// building. Doubling the chunklet cost buffered memory and queue
+	// granularity for nothing. Worth re-testing only if the per-row cost ever
+	// stops dominating.
+	chunkletMaxRows = 1000
 
 	// MaxStatementSizeBytes is the byte budget for the estimated rendered
-	// size of a single multi-row DML statement (2 MiB). Both write paths
+	// size of a single multi-row DML statement (1 MiB). Both write paths
 	// batch against it: the copy path splits chunks into chunklets
 	// (splitRowsIntoChunklets) and the binlog-apply path cuts flush
 	// batches (pkg/change) so a REPLACE/DELETE can't grow unbounded with
@@ -41,12 +43,17 @@ const (
 	// which is larger for anything quoted or hex-encoded — and a single
 	// row larger than the budget still goes in its own statement.
 	//
+	// This is normally the cap that binds, not chunkletMaxRows: at a measured
+	// ~1500 estimated bytes per row it cuts around 700 rows. Stats()
+	// .RowsPerChunklet reports which one is actually in force, so neither has
+	// to be guessed at.
+	//
 	// One bound to respect when changing this: chunklets must keep the write
 	// pool fed, so chunks-in-flight x chunklets-per-chunk has to stay above the
 	// write worker count. With a 16 MiB target chunk and ~22 chunks in flight
-	// that leaves room for roughly 8x this budget before large pools start
+	// that leaves room for roughly 16x this budget before large pools start
 	// starving.
-	MaxStatementSizeBytes = 2 * 1024 * 1024
+	MaxStatementSizeBytes = 1024 * 1024
 
 	defaultBufferSize   = 128              // Size of the shared buffer channel for chunklets
 	defaultWriteWorkers = 2                // Number of write workers, default low for tests, but in practice we can use 40+
