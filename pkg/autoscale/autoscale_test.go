@@ -51,11 +51,12 @@ func TestCeilDiv(t *testing.T) {
 	assert.Equal(t, 4, CeilDiv(8, 2))
 }
 
-// TestVCPUReserve pins the reserve and the write-side vCPU->threads mapping it
-// produces (including the floor at 1). The migration runner applies it as
-// max(1, vCPUs-VCPUReserve) when autoscaling engages; that path needs a real
-// Aurora instance to reach, so the arithmetic is pinned here instead.
-func TestVCPUReserve(t *testing.T) {
+// TestWriteStart pins the write-side vCPU->threads mapping, including the floor
+// at 1 and the reserve it subtracts. The migration runner only reaches this on a
+// real Aurora instance, so the arithmetic is pinned here — calling WriteStart
+// rather than restating its expression, so the test can actually fail if the
+// production formula changes.
+func TestWriteStart(t *testing.T) {
 	assert.Equal(t, 2, VCPUReserve, "the reserve is documented as 2 vCPUs in migrate.md and pkg/autoscale/README.md")
 	for _, tc := range []struct {
 		vCPUs, want int
@@ -65,9 +66,10 @@ func TestVCPUReserve(t *testing.T) {
 		{3, 1},
 		{4, 2},
 		{8, 6},
-		{96, 94},
+		{96, 94}, // the 24xlarge in docs/migrate.md's sizing table
+		{192, 190},
 	} {
-		assert.Equalf(t, tc.want, max(1, tc.vCPUs-VCPUReserve), "vCPUs=%d", tc.vCPUs)
+		assert.Equalf(t, tc.want, WriteStart(tc.vCPUs), "vCPUs=%d", tc.vCPUs)
 	}
 }
 

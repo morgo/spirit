@@ -144,6 +144,17 @@ func CeilDiv(n, d int) int {
 	return (n + d - 1) / d
 }
 
+// WriteStart returns the starting size for the apply (write) pool on an instance
+// of the given vCPU count: the whole instance less VCPUReserve, floored at one.
+//
+// There is no matching WriteCeiling here because the write side's upper bound is
+// not purely a function of the instance — it also depends on which load signal
+// the throttler picked and whether the commit-latency backstop is armed. That
+// rule lives with the throttler, in ResolveMaxWriteThreads.
+func WriteStart(vCPUs int) int {
+	return max(1, vCPUs-VCPUReserve)
+}
+
 // ReadBounds returns the starting size and ceiling for a read-side pool — the
 // copier's read workers and the checksum's workers — on an instance of the given
 // vCPU count: start at about a quarter of the instance, grow to at most half of

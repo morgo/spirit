@@ -3,7 +3,6 @@ package migration
 import (
 	"testing"
 
-	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/stretchr/testify/require"
 )
@@ -35,8 +34,8 @@ func TestControlPlaneConns(t *testing.T) {
 // read a vCPU count from. autoscale.ReadBounds covers the sizing it derives, and
 // the assertion below covers the branch that decides whether to apply it.
 func TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage(t *testing.T) {
-	testutils.RunSQL(t, `DROP TABLE IF EXISTS autoscale_flags, _autoscale_flags_new`)
-	testutils.RunSQL(t, `CREATE TABLE autoscale_flags (id INT NOT NULL PRIMARY KEY, pad VARCHAR(32))`)
+	testutils.NewTestTable(t, "autoscale_flags",
+		`CREATE TABLE autoscale_flags (id INT NOT NULL PRIMARY KEY, pad VARCHAR(32))`)
 	testutils.RunSQL(t, `INSERT INTO autoscale_flags VALUES (1, 'a'), (2, 'b')`)
 
 	// Values distinct from both the defaults and each other, so an override
@@ -51,14 +50,14 @@ func TestAutoscalingLeavesThreadFlagsAloneWhenItCannotEngage(t *testing.T) {
 		"--threads must survive an autoscaling request that could not engage")
 	require.Equal(t, writeThreads, m.migration.WriteThreads,
 		"--write-threads must survive an autoscaling request that could not engage")
-	// The connection budget is still derived from the flags — 2x each, the
-	// ceiling the controller could have reached had a signal appeared — rather
-	// than from an instance vCPU count that was never read. Over-budgeting
-	// connections is harmless; sizing them from a number that does not apply to
-	// this target would not be.
-	require.Equal(t, 2*threads+2*writeThreads+m.controlPlaneConns()+checksumOffPoolConns,
+	// The connection budget is derived from the flags, not from an instance vCPU
+	// count that was never read. The two pools budget differently on purpose:
+	// the write ceiling is still 2x, because the applier's controller can grow
+	// on any target that gains a gradual signal, while the read term stays at
+	// the flag value — with no instance-derived ceiling the readers cannot grow,
+	// and the checksum pre-creates its whole pool under the table lock, so
+	// provisioning 2x would only lengthen that lock window for capacity nothing
+	// can use.
+	require.Equal(t, threads+2*writeThreads+m.controlPlaneConns()+checksumOffPoolConns,
 		m.dbConfig.MaxOpenConnections)
-	// Sanity-check the guard rather than the numbers: MinVCPUs is what the
-	// engaged path would have consulted.
-	require.Positive(t, autoscale.MinVCPUs)
 }

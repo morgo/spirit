@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,6 +17,12 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/pingcap/tidb/pkg/parser"
 )
+
+// defaultWriteThreads must match the `default:"4"` kong tag on
+// Migration.WriteThreads, so a programmatic caller that leaves the field unset
+// lands on the same value the CLI does. Move keeps its own copy against its own
+// tag (pkg/move), since the two flags are independently defaulted.
+const defaultWriteThreads = 4
 
 var (
 	defaultHost     = "127.0.0.1"
@@ -162,8 +169,18 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 	if m.Threads == 0 {
 		m.Threads = 4
 	}
-	if m.WriteThreads == 0 {
-		m.WriteThreads = 4
+	// A non-positive WriteThreads is filled in rather than rejected, matching
+	// Threads above. Zero used to mean "auto-size from the instance", so anyone
+	// who adopted that opt-in would otherwise see their apply pool quietly drop
+	// from the instance vCPU count to 4 — warn, and name the flag that replaced
+	// it. (Kong's default is 4, so a literal 0 was either passed explicitly or
+	// left unset by a programmatic caller.)
+	if m.WriteThreads <= 0 {
+		if m.WriteThreads == 0 {
+			slog.Default().Warn("--write-threads 0 no longer means auto-size; using the default. Pass --enable-experimental-autoscaling for instance-derived thread counts",
+				"write_threads", defaultWriteThreads)
+		}
+		m.WriteThreads = defaultWriteThreads
 	}
 	if m.ReplicaMaxLag == 0 {
 		m.ReplicaMaxLag = 120 * time.Second

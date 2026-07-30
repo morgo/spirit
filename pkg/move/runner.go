@@ -183,10 +183,17 @@ func NewRunner(m *Move) (*Runner, error) {
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
 	}
-	// WriteThreads has no "0 means auto" meaning, so a zero here is an
-	// unset field from a programmatic caller rather than a request. Fill in the
-	// Kong default; move does not autoscale, so nothing downstream would.
-	if m.WriteThreads == 0 {
+	// WriteThreads has no "0 means auto" meaning any more, so fill in the Kong
+	// default; move does not autoscale, so nothing downstream would. Non-positive
+	// rather than zero: MaxOpenConnections is Threads + WriteThreads + 2 below, and
+	// a negative count would make that negative, which SetMaxOpenConns reads as
+	// *unlimited*. Warn on an explicit 0, which used to mean "size from the
+	// instance" and would otherwise silently become 4.
+	if m.WriteThreads <= 0 {
+		if m.WriteThreads == 0 {
+			slog.Default().Warn("--write-threads 0 no longer means auto-size; using the default",
+				"write_threads", defaultWriteThreads)
+		}
 		m.WriteThreads = defaultWriteThreads
 	}
 	r := &Runner{
