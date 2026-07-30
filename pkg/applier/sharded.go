@@ -555,20 +555,29 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	columnList, _ := chunkletData.chunk.ColumnMapping.Columns()
 	columnNames, _ := chunkletData.chunk.ColumnMapping.ColumnsSlice()
 
+	// Resolve each column's type once per chunklet, not once per value — the
+	// type is a property of the column, and the parse dominated the build.
+	// See the SingleTargetApplier's writeChunklet for the measurement.
+	targetTable := chunkletData.chunk.ColumnMapping.TargetTable()
+	colTypes := make([]table.ColumnType, len(columnNames))
+	for i, colName := range columnNames {
+		typeStr, ok := targetTable.GetColumnMySQLType(colName)
+		if !ok {
+			return 0, time.Since(buildStart), fmt.Errorf("column %s not found in table info", colName)
+		}
+		colTypes[i] = table.NewColumnType(typeStr)
+	}
+
 	// Build VALUES clauses for all rows in the chunklet
-	var valuesClauses []string
+	valuesClauses := make([]string, 0, len(chunkletData.rows))
+	values := make([]string, len(columnNames))
 	for _, row := range chunkletData.rows {
 		if len(columnNames) != len(row.values) {
 			return 0, time.Since(buildStart), fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
 				chunkletData.chunk.String(), len(columnNames), len(row.values))
 		}
-		var values []string
 		for i, value := range row.values {
-			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
-			if !ok {
-				return 0, time.Since(buildStart), fmt.Errorf("column %s not found in table info", columnNames[i])
-			}
-			datum, err := table.NewDatumFromValue(value, columnType)
+			datum, err := table.NewDatumFromValueWithType(value, colTypes[i])
 			if err != nil {
 				return 0, time.Since(buildStart), fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
 			}
@@ -576,9 +585,9 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 			// (NULL, a numeric, 0x… hex, or a "..."-quoted string). Safe
 			// to concatenate into the VALUES clause as-is — see the
 			// contract on Datum.String.
-			values = append(values, datum.String())
+			values[i] = datum.String()
 		}
-		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
+		valuesClauses = append(valuesClauses, "("+strings.Join(values, ", ")+")")
 	}
 
 	// Build the INSERT statement
