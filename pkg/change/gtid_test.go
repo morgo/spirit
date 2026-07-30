@@ -38,6 +38,69 @@ func TestSyncerConfigDecodeOptions(t *testing.T) {
 	for name, cfg := range configs {
 		require.Equal(t, time.UTC, cfg.TimestampStringLocation, "%s client must decode TIMESTAMP values in UTC", name)
 		require.True(t, cfg.RenderJSONAsMySQLText, "%s client must render JSON as MySQL text", name)
+		require.NotNil(t, cfg.RowsEventDecodeFunc, "%s client must skip row-image decoding for unsubscribed tables (see newRowsEventDecodeFunc)", name)
+	}
+}
+
+// TestRowsEventDecodeFuncSkipsUnsubscribed drives the decode filter directly:
+// events for tables without a subscription must get their header decoded (the
+// table name and LogPos come from there) but not their row images, and the
+// stopped flag must short-circuit everything. This is the fast path that keeps
+// the stream from re-decoding spirit's own _new-table writes during the copy.
+func TestRowsEventDecodeFuncSkipsUnsubscribed(t *testing.T) {
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS decodefilter_t1, decodefilter_t2, decodefilter_noise")
+	testutils.RunSQL(t, "CREATE TABLE decodefilter_t1 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE decodefilter_t2 (a INT NOT NULL, b INT, PRIMARY KEY (a))")
+	// decodefilter_noise stands in for the _new table: high write volume with
+	// no subscription.
+	testutils.RunSQL(t, "CREATE TABLE decodefilter_noise (a INT NOT NULL AUTO_INCREMENT, b VARCHAR(255), PRIMARY KEY (a))")
+
+	t1 := table.NewTableInfo(db, "test", "decodefilter_t1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "decodefilter_t2")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+
+	for _, mode := range []string{"binlog", "gtid"} {
+		t.Run(mode, func(t *testing.T) {
+			// Each mode replays the same statements; start from empty tables.
+			testutils.RunSQL(t, "DELETE FROM decodefilter_t1")
+			testutils.RunSQL(t, "DELETE FROM decodefilter_t2")
+			var client Source
+			if mode == "gtid" {
+				client = NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
+			} else {
+				client = NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
+			}
+			chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+			require.NoError(t, err)
+			require.NoError(t, client.AddSubscription(t1, t2, chunker))
+			require.NoError(t, client.Start(t.Context()))
+			defer client.Close()
+
+			// Interleave unsubscribed noise around subscribed changes. The
+			// noise events must be skipped without desyncing the stream:
+			// position keeps advancing and the t1 deltas still flush.
+			testutils.RunSQL(t, "INSERT INTO decodefilter_noise (b) VALUES (REPEAT('x', 200)), (REPEAT('y', 200))")
+			testutils.RunSQL(t, "INSERT INTO decodefilter_t1 (a, b) VALUES (1, 1)")
+			testutils.RunSQL(t, "INSERT INTO decodefilter_noise (b) SELECT b FROM decodefilter_noise")
+			testutils.RunSQL(t, "UPDATE decodefilter_t1 SET b = 2 WHERE a = 1")
+			testutils.RunSQL(t, "INSERT INTO decodefilter_noise (b) SELECT b FROM decodefilter_noise")
+
+			require.NoError(t, client.BlockWait(t.Context()))
+			require.Equal(t, 1, client.GetDeltaLen(), "t1's insert+update collapse to one key")
+			require.NoError(t, client.Flush(t.Context()))
+
+			var b int
+			require.NoError(t, db.QueryRowContext(t.Context(), "SELECT b FROM decodefilter_t2 WHERE a = 1").Scan(&b))
+			require.Equal(t, 2, b, "the subscribed table's latest image must flush despite surrounding skipped events")
+		})
 	}
 }
 
