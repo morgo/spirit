@@ -601,6 +601,7 @@ func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error { retur
 func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)    {}
 func (f *fakeFeed) StopPeriodicFlush()                                   {}
 func (f *fakeFeed) AllChangesFlushed() bool                              { return true }
+func (f *fakeFeed) Stop()                                                {}
 func (f *fakeFeed) Close()                                               {}
 
 // TestDivergenceIsFatalReconcilesApplyLag is the regression test for the

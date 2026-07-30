@@ -53,6 +53,9 @@ type gtidClient struct {
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
 
+	// stopped mirrors binlogClient.stopped; see Stop.
+	stopped atomic.Bool
+
 	serverID uint32
 
 	// bufferedGTID is everything we have seen from the stream and either
@@ -845,6 +848,10 @@ func (c *gtidClient) processTransactionPayload(e *replication.TransactionPayload
 
 // processDDLNotification mirrors binlogClient.processDDLNotification.
 func (c *gtidClient) processDDLNotification(schema, table string) {
+	if c.stopped.Load() {
+		// Post-cutover; see Source.Stop.
+		return
+	}
 	if c.ddlFilterSchema != "" {
 		if schema != c.ddlFilterSchema {
 			return
@@ -886,6 +893,10 @@ func (c *gtidClient) processDDLNotification(schema, table string) {
 
 // processRowsEvent mirrors binlogClient.processRowsEvent.
 func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
+	if c.stopped.Load() {
+		// Post-cutover; see Source.Stop and binlogClient.processRowsEvent.
+		return nil
+	}
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
 	sub, ok := c.subs.Get(subName)
 	if !ok {
@@ -954,6 +965,14 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 		}
 	}
 	return nil
+}
+
+// Stop mirrors binlogClient.Stop; see Source.Stop.
+func (c *gtidClient) Stop() {
+	if c.stopped.Swap(true) {
+		return
+	}
+	c.logger.Debug("change stream stopped; further events will not be dispatched")
 }
 
 // fatalError mirrors binlogClient.fatalError; see the doc comment there.

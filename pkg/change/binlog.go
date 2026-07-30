@@ -64,6 +64,11 @@ type binlogClient struct {
 	ddlFilterSchema  string
 	ddlFilterTables  map[string]struct{}
 
+	// stopped is set once by Stop and read by the stream reader on every event
+	// it would otherwise deliver. Atomic because the two are different
+	// goroutines. Distinct from isClosed, which tears the reader down.
+	stopped atomic.Bool
+
 	serverID    uint32         // server ID for the binlog reader
 	bufferedPos mysql.Position // buffered position
 	flushedPos  mysql.Position // safely written to new table
@@ -714,6 +719,11 @@ func (c *binlogClient) readStream(ctx context.Context) {
 // specific tables within the schema triggers cancellation — this is used for partial
 // moves where only a subset of tables from a schema are being moved.
 func (c *binlogClient) processDDLNotification(schema, table string) {
+	if c.stopped.Load() {
+		// Post-cutover, where spirit's own RENAME TABLE is the DDL we would
+		// otherwise be reporting on ourselves. See Source.Stop.
+		return
+	}
 	if c.ddlFilterSchema != "" {
 		// Schema-level filtering: cancel on DDL in the specified schema.
 		if schema != c.ddlFilterSchema {
@@ -774,6 +784,13 @@ func (c *binlogClient) processDDLNotification(schema, table string) {
 // works the same way for all event types and no reconstruction is needed.
 // If a MINIMAL image slips through we error out.
 func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replication.RowsEvent) error {
+	if c.stopped.Load() {
+		// Post-cutover. The subscription's TableInfo no longer describes the
+		// table this event's name resolves to, so decoding it would fail on a
+		// row image that is perfectly valid for the table that produced it.
+		// See Source.Stop.
+		return nil
+	}
 	subName := encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))
 	sub, ok := c.subs.Get(subName)
 	if !ok {
@@ -917,6 +934,16 @@ func (c *binlogClient) fatalError(reason FatalReason) bool {
 		return c.callerCancelFunc(reason)
 	}
 	return false
+}
+
+// Stop satisfies Source. The reader goroutine keeps running — Close owns
+// teardown — but stops delivering events to subscriptions, which is what makes
+// it cheap enough to call inside cutover's lock window.
+func (c *binlogClient) Stop() {
+	if c.stopped.Swap(true) {
+		return
+	}
+	c.logger.Debug("change stream stopped; further events will not be dispatched")
 }
 
 func (c *binlogClient) Close() {

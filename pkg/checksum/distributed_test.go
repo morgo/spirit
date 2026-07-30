@@ -63,6 +63,7 @@ func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error
 func (s *noopChangeSource) StartPeriodicFlush(context.Context, time.Duration) {}
 func (s *noopChangeSource) StopPeriodicFlush()                                {}
 func (s *noopChangeSource) AllChangesFlushed() bool                           { return true }
+func (s *noopChangeSource) Stop()                                             {}
 func (s *noopChangeSource) Close()                                            {}
 
 func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {
