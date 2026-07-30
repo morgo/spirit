@@ -60,8 +60,13 @@ type ShardedApplier struct {
 	// does not need per-shard attribution.
 	timings timingRing
 
-	// splits accumulates the chunklet/row counts behind Stats.RowsPerChunklet,
-	// summed across shards — the split rule is global, not per shard.
+	// splits accumulates the chunklet/row counts behind Stats.RowsPerChunklet.
+	// The caps (chunkletMaxRows/MaxStatementSizeBytes) are global, but the
+	// splitting itself happens per shard: Apply routes rows to shards first and
+	// then calls splitRowsIntoChunklets on each shard's share, so one chunk
+	// yields more, shorter chunklets than it would unsharded. The counter sums
+	// those per-shard splits, and the mean is correspondingly lower — see the
+	// caveat on Stats.RowsPerChunklet.
 	splits splitCounter
 
 	// State management to make Start/Stop idempotent

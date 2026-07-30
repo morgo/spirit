@@ -134,7 +134,7 @@ The four phases together account for a write worker's whole cycle, which is what
 
 The distinction matters because only *write time minus build time* is the target's write capacity. A pipeline that stops responding to added write workers looks identical in the aggregate whether the ceiling is the server, spirit's CPU, or the completion path; these four separate those cases. Note that a worker holds no connection during build or handoff, so `conns-in-use` on the runner status line sitting well below the worker count is the same observation from the other side.
 
-`Stats().RowsPerChunklet` (mean rows per chunklet since start) reports which chunklet cap — row count or byte budget — is actually binding for this table, which cannot be read off the config: it depends on the table's width and column types. Tuning the cap that *isn't* binding is a no-op.
+`Stats().RowsPerChunklet` (mean rows per chunklet since start) reports which chunklet cap — row count or byte budget — is actually binding for this table, which cannot be read off the config: it depends on the table's width and column types. Tuning the cap that *isn't* binding is a no-op. One caveat when reading it: the mean also drops when `Apply()` batches are small (every chunk's remainder is a short chunklet), and on the sharded applier the same chunk is split per shard after fan-out, producing more, shorter chunklets. The row-cap-vs-byte-cap reading is sound on the copy path's large steady-state batches; a mean at the row cap always means the row cap binds.
 
 
 ## Implementation Details

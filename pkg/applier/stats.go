@@ -39,8 +39,15 @@ type Stats struct {
 	// config, only measured. It matters because the chunklet is the unit of
 	// nearly everything on the write path: one statement, one completion, one
 	// handoff. A value at chunkletMaxRows means the row cap binds and raising
-	// MaxStatementSizeBytes would do nothing; below it means the byte cap binds
-	// and raising chunkletMaxRows would do nothing.
+	// MaxStatementSizeBytes would do nothing.
+	//
+	// A value below the row cap does NOT by itself mean the byte cap binds:
+	// the mean also drops when the batches handed to Apply() are small — each
+	// chunk's remainder is a short chunklet, and on the sharded applier a
+	// chunk is split per shard *after* fan-out, so the same chunk yields more,
+	// shorter chunklets. The caps-question reading is only sound on the copy
+	// path's large steady-state batches, where the remainder is noise; there,
+	// well below the row cap means the byte cap is what's cutting.
 	//
 	// A mean rather than a percentile: the question is which cap is in force,
 	// which the mean answers, and the last chunklet of every chunk is a short
