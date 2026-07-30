@@ -275,6 +275,27 @@ func TestTrimAlter(t *testing.T) {
 	require.Equal(t, "add column a, add column b", stmt.TrimAlter())
 }
 
+func TestMixedOperationsLogic(t *testing.T) {
+	// Test complex scenarios for the AlgorithmInplaceConsideredSafe logic
+	var testInplace = func(stmt string) error {
+		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlgorithmInplaceConsideredSafe()
+	}
+
+	// Multiple VARCHAR modifications should be safe
+	require.NoError(t, testInplace("modify `a` varchar(100), modify `b` varchar(200)"))
+	require.NoError(t, testInplace("change column `a` `a` varchar(50), change column `b` `b` varchar(75)"))
+
+	// Mixed VARCHAR and non-VARCHAR should be unsafe
+	require.ErrorIs(t, testInplace("modify `a` varchar(100), modify `b` int"), ErrMultipleAlterClauses)
+	require.ErrorIs(t, testInplace("change column `a` `a` varchar(50), change column `b` `b` text"), ErrMultipleAlterClauses)
+
+	// Complex mixed operations that should be safe (all metadata-only)
+	require.NoError(t, testInplace("ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` varchar(100)"))
+
+	// Complex mixed operations that should be unsafe (contains table-rebuilding)
+	require.ErrorIs(t, testInplace("ALTER INDEX a INVISIBLE, rename index `b` to `new_b`, modify `col` int"), ErrMultipleAlterClauses)
+}
+
 func TestNewWithOptions(t *testing.T) {
 	// Default behavior: mixed statement types are rejected
 	_, err := New("CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT)")
