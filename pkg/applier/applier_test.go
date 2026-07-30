@@ -1,7 +1,10 @@
 package applier
 
 import (
+	"math"
 	"testing"
+
+	"github.com/block/spirit/pkg/table"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,8 +31,8 @@ func TestEstimateRowSize(t *testing.T) {
 		{
 			name:    "single integer",
 			values:  []any{int64(123)},
-			minSize: 6, // "123" + overhead
-			maxSize: 10,
+			minSize: 6,
+			maxSize: 20, // flat 10-digit assumption + overhead, not the rendered "123"
 		},
 		{
 			name:    "single string",
@@ -47,7 +50,7 @@ func TestEstimateRowSize(t *testing.T) {
 			name:    "mixed types",
 			values:  []any{int64(42), "test", nil, true, 3.14},
 			minSize: 20, // sum of all values + overhead
-			maxSize: 50,
+			maxSize: 60,
 		},
 		{
 			name:    "large string",
@@ -65,12 +68,17 @@ func TestEstimateRowSize(t *testing.T) {
 			name:    "multiple columns",
 			values:  []any{int64(1), "Alice", "alice@example.com", int64(25), true},
 			minSize: 30,
-			maxSize: 60,
+			maxSize: 80,
 		},
 		{
+			// A full-width int64 is the case the flat integer estimate
+			// deliberately under-measures: ~20 rendered characters estimated as
+			// 10. See TestEstimateRowSizeUnderestimateStaysSafe for why that is
+			// acceptable, and estimateValueSize for why it is preferred to
+			// over-estimating every ordinary ID.
 			name:    "large integers",
 			values:  []any{int64(9223372036854775807), int64(-9223372036854775808)},
-			minSize: 38, // 19 digits each + overhead
+			minSize: 20,
 			maxSize: 60,
 		},
 		{
@@ -394,4 +402,81 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 		require.Equal(t, 5, totalRows, "all rows should be in chunklets")
 		t.Logf("Created %d chunklets for 5 rows (including one 2 MiB row)", len(chunklets))
 	})
+}
+
+// TestEstimateRowSizeTracksRenderedSize is the property that matters: the
+// estimate feeds MaxStatementSizeBytes, so it has to stay in the same
+// ballpark as what datum.String() actually emits into the VALUES clause.
+//
+// The previous implementation measured len(fmt.Sprintf("%v", v)), which drifted
+// badly once you account for how values actually arrive: a text-protocol Scan
+// into *any returns []byte for every column, and %v renders a []byte as
+// "[49 50 51 …]" — about four characters per byte. That over-estimated by
+// ~2.7x, so chunklets were cut well short of the budget they were sized for,
+// and nothing failed because an over-estimate is safe. This pins the direction
+// as well as the magnitude.
+func TestEstimateRowSizeTracksRenderedSize(t *testing.T) {
+	// Exactly what the driver hands back for a text-protocol row.
+	values := []any{
+		[]byte("298801139"), []byte("4211"), []byte("settled"),
+		[]byte("2026-07-30 15:12:27"), []byte("1234.560000"),
+		[]byte("405b6747-605e-3aa4-909d-69e049a6ed19"), nil,
+	}
+	types := []string{
+		"bigint", "int", "varchar(64)", "timestamp", "decimal(20,6)",
+		"varchar(36)", "int",
+	}
+
+	rendered := 2
+	for i, v := range values {
+		datum, err := table.NewDatumFromValue(v, types[i])
+		require.NoError(t, err)
+		rendered += len(datum.String()) + 2 // literal plus ", "
+	}
+
+	estimated := estimateRowSize(values)
+	ratio := float64(estimated) / float64(rendered)
+	assert.InDelta(t, 1.0, ratio, 0.5,
+		"estimate %d vs rendered %d (%.2fx) — the estimate has drifted from what is actually emitted",
+		estimated, rendered, ratio)
+
+	// And it must not allocate: this runs on every value of every copied row,
+	// on top of the rendering writeChunklet does anyway.
+	assert.Zero(t, testing.AllocsPerRun(100, func() { _ = estimateRowSize(values) }),
+		"estimateRowSize should not allocate")
+}
+
+// TestEstimateRowSizeUnderestimateStaysSafe pins the safety argument behind
+// three deliberate under-estimates: a []byte bound to a binary column renders
+// as 0x-hex (2 chars/byte), a string grows under escaping, and an integer is
+// assumed to be 10 digits when an int64 can render 20.
+//
+// Each is preferred to padding, because an over-estimate is not free — it
+// shrinks every chunklet, which is the bug this replaced. The reason it is
+// safe is headroom: MaxStatementSizeBytes sits ~64x below a typical
+// max_allowed_packet, so even all three compounding on one pathological row
+// leaves a wide margin.
+func TestEstimateRowSizeUnderestimateStaysSafe(t *testing.T) {
+	// A row built to hit every under-estimating branch at once.
+	worst := []any{
+		int64(math.MaxInt64),                       // 19 rendered, 10 estimated
+		int64(math.MinInt64),                       // 20 rendered, 10 estimated
+		[]byte("\x00\x01\x02\x03\x04\x05\x06\x07"), // hex-renders at 2x
+		`a string with "quotes" and \backslashes\ that escaping will grow`,
+	}
+	estimated := estimateRowSize(worst)
+	require.Positive(t, estimated)
+
+	// Worst-case compounding is bounded by ~2x per value, so a full statement
+	// built at the budget cannot approach a 64 MiB max_allowed_packet.
+	const compoundingFactor = 4 // generous: 2x is the real per-value bound
+	const typicalMaxAllowedPacket = 64 * 1024 * 1024
+	assert.Less(t, MaxStatementSizeBytes*compoundingFactor, typicalMaxAllowedPacket,
+		"the byte budget no longer leaves room for the estimate to under-measure")
+
+	// And the estimate must never return zero or negative for a non-empty row,
+	// which would let splitRowsIntoChunklets build an unbounded statement.
+	for _, v := range worst {
+		assert.Positive(t, estimateValueSize(v), "value %v estimated non-positively", v)
+	}
 }
