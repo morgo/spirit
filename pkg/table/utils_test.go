@@ -142,3 +142,30 @@ func TestExpandRowConstructorComparison(t *testing.T) {
 			OpGreaterThan,
 			[]Datum{{Val: 2, Tp: signedType}, {Val: 2, Tp: signedType}, {Val: 4, Tp: signedType}, {Val: 5, Tp: signedType}}))
 }
+
+// TestWidthRegexpsAreCompiledOnce guards a cost that is invisible from the
+// call site. removeWidth reads like a schema-time helper, but NewColumnType
+// reaches it for every value of every row on the copy path, so compiling the
+// pattern inside the function made type resolution ~14x the cost of building
+// an INSERT statement — visible only as applier-build-p50 dominating
+// applier-write-p50 on a wide table.
+//
+// The exact counts are not the contract; the order of magnitude is. Compiling
+// a pattern per call costs ~40 extra allocations, so these bounds catch a
+// regression without breaking on an unrelated allocation being added or saved.
+func TestWidthRegexpsAreCompiledOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   func()
+	}{
+		{"removeWidth", func() { _ = removeWidth("varchar(255)") }},
+		{"removeDecimalWidth", func() { _ = removeDecimalWidth("decimal(20,6)") }},
+		{"NewColumnType", func() { _ = NewColumnType("varchar(255)") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(200, tc.fn)
+			require.Less(t, allocs, 15.0,
+				"%s looks like it is compiling a regexp per call (was ~48 allocs before the patterns moved to package level)", tc.name)
+		})
+	}
+}
