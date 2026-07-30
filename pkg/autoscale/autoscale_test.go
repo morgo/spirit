@@ -2,6 +2,7 @@ package autoscale
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -250,4 +251,52 @@ func TestLimiterNeverOverAdmits(t *testing.T) {
 	assert.LessOrEqual(t, peak.Load(), int64(maxLimit),
 		"concurrent holders exceeded the highest limit ever set")
 	assert.Equal(t, int64(0), live.Load())
+}
+
+// TestClientCeiling pins the client-side bound and the asymmetry that made the
+// write pool the visible failure: on a small host the derived write start is
+// clipped hard, while the derived read start still fits. Only the read side's
+// room to grow is lost.
+func TestClientCeiling(t *testing.T) {
+	assert.Equal(t, 8, ClientThreadsPerCore,
+		"the ratio is documented in migrate.md and pkg/autoscale/README.md")
+
+	// Derived from GOMAXPROCS, so it tracks a container CPU limit rather than
+	// the machine size (Go 1.25+).
+	assert.Equal(t, ClientThreadsPerCore*runtime.GOMAXPROCS(0), ClientCeiling())
+	assert.Positive(t, ClientCeiling())
+
+	// Against the 96-vCPU target that motivated this: write start 94, read
+	// start 24, read ceiling 48.
+	const target = 96
+	readStart, readCeiling := ReadBounds(target)
+	writeStart := WriteStart(target)
+	require.Equal(t, []int{24, 48, 94}, []int{readStart, readCeiling, writeStart},
+		"guard: the rest of this test reads against these derived values")
+
+	for _, tc := range []struct {
+		cores                                         int
+		clipsWriteStart, clipsReadStart, clipsReadMax bool
+	}{
+		// The 4-core pod that motivated this. Its ceiling of 32 is a third of
+		// the write start, still above the read start, and below the read
+		// ceiling — so the read pool starts at full size but cannot grow.
+		{4, true, false, true},
+		{8, true, false, false},   // 64: only the write start is clipped
+		{12, false, false, false}, // 96 clears every derived value for this target
+		{16, false, false, false},
+	} {
+		ceiling := ClientThreadsPerCore * tc.cores
+		assert.Equalf(t, tc.clipsWriteStart, ceiling < writeStart,
+			"%d cores (ceiling %d) vs write start %d", tc.cores, ceiling, writeStart)
+		assert.Equalf(t, tc.clipsReadStart, ceiling < readStart,
+			"%d cores (ceiling %d) vs read start %d", tc.cores, ceiling, readStart)
+		assert.Equalf(t, tc.clipsReadMax, ceiling < readCeiling,
+			"%d cores (ceiling %d) vs read ceiling %d", tc.cores, ceiling, readCeiling)
+	}
+
+	// A host large enough to clear the biggest target in docs/migrate.md's table
+	// (192 vCPUs -> 190 write threads) is never constrained by this at all.
+	assert.GreaterOrEqual(t, ClientThreadsPerCore*24, WriteStart(192),
+		"24 cores should clear even the 48xlarge derivation")
 }
