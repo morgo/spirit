@@ -32,6 +32,7 @@ package autoscale
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -142,6 +143,49 @@ func Classify(util float64) Action {
 // halving so that, e.g., 3 backs off to 2 rather than 1.
 func CeilDiv(n, d int) int {
 	return (n + d - 1) / d
+}
+
+// ClientThreadsPerCore bounds how many workers spirit will run per core of its
+// *own* host, independent of how large the target is.
+//
+// Every derivation in this file sizes pools from the target instance, on the
+// premise that a worker is mostly waiting on the server. That premise fails
+// quietly when spirit itself is small: a worker also builds its INSERT
+// statement client-side (a datum conversion and a string format per value), and
+// that part is pure local CPU. Measured on a 96-vCPU target, roughly 60% of a
+// write worker's cycle was client-side even on a 16-core host — so the useful
+// worker count is closer to a small multiple of local cores than to the target's
+// vCPU count.
+//
+// 16 is deliberately permissive rather than tuned. The failure it exists to
+// prevent is the order-of-magnitude one: spirit on a 4-core pod deriving 94
+// write threads from a 96-vCPU target, where ~7 threads' worth of work actually
+// progressed and the other 87 only added queueing and latency. That is ~23
+// threads per core; capping it at 64 still cuts it by a third, while a 16-core
+// host (256) clears every derivation for targets up to 128 vCPUs, growth
+// ceilings included. The growth ceiling is what binds, not the start: the
+// largest size in the docs' table (192 vCPUs -> 190 write threads growing to
+// 380) needs 24 cores to be fully unconstrained. TestClientCeiling pins both.
+//
+// The ratio has to sit well above the healthy operating point, not near it.
+// Measured on 16 cores: ~99 write workers, 6.2 per core, with local CPU not
+// saturated — so a cap of 8 per core would begin binding on a host that was
+// still keeping up, and would clip the write pool's room to grow (188 -> 128)
+// while every signal read healthy. 16 leaves ~2.6x headroom over the observed
+// point. A ratio tight enough to be a real sizing input would need the
+// client-side share measured live, which is a feedback loop rather than a
+// constant.
+const ClientThreadsPerCore = 16
+
+// ClientCeiling returns the largest worker count this process can usefully run,
+// from GOMAXPROCS rather than the machine's core count so that a container CPU
+// limit is respected (Go 1.25+ derives GOMAXPROCS from the cgroup quota).
+//
+// It is a ceiling only: callers take min() with the target-derived size and never
+// scale *up* to it. A fast client does not justify more workers than the target
+// can absorb.
+func ClientCeiling() int {
+	return max(1, ClientThreadsPerCore*runtime.GOMAXPROCS(0))
 }
 
 // WriteStart returns the starting size for the apply (write) pool on an instance

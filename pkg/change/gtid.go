@@ -385,6 +385,9 @@ func (c *gtidClient) buildSyncerConfig(host string, port uint16) replication.Bin
 		// writes over time_zone='+00:00' connections, silently shifting
 		// stored TIMESTAMP values on any non-UTC host.
 		TimestampStringLocation: time.UTC,
+		// Decode row images only for subscribed tables, the same way the
+		// binlog client does — see newRowsEventDecodeFunc.
+		RowsEventDecodeFunc: newRowsEventDecodeFunc(c.subs, &c.stopped),
 	}
 }
 
@@ -901,6 +904,11 @@ func (c *gtidClient) processRowsEvent(ev *replication.BinlogEvent, e *replicatio
 	sub, ok := c.subs.Get(subName)
 	if !ok {
 		return nil
+	}
+	if e.Rows == nil {
+		// Decode-time filter skipped a now-subscribed table's event; see the
+		// equivalent check in binlogClient.processRowsEvent.
+		return fmt.Errorf("rows event for subscribed table %s arrived with undecoded rows: subscriptions must be added before Start (see Source lifecycle)", subName)
 	}
 
 	if isMinimalRowImage(e) {

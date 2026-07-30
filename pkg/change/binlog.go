@@ -323,6 +323,52 @@ func (c *binlogClient) CurrentPosition(ctx context.Context) (string, error) {
 	return formatBinlogPosition(pos), nil
 }
 
+// newRowsEventDecodeFunc returns the RowsEventDecodeFunc both clients install
+// on their syncer: decode a rows event's header (cheap — fixed-size fields and
+// a table-map lookup that resolves the schema/table name), then skip decoding
+// the row images entirely unless the table has a subscription.
+//
+// This is where most of the stream's volume goes during a migration: spirit's
+// own INSERTs into the _new table dominate the binlog while the copy runs, and
+// every one of them used to be fully decoded — every column of every row,
+// including JSON rendering — only for processRowsEvent to drop the event by
+// table name. On a fast copy the stream cannot keep up, and the gap is repaid
+// after the copy as a long catch-up phase that is ~all no-ops. Skipping the
+// row-image decode leaves header parsing and network transfer as the only
+// per-event costs for unsubscribed tables. (canal's table filter uses the
+// same hook for the same reason.)
+//
+// Correctness leans on the Source lifecycle (construct → AddSubscription* →
+// Start): the subscription set is complete before the first event is decoded,
+// so a decode-time check is equivalent to processRowsEvent's consumption-time
+// check, just earlier. processRowsEvent enforces this with a hard error if a
+// subscribed table's event arrives undecoded (Rows == nil — DecodeData always
+// allocates, so nil is unambiguous). Skipped events still advance the stream
+// position: the header, including LogPos, is parsed as usual.
+//
+// The stopped flag extends the same shortcut past cutover: Stop() means no
+// subscription's TableInfo is valid anymore and processRowsEvent drops
+// everything, so there is nothing worth decoding.
+//
+// The registry has its own lock (this runs on the syncer's parse goroutine,
+// not readStream). A DecodeHeader error is returned unchanged — the default
+// Decode path would surface the identical error.
+func newRowsEventDecodeFunc(subs *subscriptionRegistry, stopped *atomic.Bool) func(*replication.RowsEvent, []byte) error {
+	return func(e *replication.RowsEvent, data []byte) error {
+		pos, err := e.DecodeHeader(data)
+		if err != nil {
+			return err
+		}
+		if stopped.Load() {
+			return nil
+		}
+		if _, ok := subs.Get(encodeSchemaTable(string(e.Table.Schema), string(e.Table.Table))); !ok {
+			return nil // no subscription: leave e.Rows nil, the row images are never read
+		}
+		return e.DecodeData(pos, data)
+	}
+}
+
 // buildSyncerConfig returns the BinlogSyncerConfig used by Start. Split
 // out (mirroring gtidClient.buildSyncerConfig) so tests can assert the
 // decode options below stay in sync between the two clients.
@@ -355,6 +401,10 @@ func (c *binlogClient) buildSyncerConfig(host string, port uint16) replication.B
 		// UTC. Pinning the decoder to UTC keeps the binlog replay path
 		// consistent with the UTC-pinned copier connections.
 		TimestampStringLocation: time.UTC,
+		// Decode row images only for subscribed tables. During the copy the
+		// binlog is dominated by spirit's own writes to the _new table; see
+		// newRowsEventDecodeFunc.
+		RowsEventDecodeFunc: newRowsEventDecodeFunc(c.subs, &c.stopped),
 	}
 }
 
@@ -795,6 +845,15 @@ func (c *binlogClient) processRowsEvent(ev *replication.BinlogEvent, e *replicat
 	sub, ok := c.subs.Get(subName)
 	if !ok {
 		return nil // ignore event, it could be to a _new table.
+	}
+	if e.Rows == nil {
+		// The decode-time filter (newRowsEventDecodeFunc) skipped this event's
+		// row images because the table had no subscription when the event was
+		// parsed — yet one exists now. That means AddSubscription was called
+		// after Start, violating the Source lifecycle, and silently treating
+		// the event as empty would lose rows. DecodeData always allocates
+		// e.Rows, so nil cannot be a legitimately decoded event.
+		return fmt.Errorf("rows event for subscribed table %s arrived with undecoded rows: subscriptions must be added before Start (see Source lifecycle)", subName)
 	}
 
 	if isMinimalRowImage(e) {
