@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +32,20 @@ type Stats struct {
 	PendingWork int
 	// ActiveWorkers is the number of live write workers.
 	ActiveWorkers int
+	// RowsPerChunklet is the mean rows per chunklet since the applier started.
+	// splitRowsIntoChunklets cuts on whichever of chunkletMaxRows or
+	// MaxStatementSizeBytes binds first, and which one that is depends on the
+	// table's width and column types — so it cannot be predicted from the
+	// config, only measured. It matters because the chunklet is the unit of
+	// nearly everything on the write path: one statement, one completion, one
+	// handoff. A value at chunkletMaxRows means the row cap binds and raising
+	// MaxStatementSizeBytes would do nothing; below it means the byte cap binds
+	// and raising chunkletMaxRows would do nothing.
+	//
+	// A mean rather than a percentile: the question is which cap is in force,
+	// which the mean answers, and the last chunklet of every chunk is a short
+	// remainder that would skew a low percentile.
+	RowsPerChunklet float64
 
 	// Rolling percentiles over the last timingRingSize chunklets. Zero when no
 	// chunklet has completed yet. Together these account for a write worker's
@@ -75,11 +90,12 @@ type Stats struct {
 // Only the p50 of build and handoff is rendered, to keep the line readable;
 // both p90s are in Stats and in the emitted metrics.
 func (s Stats) String() string {
-	return fmt.Sprintf("applier-queue=%d/%d applier-pending=%d applier-workers=%d applier-queue-wait-p50=%v applier-queue-wait-p90=%v applier-build-p50=%v applier-write-p50=%v applier-write-p90=%v applier-handoff-p50=%v",
+	return fmt.Sprintf("applier-queue=%d/%d applier-pending=%d applier-workers=%d applier-rows-per-chunklet=%.0f applier-queue-wait-p50=%v applier-queue-wait-p90=%v applier-build-p50=%v applier-write-p50=%v applier-write-p90=%v applier-handoff-p50=%v",
 		s.QueueDepth,
 		s.QueueCap,
 		s.PendingWork,
 		s.ActiveWorkers,
+		s.RowsPerChunklet,
 		s.QueueWaitP50.Round(time.Millisecond),
 		s.QueueWaitP90.Round(time.Millisecond),
 		s.BuildTimeP50.Round(time.Millisecond),
@@ -97,6 +113,29 @@ func StatusSuffix(a Applier) string {
 		return ""
 	}
 	return " " + a.Stats().String()
+}
+
+// splitCounter accumulates how many chunklets a chunk's rows were cut into, so
+// Stats can report the mean chunklet size. Counted at split time rather than at
+// write time so it reflects the split decision even for chunklets that later
+// fail, and so it is populated before any worker has finished.
+type splitCounter struct {
+	chunklets atomic.Int64
+	rows      atomic.Int64
+}
+
+func (c *splitCounter) record(chunklets, rows int) {
+	c.chunklets.Add(int64(chunklets))
+	c.rows.Add(int64(rows))
+}
+
+// mean returns rows per chunklet, or 0 before anything has been split.
+func (c *splitCounter) mean() float64 {
+	chunklets := c.chunklets.Load()
+	if chunklets == 0 {
+		return 0
+	}
+	return float64(c.rows.Load()) / float64(chunklets)
 }
 
 // chunkletTiming is one completed chunklet's queue-wait, build, write and

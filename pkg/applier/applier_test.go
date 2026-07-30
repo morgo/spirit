@@ -214,38 +214,46 @@ func TestSplitRowsIntoChunklets(t *testing.T) {
 	})
 
 	t.Run("rows under max count threshold", func(t *testing.T) {
-		// Create 500 small rows (under chunkletMaxRows of 1000)
-		rows := make([]rowData, 500)
+		// Half the row cap, in rows small enough that the byte cap cannot be
+		// what splits them. Derived from the constant so the case stays
+		// meaningful if the cap is retuned.
+		n := chunkletMaxRows / 2
+		rows := make([]rowData, n)
 		for i := range rows {
 			rows[i] = rowData{values: []any{int64(i), "test"}}
 		}
 		chunklets := splitRowsIntoChunklets(rows)
 		require.Len(t, chunklets, 1, "should create one chunklet")
-		require.Len(t, chunklets[0], 500, "chunklet should have all 500 rows")
+		require.Len(t, chunklets[0], n, "chunklet should have all %d rows", n)
 	})
 
 	t.Run("rows exceeding max count threshold", func(t *testing.T) {
-		// Create 2500 small rows (exceeds chunkletMaxRows of 1000)
-		rows := make([]rowData, 2500)
+		// Two full chunklets plus a half remainder, again in rows too small for
+		// the byte cap to reach. This pins the row cap specifically: with
+		// ~24-byte rows, chunkletMaxRows would have to exceed ~40k before
+		// MaxStatementSizeBytes could bind first and invalidate the case.
+		remainder := chunkletMaxRows / 2
+		rows := make([]rowData, 2*chunkletMaxRows+remainder)
 		for i := range rows {
 			rows[i] = rowData{values: []any{int64(i), "test"}}
 		}
 		chunklets := splitRowsIntoChunklets(rows)
 		require.Len(t, chunklets, 3, "should create 3 chunklets")
-		require.Len(t, chunklets[0], 1000, "first chunklet should have 1000 rows")
-		require.Len(t, chunklets[1], 1000, "second chunklet should have 1000 rows")
-		require.Len(t, chunklets[2], 500, "third chunklet should have 500 rows")
+		require.Len(t, chunklets[0], chunkletMaxRows, "first chunklet should be full")
+		require.Len(t, chunklets[1], chunkletMaxRows, "second chunklet should be full")
+		require.Len(t, chunklets[2], remainder, "third chunklet should hold the remainder")
 	})
 
 	t.Run("rows exceeding max size threshold", func(t *testing.T) {
-		// Create rows with large data that exceed MaxStatementSizeBytes (1 MiB)
-		// Each row is ~100KB, so 11 rows would be ~1.1MB
-		largeData := make([]byte, 100000) // 100KB
+		// Rows large enough that the byte cap splits them well before the row
+		// cap does: each row is a tenth of MaxStatementSizeBytes, and we supply
+		// enough for a little over two chunklets' worth.
+		largeData := make([]byte, MaxStatementSizeBytes/10)
 		for i := range largeData {
 			largeData[i] = 'x'
 		}
 
-		rows := make([]rowData, 11)
+		rows := make([]rowData, 22)
 		for i := range rows {
 			rows[i] = rowData{values: []any{int64(i), string(largeData)}}
 		}

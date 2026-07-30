@@ -65,6 +65,9 @@ type SingleTargetApplier struct {
 	// durations, reported by Stats().
 	timings timingRing
 
+	// splits accumulates the chunklet/row counts behind Stats.RowsPerChunklet.
+	splits splitCounter
+
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup // tracks the feedbackCoordinator and stats-emitter goroutines
@@ -201,6 +204,7 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	// Split into chunklets based on both row count and size thresholds
 	// Then convert row batches into chunklets with metadata
 	rowBatches := splitRowsIntoChunklets(rowDataList)
+	a.splits.record(len(rowBatches), len(rowDataList))
 	chunklets := make([]chunklet, len(rowBatches))
 	for i, batch := range rowBatches {
 		chunklets[i] = chunklet{
@@ -424,18 +428,19 @@ func (a *SingleTargetApplier) Stats() Stats {
 
 	t := a.timings.percentiles()
 	return Stats{
-		QueueDepth:    queueDepth,
-		QueueCap:      queueCap,
-		PendingWork:   pending,
-		ActiveWorkers: int(a.activeWorkers.Load()),
-		QueueWaitP50:  t.queueWaitP50,
-		QueueWaitP90:  t.queueWaitP90,
-		BuildTimeP50:  t.buildP50,
-		BuildTimeP90:  t.buildP90,
-		WriteTimeP50:  t.writeP50,
-		WriteTimeP90:  t.writeP90,
-		HandoffP50:    t.handoffP50,
-		HandoffP90:    t.handoffP90,
+		QueueDepth:      queueDepth,
+		QueueCap:        queueCap,
+		PendingWork:     pending,
+		ActiveWorkers:   int(a.activeWorkers.Load()),
+		RowsPerChunklet: a.splits.mean(),
+		QueueWaitP50:    t.queueWaitP50,
+		QueueWaitP90:    t.queueWaitP90,
+		BuildTimeP50:    t.buildP50,
+		BuildTimeP90:    t.buildP90,
+		WriteTimeP50:    t.writeP50,
+		WriteTimeP90:    t.writeP90,
+		HandoffP50:      t.handoffP50,
+		HandoffP90:      t.handoffP90,
 	}
 }
 

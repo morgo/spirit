@@ -60,6 +60,10 @@ type ShardedApplier struct {
 	// does not need per-shard attribution.
 	timings timingRing
 
+	// splits accumulates the chunklet/row counts behind Stats.RowsPerChunklet,
+	// summed across shards — the split rule is global, not per shard.
+	splits splitCounter
+
 	// State management to make Start/Stop idempotent
 	stopped bool
 	started bool
@@ -299,6 +303,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		// Use shared helper to split rows into chunklets
 		// Then convert row batches into sharded chunklets with metadata
 		rowBatches := splitRowsIntoChunklets(rows)
+		a.splits.record(len(rowBatches), len(rows))
 		for _, batch := range rowBatches {
 			allChunklets = append(allChunklets, shardedChunklet{
 				workID:  workID,
@@ -461,18 +466,19 @@ func (a *ShardedApplier) Stats() Stats {
 
 	t := a.timings.percentiles()
 	return Stats{
-		QueueDepth:    queueDepth,
-		QueueCap:      queueCap,
-		PendingWork:   pending,
-		ActiveWorkers: activeWorkers,
-		QueueWaitP50:  t.queueWaitP50,
-		QueueWaitP90:  t.queueWaitP90,
-		BuildTimeP50:  t.buildP50,
-		BuildTimeP90:  t.buildP90,
-		WriteTimeP50:  t.writeP50,
-		WriteTimeP90:  t.writeP90,
-		HandoffP50:    t.handoffP50,
-		HandoffP90:    t.handoffP90,
+		QueueDepth:      queueDepth,
+		QueueCap:        queueCap,
+		PendingWork:     pending,
+		ActiveWorkers:   activeWorkers,
+		RowsPerChunklet: a.splits.mean(),
+		QueueWaitP50:    t.queueWaitP50,
+		QueueWaitP90:    t.queueWaitP90,
+		BuildTimeP50:    t.buildP50,
+		BuildTimeP90:    t.buildP90,
+		WriteTimeP50:    t.writeP50,
+		WriteTimeP90:    t.writeP90,
+		HandoffP50:      t.handoffP50,
+		HandoffP90:      t.handoffP90,
 	}
 }
 
