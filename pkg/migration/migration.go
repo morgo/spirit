@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,6 +17,12 @@ import (
 	"github.com/block/spirit/pkg/utils"
 	"github.com/pingcap/tidb/pkg/parser"
 )
+
+// defaultWriteThreads must match the `default:"4"` kong tag on
+// Migration.WriteThreads, so a programmatic caller that leaves the field unset
+// lands on the same value the CLI does. Move keeps its own copy against its own
+// tag (pkg/move), since the two flags are independently defaulted.
+const defaultWriteThreads = 4
 
 var (
 	defaultHost     = "127.0.0.1"
@@ -34,14 +41,16 @@ type Migration struct {
 	ConfFile     string  `name:"conf" help:"MySQL conf file" optional:"" type:"existingfile"`
 	Table        string  `name:"table" help:"Table" optional:""`
 	Alter        string  `name:"alter" help:"The alter statement to run on the table" optional:""`
-	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks" optional:"" default:"4"`
-	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. 0 = auto: on Aurora this is set to the instance vCPU count minus 2 (min 1), leaving CPU headroom; on non-Aurora targets it falls back to the default" optional:"" default:"4"`
+	Threads      int     `name:"threads" help:"Number of concurrent threads for copy and checksum tasks. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
+	WriteThreads int     `name:"write-threads" help:"Number of concurrent apply (write) threads. Ignored when --enable-experimental-autoscaling engages" optional:"" default:"4"`
 
-	// EnableExperimentalAutoscaling turns on dynamic write-thread scaling driven
-	// by throttler feedback; WriteThreads becomes the starting value and the
-	// cap is fixed at 2x that (deliberately not configurable for now, to keep
-	// the experimental surface small). See issue #831.
-	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: dynamically scale write threads between the starting value and 2x that, based on throttler feedback" optional:"" default:"false"`
+	// EnableExperimentalAutoscaling turns on dynamic thread scaling driven by
+	// throttler feedback. When it engages (an Aurora target with at least
+	// autoscale.MinVCPUs) it takes over both thread counts: Threads and
+	// WriteThreads are ignored, and each pool's starting size and ceiling are
+	// derived from the instance instead — see the override in
+	// setupCopierCheckerAndReplClient and autoscale.ReadBounds. See issue #831.
+	EnableExperimentalAutoscaling bool `name:"enable-experimental-autoscaling" help:"EXPERIMENTAL: size the copy, apply and checksum thread pools from the instance and scale them on throttler feedback. Overrides --threads and --write-threads. Requires an Aurora target" optional:"" default:"false"`
 	// TargetChunkTime sizes chunks for the time-based signal: the checksum
 	// (server-side CRC) and the legacy --unbuffered copier. The default buffered
 	// copier ignores it and sizes chunks by an in-memory byte budget
@@ -159,6 +168,19 @@ func (m *Migration) normalizeOptions() (stmts []*statement.AbstractStatement, er
 	}
 	if m.Threads == 0 {
 		m.Threads = 4
+	}
+	// A non-positive WriteThreads is filled in rather than rejected, matching
+	// Threads above. Zero used to mean "auto-size from the instance", so anyone
+	// who adopted that opt-in would otherwise see their apply pool quietly drop
+	// from the instance vCPU count to 4 — warn, and name the flag that replaced
+	// it. (Kong's default is 4, so a literal 0 was either passed explicitly or
+	// left unset by a programmatic caller.)
+	if m.WriteThreads <= 0 {
+		if m.WriteThreads == 0 {
+			slog.Default().Warn("--write-threads 0 no longer means auto-size; using the default. Pass --enable-experimental-autoscaling for instance-derived thread counts",
+				"write_threads", defaultWriteThreads)
+		}
+		m.WriteThreads = defaultWriteThreads
 	}
 	if m.ReplicaMaxLag == 0 {
 		m.ReplicaMaxLag = 120 * time.Second

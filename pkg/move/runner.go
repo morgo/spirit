@@ -32,6 +32,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// defaultWriteThreads must match the `default:"4"` kong tag on
+// Move.WriteThreads, so a programmatic caller that leaves the field unset lands
+// on the same value the CLI does.
+const defaultWriteThreads = 4
+
 var (
 	tableStatUpdateInterval = 5 * time.Minute
 	// checkpointTableName is deliberately distinct from migration's shared
@@ -177,6 +182,19 @@ func NewRunner(m *Move) (*Runner, error) {
 	}
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
+	}
+	// WriteThreads has no "0 means auto" meaning any more, so fill in the Kong
+	// default; move does not autoscale, so nothing downstream would. Non-positive
+	// rather than zero: MaxOpenConnections is Threads + WriteThreads + 2 below, and
+	// a negative count would make that negative, which SetMaxOpenConns reads as
+	// *unlimited*. Warn on an explicit 0, which used to mean "size from the
+	// instance" and would otherwise silently become 4.
+	if m.WriteThreads <= 0 {
+		if m.WriteThreads == 0 {
+			slog.Default().Warn("--write-threads 0 no longer means auto-size; using the default",
+				"write_threads", defaultWriteThreads)
+		}
+		m.WriteThreads = defaultWriteThreads
 	}
 	r := &Runner{
 		move:   m,
@@ -571,17 +589,8 @@ func (r *Runner) setupDiscovery(ctx context.Context) error {
 func (r *Runner) setupUnderLocks(ctx context.Context) error {
 	var err error
 
-	// Resolve the number of apply (write) threads against the target now that
-	// it is connected. WriteThreads==0 means "auto-size": on Aurora it becomes
-	// the instance vCPU count; on non-Aurora there is no reliable vCPU signal
-	// to size from, so it falls back to the default.
-	r.move.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.targets[0].DB, r.move.WriteThreads, r.logger)
-	if err != nil {
-		return err
-	}
-	// Now that write threads are known, grow connection pools to cover both the
-	// copy (read) threads and the apply (write) threads. The initial pool (set
-	// before connecting) used the requested value, which may have been 0.
+	// Grow connection pools to cover both the copy (read) threads and the apply
+	// (write) threads, in case the pool set before connecting was smaller.
 	if poolSize := r.move.Threads + r.move.WriteThreads + 2; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		for i := range r.sources {

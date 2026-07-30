@@ -168,14 +168,6 @@ var (
 	globalStatusMode = threadsMode{query: threadsRunningQuery, headroom: selfMonitoringHeadroom, label: "threads-running"}
 )
 
-// DefaultWriteThreads is the fallback apply (write) thread count used when
-// auto-sizing is requested (write-threads=0) but the target offers no reliable
-// vCPU signal to size from — i.e. a non-Aurora server. It must match the
-// `default:"4"` kong tags on the WriteThreads CLI flags (see Migration and
-// Move), so that requesting auto-sizing on non-Aurora lands on the same value
-// as not requesting it at all.
-const DefaultWriteThreads = 4
-
 // AuroraVCPUs reads the instance vCPU count from @@innodb_buffer_pool_instances,
 // which Aurora pins to the vCPU count (issue #831). It returns an error if the
 // value is non-positive. This is only meaningful on Aurora — callers should gate
@@ -189,52 +181,6 @@ func AuroraVCPUs(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, fmt.Errorf("@@innodb_buffer_pool_instances returned non-positive value %d", vCPUs)
 	}
 	return vCPUs, nil
-}
-
-// WriteThreadVCPUReserve is the number of vCPUs auto-sizing leaves free when
-// sizing the apply (write) thread pool on Aurora, so the pool does not consume
-// the whole instance: the copier's read side, the checksum, and the server's
-// own work need room too. Auto-sizing resolves to max(1, vCPUs - this). On 4+
-// vCPU instances it is the autoscaler's starting value (the controller can grow
-// back up under spare capacity); below autoscale.MinVCPUs it is the fixed size.
-const WriteThreadVCPUReserve = 2
-
-// ResolveWriteThreads resolves the number of apply (write) threads to use
-// against a target. A positive requested value is returned unchanged. Zero
-// means "auto-size": on Aurora it resolves to max(1, vCPUs -
-// WriteThreadVCPUReserve) from @@innodb_buffer_pool_instances (reserving vCPUs
-// for the rest of the workload); on non-Aurora there is no reliable vCPU signal
-// to size from, so it falls back to DefaultWriteThreads (logging that it did
-// so). A negative value is rejected.
-func ResolveWriteThreads(ctx context.Context, db *sql.DB, requested int, logger *slog.Logger) (int, error) {
-	if requested < 0 {
-		return 0, fmt.Errorf("write threads must be non-negative, got %d", requested)
-	}
-	if requested > 0 {
-		return requested, nil
-	}
-	// Auto-sizing requires probing the server, so a usable DB is mandatory
-	// here (a positive requested value above never reaches this point).
-	if db == nil {
-		return 0, errors.New("cannot auto-size write threads: no database connection provided (set write-threads to a positive value)")
-	}
-	isAurora, err := IsAurora(ctx, db)
-	if err != nil {
-		return 0, err
-	}
-	if !isAurora {
-		// No reliable vCPU signal off Aurora, so we can't honor auto-sizing.
-		// Rather than fail, fall back to the default the user would have got
-		// had they not asked to auto-size at all.
-		logger.Info("write-threads=0 requested auto-sizing, but the target is not Aurora (no reliable vCPU signal); using the default instead",
-			"write_threads", DefaultWriteThreads)
-		return DefaultWriteThreads, nil
-	}
-	vCPUs, err := AuroraVCPUs(ctx, db)
-	if err != nil {
-		return 0, err
-	}
-	return max(1, vCPUs-WriteThreadVCPUReserve), nil
 }
 
 // ResolveMaxWriteThreads resolves the upper bound the write-thread autoscaler

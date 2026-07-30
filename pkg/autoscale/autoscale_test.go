@@ -51,6 +51,61 @@ func TestCeilDiv(t *testing.T) {
 	assert.Equal(t, 4, CeilDiv(8, 2))
 }
 
+// TestWriteStart pins the write-side vCPU->threads mapping, including the floor
+// at 1 and the reserve it subtracts. The migration runner only reaches this on a
+// real Aurora instance, so the arithmetic is pinned here — calling WriteStart
+// rather than restating its expression, so the test can actually fail if the
+// production formula changes.
+func TestWriteStart(t *testing.T) {
+	assert.Equal(t, 2, VCPUReserve, "the reserve is documented as 2 vCPUs in migrate.md and pkg/autoscale/README.md")
+	for _, tc := range []struct {
+		vCPUs, want int
+	}{
+		{1, 1}, // floors at 1
+		{2, 1}, // r6g.large: 2 vCPUs -> 1 applier
+		{3, 1},
+		{4, 2},
+		{8, 6},
+		{96, 94}, // the 24xlarge in docs/migrate.md's sizing table
+		{192, 190},
+	} {
+		assert.Equalf(t, tc.want, WriteStart(tc.vCPUs), "vCPUs=%d", tc.vCPUs)
+	}
+}
+
+// TestReadBounds pins the read-side sizing against the instance sizes it is
+// meant to describe. The invariant matters more than the individual numbers:
+// the ceiling must never exceed half the instance, because for the checksum the
+// whole pool is created serially under the cutover-class table lock whether or
+// not scaling reaches it.
+func TestReadBounds(t *testing.T) {
+	for _, tc := range []struct {
+		vCPUs, start, ceiling int
+	}{
+		{4, 2, 2},   // xlarge: the bounds meet — two readers is already half of it
+		{8, 2, 4},   // 2xlarge: ceil(6/4) = 2, the start floor is not yet binding
+		{16, 4, 8},  // 4xlarge
+		{32, 8, 16}, // 8xlarge
+		{48, 12, 24},
+		{64, 16, 32},
+		{96, 24, 48}, // 24xlarge: the case that motivated this (was 2 → 4)
+	} {
+		start, ceiling := ReadBounds(tc.vCPUs)
+		assert.Equal(t, tc.start, start, "start for %d vCPUs", tc.vCPUs)
+		assert.Equal(t, tc.ceiling, ceiling, "ceiling for %d vCPUs", tc.vCPUs)
+		assert.LessOrEqual(t, ceiling, max(CeilDiv(tc.vCPUs, 2), MinReadStartThreads),
+			"the ceiling may never exceed half the instance")
+	}
+	// Below MinVCPUs no controller engages, so these sizes are never used in
+	// production — but the function must still return something coherent rather
+	// than a start above its ceiling.
+	for vCPUs := range MinVCPUs {
+		start, ceiling := ReadBounds(vCPUs)
+		assert.LessOrEqual(t, start, ceiling, "start must not exceed ceiling at %d vCPUs", vCPUs)
+		assert.Positive(t, start, "start must be usable at %d vCPUs", vCPUs)
+	}
+}
+
 func TestLimiterFloorsAtOne(t *testing.T) {
 	// A limiter admitting nobody would deadlock its caller rather than
 	// throttle it, so both entry points clamp to 1.

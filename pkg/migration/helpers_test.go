@@ -105,8 +105,9 @@ func WithWriteThreads(n int) RunnerOption {
 	}
 }
 
-// WithAutoscaling enables the experimental write-thread autoscaler.
-// WriteThreads acts as the starting value; the cap is fixed at 2x that.
+// WithAutoscaling enables the experimental thread autoscaler. Note that it only
+// engages against an Aurora target, and when it does it overrides both Threads
+// and WriteThreads (see setupCopierCheckerAndReplClient).
 func WithAutoscaling() RunnerOption {
 	return func(m *Migration) {
 		m.EnableExperimentalAutoscaling = true

@@ -46,11 +46,12 @@ import (
 // band and ping-pong with the -1 path.
 //
 // The band has hysteresis, so the resting point depends on which side it is
-// approached from. The auto-sized start (the vCPU count) sits above the band,
-// so on an idle server the controller sheds down and parks just under the high
-// watermark — the first edge it meets — and holds there; it does not continue
-// down to the low watermark (that is the floor it would climb up to had it
-// started below the band). Parking near 70% of vCPUs leaves headroom for
+// approached from. The write pool's derived start (vCPUs minus a small reserve)
+// sits above the band, so on an idle server the controller sheds down and parks
+// just under the high watermark — the first edge it meets — and holds there; it
+// does not continue down to the low watermark (that is the floor it would climb
+// up to had it started below the band, which is where the read pool begins and
+// why that side ramps instead). Parking near 70% of vCPUs leaves headroom for
 // the primary OLTP workload, and leaving copy throughput on the table is fine.
 // Responsiveness to genuine overload is not traded away: that is the
 // BlockWait hard-stop's job, which none of this touches.
@@ -122,6 +123,20 @@ var acTick = autoscale.Tick
 // pool, silently buying no extra parallelism.
 func ResolveMaxReadThreads(start int, autoscaleEnabled bool) int {
 	return autoscale.Ceiling(start, autoscaleEnabled)
+}
+
+// resolveReadCeiling picks the ceiling for the read-worker pool. A positive
+// configured value wins: the migration runner derives one from the instance
+// (autoscale.ReadBounds) and sizes its connection pool to match, so a scaled-up
+// pool never starves on connections. Callers with no view of the instance leave
+// it zero and get the Concurrency-relative formula instead. Either way the
+// ceiling is floored at the starting count, since a pool that begins above its
+// cap cannot be controlled.
+func resolveReadCeiling(configured, concurrency int) int {
+	if configured > 0 {
+		return max(configured, concurrency)
+	}
+	return ResolveMaxReadThreads(concurrency, true)
 }
 
 // writeScaler is the optional capability the autoscaler drives. The

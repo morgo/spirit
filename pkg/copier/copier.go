@@ -106,6 +106,13 @@ type AutoscaleConfig struct {
 	StartThreads int
 	// MaxThreads is the cap the controller may scale up to.
 	MaxThreads int
+	// MaxReadThreads is the cap for the read-worker pool, which scales from
+	// CopierConfig.Concurrency. Zero means "derive it from Concurrency"
+	// (ResolveMaxReadThreads) — for callers with no view of the instance size.
+	// The migration runner passes an instance-derived ceiling instead, since a
+	// read pool sized off a flag default has no relationship to the cores it is
+	// competing for (see autoscale.ReadBounds).
+	MaxReadThreads int
 }
 
 // NewCopierDefaultConfig returns a default config for the copier. It defaults

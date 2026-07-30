@@ -67,6 +67,30 @@ const (
 	// for the whole migration; the controllers themselves never see a small
 	// instance.
 	MinVCPUs = 4
+
+	// VCPUReserve is how many vCPUs a pool sized from the instance leaves free,
+	// so spirit never nominally claims the whole server: the other pool, the
+	// server's own background work, and the application all need room. Both the
+	// write pool (max(1, vCPUs-VCPUReserve)) and the read-side starting point
+	// (see ReadBounds) subtract it.
+	VCPUReserve = 2
+
+	// MinReadStartThreads is the floor on a read-side pool's starting size.
+	// ReadBounds' divisor drives small instances down to 1, which would make the
+	// copy single-threaded until the controller has ramped for 15s a step; two
+	// threads is the smallest start that still overlaps read and apply work from
+	// the first chunk.
+	MinReadStartThreads = 2
+
+	// readStartDivisor makes the read side start at roughly a quarter of the
+	// instance. See ReadBounds for why the read and write sides are asymmetric.
+	readStartDivisor = 4
+
+	// readCeilingDivisor caps the read side at half the instance. Unlike the
+	// write side's ceiling this is not a multiple of the starting value: it is an
+	// absolute share of the box, because for the checksum it is also an up-front
+	// cost. See ReadBounds.
+	readCeilingDivisor = 2
 )
 
 // Tick is how often a controller should re-evaluate. Aligned with the
@@ -118,6 +142,50 @@ func Classify(util float64) Action {
 // halving so that, e.g., 3 backs off to 2 rather than 1.
 func CeilDiv(n, d int) int {
 	return (n + d - 1) / d
+}
+
+// WriteStart returns the starting size for the apply (write) pool on an instance
+// of the given vCPU count: the whole instance less VCPUReserve, floored at one.
+//
+// There is no matching WriteCeiling here because the write side's upper bound is
+// not purely a function of the instance — it also depends on which load signal
+// the throttler picked and whether the commit-latency backstop is armed. That
+// rule lives with the throttler, in ResolveMaxWriteThreads.
+func WriteStart(vCPUs int) int {
+	return max(1, vCPUs-VCPUReserve)
+}
+
+// ReadBounds returns the starting size and ceiling for a read-side pool — the
+// copier's read workers and the checksum's workers — on an instance of the given
+// vCPU count: start at about a quarter of the instance, grow to at most half of
+// it. Callers must have already established that the instance is at least
+// MinVCPUs; below that no controller engages at all.
+//
+// This is deliberately not the write side's shape (start at vCPUs-VCPUReserve,
+// grow to 2x that), because the two pools are limited by different things. Write
+// threads spend most of their life parked on a redo-log flush, so a count above
+// the vCPU count is not oversubscription — it is what keeps the log busy, and it
+// is why the redo-aware load signal excludes those waiters. A read thread
+// scanning a table that is already in the buffer pool is pure CPU, so the same
+// count really does compete with the application for cores: oversubscribing here
+// is how a checksum ends up degrading the workload it was supposed to be
+// invisible to.
+//
+// The ceiling is a fixed share of the instance rather than a multiple of the
+// start because for the checksum it is not a hypothesis, it is a cost paid up
+// front: the snapshot transactions must all take their read view at the same
+// instant, so the whole pool is created serially under the table lock whether or
+// not scaling ever reaches it. Half the box is the most that is worth holding a
+// cutover-class lock to reserve, and it leaves the other half to the workload
+// spirit is supposed to be invisible to.
+//
+// At exactly MinVCPUs the two bounds meet (start 2, ceiling 2), so the read side
+// can shed but not grow. That is the intended reading of a 4-vCPU instance: two
+// readers is already half of it.
+func ReadBounds(vCPUs int) (start, ceiling int) {
+	ceiling = max(CeilDiv(vCPUs, readCeilingDivisor), MinReadStartThreads)
+	start = max(MinReadStartThreads, CeilDiv(vCPUs-VCPUReserve, readStartDivisor))
+	return min(start, ceiling), ceiling
 }
 
 // Limiter is a counting semaphore whose limit may change while permits are
