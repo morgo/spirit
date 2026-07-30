@@ -121,7 +121,20 @@ This allows the copier to continue reading and queuing more work without blockin
 
 ### Pipeline observability (`Stats()`)
 
-Both appliers expose a point-in-time `Stats()` snapshot (see `stats.go`): queue depth/capacity, pending work, live write workers, and rolling p50/p90 of per-chunklet **queue wait** (time between `Apply()` offering a chunklet to the buffer and a worker dequeueing it, including send-side backpressure) and **write time**. This exists because the copier's chunk feedback is end-to-end — read + queue wait + write — so a saturated write side otherwise presents as a read/chunker problem. A queue pegged at capacity with queue-wait far above write time means the pipeline is write-limited; a near-empty queue means it is read-limited.
+Both appliers expose a point-in-time `Stats()` snapshot (see `stats.go`): queue depth/capacity, pending work, live write workers, and rolling p50/p90 of four per-chunklet phases. This exists because the copier's chunk feedback is end-to-end — read + queue wait + write — so a saturated write side otherwise presents as a read/chunker problem. A queue pegged at capacity with queue-wait far above write time means the pipeline is write-limited; a near-empty queue means it is read-limited.
+
+The four phases together account for a write worker's whole cycle, which is what makes the follow-up question answerable — *given* the write side is the limit, which part of it?
+
+| Phase | What it measures | What a large value means |
+| --- | --- | --- |
+| **queue wait** | `Apply()` offering a chunklet to the buffer until a worker dequeues it, including send-side backpressure | Workers cannot keep up with the copier (or are blocked further down) |
+| **build time** | Client-side statement construction: a datum conversion and string format per value, so it scales with rows × columns | Spirit's own CPU is the limit. No server-side signal reports this, and more write workers cannot fix it. Contained *within* write time, not additional to it |
+| **write time** | Build plus the round trip to the target(s), including retry backoff | Subtract build time to get time actually at the server |
+| **handoff** | Publishing the completion after the write finished | Workers are queued behind the single `feedbackCoordinator`, which invokes the chunk callback inline — so one slow callback backs up every worker at once |
+
+The distinction matters because only *write time minus build time* is the target's write capacity. A pipeline that stops responding to added write workers looks identical in the aggregate whether the ceiling is the server, spirit's CPU, or the completion path; these four separate those cases. Note that a worker holds no connection during build or handoff, so `conns-in-use` on the runner status line sitting well below the worker count is the same observation from the other side.
+
+`Stats().RowsPerChunklet` (mean rows per chunklet since start) reports which chunklet cap — row count or byte budget — is actually binding for this table, which cannot be read off the config: it depends on the table's width and column types. Tuning the cap that *isn't* binding is a no-op.
 
 
 ## Implementation Details

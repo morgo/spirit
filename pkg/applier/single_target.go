@@ -65,6 +65,9 @@ type SingleTargetApplier struct {
 	// durations, reported by Stats().
 	timings timingRing
 
+	// splits accumulates the chunklet/row counts behind Stats.RowsPerChunklet.
+	splits splitCounter
+
 	// Context management
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup // tracks the feedbackCoordinator and stats-emitter goroutines
@@ -201,6 +204,7 @@ func (a *SingleTargetApplier) Apply(ctx context.Context, chunk *table.Chunk, row
 	// Split into chunklets based on both row count and size thresholds
 	// Then convert row batches into chunklets with metadata
 	rowBatches := splitRowsIntoChunklets(rowDataList)
+	a.splits.record(len(rowBatches), len(rowDataList))
 	chunklets := make([]chunklet, len(rowBatches))
 	for i, batch := range rowBatches {
 		chunklets[i] = chunklet{
@@ -422,16 +426,21 @@ func (a *SingleTargetApplier) Stats() Stats {
 	pending := len(a.pendingWork)
 	a.pendingMutex.Unlock()
 
-	queueWaitP50, queueWaitP90, writeTimeP50, writeTimeP90 := a.timings.percentiles()
+	t := a.timings.percentiles()
 	return Stats{
-		QueueDepth:    queueDepth,
-		QueueCap:      queueCap,
-		PendingWork:   pending,
-		ActiveWorkers: int(a.activeWorkers.Load()),
-		QueueWaitP50:  queueWaitP50,
-		QueueWaitP90:  queueWaitP90,
-		WriteTimeP50:  writeTimeP50,
-		WriteTimeP90:  writeTimeP90,
+		QueueDepth:      queueDepth,
+		QueueCap:        queueCap,
+		PendingWork:     pending,
+		ActiveWorkers:   int(a.activeWorkers.Load()),
+		RowsPerChunklet: a.splits.mean(),
+		QueueWaitP50:    t.queueWaitP50,
+		QueueWaitP90:    t.queueWaitP90,
+		BuildTimeP50:    t.buildP50,
+		BuildTimeP90:    t.buildP90,
+		WriteTimeP50:    t.writeP50,
+		WriteTimeP90:    t.writeP90,
+		HandoffP50:      t.handoffP50,
+		HandoffP90:      t.handoffP90,
 	}
 }
 
@@ -465,30 +474,45 @@ func (a *SingleTargetApplier) writeWorker(ctx context.Context, quit <-chan struc
 
 			queueWait := time.Since(chunkletData.enqueuedAt)
 			writeStart := time.Now()
-			affectedRows, err := a.writeChunklet(ctx, chunkletData)
-			a.timings.record(queueWait, time.Since(writeStart))
+			affectedRows, buildTime, err := a.writeChunklet(ctx, chunkletData)
+			writeTime := time.Since(writeStart)
 
+			// Timed separately from the write: a worker blocked here is waiting
+			// on the single feedbackCoordinator (which invokes the chunk
+			// callback inline), not on the target, and while blocked it is not
+			// pulling from chunkletBuffer either. Folding it into writeTime
+			// would attribute a completion-path stall to the database, and
+			// leaving it untimed — as it was — hides it from the status line
+			// altogether, which is the shape of "more write workers changed
+			// nothing" that is otherwise very hard to see.
+			handoffStart := time.Now()
 			a.chunkletCompletions <- chunkletCompletion{
 				workID:       chunkletData.workID,
 				affectedRows: affectedRows,
 				err:          err,
 			}
+			a.timings.record(queueWait, buildTime, writeTime, time.Since(handoffStart))
 		}
 	}
 }
 
-// writeChunklet writes a single chunklet (up to chunkletMaxRows or MaxStatementSizeBytes)
-func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData chunklet) (int64, error) {
+// writeChunklet writes a single chunklet (up to chunkletMaxRows or
+// MaxStatementSizeBytes). It returns the affected row count and, separately,
+// how long the client-side statement build took — that portion holds no
+// connection and is spent on spirit's own CPU, so Stats() reports it apart from
+// the round trip (see Stats.BuildTimeP50).
+func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData chunklet) (int64, time.Duration, error) {
 	if len(chunkletData.rows) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
+	buildStart := time.Now()
 
 	// Fast path on shutdown: if ctx is already cancelled, fail the chunklet
 	// without building the (potentially large) INSERT statement or burning
 	// retries against a dead context. writeWorker relies on chunklets failing
 	// quickly after cancellation so Stop() can drain the buffer promptly.
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return 0, time.Since(buildStart), err
 	}
 
 	// The intersected source and target column lists are parallel — row.values[i]
@@ -503,7 +527,7 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 	var valuesClauses []string
 	for _, row := range chunkletData.rows {
 		if len(sourceColumnNames) != len(row.values) {
-			return 0, fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
+			return 0, time.Since(buildStart), fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
 				chunkletData.chunk.String(), len(sourceColumnNames), len(row.values))
 		}
 		var values []string
@@ -513,11 +537,11 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 			// destination INSERT if the target column type has widened.
 			columnType, ok := mapping.SourceTable().GetColumnMySQLType(sourceColumnNames[i])
 			if !ok {
-				return 0, fmt.Errorf("column %s not found in source table info", sourceColumnNames[i])
+				return 0, time.Since(buildStart), fmt.Errorf("column %s not found in source table info", sourceColumnNames[i])
 			}
 			datum, err := table.NewDatumFromValue(value, columnType)
 			if err != nil {
-				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
+				return 0, time.Since(buildStart), fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
 			// datum.String() returns a complete pre-escaped SQL literal
 			// (NULL, a numeric, 0x… hex, or a "..."-quoted string). Safe
@@ -535,15 +559,17 @@ func (a *SingleTargetApplier) writeChunklet(ctx context.Context, chunkletData ch
 		strings.Join(valuesClauses, ", "),
 	)
 
+	buildTime := time.Since(buildStart)
+
 	a.logger.Debug("writing chunklet", "rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert
 	result, err := dbconn.RetryableTransaction(ctx, a.target.DB, dbconn.IgnoreDupKeyWarnings, a.dbConfig, query)
 	if err != nil {
-		return 0, fmt.Errorf("failed to execute chunklet insert: %w", err)
+		return 0, buildTime, fmt.Errorf("failed to execute chunklet insert: %w", err)
 	}
 
-	return result, nil
+	return result, buildTime, nil
 }
 
 // feedbackCoordinator tracks chunklet completions and invokes callbacks when work is done.

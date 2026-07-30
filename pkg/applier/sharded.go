@@ -60,6 +60,10 @@ type ShardedApplier struct {
 	// does not need per-shard attribution.
 	timings timingRing
 
+	// splits accumulates the chunklet/row counts behind Stats.RowsPerChunklet,
+	// summed across shards — the split rule is global, not per shard.
+	splits splitCounter
+
 	// State management to make Start/Stop idempotent
 	stopped bool
 	started bool
@@ -299,6 +303,7 @@ func (a *ShardedApplier) Apply(ctx context.Context, chunk *table.Chunk, rows [][
 		// Use shared helper to split rows into chunklets
 		// Then convert row batches into sharded chunklets with metadata
 		rowBatches := splitRowsIntoChunklets(rows)
+		a.splits.record(len(rowBatches), len(rows))
 		for _, batch := range rowBatches {
 			allChunklets = append(allChunklets, shardedChunklet{
 				workID:  workID,
@@ -459,16 +464,21 @@ func (a *ShardedApplier) Stats() Stats {
 	pending := len(a.pendingWork)
 	a.pendingMutex.Unlock()
 
-	queueWaitP50, queueWaitP90, writeTimeP50, writeTimeP90 := a.timings.percentiles()
+	t := a.timings.percentiles()
 	return Stats{
-		QueueDepth:    queueDepth,
-		QueueCap:      queueCap,
-		PendingWork:   pending,
-		ActiveWorkers: activeWorkers,
-		QueueWaitP50:  queueWaitP50,
-		QueueWaitP90:  queueWaitP90,
-		WriteTimeP50:  writeTimeP50,
-		WriteTimeP90:  writeTimeP90,
+		QueueDepth:      queueDepth,
+		QueueCap:        queueCap,
+		PendingWork:     pending,
+		ActiveWorkers:   activeWorkers,
+		RowsPerChunklet: a.splits.mean(),
+		QueueWaitP50:    t.queueWaitP50,
+		QueueWaitP90:    t.queueWaitP90,
+		BuildTimeP50:    t.buildP50,
+		BuildTimeP90:    t.buildP90,
+		WriteTimeP50:    t.writeP50,
+		WriteTimeP90:    t.writeP90,
+		HandoffP50:      t.handoffP50,
+		HandoffP90:      t.handoffP90,
 	}
 }
 
@@ -504,31 +514,39 @@ func (a *ShardedApplier) writeWorker(ctx context.Context, shard *shardTarget) {
 
 		queueWait := time.Since(chunkletData.enqueuedAt)
 		writeStart := time.Now()
-		affectedRows, err := a.writeChunklet(ctx, shard, chunkletData)
-		a.timings.record(queueWait, time.Since(writeStart))
+		affectedRows, buildTime, err := a.writeChunklet(ctx, shard, chunkletData)
+		writeTime := time.Since(writeStart)
 
+		// Timed separately from the write — see the equivalent comment in
+		// SingleTargetApplier.writeWorker. A worker blocked publishing its
+		// completion is waiting on the feedbackCoordinator, not the shard.
+		handoffStart := time.Now()
 		shard.chunkletCompletions <- shardedChunkletCompletion{
 			workID:       chunkletData.workID,
 			shardID:      shard.shardID,
 			affectedRows: affectedRows,
 			err:          err,
 		}
+		a.timings.record(queueWait, buildTime, writeTime, time.Since(handoffStart))
 	}
 	a.logger.Debug("writeWorker channel closed, exiting", "shardID", shard.shardID, "workerID", workerID)
 }
 
-// writeChunklet writes a single chunklet to a specific shard
-func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, chunkletData shardedChunklet) (int64, error) {
+// writeChunklet writes a single chunklet to a specific shard. It returns the
+// affected row count and, separately, how long the client-side statement build
+// took — see SingleTargetApplier.writeChunklet.
+func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, chunkletData shardedChunklet) (int64, time.Duration, error) {
 	if len(chunkletData.rows) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
+	buildStart := time.Now()
 
 	// Fast path on shutdown: if ctx is already cancelled, fail the chunklet
 	// without building the (potentially large) INSERT statement or burning
 	// retries against a dead context. writeWorker relies on chunklets failing
 	// quickly after cancellation so Stop() can drain the buffer promptly.
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return 0, time.Since(buildStart), err
 	}
 
 	// Create a context with timeout for the entire operation
@@ -543,18 +561,18 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 	var valuesClauses []string
 	for _, row := range chunkletData.rows {
 		if len(columnNames) != len(row.values) {
-			return 0, fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
+			return 0, time.Since(buildStart), fmt.Errorf("column count mismatch: chunk %s has %d columns, but chunklet has %d values",
 				chunkletData.chunk.String(), len(columnNames), len(row.values))
 		}
 		var values []string
 		for i, value := range row.values {
 			columnType, ok := chunkletData.chunk.ColumnMapping.TargetTable().GetColumnMySQLType(columnNames[i])
 			if !ok {
-				return 0, fmt.Errorf("column %s not found in table info", columnNames[i])
+				return 0, time.Since(buildStart), fmt.Errorf("column %s not found in table info", columnNames[i])
 			}
 			datum, err := table.NewDatumFromValue(value, columnType)
 			if err != nil {
-				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
+				return 0, time.Since(buildStart), fmt.Errorf("failed to convert value to datum for column %s: %w", columnNames[i], err)
 			}
 			// datum.String() returns a complete pre-escaped SQL literal
 			// (NULL, a numeric, 0x… hex, or a "..."-quoted string). Safe
@@ -574,16 +592,18 @@ func (a *ShardedApplier) writeChunklet(ctx context.Context, shard *shardTarget, 
 		strings.Join(valuesClauses, ", "),
 	)
 
+	buildTime := time.Since(buildStart)
+
 	a.logger.Debug("writing chunklet to shard", "shardID", shard.shardID,
 		"rowCount", len(chunkletData.rows), "table", chunkletData.chunk.ColumnMapping.TargetTable().TableName)
 
 	// Execute the batch insert on this shard's database
 	result, err := dbconn.RetryableTransaction(ctx, shard.writeDB, dbconn.IgnoreDupKeyWarnings, shard.dbConfig, query)
 	if err != nil {
-		return 0, fmt.Errorf("failed to execute chunklet insert on shard %d: %w", shard.shardID, err)
+		return 0, buildTime, fmt.Errorf("failed to execute chunklet insert on shard %d: %w", shard.shardID, err)
 	}
 
-	return result, nil
+	return result, buildTime, nil
 }
 
 // feedbackCoordinator tracks chunklet completions from all shards and invokes callbacks when work is done.

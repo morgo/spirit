@@ -51,8 +51,12 @@ func emitStats(ctx context.Context, a statsProvider, sink metrics.Sink, logger *
 			{Name: metrics.ApplierActiveWorkersMetricName, Type: metrics.GAUGE, Value: float64(s.ActiveWorkers)},
 			{Name: metrics.ApplierQueueWaitP50MetricName, Type: metrics.GAUGE, Value: float64(s.QueueWaitP50.Milliseconds())},
 			{Name: metrics.ApplierQueueWaitP90MetricName, Type: metrics.GAUGE, Value: float64(s.QueueWaitP90.Milliseconds())},
+			{Name: metrics.ApplierBuildTimeP50MetricName, Type: metrics.GAUGE, Value: float64(s.BuildTimeP50.Milliseconds())},
+			{Name: metrics.ApplierBuildTimeP90MetricName, Type: metrics.GAUGE, Value: float64(s.BuildTimeP90.Milliseconds())},
 			{Name: metrics.ApplierWriteTimeP50MetricName, Type: metrics.GAUGE, Value: float64(s.WriteTimeP50.Milliseconds())},
 			{Name: metrics.ApplierWriteTimeP90MetricName, Type: metrics.GAUGE, Value: float64(s.WriteTimeP90.Milliseconds())},
+			{Name: metrics.ApplierHandoffP50MetricName, Type: metrics.GAUGE, Value: float64(s.HandoffP50.Milliseconds())},
+			{Name: metrics.ApplierHandoffP90MetricName, Type: metrics.GAUGE, Value: float64(s.HandoffP90.Milliseconds())},
 		},
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, metrics.SinkTimeout)

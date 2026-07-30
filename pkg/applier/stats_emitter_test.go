@@ -77,8 +77,12 @@ func TestEmitStatsGauges(t *testing.T) {
 		ActiveWorkers: 4,
 		QueueWaitP50:  1800 * time.Millisecond,
 		QueueWaitP90:  4200 * time.Millisecond,
+		BuildTimeP50:  30 * time.Millisecond,
+		BuildTimeP90:  60 * time.Millisecond,
 		WriteTimeP50:  95 * time.Millisecond,
 		WriteTimeP90:  210 * time.Millisecond,
+		HandoffP50:    2 * time.Millisecond,
+		HandoffP90:    12 * time.Millisecond,
 	}}
 	emitStats(t.Context(), p, sink, slog.Default())
 	require.Equal(t, 1, sink.count())
@@ -95,8 +99,12 @@ func TestEmitStatsGauges(t *testing.T) {
 		metrics.ApplierActiveWorkersMetricName: 4,
 		metrics.ApplierQueueWaitP50MetricName:  1800,
 		metrics.ApplierQueueWaitP90MetricName:  4200,
+		metrics.ApplierBuildTimeP50MetricName:  30,
+		metrics.ApplierBuildTimeP90MetricName:  60,
 		metrics.ApplierWriteTimeP50MetricName:  95,
 		metrics.ApplierWriteTimeP90MetricName:  210,
+		metrics.ApplierHandoffP50MetricName:    2,
+		metrics.ApplierHandoffP90MetricName:    12,
 	}, got)
 }
 
