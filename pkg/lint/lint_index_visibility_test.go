@@ -103,6 +103,22 @@ func TestIndexVisibilityMixedLinter_ViolationDetail(t *testing.T) {
 	require.Contains(t, *violations[0].Suggestion, "Split into two statements")
 }
 
+// TestIndexVisibilityMixedLinter_MultipleIndexes verifies that a statement
+// flipping several indexes lists them all in the message, and leaves
+// Location.Index unset rather than arbitrarily naming the first one.
+func TestIndexVisibilityMixedLinter_MultipleIndexes(t *testing.T) {
+	stmts, err := statement.New("ALTER TABLE t1 ALTER INDEX a INVISIBLE, ALTER INDEX b VISIBLE, ADD COLUMN c INT")
+	require.NoError(t, err)
+
+	linter := &IndexVisibilityMixedLinter{}
+	violations := linter.Lint(nil, stmts)
+
+	require.Len(t, violations, 1)
+	require.Contains(t, violations[0].Message, "\"a, b\"")
+	require.Equal(t, "t1", violations[0].Location.Table)
+	require.Nil(t, violations[0].Location.Index)
+}
+
 // TestIndexVisibilityMixedLinter_MultipleStatements verifies each offending
 // ALTER produces its own violation, and clean statements produce none.
 func TestIndexVisibilityMixedLinter_MultipleStatements(t *testing.T) {

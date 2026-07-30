@@ -88,21 +88,25 @@ func (l *IndexVisibilityMixedLinter) Lint(_ []*statement.CreateTable, changes []
 			continue
 		}
 
-		indexName := visibilityIndexes[0]
 		// Sorted+deduplicated so that the same ALTER always reports the same
 		// operation list, regardless of clause order.
 		operations := strings.Join(slices.Compact(slices.Sorted(slices.Values(rebuildOperations))), ", ")
 		suggestion := fmt.Sprintf("Split into two statements: one for the index visibility change, and one for the %s", operations)
+
+		location := &Location{Table: change.Table}
+		// Only pin the location to an index when the statement changes exactly
+		// one. With several, naming the first would be misleading; the message
+		// lists them all.
+		if len(visibilityIndexes) == 1 {
+			location.Index = &visibilityIndexes[0]
+		}
 
 		violations = append(violations, Violation{
 			Linter:   l,
 			Severity: SeverityWarning,
 			Message: fmt.Sprintf("Index visibility change on %q is mixed with table-rebuilding operations (%s). A visibility change is usually an experiment, and rebuilding the table at the same time makes the result difficult to interpret",
 				strings.Join(visibilityIndexes, ", "), operations),
-			Location: &Location{
-				Table: change.Table,
-				Index: &indexName,
-			},
+			Location:   location,
 			Suggestion: &suggestion,
 		})
 	}
