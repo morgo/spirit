@@ -436,15 +436,7 @@ This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) en
 
 The band has hysteresis, so where it settles depends on which side it approaches from. The write pool's starting point (`vCPUs - 2`) sits *above* the band, so on an otherwise idle server the controller sheds it downward and parks just under the **70%** watermark — the first band edge it reaches — and holds there. It does not continue down to the 40% floor; that lower watermark is only the level it would climb *up* to had it started below the band. The read pool starts well *below* the band and does climb, one thread per ~15s, until either the signal reaches 40% or it hits its ceiling. Either way the remaining headroom is reserved for the primary workload, and responsiveness to genuine overload comes from the hard-stop throttle, not from thread scaling — so on a fully idle instance some capacity is deliberately left unused. The threads-running utilization signal is smoothed (an exponentially weighted moving average over ~3 samples) so one-off spikes — a checkpoint write, a brief flurry of OLTP — do not trigger scaling; the binary hard-stop throttle always acts on the raw per-sample value.
 
-**This flag takes over the thread counts: [threads](#threads) and [write-threads](#write-threads) are ignored when it engages.** A controller whose whole job is to find the right size should not also be told where to stop, and those flags are usually left at their defaults — on a `db.r8g.24xlarge`, `--threads 4` capped the checksum at 8 workers however much headroom the signal reported, while the applier pool had already sized itself to 94 from the instance. Both pools are now sized from the instance (`vCPUs` is read from `@@innodb_buffer_pool_instances` on Aurora):
-
-| Pool | Starts at | Ceiling |
-| --- | --- | --- |
-| Apply (write) threads | `vCPUs - 2` (min 1) | `2 × start` |
-| Copy read threads | `ceil((vCPUs - 2) / 4)` (min 2) | `ceil(vCPUs / 2)` |
-| Checksum threads | same as copy read threads | `ceil(vCPUs / 2)` |
-
-Which works out as follows (`start → ceiling`; the checksum column is also the copy-read column, since the checksum inherits the read side's bounds):
+**This flag takes over the thread counts: [threads](#threads) and [write-threads](#write-threads) are ignored when it engages.** A controller whose job is to find the right size should not also be told where to stop. Both pools are sized from the instance instead, as `start → ceiling`:
 
 | Instance | vCPUs | Apply (write) | Copy read / checksum |
 | --- | --- | --- | --- |
@@ -460,7 +452,7 @@ Which works out as follows (`start → ceiling`; the checksum column is also the
 
 \* Below 4 vCPUs autoscaling does not engage at all and both counts stay as configured — see the bottom of this section.
 
-The counts are logged once at startup, so the line in your migration log is the authoritative version of this table. The lower bound is always 1: the controller may shed below the starting value. Note the smallest engaging size, `xlarge`: the read bounds meet at 2, so there the read side can shed but not grow — two readers is already half the instance.
+For a size not listed: write threads start at `vCPUs - 2` (minimum 1) and may reach twice that; read threads start at `ceil((vCPUs - 2) / 4)` (minimum 2) and may reach `ceil(vCPUs / 2)`. `vCPUs` is read from `@@innodb_buffer_pool_instances`, and the resolved counts are logged once at startup. The lower bound is always 1 — the controller may shed below the starting value. Note `xlarge`, the smallest size that engages: its read bounds meet at 2, so the read side can shed but not grow there.
 
 The two shapes are deliberately different. Write threads spend most of their life parked on a redo-log flush, so a count above the vCPU count is not oversubscription; it is what keeps the log busy, and it is why the redo-aware signal excludes those waiters. A read thread scanning a table that is already in the buffer pool is pure CPU, so the same count really does compete with the application for cores — oversubscribing readers is how a checksum ends up degrading the workload it was supposed to be invisible to. The read side therefore starts at about a quarter of the instance and earns its way up through the utilization band.
 
