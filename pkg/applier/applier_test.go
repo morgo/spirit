@@ -2,6 +2,7 @@ package applier
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/block/spirit/pkg/table"
@@ -427,12 +428,16 @@ func TestEstimateRowSizeTracksRenderedSize(t *testing.T) {
 		"varchar(36)", "int",
 	}
 
-	rendered := 2
+	// Render the tuple exactly as writeChunklet would — join, not terminate,
+	// so the baseline carries no trailing separator that would slacken the
+	// ratio assertion.
+	literals := make([]string, len(values))
 	for i, v := range values {
 		datum, err := table.NewDatumFromValue(v, types[i])
 		require.NoError(t, err)
-		rendered += len(datum.String()) + 2 // literal plus ", "
+		literals[i] = datum.String()
 	}
+	rendered := len("(" + strings.Join(literals, ", ") + ")")
 
 	estimated := estimateRowSize(values)
 	ratio := float64(estimated) / float64(rendered)

@@ -233,10 +233,13 @@ func (cfg *ApplierConfig) Validate() error {
 // budget they were supposed to fill. A type switch is ~290x cheaper, allocates
 // nothing, and lands much closer to what datum.String() actually emits.
 func estimateRowSize(values []any) int {
-	size := 2 // minimal overhead for parentheses
+	size := 2 // the tuple's parentheses
 	for _, value := range values {
-		// +2 for quotes, +2 for the comma/separator
-		size += estimateValueSize(value) + 4
+		// +2 for the ", " separator. That over-counts by one separator per
+		// row (values are joined, not terminated), which exactly covers the
+		// ", " between this row's tuple and the next in the statement. Quote
+		// characters are estimateValueSize's job, not counted here.
+		size += estimateValueSize(value) + 2
 	}
 	return size
 }
@@ -254,11 +257,15 @@ func estimateValueSize(value any) int {
 	case nil:
 		return 4 // NULL
 	case []byte:
+		// +2 for the surrounding quotes. Slightly over for the numeric column
+		// types (which the text protocol also delivers as []byte but which
+		// render unquoted); telling them apart would need the column type,
+		// which this deliberately doesn't take.
 		return len(v) + 2
 	case string:
-		return len(v) + 2
+		return len(v) + 2 // +2 for the surrounding quotes
 	case time.Time:
-		return 26 // "2026-07-30 15:12:27.123456"
+		return 28 // '2026-07-30 15:12:27.123456' — quoted, unlike numerics
 	case float32, float64:
 		// Typical rather than worst case: a float64 can render as wide as 24
 		// ("-1.7976931348623157e+308") but usually lands around 6-9 ("3.14159",
