@@ -132,7 +132,11 @@ func (c *CommitLatency) run(ctx context.Context) {
 				return
 			}
 			if err := c.UpdateLag(ctx); err != nil {
-				c.logger.Error("error sampling Aurora commit latency", "error", err)
+				if isShutdownError(ctx, err) {
+					return // teardown cancelled the in-flight sample; not a monitoring failure
+				}
+				c.logger.Error("error sampling Aurora commit latency; keeping the last reading (the autoscaler holds steady if sampling stays stale)",
+					"error", err)
 			}
 		}
 	}

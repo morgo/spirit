@@ -319,7 +319,11 @@ func (a *AuroraThreads) run(ctx context.Context) {
 				return
 			}
 			if err := a.UpdateLag(ctx); err != nil {
-				a.logger.Error("error sampling Aurora threads", "mode", a.mode.label, "error", err)
+				if isShutdownError(ctx, err) {
+					return // teardown cancelled the in-flight sample; not a monitoring failure
+				}
+				a.logger.Error("error sampling Aurora threads; keeping the last reading (the autoscaler holds steady if sampling stays stale)",
+					"mode", a.mode.label, "error", err)
 			}
 		}
 	}
