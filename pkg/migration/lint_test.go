@@ -57,6 +57,22 @@ func TestLintInvisibleIndexBeforeDrop_AlreadyInvisible(t *testing.T) {
 	require.NoError(t, m.Run())
 }
 
+// TestLintIndexVisibilityMixed tests that mixing an index visibility change with
+// a table-rebuilding operation warns, but does not block the migration. This was
+// previously refused outright by a preflight check (issue #283).
+func TestLintIndexVisibilityMixed(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "t1idxvis", `CREATE TABLE t1idxvis (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		name VARCHAR(255) NOT NULL,
+		PRIMARY KEY (id),
+		KEY idx_name (name)
+	)`)
+	m := NewTestMigration(t, WithTable("t1idxvis"),
+		WithAlter("ALTER INDEX idx_name INVISIBLE, ADD COLUMN age INT"), WithLint())
+	require.NoError(t, m.Run())
+}
+
 // TestLintPrimaryKeyType_IntWarning tests that INT primary key triggers a warning.
 func TestLintPrimaryKeyType_IntWarning(t *testing.T) {
 	t.Parallel()

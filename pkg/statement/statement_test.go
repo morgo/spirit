@@ -277,7 +277,7 @@ func TestTrimAlter(t *testing.T) {
 
 func TestMixedOperationsLogic(t *testing.T) {
 	// Test complex scenarios for the AlgorithmInplaceConsideredSafe logic
-	// (Visibility logic complexity is tested in pkg/check/visibility_change_test.go)
+	// (Visibility logic complexity is tested in pkg/lint/lint_index_visibility_test.go)
 
 	var testInplace = func(stmt string) error {
 		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlgorithmInplaceConsideredSafe()

@@ -57,9 +57,15 @@ func TestForNonInstantBurn(t *testing.T) {
 }
 
 // TestIndexVisibility tests ALTER INDEX INVISIBLE/VISIBLE operations.
+//
+// Mixing a visibility change with table-rebuilding operations used to be
+// refused outright by a preflight check. It is now permitted, and the
+// index_visibility_mixed linter warns about it instead — declarative workflows
+// generate the ALTER from a schema diff and don't control how clauses are
+// batched together.
 func TestIndexVisibility(t *testing.T) {
 	t.Parallel()
-	testutils.NewTestTable(t, "indexvisibility", `CREATE TABLE indexvisibility (
+	tt := testutils.NewTestTable(t, "indexvisibility", `CREATE TABLE indexvisibility (
 		id int(11) NOT NULL AUTO_INCREMENT,
 		b INT NOT NULL,
 		c INT NOT NULL,
@@ -67,29 +73,51 @@ func TestIndexVisibility(t *testing.T) {
 		INDEX (b)
 	)`)
 
+	showCreate := func() string {
+		var name, createTable string
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(), "SHOW CREATE TABLE indexvisibility").Scan(&name, &createTable))
+		return createTable
+	}
+
+	// Read visibility from information_schema rather than parsing the
+	// version-specific `/*!80000 INVISIBLE */` comment out of SHOW CREATE TABLE.
+	indexVisible := func(indexName string) string {
+		var isVisible string
+		require.NoError(t, tt.DB.QueryRowContext(t.Context(),
+			`SELECT is_visible FROM information_schema.statistics
+			 WHERE table_schema=DATABASE() AND table_name='indexvisibility' AND index_name=?`,
+			indexName).Scan(&isVisible))
+		return isVisible
+	}
+
 	// INVISIBLE — should use inplace DDL
 	m := NewTestRunner(t, "indexvisibility", "ALTER INDEX b INVISIBLE", WithThreads(1))
 	require.NoError(t, m.Run(t.Context()))
 	require.True(t, m.usedInplaceDDL)
 	require.NoError(t, m.Close())
+	require.Equal(t, "NO", indexVisible("b"))
 
 	// VISIBLE — should use inplace DDL
 	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b VISIBLE", WithThreads(1))
 	require.NoError(t, m.Run(t.Context()))
 	require.True(t, m.usedInplaceDDL)
 	require.NoError(t, m.Close())
+	require.Equal(t, "YES", indexVisible("b"))
 
-	// VISIBLE + ADD INDEX — mixed operations should fail
-	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b VISIBLE, ADD INDEX (c)", WithThreads(1))
-	err := m.Run(t.Context())
-	require.Error(t, err)
+	// INVISIBLE + ADD INDEX — mixed with a table rebuild is allowed, and both
+	// clauses have to be applied.
+	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b INVISIBLE, ADD INDEX (c)", WithThreads(1))
+	require.NoError(t, m.Run(t.Context()))
 	require.NoError(t, m.Close())
+	require.Equal(t, "NO", indexVisible("b"))
+	require.Contains(t, showCreate(), "KEY `c` (`c`)")
 
-	// VISIBLE + CHANGE COLUMN — mixed with table-rebuilding should fail
+	// VISIBLE + CHANGE COLUMN — also allowed.
 	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b VISIBLE, CHANGE c cc BIGINT NOT NULL", WithThreads(1))
-	err = m.Run(t.Context())
-	require.Error(t, err)
+	require.NoError(t, m.Run(t.Context()))
 	require.NoError(t, m.Close())
+	require.Equal(t, "YES", indexVisible("b"))
+	require.Contains(t, showCreate(), "`cc` bigint NOT NULL")
 }
 
 // TestUnsupportedClauseRejectedBeforeDDL tests that a user-supplied ALGORITHM=
