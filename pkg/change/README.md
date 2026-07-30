@@ -209,6 +209,12 @@ if !chunker.KeyBelowLowWatermark(key[0]) {
 
 **Important:** The watermark optimization is disabled before the final cutover to ensure all changes are applied regardless of the copier's position.
 
+### Skipping row decode for unsubscribed tables
+
+While the copy runs, the binlog is dominated by spirit's **own writes** — the multi-row `INSERT`s into the `_new` table. The stream client has no subscription for `_new`, so those events are no-ops, but they still have to move through the parser, and decoding every column of every row image (including JSON rendering) just to discard the event by table name is the single largest cost in the stream path. On a fast copy the reader falls behind its own migration and repays the gap after the copy as a long catch-up phase that is almost entirely no-ops.
+
+Both clients therefore install a `RowsEventDecodeFunc` on the syncer (see `newRowsEventDecodeFunc`): the event *header* is always decoded — that is where the table name and stream position come from — but the row images are decoded only when the table has a subscription. This is the same hook go-mysql's canal uses for its table filters. It is safe because the `Source` lifecycle requires all subscriptions to be added before `Start`; `processRowsEvent` enforces that with a hard error if a subscribed table's event ever arrives undecoded, rather than silently treating it as empty.
+
 ### Checkpointing
 
 The replication client tracks two positions:
