@@ -258,7 +258,7 @@ func TestLimiterNeverOverAdmits(t *testing.T) {
 // clipped hard, while the derived read start still fits. Only the read side's
 // room to grow is lost.
 func TestClientCeiling(t *testing.T) {
-	assert.Equal(t, 8, ClientThreadsPerCore,
+	assert.Equal(t, 16, ClientThreadsPerCore,
 		"the ratio is documented in migrate.md and pkg/autoscale/README.md")
 
 	// Derived from GOMAXPROCS, so it tracks a container CPU limit rather than
@@ -266,29 +266,37 @@ func TestClientCeiling(t *testing.T) {
 	assert.Equal(t, ClientThreadsPerCore*runtime.GOMAXPROCS(0), ClientCeiling())
 	assert.Positive(t, ClientCeiling())
 
-	// Against the 96-vCPU target that motivated this: write start 94, read
-	// start 24, read ceiling 48.
+	// Against the 96-vCPU target that motivated this: write start 94 growing to
+	// 188, read start 24 growing to 48.
 	const target = 96
 	readStart, readCeiling := ReadBounds(target)
 	writeStart := WriteStart(target)
-	require.Equal(t, []int{24, 48, 94}, []int{readStart, readCeiling, writeStart},
+	writeCeiling := Ceiling(writeStart, true)
+	require.Equal(t, []int{24, 48, 94, 188},
+		[]int{readStart, readCeiling, writeStart, writeCeiling},
 		"guard: the rest of this test reads against these derived values")
 
 	for _, tc := range []struct {
-		cores                                         int
-		clipsWriteStart, clipsReadStart, clipsReadMax bool
+		cores                                                        int
+		clipsWriteStart, clipsWriteMax, clipsReadStart, clipsReadMax bool
 	}{
-		// The 4-core pod that motivated this. Its ceiling of 32 is a third of
-		// the write start, still above the read start, and below the read
-		// ceiling — so the read pool starts at full size but cannot grow.
-		{4, true, false, true},
-		{8, true, false, false},   // 64: only the write start is clipped
-		{12, false, false, false}, // 96 clears every derived value for this target
-		{16, false, false, false},
+		// The 4-core pod that motivated this. Its ceiling of 64 is two thirds of
+		// the write start, still above the read start, and above the read
+		// ceiling — so the read pool is untouched and only the write pool is cut.
+		{4, true, true, false, false},
+		// 8 cores clears every *start* but still clips the write pool's room to
+		// grow. This is the case that ruled out 8 threads per core: a host
+		// keeping up fine at 6.2 workers per core would have had its write
+		// ceiling cut from 188 to 128 with nothing reporting why.
+		{8, false, true, false, false},
+		{12, false, false, false, false}, // 192 clears everything for this target
+		{16, false, false, false, false},
 	} {
 		ceiling := ClientThreadsPerCore * tc.cores
 		assert.Equalf(t, tc.clipsWriteStart, ceiling < writeStart,
 			"%d cores (ceiling %d) vs write start %d", tc.cores, ceiling, writeStart)
+		assert.Equalf(t, tc.clipsWriteMax, ceiling < writeCeiling,
+			"%d cores (ceiling %d) vs write ceiling %d", tc.cores, ceiling, writeCeiling)
 		assert.Equalf(t, tc.clipsReadStart, ceiling < readStart,
 			"%d cores (ceiling %d) vs read start %d", tc.cores, ceiling, readStart)
 		assert.Equalf(t, tc.clipsReadMax, ceiling < readCeiling,
@@ -296,7 +304,8 @@ func TestClientCeiling(t *testing.T) {
 	}
 
 	// A host large enough to clear the biggest target in docs/migrate.md's table
-	// (192 vCPUs -> 190 write threads) is never constrained by this at all.
-	assert.GreaterOrEqual(t, ClientThreadsPerCore*24, WriteStart(192),
-		"24 cores should clear even the 48xlarge derivation")
+	// (192 vCPUs -> 190 write threads, growing to 380) is never constrained by
+	// this at all. The growth ceiling is the binding value, not the start.
+	assert.GreaterOrEqual(t, ClientThreadsPerCore*24, Ceiling(WriteStart(192), true),
+		"24 cores should clear even the 48xlarge derivation, growth included")
 }

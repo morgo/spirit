@@ -157,15 +157,23 @@ func CeilDiv(n, d int) int {
 // worker count is closer to a small multiple of local cores than to the target's
 // vCPU count.
 //
-// 8 is deliberately permissive rather than tuned. The failure it exists to
+// 16 is deliberately permissive rather than tuned. The failure it exists to
 // prevent is the order-of-magnitude one: spirit on a 4-core pod deriving 94
 // write threads from a 96-vCPU target, where ~7 threads' worth of work actually
-// progressed and the other 87 only added queueing and latency. At 8 per core
-// that config is capped to 32, while any host with 16+ cores is untouched by it
-// (8 x 16 = 128, above anything the target-side derivation produces here). A
-// tighter ratio would need the client-side share as a live input, which is a
-// feedback loop rather than a constant.
-const ClientThreadsPerCore = 8
+// progressed and the other 87 only added queueing and latency. That is ~23
+// threads per core; capping it at 64 still cuts it by a third while leaving a
+// 16-core host (256) clear of every derivation for targets up to 192 vCPUs,
+// growth ceilings included.
+//
+// The ratio has to sit well above the healthy operating point, not near it.
+// Measured on 16 cores: ~99 write workers, 6.2 per core, with local CPU not
+// saturated — so a cap of 8 per core would begin binding on a host that was
+// still keeping up, and would clip the write pool's room to grow (188 -> 128)
+// while every signal read healthy. 16 leaves ~2.6x headroom over the observed
+// point. A ratio tight enough to be a real sizing input would need the
+// client-side share measured live, which is a feedback loop rather than a
+// constant.
+const ClientThreadsPerCore = 16
 
 // ClientCeiling returns the largest worker count this process can usefully run,
 // from GOMAXPROCS rather than the machine's core count so that a container CPU
