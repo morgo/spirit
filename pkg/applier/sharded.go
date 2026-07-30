@@ -968,6 +968,19 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 	// so this is identical to the previous NonGeneratedColumns list.
 	_, columnList := mapping.Columns()
 
+	// Resolve each column's type once for the whole fan-out. Doing it inside
+	// the loop made every shard's goroutine re-parse the same type string for
+	// every value, so the cost scaled with shards as well as rows. colTypes is
+	// only read from here on, so sharing it across the goroutines is safe.
+	colTypes := make([]table.ColumnType, len(sourceOrdinal))
+	for i := range sourceOrdinal {
+		typeStr, ok := sourceTable.GetColumnMySQLType(sourceColumnNames[i])
+		if !ok {
+			return 0, fmt.Errorf("column %s not found in table info", sourceColumnNames[i])
+		}
+		colTypes[i] = table.NewColumnType(typeStr)
+	}
+
 	for shardID, rows := range shardRows {
 		if len(rows) == 0 {
 			shardsToCopy--
@@ -975,33 +988,26 @@ func (a *ShardedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMa
 		}
 		go func(sid int, r []LogicalRow) {
 			// Build the VALUES clause
-			var valuesClauses []string
+			valuesClauses := make([]string, 0, len(r))
+			values := make([]string, len(sourceOrdinal))
 			for _, logicalRow := range r {
-				var values []string
 				for i, colIdx := range sourceOrdinal {
 					if colIdx >= len(logicalRow.RowImage) {
 						results <- result{err: fmt.Errorf("column index %d exceeds row image length %d", colIdx, len(logicalRow.RowImage))}
 						return
 					}
-					value := logicalRow.RowImage[colIdx]
-					col := sourceColumnNames[i]
-					columnType, ok := sourceTable.GetColumnMySQLType(col)
-					if !ok {
-						results <- result{err: fmt.Errorf("column %s not found in table info", col)}
-						return
-					}
-					datum, err := table.NewDatumFromValue(value, columnType)
+					datum, err := table.NewDatumFromValueWithType(logicalRow.RowImage[colIdx], colTypes[i])
 					if err != nil {
-						results <- result{err: fmt.Errorf("failed to convert value to datum for column %s: %w", col, err)}
+						results <- result{err: fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)}
 						return
 					}
 					// datum.String() returns a complete pre-escaped SQL
 					// literal (NULL, a numeric, 0x… hex, or a "..."-quoted
 					// string). Safe to concatenate into the VALUES clause
 					// as-is — see the contract on Datum.String.
-					values = append(values, datum.String())
+					values[i] = datum.String()
 				}
-				valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
+				valuesClauses = append(valuesClauses, "("+strings.Join(values, ", ")+")")
 			}
 
 			// See ShardedApplier.UpsertRows (and SingleTargetApplier.UpsertRows)

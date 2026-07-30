@@ -795,25 +795,34 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 	// The sharded applier does the same; see sharded.go.
 	intersectedColumns := mapping.SourceOrdinalIndices()
 
+	// Resolve each column's type once, not once per value. In order to create
+	// a datum we need to know the MySQL type, which we get from the source
+	// table. This matters more here than on the copy path: an upsert batch can
+	// be a handful of rows, so there is far less to amortize the resolution
+	// over, and the final flush runs under the table lock at cutover.
+	sourceTable := mapping.SourceTable()
+	colTypes := make([]table.ColumnType, len(intersectedColumns))
+	for i := range intersectedColumns {
+		typeStr, ok := sourceTable.GetColumnMySQLType(sourceColumnNames[i])
+		if !ok {
+			return 0, fmt.Errorf("column %s not found in table info", sourceColumnNames[i])
+		}
+		colTypes[i] = table.NewColumnType(typeStr)
+	}
+
 	// Build the VALUES clause from the row images
-	var valuesClauses []string
+	valuesClauses := make([]string, 0, len(rows))
+	values := make([]string, len(intersectedColumns))
 	for _, logicalRow := range rows {
 		if logicalRow.IsDeleted {
 			continue // Skip deleted rows
 		}
 		// Convert the row image to a VALUES clause
-		var values []string
 		for i, colIndex := range intersectedColumns {
 			if colIndex >= len(logicalRow.RowImage) {
 				return 0, fmt.Errorf("column index %d exceeds row image length %d", colIndex, len(logicalRow.RowImage))
 			}
-			// In order to create a datum we need to know the MySQL type,
-			// which we can get from the source table.
-			columnType, ok := mapping.SourceTable().GetColumnMySQLType(sourceColumnNames[i])
-			if !ok {
-				return 0, fmt.Errorf("column %s not found in table info", sourceColumnNames[i])
-			}
-			datum, err := table.NewDatumFromValue(logicalRow.RowImage[colIndex], columnType)
+			datum, err := table.NewDatumFromValueWithType(logicalRow.RowImage[colIndex], colTypes[i])
 			if err != nil {
 				return 0, fmt.Errorf("failed to convert value to datum for column %s: %w", sourceColumnNames[i], err)
 			}
@@ -821,9 +830,9 @@ func (a *SingleTargetApplier) UpsertRows(ctx context.Context, mapping *table.Col
 			// (NULL, a numeric, 0x… hex, or a "..."-quoted string). Safe
 			// to concatenate into the VALUES clause as-is — see the
 			// contract on Datum.String.
-			values = append(values, datum.String())
+			values[i] = datum.String()
 		}
-		valuesClauses = append(valuesClauses, fmt.Sprintf("(%s)", strings.Join(values, ", ")))
+		valuesClauses = append(valuesClauses, "("+strings.Join(values, ", ")+")")
 	}
 
 	if len(valuesClauses) == 0 {
