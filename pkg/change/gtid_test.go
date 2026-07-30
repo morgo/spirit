@@ -31,9 +31,12 @@ import (
 // client previously omitted TimestampStringLocation, silently corrupting
 // TIMESTAMP columns under --gtid on non-UTC hosts.
 func TestSyncerConfigDecodeOptions(t *testing.T) {
+	// subs is initialized like the real constructors do: the config's
+	// RowsEventDecodeFunc closes over it, so a nil registry here would make
+	// the wiring under test unrepresentative (and the func a latent panic).
 	configs := map[string]replication.BinlogSyncerConfig{
-		"binlog": (&binlogClient{serverID: 123}).buildSyncerConfig("127.0.0.1", 3306),
-		"gtid":   (&gtidClient{serverID: 123}).buildSyncerConfig("127.0.0.1", 3306),
+		"binlog": (&binlogClient{serverID: 123, subs: newSubscriptionRegistry()}).buildSyncerConfig("127.0.0.1", 3306),
+		"gtid":   (&gtidClient{serverID: 123, subs: newSubscriptionRegistry()}).buildSyncerConfig("127.0.0.1", 3306),
 	}
 	for name, cfg := range configs {
 		require.Equal(t, time.UTC, cfg.TimestampStringLocation, "%s client must decode TIMESTAMP values in UTC", name)
@@ -69,9 +72,12 @@ func TestRowsEventDecodeFuncSkipsUnsubscribed(t *testing.T) {
 
 	for _, mode := range []string{"binlog", "gtid"} {
 		t.Run(mode, func(t *testing.T) {
-			// Each mode replays the same statements; start from empty tables.
+			// Each mode replays the same statements; start from empty tables —
+			// the noise table included, or its INSERT ... SELECT doublings
+			// compound across modes and the workload depends on run order.
 			testutils.RunSQL(t, "DELETE FROM decodefilter_t1")
 			testutils.RunSQL(t, "DELETE FROM decodefilter_t2")
+			testutils.RunSQL(t, "DELETE FROM decodefilter_noise")
 			var client Source
 			if mode == "gtid" {
 				client = NewGTIDClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), NewClientDefaultConfig())
