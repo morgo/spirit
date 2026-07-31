@@ -58,6 +58,17 @@ func TestIndexVisibilityMixedLinter(t *testing.T) {
 		{"ALTER INDEX b INVISIBLE, modify `a` int", true, "visibility + non-varchar modify"},
 		{"ALTER INDEX b VISIBLE, change column `a` `a` int", true, "visibility + non-varchar change"},
 
+		// A VARCHAR redeclaration that also reorders the column or declares NOT
+		// NULL is accepted by MySQL as INPLACE but rebuilds the table, so it is
+		// not a metadata-only carve-out.
+		{"ALTER INDEX b INVISIBLE, modify `a` varchar(100) NOT NULL", true, "visibility + varchar NOT NULL"},
+		{"ALTER INDEX b INVISIBLE, modify `a` varchar(100) FIRST", true, "visibility + varchar reordered"},
+		{"ALTER INDEX b INVISIBLE, change column `a` `a` varchar(100) AFTER `z`", true, "visibility + varchar change reordered"},
+
+		// A COMMENT-only table option is metadata-only; other options rebuild.
+		{"ALTER INDEX b INVISIBLE, COMMENT='hello'", false, "visibility + table comment"},
+		{"ALTER INDEX b INVISIBLE, COMMENT='hello' engine=innodb", true, "visibility + comment mixed with engine"},
+
 		// Multiple index visibility changes with mixed operations
 		{"ALTER INDEX a INVISIBLE, ALTER INDEX b VISIBLE, drop index `c`", false, "multiple visibility + metadata"},
 		{"ALTER INDEX a INVISIBLE, ALTER INDEX b VISIBLE, ADD COLUMN `c` INT", true, "multiple visibility + table rebuilding"},
@@ -100,7 +111,7 @@ func TestIndexVisibilityMixedLinter_ViolationDetail(t *testing.T) {
 	require.Contains(t, violations[0].Message, "ADD COLUMN")
 	require.NotNil(t, violations[0].Location.Index)
 	require.Equal(t, "b", *violations[0].Location.Index)
-	require.Contains(t, *violations[0].Suggestion, "Split into two statements")
+	require.Contains(t, *violations[0].Suggestion, "Apply the index visibility change separately")
 }
 
 // TestIndexVisibilityMixedLinter_MultipleIndexes verifies that a statement

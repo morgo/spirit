@@ -7,7 +7,6 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
 )
 
 func init() {
@@ -73,9 +72,18 @@ func (l *IndexVisibilityMixedLinter) Lint(_ []*statement.CreateTable, changes []
 				// visibility change into a table rebuild.
 				continue
 			case ast.AlterTableModifyColumn, ast.AlterTableChangeColumn:
-				// Only VARCHAR modifications are metadata-only, others are table-rebuilding
-				if len(spec.NewColumns) > 0 && spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar {
-					continue // VARCHAR is metadata-only
+				// A VARCHAR redeclaration is metadata-only, but not if it also
+				// reorders the column or declares NOT NULL. Shared with the
+				// classifier that routes execution, so the two can't drift.
+				if statement.ModifyColumnIsMetadataOnly(spec) {
+					continue
+				}
+				rebuildOperations = append(rebuildOperations, AlterTableTypeToString(spec.Tp))
+			case ast.AlterTableOption:
+				// ENGINE=, ROW_FORMAT=, AUTO_INCREMENT= etc rebuild the table,
+				// but a COMMENT-only change is metadata-only.
+				if statement.SpecOnlyChangesComment(spec) {
+					continue
 				}
 				rebuildOperations = append(rebuildOperations, AlterTableTypeToString(spec.Tp))
 			default:
@@ -91,7 +99,7 @@ func (l *IndexVisibilityMixedLinter) Lint(_ []*statement.CreateTable, changes []
 		// Sorted+deduplicated so that the same ALTER always reports the same
 		// operation list, regardless of clause order.
 		operations := strings.Join(slices.Compact(slices.Sorted(slices.Values(rebuildOperations))), ", ")
-		suggestion := fmt.Sprintf("Split into two statements: one for the index visibility change, and one for the %s", operations)
+		suggestion := fmt.Sprintf("Apply the index visibility change separately from the %s — as its own statement, or as its own schema revision in a declarative workflow", operations)
 
 		location := &Location{Table: change.Table}
 		// Only pin the location to an index when the statement changes exactly

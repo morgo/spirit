@@ -236,7 +236,7 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 			// AlterTableOption also covers rebuild-class options (ENGINE=,
 			// ROW_FORMAT=, AUTO_INCREMENT=, ...), so only treat it as safe when
 			// every option in this spec is COMMENT.
-			if allOptionsComment(spec) {
+			if SpecOnlyChangesComment(spec) {
 				continue
 			}
 			unsafeClauses++
@@ -252,8 +252,7 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 			// which can block replicas. A NOT NULL redeclaration can't be proven
 			// unchanged from the statement alone (we don't have the current
 			// nullability here), so it conservatively routes to the copy process.
-			if spec.NewColumns[0].Tp != nil && spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar &&
-				!columnReordered(spec) && !columnDeclaredNotNull(spec.NewColumns[0]) {
+			if ModifyColumnIsMetadataOnly(spec) {
 				continue
 			}
 			unsafeClauses++
@@ -270,12 +269,28 @@ func (a *AbstractStatement) AlgorithmInplaceConsideredSafe() error {
 	return nil
 }
 
-// allOptionsComment returns true if every table option in an AlterTableOption
-// spec is a COMMENT change. A table comment change is in-place and
-// metadata-only, but other table options (ENGINE=, ROW_FORMAT=,
+// ModifyColumnIsMetadataOnly returns true if a MODIFY/CHANGE COLUMN spec only
+// changes metadata: a VARCHAR redeclaration that neither reorders the column
+// nor declares NOT NULL. Both of those are accepted by MySQL under
+// ALGORITHM=INPLACE but performed with a full table rebuild.
+//
+// This is a statement-level judgement: without the current column definition we
+// can't tell a VARCHAR length change from an INT-to-VARCHAR conversion, so a
+// true result means "not provably a rebuild" rather than "provably not".
+func ModifyColumnIsMetadataOnly(spec *ast.AlterTableSpec) bool {
+	if len(spec.NewColumns) == 0 || spec.NewColumns[0].Tp == nil {
+		return false
+	}
+	return spec.NewColumns[0].Tp.GetType() == mysql.TypeVarchar &&
+		!columnReordered(spec) && !columnDeclaredNotNull(spec.NewColumns[0])
+}
+
+// SpecOnlyChangesComment returns true if every table option in an
+// AlterTableOption spec is a COMMENT change. A table comment change is in-place
+// and metadata-only, but other table options (ENGINE=, ROW_FORMAT=,
 // AUTO_INCREMENT=, ...) can force a table rebuild, so a spec that mixes any of
 // them in is not safe for INPLACE.
-func allOptionsComment(spec *ast.AlterTableSpec) bool {
+func SpecOnlyChangesComment(spec *ast.AlterTableSpec) bool {
 	if len(spec.Options) == 0 {
 		return false
 	}
