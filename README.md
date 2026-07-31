@@ -6,7 +6,7 @@ It is similar to gh-ost except:
 - It only supports MySQL 8.0 and higher
 - It is multi-threaded in both the row-copying and the binlog applying phase
 
-The goal of Spirit is to apply schema changes much faster than gh-ost. This makes it unsuitable in the following scenarios:
+The goal of Spirit is to apply schema changes as fast as possible, while also preserving safety. This makes it unsuitable in the following scenarios:
 - You require read replicas to be less than 10s behind the writer
 - You require support for older versions of MySQL
 
@@ -20,7 +20,7 @@ Quick Links:
 
 ## Optimizations
 
-The following are some of the optimizations that make Spirit faster than gh-ost:
+The following are some of the optimizations that make Spirit fast:
 
 ### Dynamic Chunking
 
@@ -67,6 +67,12 @@ When you consider that many migrations are best measured in _days_, this feature
 
 **Note:** [This feature](https://github.com/github/gh-ost/blob/master/doc/resume.md) is now available in gh-ost.
 
+## Auto-throttling and Autoscaling for Aurora targets
+
+When Spirit detects that it is being run against an Aurora instance, it will automatically throttle itself based on signals from the target: whether the number of running threads is too high for the number of vCPUs the instance has, or whether average commit latency has exceeded [max-commit-latency](docs/migrate.md#max-commit-latency). The threads signal prefers a redo-aware `performance_schema` count that excludes redo-log waiters, and falls back to `Threads_running` when Spirit does not have the grants to read it.
+
+When [enable-experimental-autoscaling](docs/migrate.md#enable-experimental-autoscaling) is set, the same signals drive continuous scaling rather than a binary stop. Spirit sizes the copy read, replication write and checksum thread pools from the instance, then grows or sheds them one thread at a time to hold utilization inside a target band. This helps you take advantage of off-peak windows and complete schema changes much faster, while backing off on its own when the primary workload picks up. Note that the flag takes over the thread counts: `--threads` and `--write-threads` are ignored when it engages.
+
 ## Atomic Multi-table changes
 
 Spirit supports cutting over multiple schema changes at once using the `--statement` option.
@@ -78,26 +84,21 @@ Only one atomic multi-table migration may run at a time **per schema**: they all
 Our internal goal for Spirit is to be able to migrate a 10TiB table in under 5 days. We believe we are able to achieve this in most-cases, but it depends on:
 - How many secondary indexes the table has.
 - How many active changes are being made to the table.
-- The `threads` and `target-chunk-time` that is used.
+- The `threads`, `write-threads`, `target-chunk-size` and `target-chunk-time` settings.
 - If any replication throttler is used.
-- If the MySQL server becomes significantly IO bound (at this point, the migration might slow down a lot)
+- If the MySQL server becomes significantly CPU or IO bound (at this point, the migration might slow down a lot)
 
-For proof that it is possible, here is the final output from a migration on a 10TiB `finch.xfers` table on Aurora v3:
+For proof of how fast Spirit is, here is the final output from a 1.43 TiB `finch.xfers` table on an `r8g.8xlarge` Aurora instance using `--enable-experimental-autoscaling`, which sized the pools from the instance's 32 vCPUs (write threads `30 → 60`, read threads `8 → 16`):
 
 ```
-time="2023-04-21T07:08:24Z" level=info msg="apply complete: instant-ddl=false inplace-ddl=false total-chunks=926661 copy-rows-time=59h27m9.285730804s checksum-time=6h11m2.244079686s total-time=65h38m12.790047338s"
+2026/07/31 05:01:03 INFO apply complete instant-ddl=false inplace-ddl=false total-chunks=76593 copy-rows-time=5h55m44s checksum-time=39m34s total-time=6h35m54s conns-in-use=0
 ```
 
-This table does [include some secondary indexes](https://github.com/square/finch/blob/65fef3da97cfb24892ef283bc93ab8f09c4fb732/test/workload/xfer/schema.sql#L39-L62), but the table was idle and no replication throttler was used. The configuration used `threads=8` and `target-chunk-time=2s`, which is on the higher end of normal. We attempted to run a comparison with gh-ost (w/a 10K chunk-size), but canceled it after 10 days.
+That works out to about 247 GiB/hour of copying and 2,200 GiB/hour of checksumming, on a table that [has some secondary indexes](https://github.com/square/finch/blob/65fef3da97cfb24892ef283bc93ab8f09c4fb732/test/workload/xfer/schema.sql#L39-L62) and was under light write load throughout.
 
-For a non-idle table, the performance delta is even greater. Consider the following microbench performed on a m1 mac with 10 cores and MySQL 8.0.31 using defaults:
+For back of napkin calculations we typically recommend estimating 100 GiB/hour. This is deliberately conservative against the factors above, and it is where the 10TiB in 5 days goal comes from.
 
-| Table/Scenario                               | Gh-ost   | spirit  |
-| -------------------------------------------- | -------- | ------- |
-| finch.balances (800MB/1M rows), idle load    | 28.720s  | 11.197s |
-| finch.balances (800MB/1M rows), during bench | 2:50m+   | ~15-18s |
-
-This scenario is kind of a worst case for gh-ost since it prioritizes replication over row-copying and the benchmark never lets up. The spirit time also includes a checksum.
+Larger instances can typically perform schema changes much faster, because they have more CPUs and a larger buffer pool. If you are in a cloud environment consider scaling up your database for a schema change, and scaling it down afterwards. With autoscaling enabled Spirit sizes its thread pools from the instance, so it will make use of the extra capacity without any retuning.
 
 ## Unsupported Features
 
