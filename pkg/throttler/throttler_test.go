@@ -3,6 +3,8 @@ package throttler
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -103,4 +105,22 @@ func TestMockThrottler(t *testing.T) {
 	start = time.Now()
 	interruptible.BlockWait(ctx)
 	require.Less(t, time.Since(start), time.Second)
+}
+
+func TestIsShutdownError(t *testing.T) {
+	live := t.Context()
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Once the loop's own context is cancelled, any in-flight failure is
+	// teardown noise — even one that doesn't mention cancellation, like the
+	// monitor pool being closed underneath the query.
+	require.True(t, isShutdownError(cancelled, errors.New("sql: database is closed")))
+
+	// The query can observe its cancellation before the loop observes
+	// ctx.Done(); the wrapped context.Canceled alone is enough.
+	require.True(t, isShutdownError(live, fmt.Errorf("sampling Aurora threads (redo-aware): %w", context.Canceled)))
+
+	// A real monitoring failure on a live context must still be reported.
+	require.False(t, isShutdownError(live, errors.New("Error 1142 (42000): SELECT command denied")))
 }

@@ -291,3 +291,24 @@ func TestAuroraVCPUs_LocalMySQL(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, vCPUs)
 }
+
+func TestSamplingCancelIsShutdownError(t *testing.T) {
+	db, err := sql.Open("mysql", testutils.DSN())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	// Pin the exact error shape the poll loop sees at teardown: a cancelled
+	// context makes UpdateLag fail with context.Canceled wrapped inside the
+	// "sampling Aurora threads" message, and isShutdownError must classify it
+	// as shutdown so run() exits quietly instead of logging at Error level
+	// (which monitoring pipelines surface as an incident).
+	a := newTestAuroraThreads(t, 8, redoAwareMode)
+	a.db = db
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = a.UpdateLag(ctx)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "sampling Aurora threads (redo-aware)")
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, isShutdownError(ctx, err))
+}
