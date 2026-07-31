@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/alecthomas/kong v1.16.0
 	github.com/go-ini/ini v1.67.0
-	github.com/go-mysql-org/go-mysql v1.15.1-0.20260526024741-088eb1fbf0ea
+	github.com/go-mysql-org/go-mysql v1.16.1-0.20260731133054-6f853f178dc3
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/pingcap/errors v0.11.5-0.20260310054046-9c8b3586e4b2
@@ -35,6 +35,3 @@ require (
 )
 
 replace github.com/pingcap/tidb/pkg/parser => github.com/block/tidb/pkg/parser v0.0.0-20260506200501-e528fd979fc8
-
-// TEMP(2026-07): pin fork for JSON render-fidelity fixes; remove once upstream go-mysql includes the formatMySQLDouble + zero-temporal opaque fixes.
-replace github.com/go-mysql-org/go-mysql => github.com/morgo/go-mysql v1.16.1-0.20260723231236-3aced1dddcf4
