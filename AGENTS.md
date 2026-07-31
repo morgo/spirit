@@ -166,7 +166,7 @@ pkg/
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
   statement/  → SQL parsing via TiDB parser (ALTER, CREATE, DROP, RENAME)
-  lint/       → Static analysis framework for schemas and DDL (17 built-in linters)
+  lint/       → Static analysis framework for schemas and DDL (built-in linters)
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
@@ -229,7 +229,7 @@ Uses the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) f
 **Normalization pipeline:** MySQL rewrites many constructs when it stores a table (inline `PRIMARY KEY`/`UNIQUE` → table-level, column `CHECK` hoisted to table-level, `int(11)` → `int`, the legacy `BINARY` attribute → a `_bin` collation). To stop a hand-written schema from diffing spuriously against a live `SHOW CREATE TABLE`, `ParseCreateTable` runs a registry of **normalization rules** over the parsed `CreateTable` before returning it. Each rule is a `Normalizer` (`normalize.go`) that self-registers via `init()` in its own `normalize_*.go` file and rewrites the struct's fields in place (never `Raw`). Rules run after the struct is fully parsed, so they are order-independent. Consequence: `CreateTable.Diff` **assumes normalized input**. The TiDB parser already folds most type *aliases* (`BOOL`→`tinyint(1)`, `SERIAL`→`bigint unsigned … UNIQUE`, `INTEGER`→`int`), so rules only handle what the parser leaves alone. See `pkg/statement/README.md` for the full concept and rule list.
 
 ### `pkg/lint`
-17 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
+Built-in linters auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
 
 ### `pkg/dbconn`
 Handles connection management including:

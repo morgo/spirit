@@ -61,6 +61,7 @@ These linters detect issues that could cause problems during online schema chang
 | Linter | Description |
 |--------|-------------|
 | `has_foreign_key` | Foreign keys can block online schema changes and cause replication issues |
+| `index_visibility_mixed` | Index visibility changes combined with a table rebuild make the experiment hard to interpret |
 | `invisible_index_before_drop` | Dropping indexes without first making them invisible is risky |
 | `multiple_alter_table` | Multiple ALTERs on the same table should be combined for efficiency |
 | `rename_column` | Column renames break ORMs and can't be deployed atomically with application changes |
