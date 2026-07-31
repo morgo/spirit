@@ -6,7 +6,7 @@ It is similar to gh-ost except:
 - It only supports MySQL 8.0 and higher
 - It is multi-threaded in both the row-copying and the binlog applying phase
 
-The goal of Spirit is to apply schema changes as fast as possible. This makes it unsuitable in the following scenarios:
+The goal of Spirit is to apply schema changes as fast as possible, while also preserving safety. This makes it unsuitable in the following scenarios:
 - You require read replicas to be less than 10s behind the writer
 - You require support for older versions of MySQL
 
