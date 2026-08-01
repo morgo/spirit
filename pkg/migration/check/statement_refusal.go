@@ -27,6 +27,8 @@ import (
 // only the statement, and the ENUM/SET checks — which compare a redeclared
 // column against its current type — are skipped.
 //
+// logger may be nil, in which case the checks' own logging is discarded.
+//
 // refused is true only when Spirit will refuse the statement, so a caller may
 // act on it. A statement that is not an ALTER TABLE is never refused: Spirit
 // runs CREATE TABLE and DROP TABLE as native DDL rather than through the copy

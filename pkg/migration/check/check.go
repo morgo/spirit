@@ -96,7 +96,13 @@ func registerCheck(name string, callback func(context.Context, Resources, *slog.
 // RunChecks runs all checks that are registered for the given scope.
 // Checks run in name order so that a statement failing more than one
 // check always reports the same error.
+//
+// logger may be nil: checks log as they run, and a caller classifying a
+// statement without a logger to hand must get a verdict rather than a panic.
 func RunChecks(ctx context.Context, r Resources, logger *slog.Logger, scope ScopeFlag) error {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	lock.Lock()
 	registered := maps.Clone(checks)
 	lock.Unlock()

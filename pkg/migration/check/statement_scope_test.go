@@ -240,6 +240,30 @@ func TestStatementRefusalWithoutTableMetadata(t *testing.T) {
 	assert.Equal(t, "dropping primary key is not supported", reason)
 }
 
+// TestStatementRefusalNilLogger classifies statements without a logger. A caller
+// running the checks outside a migration has no logger to hand, and every path —
+// a refusal, a pass, and the skip taken when no table metadata is supplied —
+// must still return a verdict.
+func TestStatementRefusalNilLogger(t *testing.T) {
+	reason, refused, err := StatementRefusal(t.Context(),
+		"ALTER TABLE orders MODIFY COLUMN status ENUM('shipped','new','done') NOT NULL", ordersTable, nil)
+	require.NoError(t, err)
+	assert.True(t, refused)
+	assert.Contains(t, reason, `unsafe ENUM value reorder on column "status"`)
+
+	reason, refused, err = StatementRefusal(t.Context(),
+		"ALTER TABLE orders MODIFY COLUMN status ENUM('shipped','new','done') NOT NULL", "", nil)
+	require.NoError(t, err)
+	assert.False(t, refused, "the ENUM check must skip without table metadata")
+	assert.Empty(t, reason)
+
+	reason, refused, err = StatementRefusal(t.Context(),
+		"ALTER TABLE orders ADD COLUMN shipped_at DATETIME", ordersTable, nil)
+	require.NoError(t, err)
+	assert.False(t, refused)
+	assert.Empty(t, reason)
+}
+
 // TestStatementRefusalErrors covers input that cannot be classified at all. Each
 // case must surface as an error rather than a refusal: reporting "Spirit refuses
 // this statement" for input Spirit never judged would block an apply for the
