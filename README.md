@@ -105,6 +105,10 @@ Larger instances can typically perform schema changes much faster, because they 
 - **`RENAME` column**. Some rename operations are intentionally not supported for now. For example, renaming a column and then reusing the same column name in adding a column. These are not impossible to support, but it's easy to get these wrong leading to data corruption. This is why (for now) we do not intend to support all cases.
 - **`ALTER`/NO PRIMARY KEY**. Spirit requires the table to have a primary key, and the primary key can not be altered by the schema change. There might be some flexibility to support UNIQUE keys and some modifications of the primary key in future, but it is not a priority for now.
 - **Lossy conversions**. Spirit does not support adding a `UNIQUE` index on non unique data, shortening a `VARCHAR` to a size less than the longest value, or adding a new `NOT NULL` column without a default value. To perform these changes you must fix the data, and then run the migration.
+- **Some `ENUM` and `SET` modifications**. Spirit's replication path receives these values from the binary log as integer ordinals and bitmasks, and its checksum compares their string form. A change that alters the meaning or the rendering of an existing value can not be supported:
+  - **`ENUM`**: appending values to the end of the list is supported, and so is dropping values from anywhere in the list. Reordering the values that are kept, or inserting a new value ahead of one that is kept, is not.
+  - **`SET`**: only appending values to the end of the list is supported. The new list must begin with the existing list, so reordering or removing members is not supported.
+  - **Type conversions**: converting `ENUM`/`SET` to a string type (`VARCHAR`, `CHAR`, `TEXT`, `BLOB`, etc.) is supported, and so is `ENUM` to `SET`. `SET` to `ENUM` is not, because a `SET` value can hold several members where an `ENUM` holds at most one. `ENUM`/`SET` to a numeric type is not, because the value would be coerced from its string form and lost.
 - **`FOREIGN KEYS`** or **`TRIGGERS`**. Spirit does not support migrating tables that have `FOREIGN KEYS` or `TRIGGERS`.
 
 ## Requirements
