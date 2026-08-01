@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	registerCheck("enumReorder", enumReorderCheck, ScopePreflight)
+	registerCheck("enumReorder", enumReorderCheck, ScopePreflight|ScopeStatement)
 }
 
 // enumReorderCheck prevents ENUM value reordering and middle-insertion.
@@ -32,6 +32,9 @@ func init() {
 // "kept values keep their relative order" invariant that the decode path
 // relies on.
 func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	if !hasCurrentColumnTypes(r, logger, "enumReorder") {
+		return nil
+	}
 	for _, col := range findModifiedEnumSetColumns(*r.Statement.StmtNode) {
 		if col.ColDef.Tp.GetType() == mysql.TypeSet {
 			continue // handled by setReorderCheck

@@ -10,8 +10,11 @@ import (
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
+// Not tagged ScopeStatement: MySQL's native DDL, which Spirit attempts before
+// preflight, can complete a drop and add of the same column in a single
+// statement, so this refusal is not one a caller may report ahead of an apply.
 func init() {
-	registerCheck("dropadd", dropAddCheck, ScopePreflight|ScopeStatement)
+	registerCheck("dropadd", dropAddCheck, ScopePreflight)
 }
 
 // dropAddCheck checks for a DROP and then ADD in the same statement.

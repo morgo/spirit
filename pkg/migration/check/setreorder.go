@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	registerCheck("setReorder", setReorderCheck, ScopePreflight)
+	registerCheck("setReorder", setReorderCheck, ScopePreflight|ScopeStatement)
 }
 
 // setReorderCheck prevents SET value reordering in all modes.
@@ -29,6 +29,9 @@ func init() {
 // Adding new SET values at the end of the list is always safe. The new list must
 // start with the existing values as a prefix.
 func setReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	if !hasCurrentColumnTypes(r, logger, "setReorder") {
+		return nil
+	}
 	for _, col := range findModifiedEnumSetColumns(*r.Statement.StmtNode) {
 		if col.ColDef.Tp.GetType() != mysql.TypeSet {
 			continue // handled by enumReorderCheck

@@ -11,8 +11,11 @@ import (
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 )
 
+// Not tagged ScopeStatement: renames are metadata-only, so MySQL's native DDL,
+// which Spirit attempts before preflight, can complete the shapes refused here,
+// making them unsafe for a caller to report as refusals ahead of an apply.
 func init() {
-	registerCheck("rename", renameCheck, ScopePreflight|ScopeStatement)
+	registerCheck("rename", renameCheck, ScopePreflight)
 }
 
 // renameCheck validates rename operations in ALTER TABLE statements.

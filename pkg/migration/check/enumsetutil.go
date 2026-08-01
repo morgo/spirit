@@ -2,11 +2,26 @@ package check
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 )
+
+// hasCurrentColumnTypes reports whether Resources carries the table metadata the
+// ENUM/SET checks need to compare a redeclared column against its current
+// definition. Preflight always supplies it; a ScopeStatement caller may not have
+// the table's DDL to build it from, in which case the check is skipped rather
+// than guessing at the current type (see ScopeStatement).
+func hasCurrentColumnTypes(r Resources, logger *slog.Logger, checkName string) bool {
+	if r.Table == nil {
+		logger.Debug("skipping check: no table metadata supplied, cannot compare against the current column types",
+			"check", checkName)
+		return false
+	}
+	return true
+}
 
 // isEnumOrSetType returns true if the MySQL type string represents an ENUM or SET type.
 func isEnumOrSetType(mysqlType string) bool {

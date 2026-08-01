@@ -26,17 +26,27 @@ const (
 	ScopeCutover     ScopeFlag = 1 << 3
 	ScopePostCutover ScopeFlag = 1 << 4
 	ScopeTesting     ScopeFlag = 1 << 5
-	// ScopeStatement marks preflight checks that classify the ALTER statement
-	// itself: they decide from the parsed statement alone whether Spirit
-	// refuses to run it, never touching a database connection. Callers can run
-	// them via RunChecks with only Resources.Statement set (Table is optional
-	// and widens coverage when present) to determine up front that a statement
-	// would be refused — for example, a planning tool classifying DDL before
-	// an apply. Passing these checks is not a promise Spirit will accept the
-	// statement: checks that need a live connection (existing foreign keys,
-	// triggers, privileges, ...) still run only at preflight. A check tagged
-	// with this scope must tolerate every Resources field except Statement
-	// being unset.
+	// ScopeStatement marks preflight checks a caller can run ahead of an apply
+	// to learn that Spirit will refuse a statement. Callers run them via
+	// RunChecks with Resources.Statement set and, optionally,
+	// Resources.Table — the table's current metadata, which widens coverage to
+	// the checks that compare the statement against the existing column
+	// definitions. Neither needs a database connection: Table can be built
+	// from the table's DDL with statement.CreateTable.ToTableInfo. A check
+	// tagged with this scope must tolerate every Resources field except
+	// Statement being unset.
+	//
+	// A failure here is a refusal the caller can report as certain, so the
+	// scope only carries checks no earlier stage can bypass. Spirit attempts
+	// MySQL's native DDL — ALGORITHM=INSTANT, then a safe-INPLACE subset —
+	// before it runs preflight checks, so a preflight check that the native
+	// DDL can complete anyway (dropadd, rename) is deliberately excluded:
+	// claiming those as refusals would report failure for an apply that
+	// succeeds.
+	//
+	// Passing these checks is not a promise Spirit will accept the statement.
+	// Checks that need a live connection (existing foreign keys, triggers,
+	// privileges, ...) still run only at preflight.
 	ScopeStatement ScopeFlag = 1 << 6
 )
 
