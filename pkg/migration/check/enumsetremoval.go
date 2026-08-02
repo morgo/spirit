@@ -43,7 +43,11 @@ func init() {
 // disallows it because the checksum compares CAST(col AS char) and the
 // string order changes when bits are reordered.
 func enumSetRemovalCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
-	if !hasCurrentColumnTypes(r, logger, "enumSetRemoval") {
+	haveTypes, err := requireCurrentColumnTypes(r, logger, "enumSetRemoval")
+	if err != nil {
+		return err
+	}
+	if !haveTypes {
 		return nil
 	}
 	for _, col := range findModifiedColumns(*r.Statement.StmtNode) {

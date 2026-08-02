@@ -37,16 +37,22 @@ const (
 	// Statement being unset.
 	//
 	// A failure here is a refusal the caller can report as certain, so the
-	// scope only carries checks no earlier stage can bypass. Spirit attempts
-	// MySQL's native DDL — ALGORITHM=INSTANT, then a safe-INPLACE subset —
-	// before it runs preflight checks, so a preflight check that the native
-	// DDL can complete anyway (dropadd, rename) is deliberately excluded:
-	// claiming those as refusals would report failure for an apply that
-	// succeeds.
+	// scope only carries checks that no earlier stage can bypass on any
+	// server. Spirit attempts MySQL's native DDL — ALGORITHM=INSTANT, then a
+	// safe-INPLACE subset — before it runs preflight checks, and MySQL decides
+	// what that completes, which varies with the server version and the table.
+	// A preflight check the native DDL may complete (dropadd, rename) is
+	// deliberately excluded: claiming those as refusals would report failure
+	// for an apply that succeeds.
 	//
-	// Passing these checks is not a promise Spirit will accept the statement.
-	// Checks that need a live connection (existing foreign keys, triggers,
-	// privileges, ...) still run only at preflight.
+	// That exclusion only ever under-reports, which is the safe direction:
+	// passing these checks is not a promise Spirit will accept the statement,
+	// only a failure is a claim. An excluded check still refuses at preflight
+	// whenever the native attempt does not take the statement — Spirit skips
+	// the attempt altogether for a multi-table change, and an older server
+	// rejects shapes a newer one completes instantly. Checks that need a live
+	// connection (existing foreign keys, triggers, privileges, ...) likewise
+	// run only at preflight.
 	ScopeStatement ScopeFlag = 1 << 6
 )
 
@@ -71,6 +77,11 @@ type Resources struct {
 	// change source. The configuration check uses this to additionally
 	// validate gtid_mode and enforce_gtid_consistency on the source.
 	GTID bool
+
+	// scope is the scope the checks are running under, set by RunChecks. A
+	// check that tolerates a missing resource for an external caller reads it
+	// to tell that case from a migration which failed to supply the resource.
+	scope ScopeFlag
 }
 
 type check struct {
@@ -103,6 +114,7 @@ func RunChecks(ctx context.Context, r Resources, logger *slog.Logger, scope Scop
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	r.scope = scope
 	lock.Lock()
 	registered := maps.Clone(checks)
 	lock.Unlock()

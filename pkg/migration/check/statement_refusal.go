@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -32,9 +33,10 @@ import (
 // refused is true only when Spirit will refuse the statement, so a caller may
 // act on it. A statement that is not an ALTER TABLE is never refused: Spirit
 // runs CREATE TABLE and DROP TABLE as native DDL rather than through the copy
-// process. err reports input that cannot be classified at all — an unparseable
-// statement, more than one statement, or a currentCreateTable for a different
-// table — and is never itself a refusal.
+// process. err reports input that cannot be classified — an unparseable
+// statement, more than one statement, a currentCreateTable for a different
+// table, or one that does not describe a column the statement redeclares — and
+// is never itself a refusal.
 func StatementRefusal(ctx context.Context, stmt, currentCreateTable string, logger *slog.Logger) (reason string, refused bool, err error) {
 	stmts, err := statement.New(stmt)
 	if err != nil {
@@ -56,9 +58,35 @@ func StatementRefusal(ctx context.Context, stmt, currentCreateTable string, logg
 		}
 	}
 	if checkErr := RunChecks(ctx, resources, logger, ScopeStatement); checkErr != nil {
+		var unclassified *classificationError
+		if errors.As(checkErr, &unclassified) {
+			return "", false, fmt.Errorf("classify statement against the current definition of table %q: %w", abs.Table, checkErr)
+		}
 		return checkErr.Error(), true, nil
 	}
 	return "", false, nil
+}
+
+// classificationError marks a check error that is not a refusal: the check could
+// not reach a verdict, because the inputs do not describe what it has to
+// compare — typically a column the statement redeclares that the supplied table
+// definition does not carry. A refusal is a claim about the statement, so
+// StatementRefusal reports one of these as an error rather than letting a
+// caller act on it and block an apply that may well succeed.
+//
+// It keeps the wrapped error's message: a migration reaches these through
+// preflight, where the distinction does not apply and the check's own wording
+// is what the operator needs.
+type classificationError struct{ err error }
+
+func (e *classificationError) Error() string { return e.err.Error() }
+func (e *classificationError) Unwrap() error { return e.err }
+
+// cannotClassify marks an error as a failure to reach a verdict rather than a
+// refusal. A check uses it for a condition that says nothing about whether
+// Spirit accepts the statement.
+func cannotClassify(format string, args ...any) error {
+	return &classificationError{err: fmt.Errorf(format, args...)}
 }
 
 // tableMetadataFor parses the table's current definition into the metadata the

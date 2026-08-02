@@ -12,8 +12,11 @@ import (
 )
 
 // Not tagged ScopeStatement: renames are metadata-only, so MySQL's native DDL,
-// which Spirit attempts before preflight, can complete the shapes refused here,
-// making them unsafe for a caller to report as refusals ahead of an apply.
+// which Spirit attempts before preflight for a single-table change, can complete
+// the shapes refused here, making them unsafe for a caller to report as refusals
+// ahead of an apply. It still refuses here when that attempt does not take the
+// statement — for a multi-table change Spirit skips the attempt entirely, and an
+// older server may not rename the column instantly.
 func init() {
 	registerCheck("rename", renameCheck, ScopePreflight)
 }

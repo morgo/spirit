@@ -309,6 +309,67 @@ func TestStatementRefusalErrors(t *testing.T) {
 	}
 }
 
+// TestStatementRefusalUncoveredColumn classifies a statement that redeclares a
+// column the supplied definition does not carry — a stale definition, or one
+// read after the column was dropped. The ENUM/SET checks cannot compare against
+// a current type they do not have, and that says nothing about whether Spirit
+// accepts the statement, so it surfaces as an error rather than a refusal a
+// caller would act on.
+func TestStatementRefusalUncoveredColumn(t *testing.T) {
+	tests := []struct {
+		name    string
+		stmt    string
+		wantErr string
+	}{
+		{
+			name:    "enum column absent from the definition",
+			stmt:    "ALTER TABLE orders MODIFY COLUMN ghost ENUM('a','b')",
+			wantErr: `unable to validate ENUM change for column "ghost"`,
+		},
+		{
+			name:    "set column absent from the definition",
+			stmt:    "ALTER TABLE orders MODIFY COLUMN ghost SET('a','b')",
+			wantErr: `unable to validate SET reorder for column "ghost"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, refused, err := StatementRefusal(t.Context(), tt.stmt, ordersTable, discardLogger())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.False(t, refused, "an unclassifiable statement must not be reported as refused")
+			assert.Empty(t, reason)
+		})
+	}
+}
+
+// TestEnumSetChecksRequireTableMetadataOutsideStatementScope covers the ENUM/SET
+// checks running without table metadata in a scope other than ScopeStatement.
+// Only a statement-scope caller is allowed to omit it; a migration loads the
+// table before it runs any check, so metadata missing there means these guards
+// against a data-corrupting change would not run at all, and the check fails
+// rather than passing quietly.
+func TestEnumSetChecksRequireTableMetadataOutsideStatementScope(t *testing.T) {
+	const stmt = "ALTER TABLE orders MODIFY COLUMN status ENUM('shipped','new','done') NOT NULL"
+	checks := map[string]func(context.Context, Resources, *slog.Logger) error{
+		"enumReorder":    enumReorderCheck,
+		"setReorder":     setReorderCheck,
+		"enumSetRemoval": enumSetRemovalCheck,
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			r := Resources{Statement: statement.MustNew(stmt)[0], scope: ScopePreflight}
+			err := check(t.Context(), r, discardLogger())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "check "+name+" cannot run")
+
+			r.scope = ScopeStatement
+			require.NoError(t, check(t.Context(), r, discardLogger()),
+				"a statement-scope caller may omit the table metadata")
+		})
+	}
+}
+
 // TestStatementScopeChecksDeterministicError verifies that a statement failing
 // more than one statement-scoped check reports the same error every run:
 // RunChecks iterates checks in name order, so classifiers surfacing the error
