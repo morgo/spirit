@@ -11,11 +11,27 @@ import (
 // SQL fragments used to build ALTER TABLE clauses. They are free functions; the
 // CreateTable receivers that assemble the statements live in diff.go.
 
-// formatColumnDefinition formats a column definition for ALTER TABLE
-func formatColumnDefinition(col *Column) string {
-	var parts []string
+// formatColumnType renders a column's data type for emission in an ALTER TABLE
+// clause: the type name with its length/precision/element list, followed by the
+// unsigned and zerofill display attributes. Charset and collation are excluded —
+// formatColumnDefinition emits those separately.
+func formatColumnType(col *Column) string {
+	return columnType(col, sqlescape.EscapeString)
+}
 
-	// Column name and type
+// formatColumnTypeAsMetadata renders a column's data type the way MySQL reports
+// it in information_schema.columns.column_type. It differs from formatColumnType
+// only in how ENUM/SET elements are escaped: MySQL's metadata doubles an embedded
+// single quote, where the SQL Spirit emits backslash-escapes it. Both are valid
+// SQL, but the parsers that read an element list back out of column_type accept
+// only the doubled form.
+func formatColumnTypeAsMetadata(col *Column) string {
+	return columnType(col, func(s string) string { return strings.ReplaceAll(s, "'", "''") })
+}
+
+// columnType renders a column's data type, escaping ENUM/SET elements with the
+// supplied escaper.
+func columnType(col *Column, escapeElement func(string) string) string {
 	typeDef := col.Type
 
 	// Determine the full type definition including length/precision/values
@@ -23,13 +39,13 @@ func formatColumnDefinition(col *Column) string {
 	case col.Type == "enum" && len(col.EnumValues) > 0:
 		var values []string
 		for _, v := range col.EnumValues {
-			values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(v)))
+			values = append(values, fmt.Sprintf("'%s'", escapeElement(v)))
 		}
 		typeDef = fmt.Sprintf("enum(%s)", strings.Join(values, ","))
 	case col.Type == "set" && len(col.SetValues) > 0:
 		var values []string
 		for _, v := range col.SetValues {
-			values = append(values, fmt.Sprintf("'%s'", sqlescape.EscapeString(v)))
+			values = append(values, fmt.Sprintf("'%s'", escapeElement(v)))
 		}
 		typeDef = fmt.Sprintf("set(%s)", strings.Join(values, ","))
 	case col.Precision != nil && col.Scale != nil:
@@ -52,7 +68,15 @@ func formatColumnDefinition(col *Column) string {
 		typeDef += " zerofill"
 	}
 
-	parts = append(parts, fmt.Sprintf("%s %s", sqlescape.EscapeIdentifier(col.Name), typeDef))
+	return typeDef
+}
+
+// formatColumnDefinition formats a column definition for ALTER TABLE
+func formatColumnDefinition(col *Column) string {
+	var parts []string
+
+	// Column name and type
+	parts = append(parts, fmt.Sprintf("%s %s", sqlescape.EscapeIdentifier(col.Name), formatColumnType(col)))
 
 	// Charset and collation (skip for binary types and JSON)
 	isBinaryType := col.Type == "varbinary" || col.Type == "binary" ||

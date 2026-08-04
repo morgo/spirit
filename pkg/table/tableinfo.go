@@ -106,6 +106,37 @@ func NewTableInfo(db *sql.DB, schema, table string) *TableInfo {
 	}
 }
 
+// ColumnMeta describes one column the way a table definition declares it: the
+// column name, its information_schema `column_type` text (e.g. "enum('a','b')",
+// "varchar(100)", "int unsigned"), and whether it is a generated column.
+type ColumnMeta struct {
+	Name      string
+	MySQLType string
+	Generated bool
+}
+
+// NewTableInfoFromMeta builds a TableInfo from a table's declared column
+// metadata instead of from a live server. Columns must be supplied in ordinal
+// order, matching the order they appear in the table definition.
+//
+// The returned TableInfo carries no database connection, so it supports only
+// the metadata accessors (GetColumnMySQLType, Columns, KeyColumns, ...);
+// SetInfo, chunking, and anything else that queries MySQL will fail on the nil
+// connection. It exists for callers that hold a table's DDL but no connection —
+// a planning tool classifying an ALTER before an apply — so they can supply
+// Resources.Table to the statement-scope checks.
+func NewTableInfoFromMeta(schemaName, tableName string, columns []ColumnMeta, keyColumns []string) (*TableInfo, error) {
+	t := NewTableInfo(nil, schemaName, tableName)
+	t.resetColumns()
+	for _, col := range columns {
+		if err := t.addColumn(col.Name, col.MySQLType, col.Generated); err != nil {
+			return nil, err
+		}
+	}
+	t.KeyColumns = slices.Clone(keyColumns)
+	return t, nil
+}
+
 // PrimaryKeyValues helps extract the PRIMARY KEY from a row image.
 // It uses our knowledge of the ordinal position of columns to find the
 // position of primary key columns (there might be more than one).
@@ -218,42 +249,61 @@ func (t *TableInfo) setColumns(ctx context.Context) error {
 			slog.Error("failed to close rows", "error", err)
 		}
 	}()
-	t.Columns = []string{}
-	t.NonGeneratedColumns = []string{}
-	t.columnsMySQLTps = make(map[string]string)
-	t.enumSetElements = nil
-	t.binaryColumnWidths = nil
+	t.resetColumns()
 	for rows.Next() {
 		var col, tp, expression string
 		if err := rows.Scan(&col, &tp, &expression); err != nil {
 			return err
 		}
-		t.Columns = append(t.Columns, col)
-		t.columnsMySQLTps[col] = tp
-		if expression == "" {
-			t.NonGeneratedColumns = append(t.NonGeneratedColumns, col)
-		}
-		if isEnumColumnType(tp) || isSetColumnType(tp) {
-			elements, perr := parseEnumSetElements(tp)
-			if perr != nil {
-				return fmt.Errorf("parsing ENUM/SET elements for %s.%s.%s: %w", t.SchemaName, t.TableName, col, perr)
-			}
-			if t.enumSetElements == nil {
-				t.enumSetElements = make(map[int][]string)
-			}
-			t.enumSetElements[len(t.Columns)-1] = elements
-		}
-		if isBinaryColumnType(tp) {
-			if width := parseBinaryColumnWidth(tp); width > 0 {
-				if t.binaryColumnWidths == nil {
-					t.binaryColumnWidths = make(map[int]int)
-				}
-				t.binaryColumnWidths[len(t.Columns)-1] = width
-			}
+		if err := t.addColumn(col, tp, expression != ""); err != nil {
+			return err
 		}
 	}
 	if rows.Err() != nil {
 		return rows.Err()
+	}
+	return nil
+}
+
+// resetColumns clears the column metadata so it can be repopulated from
+// scratch. Columns must then be added in ordinal order: the ENUM/SET element
+// and BINARY width caches are keyed by ordinal position.
+func (t *TableInfo) resetColumns() {
+	t.Columns = []string{}
+	t.NonGeneratedColumns = []string{}
+	t.columnsMySQLTps = make(map[string]string)
+	t.enumSetElements = nil
+	t.binaryColumnWidths = nil
+}
+
+// addColumn records one column's metadata, caching the parsed ENUM/SET element
+// list and BINARY(N) declared width that the binlog decoder needs. mysqlType is
+// the information_schema `column_type` text, e.g. "enum('a','b')" or
+// "varbinary(16)". Columns must be added in ordinal order.
+func (t *TableInfo) addColumn(name, mysqlType string, generated bool) error {
+	t.Columns = append(t.Columns, name)
+	t.columnsMySQLTps[name] = mysqlType
+	if !generated {
+		t.NonGeneratedColumns = append(t.NonGeneratedColumns, name)
+	}
+	ordinal := len(t.Columns) - 1
+	if isEnumColumnType(mysqlType) || isSetColumnType(mysqlType) {
+		elements, err := parseEnumSetElements(mysqlType)
+		if err != nil {
+			return fmt.Errorf("parsing ENUM/SET elements for %s.%s.%s: %w", t.SchemaName, t.TableName, name, err)
+		}
+		if t.enumSetElements == nil {
+			t.enumSetElements = make(map[int][]string)
+		}
+		t.enumSetElements[ordinal] = elements
+	}
+	if isBinaryColumnType(mysqlType) {
+		if width := parseBinaryColumnWidth(mysqlType); width > 0 {
+			if t.binaryColumnWidths == nil {
+				t.binaryColumnWidths = make(map[int]int)
+			}
+			t.binaryColumnWidths[ordinal] = width
+		}
 	}
 	return nil
 }
