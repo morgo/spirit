@@ -185,6 +185,7 @@ func TestIsConnectionLossError(t *testing.T) {
 	require.True(t, IsConnectionLossError(io.EOF))
 	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2003})) // CR_CONN_HOST_ERROR relayed by a proxy
 	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 2013})) // CR_SERVER_LOST relayed by a proxy
+	require.True(t, IsConnectionLossError(&mysql.MySQLError{Number: 4031})) // ER_CLIENT_INTERACTION_TIMEOUT: killed by wait_timeout
 
 	// Wrapped variants must also be detected.
 	require.True(t, IsConnectionLossError(fmt.Errorf("rename failed: %w", driver.ErrBadConn)))

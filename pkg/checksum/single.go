@@ -465,7 +465,7 @@ func (c *SingleChecker) initConnPool(ctx context.Context) error {
 	// connection per idle transaction and nothing else: all of these read views
 	// pin history from the same instant, so the history list length floor is
 	// identical whether the autoscaler ends up using four of them or sixteen.
-	c.trxPool, err = dbconn.NewTrxPool(ctx, c.db, c.maxConcurrency, c.dbConfig)
+	c.trxPool, err = dbconn.NewTrxPool(ctx, c.db, c.maxConcurrency, c.dbConfig, c.logger)
 	if err != nil {
 		return err
 	}
