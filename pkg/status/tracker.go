@@ -36,7 +36,7 @@ func (t *Tracker) Begin() {
 
 // Get returns the current state.
 func (t *Tracker) Get() State {
-	return t.state.Get()
+	return t.state.get()
 }
 
 // Set transitions to state without a bracket: time since the previous
@@ -96,7 +96,7 @@ func (t *Tracker) Duration(state State) time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	d := t.durations[state]
-	if t.open && t.state.Get() == state {
+	if t.open && t.state.get() == state {
 		d += time.Since(t.enteredAt)
 	}
 	return d
@@ -112,7 +112,7 @@ func (t *Tracker) enter(state State) {
 	if t.open {
 		t.accrueLocked(now)
 	}
-	t.state.Set(state)
+	t.state.set(state)
 	t.enteredAt = now
 	t.open = true
 }
@@ -125,7 +125,7 @@ func (t *Tracker) exit(state State) {
 	now := time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.open && t.state.Get() == state {
+	if t.open && t.state.get() == state {
 		t.accrueLocked(now)
 	}
 }
@@ -136,6 +136,6 @@ func (t *Tracker) accrueLocked(now time.Time) {
 	if t.durations == nil {
 		t.durations = make(map[State]time.Duration)
 	}
-	t.durations[t.state.Get()] += now.Sub(t.enteredAt)
+	t.durations[t.state.get()] += now.Sub(t.enteredAt)
 	t.open = false
 }
