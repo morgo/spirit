@@ -121,8 +121,8 @@ func TestTrxPoolKeepaliveInterval(t *testing.T) {
 	require.Equal(t, 5*time.Minute, keepaliveInterval(600))   // Aurora-style wait_timeout: half is exactly the cap
 	require.Equal(t, 5*time.Minute, keepaliveInterval(28800)) // MySQL default: capped
 	require.Equal(t, 30*time.Second, keepaliveInterval(60))
-	require.Equal(t, time.Second, keepaliveInterval(1)) // floored: a zero interval would panic the ticker
-	require.Equal(t, time.Second, keepaliveInterval(0)) // defensive
+	require.Equal(t, 500*time.Millisecond, keepaliveInterval(1)) // smallest valid wait_timeout: cadence stays strictly below it
+	require.Equal(t, 500*time.Millisecond, keepaliveInterval(0)) // defensive floor: a non-positive interval would panic the ticker
 }
 
 // TestTrxPoolKeepalive simulates the checksum-autoscaling failure mode: the

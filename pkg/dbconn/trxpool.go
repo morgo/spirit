@@ -19,10 +19,12 @@ const (
 	// keepaliveMaxInterval is the longest the keepalive will go between
 	// pinging the idle transactions in the pool.
 	keepaliveMaxInterval = 5 * time.Minute
-	// keepaliveMinInterval floors the ping interval so a pathological
-	// wait_timeout can't make the keepalive spin (or panic the ticker on a
-	// non-positive interval).
-	keepaliveMinInterval = time.Second
+	// keepaliveMinInterval floors the ping interval so a nonsense
+	// wait_timeout read (zero or negative) can't panic the ticker. MySQL's
+	// minimum wait_timeout is 1s, so the smallest legitimate cadence is
+	// 500ms; the floor sits exactly there to keep every real cadence
+	// strictly below its wait_timeout.
+	keepaliveMinInterval = 500 * time.Millisecond
 	// keepaliveRoundTimeout bounds one round of pings so a hung server can't
 	// hold the pool mutex (blocking Get/Put) indefinitely.
 	keepaliveRoundTimeout = 30 * time.Second
