@@ -114,17 +114,31 @@ func (p *TrxPool) keepalive(ctx context.Context, interval time.Duration) {
 }
 
 func (p *TrxPool) pingIdleTrxs(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, keepaliveRoundTimeout)
+	roundCtx, cancel := context.WithTimeout(ctx, keepaliveRoundTimeout)
 	defer cancel()
 	// Holding the mutex for the whole round guarantees a transaction can't be
 	// handed out while a ping is in flight on it. The round is quick: one
 	// trivial query per idle transaction.
 	p.Lock()
 	defer p.Unlock()
-	for _, trx := range p.trxs {
-		if _, err := trx.ExecContext(ctx, "SELECT 1"); err != nil {
+	for i, trx := range p.trxs {
+		if _, err := trx.ExecContext(roundCtx, "SELECT 1"); err != nil {
 			if ctx.Err() != nil {
-				return // pool is shutting down, or the round timed out
+				return // pool is shutting down; errors here are expected noise
+			}
+			if roundCtx.Err() != nil {
+				// A trivial query blew the whole round budget: the server or
+				// network is severely degraded. This is also lossy — the
+				// driver closes the connection whose ping was cancelled
+				// mid-flight, and the transactions the round never reached
+				// stay exposed to wait_timeout — so this line is the
+				// explanation for any cluster of dead transactions that
+				// follows.
+				p.logger.Warn("keepalive round timed out; the server appears degraded and idle checksum transactions may be lost",
+					"roundTimeout", keepaliveRoundTimeout,
+					"pinged", i,
+					"idle", len(p.trxs))
+				return
 			}
 			// Keep going: the other transactions may still be healthy, and
 			// the worst case for this one is unchanged (a worker gets it and
