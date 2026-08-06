@@ -555,7 +555,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 		// cost a connection each and no extra history retention, since every
 		// read view here pins from the same instant. See the SingleChecker
 		// equivalent for the full rationale.
-		pool, err := dbconn.NewTrxPool(ctx, srcDB, c.maxConcurrency, c.dbConfig)
+		pool, err := dbconn.NewTrxPool(ctx, srcDB, c.maxConcurrency, c.dbConfig, c.logger)
 		if err != nil {
 			// Clean up pools already created
 			for _, sp := range c.sourcePools {
@@ -573,7 +573,7 @@ func (c *DistributedChecker) initConnPool(ctx context.Context) error {
 	// with REPEATABLE-READ and a consistent snapshot
 	c.targetTrxPools = make([]*dbconn.TrxPool, len(targets))
 	for i, target := range targets {
-		targetTrxPool, err := dbconn.NewTrxPool(ctx, target.DB, c.maxConcurrency, c.dbConfig)
+		targetTrxPool, err := dbconn.NewTrxPool(ctx, target.DB, c.maxConcurrency, c.dbConfig, c.logger)
 		if err != nil {
 			// Clean up any pools we've already created
 			for _, sp := range c.sourcePools {
