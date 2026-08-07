@@ -100,6 +100,13 @@ type binlogClient struct {
 	// cap. See DefaultSubscriptionSoftLimitBytes.
 	subscriptionSoftLimitBytes int64
 
+	// flushRequests receives a token whenever a subscription parks on
+	// its soft memory limit. runPeriodicFlush selects on it so a full
+	// buffer is drained immediately instead of leaving the binlog
+	// reader parked until the next ticker fire. Buffered (cap 1);
+	// tokens coalesce.
+	flushRequests chan struct{}
+
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
 
@@ -131,6 +138,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
+		flushRequests:              make(chan struct{}, 1),
 	}
 }
 
@@ -153,6 +161,7 @@ func (c *binlogClient) AddSubscription(currentTable, newTable *table.TableInfo, 
 		Chunker:        chunker,
 		Logger:         c.logger,
 		SoftLimitBytes: c.subscriptionSoftLimitBytes,
+		FlushRequest:   c.flushRequests,
 	})
 	if err != nil {
 		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)
@@ -1220,20 +1229,26 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		trigger := "interval"
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.flushRequests:
+			// A subscription parked on its soft memory limit. Flush now:
+			// the parked reader stalls binlog ingestion, and waiting out
+			// the remainder of the interval burns retention headroom.
+			trigger = "soft-limit-park"
 		case <-ticker.C:
-			startLoop := time.Now()
-			c.logger.Debug("starting periodic flush of binary log")
-			// The periodic flush does not respect the throttler since we want to advance the binlog position
-			// we allow this to run, and then expect that if it is under load the throttler
-			// will kick in and slow down the copy-rows.
-			if err := c.flush(ctx, false, nil); err != nil {
-				c.logger.Error("error flushing binary log", "error", err)
-			}
-			c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop).String())
 		}
+		startLoop := time.Now()
+		c.logger.Debug("starting periodic flush of binary log", "trigger", trigger)
+		// The periodic flush does not respect the throttler since we want to advance the binlog position
+		// we allow this to run, and then expect that if it is under load the throttler
+		// will kick in and slow down the copy-rows.
+		if err := c.flush(ctx, false, nil); err != nil {
+			c.logger.Error("error flushing binary log", "error", err)
+		}
+		c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
 	}
 }
 

@@ -48,6 +48,13 @@ const (
 	// while still guaranteeing forward progress regardless of row width.
 	// See pkg/change/subscription_buffered.go for the accounting model.
 	//
+	// Three behaviours keep the cap from starving the change reader:
+	// map-mode overwrites of already-buffered keys bypass it (dedup
+	// stays live under backpressure), parking requests an immediate
+	// flush rather than waiting for the periodic interval, and flushes
+	// release capacity per applied batch — the reader resumes as soon
+	// as the first batch lands, not when the whole buffer has drained.
+	//
 	// Operators should be aware that pausing the binlog reader for an
 	// extended period risks falling past the source's binlog retention
 	// (binlog_expire_logs_seconds). Tune this value, or the source's

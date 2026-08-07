@@ -92,6 +92,11 @@ type gtidClient struct {
 	streamWG   sync.WaitGroup
 
 	subscriptionSoftLimitBytes int64
+
+	// flushRequests receives a token whenever a subscription parks on
+	// its soft memory limit; runPeriodicFlush selects on it to flush
+	// immediately. See the binlog client's field of the same name.
+	flushRequests chan struct{}
 }
 
 // NewGTIDClient constructs the GTID-backed change.Source. It mirrors
@@ -123,6 +128,7 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
+		flushRequests:              make(chan struct{}, 1),
 	}
 }
 
@@ -136,6 +142,7 @@ func (c *gtidClient) AddSubscription(currentTable, newTable *table.TableInfo, ch
 		Chunker:        chunker,
 		Logger:         c.logger,
 		SoftLimitBytes: c.subscriptionSoftLimitBytes,
+		FlushRequest:   c.flushRequests,
 	})
 	if err != nil {
 		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)
@@ -1151,17 +1158,23 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		trigger := "interval"
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.flushRequests:
+			// A subscription parked on its soft memory limit. Flush now:
+			// the parked reader stalls GTID ingestion, and waiting out
+			// the remainder of the interval burns retention headroom.
+			trigger = "soft-limit-park"
 		case <-ticker.C:
-			startLoop := time.Now()
-			c.logger.Debug("starting periodic flush of GTID changeset")
-			if err := c.flush(ctx, false, nil); err != nil {
-				c.logger.Error("error flushing GTID changeset", "error", err)
-			}
-			c.logger.Info("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop).String())
 		}
+		startLoop := time.Now()
+		c.logger.Debug("starting periodic flush of GTID changeset", "trigger", trigger)
+		if err := c.flush(ctx, false, nil); err != nil {
+			c.logger.Error("error flushing GTID changeset", "error", err)
+		}
+		c.logger.Info("finished periodic flush of GTID changeset", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
 	}
 }
 
