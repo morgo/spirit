@@ -152,8 +152,9 @@ func datumValFromString(val string, tp datumTp) (any, error) {
 	case binaryType:
 		// Binary types are hex-encoded ("0x...") in checkpoint JSON via
 		// jsonQuoteDatum, except the empty value, which is serialized as
-		// x'' (there is no zero-digit 0x literal). Decode both back to
-		// raw binary bytes.
+		// x'' (there is no zero-digit 0x literal). Decode both back to a
+		// Go string holding the raw bytes: Datum.Val stores binary values
+		// as string, never []byte.
 		if val == "x''" {
 			return "", nil
 		}

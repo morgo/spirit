@@ -702,12 +702,12 @@ func TestSingleTargetApplierUpsertRows(t *testing.T) {
 // binlog-apply path corrupting empty (zero-length, non-NULL) binary values.
 // Under row-based replication any update to a row produces a full row image,
 // so UpsertRows rewrites every column — including blobs the application never
-// touched. The empty value used to serialize as 0x00 (a one-byte NUL), so
-// each REPLACE turned ” into '\x00' in the target: on tables that store
-// empty strings (e.g. zero-length serialized protos) every feed-touched row
-// produced a checksum mismatch, was recopied byte-exact, and then re-minted
-// on the row's next update — a checksum that never converges, and real
-// corruption for rows whose last update lands after the final checksum pass.
+// touched. The empty value used to serialize as 0x00 — a one-byte NUL, a
+// different value — so on tables that store empty strings (e.g. zero-length
+// serialized protos) every feed-touched row produced a checksum mismatch,
+// was recopied byte-exact, and then re-minted on the row's next update: a
+// checksum that never converges, and real corruption for rows whose last
+// update lands after the final checksum pass.
 func TestSingleTargetApplierUpsertRowsEmptyBlob(t *testing.T) {
 	testutils.RunSQL(t, "DROP DATABASE IF EXISTS single_upsert_emptyblob_test")
 	testutils.RunSQL(t, "CREATE DATABASE single_upsert_emptyblob_test")
