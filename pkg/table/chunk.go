@@ -118,8 +118,9 @@ func (b *Boundary) valuesString() string {
 
 // jsonQuoteDatum renders a boundary datum as a JSON string literal (always
 // quoted, properly escaped). Numeric values are quoted to avoid JSON float
-// behavior (#125); binary values are hex-encoded ("0x...") so they round-trip
-// via datumValFromString. Crucially it uses json.Marshal rather than
+// behavior (#125); binary values are hex-encoded ("0x...", or the empty
+// binary literal for a zero-length value) so they round-trip via
+// datumValFromString. Crucially it uses json.Marshal rather than
 // Datum.String() (which SQL-escapes for WHERE clauses): a string value that is
 // valid in a MySQL string literal but not in JSON — e.g. a VARCHAR PK holding a
 // control byte like 0x16, or an embedded quote — must be JSON-escaped here, or
@@ -135,7 +136,10 @@ func jsonQuoteDatum(v Datum) string {
 			bs = fmt.Sprintf("%v", v.Val)
 		}
 		if len(bs) == 0 {
-			s = "0x00" // MySQL binary string needs at least one character
+			// Matches Datum.String(): x'' is the zero-length binary value.
+			// It must not be 0x00 (a one-byte NUL — a different value);
+			// datumValFromString decodes x'' back to the empty string.
+			s = "x''"
 		} else {
 			s = fmt.Sprintf("%#x", bs)
 		}
