@@ -35,10 +35,11 @@ type TrxPool struct {
 
 	trxs   []*sql.Tx
 	logger *slog.Logger
-	// createdAt is when the snapshots were taken; every transaction in the
-	// pool is exactly this old. Logged on keepalive failures so deaths that
-	// cluster at a fixed age (an external long-transaction reaper) can be
-	// told apart from wait_timeout kills.
+	// createdAt is when pool creation completed: every snapshot is
+	// established by then, so every transaction in the pool is at least
+	// this old. Logged on keepalive failures so deaths that cluster at a
+	// fixed age (an external long-transaction reaper) can be told apart
+	// from wait_timeout kills.
 	createdAt time.Time
 	// keepalive lifecycle: cancel stops the pinger, done is closed once it
 	// has fully exited. Both are nil if pool creation failed before the
@@ -63,7 +64,7 @@ func NewTrxPool(ctx context.Context, db *sql.DB, count int, config *DBConfig, lo
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	pool := &TrxPool{trxs: make([]*sql.Tx, 0, count), logger: logger, createdAt: time.Now()}
+	pool := &TrxPool{trxs: make([]*sql.Tx, 0, count), logger: logger}
 	for range count {
 		trx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 		if err != nil {
@@ -74,6 +75,12 @@ func NewTrxPool(ctx context.Context, db *sql.DB, count int, config *DBConfig, lo
 			return nil, errors.Join(err, pool.Close())
 		}
 	}
+	// Timestamp the pool only after every snapshot is established, so that
+	// poolAge in keepalive warnings is a floor on each transaction's true
+	// age. Stamping before the loop would inflate it by the creation time
+	// and could suggest an age threshold (wait_timeout, a reaper) that no
+	// snapshot has actually reached.
+	pool.createdAt = time.Now()
 	if len(pool.trxs) > 0 {
 		// Derive the ping cadence from the session wait_timeout so the
 		// keepalive holds up however aggressively the server is configured.
