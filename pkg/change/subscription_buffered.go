@@ -173,13 +173,17 @@ type bufferedMap struct {
 	// remain blocked on the cond with no flush in flight to wake it.
 	closed bool
 
-	// flushRequest, when non-nil, receives a non-blocking token each
-	// time HasChanged parks on the soft limit. The owning client selects
-	// on it in its periodic-flush loop so a full buffer is drained
-	// immediately rather than waiting out the remainder of the flush
-	// interval — a parked subscription stalls the binlog reader, and
-	// every second parked burns binlog-retention headroom.
-	flushRequest chan<- struct{}
+	// flushRequest, when non-nil, receives this subscription (a
+	// non-blocking send) each time HasChanged parks on the soft limit.
+	// The owning client selects on it in its periodic-flush loop and
+	// flushes the requesting subscription first, so a full buffer is
+	// drained immediately rather than waiting out the remainder of the
+	// flush interval — or, on multi-table clients, waiting behind
+	// another saturated subscription's entire drain in the
+	// nondeterministic all-subscription pass. A parked subscription
+	// stalls the binlog reader, and every second parked burns
+	// binlog-retention headroom.
+	flushRequest chan<- Subscription
 
 	// Counters for the bookend log emitted on watermark-optimization transitions.
 	keysAdded        atomic.Int64
@@ -252,12 +256,14 @@ type BufferedSubscriptionConfig struct {
 	// cap. See bufferedMap.softLimitBytes for the semantics.
 	SoftLimitBytes int64
 
-	// FlushRequest, when non-nil, receives a non-blocking token each
-	// time HasChanged parks on the soft limit. Owners that flush on a
-	// periodic ticker should select on it to flush a full buffer
-	// immediately instead of leaving the change reader parked for the
-	// rest of the interval. Optional; nil disables the signal.
-	FlushRequest chan<- struct{}
+	// FlushRequest, when non-nil, receives the parked subscription (a
+	// non-blocking send) each time HasChanged parks on the soft limit.
+	// Owners that flush on a periodic ticker should select on it and
+	// flush the received subscription first, then run their normal
+	// all-subscription pass — flushing others first would leave the
+	// change reader parked for those entire drains. Optional; nil
+	// disables the signal.
+	FlushRequest chan<- Subscription
 }
 
 // NewBufferedSubscription constructs the default bufferedMap-backed
@@ -535,16 +541,19 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	s.keysAdded.Add(1)
 }
 
-// requestFlush performs a non-blocking send on the flush-request
-// channel, if one is configured. Caller holds s.Lock; the send must not
-// block (the channel is expected to be buffered, and a token already in
-// flight carries the same information).
+// requestFlush performs a non-blocking send of this subscription on the
+// flush-request channel, if one is configured. Caller holds s.Lock; the
+// send must not block. Only one subscription per client can be parked
+// at a time (the single change-reader goroutine is what parks), so a
+// buffered channel of capacity 1 never drops a live request; if a stale
+// token from an earlier park is still in flight, the receiver's
+// subsequent all-subscription pass covers this subscription anyway.
 func (s *bufferedMap) requestFlush() {
 	if s.flushRequest == nil {
 		return
 	}
 	select {
-	case s.flushRequest <- struct{}{}:
+	case s.flushRequest <- s:
 	default:
 	}
 }

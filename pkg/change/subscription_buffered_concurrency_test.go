@@ -14,6 +14,7 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/testutils"
 	"github.com/block/spirit/pkg/utils"
+	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -297,11 +298,12 @@ func TestBufferedMapOverwriteBypassesSoftLimit(t *testing.T) {
 }
 
 // TestBufferedMapParkRequestsFlush verifies that parking performs a
-// non-blocking send on the flush-request channel, so the owning client
-// can flush immediately instead of leaving the reader parked until the
-// next periodic-flush tick.
+// non-blocking send of the parked subscription on the flush-request
+// channel, so the owning client can flush that subscription first
+// instead of leaving the reader parked until the next periodic-flush
+// tick (or behind another subscription's drain).
 func TestBufferedMapParkRequestsFlush(t *testing.T) {
-	req := make(chan struct{}, 1)
+	req := make(chan Subscription, 1)
 	sub := newBareBufferedMap(1024)
 	sub.flushRequest = req
 
@@ -324,7 +326,8 @@ func TestBufferedMapParkRequestsFlush(t *testing.T) {
 	}()
 
 	select {
-	case <-req:
+	case parked := <-req:
+		require.Same(t, sub, parked, "the flush request must carry the subscription that parked")
 	case <-time.After(2 * time.Second):
 		t.Fatal("parking did not request a flush")
 	}
@@ -502,4 +505,102 @@ func TestPeriodicFlushRespondsToParkRequest(t *testing.T) {
 		return count >= 1
 	}, 15*time.Second, 50*time.Millisecond,
 		"park-requested flush did not run; reader would stay parked until the next interval tick")
+}
+
+// orderRecordingApplier wraps a real applier and records the source
+// table name of every UpsertRows call, in call order. Used to assert
+// which subscription a multi-subscription client flushed first.
+type orderRecordingApplier struct {
+	applier.Applier
+	mu    sync.Mutex
+	order []string
+}
+
+func (a *orderRecordingApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapping, rows []applier.LogicalRow, locks []*dbconn.TableLock) (int64, error) {
+	a.mu.Lock()
+	a.order = append(a.order, mapping.SourceTable().TableName)
+	a.mu.Unlock()
+	return a.Applier.UpsertRows(ctx, mapping, rows, locks)
+}
+
+func (a *orderRecordingApplier) recorded() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.order...)
+}
+
+// TestPeriodicFlushPrioritizesParkedSubscription covers the
+// multi-subscription client: the park signal carries the subscription
+// that parked, and runPeriodicFlush must drain it before the
+// all-subscription pass. Without the priority, the pass visits the
+// registry in nondeterministic map order, and the parked reader can sit
+// behind another saturated subscription's entire drain — table B here
+// has pending changes when table A parks, so an unprioritized flush
+// would drain B first about half the time.
+func TestPeriodicFlushPrioritizesParkedSubscription(t *testing.T) {
+	makePair := func(suffix string) (*table.TableInfo, *table.TableInfo) {
+		srcBase, _ := uniqueTableNames(t)
+		srcName := srcBase + suffix
+		dstName := fmt.Sprintf("_%s_new", srcName)
+		testutils.RunSQL(t, fmt.Sprintf("DROP TABLE IF EXISTS `%s`, `%s`", srcName, dstName))
+		testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))", srcName))
+		testutils.RunSQL(t, fmt.Sprintf("CREATE TABLE `%s` (id INT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))", dstName))
+		db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+		require.NoError(t, err)
+		defer utils.CloseAndLog(db)
+		src := table.NewTableInfo(db, "test", srcName)
+		dst := table.NewTableInfo(db, "test", dstName)
+		require.NoError(t, src.SetInfo(t.Context()))
+		require.NoError(t, dst.SetInfo(t.Context()))
+		return src, dst
+	}
+	srcA, dstA := makePair("_a")
+	srcB, dstB := makePair("_b")
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+	cfg, err := mysql2.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	realApplier, err := applier.NewSingleTargetApplier(applier.Target{DB: db, KeyRange: "0", Config: cfg}, applier.NewApplierDefaultConfig())
+	require.NoError(t, err)
+	rec := &orderRecordingApplier{Applier: realApplier}
+	client := NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, rec, NewClientDefaultConfig()).(*binlogClient)
+	for _, pair := range []struct{ src, dst *table.TableInfo }{{srcA, dstA}, {srcB, dstB}} {
+		chunker, err := table.NewChunker(pair.src, table.ChunkerConfig{NewTable: pair.dst})
+		require.NoError(t, err)
+		require.NoError(t, client.AddSubscription(pair.src, pair.dst, chunker))
+	}
+	require.NoError(t, client.Start(t.Context()))
+	defer client.Close()
+	subA := getBufferedMap(t, client, srcA.SchemaName+"."+srcA.TableName)
+
+	// Only the park signal can plausibly trigger a flush at this interval.
+	client.StartPeriodicFlush(t.Context(), time.Hour)
+	defer client.StopPeriodicFlush()
+
+	// B accumulates pending changes first, so it is a candidate to be
+	// drained ahead of A in an unprioritized all-subscription pass.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'b'), (2, 'b'), (3, 'b')", srcB.QuotedTableName))
+	// Seed A with one buffered change, then clamp its limit so the next
+	// binlog-driven event parks the reader on A.
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (1, 'seed')", srcA.QuotedTableName))
+	require.NoError(t, client.BlockWait(t.Context()))
+	subA.Lock()
+	require.Positive(t, subA.sizeBytes, "seed change must be accounted")
+	subA.softLimitBytes = 1
+	subA.Unlock()
+
+	testutils.RunSQL(t, fmt.Sprintf("INSERT INTO %s (id, name) VALUES (2, 'parked')", srcA.QuotedTableName))
+	require.Eventually(t, func() bool {
+		return subA.timesParked.Load() >= 1
+	}, 10*time.Second, 10*time.Millisecond, "binlog-driven HasChanged should park on soft limit")
+
+	// The priority flush drains A; the follow-up pass drains B.
+	require.Eventually(t, func() bool {
+		return len(rec.recorded()) >= 2
+	}, 15*time.Second, 50*time.Millisecond, "park-requested flush did not reach the applier")
+	order := rec.recorded()
+	require.Equal(t, srcA.TableName, order[0], "the parked subscription must be flushed before the all-subscription pass")
+	require.Contains(t, order, srcB.TableName, "the all-subscription pass must still drain the other subscription")
 }

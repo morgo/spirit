@@ -100,12 +100,15 @@ type binlogClient struct {
 	// cap. See DefaultSubscriptionSoftLimitBytes.
 	subscriptionSoftLimitBytes int64
 
-	// flushRequests receives a token whenever a subscription parks on
-	// its soft memory limit. runPeriodicFlush selects on it so a full
-	// buffer is drained immediately instead of leaving the binlog
-	// reader parked until the next ticker fire. Buffered (cap 1);
-	// tokens coalesce.
-	flushRequests chan struct{}
+	// flushRequests receives the subscription that parked on its soft
+	// memory limit. runPeriodicFlush selects on it and flushes that
+	// subscription first — the all-subscription pass visits the
+	// registry in nondeterministic order, and draining another
+	// saturated subscription first would leave the binlog reader parked
+	// for that entire drain. Buffered (cap 1); only one subscription
+	// can be parked at a time (the single reader goroutine is what
+	// parks), so requests never queue behind each other.
+	flushRequests chan Subscription
 
 	flushedBinlogs atomic.Int64 // for testing binlog flushing frequency
 }
@@ -138,7 +141,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
-		flushRequests:              make(chan struct{}, 1),
+		flushRequests:              make(chan Subscription, 1),
 	}
 }
 
@@ -1233,11 +1236,19 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 		select {
 		case <-ctx.Done():
 			return
-		case <-c.flushRequests:
+		case parked := <-c.flushRequests:
 			// A subscription parked on its soft memory limit. Flush now:
 			// the parked reader stalls binlog ingestion, and waiting out
 			// the remainder of the interval burns retention headroom.
+			// Flush the parked subscription first — the all-subscription
+			// pass below visits the registry in nondeterministic order,
+			// and draining another saturated subscription first would
+			// leave the reader parked for that entire drain. The full
+			// pass still runs afterwards for position advancement.
 			trigger = "soft-limit-park"
+			if _, err := parked.Flush(ctx, false, nil); err != nil {
+				c.logger.Error("error flushing parked subscription", "error", err)
+			}
 		case <-ticker.C:
 		}
 		startLoop := time.Now()

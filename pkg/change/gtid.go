@@ -93,10 +93,11 @@ type gtidClient struct {
 
 	subscriptionSoftLimitBytes int64
 
-	// flushRequests receives a token whenever a subscription parks on
-	// its soft memory limit; runPeriodicFlush selects on it to flush
-	// immediately. See the binlog client's field of the same name.
-	flushRequests chan struct{}
+	// flushRequests receives the subscription that parked on its soft
+	// memory limit; runPeriodicFlush selects on it and flushes that
+	// subscription first, then runs the normal all-subscription pass.
+	// See the binlog client's field of the same name.
+	flushRequests chan Subscription
 }
 
 // NewGTIDClient constructs the GTID-backed change.Source. It mirrors
@@ -128,7 +129,7 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
-		flushRequests:              make(chan struct{}, 1),
+		flushRequests:              make(chan Subscription, 1),
 	}
 }
 
@@ -1162,11 +1163,19 @@ func (c *gtidClient) runPeriodicFlush(ctx context.Context, interval time.Duratio
 		select {
 		case <-ctx.Done():
 			return
-		case <-c.flushRequests:
+		case parked := <-c.flushRequests:
 			// A subscription parked on its soft memory limit. Flush now:
 			// the parked reader stalls GTID ingestion, and waiting out
 			// the remainder of the interval burns retention headroom.
+			// Flush the parked subscription first — the all-subscription
+			// pass below visits the registry in nondeterministic order,
+			// and draining another saturated subscription first would
+			// leave the reader parked for that entire drain. The full
+			// pass still runs afterwards for position advancement.
 			trigger = "soft-limit-park"
+			if _, err := parked.Flush(ctx, false, nil); err != nil {
+				c.logger.Error("error flushing parked subscription", "error", err)
+			}
 		case <-ticker.C:
 		}
 		startLoop := time.Now()
