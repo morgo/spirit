@@ -39,9 +39,10 @@ func (t *Tracker) Get() State {
 	return t.state.get()
 }
 
-// Set transitions to state without a bracket: time since the previous
-// transition is attributed to the previous state, and state begins accruing
-// now. Prefer Do wherever the phase has a clear extent.
+// Set transitions to state without a bracket: it closes the previous state's
+// still-open interval (if a completed Do already closed it, the gap since is
+// left unattributed) and state begins accruing now. Prefer Do wherever the
+// phase has a clear extent.
 func (t *Tracker) Set(state State) {
 	t.enter(state)
 }
