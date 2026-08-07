@@ -192,7 +192,15 @@ func (p *TrxPool) Close() error {
 			// nothing left to clean up. Surfacing it would fail an
 			// otherwise-successful caller — the checksum treats Close errors
 			// as a failed pass.
-			if IsConnectionLossError(err) {
+			//
+			// Context errors are the same situation with a client-side cause:
+			// when a statement is canceled mid-flight (keepaliveCancel above
+			// interrupting an in-flight ping round, or a ping round hitting
+			// keepaliveRoundTimeout), go-sql-driver closes the connection and
+			// stores the context error, and Rollback on the closed connection
+			// returns the stored error rather than ErrInvalidConn. The server
+			// rolls back on connection death regardless of which side closed.
+			if IsConnectionLossError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				p.logger.Warn("pooled transaction's connection was already gone at rollback", "error", err)
 				continue
 			}
