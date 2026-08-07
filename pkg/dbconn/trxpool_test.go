@@ -212,3 +212,63 @@ func TestTrxPoolCloseAfterConnectionLoss(t *testing.T) {
 	pool.Put(trx)
 	require.NoError(t, pool.Close())
 }
+
+// TestTrxPoolCloseAfterCanceledStatement verifies that Close does not report
+// an error when a statement on a pooled transaction's connection was canceled
+// mid-flight. go-sql-driver then closes the connection and *stores* the
+// context error, and a later Rollback on the closed connection returns the
+// stored error rather than ErrInvalidConn — so this shape is not covered by
+// the connection-loss tolerance alone.
+//
+// This is the deterministic version of a race inherent to Close itself:
+// keepaliveCancel() interrupts an in-flight ping round, poisoning the pinged
+// connection with context.Canceled, and the rollback loop in the very same
+// Close call then trips over it. TestTrxPoolCloseAfterConnectionLoss flaked
+// in CI exactly this way (its 9s sleep is 3x the 3s keepalive cadence, so
+// the final tick races the test's wakeup).
+func TestTrxPoolCloseAfterCanceledStatement(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  func(t *testing.T) context.Context
+	}{
+		{
+			// What keepaliveCancel (via Close, or the parent context) does
+			// to an in-flight ping.
+			name: "canceled",
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancel(t.Context())
+				timer := time.AfterFunc(100*time.Millisecond, cancel)
+				t.Cleanup(func() { timer.Stop(); cancel() })
+				return ctx
+			},
+		},
+		{
+			// What keepaliveRoundTimeout does to a ping that outlives the
+			// round budget.
+			name: "deadline exceeded",
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sql.Open("mysql", testutils.DSN())
+			require.NoError(t, err)
+			defer utils.CloseAndLog(db)
+
+			pool, err := NewTrxPool(t.Context(), db, 1, NewDBConfig(), slog.New(slog.DiscardHandler))
+			require.NoError(t, err)
+
+			trx, err := pool.Get()
+			require.NoError(t, err)
+			_, err = trx.ExecContext(tc.ctx(t), "SELECT SLEEP(2)")
+			require.Error(t, err) // the driver closed the connection and stored this context error
+
+			pool.Put(trx)
+			require.NoError(t, pool.Close())
+		})
+	}
+}
