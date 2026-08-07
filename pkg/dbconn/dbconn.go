@@ -31,6 +31,13 @@ const (
 	// inside real server error packets.
 	errCannotConnect = 2003
 	errConnLost      = 2013
+	// errClientInteractionTimeout (4031, ER_CLIENT_INTERACTION_TIMEOUT) is
+	// written by MySQL >= 8.0.24 as a final packet when the server
+	// disconnects an idle connection (wait_timeout); the client reads it on
+	// the connection's next use. Aurora does not always deliver it — a
+	// wait_timeout kill can also surface as a bare driver.ErrBadConn — so
+	// both shapes must classify the same way.
+	errClientInteractionTimeout = 4031
 	// errReadOnly (1290), errReadOnlyTransaction (1792) and errReadOnlyMode
 	// (1836) are usually consumed by go-sql-driver when RejectReadOnly is
 	// enabled (the spirit default) and converted to driver.ErrBadConn. They
@@ -101,7 +108,11 @@ func NewDBConfig() *DBConfig {
 // where the server has positively reported that the statement did NOT take
 // effect, these errors are ambiguous. Callers retrying a non-idempotent
 // statement (e.g. the cutover RENAME TABLE) must verify server-side state
-// before deciding whether the statement was applied.
+// before deciding whether the statement was applied. The exception is
+// ER_CLIENT_INTERACTION_TIMEOUT (4031): the server killed the session for
+// inactivity *before* the observing statement arrived, so that statement
+// positively did not execute — verification is still safe, just guaranteed
+// to conclude "not applied".
 func IsConnectionLossError(err error) bool {
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, io.EOF) {
 		return true
@@ -111,7 +122,7 @@ func IsConnectionLossError(err error) bool {
 		return false
 	}
 	switch val.Number {
-	case errCannotConnect, errConnLost:
+	case errCannotConnect, errConnLost, errClientInteractionTimeout:
 		return true
 	default:
 		return false
