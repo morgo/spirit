@@ -129,7 +129,22 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 	if err != nil {
 		return err
 	}
-	defer trxPool.Put(trx)
+	// The transaction is only needed for the snapshot reads: the two checksum
+	// queries and (on mismatch) the row-level inspection. It must go back to
+	// the pool the moment those are done, not at function exit: the repair
+	// path below serializes on recopyLock and can park for many minutes
+	// behind other repairs, and a checked-out transaction is invisible to the
+	// pool's keepalive — holding it there idled connections past Aurora's
+	// wait_timeout in production and killed the whole pool. Guarded so the
+	// early call and the deferred one compose to exactly one Put.
+	trxReturned := false
+	putTrx := func() {
+		if !trxReturned {
+			trxReturned = true
+			trxPool.Put(trx)
+		}
+	}
+	defer putTrx()
 	c.logger.Debug("checksumming chunk", "chunk", chunk.String())
 	sourceChecksumCols, targetChecksumCols, err := chunk.ColumnMapping.ChecksumExprs()
 	if err != nil {
@@ -177,6 +192,11 @@ func (c *SingleChecker) ChecksumChunk(ctx context.Context, trxPool *dbconn.TrxPo
 		if err := c.inspectDifferences(ctx, trx, chunk); err != nil {
 			return err
 		}
+		// The snapshot reads are done. The repair below reads current data
+		// through the pooled connections (deliberately outside the snapshot),
+		// so return the transaction now and let the keepalive cover it while
+		// this worker queues on recopyLock.
+		putTrx()
 		// Are we allowed to fix the differences? If not, return an error.
 		// This is mostly used by the test-suite.
 		if !c.fixDifferences {
@@ -492,10 +512,34 @@ func (c *SingleChecker) Run(ctx context.Context) error {
 	var lastErr error
 	for attempt := 1; attempt <= c.maxRetries; attempt++ {
 		if attempt > 1 {
-			c.logger.Error("checksum failed, retrying", "attempt", attempt, "maxRetries", c.maxRetries)
-			// Reset the chunker to start from the beginning
-			if err := c.chunker.Reset(); err != nil {
-				return fmt.Errorf("failed to reset chunker for retry: %w", err)
+			// If the previous attempt errored without finding a single
+			// difference — e.g. the transaction pool's connections were killed
+			// mid-pass — the low watermark is still trustworthy: every chunk
+			// below it verified clean. Resume there rather than discarding
+			// hours of verified work; runChecksum re-acquires the table lock
+			// and takes fresh snapshots either way, exactly as the yield path
+			// does. An attempt that found differences (lastErr == nil, or an
+			// error after repairs) still restarts from the beginning, so the
+			// "clean pass over the whole table" guarantee after repairs is
+			// unchanged.
+			resumed := false
+			if lastErr != nil && c.differencesFound.Load() == 0 {
+				if watermark, wmErr := c.chunker.GetLowWatermark(); wmErr == nil {
+					if openErr := c.chunker.OpenAtWatermark(watermark); openErr == nil {
+						resumed = true
+						c.logger.Error("checksum failed, retrying from low watermark",
+							"attempt", attempt, "maxRetries", c.maxRetries, "watermark", watermark)
+					} else {
+						c.logger.Warn("failed to resume checksum at watermark, restarting from beginning", "error", openErr)
+					}
+				}
+			}
+			if !resumed {
+				c.logger.Error("checksum failed, retrying", "attempt", attempt, "maxRetries", c.maxRetries)
+				// Reset the chunker to start from the beginning
+				if err := c.chunker.Reset(); err != nil {
+					return fmt.Errorf("failed to reset chunker for retry: %w", err)
+				}
 			}
 			// Reset differences found counter
 			c.differencesFound.Store(0)

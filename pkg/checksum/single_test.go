@@ -2,6 +2,8 @@ package checksum
 
 import (
 	"database/sql"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -602,4 +604,230 @@ func TestColumnBoundaryShift(t *testing.T) {
 	require.True(t, ok, "checker is not of type *SingleChecker")
 	err = singleChecker.runChecksum(t.Context())
 	require.ErrorContains(t, err, "checksum mismatch")
+}
+
+// TestChecksumChunkReleasesTrxDuringRepair reproduces the production failure
+// mode where checksum transactions died to wait_timeout DESPITE the pool
+// keepalive: repairs serialize on recopyLock, so a worker that hit a mismatch
+// could park for many minutes holding its transaction — checked out and
+// therefore invisible to the keepalive. The fix returns the transaction to
+// the pool the moment the snapshot reads are done. This test holds recopyLock
+// (simulating another slow repair), drives a mismatched chunk through
+// ChecksumChunk, and requires the full pool to be available while the repair
+// is still queued.
+func TestChecksumChunkReleasesTrxDuringRepair(t *testing.T) {
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS trxrelease, _trxrelease_new, _trxrelease_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE trxrelease (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _trxrelease_new (a INT NOT NULL, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "CREATE TABLE _trxrelease_chkpnt (a INT)")
+	testutils.RunSQL(t, "INSERT INTO trxrelease VALUES (1, 2, 3), (2, 2, 3), (3, 2, 3)")
+	testutils.RunSQL(t, "INSERT INTO _trxrelease_new VALUES (1, 2, 3), (2, 2, 3)") // row 3 missing: mismatch
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, "test", "trxrelease")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_trxrelease_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.FixDifferences = true
+	checkerIntf, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+	checker, ok := checkerIntf.(*SingleChecker)
+	require.True(t, ok)
+
+	chunk, err := chunker.Next() // small table: one chunk covers everything
+	require.NoError(t, err)
+
+	pool, err := dbconn.NewTrxPool(t.Context(), db, 2, config.DBConfig, config.Logger)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, pool.Close()) }()
+
+	// Simulate another worker's long-running repair.
+	checker.recopyLock.Lock()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- checker.ChecksumChunk(t.Context(), pool, chunk)
+	}()
+
+	// Once the mismatch has been inspected, the transaction must be back in
+	// the pool even though the repair is still queued on recopyLock. The
+	// differencesFound guard ensures we don't probe before the worker has
+	// taken (and must have returned) its transaction.
+	require.Eventually(t, func() bool {
+		if checker.differencesFound.Load() == 0 {
+			return false
+		}
+		trx1, err := pool.Get()
+		if err != nil {
+			return false
+		}
+		trx2, err := pool.Get()
+		if err != nil {
+			pool.Put(trx1)
+			return false
+		}
+		pool.Put(trx1)
+		pool.Put(trx2)
+		return true
+	}, 30*time.Second, 25*time.Millisecond, "transaction was not returned to the pool while the repair was queued")
+
+	// The repair itself must still be blocked on recopyLock.
+	select {
+	case err := <-errCh:
+		t.Fatalf("ChecksumChunk returned while recopyLock was held: %v", err)
+	default:
+	}
+
+	checker.recopyLock.Unlock()
+	require.NoError(t, <-errCh)
+
+	// And the repair actually repaired.
+	var cnt int
+	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM _trxrelease_new").Scan(&cnt))
+	require.Equal(t, 3, cnt)
+}
+
+// flakyChunker wraps a real chunker and injects one transient Next() error at
+// a chosen call number, recording whether the retry that follows resumed from
+// the low watermark or reset to the beginning.
+type flakyChunker struct {
+	table.MappedChunker
+	sync.Mutex
+	failAtCall int // 1-indexed Next() call to fail once; 0 disables
+	nextCalls  int
+	wmResumes  int
+	resets     int
+}
+
+func (c *flakyChunker) Next() (*table.Chunk, error) {
+	c.Lock()
+	c.nextCalls++
+	inject := c.failAtCall != 0 && c.nextCalls == c.failAtCall
+	if inject {
+		c.failAtCall = 0
+	}
+	c.Unlock()
+	if inject {
+		return nil, errors.New("injected transient error")
+	}
+	return c.MappedChunker.Next()
+}
+
+func (c *flakyChunker) OpenAtWatermark(watermark string) error {
+	c.Lock()
+	c.wmResumes++
+	c.Unlock()
+	return c.MappedChunker.OpenAtWatermark(watermark)
+}
+
+func (c *flakyChunker) Reset() error {
+	c.Lock()
+	c.resets++
+	c.Unlock()
+	return c.MappedChunker.Reset()
+}
+
+// checksumRetryHarness builds a single-checker over a seeded 4096-row table
+// pair wrapped in a flakyChunker that errors on the third Next() call. By
+// then two chunks have completed: the first chunk has no lower bound (and so
+// cannot be expressed as a watermark on its own), the second has real bounds,
+// so the low watermark is ready when the injected error fires.
+//
+// mutateSQL (optional) plants a difference in the target table. It runs
+// before the binlog feed starts: a write to the _new table after the feed is
+// running is captured as a pending change, and the checksum's own
+// flush-under-lock would faithfully re-copy those keys from the source —
+// reverting the planted difference before any chunk gets to see it.
+func checksumRetryHarness(t *testing.T, name string, mutateSQL string) (*flakyChunker, Checker, func()) {
+	t.Helper()
+	testutils.RunSQL(t, "DROP TABLE IF EXISTS "+name+", _"+name+"_new, _"+name+"_chkpnt")
+	testutils.RunSQL(t, "CREATE TABLE "+name+" (a INT NOT NULL AUTO_INCREMENT, b INT, c INT, PRIMARY KEY (a))")
+	testutils.RunSQL(t, "INSERT INTO "+name+" (b, c) VALUES (2, 3)")
+	for range 12 { // 2^12 = 4096 rows: several chunks at the 1000-row starting size
+		testutils.RunSQL(t, "INSERT INTO "+name+" (b, c) SELECT b, c FROM "+name)
+	}
+	testutils.RunSQL(t, "CREATE TABLE _"+name+"_new LIKE "+name)
+	testutils.RunSQL(t, "INSERT INTO _"+name+"_new SELECT * FROM "+name)
+	testutils.RunSQL(t, "CREATE TABLE _"+name+"_chkpnt (a INT)")
+	if mutateSQL != "" {
+		testutils.RunSQL(t, mutateSQL)
+	}
+
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+
+	t1 := table.NewTableInfo(db, "test", name)
+	require.NoError(t, t1.SetInfo(t.Context()))
+	t2 := table.NewTableInfo(db, "test", "_"+name+"_new")
+	require.NoError(t, t2.SetInfo(t.Context()))
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd, applier.NewSingleTargetForTest(t, db), change.NewClientDefaultConfig())
+	inner, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t2})
+	require.NoError(t, err)
+	chunker := &flakyChunker{MappedChunker: inner, failAtCall: 3}
+	require.NoError(t, feed.AddSubscription(t1, t2, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+	require.NoError(t, chunker.Open())
+
+	config := NewCheckerDefaultConfig()
+	config.Concurrency = 1 // deterministic: chunks 1-2 complete (watermark ready) before Next() call 3 injects
+	config.FixDifferences = true
+	checker, err := NewChecker([]*sql.DB{db}, chunker, []change.Source{feed}, config)
+	require.NoError(t, err)
+	return chunker, checker, func() {
+		feed.Close()
+		utils.CloseAndLog(db)
+	}
+}
+
+// TestChecksumRetryResumesFromWatermark verifies that an attempt which errors
+// WITHOUT having found any differences (the connection-massacre shape from
+// production) resumes its retry from the low watermark instead of discarding
+// all verified work.
+func TestChecksumRetryResumesFromWatermark(t *testing.T) {
+	chunker, checker, cleanup := checksumRetryHarness(t, "retryresume", "")
+	defer cleanup()
+
+	require.NoError(t, checker.Run(t.Context()))
+
+	chunker.Lock()
+	defer chunker.Unlock()
+	require.Equal(t, 1, chunker.wmResumes, "error-only retry should resume from the low watermark")
+	require.Zero(t, chunker.resets, "error-only retry should not reset to the beginning")
+}
+
+// TestChecksumRetryResetsAfterDifferences verifies the guard on the resume
+// path: once an attempt has found (and repaired) differences, a retry must
+// restart from the beginning so the final pass provably verifies the whole
+// table clean — including the repaired chunks.
+func TestChecksumRetryResetsAfterDifferences(t *testing.T) {
+	// A difference inside the first bounded chunk's range, found and repaired
+	// before the injected error on Next() call 3. Row a=1 is the only id the
+	// seeding guarantees: the doubling INSERT..SELECTs leave auto-inc gaps.
+	chunker, checker, cleanup := checksumRetryHarness(t, "retryreset",
+		"UPDATE _retryreset_new SET b = 999 WHERE a = 1")
+	defer cleanup()
+
+	require.NoError(t, checker.Run(t.Context()))
+
+	chunker.Lock()
+	defer chunker.Unlock()
+	require.Zero(t, chunker.wmResumes, "retry after repairs must not skip re-verification")
+	require.GreaterOrEqual(t, chunker.resets, 1, "retry after repairs should reset to the beginning")
 }
