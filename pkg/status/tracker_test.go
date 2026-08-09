@@ -52,6 +52,26 @@ func TestTrackerDoRecordsDuration(t *testing.T) {
 	require.Greater(t, tr.Elapsed(), closed)
 }
 
+func TestTrackerBeginResetsRun(t *testing.T) {
+	t.Parallel()
+
+	var tr Tracker
+	tr.Begin()
+	first := tr.StartTime()
+	require.NoError(t, tr.Do(CopyRows, func() error {
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}))
+	require.Positive(t, tr.Duration(CopyRows))
+
+	// A second Begin starts a fresh run: new StartTime, cleared durations.
+	time.Sleep(5 * time.Millisecond)
+	tr.Begin()
+	require.True(t, tr.StartTime().After(first))
+	require.Zero(t, tr.Duration(CopyRows))
+	require.Equal(t, Initial, tr.Get())
+}
+
 func TestTrackerSetAttributesTimeToPreviousState(t *testing.T) {
 	t.Parallel()
 

@@ -17,6 +17,12 @@ import (
 // meaningful end from the setter's perspective (Close, ErrCleanup); it closes
 // out the previous state's running interval, matching the historical "one
 // state ends when the next starts" semantics.
+//
+// Tracker assumes spirit's linear execution model: a single goroutine advances
+// through the phases in order, and the only concurrent transition is a fatal
+// Set (ErrCleanup) racing an open bracket. In that case time accrues to the
+// bracketed state up to the fatal transition and the bracket's own exit
+// becomes a no-op. It is not designed for concurrent or overlapping phases.
 type Tracker struct {
 	state State // atomic; safe to read via Get concurrently with Do/Set
 
@@ -27,11 +33,20 @@ type Tracker struct {
 	durations map[State]time.Duration // closed time attributed per state
 }
 
-// Begin marks the start of a run. It enters Initial, so setup work before the
-// first phase is attributed to Initial and TotalElapsed measures from here.
-// Runners call it where they previously recorded a startTime field.
+// Begin marks the start of a run: it resets all timing (start time, per-state
+// durations) and enters Initial, so setup work before the first phase is
+// attributed to Initial and TotalElapsed measures from here. Runners call it
+// at the top of Run, where they previously recorded a startTime field. Calling
+// Begin again starts a fresh run rather than extending the previous one.
 func (t *Tracker) Begin() {
-	t.enter(Initial)
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.startedAt = now
+	t.enteredAt = now
+	t.open = true
+	t.durations = nil
+	t.state.set(Initial)
 }
 
 // Get returns the current state.
@@ -92,7 +107,9 @@ func (t *Tracker) Elapsed() time.Duration {
 
 // Duration returns the total time attributed to state so far, including the
 // still-running interval when state is current. States visited more than once
-// accumulate.
+// accumulate. Note that once a bracket completes its interval is closed:
+// Duration(state) freezes while Elapsed keeps growing until the next
+// transition — they answer different questions.
 func (t *Tracker) Duration(state State) time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
