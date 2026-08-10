@@ -198,8 +198,6 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		if err != nil {
 			return fmt.Errorf("failed to get transaction for source %d: %w", i, err)
 		}
-		defer c.sourcePools[i].trxPool.Put(srcTrx)
-
 		sourceQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 			sourceChecksumCols,
 			chunk.Table.QuotedTableName,
@@ -207,7 +205,15 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		)
 		var cs int64
 		var cnt uint64
-		if err := srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt); err != nil {
+		err = srcTrx.QueryRowContext(ctx, sourceQuery).Scan(&cs, &cnt)
+		// Return the transaction as soon as its query is done (not deferred):
+		// a checked-out transaction is invisible to the pool's keepalive, and
+		// holding it across the remaining sources, the targets, and above all
+		// the recopyLock-serialized repair below can idle its connection past
+		// wait_timeout. Returning a transaction whose query just failed is
+		// fine — the pool treats dead transactions the same wherever they are.
+		c.sourcePools[i].trxPool.Put(srcTrx)
+		if err != nil {
 			return fmt.Errorf("failed to query source %d: %w", i, err)
 		}
 		sourceChecksum ^= cs
@@ -224,8 +230,6 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		if err != nil {
 			return fmt.Errorf("failed to get transaction for target %d: %w", i, err)
 		}
-		defer targetTrxPool.Put(targetTrx)
-
 		targetQuery := fmt.Sprintf("SELECT BIT_XOR(CRC32(CONCAT(%s))) as checksum, count(*) as c FROM %s WHERE %s",
 			targetChecksumCols,
 			chunk.Table.QuotedTableName,
@@ -233,7 +237,11 @@ func (c *DistributedChecker) ChecksumChunk(ctx context.Context, chunk *table.Chu
 		)
 		var cs int64
 		var cnt uint64
-		if err := targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt); err != nil {
+		err = targetTrx.QueryRowContext(ctx, targetQuery).Scan(&cs, &cnt)
+		// Returned immediately for the same keepalive-visibility reason as
+		// the source transactions above.
+		targetTrxPool.Put(targetTrx)
+		if err != nil {
 			return fmt.Errorf("failed to query target %d: %w", i, err)
 		}
 		targetChecksum ^= cs

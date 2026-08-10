@@ -35,6 +35,12 @@ type TrxPool struct {
 
 	trxs   []*sql.Tx
 	logger *slog.Logger
+	// createdAt is when pool creation completed: every snapshot is
+	// established by then, so every transaction in the pool is at least
+	// this old. Logged on keepalive failures so deaths that cluster at a
+	// fixed age (an external long-transaction reaper) can be told apart
+	// from wait_timeout kills.
+	createdAt time.Time
 	// keepalive lifecycle: cancel stops the pinger, done is closed once it
 	// has fully exited. Both are nil if pool creation failed before the
 	// keepalive started (Close tolerates that).
@@ -69,6 +75,12 @@ func NewTrxPool(ctx context.Context, db *sql.DB, count int, config *DBConfig, lo
 			return nil, errors.Join(err, pool.Close())
 		}
 	}
+	// Timestamp the pool only after every snapshot is established, so that
+	// poolAge in keepalive warnings is a floor on each transaction's true
+	// age. Stamping before the loop would inflate it by the creation time
+	// and could suggest an age threshold (wait_timeout, a reaper) that no
+	// snapshot has actually reached.
+	pool.createdAt = time.Now()
 	if len(pool.trxs) > 0 {
 		// Derive the ping cadence from the session wait_timeout so the
 		// keepalive holds up however aggressively the server is configured.
@@ -103,17 +115,19 @@ func (p *TrxPool) keepalive(ctx context.Context, interval time.Duration) {
 	defer close(p.keepaliveDone)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	lastRound := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.pingIdleTrxs(ctx)
+			p.pingIdleTrxs(ctx, time.Since(lastRound))
+			lastRound = time.Now()
 		}
 	}
 }
 
-func (p *TrxPool) pingIdleTrxs(ctx context.Context) {
+func (p *TrxPool) pingIdleTrxs(ctx context.Context, sinceLastRound time.Duration) {
 	roundCtx, cancel := context.WithTimeout(ctx, keepaliveRoundTimeout)
 	defer cancel()
 	// Holding the mutex for the whole round guarantees a transaction can't be
@@ -137,14 +151,24 @@ func (p *TrxPool) pingIdleTrxs(ctx context.Context) {
 				p.logger.Warn("keepalive round timed out; the server appears degraded and idle checksum transactions may be lost",
 					"roundTimeout", keepaliveRoundTimeout,
 					"pinged", i,
-					"idle", len(p.trxs))
+					"idle", len(p.trxs),
+					"poolAge", time.Since(p.createdAt))
 				return
 			}
 			// Keep going: the other transactions may still be healthy, and
 			// the worst case for this one is unchanged (a worker gets it and
 			// fails, exactly as it would have without the keepalive).
+			//
+			// sinceLastRound ~= the ping interval means the cadence was
+			// honored and the kill happened anyway: the transaction either
+			// died while checked out (held past wait_timeout outside the
+			// pool) or was killed by something other than idleness (failover,
+			// a long-transaction reaper — compare poolAge against any such
+			// threshold).
 			p.logger.Warn("keepalive ping of idle checksum transaction failed; its connection may have been killed (check wait_timeout)",
-				"error", err)
+				"error", err,
+				"poolAge", time.Since(p.createdAt),
+				"sinceLastRound", sinceLastRound)
 		}
 	}
 }

@@ -300,17 +300,20 @@ func TestNewDatumFromValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "0xfffefd", d.String())
 
-	// Test empty binary values - must NOT serialize as "0x" because
-	// MySQL parses that as an identifier, not a hex literal.
+	// A one-byte NUL serializes as its hex value.
 	d, err = NewDatumFromValue([]byte{0x00}, "MEDIUMBLOB")
 	require.NoError(t, err)
 	require.Equal(t, "0x00", d.String())
+	// Empty binary values must NOT serialize as "0x" (MySQL parses that as
+	// an identifier, not a hex literal) — and must NOT serialize as "0x00"
+	// either: a one-byte NUL is a different value, and emitting it here
+	// silently corrupted empty blobs applied via the binlog feed.
 	d, err = NewDatumFromValue([]byte{}, "VARBINARY(255)")
 	require.NoError(t, err)
-	require.Equal(t, "0x00", d.String())
+	require.Equal(t, "x''", d.String())
 	d, err = NewDatumFromValue("", "BLOB")
 	require.NoError(t, err)
-	require.Equal(t, "0x00", d.String())
+	require.Equal(t, "x''", d.String())
 	d, err = NewDatumFromValue(nil, "BLOB")
 	require.NoError(t, err)
 	require.Equal(t, "NULL", d.String())
@@ -473,4 +476,43 @@ func TestDatumCompareTypeMismatch(t *testing.T) {
 	gt, err := goodSigned.GreaterThan(Datum{Val: int64(0), Tp: signedType})
 	require.NoError(t, err)
 	require.True(t, gt)
+}
+
+// TestEmptyBinaryDatumRoundTrip is a regression test for empty (zero-length,
+// non-NULL) binary values. These used to serialize as 0x00 — a one-byte NUL,
+// a *different* value — so every binlog-applied REPLACE rewrote empty blobs
+// as \x00 in the target. On tables where the application stores empty strings
+// (e.g. zero-length serialized protos), the checksum then flagged every
+// feed-touched row, recopied it (which fixed it, byte-exact), and the next
+// application update re-minted the difference: a checksum that never
+// converges, plus real corruption for any row not re-verified after its last
+// update. The empty value must round-trip through both serialization paths:
+// Datum.String() (SQL literals for the applier and WHERE clauses) and
+// jsonQuoteDatum/datumValFromString (checkpoint watermarks).
+func TestEmptyBinaryDatumRoundTrip(t *testing.T) {
+	empty, err := NewDatumFromValue([]byte{}, "BLOB")
+	require.NoError(t, err)
+
+	// SQL literal path: x'' is MySQL's zero-length binary literal.
+	require.Equal(t, "x''", empty.String())
+
+	// Checkpoint JSON path: emit, then decode back to the empty string.
+	require.Equal(t, `"x''"`, jsonQuoteDatum(empty))
+	val, err := datumValFromString("x''", binaryType)
+	require.NoError(t, err)
+	decoded, ok := val.(string)
+	require.True(t, ok, "decoded empty binary should be a string, got %T", val)
+	require.Empty(t, decoded)
+
+	// A one-byte NUL is a distinct value and must stay 0x00 on both paths.
+	nul, err := NewDatumFromValue([]byte{0x00}, "BLOB")
+	require.NoError(t, err)
+	require.Equal(t, "0x00", nul.String())
+	require.Equal(t, `"0x00"`, jsonQuoteDatum(nul))
+	val, err = datumValFromString("0x00", binaryType)
+	require.NoError(t, err)
+	require.Equal(t, "\x00", val)
+
+	// NULL is also distinct from empty.
+	require.Equal(t, "NULL", NewNilDatum(binaryType).String())
 }
