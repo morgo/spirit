@@ -14,6 +14,22 @@ This ordering is deliberate — the code uses ordinal comparisons (e.g., `state 
 
 `ReverseWindow` is entered only by a `move` run with [`--reverse-window`](../../docs/move.md#reverse-window) set. It sorts immediately after `CutOver`: the forward cutover is done and traffic is on the target, but Spirit keeps the source current in change-only mode so the move can still be rolled back. Because it is `>= CutOver`, the background status/checkpoint loops have already stopped (the reverse-window driver manages its own checkpoint writes) while orchestration can still observe that a revert is possible.
 
+## Tracker
+
+`Tracker` wraps a `State` with per-state wall-clock timing, and is what the runners hold in place of a bare `State` field. Phases with a clear extent run under `Do(state, fn)`, which transitions to `state`, runs `fn`, and attributes `fn`'s elapsed time (panic inclusive) to that state:
+
+```go
+err := r.status.Do(status.CopyRows, func() error {
+    return r.copier.Run(ctx)
+})
+```
+
+`Set` remains the transition primitive for states with no bracketable extent from the setter's perspective (`Close`, `ErrCleanup`); it closes the previous state's still-open interval (a gap after a completed `Do` stays unattributed), preserving the historical "one state ends when the next starts" semantics. In both cases the state stays current after the phase's code completes — `Get()` and the ordinal comparisons above behave exactly as before.
+
+Because the tracker owns the timing, the runners no longer carry ad-hoc fields like `copyDuration` or `sentinelWaitStartTime`: status lines render `Elapsed()` (time in the current state) and final summaries render `Duration(state)` (total time attributed to a state, accumulating across repeat visits). The two can disagree after a bracket completes: `Duration(state)` freezes when the bracket closes, while `Elapsed()` keeps growing until the next transition.
+
+The tracker assumes spirit's linear execution model — one goroutine advances through the phases in order, and the only concurrent transition is a fatal `Set(ErrCleanup)` racing an open bracket (time accrues to the bracketed state up to the fatal transition; the bracket's own exit becomes a no-op). It is not designed for concurrent or overlapping phases. `Begin()` marks the start of a run and resets all timing; runners call it once at the top of `Run`.
+
 ## Task Interface
 
 The `Task` interface defines the contract that a migration runner must implement: reporting progress, returning a status string, dumping checkpoints, and cancelling. Both the `migration.Runner` and `move.Runner` implement this interface.
