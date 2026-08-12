@@ -131,12 +131,6 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 	} else if softLimit < 0 {
 		softLimit = 0 // explicit opt-out
 	}
-	flushConcurrency := config.FlushConcurrency
-	if flushConcurrency == 0 {
-		flushConcurrency = DefaultFlushConcurrency
-	} else if flushConcurrency < 0 {
-		flushConcurrency = 1 // explicit opt-out: serial
-	}
 	return &binlogClient{
 		db:                         db,
 		dbConfig:                   config.DBConfig,
@@ -151,7 +145,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
-		flushConcurrency:           flushConcurrency,
+		flushConcurrency:           config.resolveFlushConcurrency(),
 		flushRequests:              make(chan Subscription, 1),
 	}
 }

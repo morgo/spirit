@@ -80,6 +80,21 @@ type ClientConfig struct {
 	FlushConcurrency int
 }
 
+// resolveFlushConcurrency normalizes the FlushConcurrency knob for the
+// clients: 0 (the zero value) means DefaultFlushConcurrency, negative
+// means an explicit opt-out to a serial drain. Both clients resolve
+// through this so the same ClientConfig can never produce different
+// concurrency semantics per client type.
+func (c *ClientConfig) resolveFlushConcurrency() int {
+	if c.FlushConcurrency == 0 {
+		return DefaultFlushConcurrency
+	}
+	if c.FlushConcurrency < 0 {
+		return 1 // explicit opt-out: serial
+	}
+	return c.FlushConcurrency
+}
+
 // NewClientDefaultConfig returns a default config for the copier.
 func NewClientDefaultConfig() *ClientConfig {
 	return &ClientConfig{

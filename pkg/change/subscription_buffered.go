@@ -448,18 +448,18 @@ func (s *bufferedMap) ImmutableColumnOrdinal() int {
 	return slices.Index(s.table.Columns, s.table.ShardingColumn)
 }
 
-// queueModeActive reports whether new events should be appended to the
-// FIFO queue rather than the map. Caller must hold s.Lock.
-//
-// Memory-comparable PKs are never queue-mode (map-key equality matches
-// MySQL row identity). Non-memory-comparable PKs run in map mode during
-// the copy phase (watermark on) and switch to queue mode post-copy.
 // effectiveFlushConcurrency clamps flushConcurrency to at least 1 so
 // the zero value (out-of-tree callers, bare test maps) stays serial.
 func (s *bufferedMap) effectiveFlushConcurrency() int {
 	return max(1, s.flushConcurrency)
 }
 
+// queueModeActive reports whether new events should be appended to the
+// FIFO queue rather than the map. Caller must hold s.Lock.
+//
+// Memory-comparable PKs are never queue-mode (map-key equality matches
+// MySQL row identity). Non-memory-comparable PKs run in map mode during
+// the copy phase (watermark on) and switch to queue mode post-copy.
 func (s *bufferedMap) queueModeActive() bool {
 	if s.pkIsMemoryComparable {
 		return false
