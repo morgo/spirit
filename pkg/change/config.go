@@ -71,6 +71,13 @@ type ClientConfig struct {
 	// entirely (HasChanged will never block on memory). Zero (the
 	// zero-value default) means use DefaultSubscriptionSoftLimitBytes.
 	SubscriptionSoftLimitBytes int64
+
+	// FlushConcurrency overrides DefaultFlushConcurrency for new
+	// subscriptions: the maximum number of applier batches a map-mode
+	// flush keeps in flight concurrently. Set to a negative value to
+	// force serial flushing. Zero (the zero-value default) means use
+	// DefaultFlushConcurrency.
+	FlushConcurrency int
 }
 
 // NewClientDefaultConfig returns a default config for the copier.

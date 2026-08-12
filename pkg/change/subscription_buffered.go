@@ -13,6 +13,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
+	"golang.org/x/sync/errgroup"
 )
 
 // The bufferedMap avoids using REPLACE INTO .. SELECT.
@@ -119,6 +120,13 @@ type bufferedMap struct {
 	// trips are in flight. Lock order: flushMu before Mutex, never the
 	// reverse.
 	flushMu sync.Mutex
+
+	// flushConcurrency is the maximum number of applier batches a
+	// map-mode drain keeps in flight concurrently; <= 1 means serial.
+	// Only drainMapSnapshot uses it: map batches are disjoint by key
+	// and order-free. Queue-mode drains are FIFO and the under-lock
+	// (cutover) path must stay atomic, so both remain serial.
+	flushConcurrency int
 
 	// logger is supplied by the change.Source that owns this subscription.
 	// We keep only a *slog.Logger (not a back-pointer to the source) so the
@@ -264,6 +272,13 @@ type BufferedSubscriptionConfig struct {
 	// change reader parked for those entire drains. Optional; nil
 	// disables the signal.
 	FlushRequest chan<- Subscription
+
+	// FlushConcurrency is the maximum number of applier batches a
+	// map-mode flush keeps in flight concurrently. Zero or negative
+	// means serial, preserving prior behaviour for callers that do not
+	// set it; the in-tree clients pass DefaultFlushConcurrency. Queue-
+	// mode and under-lock flushes are always serial regardless.
+	FlushConcurrency int
 }
 
 // NewBufferedSubscription constructs the default bufferedMap-backed
@@ -312,6 +327,7 @@ func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, erro
 		pkIsMemoryComparable: cfg.CurrentTable.PrimaryKeyIsMemoryComparable() == nil,
 		softLimitBytes:       cfg.SoftLimitBytes,
 		flushRequest:         cfg.FlushRequest,
+		flushConcurrency:     cfg.FlushConcurrency,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub, nil
@@ -438,6 +454,12 @@ func (s *bufferedMap) ImmutableColumnOrdinal() int {
 // Memory-comparable PKs are never queue-mode (map-key equality matches
 // MySQL row identity). Non-memory-comparable PKs run in map mode during
 // the copy phase (watermark on) and switch to queue mode post-copy.
+// effectiveFlushConcurrency clamps flushConcurrency to at least 1 so
+// the zero value (out-of-tree callers, bare test maps) stays serial.
+func (s *bufferedMap) effectiveFlushConcurrency() int {
+	return max(1, s.flushConcurrency)
+}
+
 func (s *bufferedMap) queueModeActive() bool {
 	if s.pkIsMemoryComparable {
 		return false
@@ -661,39 +683,50 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn
 	return allChangesFlushed, nil
 }
 
+// mapFlushBatch is one applier round trip's worth of a map-mode drain:
+// disjoint keys, pre-partitioned into deletes and upserts, with the
+// buffer-accounting byte total captured at build time. applied is set
+// by the worker that lands the batch and read only after the errgroup
+// joins (Wait establishes the happens-before edge).
+type mapFlushBatch struct {
+	keys        []string
+	deleteKeys  [][]any
+	upsertRows  []applier.LogicalRow
+	storedBytes int64
+	applied     bool
+}
+
 // drainMapSnapshot applies a swapped-out map snapshot through the
-// applier without holding s.Mutex. Applied entries are deleted from the
-// snapshot as each batch lands, and their bytes/count are released
-// under the Mutex (with a cond broadcast) so a parked HasChanged caller
-// resumes after the first batch, not after the whole drain. Entries
-// deferred by the low-watermark filter stay in the snapshot for the
-// caller to merge back. Returns false when any entry was deferred.
+// applier without holding s.Mutex. Batches are built serially, then
+// applied with up to flushConcurrency applier calls in flight: a map
+// snapshot holds exactly one image per key, so batches are disjoint by
+// key, and map mode makes no cross-key ordering promises — REPLACE and
+// DELETE against distinct keys commute. The binlog apply path is
+// synchronous statements on one connection per call (it does not use
+// the copy path's write worker pool), so a serial drain tops out at
+// batch-rows / statement-round-trip; on large tables with secondary
+// index maintenance that is a few hundred rows/s, which a busy source
+// outruns. Parallel batches multiply that ceiling.
+//
+// Each batch releases its bytes/count under the Mutex (with a cond
+// broadcast) as it lands, so a parked HasChanged caller resumes after
+// the first batch, not after the whole drain. Applied entries are
+// deleted from the snapshot after all workers join; entries deferred by
+// the low-watermark filter (and the unapplied remainder after an error)
+// stay in the snapshot for the caller to merge back. Returns false when
+// any entry was deferred.
 func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]bufferedChange, applyWatermarkFilter bool) (bool, error) {
-	var deleteKeys [][]any
-	var upsertRows []applier.LogicalRow
-	var batchKeys []string
-	var batchBytes int64
+	var batches []*mapFlushBatch
+	current := &mapFlushBatch{}
+	var batchStmtBytes int64
 	allChangesFlushed := true
 
-	flushAndRelease := func() error {
-		if len(batchKeys) == 0 {
-			return nil
+	cutBatch := func() {
+		if len(current.keys) > 0 {
+			batches = append(batches, current)
+			current = &mapFlushBatch{}
+			batchStmtBytes = 0
 		}
-		if err := s.flushBatch(ctx, deleteKeys, upsertRows, nil); err != nil {
-			return err
-		}
-		var drainedBytes int64
-		for _, key := range batchKeys {
-			drainedBytes += sizeOfBufferedChange(key, snapshot[key])
-			delete(snapshot, key)
-		}
-		s.Lock()
-		s.sizeBytes -= drainedBytes
-		s.flushingCount -= len(batchKeys)
-		s.cond.Broadcast()
-		s.Unlock()
-		deleteKeys, upsertRows, batchKeys, batchBytes = nil, nil, nil, 0
-		return nil
 	}
 
 	for key, change := range snapshot {
@@ -714,21 +747,54 @@ func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]
 		// failure. A single row over the budget still flushes, alone in
 		// its own batch (a row can't be split).
 		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
-		if batchLen := len(batchKeys); batchLen >= DefaultBatchSize ||
-			(batchLen > 0 && batchBytes+rowBytes > applier.MaxStatementSizeBytes) {
-			if err := flushAndRelease(); err != nil {
-				return false, err
+		if batchLen := len(current.keys); batchLen >= DefaultBatchSize ||
+			(batchLen > 0 && batchStmtBytes+rowBytes > applier.MaxStatementSizeBytes) {
+			cutBatch()
+		}
+		current.keys = append(current.keys, key)
+		current.storedBytes += sizeOfBufferedChange(key, change)
+		if change.logicalRow.IsDeleted {
+			current.deleteKeys = append(current.deleteKeys, change.originalKey)
+		} else {
+			current.upsertRows = append(current.upsertRows, change.logicalRow)
+		}
+		batchStmtBytes += rowBytes
+	}
+	cutBatch()
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(s.effectiveFlushConcurrency())
+	for _, batch := range batches {
+		if gctx.Err() != nil {
+			break // a batch already failed; don't queue the rest
+		}
+		g.Go(func() error {
+			if err := s.flushBatch(gctx, batch.deleteKeys, batch.upsertRows, nil); err != nil {
+				return err
+			}
+			batch.applied = true
+			s.Lock()
+			s.sizeBytes -= batch.storedBytes
+			s.flushingCount -= len(batch.keys)
+			s.cond.Broadcast()
+			s.Unlock()
+			return nil
+		})
+	}
+	err := g.Wait()
+
+	// Drop applied batches from the snapshot whether or not the drain
+	// errored: the deferred reattach must only merge back what did not
+	// land. (Uncertain batches stay and re-apply on a later flush, which
+	// is safe — REPLACE and DELETE are idempotent.)
+	for _, batch := range batches {
+		if batch.applied {
+			for _, key := range batch.keys {
+				delete(snapshot, key)
 			}
 		}
-		batchKeys = append(batchKeys, key)
-		if change.logicalRow.IsDeleted {
-			deleteKeys = append(deleteKeys, change.originalKey)
-		} else {
-			upsertRows = append(upsertRows, change.logicalRow)
-		}
-		batchBytes += rowBytes
 	}
-	if err := flushAndRelease(); err != nil {
+	if err != nil {
 		return false, err
 	}
 	return allChangesFlushed, nil

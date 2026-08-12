@@ -93,6 +93,10 @@ type gtidClient struct {
 
 	subscriptionSoftLimitBytes int64
 
+	// flushConcurrency is the map-mode flush batch concurrency passed
+	// to each subscription on construction. See DefaultFlushConcurrency.
+	flushConcurrency int
+
 	// flushRequests receives the subscription that parked on its soft
 	// memory limit; runPeriodicFlush selects on it and flushes that
 	// subscription first, then runs the normal all-subscription pass.
@@ -115,6 +119,12 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 	} else if softLimit < 0 {
 		softLimit = 0
 	}
+	flushConcurrency := config.FlushConcurrency
+	if flushConcurrency == 0 {
+		flushConcurrency = DefaultFlushConcurrency
+	} else if flushConcurrency < 0 {
+		flushConcurrency = 1 // explicit opt-out: serial
+	}
 	return &gtidClient{
 		db:                         db,
 		dbConfig:                   config.DBConfig,
@@ -129,6 +139,7 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
+		flushConcurrency:           flushConcurrency,
 		flushRequests:              make(chan Subscription, 1),
 	}
 }
@@ -137,13 +148,14 @@ func NewGTIDClient(db *sql.DB, host string, username, password string, appl appl
 func (c *gtidClient) AddSubscription(currentTable, newTable *table.TableInfo, chunker table.MappedChunker) error {
 	subKey := encodeSchemaTable(currentTable.SchemaName, currentTable.TableName)
 	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
-		CurrentTable:   currentTable,
-		NewTable:       newTable,
-		Applier:        c.applier,
-		Chunker:        chunker,
-		Logger:         c.logger,
-		SoftLimitBytes: c.subscriptionSoftLimitBytes,
-		FlushRequest:   c.flushRequests,
+		CurrentTable:     currentTable,
+		NewTable:         newTable,
+		Applier:          c.applier,
+		Chunker:          chunker,
+		Logger:           c.logger,
+		SoftLimitBytes:   c.subscriptionSoftLimitBytes,
+		FlushRequest:     c.flushRequests,
+		FlushConcurrency: c.flushConcurrency,
 	})
 	if err != nil {
 		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)
