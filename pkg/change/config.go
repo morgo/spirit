@@ -71,6 +71,28 @@ type ClientConfig struct {
 	// entirely (HasChanged will never block on memory). Zero (the
 	// zero-value default) means use DefaultSubscriptionSoftLimitBytes.
 	SubscriptionSoftLimitBytes int64
+
+	// FlushConcurrency overrides DefaultFlushConcurrency for new
+	// subscriptions: the maximum number of applier batches a map-mode
+	// flush keeps in flight concurrently. Set to a negative value to
+	// force serial flushing. Zero (the zero-value default) means use
+	// DefaultFlushConcurrency.
+	FlushConcurrency int
+}
+
+// resolveFlushConcurrency normalizes the FlushConcurrency knob for the
+// clients: 0 (the zero value) means DefaultFlushConcurrency, negative
+// means an explicit opt-out to a serial drain. Both clients resolve
+// through this so the same ClientConfig can never produce different
+// concurrency semantics per client type.
+func (c *ClientConfig) resolveFlushConcurrency() int {
+	if c.FlushConcurrency == 0 {
+		return DefaultFlushConcurrency
+	}
+	if c.FlushConcurrency < 0 {
+		return 1 // explicit opt-out: serial
+	}
+	return c.FlushConcurrency
 }
 
 // NewClientDefaultConfig returns a default config for the copier.

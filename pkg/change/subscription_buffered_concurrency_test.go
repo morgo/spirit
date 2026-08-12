@@ -33,6 +33,10 @@ type gatedApplier struct {
 	deleteGate  chan struct{}
 	failUpserts atomic.Bool
 	failDeletes atomic.Bool
+	// failOneUpsert makes exactly one UpsertRows call fail (whichever
+	// concurrent call consumes the flag first), for exercising the
+	// partial-failure path of a parallel drain.
+	failOneUpsert atomic.Bool
 }
 
 var errInjected = errors.New("gatedApplier: injected failure")
@@ -52,6 +56,9 @@ func (g *gatedApplier) UpsertRows(ctx context.Context, mapping *table.ColumnMapp
 		<-g.upsertGate
 	}
 	if g.failUpserts.Load() {
+		return 0, errInjected
+	}
+	if g.failOneUpsert.CompareAndSwap(true, false) {
 		return 0, errInjected
 	}
 	return g.countingApplier.UpsertRows(ctx, mapping, rows, locks)
@@ -603,4 +610,260 @@ func TestPeriodicFlushPrioritizesParkedSubscription(t *testing.T) {
 	order := rec.recorded()
 	require.Equal(t, srcA.TableName, order[0], "the parked subscription must be flushed before the all-subscription pass")
 	require.Contains(t, order, srcB.TableName, "the all-subscription pass must still drain the other subscription")
+}
+
+// totalUpsertedRows sums the rows across all recorded UpsertRows calls.
+func totalUpsertedRows(fake *gatedApplier) int {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	total := 0
+	for _, call := range fake.upsertCalls {
+		total += len(call)
+	}
+	return total
+}
+
+// TestBufferedMapParallelFlushAppliesConcurrently pins the parallel
+// map-mode drain: with flushConcurrency=3 and three batches, all three
+// applier calls must be in flight at the same time. Under a serial
+// drain the second `entered` announcement can never arrive while the
+// first call is still gated, so this test times out if the drain
+// regresses to serial.
+func TestBufferedMapParallelFlushAppliesConcurrently(t *testing.T) {
+	fake := &gatedApplier{upsertGate: make(chan struct{}), entered: make(chan struct{}, 8)}
+	release := releaseGate(fake.upsertGate)
+	t.Cleanup(release)
+	sub := newGatedBufferedMap(fake, false)
+	sub.flushConcurrency = 3
+
+	const totalRows = 2*DefaultBatchSize + DefaultBatchSize/2 // 3 batches by construction
+	for i := range totalRows {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), "seed"}, false)
+	}
+	require.Equal(t, totalRows, sub.Length())
+
+	flushDone := make(chan error, 1)
+	var allFlushed bool
+	go func() {
+		var err error
+		allFlushed, err = sub.Flush(t.Context(), false, nil)
+		flushDone <- err
+	}()
+
+	// Three concurrent applier calls announce before any is released.
+	for range 3 {
+		awaitEntered(t, fake)
+	}
+	// All entries are still in flight: nothing has been released yet.
+	require.Equal(t, totalRows, sub.Length(), "in-flight snapshot entries must still be counted")
+
+	release()
+	require.NoError(t, <-flushDone)
+	require.True(t, allFlushed)
+	require.Zero(t, sub.Length())
+	require.Equal(t, totalRows, totalUpsertedRows(fake))
+	require.Zero(t, recomputeSizeBytes(sub))
+	sub.Lock()
+	require.Zero(t, sub.sizeBytes, "accounting must balance after a parallel drain")
+	sub.Unlock()
+}
+
+// TestBufferedMapParallelFlushErrorReattachesRemainder exercises the
+// partial-failure path of the parallel drain: one batch fails, sibling
+// batches either land (and are released) or are cancelled (and stay in
+// the snapshot), and everything unapplied is merged back with balanced
+// accounting. A retry drains the remainder; nothing is lost or applied
+// from a stale snapshot twice.
+func TestBufferedMapParallelFlushErrorReattachesRemainder(t *testing.T) {
+	fake := &gatedApplier{}
+	sub := newGatedBufferedMap(fake, false)
+	sub.flushConcurrency = 2
+
+	const totalRows = 2*DefaultBatchSize + DefaultBatchSize/2 // 3 batches by construction
+	for i := range totalRows {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), "seed"}, false)
+	}
+	fake.failOneUpsert.Store(true)
+
+	_, err := sub.Flush(t.Context(), false, nil)
+	require.ErrorIs(t, err, errInjected)
+	require.False(t, fake.failOneUpsert.Load(), "the injected failure must have been consumed")
+
+	// The failed batch (and any cancelled ones) must be back in the
+	// active map with balanced accounting; applied batches must not be.
+	applied := totalUpsertedRows(fake)
+	require.Less(t, applied, totalRows, "the failed batch cannot have been recorded as applied")
+	require.Equal(t, totalRows-applied, sub.Length(), "unapplied entries must be reattached")
+	sub.Lock()
+	flushing := sub.flushingCount
+	sub.Unlock()
+	require.Zero(t, flushing, "no snapshot entries may remain in flight after Flush returns")
+	require.Equal(t, recomputeSizeBytes(sub), func() int64 { sub.Lock(); defer sub.Unlock(); return sub.sizeBytes }(),
+		"sizeBytes must match the live stores after reattach")
+
+	// A retry drains the remainder exactly once.
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Zero(t, sub.Length())
+	require.Equal(t, totalRows, totalUpsertedRows(fake), "every row must land exactly once across both flushes")
+	require.Zero(t, recomputeSizeBytes(sub))
+}
+
+// TestBufferedMapFlushCanceledContextIsAnError pins the outcome of a
+// Flush whose context is already canceled: the drain schedules nothing,
+// applies nothing, and must report the context error — not success.
+// Without the skipped-batches check the errgroup joins cleanly over
+// zero scheduled batches and the flush reports allChangesFlushed=true,
+// which the clients would record as a successfully flushed position
+// while every entry had merely been reattached to the buffer.
+func TestBufferedMapFlushCanceledContextIsAnError(t *testing.T) {
+	fake := &gatedApplier{}
+	sub := newGatedBufferedMap(fake, false)
+	sub.flushConcurrency = 2
+
+	const totalRows = 2*DefaultBatchSize + DefaultBatchSize/2 // 3 batches by construction
+	for i := range totalRows {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), "seed"}, false)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	allFlushed, err := sub.Flush(ctx, false, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, allFlushed)
+	require.Zero(t, totalUpsertedRows(fake), "no batch may reach the applier on a canceled context")
+
+	// Everything is reattached with balanced accounting...
+	require.Equal(t, totalRows, sub.Length(), "all entries must be reattached")
+	sub.Lock()
+	flushing := sub.flushingCount
+	sub.Unlock()
+	require.Zero(t, flushing, "no snapshot entries may remain in flight after Flush returns")
+	require.Equal(t, recomputeSizeBytes(sub), func() int64 { sub.Lock(); defer sub.Unlock(); return sub.sizeBytes }(),
+		"sizeBytes must match the live stores after reattach")
+
+	// ...and a live retry drains it all.
+	allFlushed, err = sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Zero(t, sub.Length())
+	require.Equal(t, totalRows, totalUpsertedRows(fake), "every row must land exactly once on the retry")
+}
+
+// TestBufferedMapFlushMidDrainCancelReportsError pins the "or while
+// batches are being scheduled" half of the cancellation contract: when
+// ctx is canceled after some batches were scheduled (and land
+// successfully — the fake ignores ctx, like a statement already on the
+// wire), the remainder is skipped and g.Wait() returns nil, yet Flush
+// must report the context error. If the skippedBatches bookkeeping is
+// reordered away, a mid-drain cancel returns (true, nil) and the
+// client publishes the pre-flush position over reattached-only
+// entries.
+func TestBufferedMapFlushMidDrainCancelReportsError(t *testing.T) {
+	fake := &gatedApplier{upsertGate: make(chan struct{}), entered: make(chan struct{}, 8)}
+	release := releaseGate(fake.upsertGate)
+	t.Cleanup(release)
+	sub := newGatedBufferedMap(fake, false)
+	sub.flushConcurrency = 1 // serialize scheduling so the cancel lands between batches
+
+	const totalRows = 2*DefaultBatchSize + DefaultBatchSize/2 // 3 batches by construction
+	for i := range totalRows {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), "seed"}, false)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	flushDone := make(chan error, 1)
+	var allFlushed bool
+	go func() {
+		var err error
+		allFlushed, err = sub.Flush(ctx, false, nil)
+		flushDone <- err
+	}()
+
+	// The first batch is inside the applier: cancel now, then release
+	// the gate so the in-flight batch completes successfully.
+	awaitEntered(t, fake)
+	cancel()
+	release()
+
+	require.ErrorIs(t, <-flushDone, context.Canceled)
+	require.False(t, allFlushed)
+
+	// At least the gated batch landed; at least the tail batch was
+	// skipped — with SetLimit(1) the scheduler cannot reach the tail's
+	// gctx check until the in-flight batch (and therefore the cancel,
+	// which precedes the gate release) has completed.
+	applied := totalUpsertedRows(fake)
+	require.GreaterOrEqual(t, applied, DefaultBatchSize, "the in-flight batch must have landed")
+	require.Less(t, applied, totalRows, "the tail batch must have been skipped")
+	require.Equal(t, totalRows-applied, sub.Length(), "skipped entries must be reattached")
+	sub.Lock()
+	flushing := sub.flushingCount
+	sub.Unlock()
+	require.Zero(t, flushing, "no snapshot entries may remain in flight after Flush returns")
+	require.Equal(t, recomputeSizeBytes(sub), func() int64 { sub.Lock(); defer sub.Unlock(); return sub.sizeBytes }(),
+		"sizeBytes must match the live stores after reattach")
+
+	// A live retry drains the remainder exactly once.
+	allFlushed, err := sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Zero(t, sub.Length())
+	require.Equal(t, totalRows, totalUpsertedRows(fake), "every row must land exactly once across both flushes")
+}
+
+// TestFlushConcurrencyClientPlumbing pins the ClientConfig plumbing
+// end-to-end for both clients: the zero value must resolve to
+// DefaultFlushConcurrency (a refactor that drops the default would
+// silently revert production to the serial drain this knob exists to
+// escape), negative must resolve to the explicit serial opt-out, and
+// the resolved value must reach the bufferedMap that AddSubscription
+// builds.
+func TestFlushConcurrencyClientPlumbing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  int
+		want int
+	}{
+		{"zero-defaults-parallel", 0, DefaultFlushConcurrency},
+		{"negative-serial", -4, 1},
+		{"explicit-value", 3, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := &table.TableInfo{SchemaName: "test", TableName: "plumbing"}
+
+			cfg := NewClientDefaultConfig()
+			cfg.FlushConcurrency = tc.cfg
+			bc := NewBinlogClient(nil, "localhost", "user", "pass", &countingApplier{}, cfg).(*binlogClient)
+			require.Equal(t, tc.want, bc.flushConcurrency)
+			require.NoError(t, bc.AddSubscription(current, nil, table.NewMockChunker("plumbing", 1000)))
+			bsubs := bc.subs.Snapshot()
+			require.Len(t, bsubs, 1)
+			require.Equal(t, tc.want, bsubs[0].(*bufferedMap).flushConcurrency)
+
+			gcfg := NewClientDefaultConfig()
+			gcfg.FlushConcurrency = tc.cfg
+			gc := NewGTIDClient(nil, "localhost", "user", "pass", &countingApplier{}, gcfg).(*gtidClient)
+			require.Equal(t, tc.want, gc.flushConcurrency)
+			require.NoError(t, gc.AddSubscription(current, nil, table.NewMockChunker("plumbing", 1000)))
+			gsubs := gc.subs.Snapshot()
+			require.Len(t, gsubs, 1)
+			require.Equal(t, tc.want, gsubs[0].(*bufferedMap).flushConcurrency)
+		})
+	}
+}
+
+// TestBufferedSubscriptionZeroFlushConcurrencyStaysSerial pins the
+// compat promise on BufferedSubscriptionConfig: out-of-tree callers
+// (e.g. vstream sources) that do not set FlushConcurrency keep the
+// serial drain until they opt in.
+func TestBufferedSubscriptionZeroFlushConcurrencyStaysSerial(t *testing.T) {
+	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
+		CurrentTable: &table.TableInfo{SchemaName: "test", TableName: "compat"},
+		Applier:      &countingApplier{},
+		Chunker:      table.NewMockChunker("compat", 1000),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, sub.(*bufferedMap).effectiveFlushConcurrency())
 }

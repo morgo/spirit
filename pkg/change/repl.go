@@ -39,6 +39,20 @@ const (
 	// Longer values require more memory, but permit more merging.
 	// I expect we will change this to 1hr-24hr in the future.
 	DefaultFlushInterval = 30 * time.Second
+	// DefaultFlushConcurrency is the number of applier batches a
+	// map-mode flush keeps in flight concurrently. The binlog apply
+	// path is synchronous REPLACE/DELETE statements — it does not use
+	// the copy path's write worker pool — so each stream tops out at
+	// DefaultBatchSize rows per statement round trip. On large tables
+	// where secondary index maintenance dominates, that is only a few
+	// hundred rows/s, which a busy source's distinct-key write rate can
+	// permanently outrun: the buffer pins at the soft limit and the
+	// migration never converges, however long it runs. Map-mode flush
+	// batches are disjoint by key and order-free (REPLACE/DELETE on
+	// distinct keys commute), so applying them concurrently is safe and
+	// multiplies the ceiling. Queue-mode drains (non-memory-comparable
+	// PK, post-copy) and under-lock (cutover) flushes remain serial.
+	DefaultFlushConcurrency = 8
 	// DefaultSubscriptionSoftLimitBytes caps the approximate memory held
 	// per subscription before HasChanged starts blocking on the buffered
 	// map's condition variable. The cap is "soft": a single oversized

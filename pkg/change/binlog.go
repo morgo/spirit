@@ -100,6 +100,10 @@ type binlogClient struct {
 	// cap. See DefaultSubscriptionSoftLimitBytes.
 	subscriptionSoftLimitBytes int64
 
+	// flushConcurrency is the map-mode flush batch concurrency passed
+	// to each subscription on construction. See DefaultFlushConcurrency.
+	flushConcurrency int
+
 	// flushRequests receives the subscription that parked on its soft
 	// memory limit. runPeriodicFlush selects on it and flushes that
 	// subscription first — the all-subscription pass visits the
@@ -141,6 +145,7 @@ func NewBinlogClient(db *sql.DB, host string, username, password string, appl ap
 		serverID:                   config.ServerID,
 		applier:                    appl,
 		subscriptionSoftLimitBytes: softLimit,
+		flushConcurrency:           config.resolveFlushConcurrency(),
 		flushRequests:              make(chan Subscription, 1),
 	}
 }
@@ -158,13 +163,14 @@ func (c *binlogClient) AddSubscription(currentTable, newTable *table.TableInfo, 
 	// like a FIFO queue, which is required because of collation edge cases
 	// (A == a on the server, but not in our map).
 	sub, err := NewBufferedSubscription(BufferedSubscriptionConfig{
-		CurrentTable:   currentTable,
-		NewTable:       newTable,
-		Applier:        c.applier,
-		Chunker:        chunker,
-		Logger:         c.logger,
-		SoftLimitBytes: c.subscriptionSoftLimitBytes,
-		FlushRequest:   c.flushRequests,
+		CurrentTable:     currentTable,
+		NewTable:         newTable,
+		Applier:          c.applier,
+		Chunker:          chunker,
+		Logger:           c.logger,
+		SoftLimitBytes:   c.subscriptionSoftLimitBytes,
+		FlushRequest:     c.flushRequests,
+		FlushConcurrency: c.flushConcurrency,
 	})
 	if err != nil {
 		return fmt.Errorf("could not build subscription for table %s.%s: %w", currentTable.SchemaName, currentTable.TableName, err)

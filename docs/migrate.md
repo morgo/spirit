@@ -396,13 +396,13 @@ Spirit uses `threads` to set the parallelism of:
 - The copier task
 - The checksum task
 
-The parallelism of the replication applier is controlled separately by [write-threads](#write-threads).
+The write side of the copy — the applier's write workers — is controlled separately by [write-threads](#write-threads).
 
 This flag is **ignored** when [enable-experimental-autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes both pools from the instance instead.
 
-Internal to Spirit, the database pool is sized as `threads + write-threads + control-plane + checksum-off-pool`. This is intentional because the replication applier runs concurrently to the copier and checksum tasks: `threads` covers the copier/checksum work and `write-threads` covers the applier, while the two headroom terms keep the periodic work from queueing behind a saturated hot path:
+Internal to Spirit, the database pool is sized as `threads + write-threads + control-plane + checksum-off-pool`. This is intentional because copy writes run concurrently to copy reads and checksums: `threads` covers the copier/checksum work and `write-threads` covers the applier's write workers, while the two headroom terms keep the periodic work from queueing behind a saturated hot path:
 
-- **control-plane** is `2 + one per changed table`, for the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater — all of which run on the same pool as the copier and applier.
+- **control-plane** is `2 + one per changed table`, for the checkpoint `INSERT`, the replication-flush poll, and the per-table statistics updater — all of which run on the same pool as the copier and applier. The replication flush itself has no dedicated per-connection budget: a map-mode drain applies up to `8` batches concurrently (see [write-threads](#write-threads)) from the shared pool, borrowing capacity the copier is not using. Worst case — a drain overlapping a saturated copy — the flush batches briefly queue on connection checkout; during post-copy catch-up, when only the flush is running, the idle copier's share of the pool is available to it.
 - **checksum-off-pool** is a fixed `2`, for the two things the checksum does outside its `REPEATABLE READ` transaction pool: repairing a mismatched chunk, and the chunker's `LIMIT 1 OFFSET n` boundary prefetch. Both are serialized, so one connection each. The transaction pool itself is provisioned separately and every one of its transactions pins a connection for the whole phase, so there is no incidental slack for these to borrow.
 
 Throttler polling is not counted: it runs on a dedicated monitoring pool.
@@ -418,7 +418,9 @@ One piece of pacing is *not* opt-in: the checksum phase waits on the throttler b
 - Type: Integer
 - Default value: `4`
 
-Sets the parallelism of the **replication applier** — the number of concurrent write threads used to apply changes (read from the binlog) to the new table. Copier and checksum parallelism are controlled separately by [threads](#threads).
+Sets the parallelism of the **applier's write workers** — the pool that lands copied rows into the new table during the copy phase. Copier read and checksum parallelism are controlled separately by [threads](#threads).
+
+Replication (binlog) apply parallelism is **not** controlled by this flag. Buffered replication changes for tables with a memory-comparable primary key are drained with up to `8` applier batches in flight (a flush snapshot holds one image per key, so batches are disjoint and commute); other drains — non-memory-comparable keys post-copy, and the final under-lock flush at cutover — apply serially. The concurrency is a library-level setting (`ClientConfig.FlushConcurrency`) with no CLI flag today; raising `write-threads` does not speed up binlog catch-up.
 
 This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) engages: the autoscaler sizes the write pool from the instance (vCPU count minus 2) and treats that as its starting point.
 
@@ -427,7 +429,7 @@ This flag is **ignored** when [autoscaling](#enable-experimental-autoscaling) en
 - Type: Boolean
 - Default value: `false`
 
-**Experimental.** When enabled, Spirit dynamically adjusts the number of copy read threads, the number of replication-applier write threads, and the number of checksum threads, based on feedback from the throttlers. The copy phase is described first; see [checksum scaling](#checksum-scaling) below for how the checksum differs. Each throttler reports a continuous *utilization* signal (0 = idle, 1.0 = the point at which it would hard-stop the copy); the controller takes the highest signal across all throttlers and steers the thread counts to keep it in a comfortable band. Because both pools contribute to the same signal, utilization alone cannot tell which side to move — the buffer queue between the readers and the writers arbitrates: a near-empty queue that writers drain instantly means the read side is the limiting (or, under load, the responsible) pool; a near-full queue where chunks wait as long as they take to write means the write side is.
+**Experimental.** When enabled, Spirit dynamically adjusts the number of copy read threads, the number of applier write threads, and the number of checksum threads, based on feedback from the throttlers. The copy phase is described first; see [checksum scaling](#checksum-scaling) below for how the checksum differs. Each throttler reports a continuous *utilization* signal (0 = idle, 1.0 = the point at which it would hard-stop the copy); the controller takes the highest signal across all throttlers and steers the thread counts to keep it in a comfortable band. Because both pools contribute to the same signal, utilization alone cannot tell which side to move — the buffer queue between the readers and the writers arbitrates: a near-empty queue that writers drain instantly means the read side is the limiting (or, under load, the responsible) pool; a near-full queue where chunks wait as long as they take to write means the write side is.
 
 - **Below 40% utilization** it grows the limiting pool by one thread at a time (cautiously, with a ~15s cooldown between increases). If the pipeline is balanced — neither side limiting — it holds instead of growing either pool.
 - **At or above 70% utilization** it sheds one thread at a time from the side the queue blames (immediately on the first breach, then at most once per ~15s so the signal can reflect each cut).
