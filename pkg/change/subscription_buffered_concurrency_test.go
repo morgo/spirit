@@ -709,3 +709,44 @@ func TestBufferedMapParallelFlushErrorReattachesRemainder(t *testing.T) {
 	require.Equal(t, totalRows, totalUpsertedRows(fake), "every row must land exactly once across both flushes")
 	require.Zero(t, recomputeSizeBytes(sub))
 }
+
+// TestBufferedMapFlushCanceledContextIsAnError pins the outcome of a
+// Flush whose context is already canceled: the drain schedules nothing,
+// applies nothing, and must report the context error — not success.
+// Without the skipped-batches check the errgroup joins cleanly over
+// zero scheduled batches and the flush reports allChangesFlushed=true,
+// which the clients would record as a successfully flushed position
+// while every entry had merely been reattached to the buffer.
+func TestBufferedMapFlushCanceledContextIsAnError(t *testing.T) {
+	fake := &gatedApplier{}
+	sub := newGatedBufferedMap(fake, false)
+	sub.flushConcurrency = 2
+
+	const totalRows = 2500 // 3 batches at DefaultBatchSize=1000
+	for i := range totalRows {
+		sub.HasChanged([]any{int32(i)}, []any{int32(i), "seed"}, false)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	allFlushed, err := sub.Flush(ctx, false, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, allFlushed)
+	require.Zero(t, totalUpsertedRows(fake), "no batch may reach the applier on a canceled context")
+
+	// Everything is reattached with balanced accounting...
+	require.Equal(t, totalRows, sub.Length(), "all entries must be reattached")
+	sub.Lock()
+	flushing := sub.flushingCount
+	sub.Unlock()
+	require.Zero(t, flushing, "no snapshot entries may remain in flight after Flush returns")
+	require.Equal(t, recomputeSizeBytes(sub), func() int64 { sub.Lock(); defer sub.Unlock(); return sub.sizeBytes }(),
+		"sizeBytes must match the live stores after reattach")
+
+	// ...and a live retry drains it all.
+	allFlushed, err = sub.Flush(t.Context(), false, nil)
+	require.NoError(t, err)
+	require.True(t, allFlushed)
+	require.Zero(t, sub.Length())
+	require.Equal(t, totalRows, totalUpsertedRows(fake), "every row must land exactly once on the retry")
+}
