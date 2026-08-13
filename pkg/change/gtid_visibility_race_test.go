@@ -55,11 +55,26 @@ func TestKeyAboveWatermarkVisibilityWindow(t *testing.T) {
 	ctx := t.Context()
 
 	// ---- Environment gating -------------------------------------------------
-	var semiSyncTimeout, semiSyncEnabled string
-	err = db.QueryRowContext(ctx, "SELECT @@global.rpl_semi_sync_source_timeout, @@global.rpl_semi_sync_source_enabled").
-		Scan(&semiSyncTimeout, &semiSyncEnabled)
+	var semiSyncTimeout, semiSyncEnabled, waitNoReplica, waitPoint string
+	err = db.QueryRowContext(ctx, `SELECT @@global.rpl_semi_sync_source_timeout,
+			@@global.rpl_semi_sync_source_enabled,
+			@@global.rpl_semi_sync_source_wait_no_replica,
+			@@global.rpl_semi_sync_source_wait_point`).
+		Scan(&semiSyncTimeout, &semiSyncEnabled, &waitNoReplica, &waitPoint)
 	if err != nil {
 		t.Skipf("semi-sync source plugin not available (%v); this test needs it to widen the binlog-sync→commit window deterministically", err)
+	}
+	// Both of these are server defaults, but a scratch server configured
+	// otherwise would silently produce no window at all rather than a
+	// reproduction, so gate on them explicitly instead of leaving the test
+	// to report "inconclusive" later.
+	if waitPoint != "AFTER_SYNC" {
+		t.Skipf("rpl_semi_sync_source_wait_point=%s; the window this test needs only exists with AFTER_SYNC "+
+			"(AFTER_COMMIT waits for the ACK *after* the engine commit, so delivery never precedes visibility)", waitPoint)
+	}
+	if waitNoReplica != "1" && waitNoReplica != "ON" {
+		t.Skipf("rpl_semi_sync_source_wait_no_replica=%s; with no replica attached the source would not wait at all, "+
+			"so the commit stall this test relies on never happens", waitNoReplica)
 	}
 	var ignored, clients string
 	err = db.QueryRowContext(ctx, "SHOW GLOBAL STATUS LIKE 'Rpl_semi_sync_source_clients'").Scan(&ignored, &clients)
@@ -76,6 +91,11 @@ func TestKeyAboveWatermarkVisibilityWindow(t *testing.T) {
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("SET GLOBAL rpl_semi_sync_source_timeout = %d", stallMs)); err != nil {
 		t.Skipf("cannot SET GLOBAL rpl_semi_sync_source_timeout (%v)", err)
 	}
+	// Registered before the tables are created (and before the remaining
+	// skip conditions), so it covers every path on which they can exist:
+	// restore the server's semi-sync settings first, then drop the tables —
+	// in that order, because dropping while semi-sync is still armed can pay
+	// the timeout stall.
 	t.Cleanup(func() {
 		// The test body's deferred db.Close() runs before t.Cleanup
 		// callbacks, so restore over a dedicated connection.
@@ -92,6 +112,9 @@ func TestKeyAboveWatermarkVisibilityWindow(t *testing.T) {
 		}
 		if _, cerr := cleanupDB.ExecContext(cleanupCtx, "SET GLOBAL rpl_semi_sync_source_timeout = "+semiSyncTimeout); cerr != nil {
 			t.Errorf("failed to restore rpl_semi_sync_source_timeout: %v", cerr)
+		}
+		if _, cerr := cleanupDB.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS visrace_src, visrace_dst"); cerr != nil {
+			t.Errorf("failed to drop the test tables: %v", cerr)
 		}
 	})
 
