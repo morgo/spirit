@@ -22,7 +22,6 @@ import (
 
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/mysql"
-	tidbfeature "github.com/block/spirit/pkg/parser/tidb"
 	"github.com/block/spirit/pkg/parser/util"
 )
 
@@ -257,37 +256,13 @@ func (s *Scanner) Lex(v *yySymType) int {
 	if tok == not && s.sqlMode.HasHighNotPrecedenceMode() {
 		return not2
 	}
-	if (tok == as || tok == member) && s.getNextToken() == of {
+	if tok == member && s.getNextToken() == of {
 		_, pos, lit = s.scan()
 		v.ident = fmt.Sprintf("%s %s", v.ident, lit)
 		s.lastScanOffset = pos.Offset
 		v.offset = pos.Offset
-		if tok == as {
-			s.lastKeyword = asof
-			return asof
-		}
 		s.lastKeyword = memberof
 		return memberof
-	}
-	if tok == to {
-		tok1, tok2 := s.getNextTwoTokens()
-		if tok1 == timestampType && tok2 == stringLit {
-			_, pos, lit = s.scan()
-			v.ident = fmt.Sprintf("%s %s", v.ident, lit)
-			s.lastKeyword = toTimestamp
-			s.lastScanOffset = pos.Offset
-			v.offset = pos.Offset
-			return toTimestamp
-		}
-
-		if tok1 == tsoType && tok2 == intLit {
-			_, pos, lit = s.scan()
-			v.ident = fmt.Sprintf("%s %s", v.ident, lit)
-			s.lastKeyword = toTSO
-			s.lastScanOffset = pos.Offset
-			v.offset = pos.Offset
-			return toTSO
-		}
 	}
 	// fix shift/reduce conflict with DEFINED NULL BY xxx OPTIONALLY ENCLOSED
 	if tok == optionally {
@@ -314,7 +289,7 @@ func (s *Scanner) Lex(v *yySymType) int {
 		return toHex(s, v, lit)
 	case bitLit:
 		return toBit(s, v, lit)
-	case singleAtIdentifier, doubleAtIdentifier, cast, extract:
+	case singleAtIdentifier, doubleAtIdentifier:
 		v.item = lit
 		return tok
 	case null:
@@ -535,21 +510,6 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 		s.inBangComment = true
 		return s.scan()
 
-	case 'T': // '/*T' maybe TiDB-specific comments
-		if s.r.peek() != '!' {
-			// '/*TX' is just normal comment.
-			break
-		}
-		s.r.inc()
-		// in '/*T!', try to match the pattern '/*T![feature1,feature2,...]'.
-		features := s.scanFeatureIDs()
-		if tidbfeature.CanParseFeature(features...) {
-			s.inBangComment = true
-			return s.scan()
-		}
-	case 'M': // '/*M' maybe MariaDB-specific comments
-		// no special treatment for now.
-
 	case '+': // '/*+' optimizer hints
 		// See https://dev.mysql.com/doc/refman/5.7/en/optimizer-hints.html
 		if _, ok := hintedTokens[s.lastKeyword]; ok || s.keepHint {
@@ -557,12 +517,7 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 			// keywords like SELECT, INSERT, etc., only a special case "FOR UPDATE" needs to be handled
 			// we will report a warning in order to match MySQL's behavior, but the hint content will be ignored
 			if s.lastKeyword2 == forKwd {
-				if s.lastKeyword3 == binding {
-					// special case of `create binding for update`
-					isOptimizerHint = true
-				} else {
-					s.warns = append(s.warns, ParseErrorWith(s.r.data(&pos), s.r.p.Line))
-				}
+				s.warns = append(s.warns, ParseErrorWith(s.r.data(&pos), s.r.p.Line))
 			} else {
 				isOptimizerHint = true
 			}
@@ -948,52 +903,6 @@ func (s *Scanner) scanVersionDigits(minv, maxv int) {
 			break
 		}
 	}
-}
-
-func (s *Scanner) scanFeatureIDs() (featureIDs []string) {
-	pos := s.r.pos()
-	const init, expectChar, obtainChar = 0, 1, 2
-	state := init
-	var b strings.Builder
-	for !s.r.eof() {
-		ch := s.r.peek()
-		s.r.inc()
-		switch state {
-		case init:
-			if ch == '[' {
-				state = expectChar
-				break
-			}
-			s.r.updatePos(pos)
-			return nil
-		case expectChar:
-			if isIdentChar(ch) {
-				b.WriteByte(ch)
-				state = obtainChar
-				break
-			}
-			s.r.updatePos(pos)
-			return nil
-		case obtainChar:
-			if isIdentChar(ch) {
-				b.WriteByte(ch)
-				state = obtainChar
-				break
-			} else if ch == ',' {
-				featureIDs = append(featureIDs, b.String())
-				b.Reset()
-				state = expectChar
-				break
-			} else if ch == ']' {
-				featureIDs = append(featureIDs, b.String())
-				return featureIDs
-			}
-			s.r.updatePos(pos)
-			return nil
-		}
-	}
-	s.r.updatePos(pos)
-	return nil
 }
 
 func (s *Scanner) lastErrorAsWarn() {
