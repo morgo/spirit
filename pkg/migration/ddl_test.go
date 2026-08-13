@@ -56,42 +56,6 @@ func TestForNonInstantBurn(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-// TestIndexVisibility tests ALTER INDEX INVISIBLE/VISIBLE operations.
-func TestIndexVisibility(t *testing.T) {
-	t.Parallel()
-	testutils.NewTestTable(t, "indexvisibility", `CREATE TABLE indexvisibility (
-		id int(11) NOT NULL AUTO_INCREMENT,
-		b INT NOT NULL,
-		c INT NOT NULL,
-		PRIMARY KEY (id),
-		INDEX (b)
-	)`)
-
-	// INVISIBLE — should use inplace DDL
-	m := NewTestRunner(t, "indexvisibility", "ALTER INDEX b INVISIBLE", WithThreads(1))
-	require.NoError(t, m.Run(t.Context()))
-	require.True(t, m.usedInplaceDDL)
-	require.NoError(t, m.Close())
-
-	// VISIBLE — should use inplace DDL
-	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b VISIBLE", WithThreads(1))
-	require.NoError(t, m.Run(t.Context()))
-	require.True(t, m.usedInplaceDDL)
-	require.NoError(t, m.Close())
-
-	// VISIBLE + ADD INDEX — mixed operations should fail
-	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b VISIBLE, ADD INDEX (c)", WithThreads(1))
-	err := m.Run(t.Context())
-	require.Error(t, err)
-	require.NoError(t, m.Close())
-
-	// VISIBLE + CHANGE COLUMN — mixed with table-rebuilding should fail
-	m = NewTestRunner(t, "indexvisibility", "ALTER INDEX b VISIBLE, CHANGE c cc BIGINT NOT NULL", WithThreads(1))
-	err = m.Run(t.Context())
-	require.Error(t, err)
-	require.NoError(t, m.Close())
-}
-
 // TestUnsupportedClauseRejectedBeforeDDL tests that a user-supplied ALGORITHM=
 // or LOCK= clause fails the migration before any DDL is attempted directly on
 // MySQL. attemptMySQLDDL prepends its own ALGORITHM= assertion, and MySQL

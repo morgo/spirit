@@ -271,6 +271,12 @@ MYSQL_DSN="root:...@tcp(127.0.0.1:3306)/test" \
 
 Observed on MySQL 8.0.43: the row event is delivered and discarded ~15ms into a 3000ms commit stall, the covering chunk read (the copier's statement shape) does not contain the row, a flush during the window publishes a GTID position that already covers the transaction, and the target never receives it. The test self-skips without the plugin, without the privileges to arm the window, or when a semi-sync replica is attached — which means it skips in both CI lanes (the default lane has no plugin; the semi-sync lane has an ACKing replica) and is a scratch-server tool.
 
+### Skipping row decode for unsubscribed tables
+
+While the copy runs, the binlog is dominated by spirit's **own writes** — the multi-row `INSERT`s into the `_new` table. The stream client has no subscription for `_new`, so those events are no-ops, but they still have to move through the parser, and decoding every column of every row image (including JSON rendering) just to discard the event by table name is the single largest cost in the stream path. On a fast copy the reader falls behind its own migration and repays the gap after the copy as a long catch-up phase that is almost entirely no-ops.
+
+Both clients therefore install a `RowsEventDecodeFunc` on the syncer (see `newRowsEventDecodeFunc`): the event *header* is always decoded — that is where the table name and stream position come from — but the row images are decoded only when the table has a subscription. This is the same hook go-mysql's canal uses for its table filters. It is safe because the `Source` lifecycle requires all subscriptions to be added before `Start`; `processRowsEvent` enforces that with a hard error if a subscribed table's event ever arrives undecoded, rather than silently treating it as empty.
+
 ### Checkpointing
 
 The replication client tracks two positions:

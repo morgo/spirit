@@ -36,17 +36,33 @@ func mkIniFile(t *testing.T, content string) string {
 	return tmpFile.Name()
 }
 
+// stringerFunc adapts a func() string to fmt.Stringer so that message
+// arguments to require.Eventually can be evaluated lazily, at the moment the
+// failure message is formatted, rather than eagerly when Eventually is called.
+type stringerFunc func() string
+
+func (f stringerFunc) String() string { return f() }
+
 // waitForStatus polls until the runner reaches the target status or times out.
 // The timeout is generous because the runner must finish the copy and
 // checksum phases before it reaches the later states (e.g.
 // WaitingOnSentinelTable); under CI load those phases can starve and a
-// tighter budget produces spurious timeouts (see issue #946).
+// tighter budget produces spurious timeouts (see issue #946). Each checksum
+// attempt alone can legitimately spend up to change.DefaultTimeout (30s) on
+// binlog catch-up plus 30s acquiring the table lock, and the runner retries
+// the checksum up to 3 times, so the budget must cover at least two full
+// attempts.
 func waitForStatus(t *testing.T, m *Runner, target status.State) {
 	t.Helper()
+	// The status is read lazily via a Stringer: fmt args are evaluated when
+	// the failure message is formatted (at timeout), so the message reports
+	// the status the runner was actually stuck in, not the status when the
+	// wait began.
+	lastStatus := stringerFunc(func() string { return m.status.Get().String() })
 	require.Eventually(t, func() bool {
 		return m.status.Get() >= target
-	}, 60*time.Second, 10*time.Millisecond,
-		"timeout waiting for status >= %s, last status: %s", target, m.status.Get())
+	}, 3*time.Minute, 10*time.Millisecond,
+		"timeout waiting for status >= %s, last status: %s", target, lastStatus)
 }
 
 // waitForCopyRows blocks until the runner reaches the CopyRows state (returning
@@ -89,8 +105,9 @@ func WithWriteThreads(n int) RunnerOption {
 	}
 }
 
-// WithAutoscaling enables the experimental write-thread autoscaler.
-// WriteThreads acts as the starting value; the cap is fixed at 2x that.
+// WithAutoscaling enables the experimental thread autoscaler. Note that it only
+// engages against an Aurora target, and when it does it overrides both Threads
+// and WriteThreads (see setupCopierCheckerAndReplClient).
 func WithAutoscaling() RunnerOption {
 	return func(m *Migration) {
 		m.EnableExperimentalAutoscaling = true

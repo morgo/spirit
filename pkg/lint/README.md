@@ -168,7 +168,7 @@ type Location struct {
 
 ## Built-in Linters
 
-The `lint` package includes 17 built-in linters covering schema design, data types, and safety best practices.
+The `lint` package includes 18 built-in linters covering schema design, data types, and safety best practices.
 
 ### allow_charset
 
@@ -392,6 +392,34 @@ CREATE TABLE products (
 
 -- ❌ Violation in ALTER TABLE
 ALTER TABLE products ADD COLUMN discount DOUBLE;
+```
+
+---
+
+### index_visibility_mixed
+
+**Severity**: Warning  
+**Configurable**: No  
+**Checks**: ALTER TABLE (ALTER INDEX ... VISIBLE/INVISIBLE)
+
+Detects index visibility changes combined with table-rebuilding operations in the same `ALTER TABLE`. Making an index invisible is normally an experiment — hide the index, observe the workload, then either drop the index or make it visible again. A rebuild in the same statement changes query plans and statistics on its own, so there is no clean before/after to compare against, and the metadata-only visibility flip turns into a full copy.
+
+Mixing with other metadata-only clauses (`DROP INDEX`, `RENAME INDEX`, partition maintenance, VARCHAR length changes) is not flagged, since the statement stays metadata-only.
+
+This rule was previously a hard preflight check that refused the migration ([issue #283](https://github.com/block/spirit/issues/283)). It is a warning now: declarative workflows generate the ALTER from a schema diff, so the user doesn't control which clauses get batched together.
+
+**Examples:**
+
+```sql
+-- ❌ Violation (visibility change mixed with a rebuild)
+ALTER TABLE users ALTER INDEX idx_email INVISIBLE, ADD COLUMN age INT;
+
+-- ✅ Correct (split into two statements)
+ALTER TABLE users ALTER INDEX idx_email INVISIBLE;
+ALTER TABLE users ADD COLUMN age INT;
+
+-- ✅ Not flagged (all clauses are metadata-only)
+ALTER TABLE users ALTER INDEX idx_email INVISIBLE, DROP INDEX idx_old;
 ```
 
 ---
@@ -734,6 +762,7 @@ Detects column renames via RENAME COLUMN or CHANGE COLUMN. Column renames cannot
 | `has_foreign_key` | ❌ | ✅ | ✅ | Warning |
 | `has_float` | ❌ | ✅ | ✅ | Warning |
 | `has_timestamp` | ❌ | ✅ | ✅ | Warning (existing) / Error (new) |
+| `index_visibility_mixed` | ❌ | ❌ | ✅ | Warning |
 | `invisible_index_before_drop` | ✅ | ❌ | ✅ | Error (default), Warning (configurable) |
 | `multiple_alter_table` | ❌ | ❌ | ✅ | Info |
 | `name_case` | ❌ | ✅ | ✅ | Warning |

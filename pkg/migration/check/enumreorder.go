@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	registerCheck("enumReorder", enumReorderCheck, ScopePreflight)
+	registerCheck("enumReorder", enumReorderCheck, ScopePreflight|ScopeStatement)
 }
 
 // enumReorderCheck prevents ENUM value reordering and middle-insertion.
@@ -32,6 +32,13 @@ func init() {
 // "kept values keep their relative order" invariant that the decode path
 // relies on.
 func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	haveTypes, err := requireCurrentColumnTypes(r, logger, "enumReorder")
+	if err != nil {
+		return err
+	}
+	if !haveTypes {
+		return nil
+	}
 	for _, col := range findModifiedEnumSetColumns(*r.Statement.StmtNode) {
 		if col.ColDef.Tp.GetType() == mysql.TypeSet {
 			continue // handled by setReorderCheck
@@ -44,7 +51,7 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 
 		existingType, ok := r.Table.GetColumnMySQLType(col.LookupName)
 		if !ok {
-			return fmt.Errorf("unable to validate ENUM change for column %q: existing column type not found in table metadata", col.LookupName)
+			return cannotClassify("unable to validate ENUM change for column %q: existing column type not found in table metadata", col.LookupName)
 		}
 
 		// The ENUM reorder check only applies when the existing column is
@@ -57,7 +64,7 @@ func enumReorderCheck(ctx context.Context, r Resources, logger *slog.Logger) err
 
 		existingElems, err := parseEnumSetValues(existingType)
 		if err != nil {
-			return fmt.Errorf("unable to validate ENUM change for column %q: %w", col.LookupName, err)
+			return cannotClassify("unable to validate ENUM change for column %q: %w", col.LookupName, err)
 		}
 		if len(existingElems) == 0 {
 			continue

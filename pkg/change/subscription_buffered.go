@@ -13,6 +13,7 @@ import (
 	"github.com/block/spirit/pkg/dbconn"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
+	"golang.org/x/sync/errgroup"
 )
 
 // The bufferedMap avoids using REPLACE INTO .. SELECT.
@@ -60,14 +61,17 @@ import (
 // holds a unique value the new row is now claiming. That row is
 // briefly missing from the destination until its own event arrives in
 // a later batch (or a later row in the same batch) and re-inserts it.
-// Spirit's correctness relies on the bufferedMap being an up-to-date
-// and *disjoint* representation of pending changes — every PK appears
-// at most once at flush time, holding the latest row image — so every
-// transiently-deleted row is guaranteed to have its own event in the
-// buffer (or arriving shortly). The destination converges to source's
-// current state once the last unflushed event for each affected PK
-// has been applied; the post-cutover checksum (with
-// FixDifferences=true) catches any divergence that slips through.
+// Spirit's correctness relies on each flushed snapshot being a
+// *disjoint* representation of pending changes — within one flush,
+// every PK appears at most once, holding the latest image buffered at
+// swap time — so every transiently-deleted row is guaranteed to have
+// its own event in the buffer (or arriving shortly). A newer image for
+// a PK may arrive while its older image is mid-drain; it lands in the
+// active store and is applied by a later flush, preserving per-key
+// order. The destination converges to source's current state once the
+// last unflushed event for each affected PK has been applied; the
+// post-cutover checksum (with FixDifferences=true) catches any
+// divergence that slips through.
 //
 // SetWatermarkOptimization owns the watermark-driven transition: when
 // its toggle changes which store is active, it drains the outgoing
@@ -98,14 +102,31 @@ type bufferedMap struct {
 	sync.Mutex // protects the subscription from changes.
 
 	// cond signals waiters in HasChanged when sizeBytes drops below
-	// softLimitBytes. Broadcast at the end of every flush path. L =
-	// &Mutex. Construction invariant: every call site must wire this
-	// up immediately after the struct literal, e.g.
+	// softLimitBytes. Broadcast after every applied batch and at the
+	// end of every flush path. L = &Mutex. Construction invariant:
+	// every call site must wire this up immediately after the struct
+	// literal, e.g.
 	//   sub := &bufferedMap{...}
 	//   sub.cond = sync.NewCond(&sub.Mutex)
 	// HasChanged / Flush / SetWatermarkOptimization will panic on a
 	// nil cond, so a missing init shows up loudly in tests.
 	cond *sync.Cond
+
+	// flushMu serializes whole-flush operations — Flush and the inline
+	// drains in SetWatermarkOptimization — against each other. It is
+	// held for the full duration of a drain, while Mutex is only held
+	// for short buffer bookkeeping. That split is what lets HasChanged
+	// keep buffering (and deduping) while a flush's applier round
+	// trips are in flight. Lock order: flushMu before Mutex, never the
+	// reverse.
+	flushMu sync.Mutex
+
+	// flushConcurrency is the maximum number of applier batches a
+	// map-mode drain keeps in flight concurrently; <= 1 means serial.
+	// Only drainMapSnapshot uses it: map batches are disjoint by key
+	// and order-free. Queue-mode drains are FIFO and the under-lock
+	// (cutover) path must stay atomic, so both remain serial.
+	flushConcurrency int
 
 	// logger is supplied by the change.Source that owns this subscription.
 	// We keep only a *slog.Logger (not a back-pointer to the source) so the
@@ -128,9 +149,17 @@ type bufferedMap struct {
 	// mode is selected.
 	queue []queuedChange
 
+	// flushingCount is the number of entries an in-flight Flush has
+	// swapped out of changes/queue but not yet applied. Their bytes
+	// remain in sizeBytes until each batch completes. Length() includes
+	// it so AllChangesFlushed cannot report true while a drain is mid-
+	// air. Zero whenever no Flush is in flight.
+	flushingCount int
+
 	// sizeBytes is an approximate count of memory currently held by
-	// changes + queue. Maintained by HasChanged and the flush paths;
-	// see estimateRowSize for the accounting.
+	// changes + queue, plus the still-unapplied portion of any snapshot
+	// a Flush is currently draining. Maintained by HasChanged and the
+	// flush paths; see estimateRowSize for the accounting.
 	sizeBytes int64
 
 	// softLimitBytes is the soft cap before HasChanged blocks waiting
@@ -152,11 +181,30 @@ type bufferedMap struct {
 	// remain blocked on the cond with no flush in flight to wake it.
 	closed bool
 
+	// flushRequest, when non-nil, receives this subscription (a
+	// non-blocking send) each time HasChanged parks on the soft limit.
+	// The owning client selects on it in its periodic-flush loop and
+	// flushes the requesting subscription first, so a full buffer is
+	// drained immediately rather than waiting out the remainder of the
+	// flush interval — or, on multi-table clients, waiting behind
+	// another saturated subscription's entire drain in the
+	// nondeterministic all-subscription pass. A parked subscription
+	// stalls the binlog reader, and every second parked burns
+	// binlog-retention headroom.
+	flushRequest chan<- Subscription
+
 	// Counters for the bookend log emitted on watermark-optimization transitions.
 	keysAdded        atomic.Int64
 	keysDroppedAbove atomic.Int64
 	keysSkippedBelow atomic.Int64
 	timesParked      atomic.Int64 // HasChanged was parked at least once on the soft limit
+
+	// lastParkWarn is when the park/unpark log pair was last emitted at
+	// Warn/Info level. Since flushes release capacity per batch, a
+	// saturated applier produces frequent short parks rather than one
+	// long one; without throttling, the pair would log every couple of
+	// seconds for the lifetime of a long drain. Guarded by Mutex.
+	lastParkWarn time.Time
 
 	pkIsMemoryComparable bool
 }
@@ -168,6 +216,13 @@ type bufferedMap struct {
 // against — these constants are noise next to the BLOB / large-string
 // payload sizes. Both are approximate; the cap is "soft" anyway.
 const (
+	// parkWarnInterval throttles the park/unpark log pair. Parks under
+	// sustained backpressure are frequent and short (capacity returns
+	// per applied batch), so the pair is emitted at Warn/Info level at
+	// most once per interval per subscription and at Debug otherwise.
+	// The timesParked counter still counts every park.
+	parkWarnInterval = 30 * time.Second
+
 	// bufferedChangeOverhead is the fixed per-entry cost for an item
 	// in s.changes beyond what estimateRowSize captures: the hashed-
 	// key string header (~16 B), the bufferedChange struct laid out
@@ -208,6 +263,22 @@ type BufferedSubscriptionConfig struct {
 	// HasChanged blocks waiting on the flush path. Zero disables the
 	// cap. See bufferedMap.softLimitBytes for the semantics.
 	SoftLimitBytes int64
+
+	// FlushRequest, when non-nil, receives the parked subscription (a
+	// non-blocking send) each time HasChanged parks on the soft limit.
+	// Owners that flush on a periodic ticker should select on it and
+	// flush the received subscription first, then run their normal
+	// all-subscription pass — flushing others first would leave the
+	// change reader parked for those entire drains. Optional; nil
+	// disables the signal.
+	FlushRequest chan<- Subscription
+
+	// FlushConcurrency is the maximum number of applier batches a
+	// map-mode flush keeps in flight concurrently. Zero or negative
+	// means serial, preserving prior behaviour for callers that do not
+	// set it; the in-tree clients pass DefaultFlushConcurrency. Queue-
+	// mode and under-lock flushes are always serial regardless.
+	FlushConcurrency int
 }
 
 // NewBufferedSubscription constructs the default bufferedMap-backed
@@ -255,6 +326,8 @@ func NewBufferedSubscription(cfg BufferedSubscriptionConfig) (Subscription, erro
 		applier:              cfg.Applier,
 		pkIsMemoryComparable: cfg.CurrentTable.PrimaryKeyIsMemoryComparable() == nil,
 		softLimitBytes:       cfg.SoftLimitBytes,
+		flushRequest:         cfg.FlushRequest,
+		flushConcurrency:     cfg.FlushConcurrency,
 	}
 	sub.cond = sync.NewCond(&sub.Mutex)
 	return sub, nil
@@ -299,10 +372,13 @@ func sizeOfQueuedChange(c queuedChange) int64 {
 // (or key tuple) will occupy once the applier renders it into a SQL
 // statement. Binary values hex-encode at two characters per byte and quoted
 // strings can double under escaping, so variable-width values are counted at
-// twice their in-memory length; scalars render as short literals. Mirrors
-// the copy path's estimateRowSize (pkg/applier): deliberately approximate,
-// because the applier.MaxStatementSizeBytes budget it feeds is conservative
-// against the typical 64 MiB max_allowed_packet.
+// twice their in-memory length; scalars render as short literals. Feeds the
+// same applier.MaxStatementSizeBytes budget as the copy path's estimator
+// (pkg/applier estimateValueSize) but with the opposite bias: that one counts
+// variable-width values at 1x and leans on the budget's ~64x headroom below
+// max_allowed_packet, while this one stays pessimistic — a flush batch cut
+// short only costs an extra statement, and the binlog path has no throughput
+// reason to run the estimate hot.
 func estimateRenderedBytes(values []any) int64 {
 	var n int64 = 2 // parentheses around the tuple
 	for _, v := range values {
@@ -336,7 +412,11 @@ func (s *bufferedMap) Length() int {
 	s.Lock()
 	defer s.Unlock()
 
-	return len(s.changes) + len(s.queue)
+	// flushingCount covers entries an in-flight Flush has swapped out
+	// but not yet applied — they are still pending changes, and callers
+	// like AllChangesFlushed must not see the buffer as empty while a
+	// drain is mid-air.
+	return len(s.changes) + len(s.queue) + s.flushingCount
 }
 
 func (s *bufferedMap) Tables() []*table.TableInfo {
@@ -366,6 +446,12 @@ func (s *bufferedMap) ImmutableColumnOrdinal() int {
 		return -1
 	}
 	return slices.Index(s.table.Columns, s.table.ShardingColumn)
+}
+
+// effectiveFlushConcurrency clamps flushConcurrency to at least 1 so
+// the zero value (out-of-tree callers, bare test maps) stays serial.
+func (s *bufferedMap) effectiveFlushConcurrency() int {
+	return max(1, s.flushConcurrency)
 }
 
 // queueModeActive reports whether new events should be appended to the
@@ -409,15 +495,37 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		return
 	}
 
+	hashedKey := utils.HashKey(key)
+
+	// A map-mode overwrite of a key that is already buffered is
+	// ~memory-neutral — the new image replaces the old one and sizeBytes
+	// is rebalanced below — so it is exempt from the soft limit. This
+	// matters enormously for convergence on hot-row workloads: the
+	// overwrite is exactly the traffic dedup collapses for free, and
+	// parking it would clamp the effective apply rate to the applier's
+	// raw drain rate. Keys mid-drain (swapped out by an in-flight Flush)
+	// are not overwrites; admitting them grows the map, so they park
+	// like any new key.
+	dedupOverwrite := false
+	if !s.queueModeActive() {
+		_, dedupOverwrite = s.changes[hashedKey]
+	}
+
 	// Soft backpressure: park while the buffer is at or above the byte
 	// threshold. See softLimitBytes on bufferedMap for the semantics.
 	// We log on entry and exit because parking stalls the binlog reader
 	// — the exit duration is the operator's main signal for binlog-
 	// retention risk, and without these lines a stalled migrator looks
 	// indistinguishable from one that's just slow.
-	if s.softLimitBytes > 0 && s.sizeBytes >= s.softLimitBytes && !s.closed {
+	if s.softLimitBytes > 0 && !dedupOverwrite && s.sizeBytes >= s.softLimitBytes && !s.closed {
 		s.timesParked.Add(1)
-		s.logger.Warn("subscription parked on soft memory limit",
+		s.requestFlush()
+		parkEntryLog, parkExitLog := s.logger.Debug, s.logger.Debug
+		if time.Since(s.lastParkWarn) >= parkWarnInterval {
+			s.lastParkWarn = time.Now()
+			parkEntryLog, parkExitLog = s.logger.Warn, s.logger.Info
+		}
+		parkEntryLog("subscription parked on soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"size_bytes", s.sizeBytes,
 			"soft_limit_bytes", s.softLimitBytes,
@@ -426,7 +534,7 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 		for s.sizeBytes >= s.softLimitBytes && !s.closed {
 			s.cond.Wait()
 		}
-		s.logger.Info("subscription unparked from soft memory limit",
+		parkExitLog("subscription unparked from soft memory limit",
 			"table", s.table.SchemaName+"."+s.table.TableName,
 			"parked_duration", time.Since(parkStart).String(),
 			"size_bytes", s.sizeBytes,
@@ -438,8 +546,6 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// keeps subscription.Length() consistent with the buffered position
 	// that readStream advances after processRowsEvent returns, so a
 	// concurrent flush cannot publish a flushedPos that skips this event.
-
-	hashedKey := utils.HashKey(key)
 
 	logicalRow := applier.LogicalRow{RowImage: row}
 	if deleted {
@@ -469,25 +575,109 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	s.keysAdded.Add(1)
 }
 
+// requestFlush performs a non-blocking send of this subscription on the
+// flush-request channel, if one is configured. Caller holds s.Lock; the
+// send must not block. Only one subscription per client can be parked
+// at a time (the single change-reader goroutine is what parks), so a
+// buffered channel of capacity 1 never drops a live request; if a stale
+// token from an earlier park is still in flight, the receiver's
+// subsequent all-subscription pass covers this subscription anyway.
+func (s *bufferedMap) requestFlush() {
+	if s.flushRequest == nil {
+		return
+	}
+	select {
+	case s.flushRequest <- s:
+	default:
+	}
+}
+
 // Flush writes the pending changes to the new table.
-// We do this under a mutex, which means that unfortunately pending changes
-// are blocked from being collected while we do this. In future we may
-// come up with a more sophisticated approach to allow concurrent
-// collection of changes while we flush.
+//
+// The normal (not underLock) path does NOT hold the Mutex while the
+// applier round trips are in flight. It swaps the pending stores out
+// under the Mutex, drains the snapshot batch by batch, and releases
+// bytes (broadcasting the cond) as each batch lands. New events keep
+// buffering — and, in map mode, deduping — into the fresh stores the
+// whole time, so a long drain no longer stalls the change reader for
+// its full duration. Anything the drain could not apply (watermark-
+// deferred keys, or the remainder after an applier error) is merged
+// back into the active stores before returning; see reattachLocked.
+//
+// The reported allChangesFlushed covers the snapshot only: events that
+// arrive during the drain are, by design, not part of this flush. That
+// matches the position contract in the clients — the flushed position
+// they publish on success is captured *before* Flush is called.
+//
+// Per-key ordering is preserved: an event arriving during the drain is
+// strictly newer than the snapshot's image for the same key, lands in
+// the active store, and is applied by a later flush. Cross-key ordering
+// guarantees are unchanged (map mode is order-free across keys; queue
+// mode drains FIFO and flushes are serialized by flushMu).
+//
+// When underLock is true the entire drain runs while holding the Mutex,
+// exactly as before: the cutover flush must be atomic with respect to
+// event delivery, and with the source table locked there is no
+// concurrent traffic to win anyway.
 //
 // SetWatermarkOptimization drains the outgoing store inline before
 // flipping the mode flag, so under normal operation only one of
 // map/queue has entries when Flush runs. Both branches are still
-// iterated defensively in case anything ever leaves the inactive store
+// handled defensively in case anything ever leaves the inactive store
 // non-empty.
 func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) (allChangesFlushed bool, err error) {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	if underLock {
+		s.Lock()
+		defer s.Unlock()
+
+		allChangesFlushed = true
+		if len(s.changes) > 0 {
+			mapAllFlushed, err := s.flushMapLocked(ctx, true, locks, false)
+			if err != nil {
+				return false, err
+			}
+			if !mapAllFlushed {
+				allChangesFlushed = false
+			}
+		}
+		if len(s.queue) > 0 {
+			if err := s.flushQueueLocked(ctx, true, locks); err != nil {
+				return false, err
+			}
+		}
+		return allChangesFlushed, nil
+	}
+
+	// Swap the pending stores out under the Mutex. From here until the
+	// deferred reattach, the snapshot belongs exclusively to this
+	// goroutine; shared visibility of its pending entries is provided
+	// via flushingCount and sizeBytes only.
 	s.Lock()
-	defer s.Unlock()
+	snapshot := s.changes
+	if len(snapshot) > 0 {
+		s.changes = make(map[string]bufferedChange)
+	} else {
+		snapshot = nil
+	}
+	snapshotQueue := s.queue
+	s.queue = nil
+	s.flushingCount = len(snapshot) + len(snapshotQueue)
+	applyWatermarkFilter := s.watermarkOptimizationEnabled()
+	s.Unlock()
+
+	// Whatever the drains below leave in the snapshots — watermark-
+	// deferred keys on success, the unapplied remainder on error — is
+	// merged back into the active stores no matter how we return.
+	defer func() {
+		s.reattachLocked(snapshot, snapshotQueue)
+	}()
 
 	allChangesFlushed = true
-
-	if len(s.changes) > 0 {
-		mapAllFlushed, err := s.flushMapLocked(ctx, underLock, locks, false)
+	if len(snapshot) > 0 {
+		mapAllFlushed, err := s.drainMapSnapshot(ctx, snapshot, applyWatermarkFilter)
 		if err != nil {
 			return false, err
 		}
@@ -495,14 +685,239 @@ func (s *bufferedMap) Flush(ctx context.Context, underLock bool, locks []*dbconn
 			allChangesFlushed = false
 		}
 	}
-
-	if len(s.queue) > 0 {
-		if err := s.flushQueueLocked(ctx, underLock, locks); err != nil {
+	if len(snapshotQueue) > 0 {
+		remainder, err := s.drainQueueSnapshot(ctx, snapshotQueue)
+		snapshotQueue = remainder
+		if err != nil {
 			return false, err
 		}
 	}
-
 	return allChangesFlushed, nil
+}
+
+// mapFlushBatch is one applier round trip's worth of a map-mode drain:
+// disjoint keys, pre-partitioned into deletes and upserts, with the
+// buffer-accounting byte total captured at build time. The batch only
+// holds pointers into the snapshot's entries; the worker that lands it
+// drops those entries from the snapshot and nils the batch's slices so
+// the row images become collectible while the drain is still running.
+type mapFlushBatch struct {
+	keys        []string
+	deleteKeys  [][]any
+	upsertRows  []applier.LogicalRow
+	storedBytes int64
+}
+
+// drainMapSnapshot applies a swapped-out map snapshot through the
+// applier without holding s.Mutex. Batches are built serially, then
+// applied with up to flushConcurrency applier calls in flight: a map
+// snapshot holds exactly one image per key, so batches are disjoint by
+// key, and map mode makes no cross-key ordering promises — REPLACE and
+// DELETE against distinct keys commute. The binlog apply path is
+// synchronous statements on one connection per call (it does not use
+// the copy path's write worker pool), so a serial drain tops out at
+// batch-rows / statement-round-trip; on large tables with secondary
+// index maintenance that is a few hundred rows/s, which a busy source
+// outruns. Parallel batches multiply that ceiling.
+//
+// Each batch releases its bytes/count under the Mutex (with a cond
+// broadcast) and deletes its entries from the snapshot as it lands, so
+// a parked HasChanged caller resumes after the first batch, not after
+// the whole drain, and applied row images become collectible while the
+// rest of the drain is still running. Entries deferred by the
+// low-watermark filter (and the unapplied remainder after an error or
+// cancellation) stay in the snapshot for the caller to merge back.
+// Returns false when any entry was deferred.
+func (s *bufferedMap) drainMapSnapshot(ctx context.Context, snapshot map[string]bufferedChange, applyWatermarkFilter bool) (bool, error) {
+	var batches []*mapFlushBatch
+	current := &mapFlushBatch{}
+	var batchStmtBytes int64
+	allChangesFlushed := true
+
+	cutBatch := func() {
+		if len(current.keys) > 0 {
+			batches = append(batches, current)
+			current = &mapFlushBatch{}
+			batchStmtBytes = 0
+		}
+	}
+
+	for key, change := range snapshot {
+		// The low-watermark check defers flushing keys that are still
+		// being copied (KeyBelowLowWatermark returns false). The chunker
+		// is internally synchronized, so no Mutex is needed here.
+		if applyWatermarkFilter && !s.chunker.KeyBelowLowWatermark(change.originalKey[0]) {
+			s.keysSkippedBelow.Add(1)
+			s.logger.Debug("key not below watermark", "key", change.originalKey[0])
+			allChangesFlushed = false
+			continue
+		}
+		// Cut the batch when either cap is reached: DefaultBatchSize rows,
+		// or the estimated rendered statement size would exceed the byte
+		// budget the copy path also uses. Without the byte cap, buffered
+		// wide rows (LONGTEXT / BLOB) can render into a single REPLACE
+		// larger than max_allowed_packet — a deterministic, non-retryable
+		// failure. A single row over the budget still flushes, alone in
+		// its own batch (a row can't be split).
+		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
+		if batchLen := len(current.keys); batchLen >= DefaultBatchSize ||
+			(batchLen > 0 && batchStmtBytes+rowBytes > applier.MaxStatementSizeBytes) {
+			cutBatch()
+		}
+		current.keys = append(current.keys, key)
+		current.storedBytes += sizeOfBufferedChange(key, change)
+		if change.logicalRow.IsDeleted {
+			current.deleteKeys = append(current.deleteKeys, change.originalKey)
+		} else {
+			current.upsertRows = append(current.upsertRows, change.logicalRow)
+		}
+		batchStmtBytes += rowBytes
+	}
+	cutBatch()
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(s.effectiveFlushConcurrency())
+	// Workers delete their batch's entries as they land, so they only
+	// contend with each other here: the build loop above finished
+	// iterating the snapshot before the first worker starts, and the
+	// deferred reattach runs after Wait.
+	var snapshotMu sync.Mutex
+	var skippedBatches bool
+	for _, batch := range batches {
+		if gctx.Err() != nil {
+			skippedBatches = true
+			break // a batch failed or ctx was canceled; don't queue the rest
+		}
+		g.Go(func() error {
+			if err := s.flushBatch(gctx, batch.deleteKeys, batch.upsertRows, nil); err != nil {
+				return err
+			}
+			// Drop the applied entries immediately — from the snapshot,
+			// so the deferred reattach merges back only what did not land
+			// (uncertain batches stay and re-apply on a later flush, which
+			// is safe: REPLACE and DELETE are idempotent), and from the
+			// batch, so the row images become collectible now rather than
+			// when the whole drain finishes. Without this the snapshot
+			// retains up to a full soft limit of applied images while the
+			// live map refills toward another, transiently doubling the
+			// memory the cap is meant to bound.
+			snapshotMu.Lock()
+			for _, key := range batch.keys {
+				delete(snapshot, key)
+			}
+			snapshotMu.Unlock()
+			flushedKeys := len(batch.keys)
+			batch.keys, batch.deleteKeys, batch.upsertRows = nil, nil, nil
+			s.Lock()
+			s.sizeBytes -= batch.storedBytes
+			s.flushingCount -= flushedKeys
+			s.cond.Broadcast()
+			s.Unlock()
+			return nil
+		})
+	}
+	err := g.Wait()
+	if err == nil && skippedBatches {
+		// Scheduling stopped early yet no scheduled batch failed, so the
+		// group context can only have been canceled through ctx itself.
+		// Report that rather than success: on a nil error the clients
+		// publish the position captured before this flush as flushed,
+		// which would cover the skipped batches — but those entries were
+		// only reattached, not applied.
+		err = ctx.Err()
+	}
+	if err != nil {
+		return false, err
+	}
+	return allChangesFlushed, nil
+}
+
+// drainQueueSnapshot applies a swapped-out queue snapshot through the
+// applier in FIFO order without holding s.Mutex, coalescing consecutive
+// same-type operations exactly like flushQueueLocked. Bytes and counts
+// are released per applied segment. Returns the unapplied remainder
+// (nil on success) so the caller can merge it back ahead of any events
+// that arrived during the drain.
+func (s *bufferedMap) drainQueueSnapshot(ctx context.Context, snapshot []queuedChange) ([]queuedChange, error) {
+	var deleteKeys [][]any
+	var upsertRows []applier.LogicalRow
+	var batchBytes int64
+	segmentStart := 0 // index of the first snapshot entry in the current segment
+	applied := 0      // count of snapshot entries applied so far
+
+	flushSegment := func(segmentEnd int) error {
+		if segmentEnd == segmentStart {
+			return nil
+		}
+		if err := s.flushBatch(ctx, deleteKeys, upsertRows, nil); err != nil {
+			return err
+		}
+		var drainedBytes int64
+		for _, qc := range snapshot[segmentStart:segmentEnd] {
+			drainedBytes += sizeOfQueuedChange(qc)
+		}
+		s.Lock()
+		s.sizeBytes -= drainedBytes
+		s.flushingCount -= segmentEnd - segmentStart
+		s.cond.Broadcast()
+		s.Unlock()
+		applied = segmentEnd
+		segmentStart = segmentEnd
+		deleteKeys = nil
+		upsertRows = nil
+		batchBytes = 0
+		return nil
+	}
+
+	prevIsDelete := snapshot[0].logicalRow.IsDeleted
+	for i, change := range snapshot {
+		rowBytes := renderedBytesOfChange(change.logicalRow, change.originalKey)
+		typeFlip := change.logicalRow.IsDeleted != prevIsDelete
+		batchFull := i-segmentStart >= DefaultBatchSize
+		overBudget := i > segmentStart && batchBytes+rowBytes > applier.MaxStatementSizeBytes
+		if typeFlip || batchFull || overBudget {
+			if err := flushSegment(i); err != nil {
+				return snapshot[applied:], err
+			}
+		}
+		if change.logicalRow.IsDeleted {
+			deleteKeys = append(deleteKeys, change.originalKey)
+		} else {
+			upsertRows = append(upsertRows, change.logicalRow)
+		}
+		batchBytes += rowBytes
+		prevIsDelete = change.logicalRow.IsDeleted
+	}
+	if err := flushSegment(len(snapshot)); err != nil {
+		return snapshot[applied:], err
+	}
+	return nil, nil
+}
+
+// reattachLocked merges the unapplied remainder of an in-flight flush
+// snapshot back into the active stores and clears flushingCount.
+//
+// Map entries follow newer-wins: any event that arrived during the drain
+// is strictly newer than the snapshot's image for the same key, so when
+// the active map already holds the key the snapshot's stale image is
+// dropped (releasing its bytes). Queue remainders are prepended so
+// binlog order is preserved ahead of events that arrived during the
+// drain. Safe to call with empty/nil snapshots.
+func (s *bufferedMap) reattachLocked(snapshot map[string]bufferedChange, snapshotQueue []queuedChange) {
+	s.Lock()
+	defer s.Unlock()
+	for key, change := range snapshot {
+		if _, ok := s.changes[key]; ok {
+			s.sizeBytes -= sizeOfBufferedChange(key, change)
+		} else {
+			s.changes[key] = change
+		}
+	}
+	if len(snapshotQueue) > 0 {
+		s.queue = append(snapshotQueue, s.queue...)
+	}
+	s.flushingCount = 0
+	s.cond.Broadcast()
 }
 
 // flushMapLocked drains s.changes through the applier. Caller must hold s.Lock.
@@ -736,7 +1151,15 @@ func (s *bufferedMap) Close() {
 // precisely to preserve order for non-memory-comparable PKs). The bypass
 // flag on flushMapLocked closes that gap, and we assert s.changes is empty
 // after the drain to catch any future regression.
+//
+// flushMu is taken first (same order as Flush): a mode transition must
+// not begin while a swapped-out flush snapshot is mid-drain, and its own
+// inline drain must hold the Mutex throughout — the transition invariant
+// ("only the active store may have entries afterwards") only holds if no
+// events can land in the outgoing store during the drain.
 func (s *bufferedMap) SetWatermarkOptimization(ctx context.Context, enabled bool) error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.Lock()
 	defer s.Unlock()
 

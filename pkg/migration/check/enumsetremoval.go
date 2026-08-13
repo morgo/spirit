@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	registerCheck("enumSetRemoval", enumSetRemovalCheck, ScopePreflight)
+	registerCheck("enumSetRemoval", enumSetRemovalCheck, ScopePreflight|ScopeStatement)
 }
 
 // enumSetRemovalCheck prevents unsafe ENUM/SET type conversions.
@@ -43,6 +43,13 @@ func init() {
 // disallows it because the checksum compares CAST(col AS char) and the
 // string order changes when bits are reordered.
 func enumSetRemovalCheck(ctx context.Context, r Resources, logger *slog.Logger) error {
+	haveTypes, err := requireCurrentColumnTypes(r, logger, "enumSetRemoval")
+	if err != nil {
+		return err
+	}
+	if !haveTypes {
+		return nil
+	}
 	for _, col := range findModifiedColumns(*r.Statement.StmtNode) {
 		newTp := col.ColDef.Tp.GetType()
 

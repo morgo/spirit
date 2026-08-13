@@ -35,6 +35,7 @@ func (a *noopDistributedApplier) UpsertRows(context.Context, *table.ColumnMappin
 
 func (a *noopDistributedApplier) Wait(context.Context) error { return nil }
 func (a *noopDistributedApplier) Stop() error                { return nil }
+func (a *noopDistributedApplier) Stats() applier.Stats       { return applier.Stats{} }
 func (a *noopDistributedApplier) GetTargets() []applier.Target {
 	return nil
 }
@@ -54,12 +55,15 @@ func (s *noopChangeSource) FlushUnderTableLock(context.Context, []*dbconn.TableL
 }
 func (s *noopChangeSource) BlockWait(context.Context) error { return nil }
 func (s *noopChangeSource) GetDeltaLen() int                { return 0 }
+
+func (s *noopChangeSource) FlushResidual() (int, int) { return 0, 0 }
 func (s *noopChangeSource) SetWatermarkOptimization(context.Context, bool) error {
 	return nil
 }
 func (s *noopChangeSource) StartPeriodicFlush(context.Context, time.Duration) {}
 func (s *noopChangeSource) StopPeriodicFlush()                                {}
 func (s *noopChangeSource) AllChangesFlushed() bool                           { return true }
+func (s *noopChangeSource) Stop()                                             {}
 func (s *noopChangeSource) Close()                                            {}
 
 func TestDistributedCheckerHonorsYieldTimeoutConfig(t *testing.T) {

@@ -82,6 +82,114 @@ func TestCutOver(t *testing.T) {
 	require.Equal(t, 2, count)
 }
 
+// errorCountingHandler counts ERROR-level records and keeps their messages.
+type errorCountingHandler struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *errorCountingHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= slog.LevelError
+}
+
+func (h *errorCountingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.msgs = append(h.msgs, r.Message)
+	return nil
+}
+
+func (h *errorCountingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *errorCountingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *errorCountingHandler) errors() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.msgs...)
+}
+
+// TestCutoverStopsFeedDispatchUnderLock is the regression test for a shrinking
+// ALTER's post-cutover writes.
+//
+// The change stream is not stopped by cutover itself — nothing stops it until
+// Close() — and subscriptions are keyed by the *source* table name. So after the
+// rename, `<table>` resolves to the post-ALTER table while the subscription
+// still holds the pre-ALTER TableInfo, and the next application write arrives
+// with a row image that is short of the old column count:
+//
+//	PrimaryKeyValues: row has 2 values, fewer than the 3 table columns
+//
+// which used to kill the stream and log at Error on a migration that had
+// already succeeded. Cutover now retires the feed while it still holds the
+// exclusive lock, so those events are never dispatched.
+//
+// The write below lands after UNLOCK TABLES, which is precisely the window the
+// stop has to beat, so a stop placed after the lock rather than under it fails
+// this test intermittently rather than cleanly.
+func TestCutoverStopsFeedDispatchUnderLock(t *testing.T) {
+	t.Parallel()
+	testutils.NewTestTable(t, "dispatchstop1", `CREATE TABLE dispatchstop1 (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		dropme varchar(255) NOT NULL DEFAULT '',
+		PRIMARY KEY (id)
+	)`)
+	// The shape of "ALTER TABLE dispatchstop1 DROP COLUMN dropme": one column
+	// fewer than the table the subscription was built from.
+	testutils.RunSQL(t, `DROP TABLE IF EXISTS _dispatchstop1_new`)
+	testutils.RunSQL(t, `CREATE TABLE _dispatchstop1_new (
+		id int(11) NOT NULL AUTO_INCREMENT,
+		name varchar(255) NOT NULL,
+		PRIMARY KEY (id)
+	)`)
+
+	cfg, err := mysql.ParseDSN(testutils.DSN())
+	require.NoError(t, err)
+	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
+	require.NoError(t, err)
+	defer utils.CloseAndLog(db)
+
+	t1 := table.NewTableInfo(db, cfg.DBName, "dispatchstop1")
+	require.NoError(t, t1.SetInfo(t.Context()))
+	require.Len(t, t1.Columns, 3)
+	t1new := table.NewTableInfo(db, cfg.DBName, "_dispatchstop1_new")
+	require.NoError(t, t1new.SetInfo(t.Context()))
+
+	errLog := &errorCountingHandler{}
+	clientCfg := change.NewClientDefaultConfig()
+	clientCfg.Logger = slog.New(errLog)
+	feed := change.NewBinlogClient(db, cfg.Addr, cfg.User, cfg.Passwd,
+		applier.NewSingleTargetForTest(t, db), clientCfg)
+	defer feed.Close()
+	chunker, err := table.NewChunker(t1, table.ChunkerConfig{NewTable: t1new})
+	require.NoError(t, err)
+	require.NoError(t, feed.AddSubscription(t1, t1new, chunker))
+	require.NoError(t, feed.Start(t.Context()))
+
+	cutover, err := NewCutOver(db, []*cutoverConfig{{
+		table:        t1,
+		newTable:     t1new,
+		oldTableName: "_dispatchstop1_old",
+	}}, feed, dbconn.NewDBConfig(), slog.New(errLog))
+	require.NoError(t, err)
+	require.NoError(t, cutover.Run(t.Context()))
+
+	// A post-cutover application write: 2 values against the subscription's
+	// 3-column TableInfo. This is the event that used to be fatal.
+	testutils.RunSQL(t, `INSERT INTO dispatchstop1 (name) VALUES ('after-cutover')`)
+
+	// BlockWait proves the reader goroutine is still alive: it waits for the
+	// buffered position to reach the server's head, which only advances while
+	// readStream is running. Bounded so a dead reader fails fast rather than
+	// waiting out change.DefaultTimeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, feed.BlockWait(ctx), "the stream must survive post-cutover writes")
+
+	require.Empty(t, errLog.errors(), "a post-cutover write must not produce any Error-level log")
+	require.Zero(t, feed.GetDeltaLen(), "post-cutover events must not be buffered for apply")
+}
+
 // TestCutoverRenameCompletedDetection unit-tests the renameCompleted helper
 // against real server state: it must detect a committed cutover rename
 // (original exists, _new gone, _old exists — for every table in the config)

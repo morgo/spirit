@@ -39,6 +39,20 @@ const (
 	// Longer values require more memory, but permit more merging.
 	// I expect we will change this to 1hr-24hr in the future.
 	DefaultFlushInterval = 30 * time.Second
+	// DefaultFlushConcurrency is the number of applier batches a
+	// map-mode flush keeps in flight concurrently. The binlog apply
+	// path is synchronous REPLACE/DELETE statements — it does not use
+	// the copy path's write worker pool — so each stream tops out at
+	// DefaultBatchSize rows per statement round trip. On large tables
+	// where secondary index maintenance dominates, that is only a few
+	// hundred rows/s, which a busy source's distinct-key write rate can
+	// permanently outrun: the buffer pins at the soft limit and the
+	// migration never converges, however long it runs. Map-mode flush
+	// batches are disjoint by key and order-free (REPLACE/DELETE on
+	// distinct keys commute), so applying them concurrently is safe and
+	// multiplies the ceiling. Queue-mode drains (non-memory-comparable
+	// PK, post-copy) and under-lock (cutover) flushes remain serial.
+	DefaultFlushConcurrency = 8
 	// DefaultSubscriptionSoftLimitBytes caps the approximate memory held
 	// per subscription before HasChanged starts blocking on the buffered
 	// map's condition variable. The cap is "soft": a single oversized
@@ -47,6 +61,13 @@ const (
 	// rows (LONGTEXT / BLOB / large JSON) from OOMing the migrator
 	// while still guaranteeing forward progress regardless of row width.
 	// See pkg/change/subscription_buffered.go for the accounting model.
+	//
+	// Three behaviours keep the cap from starving the change reader:
+	// map-mode overwrites of already-buffered keys bypass it (dedup
+	// stays live under backpressure), parking requests an immediate
+	// flush rather than waiting for the periodic interval, and flushes
+	// release capacity per applied batch — the reader resumes as soon
+	// as the first batch lands, not when the whole buffer has drained.
 	//
 	// Operators should be aware that pausing the binlog reader for an
 	// extended period risks falling past the source's binlog retention

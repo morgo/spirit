@@ -20,10 +20,37 @@ const (
 	ChunkLogicalRowsCountMetricName  = "chunk_num_logical_rows"
 	ChunkAffectedRowsCountMetricName = "chunk_num_affected_rows"
 	// WriteThreadsMetricName reports the live write-thread (apply-worker) count
-	// chosen by the autoscaler. ThrottlerUtilizationMetricName reports the
-	// continuous load signal (0..>1) the autoscaler controls on.
-	WriteThreadsMetricName         = "write_threads"
+	// chosen by the autoscaler; ReadThreadsMetricName is its read-side
+	// counterpart (copier read-worker count). ThrottlerUtilizationMetricName
+	// reports the continuous load signal (0..>1) the autoscaler controls on.
+	WriteThreadsMetricName = "write_threads"
+	ReadThreadsMetricName  = "read_threads"
+	// ChecksumThreadsMetricName reports the live checksum worker count. The
+	// checksum phase scales its own pool (see pkg/checksum autoscaler), so it
+	// needs a gauge of its own rather than sharing the copier's read_threads.
+	ChecksumThreadsMetricName      = "checksum_threads"
 	ThrottlerUtilizationMetricName = "throttler_utilization"
+
+	// Applier pipeline gauges (see pkg/applier Stats). Together they
+	// distinguish a read-limited copy pipeline (queue near empty, workers
+	// idle) from a write-limited one (queue pegged at capacity with
+	// queue-wait far above write time).
+	ApplierQueueDepthMetricName    = "applier_queue_depth"
+	ApplierQueueCapacityMetricName = "applier_queue_capacity"
+	ApplierPendingWorkMetricName   = "applier_pending_work"
+	ApplierActiveWorkersMetricName = "applier_active_workers"
+	ApplierQueueWaitP50MetricName  = "applier_queue_wait_ms_p50"
+	ApplierQueueWaitP90MetricName  = "applier_queue_wait_ms_p90"
+	ApplierWriteTimeP50MetricName  = "applier_write_time_ms_p50"
+	ApplierWriteTimeP90MetricName  = "applier_write_time_ms_p90"
+	// applier_build_time_* is the client-side share of applier_write_time_*
+	// (statement construction), not an addition to it. applier_handoff_* is
+	// time write workers spent publishing completions, which was previously
+	// counted in no metric at all. See applier.Stats.
+	ApplierBuildTimeP50MetricName = "applier_build_time_ms_p50"
+	ApplierBuildTimeP90MetricName = "applier_build_time_ms_p90"
+	ApplierHandoffP50MetricName   = "applier_handoff_ms_p50"
+	ApplierHandoffP90MetricName   = "applier_handoff_ms_p90"
 )
 
 // Metrics are collection of MetricValues.

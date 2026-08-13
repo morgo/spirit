@@ -166,7 +166,7 @@ pkg/
   checksum/   → Post-copy data verification (CRC32 + BIT_XOR)
   dbconn/     → MySQL connection management, TLS, retries, locking, kill logic
   statement/  → SQL parsing via TiDB parser (ALTER, CREATE, DROP, RENAME)
-  lint/       → Static analysis framework for schemas and DDL (17 built-in linters)
+  lint/       → Static analysis framework for schemas and DDL (built-in linters)
   fmt/        → Schema file formatter (canonicalize CREATE TABLE .sql files)
   throttler/  → Rate limiting interface (noop, mock, replica-lag based)
   status/     → State machine and progress reporting
@@ -229,7 +229,7 @@ Uses the [TiDB parser](https://github.com/pingcap/tidb/tree/master/pkg/parser) f
 **Normalization pipeline:** MySQL rewrites many constructs when it stores a table (inline `PRIMARY KEY`/`UNIQUE` → table-level, column `CHECK` hoisted to table-level, `int(11)` → `int`, the legacy `BINARY` attribute → a `_bin` collation). To stop a hand-written schema from diffing spuriously against a live `SHOW CREATE TABLE`, `ParseCreateTable` runs a registry of **normalization rules** over the parsed `CreateTable` before returning it. Each rule is a `Normalizer` (`normalize.go`) that self-registers via `init()` in its own `normalize_*.go` file and rewrites the struct's fields in place (never `Raw`). Rules run after the struct is fully parsed, so they are order-independent. Consequence: `CreateTable.Diff` **assumes normalized input**. The TiDB parser already folds most type *aliases* (`BOOL`→`tinyint(1)`, `SERIAL`→`bigint unsigned … UNIQUE`, `INTEGER`→`int`), so rules only handle what the parser leaves alone. See `pkg/statement/README.md` for the full concept and rule list.
 
 ### `pkg/lint`
-17 built-in linters that auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
+Built-in linters auto-register via `init()`. Each linter is in its own file (`lint_<name>.go`). To add a new linter, create a new file following the existing pattern and implement the `Linter` interface from `linter.go`.
 
 ### `pkg/dbconn`
 Handles connection management including:
@@ -301,6 +301,8 @@ Key principles:
 
 ### Adding a normalization rule
 Normalization canonicalizes a parsed `CreateTable` so a user-written schema matches what MySQL stores (and reports via `SHOW CREATE TABLE`), preventing spurious diffs. It mirrors the linter registration pattern.
+
+**All MySQL canonical-form handling belongs in this layer.** When the desired schema and the live `SHOW CREATE TABLE` disagree only in representation — parenthesization, display widths, inline vs table-level declarations, auto-generated names — fix it by adding a `Normalizer` rule, never by special-casing `Diff`, the parse helpers, or restore functions. Keeping every MySQL-ism in the registry is what keeps the rest of the code free of per-exception complexity: `Diff` and the parser assume canonical input and stay simple.
 1. Create `pkg/statement/normalize_<name>.go` with a type implementing the `Normalizer` interface (`Name() string` + `Normalize(*CreateTable) *CreateTable`)
 2. Register it in an `init()` function using `registerNormalizer()` (defined in `normalize.go`)
 3. Mutate the **structured** fields of `CreateTable` (`Columns`, `Indexes`, …) and return the same instance — never touch `Raw`

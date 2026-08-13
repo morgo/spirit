@@ -177,12 +177,15 @@ func (f *fakeChangeSource) FlushUnderTableLock(_ context.Context, _ []*dbconn.Ta
 }
 func (f *fakeChangeSource) BlockWait(_ context.Context) error { return nil }
 func (f *fakeChangeSource) GetDeltaLen() int                  { return 0 }
+
+func (f *fakeChangeSource) FlushResidual() (int, int) { return 0, 0 }
 func (f *fakeChangeSource) SetWatermarkOptimization(_ context.Context, _ bool) error {
 	return nil
 }
 func (f *fakeChangeSource) StartPeriodicFlush(_ context.Context, _ time.Duration) {}
 func (f *fakeChangeSource) StopPeriodicFlush()                                    {}
 func (f *fakeChangeSource) AllChangesFlushed() bool                               { return true }
+func (f *fakeChangeSource) Stop()                                                 {}
 func (f *fakeChangeSource) Close()                                                { f.closed.Store(true) }
 
 // TestCloseRunsAllClosersOnError pins the Close() aggregation contract:

@@ -26,17 +26,33 @@ const (
 	ScopeCutover     ScopeFlag = 1 << 3
 	ScopePostCutover ScopeFlag = 1 << 4
 	ScopeTesting     ScopeFlag = 1 << 5
-	// ScopeStatement marks preflight checks that classify the ALTER statement
-	// itself: they decide from the parsed statement alone whether Spirit
-	// refuses to run it, never touching a database connection. Callers can run
-	// them via RunChecks with only Resources.Statement set (Table is optional
-	// and widens coverage when present) to determine up front that a statement
-	// would be refused — for example, a planning tool classifying DDL before
-	// an apply. Passing these checks is not a promise Spirit will accept the
-	// statement: checks that need a live connection (existing foreign keys,
-	// triggers, privileges, ...) still run only at preflight. A check tagged
-	// with this scope must tolerate every Resources field except Statement
-	// being unset.
+	// ScopeStatement marks preflight checks a caller can run ahead of an apply
+	// to learn that Spirit will refuse a statement. Callers run them via
+	// RunChecks with Resources.Statement set and, optionally,
+	// Resources.Table — the table's current metadata, which widens coverage to
+	// the checks that compare the statement against the existing column
+	// definitions. Neither needs a database connection: Table can be built
+	// from the table's DDL with statement.CreateTable.ToTableInfo. A check
+	// tagged with this scope must tolerate every Resources field except
+	// Statement being unset.
+	//
+	// A failure here is a refusal the caller can report as certain, so the
+	// scope only carries checks that no earlier stage can bypass on any
+	// server. Spirit attempts MySQL's native DDL — ALGORITHM=INSTANT, then a
+	// safe-INPLACE subset — before it runs preflight checks, and MySQL decides
+	// what that completes, which varies with the server version and the table.
+	// A preflight check the native DDL may complete (dropadd, rename) is
+	// deliberately excluded: claiming those as refusals would report failure
+	// for an apply that succeeds.
+	//
+	// That exclusion only ever under-reports, which is the safe direction:
+	// passing these checks is not a promise Spirit will accept the statement,
+	// only a failure is a claim. An excluded check still refuses at preflight
+	// whenever the native attempt does not take the statement — Spirit skips
+	// the attempt altogether for a multi-table change, and an older server
+	// rejects shapes a newer one completes instantly. Checks that need a live
+	// connection (existing foreign keys, triggers, privileges, ...) likewise
+	// run only at preflight.
 	ScopeStatement ScopeFlag = 1 << 6
 )
 
@@ -61,6 +77,11 @@ type Resources struct {
 	// change source. The configuration check uses this to additionally
 	// validate gtid_mode and enforce_gtid_consistency on the source.
 	GTID bool
+
+	// scope is the scope the checks are running under, set by RunChecks. A
+	// check that tolerates a missing resource for an external caller reads it
+	// to tell that case from a migration which failed to supply the resource.
+	scope ScopeFlag
 }
 
 type check struct {
@@ -86,7 +107,14 @@ func registerCheck(name string, callback func(context.Context, Resources, *slog.
 // RunChecks runs all checks that are registered for the given scope.
 // Checks run in name order so that a statement failing more than one
 // check always reports the same error.
+//
+// logger may be nil: checks log as they run, and a caller classifying a
+// statement without a logger to hand must get a verdict rather than a panic.
 func RunChecks(ctx context.Context, r Resources, logger *slog.Logger, scope ScopeFlag) error {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	r.scope = scope
 	lock.Lock()
 	registered := maps.Clone(checks)
 	lock.Unlock()

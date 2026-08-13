@@ -86,7 +86,11 @@ func (l *Replica) Open(ctx context.Context) error {
 					return
 				}
 				if err := l.UpdateLag(ctx); err != nil {
-					l.logger.Error("error getting lag", "error", err)
+					if isShutdownError(ctx, err) {
+						return // teardown cancelled the in-flight poll; not a monitoring failure
+					}
+					l.logger.Error("error polling replica lag; keeping the last reading (throttling fails closed if polling stays stale)",
+						"error", err)
 				}
 			}
 		}

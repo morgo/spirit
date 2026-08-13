@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/block/spirit/pkg/applier"
+	"github.com/block/spirit/pkg/autoscale"
 	"github.com/block/spirit/pkg/buildinfo"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/checkpoint"
@@ -70,13 +72,17 @@ type Runner struct {
 	// With a stmt, alter, table, newTable.
 	changes []*tableChange
 
-	status     status.State  // must use atomic helpers to change.
-	replClient change.Source // feed contains all binlog subscription activity.
+	status     status.Tracker // owns the current state and per-state timing.
+	replClient change.Source  // feed contains all binlog subscription activity.
 	throttler  throttler.Throttler
 
-	copier       copier.Copier
-	copyChunker  table.Chunker // the chunker for copying
-	copyDuration time.Duration // how long the copy took
+	copier      copier.Copier
+	copyChunker table.Chunker // the chunker for copying
+
+	// applier is the shared write layer used by both the copier (buffered
+	// copy) and the replication client (binlog deltas). Kept on the runner
+	// so Status() can report its pipeline snapshot.
+	applier applier.Applier
 
 	checker         checksum.Checker
 	checksumChunker table.Chunker // the chunker for checksum
@@ -102,10 +108,6 @@ type Runner struct {
 	// path's UPDATE, resurrecting the watermark on the latest row — the
 	// row resume reads. It also guards continuousChecker (see above).
 	checkpointMu sync.Mutex
-
-	// Track some key statistics.
-	startTime             time.Time
-	sentinelWaitStartTime time.Time
 
 	// Used by the test-suite and some post-migration output.
 	// Indicates if certain optimizations applied.
@@ -161,6 +163,25 @@ func NewRunner(m *Migration) (*Runner, error) {
 	return runner, nil
 }
 
+// checksumOffPoolConns is the connection headroom the checksum phase needs on
+// top of its REPEATABLE READ transaction pool, for the two things it does that
+// the pool does not cover. Both are serialized, so one connection each:
+//
+//   - Chunk repair. When a chunk mismatches, replaceChunk runs its DELETE and
+//     REPLACE on r.db rather than on the pooled read-view transaction, and the
+//     two statements run sequentially under the checker's recopyLock.
+//   - Chunker prefetch. chunker.Next() runs a SELECT ... LIMIT 1 OFFSET n on
+//     Ti.Db to find the next chunk boundary, also off-pool. Workers call it
+//     concurrently but the chunker's own mutex serializes them, so only one
+//     such query is ever in flight.
+//
+// This reserve matters more than it looks. The transaction pool is sized to the
+// read ceiling and every one of its transactions pins a connection for the whole
+// phase whether or not a worker has it checked out, so there is no incidental
+// slack left to absorb either query — without the reserve, chunk dispatch would
+// queue behind applier and control-plane connections.
+const checksumOffPoolConns = 2
+
 // controlPlaneConns is the connection headroom the main pool reserves above
 // the copy hot path (Threads read workers + WriteThreads applier workers) for
 // the periodic control-plane queries that also run on r.db:
@@ -202,7 +223,7 @@ func (r *Runner) attemptMySQLDDL(ctx context.Context) error {
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
-	r.startTime = time.Now()
+	r.status.Begin()
 	bi := buildinfo.Get()
 	r.logger.Info("Starting spirit migration",
 		"version", bi.Version,
@@ -229,23 +250,26 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Size the connection pool the same way for both the buffered and
 	// unbuffered paths:
 	//
-	//	pool = threads + write-threads + controlPlaneConns()
+	//	pool = threads + write-threads + controlPlaneConns() + checksumOffPoolConns
 	//
-	//	- threads             copier + checksum read concurrency
-	//	- write-threads       replication-applier write concurrency
-	//	- controlPlaneConns() headroom for the periodic control-plane queries
-	//	                      that also run on the main pool (checkpoint,
-	//	                      replication-flush poll, per-table stats), so they
-	//	                      don't serialize behind a single spare connection
-	//	                      once the copier + applier saturate the budget.
+	//	- threads              copier + checksum read concurrency
+	//	- write-threads        replication-applier write concurrency
+	//	- controlPlaneConns()  headroom for the periodic control-plane queries
+	//	                       that also run on the main pool (checkpoint,
+	//	                       replication-flush poll, per-table stats), so they
+	//	                       don't serialize behind a single spare connection
+	//	                       once the copier + applier saturate the budget.
+	//	- checksumOffPoolConns the two queries the checksum runs outside its
+	//	                       fully-checked-out transaction pool (chunk repair
+	//	                       and chunker prefetch).
 	//
-	// WriteThreads may still be 0 here — that's the "auto-size on Aurora"
-	// sentinel, which can only be resolved once we have a connection to probe
-	// the server. So this seeds the pool with what's known now, and
-	// setupCopierCheckerAndReplClient grows it to the final size after
-	// resolving WriteThreads. The pool only ever grows (via SetMaxOpenConns);
-	// later phases (checksum, cutover) ratchet it further but never shrink it.
-	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns()
+	// This seeds the pool from the configured thread counts. Autoscaling can
+	// replace both counts (and raise their ceilings) once there is a connection
+	// to probe the instance with, so setupCopierCheckerAndReplClient grows the
+	// pool to its final size there. The pool only ever grows (via
+	// SetMaxOpenConns); later phases (checksum, cutover) ratchet it further but
+	// never shrink it.
+	r.dbConfig.MaxOpenConnections = r.migration.Threads + r.migration.WriteThreads + r.controlPlaneConns() + checksumOffPoolConns
 	r.db, err = dbconn.New(r.dsn(), r.dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to main database (DSN: %s): %w", dbconn.RedactDSN(r.dsn()), err)
@@ -366,12 +390,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	// of migrations usually spend time. It is not strictly necessary,
 	// but we always recopy the last-bit, even if we are resuming
 	// partially through the checksum.
-	r.status.Set(status.CopyRows)
-	if err := r.copier.Run(ctx); err != nil {
+	if err := r.status.Do(status.CopyRows, func() error {
+		return r.copier.Run(ctx)
+	}); err != nil {
 		return err
 	}
 	r.logger.Info("copy rows complete")
-	r.copyDuration = time.Since(r.copier.StartTime())
 
 	// Disable both watermark optimizations so that all changes can be flushed.
 	// For non-memory-comparable PKs this also drains the buffered map and
@@ -398,18 +422,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	// that the sentinel table was created manually after the migration
 	// started.
 	if r.migration.RespectSentinel {
-		r.sentinelWaitStartTime = time.Now()
-		r.status.Set(status.WaitingOnSentinelTable)
 		// Block on the sentinel via the shared sentinel.Wait (poll/timeout timing
 		// lives in the sentinel package). The continuous-checksum lifecycle and
 		// watermark invalidation are migration-specific — invalidateChecksumWatermark
 		// scopes its UPDATE by statement because the checkpoint table is shared in
 		// multi-table mode — so they are injected as callbacks. See pkg/sentinel.
-		if err := sentinel.Wait(ctx, sentinel.WaitConfig{
-			Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
-			RunChecksum:         r.runContinuousChecksum,
-			InvalidateWatermark: r.invalidateChecksumWatermark,
-			Logger:              r.logger,
+		if err := r.status.Do(status.WaitingOnSentinelTable, func() error {
+			return sentinel.Wait(ctx, sentinel.WaitConfig{
+				Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.db) },
+				RunChecksum:         r.runContinuousChecksum,
+				InvalidateWatermark: r.invalidateChecksumWatermark,
+				Logger:              r.logger,
+			})
 		}); err != nil {
 			return err
 		}
@@ -420,29 +444,33 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	// It's time for the final cut-over, where
 	// the tables are swapped under a lock.
-	r.status.Set(status.CutOver)
-	cutoverCfg := []*cutoverConfig{}
-	for _, change := range r.changes {
-		cutoverCfg = append(cutoverCfg, &cutoverConfig{
-			table:          change.table,
-			newTable:       change.newTable,
-			oldTableName:   change.oldTableName(),
-			useTestCutover: r.migration.useTestCutover, // indicates we want the test cutover
-		})
-	}
-	cutover, err := NewCutOver(r.db, cutoverCfg, r.replClient, r.dbConfig, r.logger)
-	if err != nil {
-		return err
-	}
-	// Drop the _old table if it exists. This ensures
-	// that the rename will succeed (although there is a brief race)
-	for _, change := range r.changes {
-		if err := change.dropOldTable(ctx); err != nil {
+	if err := r.status.Do(status.CutOver, func() error {
+		cutoverCfg := []*cutoverConfig{}
+		for _, change := range r.changes {
+			cutoverCfg = append(cutoverCfg, &cutoverConfig{
+				table:          change.table,
+				newTable:       change.newTable,
+				oldTableName:   change.oldTableName(),
+				useTestCutover: r.migration.useTestCutover, // indicates we want the test cutover
+			})
+		}
+		cutover, err := NewCutOver(r.db, cutoverCfg, r.replClient, r.dbConfig, r.logger)
+		if err != nil {
 			return err
 		}
-	}
-	if err := cutover.Run(ctx); err != nil {
-		return fmt.Errorf("cutover failed: %w", err)
+		// Drop the _old table if it exists. This ensures
+		// that the rename will succeed (although there is a brief race)
+		for _, change := range r.changes {
+			if err := change.dropOldTable(ctx); err != nil {
+				return err
+			}
+		}
+		if err := cutover.Run(ctx); err != nil {
+			return fmt.Errorf("cutover failed: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if !r.migration.SkipDropAfterCutover {
 		for _, change := range r.changes {
@@ -467,9 +495,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		"instant-ddl", r.usedInstantDDL,
 		"inplace-ddl", r.usedInplaceDDL,
 		"total-chunks", copiedChunks,
-		"copy-rows-time", r.copyDuration.Round(time.Second).String(),
-		"checksum-time", r.checker.ExecTime().Round(time.Second).String(),
-		"total-time", time.Since(r.startTime).Round(time.Second).String(),
+		"copy-rows-time", r.status.Duration(status.CopyRows).Round(time.Second).String(),
+		"checksum-time", r.status.Duration(status.Checksum).Round(time.Second).String(),
+		"total-time", r.status.TotalElapsed().Round(time.Second).String(),
 		"conns-in-use", r.db.Stats().InUse,
 	)
 	// cleanup all the tables
@@ -492,13 +520,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // perform the initial checksum. When defer-cutover is not in use this
 // is also the last phase before cutover.
 func (r *Runner) postCopyPhase(ctx context.Context) error {
-	r.status.Set(status.ApplyChangeset)
 	// Disable the periodic flush and flush all pending events.
 	// We want it disabled for ANALYZE TABLE and acquiring a table lock
 	// *but* it will be started again briefly inside of the checksum
 	// runner to ensure that the lag does not grow too long.
-	r.replClient.StopPeriodicFlush()
-	if err := r.replClient.Flush(ctx); err != nil {
+	if err := r.status.Do(status.ApplyChangeset, func() error {
+		r.replClient.StopPeriodicFlush()
+		return r.replClient.Flush(ctx)
+	}); err != nil {
 		return err
 	}
 
@@ -506,30 +535,34 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// This is required so on cutover plans don't go sideways, which
 	// is at elevated risk because the batch loading can cause statistics
 	// to be out of date.
-	r.status.Set(status.AnalyzeTable)
-	r.logger.Info("Running ANALYZE TABLE")
-	for _, change := range r.changes {
-		if err := dbconn.Exec(ctx, r.db, "ANALYZE TABLE %n.%n", change.newTable.SchemaName, change.newTable.TableName); err != nil {
-			return err
-		}
+	if err := r.status.Do(status.AnalyzeTable, func() error {
+		r.logger.Info("Running ANALYZE TABLE")
+		for _, change := range r.changes {
+			if err := dbconn.Exec(ctx, r.db, "ANALYZE TABLE %n.%n", change.newTable.SchemaName, change.newTable.TableName); err != nil {
+				return err
+			}
 
-		// Disable the auto-update statistics go routine. This is because the
-		// checksum uses a consistent read and doesn't see any of the new rows in the
-		// table anyway. Chunking in the space where the consistent reads may need
-		// to read a lot of older versions is *much* slower.
-		// In a previous migration:
-		// - The checksum chunks were about 100K rows each
-		// - When the checksum reached the point at which the copier had reached,
-		//   the chunks slowed down to about 30 rows(!)
-		// - The checksum task should have finished in the next 5 minutes, but instead
-		//   the projected time was another 40 hours.
-		// My understanding of MVCC in MySQL is that the consistent read threads may
-		// have had to follow pointers to older versions of rows in UNDO, which is a
-		// linked list to find the specific versions these transactions needed. It
-		// appears that it is likely N^2 complexity, and we are better off to just
-		// have the last chunk of the checksum be slow and do this once rather than
-		// repeatedly chunking in this range.
-		change.table.DisableAutoUpdateStatistics.Store(true)
+			// Disable the auto-update statistics go routine. This is because the
+			// checksum uses a consistent read and doesn't see any of the new rows in the
+			// table anyway. Chunking in the space where the consistent reads may need
+			// to read a lot of older versions is *much* slower.
+			// In a previous migration:
+			// - The checksum chunks were about 100K rows each
+			// - When the checksum reached the point at which the copier had reached,
+			//   the chunks slowed down to about 30 rows(!)
+			// - The checksum task should have finished in the next 5 minutes, but instead
+			//   the projected time was another 40 hours.
+			// My understanding of MVCC in MySQL is that the consistent read threads may
+			// have had to follow pointers to older versions of rows in UNDO, which is a
+			// linked list to find the specific versions these transactions needed. It
+			// appears that it is likely N^2 complexity, and we are better off to just
+			// have the last chunk of the checksum be slow and do this once rather than
+			// repeatedly chunking in this range.
+			change.table.DisableAutoUpdateStatistics.Store(true)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// The checksum is ONLINE after an initial lock
@@ -672,23 +705,14 @@ func (r *Runner) checkpointTbl() *checkpoint.Table {
 func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	var err error
 
-	// Resolve the number of apply (write) threads now that we have a
-	// connection. WriteThreads==0 means "auto-size": on Aurora it becomes the
-	// instance vCPU count; on non-Aurora there is no reliable vCPU signal to
-	// size from, so it falls back to the default. Idempotent: a resolved
-	// (non-zero) value passes through unchanged if this runs again.
-	r.migration.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.db, r.migration.WriteThreads, r.logger)
-	if err != nil {
-		return err
-	}
 	// Autoscaling drives the buffered copier's applier worker pool; the legacy
 	// unbuffered copier has no such pool, so the combination downgrades to a
 	// fixed thread count with a warning rather than silently doing nothing.
-	autoscale := r.migration.EnableExperimentalAutoscaling
-	if autoscale && r.migration.Unbuffered {
+	autoscaleEnabled := r.migration.EnableExperimentalAutoscaling
+	if autoscaleEnabled && r.migration.Unbuffered {
 		r.logger.Warn("--enable-experimental-autoscaling has no effect with --unbuffered; write threads stay fixed",
 			"write_threads", r.migration.WriteThreads)
-		autoscale = false
+		autoscaleEnabled = false
 	}
 	// redoAware tracks whether the Aurora threads throttler will run its
 	// redo-aware perf_schema signal (which excludes redo-log waiters). It gates
@@ -699,27 +723,107 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// (and logs it) when the throttler is built; this is an independent probe of
 	// the same source in the same setup phase, used only to size maxWrite here.
 	redoAware := false
-	// On Aurora instances below MinAutoscaleVCPUs the utilization signal is too
-	// coarse to control on — one thread is half or more of the dead band — so
-	// the controller could only oscillate; run a fixed pool instead. Aurora is
-	// the one place the autoscaler can engage at all (it needs the continuous
-	// signal only the Aurora throttlers provide); an IsAurora probe failure is
-	// benign here, matching AuroraSetup.Build, since without Aurora the
-	// autoscaler stays dormant regardless and the copier logs its own downgrade.
-	if autoscale {
-		if isAurora, err := throttler.IsAurora(ctx, r.db); err == nil && isAurora {
+	// readCeiling is the upper bound for the read side (the copier's read workers
+	// and the checksum's workers). It stays zero unless it was derived from the
+	// instance below, which is also the marker for "nothing can grow" — see the
+	// maxRead fallback.
+	readCeiling := 0
+	// Aurora is the one place the autoscaler can engage at all: it needs the
+	// continuous signal only the Aurora throttlers provide. Below
+	// autoscale.MinVCPUs it must not engage even there — one thread is half or
+	// more of the dead band, so the controller could only oscillate.
+	//
+	// A probe failure disables autoscaling rather than falling through. It is a
+	// separate, uncached query from the one AuroraSetup.Build runs later, so a
+	// blip here does not stop the throttler from selecting a GradualThrottler
+	// that the copier would then scale against — with the flag-relative bounds
+	// this function exists to replace, and with both guards below skipped (the
+	// MinVCPUs check, and redoAware staying false so an unguarded redo log gets
+	// the 2x ceiling instead of the capped one). Autoscaling is an optimization
+	// and the guards are not, so an unreadable instance means fixed pools.
+	if autoscaleEnabled {
+		isAurora, err := throttler.IsAurora(ctx, r.db)
+		switch {
+		case err != nil:
+			r.logger.Warn("autoscaling disabled: could not determine whether the target is Aurora; thread counts stay as configured",
+				"error", err.Error(),
+				"threads", r.migration.Threads,
+				"write_threads", r.migration.WriteThreads)
+			autoscaleEnabled = false
+		case !isAurora:
+			// Left enabled deliberately: the checksum's backlog veto works on any
+			// server, so the flag still buys shedding. Only growth needs Aurora,
+			// and the copier logs its own downgrade for the copy phase.
+		default:
 			vCPUs, err := throttler.AuroraVCPUs(ctx, r.db)
 			if err != nil {
 				return err
 			}
-			if vCPUs < throttler.MinAutoscaleVCPUs {
-				r.logger.Warn("autoscaling disabled: instance is too small for the utilization signal to guide scaling; write threads stay fixed",
-					"vcpus", vCPUs, "min_vcpus", throttler.MinAutoscaleVCPUs,
+			if vCPUs < autoscale.MinVCPUs {
+				r.logger.Warn("autoscaling disabled: instance is too small for the utilization signal to guide scaling; thread counts stay as configured",
+					"vcpus", vCPUs, "min_vcpus", autoscale.MinVCPUs,
+					"threads", r.migration.Threads,
 					"write_threads", r.migration.WriteThreads)
-				autoscale = false
-			} else {
-				redoAware = throttler.CanReadRedoAwareThreads(ctx, r.db) == nil
+				autoscaleEnabled = false
+				break
 			}
+			redoAware = throttler.CanReadRedoAwareThreads(ctx, r.db) == nil
+			// Autoscaling has engaged, so it owns the thread counts: --threads
+			// and --write-threads are ignored and both pools are sized from the
+			// instance instead. The alternative — honoring the flags as starting
+			// points — makes the outcome depend on a number the caller usually
+			// left at its default, and that default is what capped the checksum
+			// at 8 workers on a 24xlarge no matter how much headroom the signal
+			// reported. A controller that is told to find the right size should
+			// not also be told where to stop.
+			//
+			// The log line reports only the derived counts: this function runs
+			// twice when a resume attempt fails and falls back to a fresh
+			// migration, and by the second call the fields below hold the first
+			// call's derived values rather than anything the caller configured.
+			// The derivation is idempotent (same instance, same numbers), so the
+			// second line agreeing with the first is correct.
+			var readStart int
+			readStart, readCeiling = autoscale.ReadBounds(vCPUs)
+			writeStart := autoscale.WriteStart(vCPUs)
+
+			// Both derivations above size the pools from the target. That
+			// assumes a worker is mostly waiting on the server, which stops
+			// being true when spirit's own host is small — a worker also builds
+			// its statement locally, which is pure client CPU. Take the client
+			// ceiling so a small pod cannot derive a thread count it has no
+			// cores to run: the excess would add queueing and latency, and
+			// nothing on the target side can see it (its CPU and commit latency
+			// both read idle while spirit is the one saturated).
+			//
+			// Applied to the derived numbers only. An explicitly configured
+			// --threads/--write-threads above this is the caller's decision and
+			// is warned about, not overridden, below.
+			clientCeiling := autoscale.ClientCeiling()
+			cappedRead, cappedWrite := min(readStart, clientCeiling), min(writeStart, clientCeiling)
+			if cappedRead != readStart || cappedWrite != writeStart {
+				r.logger.Warn("thread counts capped by this host's CPU count: the target would justify more workers than spirit has cores to run them on. Give spirit more CPU to use the target's full capacity",
+					"gomaxprocs", runtime.GOMAXPROCS(0),
+					"client_ceiling", clientCeiling,
+					"read_threads", cappedRead, "instance_read_threads", readStart,
+					"write_threads", cappedWrite, "instance_write_threads", writeStart)
+				readStart, writeStart = cappedRead, cappedWrite
+			}
+			// The read ceiling is capped too, so the checksum does not
+			// pre-create transactions under the table lock for workers this
+			// host cannot drive — that ceiling is paid in lock time whether or
+			// not scaling reaches it. Unconditionally, not just when a start was
+			// clipped: with today's formulas the ceiling cannot exceed the
+			// client ceiling while both starts fit (that would need vCPUs <
+			// MinVCPUs), but that invariant lives in another package, and the
+			// write side's ceiling below is capped unconditionally too.
+			readCeiling = max(min(readCeiling, clientCeiling), readStart)
+			r.logger.Info("autoscaling engaged: thread counts are derived from the instance; --threads and --write-threads are ignored",
+				"vcpus", vCPUs,
+				"read_threads", readStart, "max_read_threads", readCeiling,
+				"write_threads", writeStart)
+			r.migration.Threads = readStart
+			r.migration.WriteThreads = writeStart
 		}
 	}
 	// Resolve the autoscaler's upper bound. When autoscaling is disabled this
@@ -729,15 +833,56 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	// autoscaler can shed but not oversubscribe the redo log unguarded (see
 	// ResolveMaxWriteThreads).
 	commitLatencyEnabled := r.migration.MaxCommitLatency > 0
-	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscale, redoAware, commitLatencyEnabled)
-	// Finalize the pool now that WriteThreads (and its autoscale ceiling) is
-	// known: threads + maxWrite + controlPlaneConns() (see the MaxOpenConnections
-	// doc in Run). Sizing for maxWrite ensures a scaled-up applier never starves
-	// on connections. This is a no-op unless WriteThreads was auto-sized up from 0
-	// or autoscaling raised the ceiling; the pool only ever grows.
-	if poolSize := r.migration.Threads + maxWrite + r.controlPlaneConns(); poolSize > r.dbConfig.MaxOpenConnections {
+	maxWrite := throttler.ResolveMaxWriteThreads(r.migration.WriteThreads, autoscaleEnabled, redoAware, commitLatencyEnabled)
+	// The autoscaler's ceiling gets the same client-side bound as the start value:
+	// capping the start but letting growth walk past it would just re-arrive at a
+	// thread count this host cannot run, 15 seconds at a time. Never below the
+	// start value, which a pool cannot be controlled beneath.
+	if clientCeiling := autoscale.ClientCeiling(); maxWrite > clientCeiling {
+		maxWrite = max(clientCeiling, r.migration.WriteThreads)
+	}
+	// Configured counts are not overridden — an operator who names a number owns
+	// it — but the mismatch is worth saying once, since the symptom (flat
+	// throughput as threads rise, with an idle-looking target) is hard to read.
+	if configured := max(r.migration.Threads, r.migration.WriteThreads); configured > autoscale.ClientCeiling() {
+		r.logger.Warn("configured thread count is high for this host's CPU count; the extra workers may add latency without throughput",
+			"gomaxprocs", runtime.GOMAXPROCS(0),
+			"client_ceiling", autoscale.ClientCeiling(),
+			"threads", r.migration.Threads,
+			"write_threads", r.migration.WriteThreads)
+	}
+	// The read side's ceiling is half the instance when autoscaling engaged above
+	// (autoscale.ReadBounds). The pool below is sized for it, since readers scaled
+	// above the connection budget would just queue on the sql.DB pool, buying no
+	// extra parallelism.
+	//
+	// A zero readCeiling means the gate above did not derive one, which is also
+	// exactly the case where neither read pool can grow: growth needs the
+	// continuous signal only the Aurora throttlers supply, and if we could not
+	// confirm Aurora then neither the copier's autoscaler nor the checksum's will
+	// have a GradualThrottler to grow against. Provision the configured count and
+	// no more. That matters most for the checksum, which turns this ceiling into
+	// transactions started serially under the table lock whether or not scaling
+	// can ever reach it — capacity nothing can use, paid for in lock time. (The
+	// flag still buys the checksum its backlog-shedding veto there; only growth
+	// is off, so nothing is lost by not reserving for it.)
+	maxRead := readCeiling
+	if maxRead == 0 {
+		maxRead = copier.ResolveMaxReadThreads(r.migration.Threads, false)
+	}
+	// Finalize the pool now that both ceilings are known: maxRead + maxWrite +
+	// controlPlaneConns() + checksumOffPoolConns (see the MaxOpenConnections doc
+	// in Run). Sizing for the ceilings ensures a scaled-up applier or reader pool
+	// never starves on connections. This is a no-op unless autoscaling raised a
+	// ceiling; the pool only ever grows.
+	//
+	// The maxRead term covers the checksum as well as the copy: the checksum's
+	// transaction pool is sized to the same ceiling (see the checker's
+	// AutoscaleConfig below) and the copier's readers have finished by then, so
+	// the two phases reuse one allocation rather than each needing their own.
+	if poolSize := maxRead + maxWrite + r.controlPlaneConns() + checksumOffPoolConns; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
-		r.db.SetMaxOpenConns(poolSize)
+		dbconn.SetPoolSize(r.db, poolSize)
 	}
 
 	r.checkpointTable = table.NewTableInfo(r.db, r.changes[0].table.SchemaName, r.checkpointTableName())
@@ -756,14 +901,16 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 	appl, err := applier.NewSingleTargetApplier(
 		applier.Target{DB: r.db},
 		&applier.ApplierConfig{
-			Logger:   r.logger,
-			DBConfig: r.dbConfig,
-			Threads:  r.migration.WriteThreads,
+			Logger:      r.logger,
+			DBConfig:    r.dbConfig,
+			Threads:     r.migration.WriteThreads,
+			MetricsSink: r.metricsSink,
 		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create applier: %w", err)
 	}
+	r.applier = appl
 
 	// Create copier with the prepared chunker
 	r.copier, err = copier.NewCopier(r.db, r.copyChunker, &copier.CopierConfig{
@@ -776,9 +923,10 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		Applier:         appl,
 		Unbuffered:      r.migration.Unbuffered,
 		Autoscale: copier.AutoscaleConfig{
-			Enabled:      autoscale,
-			StartThreads: r.migration.WriteThreads,
-			MaxThreads:   maxWrite,
+			Enabled:        autoscaleEnabled,
+			StartThreads:   r.migration.WriteThreads,
+			MaxThreads:     maxWrite,
+			MaxReadThreads: maxRead,
 		},
 	})
 	if err != nil {
@@ -816,6 +964,17 @@ func (r *Runner) setupCopierCheckerAndReplClient(ctx context.Context) error {
 		FixDifferences:  true,
 		MaxRetries:      3,
 		YieldTimeout:    r.migration.ChecksumYieldTimeout,
+		MetricsSink:     r.metricsSink,
+		// The checksum reads with its own pool, so it shares the read side's
+		// bounds: it starts at Threads and grows to maxRead, which is already in
+		// the pool sizing above. The copier's readers have finished by the time the
+		// checksum runs, so the checksum reuses that headroom rather than adding to
+		// it. The only checksum-specific term is checksumOffPoolConns, for the
+		// queries that run off-pool.
+		Autoscale: checksum.AutoscaleConfig{
+			Enabled:    autoscaleEnabled,
+			MaxThreads: maxRead,
+		},
 	})
 
 	return err
@@ -886,7 +1045,31 @@ func (r *Runner) closeReplicas() error {
 	return errors.Join(errs...)
 }
 
-// setupThrottler sets up the throttlers used to pace the copier:
+// setThrottlerOnPhases hands the resolved throttler to every phase that paces
+// itself against it. The copier always accepts one; the checksum does so via
+// the optional checksum.ThrottleAware capability (test doubles and the
+// continuous checker do not implement it, and do not need to).
+//
+// Both phases get the same composite, but they do not react to the same parts of
+// it: the copier writes and so honours every signal in it, while the checksum
+// narrows it to the load signals (see checksum's loadOnlyThrottler — a read-only
+// snapshot pass cannot cause replica lag, so pausing it on lag would only hold
+// the snapshot open for longer).
+func (r *Runner) setThrottlerOnPhases() {
+	r.copier.SetThrottler(r.throttler)
+	if aware, ok := r.checker.(checksum.ThrottleAware); ok {
+		aware.SetThrottler(r.throttler)
+	} else {
+		// Not fatal: the checksum falls back to its Noop and runs unthrottled,
+		// which is how it behaved before it learned to throttle at all. Worth a
+		// line so it is visible if a future checker type silently loses the
+		// capability.
+		r.logger.Debug("checker does not support throttling; checksum will run unpaced")
+	}
+}
+
+// setupThrottler sets up the throttlers used to pace the copier and the
+// checksum:
 //   - one replication throttler per --replica-dsn (slowest wins)
 //   - a commit-latency throttler if the source is detected as Aurora and
 //     --max-commit-latency is positive (issue #468)
@@ -899,6 +1082,13 @@ func (r *Runner) closeReplicas() error {
 func (r *Runner) setupThrottler(ctx context.Context) error {
 	if r.migration.useTestThrottler {
 		// We are in tests, add a throttler that always throttles.
+		//
+		// Deliberately wired to the copier only, not through
+		// setThrottlerOnPhases. The mock is always-throttled and blocks for a
+		// second per call, so it exists to pace the copy at a known rate.
+		// Handing it to the checksum as well would add a second per checksum
+		// chunk to every test that uses it — real wall-clock cost, no extra
+		// coverage. Checksum throttling is covered directly in pkg/checksum.
 		r.throttler = &throttler.Mock{}
 		r.copier.SetThrottler(r.throttler)
 		return r.throttler.Open(ctx)
@@ -952,7 +1142,7 @@ func (r *Runner) setupThrottler(ctx context.Context) error {
 	}
 
 	r.throttler = throttler.NewMultiThrottler(throttlers...)
-	r.copier.SetThrottler(r.throttler)
+	r.setThrottlerOnPhases()
 	if err := r.throttler.Open(ctx); err != nil {
 		// multiThrottler already closes child throttlers on partial Open
 		// failure, but the *sql.DB connections backing replica throttlers
@@ -1483,33 +1673,33 @@ func (r *Runner) initChunkers() error {
 
 // checksum creates the checksum which opens the read view
 func (r *Runner) checksum(ctx context.Context) error {
-	r.status.Set(status.Checksum)
+	if err := r.status.Do(status.Checksum, func() error {
+		// The checksum keeps the pool threads open, so we need to extend
+		// by more than +1 on threads as we did previously. We have:
+		// - background flushing
+		// - checkpoint thread
+		// - checksum "replaceChunk" DB connections
+		// Handle a case just in the tests not having a dbConfig.
+		//
+		// Not restored when checksum completes — by then we are past the copy
+		// phase, so the +1 backpressure between copier and applier no longer
+		// applies, and the only thing left is cutover, which itself wants at
+		// least 5 connections. Pool size grows monotonically; see the
+		// MaxOpenConnections doc in (*Runner).Run.
+		dbconn.SetPoolSize(r.db, r.dbConfig.MaxOpenConnections+2)
 
-	// The checksum keeps the pool threads open, so we need to extend
-	// by more than +1 on threads as we did previously. We have:
-	// - background flushing
-	// - checkpoint thread
-	// - checksum "replaceChunk" DB connections
-	// Handle a case just in the tests not having a dbConfig.
-	//
-	// Not restored when checksum completes — by then we are past the copy
-	// phase, so the +1 backpressure between copier and applier no longer
-	// applies, and the only thing left is cutover, which itself wants at
-	// least 5 connections. Pool size grows monotonically; see the
-	// MaxOpenConnections doc in (*Runner).Run.
-	r.db.SetMaxOpenConns(r.dbConfig.MaxOpenConnections + 2)
-
-	// Run the checksum with internal retry logic.
-	//
-	// We do not invalidate the checkpoint on a checksum error. The dumper
-	// already refuses to persist a checksum_watermark for any pass that
-	// had to repair a chunk (see DumpCheckpoint), so on resume — whether
-	// the failure here was retry exhaustion, operator cancellation, or
-	// anything else — the persisted row either carries an empty watermark
-	// (forcing full re-verification) or a watermark from a clean pass
-	// (safe to resume from). Either way the silent-cutover hole is
-	// closed without needing to special-case the error path.
-	if err := r.checker.Run(ctx); err != nil {
+		// Run the checksum with internal retry logic.
+		//
+		// We do not invalidate the checkpoint on a checksum error. The dumper
+		// already refuses to persist a checksum_watermark for any pass that
+		// had to repair a chunk (see DumpCheckpoint), so on resume — whether
+		// the failure here was retry exhaustion, operator cancellation, or
+		// anything else — the persisted row either carries an empty watermark
+		// (forcing full re-verification) or a watermark from a clean pass
+		// (safe to resume from). Either way the silent-cutover hole is
+		// closed without needing to special-case the error path.
+		return r.checker.Run(ctx)
+	}); err != nil {
 		if r.addsUniqueIndex() {
 			// Overwrite the error if we think it's because of a unique index addition
 			return errors.New("checksum failed after several attempts. This is likely related to your statement adding a UNIQUE index on non-unique data")
@@ -1520,8 +1710,9 @@ func (r *Runner) checksum(ctx context.Context) error {
 	// A long checksum extends the binlog deltas
 	// So if we've called this optional checksum, we need one more state
 	// of applying the binlog deltas.
-	r.status.Set(status.PostChecksum)
-	return r.replClient.Flush(ctx)
+	return r.status.Do(status.PostChecksum, func() error {
+		return r.replClient.Flush(ctx)
+	})
 }
 
 func (r *Runner) addsUniqueIndex() bool {
@@ -1628,7 +1819,10 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		Statement:         r.migration.Statement,
 		OriginalTableName: originalTableName,
 	}); err != nil {
-		return status.ErrCouldNotWriteCheckpoint
+		// Keep the cause: the WatchTask dumper distinguishes a benign
+		// canceled-mid-write (it is being stopped) from a genuinely broken
+		// checkpoint table, which is fatal.
+		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
 	return nil
 }
@@ -1641,43 +1835,49 @@ func (r *Runner) Status() string {
 	switch state { //nolint: exhaustive
 	case status.CopyRows:
 		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v conns-in-use=%d",
+		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v conns-in-use=%d%s",
 			r.status.Get().String(),
 			r.copier.GetProgress(),
 			r.replClient.GetDeltaLen(),
-			time.Since(r.startTime).Round(time.Second),
-			time.Since(r.copier.StartTime()).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
 			r.db.Stats().InUse,
+			applier.StatusSuffix(r.applier),
 		)
 	case status.WaitingOnSentinelTable:
 		return fmt.Sprintf("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s conns-in-use=%d",
 			r.status.Get().String(),
 			r.changes[0].table.SchemaName,
 			sentinel.TableName,
-			time.Since(r.startTime).Round(time.Second),
-			time.Since(r.sentinelWaitStartTime).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
 			r.db.Stats().InUse,
 		)
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s conns-in-use=%d",
+		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s conns-in-use=%d%s",
 			r.status.Get().String(),
 			r.replClient.GetDeltaLen(),
-			time.Since(r.startTime).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
 			r.db.Stats().InUse,
+			applier.StatusSuffix(r.applier),
 		)
 	case status.Checksum:
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d",
+		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d%s",
 			r.status.Get().String(),
 			r.checker.GetProgress().String(),
 			r.replClient.GetDeltaLen(),
-			time.Since(r.startTime).Round(time.Second),
-			time.Since(r.checker.StartTime()).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 			r.db.Stats().InUse,
+			// Mirrors copier-is-throttled on the copy line: without it a
+			// checksum that is deliberately paused or scaled down looks
+			// identical to one that is simply slow.
+			checksum.StatusSuffix(r.checker),
 		)
 	}
 	return ""

@@ -150,8 +150,14 @@ func datumValFromString(val string, tp datumTp) (any, error) {
 	case unsignedType:
 		return strconv.ParseUint(val, 10, 64)
 	case binaryType:
-		// Binary types are always hex-encoded in checkpoint JSON via Datum.String().
-		// Decode the hex back to raw binary bytes.
+		// Binary types are hex-encoded ("0x...") in checkpoint JSON via
+		// jsonQuoteDatum, except the empty value, which is serialized as
+		// x'' (there is no zero-digit 0x literal). Decode both back to a
+		// Go string holding the raw bytes: Datum.Val stores binary values
+		// as string, never []byte.
+		if val == "x''" {
+			return "", nil
+		}
 		if strings.HasPrefix(val, "0x") {
 			tmp, err := hex.DecodeString(val[2:])
 			if err != nil {
@@ -322,6 +328,7 @@ func (d Datum) Range(d2 Datum) (uint64, error) {
 //   - NULL                            for IsNil()
 //   - the numeric literal (e.g. 42)   for IsNumeric()
 //   - 0x... hex literal               for IsBinaryString()
+//     (a zero-length value uses the empty binary literal instead — see below)
 //   - "..." with backslash escapes    for everything else
 //
 // The string-literal path runs sqlescape.EscapeString on the contents
@@ -351,9 +358,15 @@ func (d Datum) String() string {
 		s = fmt.Sprintf("%v", d.Val)
 	}
 	if d.IsBinaryString() {
-		// MySQL binary string needs at least one character
+		// The empty value still needs a valid SQL literal: %#x renders ""
+		// as "" and a bare "0x" parses as an identifier, so emit the
+		// standard zero-length hex literal instead. It must NOT be 0x00 —
+		// that is a one-byte NUL, a different value, and emitting it here
+		// made every binlog-applied REPLACE corrupt empty blobs (minting
+		// endless checksum mismatches on tables that store empty strings,
+		// e.g. zero-length serialized protos).
 		if len(s) == 0 {
-			return "0x00"
+			return "x''"
 		}
 		return fmt.Sprintf("%#x", s)
 	}

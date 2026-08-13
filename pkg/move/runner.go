@@ -32,6 +32,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// defaultWriteThreads must match the `default:"4"` kong tag on
+// Move.WriteThreads, so a programmatic caller that leaves the field unset lands
+// on the same value the CLI does.
+const defaultWriteThreads = 4
+
 var (
 	tableStatUpdateInterval = 5 * time.Minute
 	// checkpointTableName is deliberately distinct from migration's shared
@@ -59,6 +64,11 @@ type sourceInfo struct {
 	dsn        string
 	replClient change.Source
 	tables     []*table.TableInfo // this source's TableInfo objects (bound to this source's db)
+	// keyRange is this source shard's Vitess-style key range (from
+	// Move.SourceKeyRanges, attached before the sources are sorted so it stays
+	// with its DSN). Only set — and only needed — for a reverse-window move
+	// with a sharded source, where the reverse feed routes rows back by range.
+	keyRange string
 }
 
 // sourceKey returns a stable identifier for a source, used for checkpoint
@@ -82,7 +92,7 @@ type Runner struct {
 	move            *Move
 	sources         []sourceInfo     // one per source database
 	targets         []applier.Target // Combined DB, Config, and KeyRange
-	status          status.State     // must use atomic to get/set
+	status          status.Tracker   // owns the current state and per-state timing
 	checkpointTable *table.TableInfo
 
 	sourceTables   []*table.TableInfo // canonical table list (from sources[0])
@@ -116,8 +126,6 @@ type Runner struct {
 	checkpointMu sync.Mutex
 
 	// Track some key statistics.
-	startTime                time.Time
-	sentinelWaitStartTime    time.Time
 	usedResumeFromCheckpoint bool
 
 	cutoverFunc func(ctx context.Context) error
@@ -172,6 +180,19 @@ func NewRunner(m *Move) (*Runner, error) {
 	}
 	if m.TargetChunkSize == 0 {
 		m.TargetChunkSize = table.DefaultTargetChunkBytes
+	}
+	// WriteThreads has no "0 means auto" meaning any more, so fill in the Kong
+	// default; move does not autoscale, so nothing downstream would. Non-positive
+	// rather than zero: MaxOpenConnections is Threads + WriteThreads + 2 below, and
+	// a negative count would make that negative, which SetMaxOpenConns reads as
+	// *unlimited*. Warn on an explicit 0, which used to mean "size from the
+	// instance" and would otherwise silently become 4.
+	if m.WriteThreads <= 0 {
+		if m.WriteThreads == 0 {
+			slog.Default().Warn("--write-threads 0 no longer means auto-size; using the default",
+				"write_threads", defaultWriteThreads)
+		}
+		m.WriteThreads = defaultWriteThreads
 	}
 	r := &Runner{
 		move:   m,
@@ -566,24 +587,15 @@ func (r *Runner) setupDiscovery(ctx context.Context) error {
 func (r *Runner) setupUnderLocks(ctx context.Context) error {
 	var err error
 
-	// Resolve the number of apply (write) threads against the target now that
-	// it is connected. WriteThreads==0 means "auto-size": on Aurora it becomes
-	// the instance vCPU count; on non-Aurora there is no reliable vCPU signal
-	// to size from, so it falls back to the default.
-	r.move.WriteThreads, err = throttler.ResolveWriteThreads(ctx, r.targets[0].DB, r.move.WriteThreads, r.logger)
-	if err != nil {
-		return err
-	}
-	// Now that write threads are known, grow connection pools to cover both the
-	// copy (read) threads and the apply (write) threads. The initial pool (set
-	// before connecting) used the requested value, which may have been 0.
+	// Grow connection pools to cover both the copy (read) threads and the apply
+	// (write) threads, in case the pool set before connecting was smaller.
 	if poolSize := r.move.Threads + r.move.WriteThreads + 2; poolSize > r.dbConfig.MaxOpenConnections {
 		r.dbConfig.MaxOpenConnections = poolSize
 		for i := range r.sources {
-			r.sources[i].db.SetMaxOpenConns(poolSize)
+			dbconn.SetPoolSize(r.sources[i].db, poolSize)
 		}
 		for i := range r.targets {
-			r.targets[i].DB.SetMaxOpenConns(poolSize)
+			dbconn.SetPoolSize(r.targets[i].DB, poolSize)
 		}
 	}
 
@@ -798,15 +810,19 @@ func (r *Runner) resumeReverseWindow(ctx context.Context, rec checkpoint.Record)
 	if len(logical) == 0 {
 		return fmt.Errorf("resume reverse window: found no retired (_old) source tables to resume from")
 	}
-	src := &r.sources[0] // reverse-window is single-source (guarded at cutover)
-	src.tables = make([]*table.TableInfo, 0, len(logical))
-	for _, name := range logical {
-		// Only the name is read downstream (buildFeed derives the _old source
-		// and real target TableInfos itself), so no SetInfo — the logical table
-		// no longer exists on the source under this name.
-		src.tables = append(src.tables, table.NewTableInfo(src.db, src.config.DBName, name))
+	// Rebuild every source's table list (all source shards hold the same
+	// logical tables; sources[0] was the canonical one the names came from).
+	for si := range r.sources {
+		src := &r.sources[si]
+		src.tables = make([]*table.TableInfo, 0, len(logical))
+		for _, name := range logical {
+			// Only the name is read downstream (buildFeed derives the _old source
+			// and real target TableInfos itself), so no SetInfo — the logical table
+			// no longer exists on the source under this name.
+			src.tables = append(src.tables, table.NewTableInfo(src.db, src.config.DBName, name))
+		}
 	}
-	r.sourceTables = src.tables
+	r.sourceTables = r.sources[0].tables
 
 	return newReverseWindow(r).run(ctx)
 }
@@ -963,7 +979,7 @@ func (r *Runner) createCheckpointTable(ctx context.Context) error {
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, r.cancelFunc = context.WithCancel(ctx)
 	defer r.cancelFunc()
-	r.startTime = time.Now()
+	r.status.Begin()
 	bi := buildinfo.Get()
 	r.logger.Info("Starting table move",
 		"version", bi.Version,
@@ -974,13 +990,23 @@ func (r *Runner) Run(ctx context.Context) error {
 	)
 
 	if r.move.ReverseWindow > 0 && len(r.move.SourceDSNs) > 1 {
-		// Reverse-window is only defined for an unsharded source (1 source →
-		// M targets ⇒ an M:1 reverse). A sharded source would need an M:N
-		// reverse with a reverse sharding provider, which is out of scope.
-		return fmt.Errorf("--reverse-window requires an unsharded (single) source, got %d source shards", len(r.move.SourceDSNs))
+		// A sharded source reverses as an M:N feed: rows flowing back from the
+		// targets are routed to the source shard whose key range contains the
+		// row's hash. That routing needs the source shard layout and the source
+		// keyspace's sharding metadata, so both are required up front — failing
+		// here, before any copy, rather than after the forward cutover when the
+		// reverse feed is actually built.
+		if r.move.ReverseShardingProvider == nil {
+			return fmt.Errorf("--reverse-window with a sharded source (%d source shards) requires a ReverseShardingProvider to route reverse writes", len(r.move.SourceDSNs))
+		}
+		if len(r.move.SourceKeyRanges) != len(r.move.SourceDSNs) {
+			return fmt.Errorf("--reverse-window with a sharded source requires one SourceKeyRanges entry per source DSN, got %d ranges for %d sources", len(r.move.SourceKeyRanges), len(r.move.SourceDSNs))
+		}
+		if err := applier.ValidateKeyRanges(r.move.SourceKeyRanges); err != nil {
+			return fmt.Errorf("--reverse-window source key ranges are invalid: %w", err)
+		}
 	}
 
-	var err error
 	r.dbConfig = dbconn.NewDBConfig()
 	// ForceKill is now true by default in NewDBConfig(), no need to set explicitly.
 	// Buffered copier needs more connections due to parallel read/write workers
@@ -1005,6 +1031,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to parse source DSN %d: %w", i, err)
 		}
 		r.sources[i] = sourceInfo{db: db, config: cfg, dsn: dsn}
+		// Attach this shard's key range BEFORE the sort below, so it stays
+		// with its DSN (SourceKeyRanges is parallel to the caller's SourceDSNs
+		// order, not the sorted order).
+		if i < len(r.move.SourceKeyRanges) {
+			r.sources[i].keyRange = r.move.SourceKeyRanges[i]
+		}
 	}
 	// Sort sources by sourceKey (addr/dbname) for deterministic ordering.
 	// sources[0] is the canonical source we read the table list and SHOW
@@ -1090,11 +1122,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		// But the caller will still want their cutoverFunc called. So we do that
 		// and then exit.
 		r.logger.Info("No tables to copy, proceeding directly to cutover")
-		r.status.Set(status.CutOver)
-		if r.cutoverFunc != nil {
-			if err := r.cutoverFunc(ctx); err != nil {
-				return err
+		if err := r.status.Do(status.CutOver, func() error {
+			if r.cutoverFunc == nil {
+				return nil
 			}
+			return r.cutoverFunc(ctx)
+		}); err != nil {
+			return err
 		}
 		r.logger.Info("Move operation complete.")
 		return nil
@@ -1137,8 +1171,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	r.status.Set(status.CopyRows)
-	if err := r.copier.Run(ctx); err != nil {
+	if err := r.status.Do(status.CopyRows, func() error {
+		return r.copier.Run(ctx)
+	}); err != nil {
 		return err
 	}
 
@@ -1164,18 +1199,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.logger.Info("Initial checksum completed successfully")
 
-	r.sentinelWaitStartTime = time.Now()
-	r.status.Set(status.WaitingOnSentinelTable)
 	// Block on the sentinel via the shared sentinel.Wait (poll/timeout timing
 	// lives in the sentinel package). The continuous-checksum lifecycle and
 	// watermark invalidation are move-specific (multi-source feeds;
 	// invalidateChecksumWatermark blanks the whole per-move checkpoint table),
 	// so they are injected as callbacks. See pkg/sentinel.
-	if err := sentinel.Wait(ctx, sentinel.WaitConfig{
-		Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.targets[0].DB) },
-		RunChecksum:         r.runContinuousChecksum,
-		InvalidateWatermark: r.invalidateChecksumWatermark,
-		Logger:              r.logger,
+	if err := r.status.Do(status.WaitingOnSentinelTable, func() error {
+		return sentinel.Wait(ctx, sentinel.WaitConfig{
+			Exists:              func(ctx context.Context) (bool, error) { return sentinel.Exists(ctx, r.targets[0].DB) },
+			RunChecksum:         r.runContinuousChecksum,
+			InvalidateWatermark: r.invalidateChecksumWatermark,
+			Logger:              r.logger,
+		})
 	}); err != nil {
 		return err
 	}
@@ -1188,32 +1223,33 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.logger.Info("Sentinel released, starting cutover")
 	// Create a cutover.
-	r.status.Set(status.CutOver)
-	cutoverSources := make([]CutOverSource, len(r.sources))
-	for i := range r.sources {
-		cutoverSources[i] = CutOverSource{
-			DB:         r.sources[i].db,
-			ReplClient: r.sources[i].replClient,
-			Tables:     r.sources[i].tables,
+	if err := r.status.Do(status.CutOver, func() error {
+		cutoverSources := make([]CutOverSource, len(r.sources))
+		for i := range r.sources {
+			cutoverSources[i] = CutOverSource{
+				DB:         r.sources[i].db,
+				ReplClient: r.sources[i].replClient,
+				Tables:     r.sources[i].tables,
+			}
 		}
-	}
-	cutover, err := NewCutOver(cutoverSources, r.cutoverFunc, r.dbConfig, r.logger)
-	if err != nil {
-		return err
-	}
-	if r.move.ReverseWindow > 0 {
-		// Under the cutover lock, right after the traffic switch, capture the
-		// reverse-feed start positions and record that the move has entered its
-		// reverse window (see captureReverseWindow). The source rename still runs.
-		cutover.SetPostSwitch(func(ctx context.Context) error { return captureReverseWindow(ctx, r) })
-	}
-	// Pre-cutover: refuse to switch traffic if a revert has been requested (a
-	// marker appeared on targets[0] during the copy). Cutting over only to
-	// immediately roll back is pointless — abort while the source is still live.
-	if err := r.assertNoRevertMarker(ctx, "pre-cutover"); err != nil {
-		return err
-	}
-	if err = cutover.Run(ctx); err != nil {
+		cutover, err := NewCutOver(cutoverSources, r.cutoverFunc, r.dbConfig, r.logger)
+		if err != nil {
+			return err
+		}
+		if r.move.ReverseWindow > 0 {
+			// Under the cutover lock, right after the traffic switch, capture the
+			// reverse-feed start positions and record that the move has entered its
+			// reverse window (see captureReverseWindow). The source rename still runs.
+			cutover.SetPostSwitch(func(ctx context.Context) error { return captureReverseWindow(ctx, r) })
+		}
+		// Pre-cutover: refuse to switch traffic if a revert has been requested (a
+		// marker appeared on targets[0] during the copy). Cutting over only to
+		// immediately roll back is pointless — abort while the source is still live.
+		if err := r.assertNoRevertMarker(ctx, "pre-cutover"); err != nil {
+			return err
+		}
+		return cutover.Run(ctx)
+	}); err != nil {
 		return err
 	}
 
@@ -1362,29 +1398,31 @@ func (r *Runner) Status() string {
 	switch state { //nolint:exhaustive
 	case status.CopyRows:
 		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v",
+		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v%s",
 			r.status.Get().String(),
 			r.copier.GetProgress(),
 			r.getDeltaLenAll(),
-			time.Since(r.startTime).Round(time.Second),
-			time.Since(r.copier.StartTime()).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
+			applier.StatusSuffix(r.applier),
 		)
 	case status.WaitingOnSentinelTable:
 		return fmt.Sprintf("migration status: state=%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s",
 			r.status.Get().String(),
-			time.Since(r.startTime).Round(time.Second),
-			time.Since(r.sentinelWaitStartTime).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
 		)
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s",
+		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s%s",
 			r.status.Get().String(),
 			r.getDeltaLenAll(),
-			time.Since(r.startTime).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			applier.StatusSuffix(r.applier),
 		)
 	case status.Checksum:
 		// This could take a while if it's a large table.
@@ -1392,13 +1430,13 @@ func (r *Runner) Status() string {
 			r.status.Get().String(),
 			r.checker.GetProgress().String(),
 			r.getDeltaLenAll(),
-			time.Since(r.startTime).Round(time.Second),
-			time.Since(r.checker.StartTime()).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
+			r.status.Elapsed().Round(time.Second),
 		)
 	case status.RestoreSecondaryIndexes:
 		return fmt.Sprintf("migration status: state=%s total-time=%s",
 			r.status.Get().String(),
-			time.Since(r.startTime).Round(time.Second),
+			r.status.TotalElapsed().Round(time.Second),
 		)
 	default:
 		return ""
@@ -1552,16 +1590,18 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// pkg/change/subscription_buffered.go), unread binlog would pile up
 	// server-side, and a source purging binlogs past the reader's position
 	// during an hours-long index build would fail the move fatally.
-	r.status.Set(status.ApplyChangeset)
-	if err := r.flushAllReplClients(ctx); err != nil {
+	if err := r.status.Do(status.ApplyChangeset, func() error {
+		return r.flushAllReplClients(ctx)
+	}); err != nil {
 		return err
 	}
 
 	// Restore secondary indexes if they were deferred during table creation.
 	// This is always called (not conditional on DeferSecondaryIndexes) to handle
 	// checkpoint resume scenarios where indexes may have been deferred in a previous run.
-	r.status.Set(status.RestoreSecondaryIndexes)
-	if err := r.restoreSecondaryIndexes(ctx); err != nil {
+	if err := r.status.Do(status.RestoreSecondaryIndexes, func() error {
+		return r.restoreSecondaryIndexes(ctx)
+	}); err != nil {
 		return err
 	}
 
@@ -1569,17 +1609,21 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// This is required so on cutover plans don't go sideways, which
 	// is at elevated risk because the batch loading can cause statistics
 	// to be out of date.
-	r.status.Set(status.AnalyzeTable)
-	r.logger.Info("Running ANALYZE TABLE")
-	for _, target := range r.targets {
-		for _, tbl := range r.sourceTables {
-			// Unqualified on target.DB: the old code qualified with the source
-			// schema, which doesn't exist on a cross-cluster target (and breaks
-			// through a vtgate). See analyzeTable.
-			if err := r.analyzeTable(ctx, target.DB, tbl.TableName); err != nil {
-				return err
+	if err := r.status.Do(status.AnalyzeTable, func() error {
+		r.logger.Info("Running ANALYZE TABLE")
+		for _, target := range r.targets {
+			for _, tbl := range r.sourceTables {
+				// Unqualified on target.DB: the old code qualified with the source
+				// schema, which doesn't exist on a cross-cluster target (and breaks
+				// through a vtgate). See analyzeTable.
+				if err := r.analyzeTable(ctx, target.DB, tbl.TableName); err != nil {
+					return err
+				}
 			}
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Now stop the periodic flush: the checksum requires it. The checker
@@ -1629,7 +1673,6 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	r.status.Set(status.Checksum)
 	// On a checker error we just propagate. The DumpCheckpoint invariant
 	// guarantees that any persisted checksum_watermark describes only
 	// verified-clean chunks, so a resumed run either replays the checksum
@@ -1637,7 +1680,9 @@ func (r *Runner) postCopyPhase(ctx context.Context) error {
 	// repair) or resumes safely from a watermark that came from a clean
 	// pass. See pkg/migration/runner.go DumpCheckpoint for the full
 	// rationale.
-	return r.checker.Run(ctx)
+	return r.status.Do(status.Checksum, func() error {
+		return r.checker.Run(ctx)
+	})
 }
 
 // analyzeTable runs ANALYZE TABLE for tableName on db, unqualified: db is
@@ -1703,8 +1748,8 @@ func (r *Runner) Progress() status.Progress {
 		r.logger.Info("migration status",
 			"state", r.status.Get().String(),
 			"sentinel-table", fmt.Sprintf("%s.%s", r.targets[0].Config.DBName, sentinel.TableName),
-			"total-time", time.Since(r.startTime).Round(time.Second).String(),
-			"sentinel-wait-time", time.Since(r.sentinelWaitStartTime).Round(time.Second).String(),
+			"total-time", r.status.TotalElapsed().Round(time.Second).String(),
+			"sentinel-wait-time", r.status.Elapsed().Round(time.Second).String(),
 			"sentinel-max-wait-time", sentinel.WaitLimit.String(),
 		)
 	case status.ApplyChangeset, status.PostChecksum:
@@ -1954,7 +1999,10 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		ChecksumWatermark: checksumWatermark,
 		Position:          string(positionsJSON),
 	}); err != nil {
-		return status.ErrCouldNotWriteCheckpoint
+		// Keep the cause: the WatchTask dumper distinguishes a benign
+		// canceled-mid-write (it is being stopped) from a genuinely broken
+		// checkpoint table, which is fatal.
+		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
 	return nil
 }

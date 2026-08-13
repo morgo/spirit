@@ -595,11 +595,14 @@ func (f *fakeFeed) CurrentPosition(context.Context) (string, error)             
 func (f *fakeFeed) FlushUnderTableLock(context.Context, []*dbconn.TableLock) error     { return nil }
 func (f *fakeFeed) BlockWait(context.Context) error                                    { return nil }
 func (f *fakeFeed) GetDeltaLen() int                                                   { return 0 }
-func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error               { return nil }
-func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)                  {}
-func (f *fakeFeed) StopPeriodicFlush()                                                 {}
-func (f *fakeFeed) AllChangesFlushed() bool                                            { return true }
-func (f *fakeFeed) Close()                                                             {}
+
+func (f *fakeFeed) FlushResidual() (int, int)                            { return 0, 0 }
+func (f *fakeFeed) SetWatermarkOptimization(context.Context, bool) error { return nil }
+func (f *fakeFeed) StartPeriodicFlush(context.Context, time.Duration)    {}
+func (f *fakeFeed) StopPeriodicFlush()                                   {}
+func (f *fakeFeed) AllChangesFlushed() bool                              { return true }
+func (f *fakeFeed) Stop()                                                {}
+func (f *fakeFeed) Close()                                               {}
 
 // TestDivergenceIsFatalReconcilesApplyLag is the regression test for the
 // false-positive cutover abort: a chunk that is merely behind on applying

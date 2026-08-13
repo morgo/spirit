@@ -11,8 +11,10 @@ import (
 	"github.com/block/spirit/pkg/applier"
 	"github.com/block/spirit/pkg/change"
 	"github.com/block/spirit/pkg/dbconn"
+	"github.com/block/spirit/pkg/metrics"
 	"github.com/block/spirit/pkg/status"
 	"github.com/block/spirit/pkg/table"
+	"github.com/block/spirit/pkg/throttler"
 )
 
 var (
@@ -108,6 +110,83 @@ type Checker interface {
 	DifferencesFound() uint64
 }
 
+// AutoscaleConfig controls the checksum phase's worker-count control loop. It
+// mirrors copier.AutoscaleConfig, minus a StartThreads field — the checksum
+// starts at CheckerConfig.Concurrency.
+//
+// Enabled only turns on *scaling*. The throttler hard-stop applies either way:
+// a checksum with autoscaling disabled still pauses when the throttler says to,
+// which before this existed it did not do at all.
+type AutoscaleConfig struct {
+	Enabled bool
+	// MaxThreads is the ceiling scaling may reach. The transaction pools are
+	// provisioned at this size whether or not Enabled is set, so callers must
+	// budget connections for it (see SingleChecker.initConnPool for why the
+	// pools cannot grow on demand). Values below Concurrency are raised to it.
+	MaxThreads int
+}
+
+// ThrottleAware is the optional capability a Checker exposes when it can pace
+// itself against a throttler installed after construction. SingleChecker and
+// DistributedChecker implement it; runners build their checker before the
+// throttlers are open, so they type-assert for this and wire it later.
+//
+// It is an optional interface rather than part of Checker so that test doubles
+// and the continuous checker (which manages its own pacing) do not have to
+// carry a method they have no use for.
+type ThrottleAware interface {
+	SetThrottler(t throttler.Throttler)
+}
+
+// loadOnlyThrottler narrows a throttler to the signals a checksum should react
+// to, and is applied to every throttler a checker is given (at construction and
+// via SetThrottler) so the rule holds however the checker was wired. nil yields
+// a Noop.
+//
+// A checksum reacts to *load* and ignores binary budget signals — in practice,
+// replica lag. It reads inside a REPEATABLE READ snapshot and writes nothing to
+// the binlog, so it cannot be the cause of replica lag and pausing it cannot
+// reduce that lag; what the pause does do is extend the pass, holding the
+// snapshot open and pinning undo that the purge thread cannot advance past. The
+// replica-lag throttler also fails closed on stale polling, so an unreachable
+// replica would stall dispatch until the yield timeout with the snapshot still
+// held. Load is different in kind: a checksum genuinely adds read load to the
+// primary, so backing off on load both works and is warranted.
+//
+// The one part of a checksum that does replicate is a chunk repair, and it is
+// deliberately left unpaced: repairs are rare and small, and blocking one incurs
+// exactly the snapshot-hold cost this narrowing exists to avoid.
+func loadOnlyThrottler(t throttler.Throttler) throttler.Throttler {
+	if t == nil {
+		return &throttler.Noop{}
+	}
+	return throttler.GradualOnly(t)
+}
+
+// Paced is the optional capability a Checker exposes when it can report how it
+// is currently being paced. Runner status lines use it so a slow checksum can be
+// told apart from a throttled or scaled-down one — the same question
+// copier-is-throttled answers for the copy phase.
+type Paced interface {
+	// Threads is the live worker count, which the autoscaler may have moved
+	// away from the configured concurrency.
+	Threads() int
+	// IsThrottled reports whether the throttler is currently telling the
+	// checksum to pause.
+	IsThrottled() bool
+}
+
+// StatusSuffix renders the pacing fields for a runner status line, or "" if the
+// checker does not report them. Mirrors applier.StatusSuffix, including the
+// leading space so callers can append it unconditionally.
+func StatusSuffix(c Checker) string {
+	p, ok := c.(Paced)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(" checksum-threads=%d checksum-is-throttled=%v", p.Threads(), p.IsThrottled())
+}
+
 type CheckerConfig struct {
 	Concurrency     int
 	TargetChunkTime time.Duration
@@ -118,6 +197,17 @@ type CheckerConfig struct {
 	MaxRetries      int
 	Applier         applier.Applier // optional; indicates it is a distributed checker
 	YieldTimeout    time.Duration   // maximum duration for a single checksum pass before yielding to release long-running transactions
+	// Throttler paces the checksum. Optional: nil installs a Noop, and callers
+	// that build the checker before their throttlers are open should use
+	// SetThrottler instead (the migration runner does).
+	//
+	// Whatever is passed is narrowed by loadOnlyThrottler — a checksum reacts to
+	// load signals and ignores binary ones such as replica lag.
+	Throttler throttler.Throttler
+	// Autoscale configures the worker-count control loop.
+	Autoscale AutoscaleConfig
+	// MetricsSink is where the control loop reports its gauges. Optional.
+	MetricsSink metrics.Sink
 }
 
 func NewCheckerDefaultConfig() *CheckerConfig {
@@ -155,29 +245,47 @@ func NewChecker(sourceDBs []*sql.DB, chunker table.Chunker, feeds []change.Sourc
 	if config.YieldTimeout == 0 {
 		config.YieldTimeout = DefaultYieldTimeout
 	}
+	// A concurrency of at least 1 is required for the limiter and the
+	// transaction pools to be usable; historically a zero here produced a pool
+	// of zero transactions and a checksum that could not run.
+	concurrency := max(config.Concurrency, 1)
+	// The ceiling can never be below the start value: the pools are sized to
+	// it, and a pool smaller than the starting worker count would starve.
+	maxConcurrency := max(config.Autoscale.MaxThreads, concurrency)
+	thr := loadOnlyThrottler(config.Throttler)
 	if config.Applier != nil {
 		return &DistributedChecker{
-			concurrency:    config.Concurrency,
-			sourceDBs:      sourceDBs,
-			feeds:          feeds,
-			chunker:        chunker,
-			dbConfig:       config.DBConfig,
-			logger:         config.Logger,
-			fixDifferences: config.FixDifferences,
-			maxRetries:     config.MaxRetries,
-			applier:        config.Applier,
-			yieldTimeout:   config.YieldTimeout,
+			concurrency:     concurrency,
+			maxConcurrency:  maxConcurrency,
+			autoscale:       config.Autoscale.Enabled,
+			throttler:       thr,
+			metricsSink:     config.MetricsSink,
+			targetChunkTime: config.TargetChunkTime,
+			sourceDBs:       sourceDBs,
+			feeds:           feeds,
+			chunker:         chunker,
+			dbConfig:        config.DBConfig,
+			logger:          config.Logger,
+			fixDifferences:  config.FixDifferences,
+			maxRetries:      config.MaxRetries,
+			applier:         config.Applier,
+			yieldTimeout:    config.YieldTimeout,
 		}, nil
 	}
 	return &SingleChecker{
-		concurrency:    config.Concurrency,
-		db:             sourceDBs[0],
-		feed:           feeds[0],
-		chunker:        chunker,
-		dbConfig:       config.DBConfig,
-		logger:         config.Logger,
-		fixDifferences: config.FixDifferences,
-		maxRetries:     config.MaxRetries,
-		yieldTimeout:   config.YieldTimeout,
+		concurrency:     concurrency,
+		maxConcurrency:  maxConcurrency,
+		autoscale:       config.Autoscale.Enabled,
+		throttler:       thr,
+		metricsSink:     config.MetricsSink,
+		targetChunkTime: config.TargetChunkTime,
+		db:              sourceDBs[0],
+		feed:            feeds[0],
+		chunker:         chunker,
+		dbConfig:        config.DBConfig,
+		logger:          config.Logger,
+		fixDifferences:  config.FixDifferences,
+		maxRetries:      config.MaxRetries,
+		yieldTimeout:    config.YieldTimeout,
 	}, nil
 }

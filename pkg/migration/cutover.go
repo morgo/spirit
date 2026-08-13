@@ -86,7 +86,7 @@ func (c *CutOver) Run(ctx context.Context) error {
 		// Pool size grows monotonically and is not restored — the
 		// migration ends after cutover, so there is nothing to shrink
 		// back for. See the MaxOpenConnections doc in (*Runner).Run.
-		c.db.SetMaxOpenConns(5)
+		dbconn.SetPoolSize(c.db, 5)
 	}
 	// Collect every attempt's error and join them on exit, so an operator
 	// debugging a flapping cutover sees the full failure history rather
@@ -262,12 +262,17 @@ func (c *CutOver) algorithmRenameUnderLock(ctx context.Context) error {
 			fmt.Sprintf("%s TO %s", cfg.newTable.QuotedTableName, cfg.table.QuotedTableName),
 		)
 	}
-	return c.executeRenameUnderLock(ctx, tablesToLock, renameFragments)
+	return c.executeRenameUnderLock(ctx, tablesToLock, renameFragments, true)
 }
 
 // executeRenameUnderLock is the shared implementation for performing renames under a table lock.
 // It handles locking, binlog flushing, and executing the rename statement.
-func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*table.TableInfo, renameFragments []string) error {
+//
+// stopFeed says whether a completed rename means the feed is finished with. It
+// is true for the real cutover and false for partialRenameForTest, which leaves
+// the tables half-renamed and expects Run's retry loop — and therefore the
+// feed — to carry on.
+func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*table.TableInfo, renameFragments []string, stopFeed bool) error {
 	tableLock, err := dbconn.NewTableLock(ctx, c.db, tablesToLock, c.dbConfig, c.logger)
 	if err != nil {
 		return err
@@ -303,6 +308,15 @@ func (c *CutOver) executeRenameUnderLock(ctx context.Context, tablesToLock []*ta
 	if err := tableLock.ExecUnderLock(ctx, renameStatement); err != nil {
 		return err
 	}
+	// The tables are swapped and the lock is still held, so no application
+	// write can be in flight and nothing more can reach the changeset. Stop
+	// the feed here, in that window, rather than after the deferred UNLOCK
+	// TABLES: the first post-cutover write is a race with the unlock, and it
+	// carries a row image for the *post*-ALTER table while the subscription
+	// still holds the pre-ALTER TableInfo. See change.Source's Stop.
+	if stopFeed {
+		c.feed.Stop()
+	}
 	if c.testInjectRenameError != nil {
 		// Test-only seam: the rename was committed by the server, but we
 		// pretend the client never read the OK packet.
@@ -329,7 +343,7 @@ func (c *CutOver) partialRenameForTest(ctx context.Context) error {
 		)
 	}
 	// Execute the partial rename using the same code path
-	if err := c.executeRenameUnderLock(ctx, tablesToLock, renameFragments); err != nil {
+	if err := c.executeRenameUnderLock(ctx, tablesToLock, renameFragments, false); err != nil {
 		return err
 	}
 	// Intentionally return an error to simulate a partial cutover failure

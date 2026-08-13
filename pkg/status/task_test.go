@@ -254,3 +254,37 @@ func TestContinuallyDumpCheckpointErrorDuringCutover(t *testing.T) {
 		t.Fatal("a checkpoint error after reaching CutOver must not cancel the task")
 	}
 }
+
+// TestContinuallyDumpCheckpointCanceledMidDump reproduces the
+// stop-while-writing race: the loop's context is canceled while a dump is
+// in flight (the reverse-window flow stops the dumper right before
+// cutover), and the killed write surfaces as an arbitrary driver error —
+// NOT context.Canceled. The loop must recognize its own context is done
+// and exit quietly instead of fatally cancelling the task it belongs to.
+func TestContinuallyDumpCheckpointCanceledMidDump(t *testing.T) {
+	setTestIntervals(t, time.Hour, 2*time.Millisecond)
+	task := newFakeTask(CopyRows)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// The dump itself observes the stop signal mid-write: the caller
+	// cancels, then the interrupted write returns a non-context error.
+	task.dumpErr = func() error {
+		cancel()
+		return errors.New("invalid connection")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		continuallyDumpCheckpoint(ctx, task, slog.Default())
+	}()
+
+	waitSignal(t, done, "checkpoint loop exit after canceled-mid-dump error")
+	if task.cancelled() {
+		t.Fatal("a dump error caused by our own cancellation must not cancel the task")
+	}
+	if n := task.checkpointCount.Load(); n != 1 {
+		t.Fatalf("expected exactly 1 checkpoint attempt, got %d", n)
+	}
+}

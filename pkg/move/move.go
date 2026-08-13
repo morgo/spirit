@@ -20,7 +20,7 @@ type Move struct {
 	// in). The Kong default below must stay equal to table.DefaultTargetChunkBytes.
 	TargetChunkSize       uint64        `name:"target-chunk-size" help:"In-memory byte budget per copy chunk (in bytes)." default:"16777216"`
 	Threads               int           `name:"threads" help:"How many chunks to copy in parallel" default:"2"`
-	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target. 0 = auto: on Aurora this is set to the instance vCPU count minus 2 (min 1), leaving CPU headroom; on non-Aurora targets it falls back to the default" default:"4"`
+	WriteThreads          int           `name:"write-threads" help:"How many concurrent write threads to use per target" default:"4"`
 	CreateSentinel        bool          `name:"create-sentinel" help:"Create a sentinel table on the first target database to block after table copy" default:"false"`
 	DeferSecondaryIndexes bool          `name:"defer-secondary-indexes" help:"Create target tables without secondary indexes, add them before cutover" default:"false"`
 	CheckpointMaxAge      time.Duration `name:"checkpoint-max-age" help:"Maximum age of a checkpoint before refusing to resume from it" optional:"" default:"168h"`
@@ -36,9 +36,11 @@ type Move struct {
 	// the window the source's now-retired _old tables are kept current from the
 	// targets; an operator rolls back by creating the _spirit_move_revert table on
 	// the first target (see revertmarker.go), otherwise the window elapses and the
-	// move finalizes forward. Requires an unsharded (single) source — see the
-	// guard in Runner.Run. The data plane is ReverseFeed (reversefeed.go); the
-	// post-cutover driver is reverseWindow (reversewindow.go).
+	// move finalizes forward. A sharded (multi-DSN) source additionally requires
+	// ReverseShardingProvider and SourceKeyRanges so the reverse feed can route
+	// rows back to the correct source shard — see the guard in Runner.Run. The
+	// data plane is ReverseFeed (reversefeed.go); the post-cutover driver is
+	// reverseWindow (reversewindow.go).
 	ReverseWindow time.Duration `name:"reverse-window" help:"After cutover, reverse the move (change-only) and keep it alive for this long to allow rollback. 0 disables (normal cutover)." default:"0"`
 
 	// EnableExperimentalGTID switches the change source from binlog file+position to MySQL GTIDs.
@@ -61,14 +63,31 @@ type Move struct {
 	// table schemas. If empty, SourceDSN is used as the single source.
 	SourceDSNs []string `kong:"-"`
 
+	// SourceKeyRanges optionally specifies each source shard's Vitess-style key
+	// range ("-80", "80-", ...), parallel to SourceDSNs (SourceKeyRanges[i] is
+	// SourceDSNs[i]'s range). Required, together with ReverseShardingProvider,
+	// when ReverseWindow > 0 and the source is sharded (len(SourceDSNs) > 1):
+	// the reverse feed routes rows flowing back from the targets to the source
+	// shard whose range contains the row's hash. Unused otherwise.
+	SourceKeyRanges []string `kong:"-"`
+
 	ShardingProvider table.ShardingMetadataProvider `kong:"-"`
-	Targets          []applier.Target               `kong:"-"`
+
+	// ReverseShardingProvider provides the SOURCE keyspace's sharding metadata
+	// (vindex column + hash) for the reverse feed of a reverse-window move with
+	// a sharded source. It is consulted for each moved table when the window
+	// opens; a table without metadata is a hard error there, because reverse
+	// writes could not be routed to a source shard. Note the asymmetry with
+	// ShardingProvider, which describes the TARGET keyspace for the forward copy.
+	ReverseShardingProvider table.ShardingMetadataProvider `kong:"-"`
+
+	Targets []applier.Target `kong:"-"`
 }
 
 // Validate is called by Kong after parsing to check for invalid flag values.
-// Zero values mean "use the default" (WriteThreads==0 is documented as
-// auto-size), so they are not rejected here; only explicitly-negative or
-// otherwise invalid values are caught. Mirrors migration.Migration.Validate.
+// Zero values mean "use the default" (NewRunner fills them in), so they are not
+// rejected here; only explicitly-negative or otherwise invalid values are
+// caught. Mirrors migration.Migration.Validate.
 func (m *Move) Validate() error {
 	if m.Threads < 0 {
 		return fmt.Errorf("--threads must be non-negative, got %d", m.Threads)
