@@ -19,8 +19,8 @@ import (
 
 // TestKeyAboveWatermarkVisibilityWindow demonstrates the ordering that makes
 // the KeyAboveHighWatermark discard unsafe on its own (it is only made safe
-// end-to-end by the post-copy checksum; see
-// docs/key-above-watermark-visibility.md):
+// end-to-end by the post-copy checksum; see "Above-watermark discard vs.
+// binlog visibility" in this package's README):
 //
 //  1. A transaction T (INSERT of key K, above the copier's high watermark)
 //     reaches the binlog sync stage. Binlog subscribers — spirit included —
@@ -42,8 +42,11 @@ import (
 //
 // The test skips unless the semi-sync source plugin is installed with no
 // semi-sync replica attached (e.g. `INSTALL PLUGIN rpl_semi_sync_source
-// SONAME 'semisync_source.so'` on a scratch server). It manipulates
-// rpl_semi_sync_source_enabled/timeout globals and restores them.
+// SONAME 'semisync_source.so'` on a scratch server). It manipulates the
+// rpl_semi_sync_source_enabled/timeout globals and restores them — while
+// armed, every commit on the server pays the stall, so point it at a
+// scratch server rather than a shared one. Both CI lanes skip it: the
+// default lane has no plugin, and the semi-sync lane has an ACKing replica.
 func TestKeyAboveWatermarkVisibilityWindow(t *testing.T) {
 	db, err := dbconn.New(testutils.DSN(), dbconn.NewDBConfig())
 	require.NoError(t, err)

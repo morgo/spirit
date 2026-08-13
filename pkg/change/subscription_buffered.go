@@ -401,7 +401,8 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// it. Every current caller runs a repairing checksum before the data is
 	// trusted, which is what makes this safe end-to-end. Deterministic
 	// repro: TestKeyAboveWatermarkVisibilityWindow. Analysis + fix
-	// directions: docs/key-above-watermark-visibility.md.
+	// directions: "Above-watermark discard vs. binlog visibility" in
+	// this package's README.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
 		s.keysDroppedAbove.Add(1)
 		s.logger.Debug("key above watermark", "key", key[0])

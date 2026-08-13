@@ -209,6 +209,68 @@ if !chunker.KeyBelowLowWatermark(key[0]) {
 
 **Important:** The watermark optimization is disabled before the final cutover to ensure all changes are applied regardless of the copier's position.
 
+#### Above-watermark discard vs. binlog visibility
+
+The high-watermark discard in `HasChanged` ([`subscription_buffered.go`](subscription_buffered.go)) is only safe if:
+
+> For every discarded event `E` (transaction `T`, key `K` above the high watermark at discard time), the copier's later read of the chunk covering `K` opens a snapshot that includes `T`.
+
+The copier reads each chunk with a plain autocommit `SELECT` on a pooled connection, i.e. a fresh snapshot at read time, so the invariant reduces to *read-after-delivery visibility*: a snapshot opened after delivery of `E` must see `T`.
+
+**MySQL does not guarantee that.** Group commit runs flush → **sync** (fsync; dump threads may send from here; semi-sync `AFTER_SYNC` waits for the replica ACK here) → **engine commit** (InnoDB makes rows visible). Binlog subscribers — spirit included — receive a transaction's events at the sync stage, before its rows are readable on the source. `binlog_order_commits=ON` (required by preflight since #818) only fixes the *order* of engine commits; it does not close that window. The gap is sub-millisecond on a healthy primary, but it widens to:
+
+- the semi-sync ACK round trip, or the full `rpl_semi_sync_source_timeout` with `AFTER_SYNC` — that ordering is the entire point of "lossless" semi-sync: data reaches replicas *before* it is visible locally;
+- elevated commit latency on Aurora under load;
+- the full replication lag when the change feed and the copier read from a replica (the `spirit sync` import case).
+
+So the race is:
+
+1. `T` (INSERT of key `K`) reaches the sync stage; spirit receives its row events now. `T`'s engine commit completes later, at `t_visible`.
+2. `KeyAboveHighWatermark(K)` is true → the event is **discarded** (`keys_dropped_above_high`).
+3. A copier read worker dispatches the chunk covering `K` and opens its snapshot before `t_visible`. The chunk is copied without `T` (missing row for an INSERT; stale image for an UPDATE; for a discarded DELETE the still-visible row is copied, leaving a phantom).
+4. `T`'s GTID went into `bufferedGTID` at step 1, so the next flush publishes `flushedGTID ⊇ T` — the resume coordinate claims `T` is handled. The file/offset client advances `flushedPos` identically.
+
+End state: the change exists on the source, is absent from the target, is in no buffer, and no resume re-fetches it. Steps 2→3 race at every chunk boundary — `KeyAboveHighWatermark` compares against the dispatch-time upper bound and read workers dispatch continuously — so "key just above the watermark, covering chunk dispatched milliseconds later" is ordinary, not pathological.
+
+This is the same mechanism as [issue #746](https://github.com/block/spirit/issues/746), already fixed for the applier path (inline row images instead of `REPLACE INTO … SELECT`) and for the pre-first-chunk window (`KeyAboveHighWatermark` returns `false` until a chunk has been dispatched). The general above-watermark discard is the remaining path whose safety depends on read-after-delivery.
+
+**What is *not* a problem here:**
+
+- **Crash/resume does not add loss.** Copy resumes from the checkpointed *low* watermark, which is ≤ the high watermark at any earlier discard, so discarded-key chunks are re-read long after `t_visible` (and the `checkpointHighPtr` guard suppresses the discard up to the new table's max key). Only the *live* interleaving in step 3 loses data.
+- **Holding back the GTID/flushed position would not help.** Deferring the resume coordinate past discarded events only changes the crash path, which re-copy already heals; in the no-crash path the live stream is past `T` and never redelivers it.
+- **The checkpoint format is irrelevant.** GTID and file/offset advance identically, so disabling the optimization only under GTID mode would be misdirected.
+
+**Why the shipped flows are safe today:** a repairing checksum stands behind the copy. That backstop is load-bearing, not incidental:
+
+| Flow | Backstop | Net effect today |
+|---|---|---|
+| `migrate`, `move` | Mandatory pre-cutover checksum with `FixDifferences=true` | Repaired before cutover. Cost: `differencesFound > 0`, a chunk recopy, and a "checksum found differences" signal that looks alarming |
+| `sync` (continuous) | Continuous checksum + `MySQLRecopier`, *lazy* | Real exposure: the target can serve a missing/stale/phantom row from copy time until a later checksum pass covers that chunk |
+| `sync --copy-only` | n/a | Not applicable — the discard is never enabled (`SetWatermarkOptimization` is skipped) |
+| Library consumers of pkg/copier + pkg/change with no checksum | None | Silent data loss |
+
+This is the same reliance already accepted knowingly for collation-imprecise key comparisons ([issue #479](https://github.com/block/spirit/issues/479), "checksum will fix any discrepancies") — except the visibility window affects every key type, not just collated strings.
+
+**Field signature:** a run that hit the race shows `keys_dropped_above_high > 0` in the watermark-toggle log line **and** non-zero checksum differences. Semi-sync sources, Aurora under heavy commit load, and replica-fed syncs should expect that correlation to be reproducible.
+
+**If we want to stop relying on the checksum**, the options are:
+
+- **Buffer instead of discard.** Keep the low-watermark flush deferral, stop dropping above-high-watermark events. Airtight and simple, but the memory cost lands exactly on the workload the optimization exists for: on append-heavy tables every tail insert is buffered for the rest of the copy, and the soft limit then parks the binlog reader.
+- **Visibility-proof deferred drop.** Buffer above-watermark events and drop them at flush time once dropping is provably safe: still above the high watermark (covering chunk still undispatched) **and** the transaction is contained in `gtid_executed` (one `SELECT @@gtid_executed` per flush). Containment implies engine commit, so any later chunk read sees the row. Bounded residency (~one flush interval) preserves the memory profile, but it needs per-entry transaction identity plumbed into the subscription, and a time-dwell fallback on non-GTID sources.
+- **Copier-side visibility barrier.** Before each chunk read, `WAIT_FOR_EXECUTED_GTID_SET` on the change feed's delivered set — holds reads instead of events. Clean and usually free, but it couples the copier to the change source's position (deliberately decoupled today) and has no file/offset equivalent.
+- **Disable the discard where no synchronous checksum gate exists** (`pkg/datasync` fresh copies). One line, costs sync initial-copy throughput on hot tables, and swaps in a smaller DELETE-only hazard that sync's resume path already accepts.
+
+**Repro:** `TestKeyAboveWatermarkVisibilityWindow` ([`gtid_visibility_race_test.go`](gtid_visibility_race_test.go)) demonstrates the whole chain deterministically, using the semi-sync source plugin with **no replica** so the first commit after arming stalls for the full timeout between binlog sync and engine commit:
+
+```sh
+# once, on a scratch server:
+#   INSTALL PLUGIN rpl_semi_sync_source SONAME 'semisync_source.so';
+MYSQL_DSN="root:...@tcp(127.0.0.1:3306)/test" \
+  go test ./pkg/change/ -run TestKeyAboveWatermarkVisibilityWindow -v
+```
+
+Observed on MySQL 8.0.43: the row event is delivered and discarded ~15ms into a 3000ms commit stall, the covering chunk read (the copier's statement shape) does not contain the row, a flush during the window publishes a GTID position that already covers the transaction, and the target never receives it. The test self-skips without the plugin, without the privileges to arm the window, or when a semi-sync replica is attached — which means it skips in both CI lanes (the default lane has no plugin; the semi-sync lane has an ACKing replica) and is a scratch-server tool.
+
 ### Checkpointing
 
 The replication client tracks two positions:

@@ -278,17 +278,17 @@ func (r *Runner) Run(ctx context.Context) error {
 		// CORRECTNESS CAVEAT:
 		// keyAboveWatermark is only safe when the copier reads from a source
 		// that reflects every change the change feed has already delivered.
-		// That does NOT strictly hold anywhere (see
-		// docs/key-above-watermark-visibility.md): even on a PRIMARY, binlog
-		// subscribers receive a transaction's events at the binlog sync
-		// stage, before its engine commit makes the rows visible — a window
-		// that semi-sync (AFTER_SYNC) and Aurora commit latency stretch from
-		// sub-millisecond to hundreds of milliseconds or more. On a lagging
-		// REPLICA it is worse: an update to an above-watermark key can be
-		// observed on the change stream — and discarded — while the copier's
-		// later read of that key on the replica still returns the pre-update
-		// (stale) value, silently losing it. The intended safety net is the
-		// post-copy continuous checksum, which repairs divergence only
+		// That does NOT strictly hold anywhere (see "Above-watermark discard
+		// vs. binlog visibility" in pkg/change/README.md): even on a
+		// PRIMARY, binlog subscribers receive a transaction's events at the
+		// binlog sync stage, before its engine commit makes the rows visible
+		// — a window that semi-sync (AFTER_SYNC) and Aurora commit latency
+		// stretch from sub-millisecond to hundreds of milliseconds or more.
+		// On a lagging REPLICA it is worse: an update to an above-watermark
+		// key can be observed on the change stream — and discarded — while
+		// the copier's later read of that key on the replica still returns
+		// the pre-update (stale) value, silently losing it. The safety net is
+		// the post-copy continuous checksum, which repairs divergence only
 		// lazily, and isn't usable at all on the read-only import source yet
 		// (it needs privileges that credential lacks). So this optimization
 		// trades a small, environment-dependent divergence risk for initial
