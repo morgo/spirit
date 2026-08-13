@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/parser/mysql"
 )
 
 type DatetimeIndexPositionLinter struct{}

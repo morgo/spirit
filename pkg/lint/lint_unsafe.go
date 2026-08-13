@@ -5,7 +5,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/ast"
 )
 
 type UnsafeLinter struct {

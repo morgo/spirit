@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/block/spirit/pkg/parser"
 )
 
 // DiffOptions controls the behavior of the Diff operation.

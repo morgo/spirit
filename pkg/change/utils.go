@@ -8,9 +8,9 @@ import (
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/block/spirit/pkg/parser"
+	"github.com/block/spirit/pkg/parser/ast"
+	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 func encodeSchemaTable(schema, table string) string {

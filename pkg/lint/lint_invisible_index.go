@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/statement"
-	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/block/spirit/pkg/parser/ast"
 )
 
 func init() {

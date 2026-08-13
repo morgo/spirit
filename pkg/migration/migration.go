@@ -15,7 +15,7 @@ import (
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/block/spirit/pkg/parser"
 )
 
 // defaultWriteThreads must match the `default:"4"` kong tag on

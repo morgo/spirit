@@ -8,7 +8,7 @@ import (
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/table"
-	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/block/spirit/pkg/parser/format"
 )
 
 // DeclarativeToImperative compares current and desired schemas and returns the

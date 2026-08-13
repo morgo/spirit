@@ -6,8 +6,8 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
+	"github.com/block/spirit/pkg/parser/ast"
+	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 func init() {
