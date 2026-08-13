@@ -21,7 +21,6 @@ import (
 
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/types"
-	"github.com/pingcap/errors"
 )
 
 var (
@@ -401,53 +400,53 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 	switch n.FnName.L {
 	case "convert":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCastExpr.Expr")
+			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 		ctx.WriteKeyWord(" USING ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCastExpr.Expr")
+			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 	case "adddate", "subdate", "date_add", "date_sub":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[0]")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[0]: %w", err)
 		}
 		ctx.WritePlain(", ")
 		ctx.WriteKeyWord("INTERVAL ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[1]")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[1]: %w", err)
 		}
 		ctx.WritePlain(" ")
 		if err := n.Args[2].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[2]")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[2]: %w", err)
 		}
 	case "extract":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[0]")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[0]: %w", err)
 		}
 		ctx.WriteKeyWord(" FROM ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[1]")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[1]: %w", err)
 		}
 	case "position":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr: %w", err)
 		}
 		ctx.WriteKeyWord(" IN ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr: %w", err)
 		}
 	case "trim":
 		switch len(n.Args) {
 		case 3:
 			if err := n.Args[2].Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[2]")
+				return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[2]: %w", err)
 			}
 			ctx.WritePlain(" ")
 			fallthrough
 		case 2:
 			if expr, isValue := n.Args[1].(*ValueExpr); !isValue || expr.GetValue() != nil {
 				if err := n.Args[1].Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[1]")
+					return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[1]: %w", err)
 				}
 				ctx.WritePlain(" ")
 			}
@@ -455,19 +454,19 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 			fallthrough
 		case 1:
 			if err := n.Args[0].Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[0]")
+				return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[0]: %w", err)
 			}
 		}
 	case WeightString:
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[0]")
+			return fmt.Errorf("An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[0]: %w", err)
 		}
 		if len(n.Args) == 3 {
 			ctx.WriteKeyWord(" AS ")
 			ctx.WriteKeyWord(n.Args[1].(*ValueExpr).GetValue().(string))
 			ctx.WritePlain("(")
 			if err := n.Args[2].Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[2]")
+				return fmt.Errorf("An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[2]: %w", err)
 			}
 			ctx.WritePlain(")")
 		}
@@ -477,7 +476,7 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := argv.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args %d", i)
+				return fmt.Errorf("An error occurred while restore FuncCallExpr.Args %d: %w", i, err)
 			}
 		}
 	}
@@ -498,24 +497,24 @@ func (n *FuncCallExpr) customRestore(ctx *format.RestoreCtx) (bool, error) {
 	if specialLiteral != "" {
 		ctx.WritePlain(specialLiteral)
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return true, errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Expr")
+			return true, fmt.Errorf("An error occurred while restore FuncCallExpr.Expr: %w", err)
 		}
 		return true, nil
 	}
 	if n.FnName.L == JSONMemberOf {
 		if len(n.Args) == 2 {
 			if err := n.Args[0].Restore(ctx); err != nil {
-				return true, errors.Annotatef(err, "An error occurred while restore FuncCallExpr.(MEMBER OF).Args[0]")
+				return true, fmt.Errorf("An error occurred while restore FuncCallExpr.(MEMBER OF).Args[0]: %w", err)
 			}
 			ctx.WriteKeyWord(" MEMBER OF ")
 			ctx.WritePlain("(")
 			if err := n.Args[1].Restore(ctx); err != nil {
-				return true, errors.Annotatef(err, "An error occurred while restore FuncCallExpr.(MEMBER OF).Args[1]")
+				return true, fmt.Errorf("An error occurred while restore FuncCallExpr.(MEMBER OF).Args[1]: %w", err)
 			}
 			ctx.WritePlain(")")
 			return true, nil
 		}
-		return true, errors.WithStack(errors.Errorf("Incorrect parameter count in the call to native function 'json_memberof'"))
+		return true, (fmt.Errorf("Incorrect parameter count in the call to native function 'json_memberof'"))
 	}
 	return false, nil
 }
@@ -608,7 +607,7 @@ func (n *JSONSumCrc32Expr) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("JSON_SUM_CRC32")
 	ctx.WritePlain("(")
 	if err := n.Expr.Restore(ctx); err != nil {
-		return errors.Annotatef(err, "An error occurred while restore JSONSumCrc32Expr.Expr")
+		return fmt.Errorf("An error occurred while restore JSONSumCrc32Expr.Expr: %w", err)
 	}
 	ctx.WriteKeyWord(" AS ")
 	n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)
@@ -661,7 +660,7 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("CAST")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCastExpr.Expr")
+			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 		ctx.WriteKeyWord(" AS ")
 		n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)
@@ -670,7 +669,7 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("CONVERT")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCastExpr.Expr")
+			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 		ctx.WritePlain(", ")
 		n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)
@@ -678,7 +677,7 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 	case CastBinaryOperator:
 		ctx.WriteKeyWord("BINARY ")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FuncCastExpr.Expr")
+			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 	}
 	return nil
@@ -857,18 +856,18 @@ func (n *AggregateFuncExpr) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := n.Args[i].Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore AggregateFuncExpr.Args[%d]", i)
+				return fmt.Errorf("An error occurred while restore AggregateFuncExpr.Args[%d]: %w", i, err)
 			}
 		}
 		if n.Order != nil {
 			ctx.WritePlain(" ")
 			if err := n.Order.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occur while restore AggregateFuncExpr.Args Order")
+				return fmt.Errorf("An error occur while restore AggregateFuncExpr.Args Order: %w", err)
 			}
 		}
 		ctx.WriteKeyWord(" SEPARATOR ")
 		if err := n.Args[len(n.Args)-1].Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AggregateFuncExpr.Args SEPARATOR")
+			return fmt.Errorf("An error occurred while restore AggregateFuncExpr.Args SEPARATOR: %w", err)
 		}
 	default:
 		for i, argv := range n.Args {
@@ -876,7 +875,7 @@ func (n *AggregateFuncExpr) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := argv.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore AggregateFuncExpr.Args[%d]", i)
+				return fmt.Errorf("An error occurred while restore AggregateFuncExpr.Args[%d]: %w", i, err)
 			}
 		}
 	}
@@ -970,7 +969,7 @@ func (n *WindowFuncExpr) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("DISTINCT ")
 		}
 		if err := v.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore WindowFuncExpr.Args[%d]", i)
+			return fmt.Errorf("An error occurred while restore WindowFuncExpr.Args[%d]: %w", i, err)
 		}
 	}
 	ctx.WritePlain(")")
@@ -982,7 +981,7 @@ func (n *WindowFuncExpr) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteKeyWord(" OVER ")
 	if err := n.Spec.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore WindowFuncExpr.Spec")
+		return fmt.Errorf("An error occurred while restore WindowFuncExpr.Spec: %w", err)
 	}
 
 	return nil
@@ -1129,9 +1128,9 @@ func (unit TimeUnitType) Duration() (time.Duration, error) {
 	case TimeUnitWeek:
 		return time.Hour * 24 * 7, nil
 	case TimeUnitMonth, TimeUnitQuarter, TimeUnitYear:
-		return 0, errors.Errorf("%s is not a constant time interval and cannot be used here", unit)
+		return 0, fmt.Errorf("%s is not a constant time interval and cannot be used here", unit)
 	default:
-		return 0, errors.Errorf("%s is a composite time unit and is not supported yet", unit)
+		return 0, fmt.Errorf("%s is a composite time unit and is not supported yet", unit)
 	}
 }
 

@@ -14,14 +14,14 @@
 package mysql
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/format"
-	"github.com/pingcap/errors"
 )
 
 func newInvalidModeErr(s string) error {
-	return NewErr(ErrWrongValueForVar, "sql_mode", s)
+	return fmt.Errorf("Variable 'sql_mode' can't be set to the value of '%s'", s)
 }
 
 // Identifier length limitations.
@@ -421,7 +421,7 @@ func (n *PriorityEnum) Restore(ctx *format.RestoreCtx) error {
 	case DelayedPriority:
 		ctx.WriteKeyWord("DELAYED")
 	default:
-		return errors.Errorf("undefined PriorityEnum Type[%d]", *n)
+		return fmt.Errorf("undefined PriorityEnum Type[%d]", *n)
 	}
 	return nil
 }

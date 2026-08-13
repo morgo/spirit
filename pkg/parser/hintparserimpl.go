@@ -19,16 +19,15 @@ import (
 
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/terror"
 )
 
 //revive:disable:exported
 var (
-	ErrWarnOptimizerHintUnsupportedHint = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintUnsupportedHint)
-	ErrWarnOptimizerHintInvalidToken    = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintInvalidToken)
-	ErrWarnOptimizerHintParseError      = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintParseError)
-	ErrWarnOptimizerHintInvalidInteger  = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintInvalidInteger)
-	ErrWarnOptimizerHintWrongPos        = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintWrongPos)
+	ErrWarnOptimizerHintUnsupportedHint = mysql.NewStdErr("parser", mysql.ErrWarnOptimizerHintUnsupportedHint)
+	ErrWarnOptimizerHintInvalidToken    = mysql.NewStdErr("parser", mysql.ErrWarnOptimizerHintInvalidToken)
+	ErrWarnOptimizerHintParseError      = mysql.NewStdErr("parser", mysql.ErrWarnOptimizerHintParseError)
+	ErrWarnOptimizerHintInvalidInteger  = mysql.NewStdErr("parser", mysql.ErrWarnOptimizerHintInvalidInteger)
+	ErrWarnOptimizerHintWrongPos        = mysql.NewStdErr("parser", mysql.ErrWarnOptimizerHintWrongPos)
 )
 
 //revive:enable:exported
@@ -94,7 +93,7 @@ func (hs *hintScanner) updateSetVarValueState(tok int) {
 
 func (hs *hintScanner) Errorf(format string, args ...interface{}) error {
 	inner := hs.Scanner.Errorf(format, args...)
-	return ErrParse.GenWithStackByArgs("Optimizer hint syntax error at", inner)
+	return ErrParse.GenByArgs("Optimizer hint syntax error at", inner)
 }
 
 func (hs *hintScanner) Lex(lval *yyhintSymType) int {
@@ -113,7 +112,7 @@ func (hs *hintScanner) Lex(lval *yyhintSymType) int {
 	case intLit:
 		n, e := strconv.ParseUint(lit, 10, 64)
 		if e != nil {
-			hs.AppendError(ErrWarnOptimizerHintInvalidInteger.GenWithStackByArgs(lit))
+			hs.AppendError(ErrWarnOptimizerHintInvalidInteger.GenByArgs(lit))
 			return returnToken(hintInvalid)
 		}
 		lval.number = n
@@ -178,7 +177,7 @@ func (hs *hintScanner) Lex(lval *yyhintSymType) int {
 		errorTokenType = "unknown token"
 	}
 
-	hs.AppendError(ErrWarnOptimizerHintInvalidToken.GenWithStackByArgs(errorTokenType, lit, tok))
+	hs.AppendError(ErrWarnOptimizerHintInvalidToken.GenByArgs(errorTokenType, lit, tok))
 	return returnToken(hintInvalid)
 }
 
@@ -224,6 +223,6 @@ func ParseHint(input string, sqlMode mysql.SQLMode, initPos Pos) ([]*ast.TableOp
 }
 
 func (hp *hintParser) warnUnsupportedHint(name string) {
-	warn := ErrWarnOptimizerHintUnsupportedHint.FastGenByArgs(name)
+	warn := ErrWarnOptimizerHintUnsupportedHint.GenByArgs(name)
 	hp.lexer.warns = append(hp.lexer.warns, warn)
 }

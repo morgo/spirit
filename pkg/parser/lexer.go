@@ -945,7 +945,7 @@ type parserDepthLimitError struct {
 
 func newParserDepthLimitError(message string, maxDepth int) error {
 	return &parserDepthLimitError{
-		err: ErrParse.GenWithStackByArgs(message, strconv.Itoa(maxDepth)),
+		err: ErrParse.GenByArgs(message, strconv.Itoa(maxDepth)),
 	}
 }
 

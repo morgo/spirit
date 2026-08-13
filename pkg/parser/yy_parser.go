@@ -14,6 +14,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -25,44 +26,42 @@ import (
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/terror"
 	"github.com/block/spirit/pkg/parser/types"
-	"github.com/pingcap/errors"
 )
 
 var (
 	// ErrSyntax returns for sql syntax error.
-	ErrSyntax = terror.ClassParser.NewStd(mysql.ErrSyntax)
+	ErrSyntax = mysql.NewStdErr("parser", mysql.ErrSyntax)
 	// ErrParse returns for sql parse error.
-	ErrParse = terror.ClassParser.NewStd(mysql.ErrParse)
+	ErrParse = mysql.NewStdErr("parser", mysql.ErrParse)
 	// ErrUnknownCharacterSet returns for no character set found error.
-	ErrUnknownCharacterSet = terror.ClassParser.NewStd(mysql.ErrUnknownCharacterSet)
+	ErrUnknownCharacterSet = mysql.NewStdErr("parser", mysql.ErrUnknownCharacterSet)
 	// ErrInvalidYearColumnLength returns for illegal column length for year type.
-	ErrInvalidYearColumnLength = terror.ClassParser.NewStd(mysql.ErrInvalidYearColumnLength)
+	ErrInvalidYearColumnLength = mysql.NewStdErr("parser", mysql.ErrInvalidYearColumnLength)
 	// ErrWrongArguments returns for illegal argument.
-	ErrWrongArguments = terror.ClassParser.NewStd(mysql.ErrWrongArguments)
+	ErrWrongArguments = mysql.NewStdErr("parser", mysql.ErrWrongArguments)
 	// ErrWrongFieldTerminators returns for illegal field terminators.
-	ErrWrongFieldTerminators = terror.ClassParser.NewStd(mysql.ErrWrongFieldTerminators)
+	ErrWrongFieldTerminators = mysql.NewStdErr("parser", mysql.ErrWrongFieldTerminators)
 	// ErrTooBigDisplayWidth returns for data display width exceed limit .
-	ErrTooBigDisplayWidth = terror.ClassParser.NewStd(mysql.ErrTooBigDisplaywidth)
+	ErrTooBigDisplayWidth = mysql.NewStdErr("parser", mysql.ErrTooBigDisplaywidth)
 	// ErrTooBigPrecision returns for data precision exceed limit.
-	ErrTooBigPrecision = terror.ClassParser.NewStd(mysql.ErrTooBigPrecision)
+	ErrTooBigPrecision = mysql.NewStdErr("parser", mysql.ErrTooBigPrecision)
 	// ErrUnknownAlterLock returns for no alter lock type found error.
-	ErrUnknownAlterLock = terror.ClassParser.NewStd(mysql.ErrUnknownAlterLock)
+	ErrUnknownAlterLock = mysql.NewStdErr("parser", mysql.ErrUnknownAlterLock)
 	// ErrUnknownAlterAlgorithm returns for no alter algorithm found error.
-	ErrUnknownAlterAlgorithm = terror.ClassParser.NewStd(mysql.ErrUnknownAlterAlgorithm)
+	ErrUnknownAlterAlgorithm = mysql.NewStdErr("parser", mysql.ErrUnknownAlterAlgorithm)
 	// ErrWrongValue returns for wrong value
-	ErrWrongValue = terror.ClassParser.NewStd(mysql.ErrWrongValue)
+	ErrWrongValue = mysql.NewStdErr("parser", mysql.ErrWrongValue)
 	// ErrWarnDeprecatedSyntax return when the syntax was deprecated
-	ErrWarnDeprecatedSyntax = terror.ClassParser.NewStd(mysql.ErrWarnDeprecatedSyntax)
+	ErrWarnDeprecatedSyntax = mysql.NewStdErr("parser", mysql.ErrWarnDeprecatedSyntax)
 	// ErrWarnDeprecatedSyntaxNoReplacement return when the syntax was deprecated and there is no replacement.
-	ErrWarnDeprecatedSyntaxNoReplacement = terror.ClassParser.NewStd(mysql.ErrWarnDeprecatedSyntaxNoReplacement)
+	ErrWarnDeprecatedSyntaxNoReplacement = mysql.NewStdErr("parser", mysql.ErrWarnDeprecatedSyntaxNoReplacement)
 	// ErrWrongUsage returns for incorrect usages.
-	ErrWrongUsage = terror.ClassParser.NewStd(mysql.ErrWrongUsage)
+	ErrWrongUsage = mysql.NewStdErr("parser", mysql.ErrWrongUsage)
 	// ErrWrongDBName returns for incorrect DB name.
-	ErrWrongDBName = terror.ClassParser.NewStd(mysql.ErrWrongDBName)
+	ErrWrongDBName = mysql.NewStdErr("parser", mysql.ErrWrongDBName)
 	// ErrDataOutOfRange returns for incorrect range.
-	ErrDataOutOfRange = terror.ClassParser.NewStd(mysql.ErrDataOutOfRange)
+	ErrDataOutOfRange = mysql.NewStdErr("parser", mysql.ErrDataOutOfRange)
 	// SpecFieldPattern special result field pattern
 	SpecFieldPattern = regexp.MustCompile(`(\/\*!(M?[0-9]{5,6})?|\*\/)`)
 	specCodeStart    = regexp.MustCompile(`^\/\*!(M?[0-9]{5,6})?[ \t]*`)
@@ -195,11 +194,11 @@ func (parser *Parser) ParseSQL(sql string, params ...ParseParam) (stmt []ast.Stm
 		warns = nil
 	}
 	if len(errs) != 0 {
-		return nil, warns, errors.Trace(errs[0])
+		return nil, warns, errs[0]
 	}
 	for _, stmt := range parser.result {
 		if err := checkASTDepth(stmt); err != nil {
-			return nil, warns, errors.Trace(err)
+			return nil, warns, err
 		}
 	}
 	return parser.result, warns, nil
@@ -219,7 +218,7 @@ func checkASTDepth(stmt ast.StmtNode) error {
 	checker := astDepthChecker{}
 	_, _ = stmt.Accept(&checker)
 	if checker.exceeded {
-		return ErrParse.GenWithStackByArgs("AST nesting depth exceeds maximum", strconv.Itoa(maxASTDepth))
+		return ErrParse.GenByArgs("AST nesting depth exceeds maximum", strconv.Itoa(maxASTDepth))
 	}
 	return nil
 }
@@ -248,7 +247,7 @@ func (c *astDepthChecker) Leave(in ast.Node) (ast.Node, bool) {
 func (parser *Parser) ParseOneStmt(sql, charset, collation string) (ast.StmtNode, error) {
 	stmts, _, err := parser.ParseSQL(sql, CharsetConnection(charset), CollationConnection(collation))
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	if len(stmts) != 1 {
 		return nil, ErrSyntax
@@ -337,8 +336,8 @@ func toInt(l yyLexer, lval *yySymType, str string) int {
 func toDecimal(l yyLexer, lval *yySymType, str string) int {
 	dec, err := ast.NewDecimal(str)
 	if err != nil {
-		if terror.ErrorEqual(err, types.ErrDataOutOfRange) {
-			l.AppendWarn(types.ErrTruncatedWrongValue.FastGenByArgs("DECIMAL", dec))
+		if errors.Is(err, types.ErrDataOutOfRange) {
+			l.AppendWarn(types.ErrTruncatedWrongValue.GenByArgs("DECIMAL", dec))
 			dec, _ = ast.NewDecimal(mysql.DefaultDecimal)
 		} else {
 			l.AppendError(l.Errorf("decimal literal: %v", err))
@@ -353,7 +352,7 @@ func toFloat(l yyLexer, lval *yySymType, str string) int {
 	if err != nil {
 		e := err.(*strconv.NumError)
 		if e.Err == strconv.ErrRange {
-			l.AppendError(types.ErrIllegalValueForType.GenWithStackByArgs("double", str))
+			l.AppendError(types.ErrIllegalValueForType.GenByArgs("double", str))
 			return invalid
 		}
 		l.AppendError(l.Errorf("float literal: %v", err))

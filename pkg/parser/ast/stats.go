@@ -14,8 +14,9 @@
 package ast
 
 import (
+	"fmt"
+
 	"github.com/block/spirit/pkg/parser/format"
-	"github.com/pingcap/errors"
 )
 
 var (
@@ -92,7 +93,7 @@ func (n *AnalyzeTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(",")
 		}
 		if err := table.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore AnalyzeTableStmt.TableNames[%d]", i)
+			return fmt.Errorf("An error occurred while restore AnalyzeTableStmt.TableNames[%d]: %w", i, err)
 		}
 	}
 	if len(n.PartitionNames) != 0 {

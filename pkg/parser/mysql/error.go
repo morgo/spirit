@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,54 +16,61 @@ package mysql
 
 import (
 	"fmt"
-
-	"github.com/pingcap/errors"
 )
 
-// SQLError records an error information, from executing SQL.
-type SQLError struct {
-	Code    uint16
-	Message string
-	State   string
+// ParseError is an error emitted by the parser, carrying a MySQL error
+// code. The package-level Err* variables declared across the parser, ast,
+// types and charset packages are message templates that double as
+// sentinels: errors created from them with GenByArgs or GenByFormat match
+// their template via errors.Is.
+type ParseError struct {
+	class   string
+	code    uint16
+	message string      // format template on sentinels, final text on instances
+	base    *ParseError // template this instance was created from; nil on sentinels
 }
 
-// Error prints errors, with a formatted string.
-func (e *SQLError) Error() string {
-	return fmt.Sprintf("ERROR %d (%s): %s", e.Code, e.State, e.Message)
+// NewStdErr creates a sentinel error for the given MySQL error code, using
+// the standard message template from MySQLErrName. class only provides the
+// "[class:code]" prefix of the rendered message (e.g. "parser", "ddl").
+func NewStdErr(class string, code uint16) *ParseError {
+	return &ParseError{class: class, code: code, message: MySQLErrName[code]}
 }
 
-// NewErr generates a SQL error, with an error code and default format specifier defined in MySQLErrName.
-func NewErr(errCode uint16, args ...any) *SQLError {
-	e := &SQLError{Code: errCode}
-
-	if s, ok := MySQLState[errCode]; ok {
-		e.State = s
-	} else {
-		e.State = DefaultMySQLState
-	}
-
-	if sqlErr, ok := MySQLErrName[errCode]; ok {
-		errors.RedactErrorArg(args, sqlErr.RedactArgPos)
-		e.Message = fmt.Sprintf(sqlErr.Raw, args...)
-	} else {
-		e.Message = fmt.Sprint(args...)
-	}
-
-	return e
+// Error implements the error interface.
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("[%s:%d]%s", e.class, e.code, e.message)
 }
 
-// NewErrf creates a SQL error, with an error code and a format specifier.
-func NewErrf(errCode uint16, format string, redactArgPos []int, args ...any) *SQLError {
-	e := &SQLError{Code: errCode}
-
-	if s, ok := MySQLState[errCode]; ok {
-		e.State = s
-	} else {
-		e.State = DefaultMySQLState
+// GenByArgs creates an instance of the error with its message template
+// filled in.
+func (e *ParseError) GenByArgs(args ...any) error {
+	msg := e.message
+	if len(args) > 0 {
+		msg = fmt.Sprintf(e.message, args...)
 	}
+	return &ParseError{class: e.class, code: e.code, message: msg, base: e.template()}
+}
 
-	errors.RedactErrorArg(args, redactArgPos)
-	e.Message = fmt.Sprintf(format, args...)
+// GenByFormat is GenByArgs with the standard message template replaced.
+func (e *ParseError) GenByFormat(format string, args ...any) error {
+	return &ParseError{class: e.class, code: e.code, message: fmt.Sprintf(format, args...), base: e.template()}
+}
 
+// Is reports whether target is the same error template (or another
+// instance of it), so errors.Is(err, ErrSentinel) matches independent of
+// the formatted message.
+func (e *ParseError) Is(target error) bool {
+	t, ok := target.(*ParseError)
+	if !ok {
+		return false
+	}
+	return e.template() == t.template()
+}
+
+func (e *ParseError) template() *ParseError {
+	if e.base != nil {
+		return e.base
+	}
 	return e
 }

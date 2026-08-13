@@ -14,12 +14,13 @@
 package ast
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/pingcap/errors"
 )
 
 var (
@@ -169,7 +170,7 @@ func (n *Join) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain("(")
 	}
 	if err := n.Left.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore Join.Left")
+		return fmt.Errorf("An error occurred while restore Join.Left: %w", err)
 	}
 	if leftIsJoin && !useCommaJoin {
 		ctx.WritePlain(")")
@@ -200,7 +201,7 @@ func (n *Join) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain("(")
 	}
 	if err := n.Right.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore Join.Right")
+		return fmt.Errorf("An error occurred while restore Join.Right: %w", err)
 	}
 	if rightIsJoin {
 		ctx.WritePlain(")")
@@ -209,7 +210,7 @@ func (n *Join) Restore(ctx *format.RestoreCtx) error {
 	if n.On != nil {
 		ctx.WritePlain(" ")
 		if err := n.On.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore Join.On")
+			return fmt.Errorf("An error occurred while restore Join.On: %w", err)
 		}
 	}
 	if len(n.Using) != 0 {
@@ -220,7 +221,7 @@ func (n *Join) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := v.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore Join.Using")
+				return fmt.Errorf("An error occurred while restore Join.Using: %w", err)
 			}
 		}
 		ctx.WritePlain(")")
@@ -320,7 +321,7 @@ func (n *TableName) restoreIndexHints(ctx *format.RestoreCtx) error {
 	for _, value := range n.IndexHints {
 		ctx.WritePlain(" ")
 		if err := value.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing IndexHints")
+			return fmt.Errorf("An error occurred while splicing IndexHints: %w", err)
 		}
 	}
 	return nil
@@ -433,7 +434,7 @@ func (n *DeleteTableList) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(",")
 		}
 		if err := t.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore DeleteTableList.Tables[%v]", i)
+			return fmt.Errorf("An error occurred while restore DeleteTableList.Tables[%v]: %w", i, err)
 		}
 	}
 	return nil
@@ -469,7 +470,7 @@ type OnCondition struct {
 func (n *OnCondition) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("ON ")
 	if err := n.Expr.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore OnCondition.Expr")
+		return fmt.Errorf("An error occurred while restore OnCondition.Expr: %w", err)
 	}
 	return nil
 }
@@ -558,7 +559,7 @@ func (n *TableSource) Restore(ctx *format.RestoreCtx) error {
 		}
 
 		if err := tn.restoreIndexHints(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore TableSource.Source.(*TableName).IndexHints")
+			return fmt.Errorf("An error occurred while restore TableSource.Source.(*TableName).IndexHints: %w", err)
 		}
 
 		if needParen {
@@ -569,7 +570,7 @@ func (n *TableSource) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain("(")
 		}
 		if err := n.Source.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore TableSource.Source")
+			return fmt.Errorf("An error occurred while restore TableSource.Source: %w", err)
 		}
 		if needParen {
 			ctx.WritePlain(")")
@@ -710,12 +711,12 @@ type SelectField struct {
 func (n *SelectField) Restore(ctx *format.RestoreCtx) error {
 	if n.WildCard != nil {
 		if err := n.WildCard.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectField.WildCard")
+			return fmt.Errorf("An error occurred while restore SelectField.WildCard: %w", err)
 		}
 	}
 	if n.Expr != nil {
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectField.Expr")
+			return fmt.Errorf("An error occurred while restore SelectField.Expr: %w", err)
 		}
 	}
 	if asName := n.AsName.String(); asName != "" {
@@ -778,7 +779,7 @@ func (n *FieldList) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := v.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore FieldList.Fields[%d]", i)
+			return fmt.Errorf("An error occurred while restore FieldList.Fields[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -811,7 +812,7 @@ type TableRefsClause struct {
 // Restore implements Node interface.
 func (n *TableRefsClause) Restore(ctx *format.RestoreCtx) error {
 	if err := n.TableRefs.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore TableRefsClause.TableRefs")
+		return fmt.Errorf("An error occurred while restore TableRefsClause.TableRefs: %w", err)
 	}
 	return nil
 }
@@ -843,7 +844,7 @@ type ByItem struct {
 // Restore implements Node interface.
 func (n *ByItem) Restore(ctx *format.RestoreCtx) error {
 	if err := n.Expr.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore ByItem.Expr")
+		return fmt.Errorf("An error occurred while restore ByItem.Expr: %w", err)
 	}
 	if n.Desc {
 		ctx.WriteKeyWord(" DESC")
@@ -881,7 +882,7 @@ func (n *GroupByClause) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(",")
 		}
 		if err := v.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore GroupByClause.Items[%d]", i)
+			return fmt.Errorf("An error occurred while restore GroupByClause.Items[%d]: %w", i, err)
 		}
 	}
 	if n.Rollup {
@@ -917,7 +918,7 @@ type HavingClause struct {
 func (n *HavingClause) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("HAVING ")
 	if err := n.Expr.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore HavingClause.Expr")
+		return fmt.Errorf("An error occurred while restore HavingClause.Expr: %w", err)
 	}
 	return nil
 }
@@ -952,7 +953,7 @@ func (n *OrderByClause) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(",")
 		}
 		if err := item.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore OrderByClause.Items[%d]", i)
+			return fmt.Errorf("An error occurred while restore OrderByClause.Items[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -1199,7 +1200,7 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(" ")
 				}
 				if err := tableHint.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore SelectStmt.TableHints[%d]", i)
+					return fmt.Errorf("An error occurred while restore SelectStmt.TableHints[%d]: %w", i, err)
 				}
 			}
 			ctx.WritePlain("*/ ")
@@ -1219,7 +1220,7 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(",")
 				}
 				if err := field.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore SelectStmt.Fields[%d]", i)
+					return fmt.Errorf("An error occurred while restore SelectStmt.Fields[%d]: %w", i, err)
 				}
 			}
 		}
@@ -1227,7 +1228,7 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 		if n.From != nil {
 			ctx.WriteKeyWord(" FROM ")
 			if err := n.From.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore SelectStmt.From")
+				return fmt.Errorf("An error occurred while restore SelectStmt.From: %w", err)
 			}
 		}
 
@@ -1238,21 +1239,21 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 		if n.Where != nil {
 			ctx.WriteKeyWord(" WHERE ")
 			if err := n.Where.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore SelectStmt.Where")
+				return fmt.Errorf("An error occurred while restore SelectStmt.Where: %w", err)
 			}
 		}
 
 		if n.GroupBy != nil {
 			ctx.WritePlain(" ")
 			if err := n.GroupBy.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore SelectStmt.GroupBy")
+				return fmt.Errorf("An error occurred while restore SelectStmt.GroupBy: %w", err)
 			}
 		}
 
 		if n.Having != nil {
 			ctx.WritePlain(" ")
 			if err := n.Having.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore SelectStmt.Having")
+				return fmt.Errorf("An error occurred while restore SelectStmt.Having: %w", err)
 			}
 		}
 
@@ -1263,18 +1264,18 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(",")
 				}
 				if err := windowsSpec.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore SelectStmt.WindowSpec[%d]", i)
+					return fmt.Errorf("An error occurred while restore SelectStmt.WindowSpec[%d]: %w", i, err)
 				}
 			}
 		}
 	case SelectStmtKindTable:
 		if err := n.From.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectStmt.From")
+			return fmt.Errorf("An error occurred while restore SelectStmt.From: %w", err)
 		}
 	case SelectStmtKindValues:
 		for i, v := range n.Lists {
 			if err := v.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore SelectStmt.Lists[%d]", i)
+				return fmt.Errorf("An error occurred while restore SelectStmt.Lists[%d]: %w", i, err)
 			}
 			if i != len(n.Lists)-1 {
 				ctx.WritePlain(", ")
@@ -1285,14 +1286,14 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.OrderBy != nil {
 		ctx.WritePlain(" ")
 		if err := n.OrderBy.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectStmt.OrderBy")
+			return fmt.Errorf("An error occurred while restore SelectStmt.OrderBy: %w", err)
 		}
 	}
 
 	if n.Limit != nil {
 		ctx.WritePlain(" ")
 		if err := n.Limit.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectStmt.Limit")
+			return fmt.Errorf("An error occurred while restore SelectStmt.Limit: %w", err)
 		}
 	}
 
@@ -1348,7 +1349,7 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.SelectIntoOpt != nil {
 		ctx.WritePlain(" ")
 		if err := n.SelectIntoOpt.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectStmt.SelectIntoOpt")
+			return fmt.Errorf("An error occurred while restore SelectStmt.SelectIntoOpt: %w", err)
 		}
 	}
 	return nil
@@ -1357,7 +1358,7 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 func restoreTables(ctx *format.RestoreCtx, ts []*TableName) error {
 	for i, v := range ts {
 		if err := v.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectStmt.LockInfo")
+			return fmt.Errorf("An error occurred while restore SelectStmt.LockInfo: %w", err)
 		}
 		if i != len(ts)-1 {
 			ctx.WritePlain(", ")
@@ -1496,7 +1497,7 @@ func (n *SetOprSelectList) Restore(ctx *format.RestoreCtx) error {
 	if n.With != nil {
 		defer ctx.RestoreCTEFunc()() //nolint: all_revive
 		if err := n.With.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SetOprSelectList.With")
+			return fmt.Errorf("An error occurred while restore SetOprSelectList.With: %w", err)
 		}
 	}
 
@@ -1507,7 +1508,7 @@ func (n *SetOprSelectList) Restore(ctx *format.RestoreCtx) error {
 				ctx.WriteKeyWord(" " + selectStmt.AfterSetOperator.String() + " ")
 			}
 			if err := selectStmt.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore SetOprSelectList.SelectStmt")
+				return fmt.Errorf("An error occurred while restore SetOprSelectList.SelectStmt: %w", err)
 			}
 		case *SetOprSelectList:
 			if i != 0 {
@@ -1525,14 +1526,14 @@ func (n *SetOprSelectList) Restore(ctx *format.RestoreCtx) error {
 	if n.OrderBy != nil {
 		ctx.WritePlain(" ")
 		if err := n.OrderBy.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SetOprSelectList.OrderBy")
+			return fmt.Errorf("An error occurred while restore SetOprSelectList.OrderBy: %w", err)
 		}
 	}
 
 	if n.Limit != nil {
 		ctx.WritePlain(" ")
 		if err := n.Limit.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SetOprSelectList.Limit")
+			return fmt.Errorf("An error occurred while restore SetOprSelectList.Limit: %w", err)
 		}
 	}
 	return nil
@@ -1626,7 +1627,7 @@ func (n *SetOprStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.With != nil {
 		defer ctx.RestoreCTEFunc()() //nolint: all_revive
 		if err := n.With.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SetOprStmt.With")
+			return fmt.Errorf("An error occurred while restore SetOprStmt.With: %w", err)
 		}
 	}
 	if n.IsInBraces {
@@ -1637,20 +1638,20 @@ func (n *SetOprStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 
 	if err := n.SelectList.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore SetOprStmt.SelectList")
+		return fmt.Errorf("An error occurred while restore SetOprStmt.SelectList: %w", err)
 	}
 
 	if n.OrderBy != nil {
 		ctx.WritePlain(" ")
 		if err := n.OrderBy.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SetOprStmt.OrderBy")
+			return fmt.Errorf("An error occurred while restore SetOprStmt.OrderBy: %w", err)
 		}
 	}
 
 	if n.Limit != nil {
 		ctx.WritePlain(" ")
 		if err := n.Limit.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SetOprStmt.Limit")
+			return fmt.Errorf("An error occurred while restore SetOprStmt.Limit: %w", err)
 		}
 	}
 	return nil
@@ -1705,11 +1706,11 @@ type Assignment struct {
 // Restore implements Node interface.
 func (n *Assignment) Restore(ctx *format.RestoreCtx) error {
 	if err := n.Column.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore Assignment.Column")
+		return fmt.Errorf("An error occurred while restore Assignment.Column: %w", err)
 	}
 	ctx.WritePlain("=")
 	if err := n.Expr.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore Assignment.Expr")
+		return fmt.Errorf("An error occurred while restore Assignment.Expr: %w", err)
 	}
 	return nil
 }
@@ -1743,12 +1744,12 @@ type ColumnNameOrUserVar struct {
 func (n *ColumnNameOrUserVar) Restore(ctx *format.RestoreCtx) error {
 	if n.ColumnName != nil {
 		if err := n.ColumnName.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ColumnNameOrUserVar.ColumnName")
+			return fmt.Errorf("An error occurred while restore ColumnNameOrUserVar.ColumnName: %w", err)
 		}
 	}
 	if n.UserVar != nil {
 		if err := n.UserVar.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ColumnNameOrUserVar.UserVar")
+			return fmt.Errorf("An error occurred while restore ColumnNameOrUserVar.UserVar: %w", err)
 		}
 	}
 	return nil
@@ -1835,7 +1836,7 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteKeyWord(" INTO TABLE ")
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore LoadDataStmt.Table")
+		return fmt.Errorf("An error occurred while restore LoadDataStmt.Table: %w", err)
 	}
 	if n.Charset != nil {
 		ctx.WriteKeyWord(" CHARACTER SET ")
@@ -1859,7 +1860,7 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := c.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore LoadDataStmt.ColumnsAndUserVars")
+				return fmt.Errorf("An error occurred while restore LoadDataStmt.ColumnsAndUserVars: %w", err)
 			}
 		}
 		ctx.WritePlain(")")
@@ -1873,7 +1874,7 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 			}
 			ctx.WritePlain(" ")
 			if err := assign.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore LoadDataStmt.ColumnAssignments")
+				return fmt.Errorf("An error occurred while restore LoadDataStmt.ColumnAssignments: %w", err)
 			}
 		}
 	}
@@ -2011,7 +2012,7 @@ func (n *CallStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("CALL ")
 
 	if err := n.Procedure.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore CallStmt.Procedure")
+		return fmt.Errorf("An error occurred while restore CallStmt.Procedure: %w", err)
 	}
 
 	return nil
@@ -2078,14 +2079,14 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(" ")
 			}
 			if err := tableHint.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore InsertStmt.TableHints[%d]", i)
+				return fmt.Errorf("An error occurred while restore InsertStmt.TableHints[%d]: %w", i, err)
 			}
 		}
 		ctx.WritePlain("*/ ")
 	}
 
 	if err := n.Priority.Restore(ctx); err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	if n.Priority != mysql.NoPriority {
 		ctx.WritePlain(" ")
@@ -2095,7 +2096,7 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteKeyWord("INTO ")
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore InsertStmt.Table")
+		return fmt.Errorf("An error occurred while restore InsertStmt.Table: %w", err)
 	}
 	if len(n.PartitionNames) != 0 {
 		ctx.WriteKeyWord(" PARTITION")
@@ -2110,10 +2111,10 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 	if n.Setlist {
 		if len(n.Lists) != 1 {
-			return errors.Errorf("Expect len(InsertStmt.Lists)[%d] == 1 for SET x=y", len(n.Lists))
+			return fmt.Errorf("Expect len(InsertStmt.Lists)[%d] == 1 for SET x=y", len(n.Lists))
 		}
 		if len(n.Lists[0]) != len(n.Columns) {
-			return errors.Errorf("Expect len(InsertStmt.Columns)[%d] == len(InsertStmt.Lists[0])[%d] for SET x=y", len(n.Columns), len(n.Lists[0]))
+			return fmt.Errorf("Expect len(InsertStmt.Columns)[%d] == len(InsertStmt.Lists[0])[%d] for SET x=y", len(n.Columns), len(n.Lists[0]))
 		}
 		ctx.WriteKeyWord(" SET ")
 		for i, v := range n.Lists[0] {
@@ -2125,7 +2126,7 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 				Expr:   v,
 			}
 			if err := v.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore InsertStmt.Set (Columns = Expr)[%d]", i)
+				return fmt.Errorf("An error occurred while restore InsertStmt.Set (Columns = Expr)[%d]: %w", i, err)
 			}
 		}
 	} else {
@@ -2136,7 +2137,7 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(",")
 				}
 				if err := v.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore InsertStmt.Columns[%d]", i)
+					return fmt.Errorf("An error occurred while restore InsertStmt.Columns[%d]: %w", i, err)
 				}
 			}
 			ctx.WritePlain(")")
@@ -2153,7 +2154,7 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 						ctx.WritePlain(",")
 					}
 					if err := v.Restore(ctx); err != nil {
-						return errors.Annotatef(err, "An error occurred while restore InsertStmt.Lists[%d][%d]", i, j)
+						return fmt.Errorf("An error occurred while restore InsertStmt.Lists[%d][%d]: %w", i, j, err)
 					}
 				}
 				ctx.WritePlain(")")
@@ -2165,10 +2166,10 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 		switch v := n.Select.(type) {
 		case *SelectStmt, *SetOprStmt:
 			if err := v.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore InsertStmt.Select")
+				return fmt.Errorf("An error occurred while restore InsertStmt.Select: %w", err)
 			}
 		default:
-			return errors.Errorf("Incorrect type for InsertStmt.Select: %T", v)
+			return fmt.Errorf("Incorrect type for InsertStmt.Select: %T", v)
 		}
 	}
 	if asName := n.RowAlias.String(); asName != "" {
@@ -2192,7 +2193,7 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := v.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore InsertStmt.OnDuplicate[%d]", i)
+				return fmt.Errorf("An error occurred while restore InsertStmt.OnDuplicate[%d]: %w", i, err)
 			}
 		}
 	}
@@ -2325,14 +2326,14 @@ func (n *DeleteStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(" ")
 			}
 			if err := tableHint.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore UpdateStmt.TableHints[%d]", i)
+				return fmt.Errorf("An error occurred while restore UpdateStmt.TableHints[%d]: %w", i, err)
 			}
 		}
 		ctx.WritePlain("*/ ")
 	}
 
 	if err := n.Priority.Restore(ctx); err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	if n.Priority != mysql.NoPriority {
 		ctx.WritePlain(" ")
@@ -2347,50 +2348,50 @@ func (n *DeleteStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.IsMultiTable { // Multiple-Table Syntax
 		if n.BeforeFrom {
 			if err := n.Tables.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore DeleteStmt.Tables")
+				return fmt.Errorf("An error occurred while restore DeleteStmt.Tables: %w", err)
 			}
 
 			ctx.WriteKeyWord(" FROM ")
 			if err := n.TableRefs.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore DeleteStmt.TableRefs")
+				return fmt.Errorf("An error occurred while restore DeleteStmt.TableRefs: %w", err)
 			}
 		} else {
 			ctx.WriteKeyWord("FROM ")
 			if err := n.Tables.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore DeleteStmt.Tables")
+				return fmt.Errorf("An error occurred while restore DeleteStmt.Tables: %w", err)
 			}
 
 			ctx.WriteKeyWord(" USING ")
 			if err := n.TableRefs.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore DeleteStmt.TableRefs")
+				return fmt.Errorf("An error occurred while restore DeleteStmt.TableRefs: %w", err)
 			}
 		}
 	} else { // Single-Table Syntax
 		ctx.WriteKeyWord("FROM ")
 
 		if err := n.TableRefs.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore DeleteStmt.TableRefs")
+			return fmt.Errorf("An error occurred while restore DeleteStmt.TableRefs: %w", err)
 		}
 	}
 
 	if n.Where != nil {
 		ctx.WriteKeyWord(" WHERE ")
 		if err := n.Where.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore DeleteStmt.Where")
+			return fmt.Errorf("An error occurred while restore DeleteStmt.Where: %w", err)
 		}
 	}
 
 	if n.Order != nil {
 		ctx.WritePlain(" ")
 		if err := n.Order.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore DeleteStmt.Order")
+			return fmt.Errorf("An error occurred while restore DeleteStmt.Order: %w", err)
 		}
 	}
 
 	if n.Limit != nil {
 		ctx.WritePlain(" ")
 		if err := n.Limit.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore DeleteStmt.Limit")
+			return fmt.Errorf("An error occurred while restore DeleteStmt.Limit: %w", err)
 		}
 	}
 
@@ -2501,14 +2502,14 @@ func (n *UpdateStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(" ")
 			}
 			if err := tableHint.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore UpdateStmt.TableHints[%d]", i)
+				return fmt.Errorf("An error occurred while restore UpdateStmt.TableHints[%d]: %w", i, err)
 			}
 		}
 		ctx.WritePlain("*/ ")
 	}
 
 	if err := n.Priority.Restore(ctx); err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	if n.Priority != mysql.NoPriority {
 		ctx.WritePlain(" ")
@@ -2518,7 +2519,7 @@ func (n *UpdateStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 
 	if err := n.TableRefs.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occur while restore UpdateStmt.TableRefs")
+		return fmt.Errorf("An error occur while restore UpdateStmt.TableRefs: %w", err)
 	}
 
 	ctx.WriteKeyWord(" SET ")
@@ -2528,34 +2529,34 @@ func (n *UpdateStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 
 		if err := assignment.Column.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occur while restore UpdateStmt.List[%d].Column", i)
+			return fmt.Errorf("An error occur while restore UpdateStmt.List[%d].Column: %w", i, err)
 		}
 
 		ctx.WritePlain("=")
 
 		if err := assignment.Expr.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occur while restore UpdateStmt.List[%d].Expr", i)
+			return fmt.Errorf("An error occur while restore UpdateStmt.List[%d].Expr: %w", i, err)
 		}
 	}
 
 	if n.Where != nil {
 		ctx.WriteKeyWord(" WHERE ")
 		if err := n.Where.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occur while restore UpdateStmt.Where")
+			return fmt.Errorf("An error occur while restore UpdateStmt.Where: %w", err)
 		}
 	}
 
 	if n.Order != nil {
 		ctx.WritePlain(" ")
 		if err := n.Order.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occur while restore UpdateStmt.Order")
+			return fmt.Errorf("An error occur while restore UpdateStmt.Order: %w", err)
 		}
 	}
 
 	if n.Limit != nil {
 		ctx.WritePlain(" ")
 		if err := n.Limit.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occur while restore UpdateStmt.Limit")
+			return fmt.Errorf("An error occur while restore UpdateStmt.Limit: %w", err)
 		}
 	}
 
@@ -2640,12 +2641,12 @@ func (n *Limit) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("LIMIT ")
 	if n.Offset != nil {
 		if err := n.Offset.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore Limit.Offset")
+			return fmt.Errorf("An error occurred while restore Limit.Offset: %w", err)
 		}
 		ctx.WritePlain(",")
 	}
 	if err := n.Count.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore Limit.Count")
+		return fmt.Errorf("An error occurred while restore Limit.Count: %w", err)
 	}
 	return nil
 }
@@ -2782,12 +2783,12 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		if n.Pattern != nil && n.Pattern.Pattern != nil {
 			ctx.WriteKeyWord(" LIKE ")
 			if err := n.Pattern.Pattern.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Pattern")
+				return fmt.Errorf("An error occurred while restore ShowStmt.Pattern: %w", err)
 			}
 		} else if n.Where != nil {
 			ctx.WriteKeyWord(" WHERE ")
 			if err := n.Where.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Where")
+				return fmt.Errorf("An error occurred while restore ShowStmt.Where: %w", err)
 			}
 		}
 		return nil
@@ -2800,12 +2801,12 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 	case ShowCreateTable:
 		ctx.WriteKeyWord("CREATE TABLE ")
 		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
+			return fmt.Errorf("An error occurred while restore ShowStmt.Table: %w", err)
 		}
 	case ShowCreateView:
 		ctx.WriteKeyWord("CREATE VIEW ")
 		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.VIEW")
+			return fmt.Errorf("An error occurred while restore ShowStmt.VIEW: %w", err)
 		}
 	case ShowCreateDatabase:
 		ctx.WriteKeyWord("CREATE DATABASE ")
@@ -2816,21 +2817,21 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 	case ShowCreateUser:
 		ctx.WriteKeyWord("CREATE USER ")
 		if err := n.User.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.User")
+			return fmt.Errorf("An error occurred while restore ShowStmt.User: %w", err)
 		}
 	case ShowGrants:
 		ctx.WriteKeyWord("GRANTS")
 		if n.User != nil {
 			ctx.WriteKeyWord(" FOR ")
 			if err := n.User.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.User")
+				return fmt.Errorf("An error occurred while restore ShowStmt.User: %w", err)
 			}
 		}
 		if n.Roles != nil {
 			ctx.WriteKeyWord(" USING ")
 			for i, r := range n.Roles {
 				if err := r.Restore(ctx); err != nil {
-					return errors.Annotate(err, "An error occurred while restore ShowStmt.User")
+					return fmt.Errorf("An error occurred while restore ShowStmt.User: %w", err)
 				}
 				if i != len(n.Roles)-1 {
 					ctx.WritePlain(", ")
@@ -2881,7 +2882,7 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		if n.ShowProfileLimit != nil {
 			ctx.WritePlain(" ")
 			if err := n.ShowProfileLimit.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.WritePlain")
+				return fmt.Errorf("An error occurred while restore ShowStmt.WritePlain: %w", err)
 			}
 		}
 
@@ -2910,7 +2911,7 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 			// FROM or IN
 			ctx.WriteKeyWord("INDEX IN ")
 			if err := n.Table.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
+				return fmt.Errorf("An error occurred while restore ShowStmt.Table: %w", err)
 			} // TODO: remember to check this case
 		case ShowColumns: // equivalent to SHOW FIELDS
 			if n.Extended {
@@ -2922,7 +2923,7 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 				// FROM or IN
 				ctx.WriteKeyWord(" IN ")
 				if err := n.Table.Restore(ctx); err != nil {
-					return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
+					return fmt.Errorf("An error occurred while restore ShowStmt.Table: %w", err)
 				}
 			}
 			restoreShowDatabaseNameOpt()
@@ -3038,21 +3039,21 @@ func (n *WindowSpec) Restore(ctx *format.RestoreCtx) error {
 	if n.PartitionBy != nil {
 		ctx.WritePlain(sep)
 		if err := n.PartitionBy.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore WindowSpec.PartitionBy")
+			return fmt.Errorf("An error occurred while restore WindowSpec.PartitionBy: %w", err)
 		}
 		sep = " "
 	}
 	if n.OrderBy != nil {
 		ctx.WritePlain(sep)
 		if err := n.OrderBy.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore WindowSpec.OrderBy")
+			return fmt.Errorf("An error occurred while restore WindowSpec.OrderBy: %w", err)
 		}
 		sep = " "
 	}
 	if n.Frame != nil {
 		ctx.WritePlain(sep)
 		if err := n.Frame.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore WindowSpec.Frame")
+			return fmt.Errorf("An error occurred while restore WindowSpec.Frame: %w", err)
 		}
 	}
 	ctx.WritePlain(")")
@@ -3119,12 +3120,12 @@ func (n *SelectIntoOption) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteString(n.FileName)
 	if n.FieldsInfo != nil {
 		if err := n.FieldsInfo.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectInto.FieldsInfo")
+			return fmt.Errorf("An error occurred while restore SelectInto.FieldsInfo: %w", err)
 		}
 	}
 	if n.LinesInfo != nil {
 		if err := n.LinesInfo.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore SelectInto.LinesInfo")
+			return fmt.Errorf("An error occurred while restore SelectInto.LinesInfo: %w", err)
 		}
 	}
 	return nil
@@ -3154,7 +3155,7 @@ func (n *PartitionByClause) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := v.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore PartitionByClause.Items[%d]", i)
+			return fmt.Errorf("An error occurred while restore PartitionByClause.Items[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -3208,11 +3209,11 @@ func (n *FrameClause) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteKeyWord(" BETWEEN ")
 	if err := n.Extent.Start.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore FrameClause.Extent.Start")
+		return fmt.Errorf("An error occurred while restore FrameClause.Extent.Start: %w", err)
 	}
 	ctx.WriteKeyWord(" AND ")
 	if err := n.Extent.End.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore FrameClause.Extent.End")
+		return fmt.Errorf("An error occurred while restore FrameClause.Extent.End: %w", err)
 	}
 
 	return nil
@@ -3280,7 +3281,7 @@ func (n *FrameBound) Restore(ctx *format.RestoreCtx) error {
 		}
 		if n.Expr != nil {
 			if err := n.Expr.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore FrameBound.Expr")
+				return fmt.Errorf("An error occurred while restore FrameBound.Expr: %w", err)
 			}
 		}
 		if n.Unit != TimeUnitInvalid {

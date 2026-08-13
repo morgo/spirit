@@ -19,16 +19,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSQLError(t *testing.T) {
-	e := NewErrf(ErrNoDB, "no db error", nil)
-	require.Greater(t, len(e.Error()), 0)
+func TestParseError(t *testing.T) {
+	base := NewStdErr("parser", ErrNoDB)
+	require.Equal(t, "[parser:1046]No database selected", base.Error())
 
-	e = NewErrf(0, "customized error", nil)
-	require.Greater(t, len(e.Error()), 0)
+	inst := base.GenByArgs()
+	require.Equal(t, "[parser:1046]No database selected", inst.Error())
+	require.ErrorIs(t, inst, base)
 
-	e = NewErr(ErrNoDB)
-	require.Greater(t, len(e.Error()), 0)
+	withArgs := NewStdErr("parser", ErrUnknownCharacterSet).GenByArgs("utf9")
+	require.Equal(t, "[parser:1115]Unknown character set: 'utf9'", withArgs.Error())
 
-	e = NewErr(0, "customized error", nil)
-	require.Greater(t, len(e.Error()), 0)
+	custom := base.GenByFormat("something %s happened", "odd")
+	require.Equal(t, "[parser:1046]something odd happened", custom.Error())
+	require.ErrorIs(t, custom, base)
+
+	other := NewStdErr("parser", ErrParse)
+	require.NotErrorIs(t, inst, other)
 }

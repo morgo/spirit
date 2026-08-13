@@ -17,8 +17,6 @@ import (
 	"encoding/json"
 	"strings"
 	"unsafe"
-
-	"github.com/pingcap/errors"
 )
 
 // TableLockType is the type of the table lock.
@@ -256,7 +254,7 @@ func (cis *CIStr) UnmarshalJSON(b []byte) error {
 	// Unmarshal CIStr from a single string.
 	err := json.Unmarshal(b, &cis.O)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	cis.L = strings.ToLower(cis.O)
 	return nil

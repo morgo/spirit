@@ -1809,7 +1809,7 @@ AlgorithmClause:
 	}
 |	"ALGORITHM" EqOpt identifier
 	{
-		yylex.AppendError(ErrUnknownAlterAlgorithm.GenWithStackByArgs($1))
+		yylex.AppendError(ErrUnknownAlterAlgorithm.GenByArgs($1))
 		return 1
 	}
 
@@ -1829,7 +1829,7 @@ LockClause:
 		} else if id == "EXCLUSIVE" {
 			$$ = ast.LockTypeExclusive
 		} else {
-			yylex.AppendError(ErrUnknownAlterLock.GenWithStackByArgs($3))
+			yylex.AppendError(ErrUnknownAlterLock.GenByArgs($3))
 			return 1
 		}
 	}
@@ -2370,7 +2370,7 @@ ColumnOption:
 		srid := getUint64FromNUM($2)
 		// MySQL limits the SRID range to MaxUint32
 		if srid > 4294967295 {
-			yylex.AppendError(ErrDataOutOfRange.GenWithStackByArgs("SRID","SRID"))
+			yylex.AppendError(ErrDataOutOfRange.GenByArgs("SRID","SRID"))
 			return 1
 		}
 		$$ = &ast.ColumnOption{Tp: ast.ColumnOptionSrid, Srid: uint32(srid)}
@@ -2433,13 +2433,13 @@ ColumnOptionList:
 		columnOptionList := $1.(ast.ColumnOptionList)
 		if columnOption, ok := $2.(*ast.ColumnOption); ok {
 			if columnOption.Tp == ast.ColumnOptionCollate && columnOptionList.HasCollateOption {
-				yylex.AppendError(ErrParse.GenWithStackByArgs("Multiple COLLATE clauses", yylex.Errorf("").Error()))
+				yylex.AppendError(ErrParse.GenByArgs("Multiple COLLATE clauses", yylex.Errorf("").Error()))
 				return 1
 			}
 			columnOptionList.Options = append(columnOptionList.Options, columnOption)
 		} else {
 			if columnOptionList.HasCollateOption && $2.(ast.ColumnOptionList).HasCollateOption {
-				yylex.AppendError(ErrParse.GenWithStackByArgs("Multiple COLLATE clauses", yylex.Errorf("").Error()))
+				yylex.AppendError(ErrParse.GenByArgs("Multiple COLLATE clauses", yylex.Errorf("").Error()))
 				return 1
 			}
 			columnOptionList.Options = append(columnOptionList.Options, $2.(ast.ColumnOptionList).Options...)
@@ -3209,7 +3209,7 @@ SubPartitionNumOpt:
 	{
 		res := $2.(uint64)
 		if res == 0 {
-			yylex.AppendError(ast.ErrNoParts.GenWithStackByArgs("subpartitions"))
+			yylex.AppendError(ast.ErrNoParts.GenByArgs("subpartitions"))
 			return 1
 		}
 		$$ = res
@@ -3223,7 +3223,7 @@ PartitionNumOpt:
 	{
 		res := $2.(uint64)
 		if res == 0 {
-			yylex.AppendError(ast.ErrNoParts.GenWithStackByArgs("partitions"))
+			yylex.AppendError(ast.ErrNoParts.GenByArgs("partitions"))
 			return 1
 		}
 		$$ = res
@@ -4252,7 +4252,7 @@ PredicateExpr:
 		escape := escapeSpec.escape
 		explicit := escapeSpec.explicit
 		if len(escape) > 1 {
-			yylex.AppendError(ErrWrongArguments.GenWithStackByArgs("ESCAPE"))
+			yylex.AppendError(ErrWrongArguments.GenByArgs("ESCAPE"))
 			return 1
 		}
 		// When ESCAPE empty string is specified, escape is empty and explicit is true.
@@ -4276,7 +4276,7 @@ PredicateExpr:
 		escape := escapeSpec.escape
 		explicit := escapeSpec.explicit
 		if len(escape) > 1 {
-			yylex.AppendError(ErrWrongArguments.GenWithStackByArgs("ESCAPE"))
+			yylex.AppendError(ErrWrongArguments.GenByArgs("ESCAPE"))
 			return 1
 		}
 		// When ESCAPE empty string is specified, escape is empty and explicit is true.
@@ -5173,7 +5173,7 @@ Literal:
 		// See https://dev.mysql.com/doc/refman/5.7/en/charset-literal.html
 		co, err := charset.GetDefaultCollationLegacy($1)
 		if err != nil {
-			yylex.AppendError(ast.ErrUnknownCharacterSet.GenWithStack("Unsupported character introducer: '%-.64s'", $1))
+			yylex.AppendError(ast.ErrUnknownCharacterSet.GenByFormat("Unsupported character introducer: '%-.64s'", $1))
 			return 1
 		}
 		expr := ast.NewValueExpr($2, $1, co)
@@ -5198,7 +5198,7 @@ Literal:
 	{
 		co, err := charset.GetDefaultCollationLegacy($1)
 		if err != nil {
-			yylex.AppendError(ast.ErrUnknownCharacterSet.GenWithStack("Unsupported character introducer: '%-.64s'", $1))
+			yylex.AppendError(ast.ErrUnknownCharacterSet.GenByFormat("Unsupported character introducer: '%-.64s'", $1))
 			return 1
 		}
 		expr := ast.NewValueExpr($2, $1, co)
@@ -5215,7 +5215,7 @@ Literal:
 	{
 		co, err := charset.GetDefaultCollationLegacy($1)
 		if err != nil {
-			yylex.AppendError(ast.ErrUnknownCharacterSet.GenWithStack("Unsupported character introducer: '%-.64s'", $1))
+			yylex.AppendError(ast.ErrUnknownCharacterSet.GenByFormat("Unsupported character introducer: '%-.64s'", $1))
 			return 1
 		}
 		expr := ast.NewValueExpr($2, $1, co)
@@ -6575,7 +6575,7 @@ CastType:
 		tp := types.NewFieldType(mysql.TypeFloat)
 		fopt := $2.(*ast.FloatOpt)
 		if fopt.Flen >= 54 {
-			yylex.AppendError(ErrTooBigPrecision.GenWithStackByArgs(fopt.Flen, "CAST", 53))
+			yylex.AppendError(ErrTooBigPrecision.GenByArgs(fopt.Flen, "CAST", 53))
 		} else if fopt.Flen >= 25 {
 			tp = types.NewFieldType(mysql.TypeDouble)
 		}
@@ -6632,7 +6632,7 @@ TableName:
 	{
 		schema := $1
 		if isInCorrectIdentifierName(schema) {
-			yylex.AppendError(ErrWrongDBName.GenWithStackByArgs(schema))
+			yylex.AppendError(ErrWrongDBName.GenByArgs(schema))
 			return 1
 		}
 		$$ = &ast.TableName{Schema: ast.NewCIStr(schema), Name: ast.NewCIStr($3)}
@@ -7761,7 +7761,7 @@ SelectStmtOptsList:
 		}
 
 		if opts.Distinct && opts.ExplicitAll {
-			yylex.AppendError(ErrWrongUsage.GenWithStackByArgs("ALL", "DISTINCT"))
+			yylex.AppendError(ErrWrongUsage.GenByArgs("ALL", "DISTINCT"))
 			return 1
 		}
 
@@ -8488,7 +8488,7 @@ CharsetName:
 		// Validate input charset name to keep the same behavior as parser of MySQL.
 		cs, err := charset.GetCharsetInfo($1)
 		if err != nil {
-			yylex.AppendError(ErrUnknownCharacterSet.GenWithStackByArgs($1))
+			yylex.AppendError(ErrUnknownCharacterSet.GenByArgs($1))
 			return 1
 		}
 		// Use charset name returned from charset.GetCharsetInfo(),
@@ -10084,7 +10084,7 @@ OptCharsetWithOptBinary:
 	{
 		cs, err := charset.GetCharsetInfo("ucs2")
 		if err != nil {
-			yylex.AppendError(ErrUnknownCharacterSet.GenWithStackByArgs("ucs2"))
+			yylex.AppendError(ErrUnknownCharacterSet.GenByArgs("ucs2"))
 			return 1
 		}
 		$$ = &ast.OptBinary{
@@ -10141,7 +10141,7 @@ DateAndTimeType:
 		tp := types.NewFieldType(mysql.TypeYear)
 		tp.SetFlen($2.(int))
 		if tp.GetFlen() != types.UnspecifiedLength && tp.GetFlen() != 4 {
-			yylex.AppendError(ErrInvalidYearColumnLength.GenWithStackByArgs())
+			yylex.AppendError(ErrInvalidYearColumnLength.GenByArgs())
 			return -1
 		}
 		$$ = tp
@@ -11424,7 +11424,7 @@ FieldItem:
 	{
 		str := $2
 		if str != "\\" && len(str) > 1 {
-			yylex.AppendError(ErrWrongFieldTerminators.GenWithStackByArgs())
+			yylex.AppendError(ErrWrongFieldTerminators.GenByArgs())
 			return 1
 		}
 		$$ = &ast.FieldItem{
@@ -11437,7 +11437,7 @@ FieldItem:
 	{
 		str := $3
 		if str != "\\" && len(str) > 1 {
-			yylex.AppendError(ErrWrongFieldTerminators.GenWithStackByArgs())
+			yylex.AppendError(ErrWrongFieldTerminators.GenByArgs())
 			return 1
 		}
 		$$ = &ast.FieldItem{
@@ -11449,7 +11449,7 @@ FieldItem:
 	{
 		str := $3
 		if str != "\\" && len(str) > 1 {
-			yylex.AppendError(ErrWrongFieldTerminators.GenWithStackByArgs())
+			yylex.AppendError(ErrWrongFieldTerminators.GenByArgs())
 			return 1
 		}
 		$$ = &ast.FieldItem{
@@ -11672,7 +11672,7 @@ EncryptionOpt:
 		case "N", "n":
 			break
 		default:
-			yylex.AppendError(ErrWrongValue.GenWithStackByArgs("argument (should be Y or N)", $1))
+			yylex.AppendError(ErrWrongValue.GenByArgs("argument (should be Y or N)", $1))
 			return 1
 		}
 		$$ = $1

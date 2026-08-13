@@ -14,12 +14,13 @@
 package ast
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/terror"
 	"github.com/block/spirit/pkg/parser/types"
-	"github.com/pingcap/errors"
 )
 
 var (
@@ -84,7 +85,7 @@ func (n *DatabaseOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(" = ")
 		ctx.WriteString(n.Value)
 	default:
-		return errors.Errorf("invalid DatabaseOptionType: %d", n.Tp)
+		return fmt.Errorf("invalid DatabaseOptionType: %d", n.Tp)
 	}
 	return nil
 }
@@ -110,7 +111,7 @@ func (n *CreateDatabaseStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(" ")
 		err := option.Restore(ctx)
 		if err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing CreateDatabaseStmt DatabaseOption: [%v]", i)
+			return fmt.Errorf("An error occurred while splicing CreateDatabaseStmt DatabaseOption: [%v]: %w", i, err)
 		}
 	}
 	return nil
@@ -147,7 +148,7 @@ func (n *AlterDatabaseStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(" ")
 		err := option.Restore(ctx)
 		if err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing AlterDatabaseStmt DatabaseOption: [%v]", i)
+			return fmt.Errorf("An error occurred while splicing AlterDatabaseStmt DatabaseOption: [%v]: %w", i, err)
 		}
 	}
 	return nil
@@ -218,7 +219,7 @@ func (n *IndexPartSpecification) Restore(ctx *format.RestoreCtx) error {
 	if n.Expr != nil {
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing IndexPartSpecifications")
+			return fmt.Errorf("An error occurred while splicing IndexPartSpecifications: %w", err)
 		}
 		ctx.WritePlain(")")
 		if n.Desc {
@@ -227,7 +228,7 @@ func (n *IndexPartSpecification) Restore(ctx *format.RestoreCtx) error {
 		return nil
 	}
 	if err := n.Column.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while splicing IndexPartSpecifications")
+		return fmt.Errorf("An error occurred while splicing IndexPartSpecifications: %w", err)
 	}
 	if n.Length > 0 {
 		ctx.WritePlainf("(%d)", n.Length)
@@ -289,7 +290,7 @@ func (n *ReferenceDef) Restore(ctx *format.RestoreCtx) error {
 	if n.Table != nil {
 		ctx.WriteKeyWord("REFERENCES ")
 		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ReferenceDef")
+			return fmt.Errorf("An error occurred while splicing ReferenceDef: %w", err)
 		}
 	}
 
@@ -300,7 +301,7 @@ func (n *ReferenceDef) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := indexColNames.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while splicing IndexPartSpecifications: [%v]", i)
+				return fmt.Errorf("An error occurred while splicing IndexPartSpecifications: [%v]: %w", i, err)
 			}
 		}
 		ctx.WritePlain(")")
@@ -320,13 +321,13 @@ func (n *ReferenceDef) Restore(ctx *format.RestoreCtx) error {
 	if n.OnDelete.ReferOpt != ReferOptionNoOption {
 		ctx.WritePlain(" ")
 		if err := n.OnDelete.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing OnDelete")
+			return fmt.Errorf("An error occurred while splicing OnDelete: %w", err)
 		}
 	}
 	if n.OnUpdate.ReferOpt != ReferOptionNoOption {
 		ctx.WritePlain(" ")
 		if err := n.OnUpdate.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing OnUpdate")
+			return fmt.Errorf("An error occurred while splicing OnUpdate: %w", err)
 		}
 	}
 	return nil
@@ -502,7 +503,7 @@ func (n *ColumnOption) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain("(")
 		}
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ColumnOption DefaultValue Expr")
+			return fmt.Errorf("An error occurred while splicing ColumnOption DefaultValue Expr: %w", err)
 		}
 		if printOuterParentheses {
 			ctx.WritePlain(")")
@@ -517,18 +518,18 @@ func (n *ColumnOption) Restore(ctx *format.RestoreCtx) error {
 	case ColumnOptionOnUpdate:
 		ctx.WriteKeyWord("ON UPDATE ")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ColumnOption ON UPDATE Expr")
+			return fmt.Errorf("An error occurred while splicing ColumnOption ON UPDATE Expr: %w", err)
 		}
 	case ColumnOptionComment:
 		ctx.WriteKeyWord("COMMENT ")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ColumnOption COMMENT Expr")
+			return fmt.Errorf("An error occurred while splicing ColumnOption COMMENT Expr: %w", err)
 		}
 	case ColumnOptionGenerated:
 		ctx.WriteKeyWord("GENERATED ALWAYS AS")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ColumnOption GENERATED ALWAYS Expr")
+			return fmt.Errorf("An error occurred while splicing ColumnOption GENERATED ALWAYS Expr: %w", err)
 		}
 		ctx.WritePlain(")")
 		if n.Stored {
@@ -538,7 +539,7 @@ func (n *ColumnOption) Restore(ctx *format.RestoreCtx) error {
 		}
 	case ColumnOptionReference:
 		if err := n.Refer.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ColumnOption ReferenceDef")
+			return fmt.Errorf("An error occurred while splicing ColumnOption ReferenceDef: %w", err)
 		}
 	case ColumnOptionCollate:
 		if n.StrValue == "" {
@@ -555,7 +556,7 @@ func (n *ColumnOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("CHECK")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Trace(err)
+			return err
 		}
 		ctx.WritePlain(")")
 		if n.Enforced {
@@ -796,7 +797,7 @@ func (n *Constraint) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("CHECK")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Trace(err)
+			return err
 		}
 		ctx.WritePlain(") ")
 		if n.Enforced {
@@ -825,7 +826,7 @@ func (n *Constraint) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := keys.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing Constraint Keys: [%v]", i)
+			return fmt.Errorf("An error occurred while splicing Constraint Keys: [%v]: %w", i, err)
 		}
 	}
 	ctx.WritePlain(")")
@@ -833,14 +834,14 @@ func (n *Constraint) Restore(ctx *format.RestoreCtx) error {
 	if n.Refer != nil {
 		ctx.WritePlain(" ")
 		if err := n.Refer.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing Constraint Refer")
+			return fmt.Errorf("An error occurred while splicing Constraint Refer: %w", err)
 		}
 	}
 
 	if n.Option != nil && !n.Option.IsEmpty() {
 		ctx.WritePlain(" ")
 		if err := n.Option.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing Constraint Option")
+			return fmt.Errorf("An error occurred while splicing Constraint Option: %w", err)
 		}
 	}
 
@@ -897,18 +898,18 @@ type ColumnDef struct {
 // Restore implements Node interface.
 func (n *ColumnDef) Restore(ctx *format.RestoreCtx) error {
 	if err := n.Name.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while splicing ColumnDef Name")
+		return fmt.Errorf("An error occurred while splicing ColumnDef Name: %w", err)
 	}
 	if n.Tp != nil {
 		ctx.WritePlain(" ")
 		if err := n.Tp.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing ColumnDef Type")
+			return fmt.Errorf("An error occurred while splicing ColumnDef Type: %w", err)
 		}
 	}
 	for i, options := range n.Options {
 		ctx.WritePlain(" ")
 		if err := options.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing ColumnDef ColumnOption: [%v]", i)
+			return fmt.Errorf("An error occurred while splicing ColumnDef ColumnOption: [%v]: %w", i, err)
 		}
 	}
 	return nil
@@ -953,7 +954,7 @@ func (n *ColumnDef) Validate() error {
 		}
 	}
 	if generatedCol && illegalOpt4gc != "" {
-		return ErrWrongUsage.GenWithStackByArgs(illegalOpt4gc, "generated column")
+		return ErrWrongUsage.GenByArgs(illegalOpt4gc, "generated column")
 	}
 	return nil
 }
@@ -1002,13 +1003,13 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while splicing CreateTableStmt Table")
+		return fmt.Errorf("An error occurred while splicing CreateTableStmt Table: %w", err)
 	}
 
 	if n.ReferTable != nil {
 		ctx.WriteKeyWord(" LIKE ")
 		if err := n.ReferTable.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt ReferTable")
+			return fmt.Errorf("An error occurred while splicing CreateTableStmt ReferTable: %w", err)
 		}
 	}
 	lenCols := len(n.Cols)
@@ -1020,7 +1021,7 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := col.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while splicing CreateTableStmt ColumnDef: [%v]", i)
+				return fmt.Errorf("An error occurred while splicing CreateTableStmt ColumnDef: [%v]: %w", i, err)
 			}
 		}
 		for i, constraint := range n.Constraints {
@@ -1028,7 +1029,7 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := constraint.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while splicing CreateTableStmt Constraints: [%v]", i)
+				return fmt.Errorf("An error occurred while splicing CreateTableStmt Constraints: [%v]: %w", i, err)
 			}
 		}
 		ctx.WritePlain(")")
@@ -1037,14 +1038,14 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 	for i, option := range n.Options {
 		ctx.WritePlain(" ")
 		if err := option.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing CreateTableStmt TableOption: [%v]", i)
+			return fmt.Errorf("An error occurred while splicing CreateTableStmt TableOption: [%v]: %w", i, err)
 		}
 	}
 
 	if n.Partition != nil {
 		ctx.WritePlain(" ")
 		if err := n.Partition.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt Partition")
+			return fmt.Errorf("An error occurred while splicing CreateTableStmt Partition: %w", err)
 		}
 	}
 
@@ -1059,7 +1060,7 @@ func (n *CreateTableStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 
 		if err := n.Select.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing CreateTableStmt Select")
+			return fmt.Errorf("An error occurred while splicing CreateTableStmt Select: %w", err)
 		}
 	}
 
@@ -1166,7 +1167,7 @@ func (n *DropTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := table.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore DropTableStmt.Tables[%d]", index)
+			return fmt.Errorf("An error occurred while restore DropTableStmt.Tables[%d]: %w", index, err)
 		}
 	}
 
@@ -1209,7 +1210,7 @@ func (n *OptimizeTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := table.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore OptimizeTableStmt.Tables[%d]", index)
+			return fmt.Errorf("An error occurred while restore OptimizeTableStmt.Tables[%d]: %w", index, err)
 		}
 	}
 	return nil
@@ -1240,7 +1241,7 @@ func (n *RenameTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := table2table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore RenameTableStmt.TableToTables")
+			return fmt.Errorf("An error occurred while restore RenameTableStmt.TableToTables: %w", err)
 		}
 	}
 	return nil
@@ -1275,11 +1276,11 @@ type TableToTable struct {
 // Restore implements Node interface.
 func (n *TableToTable) Restore(ctx *format.RestoreCtx) error {
 	if err := n.OldTable.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore TableToTable.OldTable")
+		return fmt.Errorf("An error occurred while restore TableToTable.OldTable: %w", err)
 	}
 	ctx.WriteKeyWord(" TO ")
 	if err := n.NewTable.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore TableToTable.NewTable")
+		return fmt.Errorf("An error occurred while restore TableToTable.NewTable: %w", err)
 	}
 	return nil
 }
@@ -1348,7 +1349,7 @@ func (n *CreateViewStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(" VIEW ")
 
 	if err := n.ViewName.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while create CreateViewStmt.ViewName")
+		return fmt.Errorf("An error occurred while create CreateViewStmt.ViewName: %w", err)
 	}
 
 	for i, col := range n.Cols {
@@ -1366,7 +1367,7 @@ func (n *CreateViewStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(" AS ")
 
 	if err := n.Select.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while create CreateViewStmt.Select")
+		return fmt.Errorf("An error occurred while create CreateViewStmt.Select: %w", err)
 	}
 
 	if n.CheckOption != CheckOptionCascaded {
@@ -1480,7 +1481,7 @@ func (n *CreateIndexStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteName(n.IndexName)
 	ctx.WriteKeyWord(" ON ")
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore CreateIndexStmt.Table")
+		return fmt.Errorf("An error occurred while restore CreateIndexStmt.Table: %w", err)
 	}
 
 	ctx.WritePlain(" (")
@@ -1489,7 +1490,7 @@ func (n *CreateIndexStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := indexColName.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore CreateIndexStmt.IndexPartSpecifications: [%v]", i)
+			return fmt.Errorf("An error occurred while restore CreateIndexStmt.IndexPartSpecifications: [%v]: %w", i, err)
 		}
 	}
 	ctx.WritePlain(")")
@@ -1497,14 +1498,14 @@ func (n *CreateIndexStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.IndexOption != nil && !n.IndexOption.IsEmpty() {
 		ctx.WritePlain(" ")
 		if err := n.IndexOption.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore CreateIndexStmt.IndexOption")
+			return fmt.Errorf("An error occurred while restore CreateIndexStmt.IndexOption: %w", err)
 		}
 	}
 
 	if n.LockAlg != nil {
 		ctx.WritePlain(" ")
 		if err := n.LockAlg.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore CreateIndexStmt.LockAlg")
+			return fmt.Errorf("An error occurred while restore CreateIndexStmt.LockAlg: %w", err)
 		}
 	}
 
@@ -1564,13 +1565,13 @@ func (n *DropIndexStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(" ON ")
 
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while add index")
+		return fmt.Errorf("An error occurred while add index: %w", err)
 	}
 
 	if n.LockAlg != nil {
 		ctx.WritePlain(" ")
 		if err := n.LockAlg.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore CreateIndexStmt.LockAlg")
+			return fmt.Errorf("An error occurred while restore CreateIndexStmt.LockAlg: %w", err)
 		}
 	}
 
@@ -1637,7 +1638,7 @@ func (n *LockTablesStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := tl.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while add index")
+			return fmt.Errorf("An error occurred while add index: %w", err)
 		}
 		ctx.WriteKeyWord(" " + tl.Type.String())
 	}
@@ -1852,7 +1853,7 @@ func (n *TableOption) Restore(ctx *format.RestoreCtx) error {
 		case RowFormatCompact:
 			ctx.WriteKeyWord("COMPACT")
 		default:
-			return errors.Errorf("invalid TableOption: TableOptionRowFormat: %d", n.UintValue)
+			return fmt.Errorf("invalid TableOption: TableOptionRowFormat: %d", n.UintValue)
 		}
 	case TableOptionStatsPersistent:
 		// TODO: not support
@@ -1937,7 +1938,7 @@ func (n *TableOption) Restore(ctx *format.RestoreCtx) error {
 
 	// MariaDB specific options
 	default:
-		return errors.Errorf("invalid TableOption: %d", n.Tp)
+		return fmt.Errorf("invalid TableOption: %d", n.Tp)
 	}
 	return nil
 }
@@ -1995,10 +1996,10 @@ func (n *ColumnPosition) Restore(ctx *format.RestoreCtx) error {
 	case ColumnPositionAfter:
 		ctx.WriteKeyWord("AFTER ")
 		if err := n.RelativeColumn.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ColumnPosition.RelativeColumn")
+			return fmt.Errorf("An error occurred while restore ColumnPosition.RelativeColumn: %w", err)
 		}
 	default:
-		return errors.Errorf("invalid ColumnPositionType: %d", n.Tp)
+		return fmt.Errorf("invalid ColumnPositionType: %d", n.Tp)
 	}
 	return nil
 }
@@ -2173,7 +2174,7 @@ type AlterOrderItem struct {
 // Restore implements Node interface.
 func (n *AlterOrderItem) Restore(ctx *format.RestoreCtx) error {
 	if err := n.Column.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore AlterOrderItem.Column")
+		return fmt.Errorf("An error occurred while restore AlterOrderItem.Column: %w", err)
 	}
 	if n.Desc {
 		ctx.WriteKeyWord(" DESC")
@@ -2209,7 +2210,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(" ")
 				}
 				if err := opt.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.Options[%d]", i)
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.Options[%d]: %w", i, err)
 				}
 			}
 		}
@@ -2217,13 +2218,13 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("ADD COLUMN ")
 		if n.Position != nil && len(n.NewColumns) == 1 {
 			if err := n.NewColumns[0].Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.NewColumns[%d]", 0)
+				return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[%d]: %w", 0, err)
 			}
 			if n.Position.Tp != ColumnPositionNone {
 				ctx.WritePlain(" ")
 			}
 			if err := n.Position.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore AlterTableSpec.Position")
+				return fmt.Errorf("An error occurred while restore AlterTableSpec.Position: %w", err)
 			}
 		} else {
 			lenCols := len(n.NewColumns)
@@ -2233,7 +2234,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(", ")
 				}
 				if err := col.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.NewColumns[%d]", i)
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[%d]: %w", i, err)
 				}
 			}
 			for i, constraint := range n.NewConstraints {
@@ -2241,7 +2242,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(", ")
 				}
 				if err := constraint.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.NewConstraints[%d]", i)
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.NewConstraints[%d]: %w", i, err)
 				}
 			}
 			ctx.WritePlain(")")
@@ -2249,12 +2250,12 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 	case AlterTableAddConstraint:
 		ctx.WriteKeyWord("ADD ")
 		if err := n.Constraint.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.Constraint")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.Constraint: %w", err)
 		}
 	case AlterTableDropColumn:
 		ctx.WriteKeyWord("DROP COLUMN ")
 		if err := n.OldColumnName.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.OldColumnName")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.OldColumnName: %w", err)
 		}
 	// TODO: RestrictOrCascadeOpt not support
 	case AlterTableDropPrimaryKey:
@@ -2268,59 +2269,59 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 	case AlterTableModifyColumn:
 		ctx.WriteKeyWord("MODIFY COLUMN ")
 		if err := n.NewColumns[0].Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewColumns[0]")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[0]: %w", err)
 		}
 		if n.Position.Tp != ColumnPositionNone {
 			ctx.WritePlain(" ")
 		}
 		if err := n.Position.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.Position")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.Position: %w", err)
 		}
 	case AlterTableChangeColumn:
 		ctx.WriteKeyWord("CHANGE COLUMN ")
 		if err := n.OldColumnName.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.OldColumnName")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.OldColumnName: %w", err)
 		}
 		ctx.WritePlain(" ")
 		if err := n.NewColumns[0].Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewColumns[0]")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[0]: %w", err)
 		}
 		if n.Position.Tp != ColumnPositionNone {
 			ctx.WritePlain(" ")
 		}
 		if err := n.Position.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.Position")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.Position: %w", err)
 		}
 	case AlterTableRenameColumn:
 		ctx.WriteKeyWord("RENAME COLUMN ")
 		if err := n.OldColumnName.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.OldColumnName")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.OldColumnName: %w", err)
 		}
 		ctx.WriteKeyWord(" TO ")
 		if err := n.NewColumnName.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewColumnName")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumnName: %w", err)
 		}
 	case AlterTableRenameTable:
 		ctx.WriteKeyWord("RENAME AS ")
 		if err := n.NewTable.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewTable")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.NewTable: %w", err)
 		}
 	case AlterTableAlterColumn:
 		ctx.WriteKeyWord("ALTER COLUMN ")
 		if err := n.NewColumns[0].Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewColumns[0]")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[0]: %w", err)
 		}
 		if len(n.NewColumns[0].Options) == 1 {
 			ctx.WriteKeyWord("SET DEFAULT ")
 			expr := n.NewColumns[0].Options[0].Expr
 			if valueExpr, ok := expr.(*ValueExpr); ok {
 				if err := valueExpr.Restore(ctx); err != nil {
-					return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewColumns[0].Options[0].Expr")
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[0].Options[0].Expr: %w", err)
 				}
 			} else {
 				ctx.WritePlain("(")
 				if err := expr.Restore(ctx); err != nil {
-					return errors.Annotate(err, "An error occurred while restore AlterTableSpec.NewColumns[0].Options[0].Expr")
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.NewColumns[0].Options[0].Expr: %w", err)
 				}
 				ctx.WritePlain(")")
 			}
@@ -2338,7 +2339,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := alterOrderItem.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.OrderByList[%d]", i)
+				return fmt.Errorf("An error occurred while restore AlterTableSpec.OrderByList[%d]: %w", i, err)
 			}
 		}
 	case AlterTableAlgorithm:
@@ -2366,7 +2367,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(", ")
 				}
 				if err := def.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.PartDefinitions[%d]", i)
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.PartDefinitions[%d]: %w", i, err)
 				}
 			}
 			ctx.WritePlain(")")
@@ -2470,7 +2471,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord(" TABLESPACE")
 	case AlterTablePartition:
 		if err := n.Partition.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore AlterTableSpec.Partition")
+			return fmt.Errorf("An error occurred while restore AlterTableSpec.Partition: %w", err)
 		}
 	case AlterTableEnableKeys:
 		ctx.WriteKeyWord("ENABLE KEYS")
@@ -2521,7 +2522,7 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(", ")
 				}
 				if err := def.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore AlterTableSpec.PartDefinitions[%d]", i)
+					return fmt.Errorf("An error occurred while restore AlterTableSpec.PartDefinitions[%d]: %w", i, err)
 				}
 			}
 			ctx.WritePlain(")")
@@ -2652,7 +2653,7 @@ type AlterTableStmt struct {
 func (n *AlterTableStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("ALTER TABLE ")
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore AlterTableStmt.Table")
+		return fmt.Errorf("An error occurred while restore AlterTableStmt.Table: %w", err)
 	}
 	specs := n.Specs
 	for i, spec := range specs {
@@ -2662,7 +2663,7 @@ func (n *AlterTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(", ")
 		}
 		if err := spec.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore AlterTableStmt.Specs[%d]", i)
+			return fmt.Errorf("An error occurred while restore AlterTableStmt.Specs[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -2702,7 +2703,7 @@ type TruncateTableStmt struct {
 func (n *TruncateTableStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("TRUNCATE TABLE ")
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore TruncateTableStmt.Table")
+		return fmt.Errorf("An error occurred while restore TruncateTableStmt.Table: %w", err)
 	}
 	return nil
 }
@@ -2723,21 +2724,21 @@ func (n *TruncateTableStmt) Accept(v Visitor) (Node, bool) {
 }
 
 var (
-	ErrNoParts                              = terror.ClassDDL.NewStd(mysql.ErrNoParts)
-	ErrPartitionColumnList                  = terror.ClassDDL.NewStd(mysql.ErrPartitionColumnList)
-	ErrPartitionRequiresValues              = terror.ClassDDL.NewStd(mysql.ErrPartitionRequiresValues)
-	ErrPartitionsMustBeDefined              = terror.ClassDDL.NewStd(mysql.ErrPartitionsMustBeDefined)
-	ErrPartitionWrongNoPart                 = terror.ClassDDL.NewStd(mysql.ErrPartitionWrongNoPart)
-	ErrPartitionWrongNoSubpart              = terror.ClassDDL.NewStd(mysql.ErrPartitionWrongNoSubpart)
-	ErrPartitionWrongValues                 = terror.ClassDDL.NewStd(mysql.ErrPartitionWrongValues)
-	ErrRowSinglePartitionField              = terror.ClassDDL.NewStd(mysql.ErrRowSinglePartitionField)
-	ErrSubpartition                         = terror.ClassDDL.NewStd(mysql.ErrSubpartition)
-	ErrSystemVersioningWrongPartitions      = terror.ClassDDL.NewStd(mysql.ErrSystemVersioningWrongPartitions)
-	ErrTooManyValues                        = terror.ClassDDL.NewStd(mysql.ErrTooManyValues)
-	ErrWrongPartitionTypeExpectedSystemTime = terror.ClassDDL.NewStd(mysql.ErrWrongPartitionTypeExpectedSystemTime)
-	ErrUnknownCharacterSet                  = terror.ClassDDL.NewStd(mysql.ErrUnknownCharacterSet)
-	ErrCoalescePartitionNoPartition         = terror.ClassDDL.NewStd(mysql.ErrCoalescePartitionNoPartition)
-	ErrWrongUsage                           = terror.ClassDDL.NewStd(mysql.ErrWrongUsage)
+	ErrNoParts                              = mysql.NewStdErr("ddl", mysql.ErrNoParts)
+	ErrPartitionColumnList                  = mysql.NewStdErr("ddl", mysql.ErrPartitionColumnList)
+	ErrPartitionRequiresValues              = mysql.NewStdErr("ddl", mysql.ErrPartitionRequiresValues)
+	ErrPartitionsMustBeDefined              = mysql.NewStdErr("ddl", mysql.ErrPartitionsMustBeDefined)
+	ErrPartitionWrongNoPart                 = mysql.NewStdErr("ddl", mysql.ErrPartitionWrongNoPart)
+	ErrPartitionWrongNoSubpart              = mysql.NewStdErr("ddl", mysql.ErrPartitionWrongNoSubpart)
+	ErrPartitionWrongValues                 = mysql.NewStdErr("ddl", mysql.ErrPartitionWrongValues)
+	ErrRowSinglePartitionField              = mysql.NewStdErr("ddl", mysql.ErrRowSinglePartitionField)
+	ErrSubpartition                         = mysql.NewStdErr("ddl", mysql.ErrSubpartition)
+	ErrSystemVersioningWrongPartitions      = mysql.NewStdErr("ddl", mysql.ErrSystemVersioningWrongPartitions)
+	ErrTooManyValues                        = mysql.NewStdErr("ddl", mysql.ErrTooManyValues)
+	ErrWrongPartitionTypeExpectedSystemTime = mysql.NewStdErr("ddl", mysql.ErrWrongPartitionTypeExpectedSystemTime)
+	ErrUnknownCharacterSet                  = mysql.NewStdErr("ddl", mysql.ErrUnknownCharacterSet)
+	ErrCoalescePartitionNoPartition         = mysql.NewStdErr("ddl", mysql.ErrCoalescePartitionNoPartition)
+	ErrWrongUsage                           = mysql.NewStdErr("ddl", mysql.ErrWrongUsage)
 )
 
 type SubPartitionDefinition struct {
@@ -2751,7 +2752,7 @@ func (spd *SubPartitionDefinition) Restore(ctx *format.RestoreCtx) error {
 	for i, opt := range spd.Options {
 		ctx.WritePlain(" ")
 		if err := opt.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore SubPartitionDefinition.Options[%d]", i)
+			return fmt.Errorf("An error occurred while restore SubPartitionDefinition.Options[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -2780,9 +2781,9 @@ func (*PartitionDefinitionClauseNone) Validate(pt PartitionType, _ int) error {
 	switch pt {
 	case 0:
 	case PartitionTypeRange:
-		return ErrPartitionRequiresValues.GenWithStackByArgs("RANGE", "LESS THAN")
+		return ErrPartitionRequiresValues.GenByArgs("RANGE", "LESS THAN")
 	case PartitionTypeList:
-		return ErrPartitionRequiresValues.GenWithStackByArgs("LIST", "IN")
+		return ErrPartitionRequiresValues.GenByArgs("LIST", "IN")
 	case PartitionTypeSystemTime:
 		return ErrSystemVersioningWrongPartitions
 	}
@@ -2801,7 +2802,7 @@ func (n *PartitionDefinitionClauseLessThan) restore(ctx *format.RestoreCtx) erro
 			ctx.WritePlain(", ")
 		}
 		if err := expr.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore PartitionDefinitionClauseLessThan.Exprs[%d]", i)
+			return fmt.Errorf("An error occurred while restore PartitionDefinitionClauseLessThan.Exprs[%d]: %w", i, err)
 		}
 	}
 	ctx.WritePlain(")")
@@ -2823,12 +2824,12 @@ func (n *PartitionDefinitionClauseLessThan) Validate(pt PartitionType, columns i
 	switch pt {
 	case PartitionTypeRange, 0:
 	default:
-		return ErrPartitionWrongValues.GenWithStackByArgs("RANGE", "LESS THAN")
+		return ErrPartitionWrongValues.GenByArgs("RANGE", "LESS THAN")
 	}
 
 	switch {
 	case columns == 0 && len(n.Exprs) != 1:
-		return ErrTooManyValues.GenWithStackByArgs("RANGE")
+		return ErrTooManyValues.GenByArgs("RANGE")
 	case columns > 0 && len(n.Exprs) != columns:
 		return ErrPartitionColumnList
 	}
@@ -2860,7 +2861,7 @@ func (n *PartitionDefinitionClauseIn) restore(ctx *format.RestoreCtx) error {
 		}
 		if len(valList) == 1 {
 			if err := valList[0].Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore PartitionDefinitionClauseIn.Values[%d][0]", i)
+				return fmt.Errorf("An error occurred while restore PartitionDefinitionClauseIn.Values[%d][0]: %w", i, err)
 			}
 		} else {
 			ctx.WritePlain("(")
@@ -2869,7 +2870,7 @@ func (n *PartitionDefinitionClauseIn) restore(ctx *format.RestoreCtx) error {
 					ctx.WritePlain(", ")
 				}
 				if err := val.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while restore PartitionDefinitionClauseIn.Values[%d][%d]", i, j)
+					return fmt.Errorf("An error occurred while restore PartitionDefinitionClauseIn.Values[%d][%d]: %w", i, j, err)
 				}
 			}
 			ctx.WritePlain(")")
@@ -2896,7 +2897,7 @@ func (n *PartitionDefinitionClauseIn) Validate(pt PartitionType, columns int) er
 	switch pt {
 	case PartitionTypeList, 0:
 	default:
-		return ErrPartitionWrongValues.GenWithStackByArgs("LIST", "IN")
+		return ErrPartitionWrongValues.GenByArgs("LIST", "IN")
 	}
 
 	if len(n.Values) == 0 {
@@ -2995,13 +2996,13 @@ func (n *PartitionDefinition) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteName(n.Name.O)
 
 	if err := n.Clause.restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore PartitionDefinition.Clause")
+		return fmt.Errorf("An error occurred while restore PartitionDefinition.Clause: %w", err)
 	}
 
 	for i, opt := range n.Options {
 		ctx.WritePlain(" ")
 		if err := opt.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore PartitionDefinition.Options[%d]", i)
+			return fmt.Errorf("An error occurred while restore PartitionDefinition.Options[%d]: %w", i, err)
 		}
 	}
 
@@ -3012,7 +3013,7 @@ func (n *PartitionDefinition) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := spd.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore PartitionDefinition.Sub[%d]", i)
+				return fmt.Errorf("An error occurred while restore PartitionDefinition.Sub[%d]: %w", i, err)
 			}
 		}
 		ctx.WritePlain(")")
@@ -3088,7 +3089,7 @@ func (n *PartitionMethod) Restore(ctx *format.RestoreCtx) error {
 		if n.Expr != nil && n.Unit != TimeUnitInvalid {
 			ctx.WriteKeyWord(" INTERVAL ")
 			if err := n.Expr.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore PartitionMethod.Expr")
+				return fmt.Errorf("An error occurred while restore PartitionMethod.Expr: %w", err)
 			}
 			ctx.WritePlain(" ")
 			ctx.WriteKeyWord(n.Unit.String())
@@ -3101,7 +3102,7 @@ func (n *PartitionMethod) Restore(ctx *format.RestoreCtx) error {
 	case n.Expr != nil:
 		ctx.WritePlain(" (")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore PartitionMethod.Expr")
+			return fmt.Errorf("An error occurred while restore PartitionMethod.Expr: %w", err)
 		}
 		ctx.WritePlain(")")
 
@@ -3115,7 +3116,7 @@ func (n *PartitionMethod) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := col.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while splicing PartitionMethod.ColumnName[%d]", i)
+				return fmt.Errorf("An error occurred while splicing PartitionMethod.ColumnName[%d]: %w", i, err)
 			}
 		}
 		ctx.WritePlain(")")
@@ -3213,7 +3214,7 @@ func (n *PartitionOptions) Validate() error {
 		}
 	case PartitionTypeRange, PartitionTypeList:
 		if n.Interval == nil && len(n.Definitions) == 0 {
-			return ErrPartitionsMustBeDefined.GenWithStackByArgs(n.Tp)
+			return ErrPartitionsMustBeDefined.GenByArgs(n.Tp)
 		}
 	case PartitionTypeSystemTime:
 		if len(n.Definitions) < 2 {
@@ -3235,7 +3236,7 @@ func (n *PartitionOptions) Validate() error {
 func (n *PartitionOptions) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("PARTITION BY ")
 	if err := n.PartitionMethod.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore PartitionOptions.PartitionMethod")
+		return fmt.Errorf("An error occurred while restore PartitionOptions.PartitionMethod: %w", err)
 	}
 
 	if n.Num > 0 && len(n.Definitions) == 0 {
@@ -3246,7 +3247,7 @@ func (n *PartitionOptions) Restore(ctx *format.RestoreCtx) error {
 	if n.Sub != nil {
 		ctx.WriteKeyWord(" SUBPARTITION BY ")
 		if err := n.Sub.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore PartitionOptions.Sub")
+			return fmt.Errorf("An error occurred while restore PartitionOptions.Sub: %w", err)
 		}
 		if n.Sub.Num > 0 {
 			ctx.WriteKeyWord(" SUBPARTITIONS ")
@@ -3261,7 +3262,7 @@ func (n *PartitionOptions) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(",")
 			}
 			if err := def.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore PartitionOptions.Definitions[%d]", i)
+				return fmt.Errorf("An error occurred while restore PartitionOptions.Definitions[%d]: %w", i, err)
 			}
 		}
 		ctx.WritePlain(")")

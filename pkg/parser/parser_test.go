@@ -15,6 +15,7 @@ package parser_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"runtime"
 	"slices"
@@ -27,8 +28,6 @@ import (
 	. "github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/parser/opcode"
-	"github.com/block/spirit/pkg/parser/terror"
-	"github.com/pingcap/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,10 +80,10 @@ func RunTest(t *testing.T, table []testCase, enableWindowFunc bool) {
 	for _, tbl := range table {
 		_, _, err := p.Parse(tbl.src, "", "")
 		if !tbl.ok {
-			require.Errorf(t, err, "source %v, error %v", tbl.src, errors.Trace(err))
+			require.Errorf(t, err, "source %v, error %v", tbl.src, err)
 			continue
 		}
-		require.NoErrorf(t, err, "source:\n%v\nerror:\n%v", tbl.src, errors.Trace(err))
+		require.NoErrorf(t, err, "source:\n%v\nerror:\n%v", tbl.src, err)
 		// restore correctness test
 		if tbl.ok {
 			RunRestoreTest(t, tbl.src, tbl.restore, enableWindowFunc)
@@ -119,13 +118,28 @@ func RunRestoreTest(t *testing.T, sourceSQLs, expectSQLs string, enableWindowFun
 	require.Equalf(t, expectSQLs, restoreSQLs, "restore %v; expect %v", restoreSQLs, expectSQLs)
 }
 
+// errorsEqual reports whether two errors match, either via errors.Is or by
+// rendering to the same message.
+func errorsEqual(err1, err2 error) bool {
+	if err1 == err2 {
+		return true
+	}
+	if err1 == nil || err2 == nil {
+		return false
+	}
+	if errors.Is(err1, err2) {
+		return true
+	}
+	return err1.Error() == err2.Error()
+}
+
 func RunErrMsgTest(t *testing.T, table []testErrMsgCase) {
 	p := parser.New()
 	for _, tbl := range table {
 		_, _, err := p.Parse(tbl.src, "", "")
 		comment := fmt.Sprintf("source %v", tbl.src)
 		if tbl.err != nil {
-			require.True(t, terror.ErrorEqual(err, tbl.err), comment)
+			require.True(t, errorsEqual(err, tbl.err), comment)
 		} else {
 			require.NoError(t, err, comment)
 		}
@@ -941,7 +955,7 @@ func TestUnderscoreCharset(t *testing.T) {
 		if tt.parseFail {
 			require.EqualError(t, err, fmt.Sprintf("line 1 column %d near \"'3F')\" ", len(tt.cs)+17))
 		} else if tt.unSupport {
-			require.EqualError(t, err, ast.ErrUnknownCharacterSet.GenWithStack("Unsupported character introducer: '%-.64s'", tt.cs).Error())
+			require.EqualError(t, err, ast.ErrUnknownCharacterSet.GenByFormat("Unsupported character introducer: '%-.64s'", tt.cs).Error())
 		} else {
 			require.NoError(t, err)
 		}

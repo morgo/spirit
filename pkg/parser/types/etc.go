@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/terror"
 )
 
 // IsTypeBlob returns a boolean indicating whether the tp is a blob type.
@@ -156,12 +155,12 @@ const (
 
 var (
 	// ErrInvalidDefault is returned when meet a invalid default value.
-	ErrInvalidDefault = terror.ClassTypes.NewStd(mysql.ErrInvalidDefault)
+	ErrInvalidDefault = mysql.NewStdErr("types", mysql.ErrInvalidDefault)
 	// ErrDataOutOfRange is returned when meet a value out of range.
-	ErrDataOutOfRange = terror.ClassTypes.NewStd(mysql.ErrDataOutOfRange)
+	ErrDataOutOfRange = mysql.NewStdErr("types", mysql.ErrDataOutOfRange)
 	// ErrTruncatedWrongValue is returned when meet a value bigger than
 	// 99999999999999999999999999999999999999999999999999999999999999999 during parsing.
-	ErrTruncatedWrongValue = terror.ClassTypes.NewStd(mysql.ErrTruncatedWrongValue)
+	ErrTruncatedWrongValue = mysql.NewStdErr("types", mysql.ErrTruncatedWrongValue)
 	// ErrIllegalValueForType is returned when strconv.ParseFloat meet strconv.ErrRange during parsing.
-	ErrIllegalValueForType = terror.ClassTypes.NewStd(mysql.ErrIllegalValueForType)
+	ErrIllegalValueForType = mysql.NewStdErr("types", mysql.ErrIllegalValueForType)
 )

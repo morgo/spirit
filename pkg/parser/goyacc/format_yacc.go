@@ -22,7 +22,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/pingcap/errors"
 	parser "modernc.org/parser/yacc"
 	"modernc.org/strutil"
 )
@@ -200,7 +199,7 @@ func getTokenComment(token *parser.Token, layout stringLayout) string {
 	case divNewLineStringLayout:
 		splitter, beforeComment = "\n", "\n"
 	default:
-		panic(errors.Errorf("unsupported stringLayout: %v", layout))
+		panic(fmt.Errorf("unsupported stringLayout: %v", layout))
 	}
 
 	var sb strings.Builder
@@ -472,7 +471,7 @@ func (s *SpecialActionValTransformer) restore(src string) string {
 	return yaccFmtVarRegex.ReplaceAllStringFunc(src, func(matched string) string {
 		origin, ok := s.store[matched]
 		if !ok {
-			panic(errors.Errorf("mismatch in SpecialActionValTransformer"))
+			panic(fmt.Errorf("mismatch in SpecialActionValTransformer"))
 		}
 		return origin
 	})
@@ -525,7 +524,7 @@ func (n *NotNilAssert) and(target any) *NotNilAssert {
 		return n
 	}
 	if target == nil {
-		n.err = errors.Errorf("encounter nil, index: %d", n.idx)
+		n.err = fmt.Errorf("encounter nil, index: %d", n.idx)
 	}
 	n.idx++
 	return n

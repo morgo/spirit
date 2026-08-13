@@ -14,19 +14,18 @@
 package charset
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/terror"
-	"github.com/pingcap/errors"
 )
 
 var (
 	// ErrUnknownCollation is unknown collation.
-	ErrUnknownCollation = terror.ClassDDL.NewStd(mysql.ErrUnknownCollation)
+	ErrUnknownCollation = mysql.NewStdErr("ddl", mysql.ErrUnknownCollation)
 	// ErrCollationCharsetMismatch is collation charset mismatch.
-	ErrCollationCharsetMismatch = terror.ClassDDL.NewStd(mysql.ErrCollationCharsetMismatch)
+	ErrCollationCharsetMismatch = mysql.NewStdErr("ddl", mysql.ErrCollationCharsetMismatch)
 )
 
 var (
@@ -139,7 +138,7 @@ func GetDefaultCollationLegacy(charset string) (string, error) {
 	case CharsetUTF8, CharsetUTF8MB4, CharsetASCII, CharsetLatin1, CharsetBin:
 		return GetDefaultCollation(charset)
 	default:
-		return "", errors.Errorf("Unknown charset %s", charset)
+		return "", fmt.Errorf("Unknown charset %s", charset)
 	}
 }
 
@@ -168,10 +167,10 @@ func GetCharsetInfo(cs string) (*Charset, error) {
 	}
 
 	if c, ok := charsets[strings.ToLower(cs)]; ok {
-		return c, errors.Errorf("Unsupported charset %s", cs)
+		return c, fmt.Errorf("Unsupported charset %s", cs)
 	}
 
-	return nil, errors.Errorf("Unknown charset %s", cs)
+	return nil, fmt.Errorf("Unknown charset %s", cs)
 }
 
 // GetCharsetInfoByID returns charset and collation for id as cs_number.
@@ -183,7 +182,7 @@ func GetCharsetInfoByID(coID int) (charsetStr string, collateStr string, err err
 		return collation.CharsetName, collation.Name, nil
 	}
 
-	return mysql.DefaultCharset, mysql.DefaultCollationName, errors.Errorf("Unknown collation id %d", coID)
+	return mysql.DefaultCharset, mysql.DefaultCollationName, fmt.Errorf("Unknown collation id %d", coID)
 }
 
 func utf8Alias(csname string) string {
@@ -204,7 +203,7 @@ func GetCollationByName(name string) (*Collation, error) {
 	csname := utf8Alias(strings.ToLower(name))
 	collation, ok := collationsNameMap[csname]
 	if !ok {
-		return nil, ErrUnknownCollation.GenWithStackByArgs(name)
+		return nil, ErrUnknownCollation.GenByArgs(name)
 	}
 	return collation, nil
 }
@@ -213,7 +212,7 @@ func GetCollationByName(name string) (*Collation, error) {
 func GetCollationByID(id int) (*Collation, error) {
 	collation, ok := collationsIDMap[id]
 	if !ok {
-		return nil, errors.Errorf("Unknown collation id %d", id)
+		return nil, fmt.Errorf("Unknown collation id %d", id)
 	}
 
 	return collation, nil
