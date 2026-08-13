@@ -51,19 +51,6 @@ type Node interface {
 }
 
 // Flags indicates whether an expression contains certain types of expression.
-const (
-	FlagConstant       uint64 = 0
-	FlagHasParamMarker uint64 = 1 << iota
-	FlagHasFunc
-	FlagHasReference
-	FlagHasAggregateFunc
-	FlagHasSubquery
-	FlagHasVariable
-	FlagHasDefault
-	FlagPreEvaluated
-	FlagHasWindowFunc
-)
-
 // ExprNode is a node that can be evaluated.
 // Name of implementations should have 'Expr' suffix.
 type ExprNode interface {
@@ -73,12 +60,6 @@ type ExprNode interface {
 	SetType(tp *types.FieldType)
 	// GetType gets the evaluation type of the expression.
 	GetType() *types.FieldType
-	// SetFlag sets flag to the expression.
-	// Flag indicates whether the expression contains
-	// parameter marker, reference, aggregate function...
-	SetFlag(flag uint64)
-	// GetFlag returns the flag of the expression.
-	GetFlag() uint64
 
 	// Format formats the AST into a writer.
 	Format(w io.Writer)

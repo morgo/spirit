@@ -19,12 +19,6 @@ import (
 	"github.com/pingcap/errors"
 )
 
-// Portable analogs of some common call errors.
-var (
-	ErrBadConn       = errors.New("connection was bad")
-	ErrMalformPacket = errors.New("malform packet error")
-)
-
 // SQLError records an error information, from executing SQL.
 type SQLError struct {
 	Code    uint16

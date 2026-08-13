@@ -407,7 +407,6 @@ func (dn *dmlNode) dmlStatement() {}
 type exprNode struct {
 	node
 	Type types.FieldType
-	flag uint64
 }
 
 // SetType implements ExprNode interface.
@@ -418,16 +417,6 @@ func (en *exprNode) SetType(tp *types.FieldType) {
 // GetType implements ExprNode interface.
 func (en *exprNode) GetType() *types.FieldType {
 	return &en.Type
-}
-
-// SetFlag implements ExprNode interface.
-func (en *exprNode) SetFlag(flag uint64) {
-	en.flag = flag
-}
-
-// GetFlag implements ExprNode interface.
-func (en *exprNode) GetFlag() uint64 {
-	return en.flag
 }
 
 type funcNode struct {

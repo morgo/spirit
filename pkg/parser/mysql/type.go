@@ -45,7 +45,6 @@ const (
 	TypeVarString  byte = 0xfd
 	TypeString     byte = 0xfe /* TypeString is char type */
 	TypeGeometry   byte = 0xff
-
 )
 
 // Flag information.
@@ -76,13 +75,6 @@ const (
 	DropColumnIndexFlag   uint = 1 << 22 /* Internal: Used for indicate the column is being dropped with index */
 	GeneratedColumnFlag   uint = 1 << 23 /* Internal: TiFlash will check this flag and add a placeholder for this column */
 	UnderScoreCharsetFlag uint = 1 << 24 /* Internal: Indicate whether charset is specified by underscore like _latin1'abc' */
-)
-
-// TypeInt24 bounds.
-const (
-	MaxUint24 = 1<<24 - 1
-	MaxInt24  = 1<<23 - 1
-	MinInt24  = -1 << 23
 )
 
 // HasDropColumnWithIndexFlag checks if DropColumnIndexFlag is set.

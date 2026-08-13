@@ -14,126 +14,14 @@
 package mysql
 
 import (
-	"fmt"
 	"strings"
 
-	"github.com/coreos/go-semver/semver"
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/format"
+	"github.com/pingcap/errors"
 )
 
 func newInvalidModeErr(s string) error {
 	return NewErr(ErrWrongValueForVar, "sql_mode", s)
-}
-
-const (
-	mysqlCompatibilityVersion = "8.0.11"
-	// VersionSeparator NOTE: DON'T MODIFY THIS VALUE.
-	// We don't store TiDB server version directly inside PD, but stores a concatenated
-	// one with MySQL compatibility version, with this fixed then we can parse TiDB
-	// version from ServerVersion.
-	VersionSeparator = "-TiDB-"
-
-	// tidbXReleaseVersionPrefix is used in `select tidb_version()` output of nextgen.
-	tidbXReleaseVersionPrefix = "CLOUD."
-
-	legacyTiDBReleaseVersionPlaceholder = "v8.4.0-this-is-a-placeholder"
-	// tidbXPlaceholderReleaseVersion is the default release version for nextgen when no
-	// release version is injected during build, such as when running in IDE.
-	tidbXPlaceholderReleaseVersion = "v26.3.0-this-is-a-placeholder"
-	// TiDBXVerMinYear is set to 2025 just for sanity check.
-	// our first release of next-gen since 2025
-	TiDBXVerMinYear = 2025
-	// TiDBXVerMaxYear is set to 2099 just for sanity check, we don't expect the
-	// year part of release version to be larger than this.
-	// enough for now.
-	TiDBXVerMaxYear = 2099
-)
-
-// Version information.
-var (
-	// TiDBReleaseVersion is initialized by (git describe --tags) in Makefile.
-	TiDBReleaseVersion = legacyTiDBReleaseVersionPlaceholder
-
-	// ServerVersion is the version information of this tidb-server in MySQL's format.
-	ServerVersion = fmt.Sprintf("%s%s%s", mysqlCompatibilityVersion, VersionSeparator, TiDBReleaseVersion)
-)
-
-// NormalizeTiDBReleaseVersionForNextGen rewrites the legacy placeholder into a nextgen
-// placeholder that follows `v[2-digit-year].[month].[fix-version]`.
-// pkg/parser is Golang project, it cannot use kerneltype pkg to conditionally
-// compile different code for next-gen and classic, so we have to rewrite the
-// placeholder value in this function.
-func NormalizeTiDBReleaseVersionForNextGen(releaseVersion string) string {
-	// the version is not set if we run next-gen tidb from IDE.
-	if releaseVersion == legacyTiDBReleaseVersionPlaceholder {
-		return tidbXPlaceholderReleaseVersion
-	}
-	return releaseVersion
-}
-
-// BuildTiDBXReleaseVersion converts mysql.TiDBReleaseVersion into the nextgen visible
-// version format `CLOUD.<4-digit-year-2-digit-month>.<fix-version><optional-pre-release>`.
-func BuildTiDBXReleaseVersion(releaseVersion string) (string, error) {
-	if !strings.HasPrefix(releaseVersion, "v") {
-		return "", errors.Errorf("invalid TiDB release version %q, should start with 'v'", releaseVersion)
-	}
-	rawVer := strings.TrimPrefix(releaseVersion, "v")
-	ver, err := semver.NewVersion(rawVer)
-	if err != nil {
-		return "", errors.Errorf("invalid TiDB release version %q, expect a semantic version", releaseVersion)
-	}
-	year := 2000 + ver.Major
-	if year < TiDBXVerMinYear || year > TiDBXVerMaxYear || ver.Minor < 1 || ver.Minor > 12 {
-		return "", errors.Errorf("invalid TiDB release version %q, the semantic version part should be in [2-digit-year].[month].[fix-version]-[xxx] format", releaseVersion)
-	}
-	preRelease := string(ver.PreRelease)
-	if preRelease != "" {
-		preRelease = "-" + preRelease
-	}
-	return fmt.Sprintf("%s%d%02d.%d%s", tidbXReleaseVersionPrefix, year, ver.Minor, ver.Patch, preRelease), nil
-}
-
-// BuildTiDBXServerVersion converts mysql.TiDBReleaseVersion into MySQL server version
-// format `8.0.11-TiDB-CLOUD.<4-digit-year-2-digit-month>.<fix-version>`.
-func BuildTiDBXServerVersion(releaseVersion string) (string, error) {
-	tidbXReleaseVersion, err := BuildTiDBXReleaseVersion(releaseVersion)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%s%s", mysqlCompatibilityVersion, VersionSeparator, tidbXReleaseVersion), nil
-}
-
-// Header information.
-const (
-	OKHeader          byte = 0x00
-	ErrHeader         byte = 0xff
-	EOFHeader         byte = 0xfe
-	LocalInFileHeader byte = 0xfb
-)
-
-// AuthSwitchRequest is a protocol feature.
-const AuthSwitchRequest byte = 0xfe
-
-// Server information.
-const (
-	ServerStatusInTrans            uint16 = 0x0001
-	ServerStatusAutocommit         uint16 = 0x0002
-	ServerMoreResultsExists        uint16 = 0x0008
-	ServerStatusNoGoodIndexUsed    uint16 = 0x0010
-	ServerStatusNoIndexUsed        uint16 = 0x0020
-	ServerStatusCursorExists       uint16 = 0x0040
-	ServerStatusLastRowSend        uint16 = 0x0080
-	ServerStatusDBDropped          uint16 = 0x0100
-	ServerStatusNoBackslashEscaped uint16 = 0x0200
-	ServerStatusMetadataChanged    uint16 = 0x0400
-	ServerStatusWasSlow            uint16 = 0x0800
-	ServerPSOutParams              uint16 = 0x1000
-)
-
-// HasCursorExistsFlag return true if cursor exists indicated by server status.
-func HasCursorExistsFlag(serverStatus uint16) bool {
-	return serverStatus&ServerStatusCursorExists > 0
 }
 
 // Identifier length limitations.
@@ -166,93 +54,12 @@ const (
 // ErrTextLength error text length limit.
 const ErrTextLength = 80
 
-// Command information.
-const (
-	ComSleep byte = iota
-	ComQuit
-	ComInitDB
-	ComQuery
-	ComFieldList
-	ComCreateDB
-	ComDropDB
-	ComRefresh
-	ComShutdown
-	ComStatistics
-	ComProcessInfo
-	ComConnect
-	ComProcessKill
-	ComDebug
-	ComPing
-	ComTime
-	ComDelayedInsert
-	ComChangeUser
-	ComBinlogDump
-	ComTableDump
-	ComConnectOut
-	ComRegisterSlave
-	ComStmtPrepare
-	ComStmtExecute
-	ComStmtSendLongData
-	ComStmtClose
-	ComStmtReset
-	ComSetOption
-	ComStmtFetch
-	ComDaemon
-	ComBinlogDumpGtid
-	ComResetConnection
-	ComEnd
-)
-
-// Client information. https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
-const (
-	ClientLongPassword               uint32 = 1 << iota // CLIENT_LONG_PASSWORD
-	ClientFoundRows                                     // CLIENT_FOUND_ROWS
-	ClientLongFlag                                      // CLIENT_LONG_FLAG
-	ClientConnectWithDB                                 // CLIENT_CONNECT_WITH_DB
-	ClientNoSchema                                      // CLIENT_NO_SCHEMA
-	ClientCompress                                      // CLIENT_COMPRESS
-	ClientODBC                                          // CLIENT_ODBC
-	ClientLocalFiles                                    // CLIENT_LOCAL_FILES
-	ClientIgnoreSpace                                   // CLIENT_IGNORE_SPACE
-	ClientProtocol41                                    // CLIENT_PROTOCOL_41
-	ClientInteractive                                   // CLIENT_INTERACTIVE
-	ClientSSL                                           // CLIENT_SSL
-	ClientIgnoreSigpipe                                 // CLIENT_IGNORE_SIGPIPE
-	ClientTransactions                                  // CLIENT_TRANSACTIONS
-	ClientReserved                                      // Deprecated: CLIENT_RESERVED
-	ClientSecureConnection                              // Deprecated: CLIENT_SECURE_CONNECTION
-	ClientMultiStatements                               // CLIENT_MULTI_STATEMENTS
-	ClientMultiResults                                  // CLIENT_MULTI_RESULTS
-	ClientPSMultiResults                                // CLIENT_PS_MULTI_RESULTS
-	ClientPluginAuth                                    // CLIENT_PLUGIN_AUTH
-	ClientConnectAtts                                   // CLIENT_CONNECT_ATTRS
-	ClientPluginAuthLenencClientData                    // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-	ClientHandleExpiredPasswords                        // CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS, Not supported: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_expired_passwords.html
-	ClientSessionTrack                                  // CLIENT_SESSION_TRACK, Not supported: https://github.com/pingcap/tidb/issues/35309
-	ClientDeprecateEOF                                  // CLIENT_DEPRECATE_EOF
-	ClientOptionalResultsetMetadata                     // CLIENT_OPTIONAL_RESULTSET_METADATA, Not supported: https://dev.mysql.com/doc/c-api/8.0/en/c-api-optional-metadata.html
-	ClientZstdCompressionAlgorithm                      // CLIENT_ZSTD_COMPRESSION_ALGORITHM
-	// 1 << 27 == CLIENT_QUERY_ATTRIBUTES
-	// 1 << 28 == MULTI_FACTOR_AUTHENTICATION
-	// 1 << 29 == CLIENT_CAPABILITY_EXTENSION
-	// 1 << 30 == CLIENT_SSL_VERIFY_SERVER_CERT
-	// 1 << 31 == CLIENT_REMEMBER_OPTIONS
-)
-
-// Cache type information.
-const (
-	TypeNoCache byte = 0xff
-)
-
 // Auth name information.
 const (
 	AuthNativePassword      = "mysql_native_password" // #nosec G101
 	AuthCachingSha2Password = "caching_sha2_password" // #nosec G101
-	AuthTiDBSM3Password     = "tidb_sm3_password"     // #nosec G101
 	AuthMySQLClearPassword  = "mysql_clear_password"
 	AuthSocket              = "auth_socket"
-	AuthTiDBSessionToken    = "tidb_session_token"
-	AuthTiDBAuthToken       = "tidb_auth_token"
 	AuthLDAPSimple          = "authentication_ldap_simple"
 	AuthLDAPSASL            = "authentication_ldap_sasl"
 )
@@ -296,78 +103,16 @@ const (
 	// which is 1 more than the maximum number of decimals permitted for the DECIMAL, FLOAT, and DOUBLE data types.
 	NotFixedDec = 31
 
-	MaxIntWidth              = 20
-	MaxRealWidth             = 23
-	MaxFloatingTypeScale     = 30
-	MaxFloatingTypeWidth     = 255
 	MaxDecimalScale          = 30
 	MaxDecimalWidth          = 65
-	MaxDateWidth             = 10 // YYYY-MM-DD.
 	MaxDatetimeWidthNoFsp    = 19 // YYYY-MM-DD HH:MM:SS
-	MaxDatetimeWidthWithFsp  = 26 // YYYY-MM-DD HH:MM:SS[.fraction]
-	MaxDatetimeFullWidth     = 29 // YYYY-MM-DD HH:MM:SS.###### AM
 	MaxDurationWidthNoFsp    = 10 // HH:MM:SS
-	MaxDurationWidthWithFsp  = 17 // HH:MM:SS[.fraction] -838:59:59.000000 to 838:59:59.000000
-	MaxBlobWidth             = 16777216
-	MaxLongBlobWidth         = 4294967295
-	MaxBitDisplayWidth       = 64
 	MaxFloatPrecisionLength  = 24
 	MaxDoublePrecisionLength = 53
 )
 
-// MySQL max type field length.
-const (
-	MaxFieldCharLength    = 255
-	MaxFieldVarCharLength = 65535
-)
-
 // MaxTypeSetMembers is the number of set members.
 const MaxTypeSetMembers = 64
-
-// PWDHashLen is the length of mysql_native_password's hash.
-const PWDHashLen = 40 // excluding the '*'
-
-// SHAPWDHashLen is the length of sha256_password's hash.
-const SHAPWDHashLen = 70
-
-// SM3PWDHashLen is the length of tidb_sm3_password's hash.
-const SM3PWDHashLen = 70
-
-// Command2Str is the command information to command name.
-var Command2Str = map[byte]string{
-	ComSleep:            "Sleep",
-	ComQuit:             "Quit",
-	ComInitDB:           "Init DB",
-	ComQuery:            "Query",
-	ComFieldList:        "Field List",
-	ComCreateDB:         "Create DB",
-	ComDropDB:           "Drop DB",
-	ComRefresh:          "Refresh",
-	ComShutdown:         "Shutdown",
-	ComStatistics:       "Statistics",
-	ComProcessInfo:      "Processlist",
-	ComConnect:          "Connect",
-	ComProcessKill:      "Kill",
-	ComDebug:            "Debug",
-	ComPing:             "Ping",
-	ComTime:             "Time",
-	ComDelayedInsert:    "Delayed Insert",
-	ComChangeUser:       "Change User",
-	ComBinlogDump:       "Binlog Dump",
-	ComTableDump:        "Table Dump",
-	ComConnectOut:       "Connect out",
-	ComRegisterSlave:    "Register Slave",
-	ComStmtPrepare:      "Prepare",
-	ComStmtExecute:      "Execute",
-	ComStmtSendLongData: "Long Data",
-	ComStmtClose:        "Close stmt",
-	ComStmtReset:        "Reset stmt",
-	ComSetOption:        "Set option",
-	ComStmtFetch:        "Fetch",
-	ComDaemon:           "Daemon",
-	ComBinlogDumpGtid:   "Binlog Dump",
-	ComResetConnection:  "Reset connect",
-}
 
 // DefaultSQLMode for GLOBAL_VARIABLES
 const DefaultSQLMode = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
@@ -406,19 +151,6 @@ var DefaultLengthOfTimeFraction = map[int]int{
 
 	5: 3,
 	6: 3,
-}
-
-// DefaultAuthPlugins are the supported default authentication plugins.
-var DefaultAuthPlugins = []string{
-	AuthNativePassword,
-	AuthCachingSha2Password,
-	AuthTiDBSM3Password,
-	AuthLDAPSASL,
-	AuthLDAPSimple,
-	AuthSocket,
-	AuthTiDBSessionToken,
-	AuthTiDBAuthToken,
-	AuthMySQLClearPassword,
 }
 
 // SQLMode is the type for MySQL sql_mode.
@@ -546,7 +278,6 @@ const (
 	ModeNoEngineSubstitution
 	ModePadCharToFullLength
 	ModeAllowInvalidDates
-	ModeNone = 0
 )
 
 // FormatSQLModeStr re-format 'SQL_MODE' variable.
@@ -704,16 +435,6 @@ const (
 	// Reference linking https://dev.mysql.com/doc/refman/5.7/en/partitioning-limitations.html.
 	PartitionCountLimit = 8192
 )
-
-// This is enum_cursor_type in MySQL
-const (
-	CursorTypeReadOnly = 1 << iota
-	CursorTypeForUpdate
-	CursorTypeScrollable
-)
-
-// ZlibCompressDefaultLevel is the zlib compression level for the compressed protocol
-const ZlibCompressDefaultLevel = 6
 
 const (
 	// CompressionNone is no compression in use

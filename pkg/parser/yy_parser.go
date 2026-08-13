@@ -21,13 +21,13 @@ import (
 	"strconv"
 	"unicode"
 
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/parser/terror"
 	"github.com/block/spirit/pkg/parser/types"
+	"github.com/pingcap/errors"
 )
 
 var (
@@ -201,7 +201,6 @@ func (parser *Parser) ParseSQL(sql string, params ...ParseParam) (stmt []ast.Stm
 		if err := checkASTDepth(stmt); err != nil {
 			return nil, warns, errors.Trace(err)
 		}
-		ast.SetFlag(stmt)
 	}
 	return parser.result, warns, nil
 }
@@ -254,7 +253,6 @@ func (parser *Parser) ParseOneStmt(sql, charset, collation string) (ast.StmtNode
 	if len(stmts) != 1 {
 		return nil, ErrSyntax
 	}
-	ast.SetFlag(stmts[0])
 	return stmts[0], nil
 }
 
