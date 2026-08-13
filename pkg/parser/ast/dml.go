@@ -14,14 +14,12 @@
 package ast
 
 import (
-	"reflect"
 	"strings"
 
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/util"
+	"github.com/pingcap/errors"
 )
 
 var (
@@ -629,45 +627,6 @@ type SelectLockInfo struct {
 	LockType SelectLockType
 	WaitSec  uint64
 	Tables   []*TableName
-}
-
-// Hash64 implements the cascades/base.Hasher.<0th> interface.
-func (n *SelectLockInfo) Hash64(h util.IHasher) {
-	h.HashInt(int(n.LockType))
-	h.HashUint64(n.WaitSec)
-	h.HashInt(len(n.Tables))
-	for _, one := range n.Tables {
-		// to make it simple, we just use lockInfo's addr.
-		h.HashUint64(uint64(reflect.ValueOf(one).Pointer()))
-	}
-}
-
-// Equals implements the cascades/base.Hasher.<1th> interface.
-func (n *SelectLockInfo) Equals(other any) bool {
-	n2, ok := other.(*SelectLockInfo)
-	if !ok {
-		return false
-	}
-	if n == nil {
-		return n2 == nil
-	}
-	if other == nil {
-		return false
-	}
-	ok = n.LockType == n2.LockType &&
-		n.WaitSec == n2.WaitSec
-	if !ok {
-		return false
-	}
-	if len(n.Tables) != len(n2.Tables) {
-		return false
-	}
-	for i, one := range n.Tables {
-		if one != n2.Tables[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // String implements fmt.Stringer.
@@ -2735,59 +2694,21 @@ const (
 	ShowCreateTable
 	ShowCreateView
 	ShowCreateUser
-	ShowCreateSequence
-	ShowCreatePlacementPolicy
 	ShowGrants
-	ShowMaskingPolicies
 	ShowTriggers
-	ShowProcedureStatus
-	ShowFunctionStatus
 	ShowIndex
 	ShowProcessList
 	ShowCreateDatabase
-	ShowConfig
 	ShowEvents
-	ShowStatsExtended
-	ShowStatsMeta
-	ShowStatsHistograms
-	ShowStatsTopN
-	ShowStatsBuckets
-	ShowStatsHealthy
-	ShowStatsLocked
-	ShowHistogramsInFlight
-	ShowColumnStatsUsage
 	ShowPlugins
 	ShowProfile
 	ShowProfiles
 	ShowMasterStatus
 	ShowPrivileges
 	ShowErrors
-	ShowBindings
-	ShowBindingCacheStatus
 	ShowOpenTables
-	ShowAnalyzeStatus
-	ShowRegions
-	ShowBuiltins
-	ShowTableNextRowId
-	ShowBackups
-	ShowRestores
-	ShowImports
-	ShowCreateImport
-	ShowPlacement
-	ShowPlacementForDatabase
-	ShowPlacementForTable
-	ShowPlacementForPartition
-	ShowPlacementLabels
-	ShowSessionStates
-	ShowCreateResourceGroup
-	ShowImportJobs
-	ShowImportGroups
-	ShowCreateProcedure
 	ShowBinlogStatus
 	ShowReplicaStatus
-	ShowDistributions
-	ShowDistributionJobs
-	ShowAffinity
 	// showTpCount is the count of all kinds of `SHOW` statements.
 	showTpCount
 )
@@ -2810,26 +2731,23 @@ const (
 type ShowStmt struct {
 	dmlNode
 
-	Tp     ShowStmtType // Databases/Tables/Columns/....
-	DBName string
-	Table  *TableName // Used for showing columns.
-	// Procedure's naming method is consistent with the table name
-	Procedure         *TableName
-	Partition         CIStr       // Used for showing partition.
-	Column            *ColumnName // Used for `desc table column`.
-	IndexName         CIStr
-	ResourceGroupName string // used for showing resource group
-	Flag              int    // Some flag parsed from sql, such as FULL.
-	Full              bool
-	User              *auth.UserIdentity   // Used for show grants/create user.
-	Roles             []*auth.RoleIdentity // Used for show grants .. using
-	IfNotExists       bool                 // Used for `show create database if not exists`
-	Extended          bool                 // Used for `show extended columns from ...`
-	Limit             *Limit               // Used for partial Show STMTs to limit Result Set row numbers.
+	Tp          ShowStmtType // Databases/Tables/Columns/....
+	DBName      string
+	Table       *TableName  // Used for showing columns.
+	Partition   CIStr       // Used for showing partition.
+	Column      *ColumnName // Used for `desc table column`.
+	IndexName   CIStr
+	Flag        int // Some flag parsed from sql, such as FULL.
+	Full        bool
+	User        *auth.UserIdentity   // Used for show grants/create user.
+	Roles       []*auth.RoleIdentity // Used for show grants .. using
+	IfNotExists bool                 // Used for `show create database if not exists`
+	Extended    bool                 // Used for `show extended columns from ...`
+	Limit       *Limit               // Used for partial Show STMTs to limit Result Set row numbers.
 
 	CountWarningsOrErrors bool // Used for showing count(*) warnings | errors
 
-	// GlobalScope is used by `show variables` and `show bindings`
+	// GlobalScope is used by `show variables`
 	GlobalScope bool
 	Pattern     *PatternLikeOrIlikeExpr
 	Where       ExprNode
@@ -2837,13 +2755,6 @@ type ShowStmt struct {
 	ShowProfileTypes []int  // Used for `SHOW PROFILE` syntax
 	ShowProfileArgs  *int64 // Used for `SHOW PROFILE` syntax
 	ShowProfileLimit *Limit // Used for `SHOW PROFILE` syntax
-
-	ShowGroupKey string // Used for `SHOW IMPORT GROUP <GROUP_KEY>` syntax
-
-	ImportJobID  *int64 // Used for `SHOW IMPORT JOB <ID>` syntax
-	ImportJobRaw bool   // Used for `SHOW RAW IMPORT JOB(S)` syntax
-
-	DistributionJobID *int64 // Used for `SHOW DISTRIBUTION JOB <ID>` syntax
 }
 
 // Restore implements Node interface.
@@ -2891,11 +2802,6 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		if err := n.Table.Restore(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
 		}
-	case ShowCreateProcedure:
-		ctx.WriteKeyWord("CREATE PROCEDURE ")
-		if err := n.Procedure.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.Procedure")
-		}
 	case ShowCreateView:
 		ctx.WriteKeyWord("CREATE VIEW ")
 		if err := n.Table.Restore(ctx); err != nil {
@@ -2907,32 +2813,10 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("IF NOT EXISTS ")
 		}
 		ctx.WriteName(n.DBName)
-	case ShowCreateSequence:
-		ctx.WriteKeyWord("CREATE SEQUENCE ")
-		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.SEQUENCE")
-		}
-	case ShowCreatePlacementPolicy:
-		ctx.WriteKeyWord("CREATE PLACEMENT POLICY ")
-		ctx.WriteName(n.DBName)
-	case ShowCreateResourceGroup:
-		ctx.WriteKeyWord("CREATE RESOURCE GROUP ")
-		ctx.WriteName(n.ResourceGroupName)
 	case ShowCreateUser:
 		ctx.WriteKeyWord("CREATE USER ")
 		if err := n.User.Restore(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while restore ShowStmt.User")
-		}
-	case ShowMaskingPolicies:
-		ctx.WriteKeyWord("MASKING POLICIES FOR ")
-		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
-		}
-		if n.Where != nil {
-			ctx.WriteKeyWord(" WHERE ")
-			if err := n.Where.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Where")
-			}
 		}
 	case ShowGrants:
 		ctx.WriteKeyWord("GRANTS")
@@ -2958,51 +2842,6 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 	case ShowProcessList:
 		restoreOptFull()
 		ctx.WriteKeyWord("PROCESSLIST")
-	case ShowStatsExtended:
-		ctx.WriteKeyWord("STATS_EXTENDED")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowStatsMeta:
-		ctx.WriteKeyWord("STATS_META")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowStatsLocked:
-		ctx.WriteKeyWord("STATS_LOCKED")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowStatsHistograms:
-		ctx.WriteKeyWord("STATS_HISTOGRAMS")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowStatsTopN:
-		ctx.WriteKeyWord("STATS_TOPN")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowStatsBuckets:
-		ctx.WriteKeyWord("STATS_BUCKETS")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowStatsHealthy:
-		ctx.WriteKeyWord("STATS_HEALTHY")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowHistogramsInFlight:
-		ctx.WriteKeyWord("HISTOGRAMS_IN_FLIGHT")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
-	case ShowColumnStatsUsage:
-		ctx.WriteKeyWord("COLUMN_STATS_USAGE")
-		if err := restoreShowLikeOrWhereOpt(); err != nil {
-			return err
-		}
 	case ShowProfiles:
 		ctx.WriteKeyWord("PROFILES")
 	case ShowProfile:
@@ -3048,57 +2887,10 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 
 	case ShowPrivileges:
 		ctx.WriteKeyWord("PRIVILEGES")
-	case ShowBuiltins:
-		ctx.WriteKeyWord("BUILTINS")
-	case ShowPlacementForDatabase:
-		ctx.WriteKeyWord("PLACEMENT FOR DATABASE ")
-		ctx.WriteName(n.DBName)
-	case ShowPlacementForTable:
-		ctx.WriteKeyWord("PLACEMENT FOR TABLE ")
-		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
-		}
-	case ShowPlacementForPartition:
-		ctx.WriteKeyWord("PLACEMENT FOR TABLE ")
-		if err := n.Table.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
-		}
-		ctx.WriteKeyWord(" PARTITION ")
-		ctx.WriteName(n.Partition.String())
-	case ShowImportJobs:
-		if n.ImportJobRaw {
-			ctx.WriteKeyWord("RAW ")
-		}
-		if n.ImportJobID != nil {
-			ctx.WriteKeyWord("IMPORT JOB ")
-			ctx.WritePlainf("%d", *n.ImportJobID)
-		} else {
-			ctx.WriteKeyWord("IMPORT JOBS")
-			restoreShowLikeOrWhereOpt()
-		}
-	case ShowImportGroups:
-		if n.ShowGroupKey != "" {
-			ctx.WriteKeyWord("IMPORT GROUP ")
-			ctx.WriteString(n.ShowGroupKey)
-		} else {
-			ctx.WriteKeyWord("IMPORT GROUPS")
-			restoreShowLikeOrWhereOpt()
-		}
-	case ShowDistributionJobs:
-		if n.DistributionJobID != nil {
-			ctx.WriteKeyWord("DISTRIBUTION JOB ")
-			ctx.WritePlainf("%d", *n.DistributionJobID)
-		} else {
-			ctx.WriteKeyWord("DISTRIBUTION JOBS")
-			restoreShowLikeOrWhereOpt()
-		}
-	// ShowTargetFilterable
 	default:
 		switch n.Tp {
 		case ShowEngines:
 			ctx.WriteKeyWord("ENGINES")
-		case ShowConfig:
-			ctx.WriteKeyWord("CONFIG")
 		case ShowDatabases:
 			ctx.WriteKeyWord("DATABASES")
 		case ShowCharset:
@@ -3149,69 +2941,11 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 		case ShowTriggers:
 			ctx.WriteKeyWord("TRIGGERS")
 			restoreShowDatabaseNameOpt()
-		case ShowProcedureStatus:
-			ctx.WriteKeyWord("PROCEDURE STATUS")
-		case ShowFunctionStatus:
-			ctx.WriteKeyWord("FUNCTION STATUS")
 		case ShowEvents:
 			ctx.WriteKeyWord("EVENTS")
 			restoreShowDatabaseNameOpt()
 		case ShowPlugins:
 			ctx.WriteKeyWord("PLUGINS")
-		case ShowBindings:
-			if n.GlobalScope {
-				ctx.WriteKeyWord("GLOBAL ")
-			} else {
-				ctx.WriteKeyWord("SESSION ")
-			}
-			ctx.WriteKeyWord("BINDINGS")
-		case ShowBindingCacheStatus:
-			ctx.WriteKeyWord("BINDING_CACHE STATUS")
-		case ShowAnalyzeStatus:
-			ctx.WriteKeyWord("ANALYZE STATUS")
-		case ShowDistributions:
-			ctx.WriteKeyWord("TABLE ")
-			if err := n.Table.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
-			}
-			ctx.WriteKeyWord(" DISTRIBUTIONS")
-			if err := restoreShowLikeOrWhereOpt(); err != nil {
-				return err
-			}
-			return nil
-		case ShowRegions:
-			ctx.WriteKeyWord("TABLE ")
-			if err := n.Table.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
-			}
-			if len(n.IndexName.L) > 0 {
-				ctx.WriteKeyWord(" INDEX ")
-				ctx.WriteName(n.IndexName.String())
-			}
-			ctx.WriteKeyWord(" REGIONS")
-			if err := restoreShowLikeOrWhereOpt(); err != nil {
-				return err
-			}
-			return nil
-		case ShowTableNextRowId:
-			ctx.WriteKeyWord("TABLE ")
-			if err := n.Table.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ShowStmt.Table")
-			}
-			ctx.WriteKeyWord(" NEXT_ROW_ID")
-			return nil
-		case ShowBackups:
-			ctx.WriteKeyWord("BACKUPS")
-		case ShowRestores:
-			ctx.WriteKeyWord("RESTORES")
-		case ShowImports:
-			ctx.WriteKeyWord("IMPORTS")
-		case ShowPlacement:
-			ctx.WriteKeyWord("PLACEMENT")
-		case ShowPlacementLabels:
-			ctx.WriteKeyWord("PLACEMENT LABELS")
-		case ShowSessionStates:
-			ctx.WriteKeyWord("SESSION_STATES")
 		case ShowReplicaStatus:
 			ctx.WriteKeyWord("REPLICA STATUS")
 		default:
@@ -3266,38 +3000,6 @@ func (n *ShowStmt) Accept(v Visitor) (Node, bool) {
 		n.Limit = node.(*Limit)
 	}
 	return v.Leave(n)
-}
-
-// Allow limit result set for partial SHOW cmd
-func (n *ShowStmt) NeedLimitRSRow() bool {
-	switch n.Tp {
-	// Show statements need to have consistence behavior with MySQL Does
-	case ShowEngines, ShowDatabases, ShowTables, ShowColumns, ShowTableStatus, ShowWarnings,
-		ShowCharset, ShowVariables, ShowStatus, ShowCollation, ShowIndex, ShowPlugins:
-		return true
-	default:
-		// There are five classes of Show STMT.
-		// 1) The STMT Only return one row:
-		//    ShowCreateTable, ShowCreateView, ShowCreateUser, ShowCreateDatabase, ShowMasterStatus,
-		//
-		// 2) The STMT is a MySQL syntax extend, so just keep it behavior as before:
-		//    ShowCreateSequence, ShowCreatePlacementPolicy, ShowConfig, ShowStatsExtended,
-		//    ShowStatsMeta, ShowStatsHistograms, ShowStatsTopN, ShowStatsBuckets, ShowStatsHealthy
-		//    ShowHistogramsInFlight, ShowColumnStatsUsage, ShowBindings, ShowBindingCacheStatus,
-		//    ShowPumpStatus, ShowDrainerStatus, ShowAnalyzeStatus, ShowRegions, ShowBuiltins,
-		//    ShowTableNextRowId, ShowBackups, ShowRestores, ShowImports, ShowCreateImport, ShowPlacement
-		//    ShowPlacementForDatabase, ShowPlacementForTable, ShowPlacementForPartition, ShowPlacementLabels
-		//
-		// 3) There is corelated statements in MySQL, but no limit result set return number also.
-		//    ShowGrants, ShowProcessList, ShowPrivileges, ShowBuiltins, ShowTableNextRowId
-		//
-		// 4) There is corelated statements in MySQL, but it seems not recommand to use them and likely deprecte in the future.
-		//    ShowProfile, ShowProfiles
-		//
-		// 5) Below STMTs do not implement fetch logic.
-		//    ShowTriggers, ShowProcedureStatus, ShowEvents, ShowErrors, ShowOpenTables.
-		return false
-	}
 }
 
 // WindowSpec is the specification of a window.

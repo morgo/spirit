@@ -40,11 +40,6 @@ func IsTypeChar(tp byte) bool {
 	return tp == mysql.TypeString || tp == mysql.TypeVarchar
 }
 
-// IsTypeVector returns whether tp is a vector type.
-func IsTypeVector(tp byte) bool {
-	return tp == mysql.TypeTiDBVectorFloat32
-}
-
 var type2Str = map[byte]string{
 	mysql.TypeBit:               "bit",
 	mysql.TypeBlob:              "text",
@@ -56,7 +51,6 @@ var type2Str = map[byte]string{
 	mysql.TypeEnum:              "enum",
 	mysql.TypeFloat:             "float",
 	mysql.TypeGeometry:          "geometry",
-	mysql.TypeTiDBVectorFloat32: "vector",
 	mysql.TypeInt24:             "mediumint",
 	mysql.TypeJSON:              "json",
 	mysql.TypeLong:              "int",
@@ -87,7 +81,6 @@ var str2Type = map[string]byte{
 	"enum":        mysql.TypeEnum,
 	"float":       mysql.TypeFloat,
 	"geometry":    mysql.TypeGeometry,
-	"vector":      mysql.TypeTiDBVectorFloat32,
 	"mediumint":   mysql.TypeInt24,
 	"json":        mysql.TypeJSON,
 	"int":         mysql.TypeLong,

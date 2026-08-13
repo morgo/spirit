@@ -24,20 +24,11 @@ import (
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/util"
 )
 
 // UnspecifiedLength is unspecified length.
 const (
 	UnspecifiedLength = -1
-)
-
-// TiDBStrictIntegerDisplayWidth represent whether return warnings when integerType with (length) was parsed.
-// The default is `false`, it will be parsed as warning, and the result in show-create-table will ignore the
-// display length when it set to `true`. This is for compatibility with MySQL 8.0 in which integer max display
-// length is deprecated, referring this issue #6688 for more details.
-var (
-	TiDBStrictIntegerDisplayWidth bool
 )
 
 // GeometryType is storing the geometry subtype for TypeGeometry
@@ -132,68 +123,6 @@ func (ft *FieldType) DeepCopy() *FieldType {
 	return ret
 }
 
-// Hash64 implements the cascades/base.Hasher.<0th> interface.
-func (ft *FieldType) Hash64(h util.IHasher) {
-	h.HashByte(ft.tp)
-	h.HashUint64(uint64(ft.flag))
-	h.HashInt(ft.flen)
-	h.HashInt(ft.decimal)
-	h.HashString(ft.charset)
-	h.HashString(ft.collate)
-	h.HashInt(len(ft.elems))
-	for _, elem := range ft.elems {
-		h.HashString(elem)
-	}
-	h.HashInt(len(ft.elemsIsBinaryLit))
-	for _, elem := range ft.elemsIsBinaryLit {
-		h.HashBool(elem)
-	}
-	h.HashBool(ft.array)
-	h.HashByte(byte(ft.geo))
-}
-
-// Equals implements the cascades/base.Hasher.<1th> interface.
-func (ft *FieldType) Equals(other any) bool {
-	ft2, ok := other.(*FieldType)
-	if !ok {
-		return false
-	}
-	if ft == nil {
-		return ft2 == nil
-	}
-	if other == nil {
-		return false
-	}
-	ok = ft.tp == ft2.tp &&
-		ft.flag == ft2.flag &&
-		ft.flen == ft2.flen &&
-		ft.decimal == ft2.decimal &&
-		ft.charset == ft2.charset &&
-		ft.collate == ft2.collate &&
-		ft.array == ft2.array &&
-		ft.geo == ft2.geo
-	if !ok {
-		return false
-	}
-	if len(ft.elems) != len(ft2.elems) {
-		return false
-	}
-	for i, one := range ft.elems {
-		if one != ft2.elems[i] {
-			return false
-		}
-	}
-	if len(ft.elemsIsBinaryLit) != len(ft2.elemsIsBinaryLit) {
-		return false
-	}
-	for i, one := range ft.elemsIsBinaryLit {
-		if one != ft2.elemsIsBinaryLit[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // NewFieldType returns a FieldType,
 // with a type and other information about field type.
 func NewFieldType(tp byte) *FieldType {
@@ -215,7 +144,7 @@ func (ft *FieldType) IsDecimalValid() bool {
 // IsVarLengthType Determine whether the column type is a variable-length type
 func (ft *FieldType) IsVarLengthType() bool {
 	switch ft.GetType() {
-	case mysql.TypeVarchar, mysql.TypeVarString, mysql.TypeJSON, mysql.TypeBlob, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeTiDBVectorFloat32, mysql.TypeGeometry:
+	case mysql.TypeVarchar, mysql.TypeVarString, mysql.TypeJSON, mysql.TypeBlob, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeGeometry:
 		return true
 	default:
 		return false
@@ -491,8 +420,6 @@ func (ft *FieldType) EvalType() EvalType {
 		return ETDuration
 	case mysql.TypeJSON:
 		return ETJson
-	case mysql.TypeTiDBVectorFloat32:
-		return ETVectorFloat32
 	case mysql.TypeEnum, mysql.TypeSet:
 		if ft.flag&mysql.EnumSetAsIntFlag > 0 {
 			return ETInt
@@ -556,28 +483,12 @@ func (ft *FieldType) CompactStr() string {
 		suffix = fmt.Sprintf("(%d,%d)", displayFlen, displayDecimal)
 	case mysql.TypeBit, mysql.TypeVarchar, mysql.TypeString, mysql.TypeVarString:
 		suffix = fmt.Sprintf("(%d)", displayFlen)
-	case mysql.TypeTiny:
-		// With display length deprecation active tinyint(1) still has
-		// a display length to indicate this might have been a BOOL.
-		// Connectors expect this.
-		//
-		// See also:
-		// https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-19.html
-		if !TiDBStrictIntegerDisplayWidth || (mysql.HasZerofillFlag(ft.flag) || displayFlen == 1) {
-			suffix = fmt.Sprintf("(%d)", displayFlen)
-		}
-	case mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong:
-		// Referring this issue #6688, the integer max display length is deprecated in MySQL 8.0.
-		// Since the length doesn't take any effect in TiDB storage or showing result, we remove it here.
-		if !TiDBStrictIntegerDisplayWidth || mysql.HasZerofillFlag(ft.flag) {
-			suffix = fmt.Sprintf("(%d)", displayFlen)
-		}
+	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong:
+		// Integer display widths are deprecated in MySQL 8.0 but still
+		// round-trip through SHOW CREATE TABLE, so keep them when set.
+		suffix = fmt.Sprintf("(%d)", displayFlen)
 	case mysql.TypeYear:
 		suffix = fmt.Sprintf("(%d)", ft.flen)
-	case mysql.TypeTiDBVectorFloat32:
-		if ft.flen != UnspecifiedLength {
-			suffix = fmt.Sprintf("(%d)", ft.flen)
-		}
 	case mysql.TypeNull:
 		suffix = "(0)"
 	}
@@ -736,8 +647,6 @@ func (ft *FieldType) RestoreAsCastType(ctx *format.RestoreCtx, explicitCharset b
 		ctx.WriteKeyWord("FLOAT")
 	case mysql.TypeYear:
 		ctx.WriteKeyWord("YEAR")
-	case mysql.TypeTiDBVectorFloat32:
-		ctx.WriteKeyWord("VECTOR")
 	}
 	if ft.array {
 		ctx.WritePlain(" ")

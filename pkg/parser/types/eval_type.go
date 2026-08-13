@@ -35,19 +35,12 @@ const (
 	ETDuration
 	// ETJson represents type JSON in evaluation.
 	ETJson
-	// ETVectorFloat32 represents type VectorFloat32 in evaluation.
-	ETVectorFloat32
 )
 
 // IsStringKind returns true for ETString, ETDatetime, ETTimestamp, ETDuration, ETJson EvalTypes.
 func (et EvalType) IsStringKind() bool {
 	return et == ETString || et == ETDatetime ||
-		et == ETTimestamp || et == ETDuration || et == ETJson || et == ETVectorFloat32
-}
-
-// IsVectorKind returns true for ETVectorXxx EvalTypes.
-func (et EvalType) IsVectorKind() bool {
-	return et == ETVectorFloat32
+		et == ETTimestamp || et == ETDuration || et == ETJson
 }
 
 // String implements fmt.Stringer interface.
@@ -69,8 +62,6 @@ func (et EvalType) String() string {
 		return "Time"
 	case ETJson:
 		return "Json"
-	case ETVectorFloat32:
-		return "VectorFloat32"
 	default:
 		panic(fmt.Sprintf("invalid EvalType %d", et))
 	}

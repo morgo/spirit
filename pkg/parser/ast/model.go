@@ -19,7 +19,6 @@ import (
 	"unsafe"
 
 	"github.com/pingcap/errors"
-	"github.com/block/spirit/pkg/parser/util"
 )
 
 // TableLockType is the type of the table lock.
@@ -180,14 +179,6 @@ func (t IndexType) String() string {
 		return "HASH"
 	case IndexTypeRtree:
 		return "RTREE"
-	case IndexTypeHypo:
-		return "HYPO"
-	case IndexTypeHNSW:
-		return "HNSW"
-	case IndexTypeVector:
-		return "VECTOR"
-	case IndexTypeInverted:
-		return "INVERTED"
 	case IndexTypeFulltext:
 		return "FULLTEXT"
 	default:
@@ -196,19 +187,11 @@ func (t IndexType) String() string {
 }
 
 // IndexTypes
-// Warning: 1) Also used in TiFlash 2) May come from a previous version persisted in TableInfo.
-// So you must keep it compatible when modifying it.
 const (
 	IndexTypeInvalid IndexType = iota
 	IndexTypeBtree
 	IndexTypeHash
 	IndexTypeRtree
-	IndexTypeHypo
-	IndexTypeVector
-	IndexTypeInverted
-	// IndexTypeHNSW is only used in AST.
-	// It will be rewritten into IndexTypeVector after preprocessor phase.
-	IndexTypeHNSW
 	IndexTypeFulltext
 )
 
@@ -246,26 +229,6 @@ func (r ReferOptionType) String() string {
 type CIStr struct {
 	O string `json:"O"` // Original string.
 	L string `json:"L"` // Lower case string.
-}
-
-// Hash64 implements HashEquals interface.
-func (cis *CIStr) Hash64(h util.IHasher) {
-	h.HashString(cis.L)
-}
-
-// Equals implements HashEquals interface.
-func (cis *CIStr) Equals(other any) bool {
-	cis2, ok := other.(*CIStr)
-	if !ok {
-		return false
-	}
-	if cis == nil {
-		return cis2 == nil
-	}
-	if cis2 == nil {
-		return false
-	}
-	return cis.L == cis2.L
 }
 
 // String implements fmt.Stringer interface.

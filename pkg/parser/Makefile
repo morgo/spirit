@@ -2,9 +2,6 @@
 
 all: fmt parser generate
 
-test: fmt parser
-	sh test.sh
-
 parser: parser.go hintparser.go
 
 genkeyword: generate_keyword/genkeyword.go

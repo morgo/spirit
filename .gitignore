@@ -26,3 +26,4 @@ bin/
 genkeyword
 bin/
 y.output
+pkg/parser/goyacc/goyacc

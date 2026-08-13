@@ -45,20 +45,6 @@ type likeEscapeSpec struct {
 	escape   string
 	explicit bool
 }
-
-func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool) {
-	switch strings.ToUpper(name) {
-	case ast.MaskingPolicyRestrictNameInsertIntoSelect:
-		return ast.MaskingPolicyRestrictOpInsertIntoSelect, true
-	case ast.MaskingPolicyRestrictNameUpdateSelect:
-		return ast.MaskingPolicyRestrictOpUpdateSelect, true
-	case ast.MaskingPolicyRestrictNameDeleteSelect:
-		return ast.MaskingPolicyRestrictOpDeleteSelect, true
-	case ast.MaskingPolicyRestrictNameCTAS:
-		return ast.MaskingPolicyRestrictOpCTAS, true
-	}
-	return ast.MaskingPolicyRestrictOpNone, false
-}
 %}
 
 %union {
@@ -277,7 +263,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	tableKwd          "TABLE"
 	terminated        "TERMINATED"
 	then              "THEN"
-	tidbCurrentTSO    "TIDB_CURRENT_TSO"
 	tinyblobType      "TINYBLOB"
 	tinyIntType       "TINYINT"
 	tinytextType      "TINYTEXT"
@@ -321,7 +306,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	any                        "ANY"
 	ascii                      "ASCII"
 	attribute                  "ATTRIBUTE"
-	attributes                 "ATTRIBUTES"
 	autoextendSize             "AUTOEXTEND_SIZE"
 	autoIncrement              "AUTO_INCREMENT"
 	avg                        "AVG"
@@ -342,10 +326,8 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	cipher                     "CIPHER"
 	client                     "CLIENT"
 	clientErrorsSummary        "CLIENT_ERRORS_SUMMARY"
-	cluster                    "CLUSTER"
 	coalesce                   "COALESCE"
 	collation                  "COLLATION"
-	columnar                   "COLUMNAR"
 	columns                    "COLUMNS"
 	columnFormat               "COLUMN_FORMAT"
 	comment                    "COMMENT"
@@ -428,10 +410,8 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	issuer                     "ISSUER"
 	jsonType                   "JSON"
 	keyBlockSize               "KEY_BLOCK_SIZE"
-	labels                     "LABELS"
 	language                   "LANGUAGE"
 	last                       "LAST"
-	lastval                    "LASTVAL"
 	less                       "LESS"
 	level                      "LEVEL"
 	lineString                 "LINESTRING"
@@ -439,7 +419,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	local                      "LOCAL"
 	locked                     "LOCKED"
 	logs                       "LOGS"
-	masking                    "MASKING"
 	master                     "MASTER"
 	maxConnectionsPerHour      "MAX_CONNECTIONS_PER_HOUR"
 	maxQueriesPerHour          "MAX_QUERIES_PER_HOUR"
@@ -463,7 +442,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	ncharType                  "NCHAR"
 	never                      "NEVER"
 	next                       "NEXT"
-	nextval                    "NEXTVAL"
 	no                         "NO"
 	nodegroup                  "NODEGROUP"
 	none                       "NONE"
@@ -531,7 +509,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	serial                     "SERIAL"
 	serializable               "SERIALIZABLE"
 	session                    "SESSION"
-	setval                     "SETVAL"
 	share                      "SHARE"
 	shutdown                   "SHUTDOWN"
 	signed                     "SIGNED"
@@ -580,7 +557,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	transaction                "TRANSACTION"
 	triggers                   "TRIGGERS"
 	truncate                   "TRUNCATE"
-	ttl                        "TTL"
 	tp                         "TYPE"
 	unbounded                  "UNBOUNDED"
 	uncommitted                "UNCOMMITTED"
@@ -591,7 +567,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	validation                 "VALIDATION"
 	value                      "VALUE"
 	variables                  "VARIABLES"
-	vectorType                 "VECTOR"
 	view                       "VIEW"
 	visible                    "VISIBLE"
 	wait                       "WAIT"
@@ -614,7 +589,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	jsonObjectAgg         "JSON_OBJECTAGG"
 	jsonSumCrc32          "JSON_SUM_CRC32"
 	log                   "LOG"
-	placement             "PLACEMENT"
 	s3                    "S3"
 	subDate               "SUBDATE"
 	timestampAdd          "TIMESTAMPADD"
@@ -706,10 +680,7 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	NowSymOptionFraction            "NowSym with optional fraction part"
 	NowSymOptionFractionParentheses "NowSym with optional fraction part within potential parentheses"
 	CharsetNameOrDefault            "Character set name or default"
-	NextValueForSequenceParentheses "Default nextval expression within potential parentheses"
-	NextValueForSequence            "Default nextval expression"
 	BuiltinFunction                 "Default builtin functions for columns"
-	FunctionNameSequence            "Function with sequence function call"
 	WindowFuncCall                  "WINDOW function call"
 	ProcedureCall                   "Procedure call with Identifier or identifier"
 
@@ -889,7 +860,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	IntervalExpr                           "Interval expression"
 	JoinTable                              "join table"
 	JoinType                               "join type"
-	KillOrKillTiDB                         "Kill or Kill TiDB"
 	LikeTableWithOrWithoutParen            "LIKE table_name or ( LIKE table_name )"
 	LimitClause                            "LIMIT clause"
 	LimitOption                            "Limit option could be integer or parameter marker."
@@ -1198,10 +1168,7 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	Symbol                          "Constraint Symbol"
 
 %precedence empty
-%precedence masking
-%precedence statsExtended
 %precedence as
-%precedence placement
 %precedence lowerThanSelectOpt
 %precedence sqlBufferResult
 %precedence sqlBigResult
@@ -1235,8 +1202,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 %precedence lowerThanFunction
 %precedence function
 %precedence constraint
-%precedence vectorType
-%precedence columnar
 
 /* A dummy token to force the priority of TableRef production in a join. */
 %left tableRefPriority
@@ -1266,7 +1231,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 %right collate
 %left interval
 %right encryption
-%left labels
 %precedence quick
 %precedence escape
 %precedence lowerThanComma
@@ -1784,7 +1748,6 @@ AlterTableSpec:
 			Visibility: $4.(ast.IndexVisibility),
 		}
 	}
-// 	Support caching or non-caching a table in memory for tidb, It can be found in the official Oracle document, see: https://docs.oracle.com/database/121/SQLRF/statements_3001.htm
 ReorganizePartitionRuleOpt:
 	/* empty */ %prec lowerThanRemove
 	{
@@ -2707,7 +2670,6 @@ ReferOpt:
 DefaultValueExpr:
 	NowSymOptionFractionParentheses
 |	SignedLiteral
-|	NextValueForSequenceParentheses
 |	BuiltinFunction
 |	'(' Identifier ')'
 	{
@@ -2773,35 +2735,6 @@ NowSymOptionFraction:
 |	"CURRENT_DATE"
 	{
 		$$ = &ast.FuncCallExpr{FnName: ast.NewCIStr("CURRENT_DATE")}
-	}
-
-NextValueForSequenceParentheses:
-	'(' NextValueForSequenceParentheses ')'
-	{
-		$$ = $2.(*ast.FuncCallExpr)
-	}
-|	NextValueForSequence
-
-NextValueForSequence:
-	"NEXT" "VALUE" forKwd TableName
-	{
-		objNameExpr := &ast.TableNameExpr{
-			Name: $4.(*ast.TableName),
-		}
-		$$ = &ast.FuncCallExpr{
-			FnName: ast.NewCIStr(ast.NextVal),
-			Args:   []ast.ExprNode{objNameExpr},
-		}
-	}
-|	"NEXTVAL" '(' TableName ')'
-	{
-		objNameExpr := &ast.TableNameExpr{
-			Name: $3.(*ast.TableName),
-		}
-		$$ = &ast.FuncCallExpr{
-			FnName: ast.NewCIStr(ast.NextVal),
-			Args:   []ast.ExprNode{objNameExpr},
-		}
 	}
 
 /*
@@ -4643,7 +4576,6 @@ UnReservedKeyword:
 	"ACTION"
 |	"ASCII"
 |	"ATTRIBUTE"
-|	"ATTRIBUTES"
 |	"AUTO_INCREMENT"
 |	"AFTER"
 |	"ALWAYS"
@@ -4818,7 +4750,6 @@ UnReservedKeyword:
 |	"MAX_QUERIES_PER_HOUR"
 |	"MAX_UPDATES_PER_HOUR"
 |	"MAX_USER_CONNECTIONS"
-|	"MASKING"
 |	"REPLICATION"
 |	"CLIENT"
 |	"SLAVE"
@@ -4897,28 +4828,20 @@ UnReservedKeyword:
 |	"NOWAIT"
 |	"INSTANCE"
 |	"REPLICA"
-|	"LABELS"
 |	"LOGS"
 |	"HOSTS"
 |	"AGAINST"
 |	"EXPANSION"
 |	"NEXT"
-|	"NEXTVAL"
-|	"LASTVAL"
-|	"SETVAL"
 |	"WAIT"
 |	"CLIENT_ERRORS_SUMMARY"
 |	"SKIP"
 |	"LOCKED"
-|	"CLUSTER"
 |	"TOKEN_ISSUER"
-|	"TTL"
 |	"FAILED_LOGIN_ATTEMPTS"
 |	"PASSWORD_LOCK_TIME"
 |	"REUSE" %prec lowerThanEq
 |	"FOUND"
-|	"VECTOR"
-|	"COLUMNAR"
 |	"AUTOEXTEND_SIZE"
 |	"GEOMETRY"
 |	"GEOMETRYCOLLECTION"
@@ -4938,7 +4861,6 @@ NotKeywordToken:
 |	"INPLACE"
 |	"INSTANT"
 |	"LOG"
-|	"PLACEMENT"
 |	"S3"
 |	"SUBDATE"
 |	"TIMESTAMPADD"
@@ -5820,7 +5742,6 @@ FunctionNameOptionalBraces:
 |	"CURRENT_DATE"
 |	"CURRENT_ROLE"
 |	"UTC_DATE"
-|	"TIDB_CURRENT_TSO"
 
 FunctionNameDatetimePrecision:
 	"CURRENT_TIME"
@@ -6059,7 +5980,6 @@ FunctionCallNonKeyword:
 			Args:   []ast.ExprNode{$3, ast.NewValueExpr("BINARY", parser.charset, parser.collation), ast.NewValueExpr($6, parser.charset, parser.collation)},
 		}
 	}
-|	FunctionNameSequence
 |	builtinTranslate '(' Expression ',' Expression ',' Expression ')'
 	{
 		$$ = &ast.FuncCallExpr{
@@ -6111,30 +6031,6 @@ TrimDirection:
 	{
 		$$ = ast.TrimTrailing
 	}
-
-FunctionNameSequence:
-	"LASTVAL" '(' TableName ')'
-	{
-		objNameExpr := &ast.TableNameExpr{
-			Name: $3.(*ast.TableName),
-		}
-		$$ = &ast.FuncCallExpr{
-			FnName: ast.NewCIStr(ast.LastVal),
-			Args:   []ast.ExprNode{objNameExpr},
-		}
-	}
-|	"SETVAL" '(' TableName ',' SignedNum ')'
-	{
-		objNameExpr := &ast.TableNameExpr{
-			Name: $3.(*ast.TableName),
-		}
-		valueExpr := ast.NewValueExpr($5, parser.charset, parser.collation)
-		$$ = &ast.FuncCallExpr{
-			FnName: ast.NewCIStr(ast.SetVal),
-			Args:   []ast.ExprNode{objNameExpr, valueExpr},
-		}
-	}
-|	NextValueForSequence
 
 SumExpr:
 	"AVG" '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
@@ -10673,19 +10569,6 @@ ConnectionOptions:
 |	"WITH" ConnectionOptionList
 	{
 		$$ = $2
-		needWarning := false
-		for _, option := range $2.([]*ast.ResourceOption) {
-			switch option.Type {
-			case ast.MaxUserConnections:
-			// do nothing.
-			default:
-				needWarning = true
-			}
-		}
-		if needWarning {
-			yylex.AppendError(yylex.Errorf("TiDB does not support WITH ConnectionOptions but MAX_USER_CONNECTIONS now, they would be parsed but ignored."))
-			parser.lastErrorAsWarn()
-		}
 	}
 
 ConnectionOptionList:
@@ -11413,7 +11296,6 @@ RevokeRoleStmt:
 
 /**************************************LoadDataStmt*****************************************
  * See https://dev.mysql.com/doc/refman/5.7/en/load-data.html
- * for load stmt with format see https://github.com/pingcap/tidb/issues/40499
  *******************************************************************************************/
 LoadDataStmt:
 	"LOAD" "DATA" LowPriorityOpt LocalOpt "INFILE" stringLit DuplicateOpt "INTO" "TABLE" TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt
@@ -11733,43 +11615,32 @@ OptimizeTableStmt:
  * See https://dev.mysql.com/doc/refman/5.7/en/kill.html
  *******************************************************************/
 KillStmt:
-	KillOrKillTiDB NUM
+	"KILL" NUM
 	{
 		$$ = &ast.KillStmt{
-			ConnectionID:  getUint64FromNUM($2),
-			TiDBExtension: $1.(bool),
+			ConnectionID: getUint64FromNUM($2),
 		}
 	}
-|	KillOrKillTiDB "CONNECTION" NUM
+|	"KILL" "CONNECTION" NUM
 	{
 		$$ = &ast.KillStmt{
-			ConnectionID:  getUint64FromNUM($3),
-			TiDBExtension: $1.(bool),
+			ConnectionID: getUint64FromNUM($3),
 		}
 	}
-|	KillOrKillTiDB "QUERY" NUM
+|	"KILL" "QUERY" NUM
 	{
 		$$ = &ast.KillStmt{
-			ConnectionID:  getUint64FromNUM($3),
-			Query:         true,
-			TiDBExtension: $1.(bool),
+			ConnectionID: getUint64FromNUM($3),
+			Query:        true,
 		}
 	}
-|	KillOrKillTiDB BuiltinFunction
+|	"KILL" BuiltinFunction
 	{
 		$$ = &ast.KillStmt{
-			TiDBExtension: $1.(bool),
-			Expr:          $2,
+			Expr: $2,
 		}
 	}
 
-KillOrKillTiDB:
-	"KILL"
-	{
-		$$ = false
-	}
-/* KILL TIDB is a special grammar extension in TiDB, it can be used only when
-   the client connect to TiDB directly, not proxied under LVS. */
 SignedNum:
 	Int64Num
 |	'+' Int64Num

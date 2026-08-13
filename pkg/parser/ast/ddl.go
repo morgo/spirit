@@ -1398,67 +1398,6 @@ func (n *CreateViewStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// MaskingPolicyRestrictOps is a bitmask of operations restricted by a masking policy.
-type MaskingPolicyRestrictOps uint64
-
-// Masking policy restricted operation values.
-const (
-	MaskingPolicyRestrictOpNone MaskingPolicyRestrictOps = 0
-
-	MaskingPolicyRestrictOpInsertIntoSelect MaskingPolicyRestrictOps = 1 << iota
-	MaskingPolicyRestrictOpUpdateSelect
-	MaskingPolicyRestrictOpDeleteSelect
-	MaskingPolicyRestrictOpCTAS
-)
-
-// Masking policy restricted operation names.
-const (
-	MaskingPolicyRestrictNameInsertIntoSelect = "INSERT_INTO_SELECT"
-	MaskingPolicyRestrictNameUpdateSelect     = "UPDATE_SELECT"
-	MaskingPolicyRestrictNameDeleteSelect     = "DELETE_SELECT"
-	MaskingPolicyRestrictNameCTAS             = "CTAS"
-)
-
-func (ops MaskingPolicyRestrictOps) names() []string {
-	if ops == MaskingPolicyRestrictOpNone {
-		return nil
-	}
-
-	names := make([]string, 0, 4)
-	if ops&MaskingPolicyRestrictOpInsertIntoSelect != 0 {
-		names = append(names, MaskingPolicyRestrictNameInsertIntoSelect)
-	}
-	if ops&MaskingPolicyRestrictOpUpdateSelect != 0 {
-		names = append(names, MaskingPolicyRestrictNameUpdateSelect)
-	}
-	if ops&MaskingPolicyRestrictOpDeleteSelect != 0 {
-		names = append(names, MaskingPolicyRestrictNameDeleteSelect)
-	}
-	if ops&MaskingPolicyRestrictOpCTAS != 0 {
-		names = append(names, MaskingPolicyRestrictNameCTAS)
-	}
-	return names
-}
-
-func restoreMaskingPolicyRestrictOn(ctx *format.RestoreCtx, ops MaskingPolicyRestrictOps, writeNone bool) {
-	if ops == MaskingPolicyRestrictOpNone {
-		if !writeNone {
-			return
-		}
-		ctx.WriteKeyWord("RESTRICT ON NONE")
-		return
-	}
-
-	ctx.WriteKeyWord("RESTRICT ON (")
-	for i, name := range ops.names() {
-		if i > 0 {
-			ctx.WritePlain(", ")
-		}
-		ctx.WriteKeyWord(name)
-	}
-	ctx.WritePlain(")")
-}
-
 // IndexLockAndAlgorithm stores the algorithm option and the lock option.
 type IndexLockAndAlgorithm struct {
 	node
