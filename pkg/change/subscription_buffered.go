@@ -477,6 +477,22 @@ func (s *bufferedMap) HasChanged(key, row []any, deleted bool) {
 	// We then disable the optimization after the copier phase has finished.
 	// Watermark drops happen before the soft-limit wait — those rows never
 	// enter the buffer, so there is no point parking on their behalf.
+	//
+	// CORRECTNESS CAVEAT: discarding relies on the copier's later chunk
+	// SELECT seeing this event's transaction. MySQL only makes a
+	// transaction's row versions visible at the engine-commit stage, which
+	// happens *after* binlog subscribers receive its events (sync stage) —
+	// so a chunk dispatched inside that window copies the old state while
+	// the event is gone, and the flushed GTID/position still advances past
+	// it. A repairing checksum is the only thing that closes the gap, and
+	// how much it closes depends on the caller: migrate and move gate
+	// cutover on a mandatory FixDifferences checksum, so the divergence
+	// never reaches trusted data; continuous sync (pkg/datasync) only
+	// repairs it eventually, so its target can serve a
+	// missing/stale/phantom row until a later checksum pass covers that
+	// chunk. Deterministic repro: TestKeyAboveWatermarkVisibilityWindow.
+	// Analysis + fix directions: "Above-watermark discard vs. binlog
+	// visibility" in this package's README.
 	if s.watermarkOptimizationEnabled() && s.chunker.KeyAboveHighWatermark(key[0]) {
 		s.keysDroppedAbove.Add(1)
 		s.logger.Debug("key above watermark", "key", key[0])
