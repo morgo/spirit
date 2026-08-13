@@ -17,13 +17,12 @@ package sqlescape
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/pingcap/errors"
 )
 
 func reserveBuffer(buf []byte, appendSize int) []byte {
@@ -135,20 +134,20 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 		switch ch {
 		case 'n':
 			if argPos >= len(args) {
-				return nil, errors.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
+				return nil, fmt.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
 			}
 			arg := args[argPos]
 			argPos++
 
 			v, ok := arg.(string)
 			if !ok {
-				return nil, errors.Errorf("expect a string identifier, got %v", arg)
+				return nil, fmt.Errorf("expect a string identifier, got %v", arg)
 			}
 			buf = appendEscapedIdentifier(buf, v)
 			i++ // skip specifier
 		case '?':
 			if argPos >= len(args) {
-				return nil, errors.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
+				return nil, fmt.Errorf("missing arguments, need %d-th arg, but only got %d args", argPos+1, len(args))
 			}
 			arg := args[argPos]
 			argPos++
@@ -246,7 +245,7 @@ func escapeSQL(sql string, args ...any) ([]byte, error) {
 					case reflect.String:
 						buf = appendSQLArgString(buf, reflect.ValueOf(arg).String())
 					default:
-						return nil, errors.Errorf("unsupported %d-th argument: %v", argPos, arg)
+						return nil, fmt.Errorf("unsupported %d-th argument: %v", argPos, arg)
 					}
 				}
 			}
