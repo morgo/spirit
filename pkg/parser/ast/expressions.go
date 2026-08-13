@@ -19,9 +19,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/opcode"
+	"github.com/pingcap/errors"
 )
 
 var (

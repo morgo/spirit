@@ -201,29 +201,29 @@ func TestFlushPrivileges(t *testing.T) {
 
 func TestHintError(t *testing.T) {
 	p := parser.New()
-	stmt, warns, err := p.Parse("select /*+ tidb_unknown(T1,t2) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	stmt, warns, err := p.Parse("select /*+ unknown_hint(T1,t2) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	require.Len(t, warns, 1)
-	require.Equal(t, `[parser:8061]Optimizer hint tidb_unknown is not supported by TiDB and is ignored`, warns[0].Error())
+	require.Equal(t, `[parser:8061]Optimizer hint unknown_hint is not supported and is ignored`, warns[0].Error())
 	require.Len(t, stmt[0].(*ast.SelectStmt).TableHints, 0)
-	stmt, warns, err = p.Parse("select /*+ TIDB_INLJ(t1, T2) tidb_unknown(T1,t2, 1) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	stmt, warns, err = p.Parse("select /*+ HASH_JOIN(t1, T2) unknown_hint(T1,t2, 1) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.Len(t, stmt[0].(*ast.SelectStmt).TableHints, 1)
 	require.NoError(t, err)
 	require.Len(t, warns, 1)
-	require.Equal(t, `[parser:8061]Optimizer hint tidb_unknown is not supported by TiDB and is ignored`, warns[0].Error())
-	_, _, err = p.Parse("select c1, c2 from /*+ tidb_unknow(T1,t2) */ t1, t2 where t1.c1 = t2.c1", "", "")
+	require.Equal(t, `[parser:8061]Optimizer hint unknown_hint is not supported and is ignored`, warns[0].Error())
+	_, _, err = p.Parse("select c1, c2 from /*+ unknown_hint(T1,t2) */ t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err) // Hints are ignored after the "FROM" keyword!
-	_, _, err = p.Parse("select1 /*+ TIDB_INLJ(t1, T2) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.EqualError(t, err, "line 1 column 7 near \"select1 /*+ TIDB_INLJ(t1, T2) */ c1, c2 from t1, t2 where t1.c1 = t2.c1\" ")
-	_, _, err = p.Parse("select /*+ TIDB_INLJ(t1, T2) */ c1, c2 fromt t1, t2 where t1.c1 = t2.c1", "", "")
+	_, _, err = p.Parse("select1 /*+ HASH_JOIN(t1, T2) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	require.EqualError(t, err, "line 1 column 7 near \"select1 /*+ HASH_JOIN(t1, T2) */ c1, c2 from t1, t2 where t1.c1 = t2.c1\" ")
+	_, _, err = p.Parse("select /*+ HASH_JOIN(t1, T2) */ c1, c2 fromt t1, t2 where t1.c1 = t2.c1", "", "")
 	require.EqualError(t, err, "line 1 column 47 near \"t1, t2 where t1.c1 = t2.c1\" ")
 	_, _, err = p.Parse("SELECT 1 FROM DUAL WHERE 1 IN (SELECT /*+ DEBUG_HINT3 */ 1)", "", "")
 	require.NoError(t, err)
-	stmt, _, err = p.Parse("insert into t select /*+ memory_quota(1 MB) */ * from t;", "", "")
+	stmt, _, err = p.Parse("insert into t select /*+ MAX_EXECUTION_TIME(1000) */ * from t;", "", "")
 	require.NoError(t, err)
 	require.Len(t, stmt[0].(*ast.InsertStmt).TableHints, 0)
 	require.Len(t, stmt[0].(*ast.InsertStmt).Select.(*ast.SelectStmt).TableHints, 1)
-	stmt, _, err = p.Parse("insert /*+ memory_quota(1 MB) */ into t select * from t;", "", "")
+	stmt, _, err = p.Parse("insert /*+ MAX_EXECUTION_TIME(1000) */ into t select * from t;", "", "")
 	require.NoError(t, err)
 	require.Len(t, stmt[0].(*ast.InsertStmt).TableHints, 1)
 
@@ -340,72 +340,12 @@ func TestErrorMsg(t *testing.T) {
 
 func TestOptimizerHints(t *testing.T) {
 	p := parser.New()
-	// Test USE_INDEX
-	stmt, _, err := p.Parse("select /*+ USE_INDEX(T1,T2), use_index(t3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test ORDER_INDEX
+	stmt, _, err := p.Parse("select /*+ ORDER_INDEX(T1,T2), order_index(t3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt := stmt[0].(*ast.SelectStmt)
 
 	hints := selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "use_index", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 1)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Len(t, hints[0].Indexes, 1)
-	require.Equal(t, "t2", hints[0].Indexes[0].L)
-
-	require.Equal(t, "use_index", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Len(t, hints[1].Indexes, 1)
-	require.Equal(t, "t4", hints[1].Indexes[0].L)
-
-	// Test FORCE_INDEX
-	stmt, _, err = p.Parse("select /*+ FORCE_INDEX(T1,T2), force_index(t3,t4) RESOURCE_GROUP(rg1)*/ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 3)
-	require.Equal(t, "force_index", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 1)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Len(t, hints[0].Indexes, 1)
-	require.Equal(t, "t2", hints[0].Indexes[0].L)
-
-	require.Equal(t, "force_index", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Len(t, hints[1].Indexes, 1)
-	require.Equal(t, "t4", hints[1].Indexes[0].L)
-
-	require.Equal(t, "resource_group", hints[2].HintName.L)
-	require.Equal(t, hints[2].HintData, "rg1")
-
-	// Test IGNORE_INDEX
-	stmt, _, err = p.Parse("select /*+ IGNORE_INDEX(T1,T2), ignore_index(t3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "ignore_index", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 1)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Len(t, hints[0].Indexes, 1)
-	require.Equal(t, "t2", hints[0].Indexes[0].L)
-
-	require.Equal(t, "ignore_index", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Len(t, hints[1].Indexes, 1)
-	require.Equal(t, "t4", hints[1].Indexes[0].L)
-
-	// Test ORDER_INDEX
-	stmt, _, err = p.Parse("select /*+ ORDER_INDEX(T1,T2), order_index(t3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
 	require.Len(t, hints, 2)
 	require.Equal(t, "order_index", hints[0].HintName.L)
 	require.Len(t, hints[0].Tables, 1)
@@ -419,13 +359,13 @@ func TestOptimizerHints(t *testing.T) {
 	require.Len(t, hints[1].Indexes, 1)
 	require.Equal(t, "t4", hints[1].Indexes[0].L)
 
-	// Test NO_ORDER_INDEX
-	stmt, _, err = p.Parse("select /*+ NO_ORDER_INDEX(T1,T2), no_order_index(t3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test NO_ORDER_INDEX and RESOURCE_GROUP
+	stmt, _, err = p.Parse("select /*+ NO_ORDER_INDEX(T1,T2), no_order_index(t3,t4) RESOURCE_GROUP(rg1)*/ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt = stmt[0].(*ast.SelectStmt)
 
 	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
+	require.Len(t, hints, 3)
 	require.Equal(t, "no_order_index", hints[0].HintName.L)
 	require.Len(t, hints[0].Tables, 1)
 	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
@@ -438,163 +378,11 @@ func TestOptimizerHints(t *testing.T) {
 	require.Len(t, hints[1].Indexes, 1)
 	require.Equal(t, "t4", hints[1].Indexes[0].L)
 
-	// Test INDEX_LOOKUP_PUSHDOWN
-	stmt, _, err = p.Parse("select /*+ INDEX_LOOKUP_PUSHDOWN(T1,T2), index_lookup_pushdown(t3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
+	require.Equal(t, "resource_group", hints[2].HintName.L)
+	require.Equal(t, hints[2].HintData, "rg1")
 
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "index_lookup_pushdown", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 1)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Len(t, hints[0].Indexes, 1)
-	require.Equal(t, "t2", hints[0].Indexes[0].L)
-
-	require.Equal(t, "index_lookup_pushdown", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Len(t, hints[1].Indexes, 1)
-	require.Equal(t, "t4", hints[1].Indexes[0].L)
-
-	// Test TIDB_SMJ
-	stmt, _, err = p.Parse("select /*+ TIDB_SMJ(T1,t2), tidb_smj(T3,t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "tidb_smj", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "tidb_smj", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test MERGE_JOIN
-	stmt, _, err = p.Parse("select /*+ MERGE_JOIN(t1, T2), merge_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "merge_join", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "merge_join", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// TEST BROADCAST_JOIN
-	stmt, _, err = p.Parse("select /*+ BROADCAST_JOIN(t1, T2), broadcast_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "broadcast_join", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "broadcast_join", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test TIDB_INLJ
-	stmt, _, err = p.Parse("select /*+ TIDB_INLJ(t1, T2), tidb_inlj(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "tidb_inlj", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "tidb_inlj", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test INL_JOIN
-	stmt, _, err = p.Parse("select /*+ INL_JOIN(t1, T2), inl_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "inl_join", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "inl_join", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test INL_HASH_JOIN
-	stmt, _, err = p.Parse("select /*+ INL_HASH_JOIN(t1, T2), inl_hash_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "inl_hash_join", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "inl_hash_join", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test INL_MERGE_JOIN
-	stmt, _, err = p.Parse("select /*+ INL_MERGE_JOIN(t1, T2), inl_merge_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "inl_merge_join", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "inl_merge_join", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test TIDB_HJ
-	stmt, _, err = p.Parse("select /*+ TIDB_HJ(t1, T2), tidb_hj(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "tidb_hj", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "tidb_hj", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	// Test HASH_JOIN
-	stmt, _, err = p.Parse("select /*+ HASH_JOIN(t1, T2), hash_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test HASH_JOIN and NO_HASH_JOIN
+	stmt, _, err = p.Parse("select /*+ HASH_JOIN(t1, T2), no_hash_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt = stmt[0].(*ast.SelectStmt)
 
@@ -605,51 +393,31 @@ func TestOptimizerHints(t *testing.T) {
 	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
 	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
 
-	require.Equal(t, "hash_join", hints[1].HintName.L)
+	require.Equal(t, "no_hash_join", hints[1].HintName.L)
 	require.Len(t, hints[1].Tables, 2)
 	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
 	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
 
-	// Test HASH_JOIN_BUILD and HASH_JOIN_PROBE
-	stmt, _, err = p.Parse("select /*+ hash_join_build(t1), hash_join_probe(t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test MERGE
+	stmt, _, err = p.Parse("select /*+ MERGE(), merge(@qb1) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt = stmt[0].(*ast.SelectStmt)
 
 	hints = selectStmt.TableHints
 	require.Len(t, hints, 2)
-	require.Equal(t, "hash_join_build", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 1)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
+	require.Equal(t, "merge", hints[0].HintName.L)
+	require.Equal(t, "merge", hints[1].HintName.L)
+	require.Equal(t, "qb1", hints[1].QBName.L)
 
-	require.Equal(t, "hash_join_probe", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t4", hints[1].Tables[0].TableName.L)
-
-	// Test HASH_JOIN with SWAP_JOIN_INPUTS/NO_SWAP_JOIN_INPUTS
-	// t1 for build, t4 for probe
-	stmt, _, err = p.Parse("select /*+ HASH_JOIN(t1, T2), hash_join(t3, t4), SWAP_JOIN_INPUTS(t1), NO_SWAP_JOIN_INPUTS(t4)  */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test NO_INDEX_MERGE
+	stmt, _, err = p.Parse("select /*+ NO_INDEX_MERGE(), no_index_merge() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt = stmt[0].(*ast.SelectStmt)
 
 	hints = selectStmt.TableHints
-	require.Len(t, hints, 4)
-	require.Equal(t, "hash_join", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-
-	require.Equal(t, "hash_join", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 2)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-	require.Equal(t, "t4", hints[1].Tables[1].TableName.L)
-
-	require.Equal(t, "swap_join_inputs", hints[2].HintName.L)
-	require.Len(t, hints[2].Tables, 1)
-	require.Equal(t, "t1", hints[2].Tables[0].TableName.L)
-
-	require.Equal(t, "no_swap_join_inputs", hints[3].HintName.L)
-	require.Len(t, hints[3].Tables, 1)
-	require.Equal(t, "t4", hints[3].Tables[0].TableName.L)
+	require.Len(t, hints, 2)
+	require.Equal(t, "no_index_merge", hints[0].HintName.L)
+	require.Equal(t, "no_index_merge", hints[1].HintName.L)
 
 	// Test MAX_EXECUTION_TIME
 	queries := []string{
@@ -663,441 +431,43 @@ func TestOptimizerHints(t *testing.T) {
 		require.NoError(t, err)
 		selectStmt = stmt[0].(*ast.SelectStmt)
 		hints = selectStmt.TableHints
-		require.Len(t, hints, 1)
-		require.Equal(t, "max_execution_time", hints[0].HintName.L, "case", i)
+		require.Lenf(t, hints, 1, "case", i)
+		require.Equal(t, "max_execution_time", hints[0].HintName.L)
 		require.Equal(t, uint64(1000), hints[0].HintData.(uint64))
 	}
 
-	// Test NTH_PLAN
-	queries = []string{
-		"SELECT /*+ NTH_PLAN(10) */ * FROM t1 INNER JOIN t2 where t1.c1 = t2.c1",
-		"SELECT /*+ NTH_PLAN(10) */ 1",
-		"SELECT /*+ NTH_PLAN(10) */ SLEEP(20)",
-		"SELECT /*+ NTH_PLAN(10) */ 1 FROM DUAL",
-	}
-	for i, query := range queries {
-		stmt, _, err = p.Parse(query, "", "")
-		require.NoError(t, err)
-		selectStmt = stmt[0].(*ast.SelectStmt)
-		hints = selectStmt.TableHints
-		require.Len(t, hints, 1)
-		require.Equal(t, "nth_plan", hints[0].HintName.L, "case", i)
-		require.Equal(t, int64(10), hints[0].HintData.(int64))
-	}
-
-	// Test USE_INDEX_MERGE
-	stmt, _, err = p.Parse("select /*+ USE_INDEX_MERGE(t1, c1), use_index_merge(t2, c1), use_index_merge(t3, c1, primary, c2) */ c1, c2 from t1, t2, t3 where t1.c1 = t2.c1 and t3.c2 = t1.c2", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 3)
-	require.Equal(t, "use_index_merge", hints[0].HintName.L)
-	require.Len(t, hints[0].Tables, 1)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Len(t, hints[0].Indexes, 1)
-	require.Equal(t, "c1", hints[0].Indexes[0].L)
-
-	require.Equal(t, "use_index_merge", hints[1].HintName.L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t2", hints[1].Tables[0].TableName.L)
-	require.Len(t, hints[1].Indexes, 1)
-	require.Equal(t, "c1", hints[1].Indexes[0].L)
-
-	require.Equal(t, "use_index_merge", hints[2].HintName.L)
-	require.Len(t, hints[2].Tables, 1)
-	require.Equal(t, "t3", hints[2].Tables[0].TableName.L)
-	require.Len(t, hints[2].Indexes, 3)
-	require.Equal(t, "c1", hints[2].Indexes[0].L)
-	require.Equal(t, "primary", hints[2].Indexes[1].L)
-	require.Equal(t, "c2", hints[2].Indexes[2].L)
-
-	// Test READ_FROM_STORAGE
-	stmt, _, err = p.Parse("select /*+ READ_FROM_STORAGE(tiflash[t1, t2], tikv[t3]) */ c1, c2 from t1, t2, t1 t3 where t1.c1 = t2.c1 and t2.c1 = t3.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "read_from_storage", hints[0].HintName.L)
-	require.Equal(t, "tiflash", hints[0].HintData.(ast.CIStr).L)
-	require.Len(t, hints[0].Tables, 2)
-	require.Equal(t, "t1", hints[0].Tables[0].TableName.L)
-	require.Equal(t, "t2", hints[0].Tables[1].TableName.L)
-	require.Equal(t, "read_from_storage", hints[1].HintName.L)
-	require.Equal(t, "tikv", hints[1].HintData.(ast.CIStr).L)
-	require.Len(t, hints[1].Tables, 1)
-	require.Equal(t, "t3", hints[1].Tables[0].TableName.L)
-
-	// Test USE_TOJA
-	stmt, _, err = p.Parse("select /*+ USE_TOJA(true), use_toja(false) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "use_toja", hints[0].HintName.L)
-	require.True(t, hints[0].HintData.(bool))
-
-	require.Equal(t, "use_toja", hints[1].HintName.L)
-	require.False(t, hints[1].HintData.(bool))
-
-	// Test IGNORE_PLAN_CACHE
-	stmt, _, err = p.Parse("select /*+ IGNORE_PLAN_CACHE(), ignore_plan_cache() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test QB_NAME
+	stmt, _, err = p.Parse("select /*+ QB_NAME(qb1) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt = stmt[0].(*ast.SelectStmt)
 	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "ignore_plan_cache", hints[0].HintName.L)
-	require.Equal(t, "ignore_plan_cache", hints[1].HintName.L)
+	require.Len(t, hints, 1)
+	require.Equal(t, "qb_name", hints[0].HintName.L)
+	require.Equal(t, "qb1", hints[0].QBName.L)
 
-	stmt, _, err = p.Parse("delete /*+ IGNORE_PLAN_CACHE(), ignore_plan_cache() */ from t where a = 1", "", "")
-	require.NoError(t, err)
-	deleteStmt := stmt[0].(*ast.DeleteStmt)
-	hints = deleteStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "ignore_plan_cache", hints[0].HintName.L)
-	require.Equal(t, "ignore_plan_cache", hints[1].HintName.L)
-
-	stmt, _, err = p.Parse("update /*+  IGNORE_PLAN_CACHE(), ignore_plan_cache() */ t set a = 1 where a = 10", "", "")
-	require.NoError(t, err)
-	updateStmt := stmt[0].(*ast.UpdateStmt)
-	hints = updateStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "ignore_plan_cache", hints[0].HintName.L)
-	require.Equal(t, "ignore_plan_cache", hints[1].HintName.L)
-
-	// Test WRITE_SLOW_LOG
-	stmt, _, err = p.Parse("select /*+ WRITE_SLOW_LOG(), write_slow_log() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// Test SET_VAR
+	stmt, _, err = p.Parse("select /*+ SET_VAR(sql_mode = 'ANSI') */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.NoError(t, err)
 	selectStmt = stmt[0].(*ast.SelectStmt)
 	hints = selectStmt.TableHints
-	require.Len(t, hints, 0)
+	require.Len(t, hints, 1)
+	require.Equal(t, "set_var", hints[0].HintName.L)
+	require.Equal(t, ast.HintSetVar{VarName: "sql_mode", Value: "ANSI"}, hints[0].HintData)
 
-	stmt, _, err = p.Parse("select /*+ WRITE_SLOW_LOG, write_slow_log*/ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// MySQL hints that the parser recognizes but does not model produce a
+	// warning and are dropped from the AST.
+	stmt, warns, err := p.Parse("select /*+ BKA(t1), NO_BNL(t2), JOIN_ORDER(t3, t4), MRR(t5 idx1), SEMIJOIN(FIRSTMATCH) */ c1 from t1", "", "")
 	require.NoError(t, err)
+	require.Len(t, warns, 5)
 	selectStmt = stmt[0].(*ast.SelectStmt)
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "write_slow_log", hints[0].HintName.L)
-	require.Equal(t, "write_slow_log", hints[1].HintName.L)
+	require.Len(t, selectStmt.TableHints, 0)
 
-	// Test USE_CASCADES
-	stmt, _, err = p.Parse("select /*+ USE_CASCADES(true), use_cascades(false) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
+	// TiDB-only hint names are unknown identifiers now, and also warn.
+	stmt, warns, err = p.Parse("select /*+ INL_JOIN(t1, t2), HASH_AGG(), READ_FROM_STORAGE(TIFLASH[t1]) */ c1 from t1", "", "")
 	require.NoError(t, err)
+	require.NotEmpty(t, warns)
 	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "use_cascades", hints[0].HintName.L)
-	require.True(t, hints[0].HintData.(bool))
-
-	require.Equal(t, "use_cascades", hints[1].HintName.L)
-	require.False(t, hints[1].HintData.(bool))
-
-	// Test USE_PLAN_CACHE
-	stmt, _, err = p.Parse("select /*+ USE_PLAN_CACHE(), use_plan_cache() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "use_plan_cache", hints[0].HintName.L)
-	require.Equal(t, "use_plan_cache", hints[1].HintName.L)
-
-	// Test QUERY_TYPE
-	stmt, _, err = p.Parse("select /*+ QUERY_TYPE(OLAP), query_type(OLTP) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "query_type", hints[0].HintName.L)
-	require.Equal(t, "olap", hints[0].HintData.(ast.CIStr).L)
-	require.Equal(t, "query_type", hints[1].HintName.L)
-	require.Equal(t, "oltp", hints[1].HintData.(ast.CIStr).L)
-
-	// Test MEMORY_QUOTA
-	stmt, _, err = p.Parse("select /*+ MEMORY_QUOTA(1 MB), memory_quota(1 GB) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "memory_quota", hints[0].HintName.L)
-	require.Equal(t, int64(1024*1024), hints[0].HintData.(int64))
-	require.Equal(t, "memory_quota", hints[1].HintName.L)
-	require.Equal(t, int64(1024*1024*1024), hints[1].HintData.(int64))
-
-	_, _, err = p.Parse("select /*+ MEMORY_QUOTA(18446744073709551612 MB), memory_quota(8689934592 GB) */ 1", "", "")
-	require.NoError(t, err)
-
-	// Test HASH_AGG
-	stmt, _, err = p.Parse("select /*+ HASH_AGG(), hash_agg() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "hash_agg", hints[0].HintName.L)
-	require.Equal(t, "hash_agg", hints[1].HintName.L)
-
-	// Test MPPAgg
-	stmt, _, err = p.Parse("select /*+ MPP_1PHASE_AGG(), mpp_1phase_agg() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "mpp_1phase_agg", hints[0].HintName.L)
-	require.Equal(t, "mpp_1phase_agg", hints[1].HintName.L)
-
-	stmt, _, err = p.Parse("select /*+ MPP_2PHASE_AGG(), mpp_2phase_agg() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "mpp_2phase_agg", hints[0].HintName.L)
-	require.Equal(t, "mpp_2phase_agg", hints[1].HintName.L)
-
-	// Test ShuffleJoin
-	stmt, _, err = p.Parse("select /*+ SHUFFLE_JOIN(t1, t2), shuffle_join(t1, t2) */ * from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "shuffle_join", hints[0].HintName.L)
-	require.Equal(t, "shuffle_join", hints[1].HintName.L)
-
-	// Test STREAM_AGG
-	stmt, _, err = p.Parse("select /*+ STREAM_AGG(), stream_agg() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "stream_agg", hints[0].HintName.L)
-	require.Equal(t, "stream_agg", hints[1].HintName.L)
-
-	// Test AGG_TO_COP
-	stmt, _, err = p.Parse("select /*+ AGG_TO_COP(), agg_to_cop() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "agg_to_cop", hints[0].HintName.L)
-	require.Equal(t, "agg_to_cop", hints[1].HintName.L)
-
-	// Test NO_INDEX_MERGE
-	stmt, _, err = p.Parse("select /*+ NO_INDEX_MERGE(), no_index_merge() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "no_index_merge", hints[0].HintName.L)
-	require.Equal(t, "no_index_merge", hints[1].HintName.L)
-
-	// Test READ_CONSISTENT_REPLICA
-	stmt, _, err = p.Parse("select /*+ READ_CONSISTENT_REPLICA(), read_consistent_replica() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "read_consistent_replica", hints[0].HintName.L)
-	require.Equal(t, "read_consistent_replica", hints[1].HintName.L)
-
-	// Test LIMIT_TO_COP
-	stmt, _, err = p.Parse("select /*+ LIMIT_TO_COP(), limit_to_cop() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "limit_to_cop", hints[0].HintName.L)
-	require.Equal(t, "limit_to_cop", hints[1].HintName.L)
-
-	// Test CTE MERGE
-	stmt, _, err = p.Parse("with cte(x) as (select * from t1) select /*+ MERGE(), merge() */ * from cte;", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "merge", hints[0].HintName.L)
-	require.Equal(t, "merge", hints[1].HintName.L)
-
-	// Test STRAIGHT_JOIN
-	stmt, _, err = p.Parse("select /*+ STRAIGHT_JOIN(), straight_join() */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "straight_join", hints[0].HintName.L)
-	require.Equal(t, "straight_join", hints[1].HintName.L)
-
-	// Test LEADING
-	stmt, _, err = p.Parse("select /*+ LEADING(T1), LEADING(t2, t3), LEADING(T4, t5, t6) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 3)
-	require.Equal(t, "leading", hints[0].HintName.L)
-	leadingList1, ok := hints[0].HintData.(*ast.LeadingList)
-	require.True(t, ok)
-	require.Len(t, leadingList1.Items, 1)
-	hintTable1, ok := leadingList1.Items[0].(*ast.HintTable)
-	require.True(t, ok)
-	require.Equal(t, "t1", hintTable1.TableName.L)
-
-	require.Equal(t, "leading", hints[1].HintName.L)
-	leadingList2, ok := hints[1].HintData.(*ast.LeadingList)
-	require.True(t, ok)
-	require.Len(t, leadingList2.Items, 2)
-	hintTable2, ok := leadingList2.Items[0].(*ast.HintTable)
-	require.True(t, ok)
-	require.Equal(t, "t2", hintTable2.TableName.L)
-	hintTable3, ok := leadingList2.Items[1].(*ast.HintTable)
-	require.True(t, ok)
-	require.Equal(t, "t3", hintTable3.TableName.L)
-
-	require.Equal(t, "leading", hints[2].HintName.L)
-	leadingList3, ok := hints[2].HintData.(*ast.LeadingList)
-	require.True(t, ok)
-	require.Len(t, leadingList3.Items, 3)
-	hintTable4, ok := leadingList3.Items[0].(*ast.HintTable)
-	require.True(t, ok)
-	require.Equal(t, "t4", hintTable4.TableName.L)
-	hintTable5, ok := leadingList3.Items[1].(*ast.HintTable)
-	require.True(t, ok)
-	require.Equal(t, "t5", hintTable5.TableName.L)
-	hintTable6, ok := leadingList3.Items[2].(*ast.HintTable)
-	require.True(t, ok)
-	require.Equal(t, "t6", hintTable6.TableName.L)
-
-	// Test NO_HASH_JOIN
-	stmt, _, err = p.Parse("select /*+ NO_HASH_JOIN(t1, t2), NO_HASH_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "no_hash_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-	require.Equal(t, hints[0].Tables[1].TableName.L, "t2")
-
-	require.Equal(t, "no_hash_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test NO_MERGE_JOIN
-	stmt, _, err = p.Parse("select /*+ NO_MERGE_JOIN(t1), NO_MERGE_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "no_merge_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "no_merge_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test INDEX_JOIN
-	stmt, _, err = p.Parse("select /*+ INDEX_JOIN(t1), INDEX_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "index_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "index_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test NO_INDEX_JOIN
-	stmt, _, err = p.Parse("select /*+ NO_INDEX_JOIN(t1), NO_INDEX_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "no_index_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "no_index_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test INDEX_HASH_JOIN
-	stmt, _, err = p.Parse("select /*+ INDEX_HASH_JOIN(t1), INDEX_HASH_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "index_hash_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "index_hash_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test NO_INDEX_HASH_JOIN
-	stmt, _, err = p.Parse("select /*+ NO_INDEX_HASH_JOIN(t1), NO_INDEX_HASH_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "no_index_hash_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "no_index_hash_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test INDEX_MERGE_JOIN
-	stmt, _, err = p.Parse("select /*+ INDEX_MERGE_JOIN(t1), INDEX_MERGE_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "index_merge_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "index_merge_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test NO_INDEX_MERGE_JOIN
-	stmt, _, err = p.Parse("select /*+ NO_INDEX_MERGE_JOIN(t1), NO_INDEX_MERGE_JOIN(t3) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "no_index_merge_join", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "no_index_merge_join", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
-
-	// Test HYPO_INDEX
-	stmt, _, err = p.Parse("select /*+ HYPO_INDEX(t1, a), HYPO_INDEX(t3, a, b, c) */ * from t1, t2, t3", "", "")
-	require.NoError(t, err)
-	selectStmt = stmt[0].(*ast.SelectStmt)
-
-	hints = selectStmt.TableHints
-	require.Len(t, hints, 2)
-	require.Equal(t, "hypo_index", hints[0].HintName.L)
-	require.Equal(t, hints[0].Tables[0].TableName.L, "t1")
-
-	require.Equal(t, "hypo_index", hints[1].HintName.L)
-	require.Equal(t, hints[1].Tables[0].TableName.L, "t3")
+	require.Len(t, selectStmt.TableHints, 0)
 }
 
 func TestParserErrMsg(t *testing.T) {
@@ -2022,8 +1392,8 @@ func TestMaxParenthesesDepth(t *testing.T) {
 	nestedFuncExpr := func(depth int) string {
 		return "select " + strings.Repeat("f(", depth) + "1" + strings.Repeat(")", depth)
 	}
-	nestedLeadingHint := func(depth int) string {
-		return "select /*+ LEADING(" + strings.Repeat("(", depth) + "t" + strings.Repeat(")", depth) + ") */ * from t"
+	nestedParenHint := func(depth int) string {
+		return "select /*+ HASH_JOIN(" + strings.Repeat("(", depth) + "t" + strings.Repeat(")", depth) + ") */ * from t"
 	}
 
 	_, err := p.ParseOneStmt(nestedExpr(10000), "", "")
@@ -2037,9 +1407,10 @@ func TestMaxParenthesesDepth(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "parentheses nesting depth exceeds maximum 10000")
 
-	_, err = p.ParseOneStmt(nestedLeadingHint(10000), "", "")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "parentheses nesting depth exceeds maximum 10000")
+	// An over-nested optimizer hint is not valid hint syntax; it is dropped
+	// with a warning and the statement itself still parses.
+	_, err = p.ParseOneStmt(nestedParenHint(10000), "", "")
+	require.NoError(t, err)
 }
 
 func TestMaxASTDepth(t *testing.T) {

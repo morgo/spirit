@@ -238,7 +238,7 @@ type likeEscapeSpec struct {
 	rename            "RENAME"
 	repeat            "REPEAT"
 	replace           "REPLACE"
-	require           "REQUIRE"
+	requireKwd        "REQUIRE"
 	restrict          "RESTRICT"
 	revoke            "REVOKE"
 	right             "RIGHT"

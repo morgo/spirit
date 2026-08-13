@@ -31,8 +31,8 @@ import (
 	"os"
 	"testing"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/block/spirit/pkg/parser/ast"
+	_ "github.com/go-sql-driver/mysql"
 	requires "github.com/stretchr/testify/require"
 )
 

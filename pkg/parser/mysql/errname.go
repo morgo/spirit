@@ -977,9 +977,8 @@ var MySQLErrName = map[uint16]*ErrMessage{
 
 	// TiDB errors.
 	ErrWarnOptimizerHintInvalidInteger:  Message("integer value is out of range in '%s'", nil),
-	ErrWarnOptimizerHintUnsupportedHint: Message("Optimizer hint %s is not supported by TiDB and is ignored", nil),
+	ErrWarnOptimizerHintUnsupportedHint: Message("Optimizer hint %s is not supported and is ignored", nil),
 	ErrWarnOptimizerHintInvalidToken:    Message("Cannot use %s '%s' (tok = %d) in an optimizer hint", nil),
-	ErrWarnMemoryQuotaOverflow:          Message("Max value of MEMORY_QUOTA is %d bytes, ignore this invalid limit", nil),
 	ErrWarnOptimizerHintParseError:      Message("Optimizer hint syntax error at %v", nil),
 	ErrWarnOptimizerHintWrongPos:        Message("Optimizer hint can only be followed by certain keywords like SELECT, INSERT, etc.", nil),
 }

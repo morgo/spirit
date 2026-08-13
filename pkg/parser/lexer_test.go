@@ -626,4 +626,3 @@ func TestVersionDigits(t *testing.T) {
 		requires.Equalf(t, test.nextChar, nextChar, "input = %s", test.input)
 	}
 }
-

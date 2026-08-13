@@ -14,13 +14,12 @@
 package ast
 
 import (
-
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/parser/terror"
 	"github.com/block/spirit/pkg/parser/types"
+	"github.com/pingcap/errors"
 )
 
 var (
@@ -64,9 +63,9 @@ const (
 
 // DatabaseOption represents database option.
 type DatabaseOption struct {
-	Tp             DatabaseOptionType
-	Value          string
-	UintValue      uint64
+	Tp        DatabaseOptionType
+	Value     string
+	UintValue uint64
 }
 
 // Restore implements Node interface.
@@ -467,8 +466,8 @@ type ColumnOption struct {
 	// Stored is only for ColumnOptionGenerated, default is false.
 	Stored bool
 	// Refer is used for foreign key.
-	Refer       *ReferenceDef
-	StrValue    string
+	Refer    *ReferenceDef
+	StrValue string
 	// Enforced is only for Check, default is true.
 	Enforced bool
 	// Name is only used for Check Constraint name.
@@ -622,12 +621,12 @@ const (
 type IndexOption struct {
 	node
 
-	KeyBlockSize               uint64
-	Tp                         IndexType
-	Comment                    string
-	ParserName                 CIStr
-	Visibility                 IndexVisibility
-	SecondaryEngineAttr        string
+	KeyBlockSize        uint64
+	Tp                  IndexType
+	Comment             string
+	ParserName          CIStr
+	Visibility          IndexVisibility
+	SecondaryEngineAttr string
 }
 
 // IsEmpty is true if only default options are given
@@ -2139,29 +2138,29 @@ type AlterTableSpec struct {
 	NoWriteToBinlog bool
 	OnAllPartitions bool
 
-	Tp                       AlterTableType
-	Name                     string
-	IndexName                CIStr
-	Constraint               *Constraint
-	Options                  []*TableOption
-	OrderByList              []*AlterOrderItem
-	NewTable                 *TableName
-	NewColumns               []*ColumnDef
-	NewConstraints           []*Constraint
-	OldColumnName            *ColumnName
-	NewColumnName            *ColumnName
-	Position                 *ColumnPosition
-	LockType                 LockType
-	Algorithm                AlgorithmType
-	Comment                  string
-	FromKey                  CIStr
-	ToKey                    CIStr
-	Partition                *PartitionOptions
-	PartitionNames           []CIStr
-	PartDefinitions          []*PartitionDefinition
-	WithValidation           bool
-	Num                      uint64
-	Visibility               IndexVisibility
+	Tp              AlterTableType
+	Name            string
+	IndexName       CIStr
+	Constraint      *Constraint
+	Options         []*TableOption
+	OrderByList     []*AlterOrderItem
+	NewTable        *TableName
+	NewColumns      []*ColumnDef
+	NewConstraints  []*Constraint
+	OldColumnName   *ColumnName
+	NewColumnName   *ColumnName
+	Position        *ColumnPosition
+	LockType        LockType
+	Algorithm       AlgorithmType
+	Comment         string
+	FromKey         CIStr
+	ToKey           CIStr
+	Partition       *PartitionOptions
+	PartitionNames  []CIStr
+	PartDefinitions []*PartitionDefinition
+	WithValidation  bool
+	Num             uint64
+	Visibility      IndexVisibility
 }
 
 // AlterOrderItem represents an item in order by at alter table stmt.
@@ -3173,8 +3172,8 @@ func (n *PartitionMethod) acceptInPlace(v Visitor) bool {
 // PartitionOptions specifies the partition options.
 type PartitionOptions struct {
 	PartitionMethod
-	Sub           *PartitionMethod
-	Definitions   []*PartitionDefinition
+	Sub         *PartitionMethod
+	Definitions []*PartitionDefinition
 }
 
 // Validate checks if the partition is well-formed.
@@ -3291,4 +3290,3 @@ func (n *PartitionOptions) Accept(v Visitor) (Node, bool) {
 	}
 	return v.Leave(n)
 }
-

@@ -20,15 +20,15 @@ import (
 	"strings"
 	"testing"
 
-	requires "github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/require"
 )
 
 func TestKeywordConsistent(t *testing.T) {
 	parserFilename := "parser.y"
 	parserFile, err := os.Open(parserFilename)
-	requires.NoError(t, err)
+	require.NoError(t, err)
 	data, err := gio.ReadAll(parserFile)
-	requires.NoError(t, err)
+	require.NoError(t, err)
 	content := string(data)
 
 	reservedKeywordStartMarker := "\t/* The following tokens belong to ReservedKeyword. Notice: make sure these tokens are contained in ReservedKeyword. */"
@@ -41,17 +41,17 @@ func TestKeywordConsistent(t *testing.T) {
 	notKeywordTokens := extractKeywords(content, notKeywordTokenStartMarker, identTokenEndMarker)
 
 	for k, v := range aliases {
-		requires.NotEqual(t, k, v)
-		requires.Equal(t, tokenMap[v], tokenMap[k])
+		require.NotEqual(t, k, v)
+		require.Equal(t, tokenMap[v], tokenMap[k])
 	}
 	keywordCount := len(reservedKeywords) + len(unreservedKeywords) + len(notKeywordTokens)
-	requires.Equal(t, keywordCount-len(windowFuncTokenMap), len(tokenMap)-len(aliases))
+	require.Equal(t, keywordCount-len(windowFuncTokenMap), len(tokenMap)-len(aliases))
 
 	unreservedCollectionDef := extractKeywordsFromCollectionDef(content, "\nUnReservedKeyword:")
-	requires.Equal(t, unreservedCollectionDef, unreservedKeywords, "UnReservedKeyword")
+	require.Equal(t, unreservedCollectionDef, unreservedKeywords, "UnReservedKeyword")
 
 	notKeywordTokensCollectionDef := extractKeywordsFromCollectionDef(content, "\nNotKeywordToken:")
-	requires.Equal(t, notKeywordTokensCollectionDef, notKeywordTokens, "NotKeywordToken")
+	require.Equal(t, notKeywordTokensCollectionDef, notKeywordTokens, "NotKeywordToken")
 
 }
 

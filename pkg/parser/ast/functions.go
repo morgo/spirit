@@ -19,9 +19,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/types"
+	"github.com/pingcap/errors"
 )
 
 var (
@@ -360,7 +360,6 @@ const (
 	JSONDepth         = "json_depth"
 	JSONKeys          = "json_keys"
 	JSONLength        = "json_length"
-
 )
 
 type FuncCallExprType int8

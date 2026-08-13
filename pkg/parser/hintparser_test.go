@@ -35,19 +35,6 @@ func TestParseHint(t *testing.T) {
 			errs:  []string{`Optimizer hint syntax error at line 1 `},
 		},
 		{
-			input: "MEMORY_QUOTA(8 MB) MEMORY_QUOTA(6 GB)",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("MEMORY_QUOTA"),
-					HintData: int64(8 * 1024 * 1024),
-				},
-				{
-					HintName: ast.NewCIStr("MEMORY_QUOTA"),
-					HintData: int64(6 * 1024 * 1024 * 1024),
-				},
-			},
-		},
-		{
 			input: "QB_NAME(qb1) QB_NAME(`qb2`), QB_NAME(TRUE) QB_NAME(\"ANSI quoted\") QB_NAME(_utf8), QB_NAME(0b10) QB_NAME(0x1a)",
 			mode:  mysql.ModeANSIQuotes,
 			output: []*ast.TableOptimizerHint{
@@ -119,6 +106,8 @@ func TestParseHint(t *testing.T) {
 			},
 		},
 		{
+			// MySQL hints TiDB never implemented parse but are reported
+			// (and dropped) as unsupported.
 			input: "JOIN_FIXED_ORDER() BKA()",
 			errs: []string{
 				`Optimizer hint JOIN_FIXED_ORDER is not supported`,
@@ -126,81 +115,78 @@ func TestParseHint(t *testing.T) {
 			},
 		},
 		{
-			input: "HASH_JOIN() TIDB_HJ(@qb1) INL_JOIN(x, `y y`.z) MERGE_JOIN(w@`First QB`)",
+			input: "SEMIJOIN(@qb1 FIRSTMATCH, LOOSESCAN) NO_SEMIJOIN(DUPSWEEDOUT, MATERIALIZATION)",
+			errs: []string{
+				`Optimizer hint SEMIJOIN is not supported`,
+				`Optimizer hint NO_SEMIJOIN is not supported`,
+			},
+		},
+		{
+			input: "HASH_JOIN() NO_HASH_JOIN(x, `y y`.z@qb) MERGE(@qb1)",
 			output: []*ast.TableOptimizerHint{
 				{
 					HintName: ast.NewCIStr("HASH_JOIN"),
 				},
 				{
-					HintName: ast.NewCIStr("TIDB_HJ"),
-					QBName:   ast.NewCIStr("qb1"),
-				},
-				{
-					HintName: ast.NewCIStr("INL_JOIN"),
+					HintName: ast.NewCIStr("NO_HASH_JOIN"),
 					Tables: []ast.HintTable{
 						{TableName: ast.NewCIStr("x")},
-						{DBName: ast.NewCIStr("y y"), TableName: ast.NewCIStr("z")},
+						{DBName: ast.NewCIStr("y y"), TableName: ast.NewCIStr("z"), QBName: ast.NewCIStr("qb")},
 					},
 				},
 				{
-					HintName: ast.NewCIStr("MERGE_JOIN"),
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("w"), QBName: ast.NewCIStr("First QB")},
-					},
+					HintName: ast.NewCIStr("MERGE"),
+					QBName:   ast.NewCIStr("qb1"),
 				},
 			},
 		},
 		{
-			input: "USE_INDEX_MERGE(@qb1 tbl1 x, y, z) IGNORE_INDEX(tbl2@qb2) USE_INDEX(tbl3 PRIMARY) FORCE_INDEX(tbl4@qb3 c1) INDEX_LOOKUP_PUSHDOWN(tbl5@qb6 c3)",
+			input: "ORDER_INDEX(@qb1 tbl1 x, y, z) NO_ORDER_INDEX(tbl2@qb2 c1)",
 			output: []*ast.TableOptimizerHint{
 				{
-					HintName: ast.NewCIStr("USE_INDEX_MERGE"),
+					HintName: ast.NewCIStr("ORDER_INDEX"),
 					Tables:   []ast.HintTable{{TableName: ast.NewCIStr("tbl1")}},
 					QBName:   ast.NewCIStr("qb1"),
 					Indexes:  []ast.CIStr{ast.NewCIStr("x"), ast.NewCIStr("y"), ast.NewCIStr("z")},
 				},
 				{
-					HintName: ast.NewCIStr("IGNORE_INDEX"),
+					HintName: ast.NewCIStr("NO_ORDER_INDEX"),
 					Tables:   []ast.HintTable{{TableName: ast.NewCIStr("tbl2"), QBName: ast.NewCIStr("qb2")}},
-				},
-				{
-					HintName: ast.NewCIStr("USE_INDEX"),
-					Tables:   []ast.HintTable{{TableName: ast.NewCIStr("tbl3")}},
-					Indexes:  []ast.CIStr{ast.NewCIStr("PRIMARY")},
-				},
-				{
-					HintName: ast.NewCIStr("FORCE_INDEX"),
-					Tables:   []ast.HintTable{{TableName: ast.NewCIStr("tbl4"), QBName: ast.NewCIStr("qb3")}},
 					Indexes:  []ast.CIStr{ast.NewCIStr("c1")},
-				},
-				{
-					HintName: ast.NewCIStr("INDEX_LOOKUP_PUSHDOWN"),
-					Tables:   []ast.HintTable{{TableName: ast.NewCIStr("tbl5"), QBName: ast.NewCIStr("qb6")}},
-					Indexes:  []ast.CIStr{ast.NewCIStr("c3")},
 				},
 			},
 		},
 		{
-			input: "USE_INDEX(@qb1 tbl1 partition(p0) x) USE_INDEX_MERGE(@qb2 tbl2@qb2 partition(p0, p1) x, y, z)",
+			input: "MRR(tbl1 idx1) NO_ICP(tbl2) INDEX_MERGE(tbl3 x, y)",
+			errs: []string{
+				`Optimizer hint MRR is not supported`,
+				`Optimizer hint NO_ICP is not supported`,
+				`Optimizer hint INDEX_MERGE is not supported`,
+			},
+		},
+		{
+			input: "MAX_EXECUTION_TIME(1000) MAX_EXECUTION_TIME(@qb1 3000)",
 			output: []*ast.TableOptimizerHint{
 				{
-					HintName: ast.NewCIStr("USE_INDEX"),
-					Tables: []ast.HintTable{{
-						TableName:     ast.NewCIStr("tbl1"),
-						PartitionList: []ast.CIStr{ast.NewCIStr("p0")},
-					}},
-					QBName:  ast.NewCIStr("qb1"),
-					Indexes: []ast.CIStr{ast.NewCIStr("x")},
+					HintName: ast.NewCIStr("MAX_EXECUTION_TIME"),
+					HintData: uint64(1000),
 				},
 				{
-					HintName: ast.NewCIStr("USE_INDEX_MERGE"),
-					Tables: []ast.HintTable{{
-						TableName:     ast.NewCIStr("tbl2"),
-						QBName:        ast.NewCIStr("qb2"),
-						PartitionList: []ast.CIStr{ast.NewCIStr("p0"), ast.NewCIStr("p1")},
-					}},
-					QBName:  ast.NewCIStr("qb2"),
-					Indexes: []ast.CIStr{ast.NewCIStr("x"), ast.NewCIStr("y"), ast.NewCIStr("z")},
+					HintName: ast.NewCIStr("MAX_EXECUTION_TIME"),
+					QBName:   ast.NewCIStr("qb1"),
+					HintData: uint64(3000),
+				},
+			},
+		},
+		{
+			input: "NO_INDEX_MERGE() RESOURCE_GROUP(rg1)",
+			output: []*ast.TableOptimizerHint{
+				{
+					HintName: ast.NewCIStr("NO_INDEX_MERGE"),
+				},
+				{
+					HintName: ast.NewCIStr("RESOURCE_GROUP"),
+					HintData: "rg1",
 				},
 			},
 		},
@@ -266,86 +252,29 @@ func TestParseHint(t *testing.T) {
 			},
 		},
 		{
-			input: "USE_TOJA(TRUE) IGNORE_PLAN_CACHE() USE_CASCADES(TRUE) QUERY_TYPE(@qb1 OLAP) QUERY_TYPE(OLTP) NO_INDEX_MERGE() RESOURCE_GROUP(rg1)",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("USE_TOJA"),
-					HintData: true,
-				},
-				{
-					HintName: ast.NewCIStr("IGNORE_PLAN_CACHE"),
-				},
-				{
-					HintName: ast.NewCIStr("USE_CASCADES"),
-					HintData: true,
-				},
-				{
-					HintName: ast.NewCIStr("QUERY_TYPE"),
-					QBName:   ast.NewCIStr("qb1"),
-					HintData: ast.NewCIStr("OLAP"),
-				},
-				{
-					HintName: ast.NewCIStr("QUERY_TYPE"),
-					HintData: ast.NewCIStr("OLTP"),
-				},
-				{
-					HintName: ast.NewCIStr("NO_INDEX_MERGE"),
-				},
-				{
-					HintName: ast.NewCIStr("RESOURCE_GROUP"),
-					HintData: "rg1",
-				},
+			// TiDB-only hints are no longer recognized: hints with a plain
+			// identifier list degrade to an "unsupported" warning, ...
+			input: "INL_JOIN(x, z) USE_INDEX(tbl3, PRIMARY)",
+			errs: []string{
+				`Optimizer hint INL_JOIN is not supported`,
+				`Optimizer hint USE_INDEX is not supported`,
 			},
 		},
 		{
-			input: "READ_FROM_STORAGE(@foo TIKV[a, b], TIFLASH[c, d]) HASH_AGG() SEMI_JOIN_REWRITE() READ_FROM_STORAGE(TIKV[e])",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("READ_FROM_STORAGE"),
-					HintData: ast.NewCIStr("TIKV"),
-					QBName:   ast.NewCIStr("foo"),
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("a")},
-						{TableName: ast.NewCIStr("b")},
-					},
-				},
-				{
-					HintName: ast.NewCIStr("READ_FROM_STORAGE"),
-					HintData: ast.NewCIStr("TIFLASH"),
-					QBName:   ast.NewCIStr("foo"),
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("c")},
-						{TableName: ast.NewCIStr("d")},
-					},
-				},
-				{
-					HintName: ast.NewCIStr("HASH_AGG"),
-				},
-				{
-					HintName: ast.NewCIStr("SEMI_JOIN_REWRITE"),
-				},
-				{
-					HintName: ast.NewCIStr("READ_FROM_STORAGE"),
-					HintData: ast.NewCIStr("TIKV"),
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("e")},
-					},
-				},
-			},
+			// ... and TiDB-specific argument shapes are syntax errors.
+			input: "MEMORY_QUOTA(8 MB)",
+			errs:  []string{`Optimizer hint syntax error at line 1 `},
 		},
 		{
-			input: "WRITE_SLOW_LOG, WRITE_SLOW_LOG",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("WRITE_SLOW_LOG"),
-				},
-				{
-					HintName: ast.NewCIStr("WRITE_SLOW_LOG"),
-				},
-			},
+			input: "READ_FROM_STORAGE(TIKV[a, b])",
+			errs:  []string{`Optimizer hint syntax error at line 1 `},
 		},
 		{
-			input: "WRITE_SLOW_LOG()",
+			input: "LEADING(a, (b, c))",
+			errs:  []string{`Optimizer hint syntax error at line 1 `},
+		},
+		{
+			input: "TIME_RANGE('2020-02-20 12:12:12','2020-02-20 13:12:12')",
 			errs:  []string{`Optimizer hint syntax error at line 1 `},
 		},
 		{
@@ -375,136 +304,6 @@ func TestParseHint(t *testing.T) {
 				`Optimizer hint syntax error at line 1 `,
 			},
 		},
-		{
-			input: "time_range('2020-02-20 12:12:12',456)",
-			errs: []string{
-				`Optimizer hint syntax error at line 1 `,
-			},
-		},
-		{
-			input: "time_range(456,'2020-02-20 12:12:12')",
-			errs: []string{
-				`Optimizer hint syntax error at line 1 `,
-			},
-		},
-		{
-			input: "TIME_RANGE('2020-02-20 12:12:12','2020-02-20 13:12:12')",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("TIME_RANGE"),
-					HintData: ast.HintTimeRange{
-						From: "2020-02-20 12:12:12",
-						To:   "2020-02-20 13:12:12",
-					},
-				},
-			},
-		},
-		{
-			input: "LEADING(a,(b,(c,d)))",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("LEADING"),
-					HintData: &ast.LeadingList{
-						Items: []interface{}{
-							&ast.HintTable{TableName: ast.NewCIStr("a")},
-							&ast.LeadingList{
-								Items: []interface{}{
-									&ast.HintTable{TableName: ast.NewCIStr("b")},
-									&ast.LeadingList{
-										Items: []interface{}{
-											&ast.HintTable{TableName: ast.NewCIStr("c")},
-											&ast.HintTable{TableName: ast.NewCIStr("d")},
-										},
-									},
-								},
-							},
-						},
-					},
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("a")},
-						{TableName: ast.NewCIStr("b")},
-						{TableName: ast.NewCIStr("c")},
-						{TableName: ast.NewCIStr("d")},
-					},
-				},
-			},
-		},
-		{
-			input: "LEADING(a,b,c)",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("LEADING"),
-					HintData: &ast.LeadingList{
-						Items: []interface{}{
-							&ast.HintTable{TableName: ast.NewCIStr("a")},
-							&ast.HintTable{TableName: ast.NewCIStr("b")},
-							&ast.HintTable{TableName: ast.NewCIStr("c")},
-						},
-					},
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("a")},
-						{TableName: ast.NewCIStr("b")},
-						{TableName: ast.NewCIStr("c")},
-					},
-				},
-			},
-		},
-		{
-			input: "LEADING((a,b),(c,d))",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("LEADING"),
-					HintData: &ast.LeadingList{
-						Items: []interface{}{
-							&ast.LeadingList{
-								Items: []interface{}{
-									&ast.HintTable{TableName: ast.NewCIStr("a")},
-									&ast.HintTable{TableName: ast.NewCIStr("b")},
-								},
-							},
-							&ast.LeadingList{
-								Items: []interface{}{
-									&ast.HintTable{TableName: ast.NewCIStr("c")},
-									&ast.HintTable{TableName: ast.NewCIStr("d")},
-								},
-							},
-						},
-					},
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("a")},
-						{TableName: ast.NewCIStr("b")},
-						{TableName: ast.NewCIStr("c")},
-						{TableName: ast.NewCIStr("d")},
-					},
-				},
-			},
-		},
-		{
-			input: "LEADING(x,(y,z),w)",
-			output: []*ast.TableOptimizerHint{
-				{
-					HintName: ast.NewCIStr("LEADING"),
-					HintData: &ast.LeadingList{
-						Items: []interface{}{
-							&ast.HintTable{TableName: ast.NewCIStr("x")},
-							&ast.LeadingList{
-								Items: []interface{}{
-									&ast.HintTable{TableName: ast.NewCIStr("y")},
-									&ast.HintTable{TableName: ast.NewCIStr("z")},
-								},
-							},
-							&ast.HintTable{TableName: ast.NewCIStr("w")},
-						},
-					},
-					Tables: []ast.HintTable{
-						{TableName: ast.NewCIStr("x")},
-						{TableName: ast.NewCIStr("y")},
-						{TableName: ast.NewCIStr("z")},
-						{TableName: ast.NewCIStr("w")},
-					},
-				},
-			},
-		},
 	}
 
 	for _, tc := range testCases {
@@ -519,10 +318,14 @@ func TestParseHint(t *testing.T) {
 }
 
 func TestMaxOptimizerHintDepth(t *testing.T) {
-	input := "/*+LEADING(" + strings.Repeat("(", 10000) + "t" + strings.Repeat(")", 10000) + ")*/"
+	// No hint accepts nested parentheses anymore (LEADING, the one TiDB
+	// hint that did, is gone), so deeply nested input degrades to a syntax
+	// error rather than reaching the lexer's depth guard.
+	input := "/*+HASH_JOIN(" + strings.Repeat("(", 10000) + "t" + strings.Repeat(")", 10000) + ")*/"
 	mode, err := mysql.GetSQLMode(mysql.DefaultSQLMode)
 	require.NoError(t, err)
-	_, errs := parser.ParseHint(input, mode, parser.Pos{Line: 1})
+	output, errs := parser.ParseHint(input, mode, parser.Pos{Line: 1})
 	require.NotEmpty(t, errs)
-	require.Contains(t, errs[0].Error(), "parentheses nesting depth exceeds maximum 10000")
+	require.Contains(t, errs[0].Error(), "Optimizer hint syntax error")
+	require.Empty(t, output)
 }

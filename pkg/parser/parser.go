@@ -502,7 +502,7 @@ const (
 	replace                    = 57517
 	replica                    = 57760
 	replication                = 57761
-	require                    = 57518
+	requireKwd                 = 57518
 	resource                   = 57762
 	respect                    = 57763
 	restart                    = 57764
@@ -1153,7 +1153,7 @@ var (
 		57907: 482,  // juss (341x)
 		57362: 483,  // array (340x)
 		57902: 484,  // assignmentEq (336x)
-		57518: 485,  // require (332x)
+		57518: 485,  // requireKwd (332x)
 		57554: 486,  // update (331x)
 		57467: 487,  // lines (327x)
 		57460: 488,  // lateral (322x)
@@ -2286,7 +2286,7 @@ var (
 		"juss",
 		"array",
 		"assignmentEq",
-		"require",
+		"requireKwd",
 		"update",
 		"lines",
 		"lateral",

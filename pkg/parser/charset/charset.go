@@ -17,9 +17,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/mysql"
 	"github.com/block/spirit/pkg/parser/terror"
+	"github.com/pingcap/errors"
 )
 
 var (

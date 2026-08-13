@@ -26,7 +26,6 @@ import (
 var (
 	ErrWarnOptimizerHintUnsupportedHint = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintUnsupportedHint)
 	ErrWarnOptimizerHintInvalidToken    = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintInvalidToken)
-	ErrWarnMemoryQuotaOverflow          = terror.ClassParser.NewStd(mysql.ErrWarnMemoryQuotaOverflow)
 	ErrWarnOptimizerHintParseError      = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintParseError)
 	ErrWarnOptimizerHintInvalidInteger  = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintInvalidInteger)
 	ErrWarnOptimizerHintWrongPos        = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintWrongPos)
@@ -227,8 +226,4 @@ func ParseHint(input string, sqlMode mysql.SQLMode, initPos Pos) ([]*ast.TableOp
 func (hp *hintParser) warnUnsupportedHint(name string) {
 	warn := ErrWarnOptimizerHintUnsupportedHint.FastGenByArgs(name)
 	hp.lexer.warns = append(hp.lexer.warns, warn)
-}
-
-func (hp *hintParser) lastErrorAsWarn() {
-	hp.lexer.lastErrorAsWarn()
 }

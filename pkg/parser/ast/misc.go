@@ -19,10 +19,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pingcap/errors"
 	"github.com/block/spirit/pkg/parser/auth"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/pingcap/errors"
 )
 
 var (
@@ -895,7 +895,7 @@ func (n *SetSessionStatesStmt) Accept(v Visitor) (Node, bool) {
 }
 
 /*
-*/
+ */
 
 // SetPwdStmt is a statement to assign a password to user account.
 // See https://dev.mysql.com/doc/refman/5.7/en/set-password.html
@@ -1453,7 +1453,7 @@ func (n *AlterUserStmt) Restore(ctx *format.RestoreCtx) error {
 		if err := n.CurrentAuth.Restore(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while restore AlterUserStmt.CurrentAuth")
 		}
-	if n.CurrentDualPasswordOption != 0 {
+		if n.CurrentDualPasswordOption != 0 {
 			ctx.WritePlain(" ")
 			if err := n.CurrentDualPasswordOption.Restore(ctx); err != nil {
 				return errors.Annotate(err, "An error occurred while restore AlterUserStmt.CurrentDualPasswordOption")
@@ -2344,41 +2344,16 @@ type TableOptimizerHint struct {
 	// It allows only table name or alias (if table has an alias)
 	HintName CIStr
 	// HintData is the payload of the hint. The actual type of this field
-	// is defined differently as according `HintName`. Define as following:
+	// depends on `HintName`:
 	//
-	// Statement Execution Time Optimizer Hints
-	// See https://dev.mysql.com/doc/refman/5.7/en/optimizer-hints.html#optimizer-hints-execution-time
 	// - MAX_EXECUTION_TIME  => uint64
-	// - MEMORY_QUOTA        => int64
-	// - QUERY_TYPE          => CIStr
-	//
-	// Time Range is used to hint the time range of inspection tables
-	// e.g: select /*+ time_range('','') */ * from information_schema.inspection_result.
-	// - TIME_RANGE          => ast.HintTimeRange
-	// - READ_FROM_STORAGE   => CIStr
-	// - USE_TOJA            => bool
-	// - NTH_PLAN            => int64
+	// - RESOURCE_GROUP      => string
+	// - SET_VAR             => HintSetVar
 	HintData any
 	// QBName is the default effective query block of this hint.
 	QBName  CIStr
 	Tables  []HintTable
 	Indexes []CIStr
-}
-
-// HintTimeRange is the payload of `TIME_RANGE` hint
-type HintTimeRange struct {
-	From string
-	To   string
-}
-
-// LeadingList represents a nested structure in LEADING hints.
-// It could be *HintTable or LeadingList
-//
-//	eg: LEADING(a, (b, c), d)
-//	will be parsed into a LeadingList like:
-//	Items = [HintTable("a"), LeadingList{[HintTable("b"), HintTable("c")]}, HintTable("d")]
-type LeadingList struct {
-	Items []interface{}
 }
 
 // HintSetVar is the payload of `SET_VAR` hint
@@ -2389,29 +2364,9 @@ type HintSetVar struct {
 
 // HintTable is table in the hint. It may have query block info.
 type HintTable struct {
-	DBName        CIStr
-	TableName     CIStr
-	QBName        CIStr
-	PartitionList []CIStr
-}
-
-// FlattenLeadingList collects all HintTable nodes from a possibly nested LeadingList into a flat slice.
-// Note:
-//   - Only table names are preserved.
-func FlattenLeadingList(list *LeadingList) []HintTable {
-	if list == nil {
-		return nil
-	}
-	var result []HintTable
-	for _, item := range list.Items {
-		switch t := item.(type) {
-		case *HintTable:
-			result = append(result, *t)
-		case *LeadingList:
-			result = append(result, FlattenLeadingList(t)...)
-		}
-	}
-	return result
+	DBName    CIStr
+	TableName CIStr
+	QBName    CIStr
 }
 
 func (ht *HintTable) Restore(ctx *format.RestoreCtx) {
@@ -2426,65 +2381,13 @@ func (ht *HintTable) Restore(ctx *format.RestoreCtx) {
 		ctx.WriteKeyWord("@")
 		ctx.WriteName(ht.QBName.String())
 	}
-	if len(ht.PartitionList) > 0 {
-		ctx.WriteKeyWord(" PARTITION")
-		ctx.WritePlain("(")
-		for i, p := range ht.PartitionList {
-			if i > 0 {
-				ctx.WritePlain(", ")
-			}
-			ctx.WriteName(p.String())
-		}
-		ctx.WritePlain(")")
-	}
-}
-
-func (lt *LeadingList) RestoreWithQB(ctx *format.RestoreCtx, qbName CIStr, needParen bool, isTop bool, qbOnTable bool) error {
-	if lt == nil || len(lt.Items) == 0 {
-		return nil
-	}
-	if needParen {
-		ctx.WritePlain("(")
-	}
-
-	currentQBName := qbName // hint level QBName
-
-	for i, item := range lt.Items {
-		if i > 0 {
-			ctx.WritePlain(", ")
-		}
-
-		switch t := item.(type) {
-		case *HintTable:
-			if i == 0 && currentQBName.L != "" && !qbOnTable {
-				ctx.WriteKeyWord("@")
-				ctx.WriteName(currentQBName.String())
-				ctx.WritePlain(" ")
-				t.Restore(ctx)
-				currentQBName = CIStr{}
-			} else {
-				t.Restore(ctx)
-			}
-		case *LeadingList:
-			if err := t.RestoreWithQB(ctx, currentQBName, true, false, qbOnTable); err != nil {
-				return err
-			}
-			currentQBName = CIStr{}
-		default:
-			return fmt.Errorf("unexpected type in LeadingList: %T", t)
-		}
-	}
-	if needParen {
-		ctx.WritePlain(")")
-	}
-	return nil
 }
 
 // Restore implements Node interface.
 func (n *TableOptimizerHint) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(n.HintName.String())
 	ctx.WritePlain("(")
-	if n.HintName.L != "leading" && n.QBName.L != "" {
+	if n.QBName.L != "" {
 		if n.HintName.L != "qb_name" {
 			ctx.WriteKeyWord("@")
 		}
@@ -2496,11 +2399,11 @@ func (n *TableOptimizerHint) Restore(ctx *format.RestoreCtx) error {
 	}
 	// Hints without args except query block.
 	switch n.HintName.L {
-	case "mpp_1phase_agg", "mpp_2phase_agg", "hash_agg", "stream_agg", "agg_to_cop", "read_consistent_replica", "no_index_merge", "ignore_plan_cache", "use_plan_cache", "limit_to_cop", "straight_join", "merge", "no_decorrelate":
+	case "no_index_merge", "merge":
 		ctx.WritePlain(")")
 		return nil
 	}
-	if n.HintName.L != "leading" && n.QBName.L != "" {
+	if n.QBName.L != "" {
 		ctx.WritePlain(" ")
 	}
 	// Hints with args except query block.
@@ -2509,36 +2412,14 @@ func (n *TableOptimizerHint) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlainf("%d", n.HintData.(uint64))
 	case "resource_group":
 		ctx.WriteName(n.HintData.(string))
-	case "nth_plan":
-		ctx.WritePlainf("%d", n.HintData.(int64))
-	case "leading":
-		if list, ok := n.HintData.(*LeadingList); ok && list != nil {
-			// if table level QBName or not
-			qbOnTable := false
-			if len(n.Tables) > 0 && n.Tables[0].QBName.L != "" {
-				qbOnTable = true
-			}
-			if err := list.RestoreWithQB(ctx, n.QBName, false, true, qbOnTable); err != nil {
-				return err
-			}
-		} else {
-			for i, table := range n.Tables {
-				if i != 0 {
-					ctx.WritePlain(", ")
-				}
-				table.Restore(ctx)
-			}
-		}
-	case "tidb_hj", "tidb_smj", "tidb_inlj", "hash_join", "hash_join_build", "hash_join_probe", "merge_join", "inl_join",
-		"broadcast_join", "shuffle_join", "inl_hash_join", "inl_merge_join", "no_hash_join", "no_merge_join",
-		"no_index_join", "no_index_hash_join", "no_index_merge_join":
+	case "hash_join", "no_hash_join":
 		for i, table := range n.Tables {
 			if i != 0 {
 				ctx.WritePlain(", ")
 			}
 			table.Restore(ctx)
 		}
-	case "use_index", "ignore_index", "use_index_merge", "force_index", "order_index", "no_order_index", "index_lookup_pushdown", "no_index_lookup_pushdown":
+	case "order_index", "no_order_index":
 		n.Tables[0].Restore(ctx)
 		ctx.WritePlain(" ")
 		for i, index := range n.Indexes {
@@ -2557,34 +2438,6 @@ func (n *TableOptimizerHint) Restore(ctx *format.RestoreCtx) error {
 				table.Restore(ctx)
 			}
 		}
-	case "use_toja", "use_cascades":
-		if n.HintData.(bool) {
-			ctx.WritePlain("TRUE")
-		} else {
-			ctx.WritePlain("FALSE")
-		}
-	case "query_type":
-		ctx.WriteKeyWord(n.HintData.(CIStr).String())
-	case "memory_quota":
-		ctx.WritePlainf("%d MB", n.HintData.(int64)/1024/1024)
-	case "read_from_storage":
-		ctx.WriteKeyWord(n.HintData.(CIStr).String())
-		for i, table := range n.Tables {
-			if i == 0 {
-				ctx.WritePlain("[")
-			}
-			table.Restore(ctx)
-			if i == len(n.Tables)-1 {
-				ctx.WritePlain("]")
-			} else {
-				ctx.WritePlain(", ")
-			}
-		}
-	case "time_range":
-		hintData := n.HintData.(HintTimeRange)
-		ctx.WriteString(hintData.From)
-		ctx.WritePlain(", ")
-		ctx.WriteString(hintData.To)
 	case "set_var":
 		hintData := n.HintData.(HintSetVar)
 		ctx.WritePlain(hintData.VarName)
@@ -2610,4 +2463,3 @@ type TextString struct {
 	Value           string
 	IsBinaryLiteral bool
 }
-

@@ -970,7 +970,6 @@ const (
 	// TiDB self-defined errors.
 	ErrWarnOptimizerHintUnsupportedHint = 8061
 	ErrWarnOptimizerHintInvalidToken    = 8062
-	ErrWarnMemoryQuotaOverflow          = 8063
 	ErrWarnOptimizerHintParseError      = 8064
 	ErrWarnOptimizerHintInvalidInteger  = 8065
 	ErrWarnOptimizerHintWrongPos        = 8066
