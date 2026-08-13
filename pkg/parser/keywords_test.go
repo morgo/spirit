@@ -37,7 +37,7 @@ func TestKeywords(t *testing.T) {
 }
 
 func TestKeywordsLength(t *testing.T) {
-	require.Equal(t, 505, len(parser.Keywords))
+	require.Equal(t, 507, len(parser.Keywords))
 
 	reservedNr := 0
 	for _, kw := range parser.Keywords {
