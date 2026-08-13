@@ -11,7 +11,6 @@ import (
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 type AbstractStatement struct {

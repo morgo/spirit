@@ -11,47 +11,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
-
-package test_driver
+package ast
 
 import (
 	"fmt"
 	"io"
 	"strconv"
 
-	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
 )
 
-func init() {
-	ast.NewValueExpr = newValueExpr
-	ast.NewParamMarkerExpr = newParamMarkerExpr
-	ast.NewDecimal = func(str string) (any, error) {
-		dec := new(MyDecimal)
-		err := dec.FromString([]byte(str))
-		return dec, err
-	}
-	ast.NewHexLiteral = func(str string) (any, error) {
-		h, err := NewHexLiteral(str)
-		return h, err
-	}
-	ast.NewBitLiteral = func(str string) (any, error) {
-		b, err := NewBitLiteral(str)
-		return b, err
-	}
-}
+var _ ExprNode = &ValueExpr{}
 
-var (
-	_ ast.ParamMarkerExpr = &ParamMarkerExpr{}
-	_ ast.ValueExpr       = &ValueExpr{}
-)
+// NewDecimal parses a string into a MyDecimal value.
+func NewDecimal(str string) (*MyDecimal, error) {
+	dec := new(MyDecimal)
+	err := dec.FromString([]byte(str))
+	return dec, err
+}
 
 // ValueExpr is the simple value expression.
 type ValueExpr struct {
-	ast.TexprNode
+	exprNode
 	Datum
 	projectionOffset int
 }
@@ -113,7 +96,7 @@ func (n *ValueExpr) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-// GetDatumString implements the ValueExpr interface.
+// GetDatumString returns the string value of the datum.
 func (n *ValueExpr) GetDatumString() string {
 	return n.GetString()
 }
@@ -156,8 +139,8 @@ func (n *ValueExpr) Format(w io.Writer) {
 	_, _ = fmt.Fprint(w, s)
 }
 
-// newValueExpr creates a ValueExpr with value, and sets default field type.
-func newValueExpr(value any, charset string, collate string) ast.ValueExpr {
+// NewValueExpr creates a ValueExpr with value, and sets default field type.
+func NewValueExpr(value any, charset string, collate string) *ValueExpr {
 	if ve, ok := value.(*ValueExpr); ok {
 		return ve
 	}
@@ -179,7 +162,7 @@ func (n *ValueExpr) GetProjectionOffset() int {
 }
 
 // Accept implements Node interface.
-func (n *ValueExpr) Accept(v ast.Visitor) (ast.Node, bool) {
+func (n *ValueExpr) Accept(v Visitor) (Node, bool) {
 	newNode, skipChildren := v.Enter(n)
 	if skipChildren {
 		return v.Leave(newNode)
@@ -203,7 +186,8 @@ func (n *ParamMarkerExpr) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-func newParamMarkerExpr(offset int) ast.ParamMarkerExpr {
+// NewParamMarkerExpr creates a ParamMarkerExpr.
+func NewParamMarkerExpr(offset int) *ParamMarkerExpr {
 	return &ParamMarkerExpr{
 		Offset: offset,
 	}
@@ -215,7 +199,7 @@ func (n *ParamMarkerExpr) Format(w io.Writer) {
 }
 
 // Accept implements Node Accept interface.
-func (n *ParamMarkerExpr) Accept(v ast.Visitor) (ast.Node, bool) {
+func (n *ParamMarkerExpr) Accept(v Visitor) (Node, bool) {
 	newNode, skipChildren := v.Enter(n)
 	if skipChildren {
 		return v.Leave(newNode)
@@ -224,7 +208,7 @@ func (n *ParamMarkerExpr) Accept(v ast.Visitor) (ast.Node, bool) {
 	return v.Leave(n)
 }
 
-// SetOrder implements the ParamMarkerExpr interface.
+// SetOrder sets the order of the parameter marker.
 func (n *ParamMarkerExpr) SetOrder(order int) {
 	n.Order = order
 }

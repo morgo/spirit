@@ -332,8 +332,6 @@ func AlterTableTypeToString(tp ast.AlterTableType) string {
 		return "ALTER INDEX INVISIBLE"
 	case ast.AlterTableOrderByColumns:
 		return "ORDER BY"
-	case ast.AlterTableSetTiFlashReplica:
-		return "SET TIFLASH REPLICA"
 	default:
 		return fmt.Sprintf("ALTER TABLE (type %d)", tp)
 	}

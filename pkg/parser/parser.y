@@ -328,9 +328,9 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	boolType                   "BOOL"
 	booleanType                "BOOLEAN"
 	btree                      "BTREE"
+	buckets                    "BUCKETS"
 	byteType                   "BYTE"
 	cascaded                   "CASCADED"
-	causal                     "CAUSAL"
 	chain                      "CHAIN"
 	charsetKwd                 "CHARSET"
 	checksum                   "CHECKSUM"
@@ -351,7 +351,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	compression                "COMPRESSION"
 	config                     "CONFIG"
 	connection                 "CONNECTION"
-	consistency                "CONSISTENCY"
 	consistent                 "CONSISTENT"
 	context                    "CONTEXT"
 	cpu                        "CPU"
@@ -450,7 +449,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	minRows                    "MIN_ROWS"
 	mode                       "MODE"
 	modify                     "MODIFY"
-	monitor                    "MONITOR"
 	month                      "MONTH"
 	multiLineString            "MULTILINESTRING"
 	multiPoint                 "MULTIPOINT"
@@ -615,18 +613,7 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	timestampAdd          "TIMESTAMPADD"
 	timestampDiff         "TIMESTAMPDIFF"
 	tls                   "TLS"
-	tokudbDefault         "TOKUDB_DEFAULT"
-	tokudbFast            "TOKUDB_FAST"
-	tokudbLzma            "TOKUDB_LZMA"
-	tokudbQuickLZ         "TOKUDB_QUICKLZ"
-	tokudbSmall           "TOKUDB_SMALL"
-	tokudbSnappy          "TOKUDB_SNAPPY"
-	tokudbUncompressed    "TOKUDB_UNCOMPRESSED"
-	tokudbZlib            "TOKUDB_ZLIB"
-	tokudbZstd            "TOKUDB_ZSTD"
 
-	/* The following tokens belong to TiDBKeyword. Notice: make sure these tokens are contained in TiDBKeyword. */
-	buckets                    "BUCKETS"
 	builtinApproxCountDistinct
 	builtinApproxPercentile
 	builtinBitAnd
@@ -654,20 +641,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	builtinUser
 	builtinVarPop
 	builtinVarSamp
-	cmSketch                   "CMSKETCH"
-	depth                      "DEPTH"
-	ndvRate                    "NDVRATE"
-	optimistic                 "OPTIMISTIC"
-	pessimistic                "PESSIMISTIC"
-	regions                    "REGIONS"
-	sampleRate                 "SAMPLERATE"
-	samples                    "SAMPLES"
-	split                      "SPLIT"
-	statsDelta                 "STATS_DELTA"
-	statsExtended              "STATS_EXTENDED"
-	tidb                       "TIDB"
-	topn                       "TOPN"
-	width                      "WIDTH"
 
 %token	<item>
 
@@ -845,7 +818,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	Constraint                             "table constraint"
 	ConstraintElem                         "table constraint element"
 	ConstraintKeywordOpt                   "Constraint Keyword or empty"
-	ConstraintWithColumnarIndex            "table constraint with columnar index"
 	CreateTableOptionListOpt               "create table option list opt"
 	CreateTableSelectOpt                   "Select/Union statement in CREATE TABLE ... SELECT"
 	DatabaseOption                         "CREATE Database specification"
@@ -871,7 +843,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	Fields                                 "Fields clause"
 	FieldList                              "field expression list"
 	FlushOption                            "Flush option"
-	ClusterOpt                             "Cluster option"
 	ForceOpt                               "Force opt"
 	InstanceOption                         "Instance option"
 	FulltextSearchModifierOpt              "Fulltext modifier"
@@ -965,8 +936,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	Priority                               "Statement priority"
 	PriorityOpt                            "Statement priority option"
 	PrivElem                               "Privilege element"
-	StatsObject                            "Stats object"
-	StatsObjectList                        "Stats object list"
 	PrivLevel                              "Privilege scope"
 	PrivType                               "Privilege type"
 	ReferDef                               "Reference definition"
@@ -1145,9 +1114,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	EnforcedOrNotOrNotNullOpt              "{[ENFORCED|NOT ENFORCED|NOT NULL]}"
 	Match                                  "[MATCH FULL | MATCH PARTIAL | MATCH SIMPLE]"
 	MatchOpt                               "optional MATCH clause"
-	AttributesOpt                          "Attributes options"
-	SplitOptionBetween                     "Split index option, between format"
-	SplitIndexOption                       "Split index option in CREATE/ALTER table"
 
 %type	<ident>
 	AsOpt             "AS or EmptyString"
@@ -1194,7 +1160,6 @@ func getMaskingPolicyRestrictOp(name string) (ast.MaskingPolicyRestrictOps, bool
 	Identifier                      "identifier or unreserved keyword"
 	NotKeywordToken                 "Tokens not mysql keyword but treated specially"
 	UnReservedKeyword               "MySQL unreserved keywords"
-	TiDBKeyword                     "TiDB added keywords"
 	FunctionNameConflict            "Built-in function call names which are conflict with keywords"
 	FunctionNameOptionalBraces      "Function with optional braces, all of them are reserved keywords."
 	FunctionNameDatetimePrecision   "Function with optional datetime precision, all of them are reserved keywords."
@@ -1327,40 +1292,6 @@ AlterTableStmt:
 		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$4.(*ast.TableName)}, PartitionNames: $7.([]ast.CIStr)}
 	}
 
-SplitIndexOption:
-	"SPLIT" "PRIMARY" "KEY" SplitOptionBetween
-	{
-		$$ = &ast.SplitIndexOption{
-			PrimaryKey: true,
-			IndexName:  ast.NewCIStr(mysql.PrimaryKeyName),
-			SplitOpt:   $4.(*ast.SplitOption),
-		}
-	}
-|	"SPLIT" "INDEX" Identifier SplitOptionBetween
-	{
-		$$ = &ast.SplitIndexOption{
-			IndexName: ast.NewCIStr($3),
-			SplitOpt:  $4.(*ast.SplitOption),
-		}
-	}
-|	"SPLIT" SplitOptionBetween
-	{
-		$$ = &ast.SplitIndexOption{
-			TableLevel: true,
-			SplitOpt:   $2.(*ast.SplitOption),
-		}
-	}
-
-AttributesOpt:
-	"ATTRIBUTES" EqOpt "DEFAULT"
-	{
-		$$ = &ast.AttributesSpec{Default: true}
-	}
-|	"ATTRIBUTES" EqOpt stringLit
-	{
-		$$ = &ast.AttributesSpec{Default: false, Attributes: $3}
-	}
-
 AlterTableSpecSingleOpt:
 	PartitionOpt
 	{
@@ -1385,58 +1316,6 @@ AlterTableSpecSingleOpt:
 		ret.NoWriteToBinlog = $3.(bool)
 		$$ = ret
 	}
-|	SplitIndexOption
-	{
-		$$ = &ast.AlterTableSpec{
-			Tp:         ast.AlterTableSplitIndex,
-			SplitIndex: $1.(*ast.SplitIndexOption),
-		}
-	}
-|	"SPLIT" "MAXVALUE" "PARTITION" "LESS" "THAN" '(' BitExpr ')'
-	{
-		partitionMethod := ast.PartitionMethod{Expr: $7}
-		startOffset := parser.yyVAL.offset
-		endOffset := parser.yylval.offset
-		parser.setNodeText(&partitionMethod, parser.src[startOffset:endOffset])
-		$$ = &ast.AlterTableSpec{
-			Tp:        ast.AlterTableReorganizeLastPartition,
-			Partition: &ast.PartitionOptions{PartitionMethod: partitionMethod},
-		}
-	}
-|	"MERGE" "FIRST" "PARTITION" "LESS" "THAN" '(' BitExpr ')'
-	{
-		partitionMethod := ast.PartitionMethod{Expr: $7}
-		startOffset := parser.yyVAL.offset
-		endOffset := parser.yylval.offset
-		parser.setNodeText(&partitionMethod, parser.src[startOffset:endOffset])
-		$$ = &ast.AlterTableSpec{
-			Tp:        ast.AlterTableReorganizeFirstPartition,
-			Partition: &ast.PartitionOptions{PartitionMethod: partitionMethod},
-		}
-	}
-|	"PARTITION" Identifier AttributesOpt
-	{
-		$$ = &ast.AlterTableSpec{
-			Tp:             ast.AlterTablePartitionAttributes,
-			PartitionNames: []ast.CIStr{ast.NewCIStr($2)},
-			AttributesSpec: $3.(*ast.AttributesSpec),
-		}
-	}
-|	"PARTITION" Identifier PartDefOptionList
-	{
-		$$ = &ast.AlterTableSpec{
-			Tp:             ast.AlterTablePartitionOptions,
-			PartitionNames: []ast.CIStr{ast.NewCIStr($2)},
-			Options:        $3.([]*ast.TableOption),
-		}
-	}
-|	"REMOVE" "TTL"
-	{
-		$$ = &ast.AlterTableSpec{
-			Tp: ast.AlterTableRemoveTTL,
-		}
-	}
-
 AlterTableSpec:
 	TableOptionList %prec higherThanComma
 	{
@@ -1469,18 +1348,17 @@ AlterTableSpec:
 		}
 		$$ = op
 	}
-|	"ADD" ColumnKeywordOpt IfNotExists ColumnDef ColumnPosition
+|	"ADD" ColumnKeywordOpt ColumnDef ColumnPosition
 	{
 		$$ = &ast.AlterTableSpec{
-			IfNotExists: $3.(bool),
-			Tp:          ast.AlterTableAddColumns,
-			NewColumns:  []*ast.ColumnDef{$4.(*ast.ColumnDef)},
-			Position:    $5.(*ast.ColumnPosition),
+			Tp:         ast.AlterTableAddColumns,
+			NewColumns: []*ast.ColumnDef{$3.(*ast.ColumnDef)},
+			Position:   $4.(*ast.ColumnPosition),
 		}
 	}
-|	"ADD" ColumnKeywordOpt IfNotExists '(' TableElementList ')'
+|	"ADD" ColumnKeywordOpt '(' TableElementList ')'
 	{
-		tes := $5.([]interface{})
+		tes := $4.([]interface{})
 		var columnDefs []*ast.ColumnDef
 		var constraints []*ast.Constraint
 		for _, te := range tes {
@@ -1492,13 +1370,12 @@ AlterTableSpec:
 			}
 		}
 		$$ = &ast.AlterTableSpec{
-			IfNotExists:    $3.(bool),
 			Tp:             ast.AlterTableAddColumns,
 			NewColumns:     columnDefs,
 			NewConstraints: constraints,
 		}
 	}
-|	"ADD" ConstraintWithColumnarIndex
+|	"ADD" Constraint
 	{
 		constraint := $2.(*ast.Constraint)
 		$$ = &ast.AlterTableSpec{
@@ -1506,36 +1383,34 @@ AlterTableSpec:
 			Constraint: constraint,
 		}
 	}
-|	"ADD" "PARTITION" IfNotExists NoWriteToBinLogAliasOpt PartitionDefinitionListOpt
+|	"ADD" "PARTITION" NoWriteToBinLogAliasOpt PartitionDefinitionListOpt
 	{
 		var defs []*ast.PartitionDefinition
-		if $5 != nil {
-			defs = $5.([]*ast.PartitionDefinition)
+		if $4 != nil {
+			defs = $4.([]*ast.PartitionDefinition)
 		}
-		noWriteToBinlog := $4.(bool)
+		noWriteToBinlog := $3.(bool)
 		if noWriteToBinlog {
 			yylex.AppendError(yylex.Errorf("The NO_WRITE_TO_BINLOG option is parsed but ignored for now."))
 			parser.lastErrorAsWarn()
 		}
 		$$ = &ast.AlterTableSpec{
-			IfNotExists:     $3.(bool),
 			NoWriteToBinlog: noWriteToBinlog,
 			Tp:              ast.AlterTableAddPartitions,
 			PartDefinitions: defs,
 		}
 	}
-|	"ADD" "PARTITION" IfNotExists NoWriteToBinLogAliasOpt "PARTITIONS" NUM
+|	"ADD" "PARTITION" NoWriteToBinLogAliasOpt "PARTITIONS" NUM
 	{
-		noWriteToBinlog := $4.(bool)
+		noWriteToBinlog := $3.(bool)
 		if noWriteToBinlog {
 			yylex.AppendError(yylex.Errorf("The NO_WRITE_TO_BINLOG option is parsed but ignored for now."))
 			parser.lastErrorAsWarn()
 		}
 		$$ = &ast.AlterTableSpec{
-			IfNotExists:     $3.(bool),
 			NoWriteToBinlog: noWriteToBinlog,
 			Tp:              ast.AlterTableAddPartitions,
-			Num:             getUint64FromNUM($6),
+			Num:             getUint64FromNUM($5),
 		}
 	}
 |	"CHECK" "PARTITION" AllOrPartitionNameList
@@ -1565,24 +1440,22 @@ AlterTableSpec:
 			Num:             getUint64FromNUM($4),
 		}
 	}
-|	"DROP" ColumnKeywordOpt IfExists ColumnName RestrictOrCascadeOpt
+|	"DROP" ColumnKeywordOpt ColumnName RestrictOrCascadeOpt
 	{
 		$$ = &ast.AlterTableSpec{
-			IfExists:      $3.(bool),
 			Tp:            ast.AlterTableDropColumn,
-			OldColumnName: $4.(*ast.ColumnName),
+			OldColumnName: $3.(*ast.ColumnName),
 		}
 	}
 |	"DROP" "PRIMARY" "KEY"
 	{
 		$$ = &ast.AlterTableSpec{Tp: ast.AlterTableDropPrimaryKey}
 	}
-|	"DROP" "PARTITION" IfExists PartitionNameList %prec lowerThanComma
+|	"DROP" "PARTITION" PartitionNameList %prec lowerThanComma
 	{
 		$$ = &ast.AlterTableSpec{
-			IfExists:       $3.(bool),
 			Tp:             ast.AlterTableDropPartition,
-			PartitionNames: $4.([]ast.CIStr),
+			PartitionNames: $3.([]ast.CIStr),
 		}
 	}
 |	"EXCHANGE" "PARTITION" Identifier "WITH" "TABLE" TableName WithValidationOpt
@@ -1691,12 +1564,11 @@ AlterTableSpec:
 		}
 		$$ = ret
 	}
-|	"DROP" KeyOrIndex IfExists Identifier
+|	"DROP" KeyOrIndex Identifier
 	{
 		$$ = &ast.AlterTableSpec{
-			IfExists: $3.(bool),
-			Tp:       ast.AlterTableDropIndex,
-			Name:     $4,
+			Tp:   ast.AlterTableDropIndex,
+			Name: $3,
 		}
 	}
 |	"DROP" "FOREIGN" "KEY" Symbol
@@ -1725,23 +1597,21 @@ AlterTableSpec:
 			Tp: ast.AlterTableEnableKeys,
 		}
 	}
-|	"MODIFY" ColumnKeywordOpt IfExists ColumnDef ColumnPosition
+|	"MODIFY" ColumnKeywordOpt ColumnDef ColumnPosition
 	{
 		$$ = &ast.AlterTableSpec{
-			IfExists:   $3.(bool),
 			Tp:         ast.AlterTableModifyColumn,
-			NewColumns: []*ast.ColumnDef{$4.(*ast.ColumnDef)},
-			Position:   $5.(*ast.ColumnPosition),
+			NewColumns: []*ast.ColumnDef{$3.(*ast.ColumnDef)},
+			Position:   $4.(*ast.ColumnPosition),
 		}
 	}
-|	"CHANGE" ColumnKeywordOpt IfExists ColumnName ColumnDef ColumnPosition
+|	"CHANGE" ColumnKeywordOpt ColumnName ColumnDef ColumnPosition
 	{
 		$$ = &ast.AlterTableSpec{
-			IfExists:      $3.(bool),
 			Tp:            ast.AlterTableChangeColumn,
-			OldColumnName: $4.(*ast.ColumnName),
-			NewColumns:    []*ast.ColumnDef{$5.(*ast.ColumnDef)},
-			Position:      $6.(*ast.ColumnPosition),
+			OldColumnName: $3.(*ast.ColumnName),
+			NewColumns:    []*ast.ColumnDef{$4.(*ast.ColumnDef)},
+			Position:      $5.(*ast.ColumnPosition),
 		}
 	}
 |	"ALTER" ColumnKeywordOpt ColumnName "SET" "DEFAULT" SignedLiteral
@@ -2140,16 +2010,6 @@ UserToUser:
  *      RECOVER TABLE BY JOB 100;
  *
  *******************************************************************/
-SplitOptionBetween:
-	"BETWEEN" RowValue "AND" RowValue "REGIONS" Int64Num
-	{
-		$$ = &ast.SplitOption{
-			Lower: $2.([]ast.ExprNode),
-			Upper: $4.([]ast.ExprNode),
-			Num:   $6.(int64),
-		}
-	}
-
 AnalyzeTableStmt:
 	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableNameList
 	{
@@ -2202,32 +2062,6 @@ AnalyzeOption:
 	{
 		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptNumBuckets, Value: ast.NewValueExpr($1, "", "")}
 	}
-|	NUM "TOPN"
-	{
-		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptNumTopN, Value: ast.NewValueExpr($1, "", "")}
-	}
-|	NUM "CMSKETCH" "DEPTH"
-	{
-		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptCMSketchDepth, Value: ast.NewValueExpr($1, "", "")}
-	}
-|	NUM "CMSKETCH" "WIDTH"
-	{
-		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptCMSketchWidth, Value: ast.NewValueExpr($1, "", "")}
-	}
-|	NUM "SAMPLES"
-	{
-		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptNumSamples, Value: ast.NewValueExpr($1, "", "")}
-	}
-|	NumLiteral "SAMPLERATE"
-	{
-		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptSampleRate, Value: ast.NewValueExpr($1, "", "")}
-	}
-|	NumLiteral "NDVRATE"
-	{
-		$$ = ast.AnalyzeOpt{Type: ast.AnalyzeOptNDVRate, Value: ast.NewValueExpr($1, "", "")}
-	}
-
-/*******************************************************************************************/
 Assignment:
 	ColumnName EqOrAssignmentEq ExprOrDefault
 	{
@@ -2249,18 +2083,6 @@ BeginTransactionStmt:
 	{
 		$$ = &ast.BeginStmt{}
 	}
-|	"BEGIN" "PESSIMISTIC"
-	{
-		$$ = &ast.BeginStmt{
-			Mode: ast.Pessimistic,
-		}
-	}
-|	"BEGIN" "OPTIMISTIC"
-	{
-		$$ = &ast.BeginStmt{
-			Mode: ast.Optimistic,
-		}
-	}
 |	"START" "TRANSACTION"
 	{
 		$$ = &ast.BeginStmt{}
@@ -2272,12 +2094,6 @@ BeginTransactionStmt:
 |	"START" "TRANSACTION" "WITH" "CONSISTENT" "SNAPSHOT"
 	{
 		$$ = &ast.BeginStmt{}
-	}
-|	"START" "TRANSACTION" "WITH" "CAUSAL" "CONSISTENCY" "ONLY"
-	{
-		$$ = &ast.BeginStmt{
-			CausalConsistencyOnly: true,
-		}
 	}
 |	"START" "TRANSACTION" "READ" "ONLY"
 	{
@@ -2713,19 +2529,18 @@ ConstraintElem:
 		}
 		$$ = c
 	}
-|	KeyOrIndex IfNotExists IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList
+|	KeyOrIndex IndexNameAndTypeOpt '(' IndexPartSpecificationList ')' IndexOptionList
 	{
 		c := &ast.Constraint{
-			IfNotExists:  $2.(bool),
 			Tp:           ast.ConstraintIndex,
-			Keys:         $5.([]*ast.IndexPartSpecification),
-			Name:         $3.([]interface{})[0].(*ast.NullString).String,
-			IsEmptyIndex: $3.([]interface{})[0].(*ast.NullString).Empty,
+			Keys:         $4.([]*ast.IndexPartSpecification),
+			Name:         $2.([]interface{})[0].(*ast.NullString).String,
+			IsEmptyIndex: $2.([]interface{})[0].(*ast.NullString).Empty,
 		}
-		if $7 != nil {
-			c.Option = $7.(*ast.IndexOption)
+		if $6 != nil {
+			c.Option = $6.(*ast.IndexOption)
 		}
-		if indexType := $3.([]interface{})[1]; indexType != nil {
+		if indexType := $2.([]interface{})[1]; indexType != nil {
 			if c.Option == nil {
 				c.Option = &ast.IndexOption{}
 			}
@@ -2752,15 +2567,14 @@ ConstraintElem:
 		}
 		$$ = c
 	}
-|	"FOREIGN" "KEY" IfNotExists IndexName '(' IndexPartSpecificationList ')' ReferDef
+|	"FOREIGN" "KEY" IndexName '(' IndexPartSpecificationList ')' ReferDef
 	{
 		$$ = &ast.Constraint{
-			IfNotExists:  $3.(bool),
 			Tp:           ast.ConstraintForeignKey,
-			Keys:         $6.([]*ast.IndexPartSpecification),
-			Name:         $4.(*ast.NullString).String,
-			Refer:        $8.(*ast.ReferenceDef),
-			IsEmptyIndex: $4.(*ast.NullString).Empty,
+			Keys:         $5.([]*ast.IndexPartSpecification),
+			Name:         $3.(*ast.NullString).String,
+			Refer:        $7.(*ast.ReferenceDef),
+			IsEmptyIndex: $3.(*ast.NullString).Empty,
 		}
 	}
 |	"CHECK" '(' Expression ')' EnforcedOrNotOpt
@@ -3018,34 +2832,33 @@ NumLiteral:
 |	decLit
 
 CreateIndexStmt:
-	"CREATE" IndexKeyTypeOpt "INDEX" IfNotExists Identifier IndexTypeOpt "ON" TableName '(' IndexPartSpecificationList ')' IndexOptionList IndexLockAndAlgorithmOpt
+	"CREATE" IndexKeyTypeOpt "INDEX" Identifier IndexTypeOpt "ON" TableName '(' IndexPartSpecificationList ')' IndexOptionList IndexLockAndAlgorithmOpt
 	{
 		var indexOption *ast.IndexOption
-		if $12 != nil {
-			indexOption = $12.(*ast.IndexOption)
+		if $11 != nil {
+			indexOption = $11.(*ast.IndexOption)
 			if indexOption.Tp == ast.IndexTypeInvalid {
-				if $6 != nil {
-					indexOption.Tp = $6.(ast.IndexType)
+				if $5 != nil {
+					indexOption.Tp = $5.(ast.IndexType)
 				}
 			}
 		} else {
 			indexOption = &ast.IndexOption{}
-			if $6 != nil {
-				indexOption.Tp = $6.(ast.IndexType)
+			if $5 != nil {
+				indexOption.Tp = $5.(ast.IndexType)
 			}
 		}
 		var indexLockAndAlgorithm *ast.IndexLockAndAlgorithm
-		if $13 != nil {
-			indexLockAndAlgorithm = $13.(*ast.IndexLockAndAlgorithm)
+		if $12 != nil {
+			indexLockAndAlgorithm = $12.(*ast.IndexLockAndAlgorithm)
 			if indexLockAndAlgorithm.LockTp == ast.LockTypeDefault && indexLockAndAlgorithm.AlgorithmTp == ast.AlgorithmTypeDefault {
 				indexLockAndAlgorithm = nil
 			}
 		}
 		$$ = &ast.CreateIndexStmt{
-			IfNotExists:             $4.(bool),
-			IndexName:               $5,
-			Table:                   $8.(*ast.TableName),
-			IndexPartSpecifications: $10.([]*ast.IndexPartSpecification),
+			IndexName:               $4,
+			Table:                   $7.(*ast.TableName),
+			IndexPartSpecifications: $9.([]*ast.IndexPartSpecification),
 			IndexOption:             indexOption,
 			KeyType:                 $2.(ast.IndexKeyType),
 			LockAlg:                 indexLockAndAlgorithm,
@@ -3968,16 +3781,16 @@ DropDatabaseStmt:
  *      LOCK [=] {DEFAULT|NONE|SHARED|EXCLUSIVE}
  ******************************************************************/
 DropIndexStmt:
-	"DROP" "INDEX" IfExists Identifier "ON" TableName IndexLockAndAlgorithmOpt
+	"DROP" "INDEX" Identifier "ON" TableName IndexLockAndAlgorithmOpt
 	{
 		var indexLockAndAlgorithm *ast.IndexLockAndAlgorithm
-		if $7 != nil {
-			indexLockAndAlgorithm = $7.(*ast.IndexLockAndAlgorithm)
+		if $6 != nil {
+			indexLockAndAlgorithm = $6.(*ast.IndexLockAndAlgorithm)
 			if indexLockAndAlgorithm.LockTp == ast.LockTypeDefault && indexLockAndAlgorithm.AlgorithmTp == ast.AlgorithmTypeDefault {
 				indexLockAndAlgorithm = nil
 			}
 		}
-		$$ = &ast.DropIndexStmt{IfExists: $3.(bool), IndexName: $4, Table: $6.(*ast.TableName), LockAlg: indexLockAndAlgorithm}
+		$$ = &ast.DropIndexStmt{IndexName: $3, Table: $5.(*ast.TableName), LockAlg: indexLockAndAlgorithm}
 	}
 DropTableStmt:
 	"DROP" OptTemporary TableOrTables IfExists TableNameList RestrictOrCascadeOpt
@@ -4714,18 +4527,8 @@ IndexOptionList:
 				opt1.ParserName = opt2.ParserName
 			} else if opt2.Visibility != ast.IndexVisibilityDefault {
 				opt1.Visibility = opt2.Visibility
-			} else if opt2.PrimaryKeyTp != ast.PrimaryKeyTypeDefault {
-				opt1.PrimaryKeyTp = opt2.PrimaryKeyTp
-			} else if opt2.AddColumnarReplicaOnDemand > 0 {
-				opt1.AddColumnarReplicaOnDemand = opt2.AddColumnarReplicaOnDemand
-			} else if opt2.Global {
-				opt1.Global = true
-			} else if opt2.SplitOpt != nil {
-				opt1.SplitOpt = opt2.SplitOpt
 			} else if len(opt2.SecondaryEngineAttr) > 0 {
 				opt1.SecondaryEngineAttr = opt2.SecondaryEngineAttr
-			} else if opt2.Condition != nil {
-				opt1.Condition = opt2.Condition
 			}
 			$$ = opt1
 		}
@@ -4824,7 +4627,6 @@ Identifier:
 	identifier
 |	UnReservedKeyword
 |	NotKeywordToken
-|	TiDBKeyword
 
 UnReservedKeyword:
 	"ACTION"
@@ -4840,8 +4642,8 @@ UnReservedKeyword:
 |	"BOOL"
 |	"BOOLEAN"
 |	"BTREE"
+|	"BUCKETS"
 |	"BYTE"
-|	"CAUSAL"
 |	"CHAIN"
 |	"CHARSET"
 |	"COLUMNS"
@@ -4850,7 +4652,6 @@ UnReservedKeyword:
 |	"COMMIT"
 |	"COMPACT"
 |	"COMPRESSED"
-|	"CONSISTENCY"
 |	"CONSISTENT"
 |	"CURRENT"
 |	"DATA"
@@ -5105,7 +4906,6 @@ UnReservedKeyword:
 |	"FOUND"
 |	"VECTOR"
 |	"COLUMNAR"
-|	"MONITOR"
 |	"AUTOEXTEND_SIZE"
 |	"GEOMETRY"
 |	"GEOMETRYCOLLECTION"
@@ -5115,23 +4915,6 @@ UnReservedKeyword:
 |	"MULTIPOLYGON"
 |	"POLYGON"
 |	"SRID"
-
-TiDBKeyword:
-	"BUCKETS"
-|	"CMSKETCH"
-|	"DEPTH"
-|	"NDVRATE"
-|	"SAMPLES"
-|	"SAMPLERATE"
-|	"STATS_DELTA"
-|	"STATS_EXTENDED"
-|	"TIDB"
-|	"TOPN"
-|	"SPLIT"
-|	"OPTIMISTIC"
-|	"PESSIMISTIC"
-|	"WIDTH"
-|	"REGIONS"
 
 NotKeywordToken:
 	"ADDDATE"
@@ -5147,15 +4930,6 @@ NotKeywordToken:
 |	"SUBDATE"
 |	"TIMESTAMPADD"
 |	"TIMESTAMPDIFF"
-|	"TOKUDB_DEFAULT"
-|	"TOKUDB_FAST"
-|	"TOKUDB_LZMA"
-|	"TOKUDB_QUICKLZ"
-|	"TOKUDB_SNAPPY"
-|	"TOKUDB_SMALL"
-|	"TOKUDB_UNCOMPRESSED"
-|	"TOKUDB_ZLIB"
-|	"TOKUDB_ZSTD"
 |	"JSON_OBJECTAGG"
 |	"JSON_ARRAYAGG"
 |	"JSON_SUM_CRC32"
@@ -5488,7 +5262,7 @@ StringLiteral:
 	}
 |	StringLiteral stringLit
 	{
-		valExpr := $1.(ast.ValueExpr)
+		valExpr := $1.(*ast.ValueExpr)
 		strLit := valExpr.GetString()
 		expr := ast.NewValueExpr(strLit+$2, parser.charset, parser.collation)
 		// Fix #4239, use first string literal as projection name.
@@ -5536,7 +5310,7 @@ ByItem:
 	Expression
 	{
 		expr := $1
-		valueExpr, ok := expr.(ast.ValueExpr)
+		valueExpr, ok := expr.(*ast.ValueExpr)
 		if ok {
 			position, isPosition := valueExpr.GetValue().(int64)
 			if isPosition {
@@ -5548,7 +5322,7 @@ ByItem:
 |	Expression Order
 	{
 		expr := $1
-		valueExpr, ok := expr.(ast.ValueExpr)
+		valueExpr, ok := expr.(*ast.ValueExpr)
 		if ok {
 			position, isPosition := valueExpr.GetValue().(int64)
 			if isPosition {
@@ -7869,7 +7643,7 @@ LimitClause:
 	}
 |	"LIMIT" LimitOption
 	{
-		$$ = &ast.Limit{Count: $2.(ast.ValueExpr)}
+		$$ = &ast.Limit{Count: $2.(*ast.ValueExpr)}
 	}
 
 LimitOption:
@@ -9350,15 +9124,6 @@ FlushOption:
 			Tp: ast.FlushClientErrorsSummary,
 		}
 	}
-|	"STATS_DELTA" StatsObjectList ClusterOpt
-	{
-		$$ = &ast.FlushStmt{
-			Tp:           ast.FlushStatsDelta,
-			FlushObjects: $2.([]*ast.StatsObject),
-			IsCluster:    $3.(bool),
-		}
-	}
-
 LogTypeOpt:
 	/* empty */
 	{
@@ -9383,16 +9148,6 @@ LogTypeOpt:
 |	"SLOW"
 	{
 		$$ = ast.LogTypeSlow
-	}
-
-ClusterOpt:
-	/* empty */
-	{
-		$$ = false
-	}
-|	"CLUSTER"
-	{
-		$$ = true
 	}
 
 NoWriteToBinLogAliasOpt:
@@ -9554,16 +9309,13 @@ Constraint:
 		$$ = cst
 	}
 
-// ConstraintVectorIndex is only a compatible and shortcut syntax for CREATE COLUMNAR INDEX USING VECTOR.
-ConstraintWithColumnarIndex:
-	Constraint
 CheckConstraintKeyword:
 	"CHECK"
 |	"CONSTRAINT"
 
 TableElement:
 	ColumnDef
-|	ConstraintWithColumnarIndex
+|	Constraint
 
 TableElementList:
 	TableElement
@@ -9828,42 +9580,6 @@ RowFormat:
 |	"ROW_FORMAT" EqOpt "COMPACT"
 	{
 		$$ = ast.RowFormatCompact
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_DEFAULT"
-	{
-		$$ = ast.TokuDBRowFormatDefault
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_FAST"
-	{
-		$$ = ast.TokuDBRowFormatFast
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_SMALL"
-	{
-		$$ = ast.TokuDBRowFormatSmall
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_ZLIB"
-	{
-		$$ = ast.TokuDBRowFormatZlib
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_ZSTD"
-	{
-		$$ = ast.TokuDBRowFormatZstd
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_QUICKLZ"
-	{
-		$$ = ast.TokuDBRowFormatQuickLZ
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_LZMA"
-	{
-		$$ = ast.TokuDBRowFormatLzma
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_SNAPPY"
-	{
-		$$ = ast.TokuDBRowFormatSnappy
-	}
-|	"ROW_FORMAT" EqOpt "TOKUDB_UNCOMPRESSED"
-	{
-		$$ = ast.TokuDBRowFormatUncompressed
 	}
 
 /*************************************Type Begin***************************************/
@@ -10586,11 +10302,11 @@ TextString:
 	}
 |	hexLit
 	{
-		$$ = &ast.TextString{Value: $1.(ast.BinaryLiteral).ToString(), IsBinaryLiteral: true}
+		$$ = &ast.TextString{Value: $1.(ast.HexLiteral).ToString(), IsBinaryLiteral: true}
 	}
 |	bitLit
 	{
-		$$ = &ast.TextString{Value: $1.(ast.BinaryLiteral).ToString(), IsBinaryLiteral: true}
+		$$ = &ast.TextString{Value: $1.(ast.BitLiteral).ToString(), IsBinaryLiteral: true}
 	}
 
 TextStringList:
@@ -11127,7 +10843,7 @@ HashString:
 	stringLit
 |	hexLit
 	{
-		$$ = $1.(ast.BinaryLiteral).ToString()
+		$$ = $1.(ast.HexLiteral).ToString()
 	}
 
 RoleSpec:
@@ -11372,15 +11088,6 @@ PrivType:
 |	"REPLICATION" "CLIENT"
 	{
 		$$ = mysql.ReplicationClientPriv
-	}
-|	"BINLOG" "MONITOR"
-	{
-		if parser.enableMariaDB {
-			$$ = mysql.ReplicationClientPriv
-		} else {
-			yylex.AppendError(ErrSyntax)
-			return 1
-		}
 	}
 |	"USAGE"
 	{
@@ -11730,11 +11437,11 @@ FieldTerminator:
 	stringLit
 |	hexLit
 	{
-		$$ = $1.(ast.BinaryLiteral).ToString()
+		$$ = $1.(ast.HexLiteral).ToString()
 	}
 |	bitLit
 	{
-		$$ = $1.(ast.BinaryLiteral).ToString()
+		$$ = $1.(ast.BitLiteral).ToString()
 	}
 
 Lines:
@@ -11905,46 +11612,6 @@ KillOrKillTiDB:
 	}
 /* KILL TIDB is a special grammar extension in TiDB, it can be used only when
    the client connect to TiDB directly, not proxied under LVS. */
-StatsObjectList:
-	StatsObject
-	{
-		$$ = []*ast.StatsObject{$1.(*ast.StatsObject)}
-	}
-|	StatsObjectList ',' StatsObject
-	{
-		$$ = append($1.([]*ast.StatsObject), $3.(*ast.StatsObject))
-	}
-
-StatsObject:
-	'*' '.' '*'
-	{
-		$$ = &ast.StatsObject{
-			StatsObjectScope: ast.StatsObjectScopeGlobal,
-		}
-	}
-|	Identifier '.' '*'
-	{
-		$$ = &ast.StatsObject{
-			StatsObjectScope: ast.StatsObjectScopeDatabase,
-			DBName:             ast.NewCIStr($1),
-		}
-	}
-|	Identifier '.' Identifier
-	{
-		$$ = &ast.StatsObject{
-			StatsObjectScope: ast.StatsObjectScopeTable,
-			DBName:             ast.NewCIStr($1),
-			TableName:          ast.NewCIStr($3),
-		}
-	}
-|	Identifier
-	{
-		$$ = &ast.StatsObject{
-			StatsObjectScope: ast.StatsObjectScopeTable,
-			TableName:          ast.NewCIStr($1),
-		}
-	}
-
 SignedNum:
 	Int64Num
 |	'+' Int64Num

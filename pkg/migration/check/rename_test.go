@@ -6,7 +6,6 @@ import (
 
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 	"github.com/stretchr/testify/require"
 )
 

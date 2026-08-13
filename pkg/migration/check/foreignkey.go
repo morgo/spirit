@@ -7,7 +7,6 @@ import (
 
 	"github.com/block/spirit/pkg/utils"
 	"github.com/block/spirit/pkg/parser/ast"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 func init() {

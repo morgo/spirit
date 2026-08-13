@@ -470,7 +470,7 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(" ")
 			fallthrough
 		case 2:
-			if expr, isValue := n.Args[1].(ValueExpr); !isValue || expr.GetValue() != nil {
+			if expr, isValue := n.Args[1].(*ValueExpr); !isValue || expr.GetValue() != nil {
 				if err := n.Args[1].Restore(ctx); err != nil {
 					return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.Args[1]")
 				}
@@ -489,7 +489,7 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 		}
 		if len(n.Args) == 3 {
 			ctx.WriteKeyWord(" AS ")
-			ctx.WriteKeyWord(n.Args[1].(ValueExpr).GetValue().(string))
+			ctx.WriteKeyWord(n.Args[1].(*ValueExpr).GetValue().(string))
 			ctx.WritePlain("(")
 			if err := n.Args[2].Restore(ctx); err != nil {
 				return errors.Annotatef(err, "An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[2]")

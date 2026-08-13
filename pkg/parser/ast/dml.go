@@ -26,7 +26,6 @@ import (
 
 var (
 	_ DMLNode = &DeleteStmt{}
-	_ DMLNode = &DistributeTableStmt{}
 	_ DMLNode = &InsertStmt{}
 	_ DMLNode = &SetOprStmt{}
 	_ DMLNode = &UpdateStmt{}
@@ -34,16 +33,12 @@ var (
 	_ DMLNode = &CallStmt{}
 	_ DMLNode = &ShowStmt{}
 	_ DMLNode = &LoadDataStmt{}
-	_ DMLNode = &ImportIntoStmt{}
-	_ DMLNode = &SplitRegionStmt{}
-	_ DMLNode = &NonTransactionalDMLStmt{}
 
 	_ Node = &Assignment{}
 	_ Node = &ByItem{}
 	_ Node = &FieldList{}
 	_ Node = &GroupByClause{}
 	_ Node = &HavingClause{}
-	_ Node = &AsOfClause{}
 	_ Node = &Join{}
 	_ Node = &Limit{}
 	_ Node = &OnCondition{}
@@ -281,9 +276,6 @@ type TableName struct {
 
 	IndexHints     []*IndexHint
 	PartitionNames []CIStr
-	TableSample    *TableSample
-	// AS OF is used to see the data as it was at a specific point in time.
-	AsOf *AsOfClause
 	// IsAlias is true if this table name is an alias.
 	//  sometime, we need to distinguish the table name is an alias or not.
 	//   for example ```delete tt1 from t1 tt1,(select max(id) id from t2)tt2 where tt1.id<=tt2.id```
@@ -341,18 +333,6 @@ func (n *TableName) Restore(ctx *format.RestoreCtx) error {
 	n.restorePartitions(ctx)
 	if err := n.restoreIndexHints(ctx); err != nil {
 		return err
-	}
-	if n.AsOf != nil {
-		ctx.WritePlain(" ")
-		if err := n.AsOf.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing TableName.Asof")
-		}
-	}
-	if n.TableSample != nil {
-		ctx.WritePlain(" ")
-		if err := n.TableSample.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing TableName.TableSample")
-		}
 	}
 	return nil
 }
@@ -439,20 +419,6 @@ func (n *TableName) Accept(v Visitor) (Node, bool) {
 		return v.Leave(newNode)
 	}
 	n = newNode.(*TableName)
-	if n.TableSample != nil {
-		newTs, ok := n.TableSample.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.TableSample = newTs.(*TableSample)
-	}
-	if n.AsOf != nil {
-		newNode, skipChildren := n.AsOf.Accept(v)
-		if skipChildren {
-			return v.Leave(n)
-		}
-		n.AsOf = newNode.(*AsOfClause)
-	}
 	return v.Leave(n)
 }
 
@@ -593,20 +559,8 @@ func (n *TableSource) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteName(asName)
 		}
 
-		if tn.AsOf != nil {
-			ctx.WritePlain(" ")
-			if err := tn.AsOf.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore TableSource.AsOf")
-			}
-		}
 		if err := tn.restoreIndexHints(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while restore TableSource.Source.(*TableName).IndexHints")
-		}
-		if tn.TableSample != nil {
-			ctx.WritePlain(" ")
-			if err := tn.TableSample.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while splicing TableName.TableSample")
-			}
 		}
 
 		if needParen {
@@ -1062,89 +1016,6 @@ func (n *OrderByClause) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-type SampleMethodType int8
-
-const (
-	SampleMethodTypeNone SampleMethodType = iota
-	SampleMethodTypeSystem
-	SampleMethodTypeBernoulli
-	SampleMethodTypeTiDBRegion
-)
-
-type SampleClauseUnitType int8
-
-const (
-	SampleClauseUnitTypeDefault SampleClauseUnitType = iota
-	SampleClauseUnitTypeRow
-	SampleClauseUnitTypePercent
-)
-
-type TableSample struct {
-	node
-	SampleMethod     SampleMethodType
-	Expr             ExprNode
-	SampleClauseUnit SampleClauseUnitType
-	RepeatableSeed   ExprNode
-}
-
-func (s *TableSample) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("TABLESAMPLE ")
-	switch s.SampleMethod {
-	case SampleMethodTypeBernoulli:
-		ctx.WriteKeyWord("BERNOULLI ")
-	case SampleMethodTypeSystem:
-		ctx.WriteKeyWord("SYSTEM ")
-	case SampleMethodTypeTiDBRegion:
-		ctx.WriteKeyWord("REGION ")
-	}
-	ctx.WritePlain("(")
-	if s.Expr != nil {
-		if err := s.Expr.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore TableSample.Expr")
-		}
-	}
-	switch s.SampleClauseUnit {
-	case SampleClauseUnitTypeDefault:
-	case SampleClauseUnitTypePercent:
-		ctx.WriteKeyWord(" PERCENT")
-	case SampleClauseUnitTypeRow:
-		ctx.WriteKeyWord(" ROWS")
-	}
-	ctx.WritePlain(")")
-	if s.RepeatableSeed != nil {
-		ctx.WriteKeyWord(" REPEATABLE")
-		ctx.WritePlain("(")
-		if err := s.RepeatableSeed.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore TableSample.Expr")
-		}
-		ctx.WritePlain(")")
-	}
-	return nil
-}
-
-func (s *TableSample) Accept(v Visitor) (node Node, ok bool) {
-	newNode, skipChildren := v.Enter(s)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	s = newNode.(*TableSample)
-	if s.Expr != nil {
-		node, ok = s.Expr.Accept(v)
-		if !ok {
-			return s, false
-		}
-		s.Expr = node.(ExprNode)
-	}
-	if s.RepeatableSeed != nil {
-		node, ok = s.RepeatableSeed.Accept(v)
-		if !ok {
-			return s, false
-		}
-		s.RepeatableSeed = node.(ExprNode)
-	}
-	return v.Leave(s)
-}
-
 type SelectStmtKind uint8
 
 const (
@@ -1388,24 +1259,16 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 				if i != 0 {
 					ctx.WritePlain(",")
 				}
-				if ctx.Flags.HasRestoreForNonPrepPlanCache() && len(field.OriginalText()) > 0 {
-					ctx.WritePlain(field.OriginalText())
-				} else {
-					if err := field.Restore(ctx); err != nil {
-						return errors.Annotatef(err, "An error occurred while restore SelectStmt.Fields[%d]", i)
-					}
+				if err := field.Restore(ctx); err != nil {
+					return errors.Annotatef(err, "An error occurred while restore SelectStmt.Fields[%d]", i)
 				}
 			}
 		}
 
 		if n.From != nil {
 			ctx.WriteKeyWord(" FROM ")
-			if ctx.Flags.HasRestoreForNonPrepPlanCache() && len(n.From.OriginalText()) > 0 {
-				ctx.WritePlain(n.From.OriginalText())
-			} else {
-				if err := n.From.Restore(ctx); err != nil {
-					return errors.Annotate(err, "An error occurred while restore SelectStmt.From")
-				}
+			if err := n.From.Restore(ctx); err != nil {
+				return errors.Annotate(err, "An error occurred while restore SelectStmt.From")
 			}
 		}
 
@@ -1955,21 +1818,21 @@ func (n *ColumnNameOrUserVar) Accept(v Visitor) (node Node, ok bool) {
 	return v.Leave(n)
 }
 
+// LoadDataStmt is a statement to load data from a specified file, then insert this rows into an existing table.
+// See https://dev.mysql.com/doc/refman/5.7/en/load-data.html
+// in TiDB we extend the syntax to use LOAD DATA as a more general way to import data, see
+// https://github.com/pingcap/tidb/issues/40499
 type FileLocRefTp int
 
 const (
-	// FileLocServerOrRemote is used when there's no keywords in SQL, which means the data file should be located on the
-	// tidb-server or on remote storage (S3 for example).
+	// FileLocServerOrRemote is used when there's no keywords in SQL, which means the data file is located on the
+	// server host.
 	FileLocServerOrRemote FileLocRefTp = iota
 	// FileLocClient is used when there's LOCAL keyword in SQL, which means the data file should be located on the MySQL
 	// client.
 	FileLocClient
 )
 
-// LoadDataStmt is a statement to load data from a specified file, then insert this rows into an existing table.
-// See https://dev.mysql.com/doc/refman/5.7/en/load-data.html
-// in TiDB we extend the syntax to use LOAD DATA as a more general way to import data, see
-// https://github.com/pingcap/tidb/issues/40499
 type LoadDataStmt struct {
 	dmlNode
 
@@ -1985,7 +1848,6 @@ type LoadDataStmt struct {
 	LinesInfo         *LinesClause
 	IgnoreLines       *uint64
 	ColumnAssignments []*Assignment
-	Options           []*LoadDataOpt
 
 	ColumnsAndUserVars []*ColumnNameOrUserVar
 }
@@ -2057,18 +1919,6 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 	}
 
-	if len(n.Options) > 0 {
-		ctx.WriteKeyWord(" WITH")
-		for i, option := range n.Options {
-			if i != 0 {
-				ctx.WritePlain(",")
-			}
-			ctx.WritePlain(" ")
-			if err := option.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore LoadDataStmt.Options")
-			}
-		}
-	}
 	return nil
 }
 
@@ -2109,25 +1959,6 @@ func (n *LoadDataStmt) Accept(v Visitor) (Node, bool) {
 		n.ColumnsAndUserVars[i] = node.(*ColumnNameOrUserVar)
 	}
 	return v.Leave(n)
-}
-
-type LoadDataOpt struct {
-	// Name is the name of the option, will be converted to lower case during parse.
-	Name string
-	// only literal is allowed, we use ExprNode to support negative number
-	Value ExprNode
-}
-
-func (l *LoadDataOpt) Restore(ctx *format.RestoreCtx) error {
-	if l.Value == nil {
-		ctx.WritePlain(l.Name)
-	} else {
-		ctx.WritePlain(l.Name + "=")
-		if err := l.Value.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore LoadDataOpt")
-		}
-	}
-	return nil
 }
 
 const (
@@ -2206,142 +2037,6 @@ func (n *LinesClause) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteString(*n.Terminated)
 	}
 	return nil
-}
-
-// ImportIntoStmt represents a IMPORT INTO statement node.
-// this statement is used to import data into TiDB using lightning local mode.
-// see  https://github.com/pingcap/tidb/issues/42930
-type ImportIntoStmt struct {
-	dmlNode
-
-	Table              *TableName
-	ColumnsAndUserVars []*ColumnNameOrUserVar
-	ColumnAssignments  []*Assignment
-	Path               string
-	Format             *string
-	Options            []*LoadDataOpt
-	Select             ResultSetNode
-}
-
-var _ SensitiveStmtNode = &ImportIntoStmt{}
-
-// Restore implements Node interface.
-func (n *ImportIntoStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("IMPORT INTO ")
-	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore ImportIntoStmt.Table")
-	}
-	if len(n.ColumnsAndUserVars) != 0 {
-		ctx.WritePlain(" (")
-		for i, c := range n.ColumnsAndUserVars {
-			if i != 0 {
-				ctx.WritePlain(",")
-			}
-			if err := c.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ImportIntoStmt.ColumnsAndUserVars")
-			}
-		}
-		ctx.WritePlain(")")
-	}
-
-	if n.ColumnAssignments != nil {
-		ctx.WriteKeyWord(" SET")
-		for i, assign := range n.ColumnAssignments {
-			if i != 0 {
-				ctx.WritePlain(",")
-			}
-			ctx.WritePlain(" ")
-			if err := assign.Restore(ctx); err != nil {
-				return errors.Annotate(err, "An error occurred while restore ImportIntoStmt.ColumnAssignments")
-			}
-		}
-	}
-	ctx.WriteKeyWord(" FROM ")
-	if n.Select != nil {
-		if err := n.Select.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ImportIntoStmt.Select")
-		}
-	} else {
-		ctx.WriteString(n.Path)
-		if n.Format != nil {
-			ctx.WriteKeyWord(" FORMAT ")
-			ctx.WriteString(*n.Format)
-		}
-	}
-
-	if len(n.Options) > 0 {
-		ctx.WriteKeyWord(" WITH")
-		for i, option := range n.Options {
-			if i != 0 {
-				ctx.WritePlain(",")
-			}
-			ctx.WritePlain(" ")
-			if err := option.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore ImportIntoStmt.Options")
-			}
-		}
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *ImportIntoStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*ImportIntoStmt)
-	if n.Table != nil {
-		node, ok := n.Table.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.Table = node.(*TableName)
-	}
-
-	for i, cuVars := range n.ColumnsAndUserVars {
-		node, ok := cuVars.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.ColumnsAndUserVars[i] = node.(*ColumnNameOrUserVar)
-	}
-	for i, assignment := range n.ColumnAssignments {
-		node, ok := assignment.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.ColumnAssignments[i] = node.(*Assignment)
-	}
-	if n.Select != nil {
-		node, ok := n.Select.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.Select = node.(ResultSetNode)
-	}
-	return v.Leave(n)
-}
-
-func (n *ImportIntoStmt) SecureText() string {
-	redactedStmt := *n
-	redactedStmt.Path = RedactURL(n.Path)
-	redactedStmt.Options = make([]*LoadDataOpt, 0, len(n.Options))
-	for _, opt := range n.Options {
-		outOpt := opt
-		ln := strings.ToLower(opt.Name)
-		if ln == CloudStorageURI {
-			redactedStr := RedactURL(opt.Value.(ValueExpr).GetString())
-			outOpt = &LoadDataOpt{
-				Name:  opt.Name,
-				Value: NewValueExpr(redactedStr, "", ""),
-			}
-		}
-		redactedStmt.Options = append(redactedStmt.Options, outOpt)
-	}
-	var sb strings.Builder
-	_ = redactedStmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
-	return sb.String()
 }
 
 // CallStmt represents a call procedure query node.
@@ -2475,12 +2170,8 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 				if i != 0 {
 					ctx.WritePlain(",")
 				}
-				if ctx.Flags.HasRestoreForNonPrepPlanCache() && len(v.OriginalText()) > 0 {
-					ctx.WritePlain(v.OriginalText())
-				} else {
-					if err := v.Restore(ctx); err != nil {
-						return errors.Annotatef(err, "An error occurred while restore InsertStmt.Columns[%d]", i)
-					}
+				if err := v.Restore(ctx); err != nil {
+					return errors.Annotatef(err, "An error occurred while restore InsertStmt.Columns[%d]", i)
 				}
 			}
 			ctx.WritePlain(")")
@@ -2793,82 +2484,6 @@ func (n *DeleteStmt) SetWhereExpr(e ExprNode) {
 // TableRefsJoin implements ShardableDMLStmt interface.
 func (n *DeleteStmt) TableRefsJoin() (*Join, bool) {
 	return n.TableRefs.TableRefs, true
-}
-
-const (
-	NoDryRun = iota
-	DryRunQuery
-	DryRunSplitDml
-)
-
-type ShardableDMLStmt = interface {
-	StmtNode
-	WhereExpr() ExprNode
-	SetWhereExpr(ExprNode)
-	// TableRefsJoin returns the table refs in the statement.
-	TableRefsJoin() (refs *Join, ok bool)
-}
-
-var _ ShardableDMLStmt = &DeleteStmt{}
-var _ ShardableDMLStmt = &UpdateStmt{}
-var _ ShardableDMLStmt = &InsertStmt{}
-
-type NonTransactionalDMLStmt struct {
-	dmlNode
-
-	DryRun      int         // 0: no dry run, 1: dry run the query, 2: dry run split DMLs
-	ShardColumn *ColumnName // if it's nil, the handle column is automatically chosen for it
-	Limit       uint64
-	DMLStmt     ShardableDMLStmt
-}
-
-// Restore implements Node interface.
-func (n *NonTransactionalDMLStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("BATCH ")
-	if n.ShardColumn != nil {
-		ctx.WriteKeyWord("ON ")
-		if err := n.ShardColumn.Restore(ctx); err != nil {
-			return errors.Trace(err)
-		}
-		ctx.WritePlain(" ")
-	}
-	ctx.WriteKeyWord("LIMIT ")
-	ctx.WritePlainf("%d ", n.Limit)
-	if n.DryRun == DryRunSplitDml {
-		ctx.WriteKeyWord("DRY RUN ")
-	}
-	if n.DryRun == DryRunQuery {
-		ctx.WriteKeyWord("DRY RUN QUERY ")
-	}
-	if err := n.DMLStmt.Restore(ctx); err != nil {
-		return errors.Trace(err)
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *NonTransactionalDMLStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-
-	n = newNode.(*NonTransactionalDMLStmt)
-	if n.ShardColumn != nil {
-		node, ok := n.ShardColumn.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.ShardColumn = node.(*ColumnName)
-	}
-	if n.DMLStmt != nil {
-		node, ok := n.DMLStmt.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.DMLStmt = node.(ShardableDMLStmt)
-	}
-	return v.Leave(n)
 }
 
 // UpdateStmt is a statement to update columns of existing rows in tables with new values.
@@ -3976,277 +3591,6 @@ func (n *FrameBound) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-type DistributeTableStmt struct {
-	dmlNode
-	Table          *TableName
-	PartitionNames []CIStr
-	Rule           string
-	Engine         string
-	Timeout        string
-}
-
-// Restore implements Node interface.
-func (n *DistributeTableStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("DISTRIBUTE ")
-	ctx.WriteKeyWord("TABLE ")
-
-	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore SplitIndexRegionStmt.Table")
-	}
-	if len(n.PartitionNames) > 0 {
-		ctx.WriteKeyWord(" PARTITION")
-		ctx.WritePlain("(")
-		for i, v := range n.PartitionNames {
-			if i != 0 {
-				ctx.WritePlain(", ")
-			}
-			ctx.WriteName(v.String())
-		}
-		ctx.WritePlain(")")
-	}
-
-	if len(n.Rule) > 0 {
-		ctx.WriteKeyWord(" RULE = ")
-		ctx.WriteString(n.Rule)
-	}
-
-	if len(n.Engine) > 0 {
-		ctx.WriteKeyWord(" ENGINE = ")
-		ctx.WriteString(n.Engine)
-	}
-
-	if len(n.Timeout) > 0 {
-		ctx.WriteKeyWord(" TIMEOUT = ")
-		ctx.WriteString(n.Timeout)
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *DistributeTableStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-
-	n = newNode.(*DistributeTableStmt)
-	node, ok := n.Table.Accept(v)
-	if !ok {
-		return n, false
-	}
-	n.Table = node.(*TableName)
-	return v.Leave(n)
-}
-
-type SplitRegionStmt struct {
-	dmlNode
-
-	Table          *TableName
-	IndexName      CIStr
-	PartitionNames []CIStr
-
-	SplitSyntaxOpt *SplitSyntaxOption
-
-	SplitOpt *SplitOption
-}
-
-type SplitIndexOption struct {
-	stmtNode
-
-	TableLevel bool
-	PrimaryKey bool
-	IndexName  CIStr
-	SplitOpt   *SplitOption
-}
-
-type SplitOption struct {
-	stmtNode
-
-	Lower      []ExprNode
-	Upper      []ExprNode
-	Num        int64
-	ValueLists [][]ExprNode
-}
-
-type SplitSyntaxOption struct {
-	HasRegionFor bool
-	HasPartition bool
-}
-
-func (n *SplitRegionStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("SPLIT ")
-	if n.SplitSyntaxOpt != nil {
-		if n.SplitSyntaxOpt.HasRegionFor {
-			ctx.WriteKeyWord("REGION FOR ")
-		}
-		if n.SplitSyntaxOpt.HasPartition {
-			ctx.WriteKeyWord("PARTITION ")
-		}
-	}
-	ctx.WriteKeyWord("TABLE ")
-
-	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore SplitIndexRegionStmt.Table")
-	}
-	if len(n.PartitionNames) > 0 {
-		ctx.WriteKeyWord(" PARTITION")
-		ctx.WritePlain("(")
-		for i, v := range n.PartitionNames {
-			if i != 0 {
-				ctx.WritePlain(", ")
-			}
-			ctx.WriteName(v.String())
-		}
-		ctx.WritePlain(")")
-	}
-
-	if len(n.IndexName.L) > 0 {
-		ctx.WriteKeyWord(" INDEX ")
-		ctx.WriteName(n.IndexName.String())
-	}
-	ctx.WritePlain(" ")
-	err := n.SplitOpt.Restore(ctx)
-	return err
-}
-
-func (n *SplitRegionStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-
-	n = newNode.(*SplitRegionStmt)
-	node, ok := n.Table.Accept(v)
-	if !ok {
-		return n, false
-	}
-	n.Table = node.(*TableName)
-
-	if n.SplitOpt != nil {
-		node, ok := n.SplitOpt.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.SplitOpt = node.(*SplitOption)
-	}
-	return v.Leave(n)
-}
-
-func (n *SplitOption) Restore(ctx *format.RestoreCtx) error {
-	if len(n.ValueLists) == 0 {
-		ctx.WriteKeyWord("BETWEEN ")
-		ctx.WritePlain("(")
-		for j, v := range n.Lower {
-			if j != 0 {
-				ctx.WritePlain(",")
-			}
-			if err := v.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore SplitOption Lower")
-			}
-		}
-		ctx.WritePlain(")")
-
-		ctx.WriteKeyWord(" AND ")
-		ctx.WritePlain("(")
-		for j, v := range n.Upper {
-			if j != 0 {
-				ctx.WritePlain(",")
-			}
-			if err := v.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore SplitOption Upper")
-			}
-		}
-		ctx.WritePlain(")")
-		ctx.WriteKeyWord(" REGIONS")
-		ctx.WritePlainf(" %d", n.Num)
-		return nil
-	}
-	ctx.WriteKeyWord("BY ")
-	for i, row := range n.ValueLists {
-		if i != 0 {
-			ctx.WritePlain(",")
-		}
-		ctx.WritePlain("(")
-		for j, v := range row {
-			if j != 0 {
-				ctx.WritePlain(",")
-			}
-			if err := v.Restore(ctx); err != nil {
-				return errors.Annotatef(err, "An error occurred while restore SplitOption.ValueLists[%d][%d]", i, j)
-			}
-		}
-		ctx.WritePlain(")")
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *SplitOption) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*SplitOption)
-
-	for i, val := range n.Lower {
-		node, ok := val.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.Lower[i] = node.(ExprNode)
-	}
-	for i, val := range n.Upper {
-		node, ok := val.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.Upper[i] = node.(ExprNode)
-	}
-
-	for i, list := range n.ValueLists {
-		for j, val := range list {
-			node, ok := val.Accept(v)
-			if !ok {
-				return n, false
-			}
-			n.ValueLists[i][j] = node.(ExprNode)
-		}
-	}
-	return v.Leave(n)
-}
-
-func (n *SplitIndexOption) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*SplitIndexOption)
-
-	node, ok := n.SplitOpt.Accept(v)
-	if !ok {
-		return n, false
-	}
-	n.SplitOpt = node.(*SplitOption)
-
-	return v.Leave(n)
-}
-
-func (n *SplitIndexOption) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("SPLIT ")
-
-	// Table split, empty prefix
-	if n.TableLevel {
-	} else if n.PrimaryKey {
-		ctx.WriteKeyWord("PRIMARY KEY ")
-	} else {
-		ctx.WriteKeyWord("INDEX ")
-		ctx.WriteName(n.IndexName.String())
-		ctx.WritePlain(" ")
-	}
-
-	return n.SplitOpt.Restore(ctx)
-}
-
 type FulltextSearchModifier int
 
 const (
@@ -4266,33 +3610,4 @@ func (m FulltextSearchModifier) IsNaturalLanguageMode() bool {
 
 func (m FulltextSearchModifier) WithQueryExpansion() bool {
 	return m&FulltextSearchModifierWithQueryExpansion == FulltextSearchModifierWithQueryExpansion
-}
-
-type AsOfClause struct {
-	node
-	TsExpr ExprNode
-}
-
-// Restore implements Node interface.
-func (n *AsOfClause) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("AS OF TIMESTAMP ")
-	if err := n.TsExpr.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while restore AsOfClause.Expr")
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *AsOfClause) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*AsOfClause)
-	node, ok := n.TsExpr.Accept(v)
-	if !ok {
-		return n, false
-	}
-	n.TsExpr = node.(ExprNode)
-	return v.Leave(n)
 }

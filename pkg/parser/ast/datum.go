@@ -11,9 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
-
-package test_driver
+package ast
 
 import (
 	"bytes"
@@ -363,7 +361,7 @@ func NewBitLiteral(s string) (BitLiteral, error) {
 	return BitLiteral(b), nil
 }
 
-// ToString implement ast.BinaryLiteral interface
+// ToString returns the string representation for the literal.
 func (b BitLiteral) ToString() string {
 	return BinaryLiteral(b).ToString()
 }
@@ -411,7 +409,7 @@ func NewHexLiteral(s string) (HexLiteral, error) {
 	return HexLiteral(h), nil
 }
 
-// ToString implement ast.BinaryLiteral interface
+// ToString returns the string representation for the literal.
 func (b HexLiteral) ToString() string {
 	return BinaryLiteral(b).ToString()
 }

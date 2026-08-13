@@ -11,9 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
-
-package test_driver
+package ast
 
 import (
 	"math"
@@ -38,7 +36,7 @@ func pow10(x int) int32 {
 	return int32(math.Pow10(x))
 }
 
-func Abs(n int64) int64 {
+func absInt64(n int64) int64 {
 	y := n >> 63
 	return (n ^ y) - y
 }
@@ -68,5 +66,5 @@ func StrLenOfInt64Fast(x int64) int {
 	if x < 0 {
 		size = 1 // add "-" sign on the length count
 	}
-	return size + StrLenOfUint64Fast(uint64(Abs(x)))
+	return size + StrLenOfUint64Fast(uint64(absInt64(x)))
 }

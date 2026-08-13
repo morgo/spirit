@@ -243,8 +243,9 @@ SELECT`, selectKwd},
 
 		// The odd behavior of '*/' inside conditional comment is the same as
 		// that of MySQL.
-		{"/*T![unsupported] '*/0 -- ' */", intLit},  // equivalent to 0
-		{"/*T![auto_rand] '*/0 -- ' */", stringLit}, // equivalent to '*/0 -- '
+		// /*T![...] ... */ is a TiDB feature comment; it is treated as a plain
+		// C comment now, so everything through the first `*/` is skipped.
+		{"/*T![unsupported] '*/0 -- ' */", intLit}, // equivalent to 0
 	}
 	runTest(t, table)
 }
@@ -369,25 +370,6 @@ func TestSpecialComment(t *testing.T) {
 	requires.Equal(t, Pos{2, 1, 16}, pos)
 }
 
-func TestFeatureIDsComment(t *testing.T) {
-	l := NewScanner("/*T![auto_rand] auto_random(5) */")
-	tok, pos, lit := l.scan()
-	requires.Equal(t, identifier, tok)
-	requires.Equal(t, "auto_random", lit)
-	requires.Equal(t, Pos{1, 16, 16}, pos)
-	tok, _, _ = l.scan()
-	requires.Equal(t, int('('), tok)
-	_, pos, lit = l.scan()
-	requires.Equal(t, "5", lit)
-	requires.Equal(t, Pos{1, 28, 28}, pos)
-	tok, _, _ = l.scan()
-	requires.Equal(t, int(')'), tok)
-
-	l = NewScanner("/*T![unsupported_feature] unsupported(123) */")
-	tok, _, _ = l.scan()
-	requires.Equal(t, 0, tok)
-}
-
 func TestOptimizerHint(t *testing.T) {
 	l := NewScanner("SELECT /*+ BKA(t1) */ 0;")
 	tokens := []struct {
@@ -455,10 +437,6 @@ func TestOptimizerHintAfterCertainKeywordOnly(t *testing.T) {
 		},
 		{
 			input:  "SELECT /*T![auto_rand] * */ /*+ hint */",
-			tokens: []int{selectKwd, '*', 0},
-		},
-		{
-			input:  "SELECT /*T![unsupported] * */ /*+ hint */",
 			tokens: []int{selectKwd, hintComment, 0},
 		},
 		{
@@ -649,74 +627,3 @@ func TestVersionDigits(t *testing.T) {
 	}
 }
 
-func TestFeatureIDs(t *testing.T) {
-	tests := []struct {
-		input      string
-		featureIDs []string
-		nextChar   byte
-	}{
-		{
-			input:      "[feature]",
-			featureIDs: []string{"feature"},
-			nextChar:   0,
-		},
-		{
-			input:      "[feature] xx",
-			featureIDs: []string{"feature"},
-			nextChar:   ' ',
-		},
-		{
-			input:      "[feature1,feature2]",
-			featureIDs: []string{"feature1", "feature2"},
-			nextChar:   0,
-		},
-		{
-			input:      "[feature1,feature2,feature3]",
-			featureIDs: []string{"feature1", "feature2", "feature3"},
-			nextChar:   0,
-		},
-		{
-			input:      "[id_en_ti_fier]",
-			featureIDs: []string{"id_en_ti_fier"},
-			nextChar:   0,
-		},
-		{
-			input:      "[invalid,    whitespace]",
-			featureIDs: nil,
-			nextChar:   '[',
-		},
-		{
-			input:      "[unclosed_brac",
-			featureIDs: nil,
-			nextChar:   '[',
-		},
-		{
-			input:      "unclosed_brac]",
-			featureIDs: nil,
-			nextChar:   'u',
-		},
-		{
-			input:      "[invalid_comma,]",
-			featureIDs: nil,
-			nextChar:   '[',
-		},
-		{
-			input:      "[,]",
-			featureIDs: nil,
-			nextChar:   '[',
-		},
-		{
-			input:      "[]",
-			featureIDs: nil,
-			nextChar:   '[',
-		},
-	}
-	scanner := NewScanner("")
-	for _, test := range tests {
-		scanner.reset(test.input)
-		featureIDs := scanner.scanFeatureIDs()
-		requires.Equalf(t, test.featureIDs, featureIDs, "input = %s", test.input)
-		nextChar := scanner.r.readByte()
-		requires.Equalf(t, test.nextChar, nextChar, "input = %s", test.input)
-	}
-}

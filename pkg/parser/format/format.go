@@ -234,12 +234,8 @@ const (
 	RestoreStringWithoutCharset
 	RestoreStringWithoutDefaultCharset
 
-	RestoreTiDBSpecialComment
-	SkipPlacementRuleForRestore
-	RestoreWithTTLEnableOff
 	RestoreWithoutSchemaName
 	RestoreWithoutTableName
-	RestoreForNonPrepPlanCache
 
 	RestoreBracketAroundBetweenExpr
 )
@@ -337,27 +333,6 @@ func (rf RestoreFlags) HasStringWithoutCharset() bool {
 	return rf.has(RestoreStringWithoutCharset)
 }
 
-// HasTiDBSpecialCommentFlag returns a boolean indicating whether `rf` has `RestoreTiDBSpecialComment` flag.
-func (rf RestoreFlags) HasTiDBSpecialCommentFlag() bool {
-	return rf.has(RestoreTiDBSpecialComment)
-}
-
-// HasSkipPlacementRuleForRestoreFlag returns a boolean indicating whether `rf` has `SkipPlacementRuleForRestore` flag.
-func (rf RestoreFlags) HasSkipPlacementRuleForRestoreFlag() bool {
-	return rf.has(SkipPlacementRuleForRestore)
-}
-
-// HasRestoreWithTTLEnableOff returns a boolean indicating
-// whether to force set TTL_ENABLE='OFF' when restoring a TTL table
-func (rf RestoreFlags) HasRestoreWithTTLEnableOff() bool {
-	return rf.has(RestoreWithTTLEnableOff)
-}
-
-// HasRestoreForNonPrepPlanCache returns a boolean indicating whether `rf` has `RestoreForNonPrepPlanCache` flag.
-func (rf RestoreFlags) HasRestoreForNonPrepPlanCache() bool {
-	return rf.has(RestoreForNonPrepPlanCache)
-}
-
 // RestoreWriter is the interface for `Restore` to write.
 type RestoreWriter interface {
 	io.Writer
@@ -387,31 +362,6 @@ func (ctx *RestoreCtx) WriteKeyWord(keyWord string) {
 		keyWord = strings.ToLower(keyWord)
 	}
 	ctx.In.WriteString(keyWord)
-}
-
-// WriteWithSpecialComments writes a string with a special comment wrapped.
-func (ctx *RestoreCtx) WriteWithSpecialComments(featureID string, fn func() error) error {
-	if !ctx.Flags.HasTiDBSpecialCommentFlag() {
-		return fn()
-	}
-	ctx.WritePlain("/*T!")
-	if len(featureID) != 0 {
-		ctx.WritePlainf("[%s]", featureID)
-	}
-	ctx.WritePlain(" ")
-	if err := fn(); err != nil {
-		return err
-	}
-	ctx.WritePlain(" */")
-	return nil
-}
-
-// WriteKeyWordWithSpecialComments writes a keyword with a special comment wrapped.
-func (ctx *RestoreCtx) WriteKeyWordWithSpecialComments(featureID string, keyWord string) {
-	_ = ctx.WriteWithSpecialComments(featureID, func() error {
-		ctx.WriteKeyWord(keyWord)
-		return nil
-	})
 }
 
 // WriteString writes the string into writer

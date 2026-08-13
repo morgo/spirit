@@ -7,7 +7,6 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/parser/ast"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 // Not tagged ScopeStatement: MySQL's native DDL, which Spirit attempts before

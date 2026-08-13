@@ -6,7 +6,6 @@ import (
 
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/format"
-	driver "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 // This file holds low-level, stateless parsing helpers used by the CreateTable
@@ -31,7 +30,7 @@ import (
 // also accepts; the doubled and backslash forms are equivalent in the
 // default sql_mode.
 func stringLiteralValue(expr ast.ExprNode) (string, bool) {
-	if v, ok := expr.(*driver.ValueExpr); ok && v.Kind() == driver.KindString {
+	if v, ok := expr.(*ast.ValueExpr); ok && v.Kind() == ast.KindString {
 		return v.GetString(), true
 	}
 	return "", false

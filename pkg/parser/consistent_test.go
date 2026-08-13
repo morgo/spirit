@@ -34,19 +34,17 @@ func TestKeywordConsistent(t *testing.T) {
 	reservedKeywordStartMarker := "\t/* The following tokens belong to ReservedKeyword. Notice: make sure these tokens are contained in ReservedKeyword. */"
 	unreservedKeywordStartMarker := "\t/* The following tokens belong to UnReservedKeyword. Notice: make sure these tokens are contained in UnReservedKeyword. */"
 	notKeywordTokenStartMarker := "\t/* The following tokens belong to NotKeywordToken. Notice: make sure these tokens are contained in NotKeywordToken. */"
-	tidbKeywordStartMarker := "\t/* The following tokens belong to TiDBKeyword. Notice: make sure these tokens are contained in TiDBKeyword. */"
 	identTokenEndMarker := "%token\t<item>"
 
 	reservedKeywords := extractKeywords(content, reservedKeywordStartMarker, unreservedKeywordStartMarker)
 	unreservedKeywords := extractKeywords(content, unreservedKeywordStartMarker, notKeywordTokenStartMarker)
-	notKeywordTokens := extractKeywords(content, notKeywordTokenStartMarker, tidbKeywordStartMarker)
-	tidbKeywords := extractKeywords(content, tidbKeywordStartMarker, identTokenEndMarker)
+	notKeywordTokens := extractKeywords(content, notKeywordTokenStartMarker, identTokenEndMarker)
 
 	for k, v := range aliases {
 		requires.NotEqual(t, k, v)
 		requires.Equal(t, tokenMap[v], tokenMap[k])
 	}
-	keywordCount := len(reservedKeywords) + len(unreservedKeywords) + len(notKeywordTokens) + len(tidbKeywords)
+	keywordCount := len(reservedKeywords) + len(unreservedKeywords) + len(notKeywordTokens)
 	requires.Equal(t, keywordCount-len(windowFuncTokenMap), len(tokenMap)-len(aliases))
 
 	unreservedCollectionDef := extractKeywordsFromCollectionDef(content, "\nUnReservedKeyword:")
@@ -55,8 +53,6 @@ func TestKeywordConsistent(t *testing.T) {
 	notKeywordTokensCollectionDef := extractKeywordsFromCollectionDef(content, "\nNotKeywordToken:")
 	requires.Equal(t, notKeywordTokensCollectionDef, notKeywordTokens, "NotKeywordToken")
 
-	tidbKeywordsCollectionDef := extractKeywordsFromCollectionDef(content, "\nTiDBKeyword:")
-	requires.Equal(t, tidbKeywordsCollectionDef, tidbKeywords, "TiDBKeyword")
 }
 
 func extractMiddle(str, startMarker, endMarker string) string {

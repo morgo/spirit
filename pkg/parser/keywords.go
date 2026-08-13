@@ -23,7 +23,7 @@ type KeywordsType struct {
 	Section  string
 }
 
-// Keywords is used for all keywords in TiDB
+// Keywords is used for all keywords in the parser
 var Keywords = []KeywordsType{
 	{"ADD", true, "reserved"},
 	{"ALL", true, "reserved"},
@@ -265,9 +265,9 @@ var Keywords = []KeywordsType{
 	{"BOOL", false, "unreserved"},
 	{"BOOLEAN", false, "unreserved"},
 	{"BTREE", false, "unreserved"},
+	{"BUCKETS", false, "unreserved"},
 	{"BYTE", false, "unreserved"},
 	{"CASCADED", false, "unreserved"},
-	{"CAUSAL", false, "unreserved"},
 	{"CHAIN", false, "unreserved"},
 	{"CHARSET", false, "unreserved"},
 	{"CHECKSUM", false, "unreserved"},
@@ -288,7 +288,6 @@ var Keywords = []KeywordsType{
 	{"COMPRESSION", false, "unreserved"},
 	{"CONFIG", false, "unreserved"},
 	{"CONNECTION", false, "unreserved"},
-	{"CONSISTENCY", false, "unreserved"},
 	{"CONSISTENT", false, "unreserved"},
 	{"CONTEXT", false, "unreserved"},
 	{"CPU", false, "unreserved"},
@@ -531,19 +530,4 @@ var Keywords = []KeywordsType{
 	{"WITHOUT", false, "unreserved"},
 	{"X509", false, "unreserved"},
 	{"YEAR", false, "unreserved"},
-	{"BUCKETS", false, "tidb"},
-	{"CMSKETCH", false, "tidb"},
-	{"DEPTH", false, "tidb"},
-	{"NDVRATE", false, "tidb"},
-	{"OPTIMISTIC", false, "tidb"},
-	{"PESSIMISTIC", false, "tidb"},
-	{"REGIONS", false, "tidb"},
-	{"SAMPLERATE", false, "tidb"},
-	{"SAMPLES", false, "tidb"},
-	{"SPLIT", false, "tidb"},
-	{"STATS_DELTA", false, "tidb"},
-	{"STATS_EXTENDED", false, "tidb"},
-	{"TIDB", false, "tidb"},
-	{"TOPN", false, "tidb"},
-	{"WIDTH", false, "tidb"},
 }

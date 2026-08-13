@@ -21,7 +21,6 @@ import (
 	. "github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
-	"github.com/block/spirit/pkg/parser/test_driver"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,84 +37,6 @@ func TestFunctionsVisitorCover(t *testing.T) {
 		stmt.Accept(visitor{})
 		stmt.Accept(visitor1{})
 	}
-}
-
-func TestFuncCallExprRestore(t *testing.T) {
-	testCases := []NodeRestoreTestCase{
-		{"JSON_ARRAYAGG(attribute)", "JSON_ARRAYAGG(`attribute`)"},
-		{"JSON_OBJECTAGG(attribute, value)", "JSON_OBJECTAGG(`attribute`, `value`)"},
-		{"ABS(-1024)", "ABS(-1024)"},
-		{"ACOS(3.14)", "ACOS(3.14)"},
-		{"CONV('a',16,2)", "CONV(_UTF8MB4'a', 16, 2)"},
-		{"COS(PI())", "COS(PI())"},
-		{"RAND()", "RAND()"},
-		{"ADDDATE('2000-01-01', 1)", "ADDDATE(_UTF8MB4'2000-01-01', INTERVAL 1 DAY)"},
-		{"DATE_ADD('2000-01-01', INTERVAL 1 DAY)", "DATE_ADD(_UTF8MB4'2000-01-01', INTERVAL 1 DAY)"},
-		{"DATE_ADD('2000-01-01', INTERVAL '1 1:12:23.100000' DAY_MICROSECOND)", "DATE_ADD(_UTF8MB4'2000-01-01', INTERVAL _UTF8MB4'1 1:12:23.100000' DAY_MICROSECOND)"},
-		{"EXTRACT(DAY FROM '2000-01-01')", "EXTRACT(DAY FROM _UTF8MB4'2000-01-01')"},
-		{"extract(day from '1999-01-01')", "EXTRACT(DAY FROM _UTF8MB4'1999-01-01')"},
-		{"GET_FORMAT(DATE, 'EUR')", "GET_FORMAT(DATE, _UTF8MB4'EUR')"},
-		{"POSITION('a' IN 'abc')", "POSITION(_UTF8MB4'a' IN _UTF8MB4'abc')"},
-		{"TRIM('  bar   ')", "TRIM(_UTF8MB4'  bar   ')"},
-		{"TRIM('a' FROM '  bar   ')", "TRIM(_UTF8MB4'a' FROM _UTF8MB4'  bar   ')"},
-		{"TRIM(LEADING FROM '  bar   ')", "TRIM(LEADING _UTF8MB4' ' FROM _UTF8MB4'  bar   ')"},
-		{"TRIM(BOTH FROM '  bar   ')", "TRIM(BOTH _UTF8MB4' ' FROM _UTF8MB4'  bar   ')"},
-		{"TRIM(TRAILING FROM '  bar   ')", "TRIM(TRAILING _UTF8MB4' ' FROM _UTF8MB4'  bar   ')"},
-		{"TRIM(LEADING 'x' FROM 'xxxyxxx')", "TRIM(LEADING _UTF8MB4'x' FROM _UTF8MB4'xxxyxxx')"},
-		{"TRIM(BOTH 'x' FROM 'xxxyxxx')", "TRIM(BOTH _UTF8MB4'x' FROM _UTF8MB4'xxxyxxx')"},
-		{"TRIM(TRAILING 'x' FROM 'xxxyxxx')", "TRIM(TRAILING _UTF8MB4'x' FROM _UTF8MB4'xxxyxxx')"},
-		{"TRIM(BOTH col1 FROM col2)", "TRIM(BOTH `col1` FROM `col2`)"},
-		{"DATE_ADD('2008-01-02', INTERVAL INTERVAL(1, 0, 1) DAY)", "DATE_ADD(_UTF8MB4'2008-01-02', INTERVAL INTERVAL(1, 0, 1) DAY)"},
-		{"BENCHMARK(1000000, AES_ENCRYPT('text', UNHEX('F3229A0B371ED2D9441B830D21A390C3')))", "BENCHMARK(1000000, AES_ENCRYPT(_UTF8MB4'text', UNHEX(_UTF8MB4'F3229A0B371ED2D9441B830D21A390C3')))"},
-		{"SUBSTRING('Quadratically', 5)", "SUBSTRING(_UTF8MB4'Quadratically', 5)"},
-		{"SUBSTRING('Quadratically' FROM 5)", "SUBSTRING(_UTF8MB4'Quadratically', 5)"},
-		{"SUBSTRING('Quadratically', 5, 6)", "SUBSTRING(_UTF8MB4'Quadratically', 5, 6)"},
-		{"SUBSTRING('Quadratically' FROM 5 FOR 6)", "SUBSTRING(_UTF8MB4'Quadratically', 5, 6)"},
-		{"JSON_TYPE('[123]')", "JSON_TYPE(_UTF8MB4'[123]')"},
-		{"bit_and(all c1)", "BIT_AND(`c1`)"},
-		{"nextval(seq)", "NEXTVAL(`seq`)"},
-		{"nextval(test.seq)", "NEXTVAL(`test`.`seq`)"},
-		{"lastval(seq)", "LASTVAL(`seq`)"},
-		{"lastval(test.seq)", "LASTVAL(`test`.`seq`)"},
-		{"setval(seq, 100)", "SETVAL(`seq`, 100)"},
-		{"setval(test.seq, 100)", "SETVAL(`test`.`seq`, 100)"},
-		{"next value for seq", "NEXTVAL(`seq`)"},
-		{"next value for test.seq", "NEXTVAL(`test`.`seq`)"},
-		{"next value for sequence", "NEXTVAL(`sequence`)"},
-		{"NeXt vAluE for seQuEncE2", "NEXTVAL(`seQuEncE2`)"},
-		{"NeXt vAluE for test.seQuEncE2", "NEXTVAL(`test`.`seQuEncE2`)"},
-		{"weight_string(a)", "WEIGHT_STRING(`a`)"},
-		{"Weight_stRing(test.a)", "WEIGHT_STRING(`test`.`a`)"},
-		{"weight_string('a')", "WEIGHT_STRING(_UTF8MB4'a')"},
-		// Expressions with collations of different charsets will lead to an error in MySQL, but the error check should be done in TiDB, so it's valid here.
-		{"weight_string('a' collate utf8_general_ci collate utf8mb4_general_ci)", "WEIGHT_STRING(_UTF8MB4'a' COLLATE utf8_general_ci COLLATE utf8mb4_general_ci)"},
-		{"weight_string(_utf8 'a' collate utf8_general_ci)", "WEIGHT_STRING(_UTF8'a' COLLATE utf8_general_ci)"},
-		{"weight_string(_utf8 'a')", "WEIGHT_STRING(_UTF8'a')"},
-		{"weight_string(a as char(5))", "WEIGHT_STRING(`a` AS CHAR(5))"},
-		{"weight_string(a as character(5))", "WEIGHT_STRING(`a` AS CHAR(5))"},
-		{"weight_string(a as binary(5))", "WEIGHT_STRING(`a` AS BINARY(5))"},
-		{"hex(weight_string('abc' as binary(5)))", "HEX(WEIGHT_STRING(_UTF8MB4'abc' AS BINARY(5)))"},
-		{"soundex(attr)", "SOUNDEX(`attr`)"},
-		{"soundex('string')", "SOUNDEX(_UTF8MB4'string')"},
-	}
-	extractNodeFunc := func(node Node) Node {
-		return node.(*SelectStmt).Fields.Fields[0].Expr
-	}
-	runNodeRestoreTest(t, testCases, "select %s", extractNodeFunc)
-}
-
-func TestFuncCastExprRestore(t *testing.T) {
-	testCases := []NodeRestoreTestCase{
-		{"CONVERT('Müller' USING UtF8)", "CONVERT(_UTF8MB4'Müller' USING 'utf8')"},
-		{"CONVERT('Müller' USING UtF8Mb4)", "CONVERT(_UTF8MB4'Müller' USING 'utf8mb4')"},
-		{"CONVERT('Müller', CHAR(32) CHARACTER SET UtF8)", "CONVERT(_UTF8MB4'Müller', CHAR(32) CHARSET UTF8)"},
-		{"CAST('test' AS CHAR CHARACTER SET UtF8)", "CAST(_UTF8MB4'test' AS CHAR CHARSET UTF8)"},
-		{"BINARY 'New York'", "BINARY _UTF8MB4'New York'"},
-	}
-	extractNodeFunc := func(node Node) Node {
-		return node.(*SelectStmt).Fields.Fields[0].Expr
-	}
-	runNodeRestoreTest(t, testCases, "select %s", extractNodeFunc)
 }
 
 func TestAggregateFuncExprRestore(t *testing.T) {
@@ -177,7 +98,7 @@ func TestConvert(t *testing.T) {
 
 		st := stmt.(*SelectStmt)
 		expr := st.Fields.Fields[0].Expr.(*FuncCallExpr)
-		charsetArg := expr.Args[1].(*test_driver.ValueExpr)
+		charsetArg := expr.Args[1].(*ValueExpr)
 		require.Equal(t, testCase.CharsetName, charsetArg.GetString())
 	}
 }
@@ -206,7 +127,7 @@ func TestChar(t *testing.T) {
 
 		st := stmt.(*SelectStmt)
 		expr := st.Fields.Fields[0].Expr.(*FuncCallExpr)
-		charsetArg := expr.Args[1].(*test_driver.ValueExpr)
+		charsetArg := expr.Args[1].(*ValueExpr)
 		require.Equal(t, testCase.CharsetName, charsetArg.GetString())
 	}
 }

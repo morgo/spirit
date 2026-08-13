@@ -168,29 +168,6 @@ func (p PartitionType) String() string {
 	}
 }
 
-// PrimaryKeyType is the type of primary key.
-// Available values are "clustered", "nonclustered", and ""(default).
-type PrimaryKeyType int8
-
-// String implements fmt.Stringer interface.
-func (p PrimaryKeyType) String() string {
-	switch p {
-	case PrimaryKeyTypeClustered:
-		return "CLUSTERED"
-	case PrimaryKeyTypeNonClustered:
-		return "NONCLUSTERED"
-	default:
-		return ""
-	}
-}
-
-// PrimaryKeyType values.
-const (
-	PrimaryKeyTypeDefault PrimaryKeyType = iota
-	PrimaryKeyTypeClustered
-	PrimaryKeyTypeNonClustered
-)
-
 // IndexType is the type of index
 type IndexType int
 
@@ -331,69 +308,6 @@ func (cis *CIStr) MemoryUsage() (sum int64) {
 	return int64(unsafe.Sizeof(cis.O))*2 + int64(len(cis.O)+len(cis.L))
 }
 
-// RunawayActionType is the type of runaway action.
-type RunawayActionType int32
-
-// RunawayActionType values.
-const (
-	RunawayActionNone RunawayActionType = iota
-	RunawayActionDryRun
-	RunawayActionCooldown
-	RunawayActionKill
-	RunawayActionSwitchGroup
-)
-
-// RunawayWatchType is the type of runaway watch.
-type RunawayWatchType int32
-
-// RunawayWatchType values.
-const (
-	WatchNone RunawayWatchType = iota
-	WatchExact
-	WatchSimilar
-	WatchPlan
-)
-
-// String implements fmt.Stringer interface.
-func (t RunawayWatchType) String() string {
-	switch t {
-	case WatchExact:
-		return "EXACT"
-	case WatchSimilar:
-		return "SIMILAR"
-	case WatchPlan:
-		return "PLAN"
-	default:
-		return "NONE"
-	}
-}
-
-// RunawayOptionType is the runaway's option type.
-type RunawayOptionType int
-
-// RunawayOptionType values.
-const (
-	RunawayRule RunawayOptionType = iota
-	RunawayAction
-	RunawayWatch
-)
-
-// String implements fmt.Stringer interface.
-func (t RunawayActionType) String() string {
-	switch t {
-	case RunawayActionDryRun:
-		return "DRYRUN"
-	case RunawayActionCooldown:
-		return "COOLDOWN"
-	case RunawayActionKill:
-		return "KILL"
-	case RunawayActionSwitchGroup:
-		return "SWITCH_GROUP"
-	default:
-		return "DRYRUN"
-	}
-}
-
 // ColumnChoice is the type of the column choice.
 type ColumnChoice byte
 
@@ -425,17 +339,3 @@ const (
 	MediumPriorityValue = 8
 	HighPriorityValue   = 16
 )
-
-// PriorityValueToName converts the priority value to corresponding name
-func PriorityValueToName(value uint64) string {
-	switch value {
-	case LowPriorityValue:
-		return "LOW"
-	case MediumPriorityValue:
-		return "MEDIUM"
-	case HighPriorityValue:
-		return "HIGH"
-	default:
-		return "MEDIUM"
-	}
-}

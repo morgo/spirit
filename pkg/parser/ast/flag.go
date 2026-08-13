@@ -36,7 +36,7 @@ func (f *flagSetter) Enter(in Node) (Node, bool) {
 }
 
 func (f *flagSetter) Leave(in Node) (Node, bool) {
-	if x, ok := in.(ParamMarkerExpr); ok {
+	if x, ok := in.(*ParamMarkerExpr); ok {
 		x.SetFlag(FlagHasParamMarker)
 	}
 	switch x := in.(type) {

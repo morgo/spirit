@@ -22,7 +22,6 @@ import (
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/mysql"
 	// import parser_driver
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 	. "github.com/block/spirit/pkg/parser/types"
 	"github.com/stretchr/testify/require"
 )

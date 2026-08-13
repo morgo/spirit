@@ -25,18 +25,19 @@ func TestKeywords(t *testing.T) {
 	require.Equal(t, "ADD", parser.Keywords[0].Word)
 	require.Equal(t, true, parser.Keywords[0].Reserved)
 
-	// Make sure TiDBKeywords are included.
+	// Make sure unreserved keywords are included.
 	found := false
 	for _, kw := range parser.Keywords {
-		if kw.Word == "ADMIN" {
+		if kw.Word == "BUCKETS" {
 			found = true
+			require.False(t, kw.Reserved)
 		}
 	}
-	require.Equal(t, found, true, "TiDBKeyword ADMIN is part of the list")
+	require.Equal(t, found, true, "unreserved keyword BUCKETS is part of the list")
 }
 
 func TestKeywordsLength(t *testing.T) {
-	require.Equal(t, 687, len(parser.Keywords))
+	require.Equal(t, 505, len(parser.Keywords))
 
 	reservedNr := 0
 	for _, kw := range parser.Keywords {
@@ -44,7 +45,7 @@ func TestKeywordsLength(t *testing.T) {
 			reservedNr += 1
 		}
 	}
-	require.Equal(t, 233, reservedNr)
+	require.Equal(t, 219, reservedNr)
 }
 
 func TestKeywordsSorting(t *testing.T) {

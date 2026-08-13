@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/ast"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 // Not tagged ScopeStatement: renames are metadata-only, so MySQL's native DDL,

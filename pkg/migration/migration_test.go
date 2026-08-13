@@ -18,7 +18,6 @@ import (
 	"github.com/block/spirit/pkg/testutils"
 
 	"github.com/go-sql-driver/mysql"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )

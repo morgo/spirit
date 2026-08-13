@@ -18,7 +18,6 @@ import (
 	"log"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 )
 
@@ -26,14 +25,12 @@ const (
 	reservedKeywordStart   = "The following tokens belong to ReservedKeyword"
 	unreservedkeywordStart = "The following tokens belong to UnReservedKeyword"
 	notKeywordStart        = "The following tokens belong to NotKeywordToken"
-	tiDBKeywordStart       = "The following tokens belong to TiDBKeyword"
 )
 
 const (
 	sectionNone = iota
 	sectionReservedKeyword
 	sectionUnreservedKeyword
-	sectionTiDBKeyword
 )
 
 const (
@@ -62,7 +59,7 @@ type KeywordsType struct {
 	Section  string
 }
 
-// Keywords is used for all keywords in TiDB
+// Keywords is used for all keywords in the parser
 var Keywords = []KeywordsType{
 `
 	fileEnd = `}
@@ -83,9 +80,6 @@ func parseLine(line string) string {
 	}
 	m := keywordRe.FindStringSubmatch(line)
 	if len(m) != 2 {
-		return ""
-	}
-	if slices.Contains(keywordsMariaDB, m[1]) {
 		return ""
 	}
 	return m[1]
@@ -117,8 +111,6 @@ func main() {
 			section = sectionReservedKeyword
 		} else if strings.Contains(line, unreservedkeywordStart) {
 			section = sectionUnreservedKeyword
-		} else if strings.Contains(line, tiDBKeywordStart) {
-			section = sectionTiDBKeyword
 		} else if strings.Contains(line, notKeywordStart) {
 			section = sectionNone
 		}
@@ -128,11 +120,6 @@ func main() {
 			word := parseLine(line)
 			if len(word) > 0 {
 				fmt.Fprintf(keywordsFile, "\t{\"%s\", true, \"reserved\"},\n", word)
-			}
-		case sectionTiDBKeyword:
-			word := parseLine(line)
-			if len(word) > 0 {
-				fmt.Fprintf(keywordsFile, "\t{\"%s\", false, \"tidb\"},\n", word)
 			}
 		case sectionUnreservedKeyword:
 			word := parseLine(line)

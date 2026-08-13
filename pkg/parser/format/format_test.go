@@ -19,7 +19,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pingcap/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,29 +80,4 @@ func TestRestoreCtx(t *testing.T) {
 		ctx.WriteName("na`.'\"Me\\")
 		require.Equalf(t, testCase.expect, sb.String(), "case: %#v", testCase)
 	}
-}
-
-func TestRestoreSpecialComment(t *testing.T) {
-	var sb strings.Builder
-	sb.Reset()
-	ctx := NewRestoreCtx(RestoreTiDBSpecialComment, &sb)
-	require.NoError(t, ctx.WriteWithSpecialComments("fea_id", func() error {
-		ctx.WritePlain("content")
-		return nil
-	}))
-	require.Equal(t, "/*T![fea_id] content */", sb.String())
-
-	sb.Reset()
-	require.NoError(t, ctx.WriteWithSpecialComments("", func() error {
-		ctx.WritePlain("shard_row_id_bits")
-		return nil
-	}))
-	require.Equal(t, "/*T! shard_row_id_bits */", sb.String())
-
-	sb.Reset()
-	err := errors.New("xxxx")
-	got := ctx.WriteWithSpecialComments("", func() error {
-		return err
-	})
-	require.Same(t, err, got)
 }

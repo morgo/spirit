@@ -16,7 +16,6 @@ package ast
 import (
 	"fmt"
 	"io"
-	"reflect"
 	"regexp"
 	"strings"
 
@@ -52,23 +51,6 @@ var (
 	_ Node = &ColumnName{}
 	_ Node = &WhenClause{}
 )
-
-// ValueExpr define a interface for ValueExpr.
-type ValueExpr interface {
-	ExprNode
-	SetValue(val any)
-	GetValue() any
-	GetDatumString() string
-	GetString() string
-	GetProjectionOffset() int
-	SetProjectionOffset(offset int)
-}
-
-// NewValueExpr creates a ValueExpr with value, and sets default field type.
-var NewValueExpr func(value any, charset string, collate string) ValueExpr
-
-// NewParamMarkerExpr creates a ParamMarkerExpr.
-var NewParamMarkerExpr func(offset int) ParamMarkerExpr
 
 // BetweenExpr is for "between and" or "not between and" expression.
 type BetweenExpr struct {
@@ -995,13 +977,6 @@ func (n *PatternLikeOrIlikeExpr) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// ParamMarkerExpr expression holds a place for another expression.
-// Used in parsing prepare statement.
-type ParamMarkerExpr interface {
-	ValueExpr
-	SetOrder(int)
-}
-
 // ParenthesesExpr is the parentheses' expression.
 type ParenthesesExpr struct {
 	exprNode
@@ -1524,18 +1499,4 @@ func (e *exprCleaner) Enter(n Node) (node Node, skipChildren bool) {
 
 func (e *exprCleaner) Leave(n Node) (node Node, ok bool) {
 	return n, true
-}
-
-// ExpressionDeepEqual compares the equivalence of two expressions.
-func ExpressionDeepEqual(a ExprNode, b ExprNode) bool {
-	cleanerA := &exprCleaner{}
-	cleanerB := &exprCleaner{}
-	a.Accept(cleanerA)
-	b.Accept(cleanerB)
-	result := reflect.DeepEqual(a, b)
-	cleanerA.BeginRestore()
-	cleanerB.BeginRestore()
-	a.Accept(cleanerA)
-	b.Accept(cleanerB)
-	return result
 }

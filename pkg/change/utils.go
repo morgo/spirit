@@ -10,7 +10,6 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/parser/ast"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 func encodeSchemaTable(schema, table string) string {

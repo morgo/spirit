@@ -90,11 +90,6 @@ type OptBinary struct {
 	Charset  string
 }
 
-// OptVectorType represents the element type of the vector.
-type VectorElementType struct {
-	Tp byte // Only FLOAT and DOUBLE is accepted.
-}
-
 // FuncNode represents function call expression node.
 type FuncNode interface {
 	ExprNode
@@ -106,12 +101,6 @@ type FuncNode interface {
 type StmtNode interface {
 	Node
 	statement()
-	// SEMCommand generates a string that represents the command type of the statement.
-	// It's only used for Security Enforcement Mode (SEM) for now. If it's going to be
-	// re-used for other purposes, we may need to rename and give it a clearer definition.
-	//
-	// The function of this method is similar to `GetStmtLabel`, but it returns more detail.
-	SEMCommand() string
 }
 
 // DDLNode represents DDL statement node.
@@ -166,8 +155,6 @@ func GetStmtLabel(stmtNode StmtNode) string {
 		return "Begin"
 	case *CommitStmt:
 		return "Commit"
-	case *CompactTableStmt:
-		return "CompactTable"
 	case *CreateDatabaseStmt:
 		return "CreateDatabase"
 	case *CreateIndexStmt:
@@ -202,8 +189,6 @@ func GetStmtLabel(stmtNode StmtNode) string {
 			return "Replace"
 		}
 		return "Insert"
-	case *ImportIntoStmt:
-		return "ImportInto"
 	case *LoadDataStmt:
 		return "LoadData"
 	case *RollbackStmt:
@@ -230,12 +215,6 @@ func GetStmtLabel(stmtNode StmtNode) string {
 		return "Prepare"
 	case *UseStmt:
 		return "Use"
-	case *CreateBindingStmt:
-		return "CreateBinding"
-	case *DropBindingStmt:
-		return "DropBinding"
-	case *TraceStmt:
-		return "Trace"
 	case *ShutdownStmt:
 		return "Shutdown"
 	case *SavepointStmt:

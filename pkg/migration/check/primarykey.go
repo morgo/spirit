@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"github.com/block/spirit/pkg/parser/ast"
-	_ "github.com/block/spirit/pkg/parser/test_driver"
 )
 
 func init() {

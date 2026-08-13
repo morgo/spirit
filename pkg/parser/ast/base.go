@@ -410,9 +410,6 @@ type exprNode struct {
 	flag uint64
 }
 
-// TexprNode is exported for parser driver.
-type TexprNode = exprNode
-
 // SetType implements ExprNode interface.
 func (en *exprNode) SetType(tp *types.FieldType) {
 	en.Type = *tp
