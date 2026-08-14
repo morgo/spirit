@@ -125,10 +125,9 @@ func needsSpaceBeforeHexLiteral(utf8Text []byte, quoteStart int) bool {
 //
 // The function first transforms the entire text to UTF-8 and then scans the
 // UTF-8 result for string literal boundaries. This avoids ambiguity in
-// encodings like GBK/GB18030 where ASCII-range bytes (e.g. 0x5C backslash)
-// can appear as trail bytes of multibyte characters — UTF-8 never reuses
-// ASCII byte values in multibyte sequences, so quote and backslash detection
-// is always correct.
+// encodings whose multibyte sequences can contain ASCII-range bytes (e.g.
+// 0x5C backslash) as trail bytes — UTF-8 never reuses ASCII byte values in
+// multibyte sequences, so quote and backslash detection is always correct.
 //
 // A parallel index into the original byte sequence is maintained so that
 // non-printable strings can be hex-encoded from their original bytes.

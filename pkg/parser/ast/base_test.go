@@ -32,8 +32,7 @@ func TestNodeSetText(t *testing.T) {
 		expectText     string
 	}{
 		{"你好", nil, "你好", "你好"},
-		{"\xd2\xbb", charset.EncodingGBKImpl, "一", "\xd2\xbb"},
-		{"\xc1\xd0", charset.EncodingGBKImpl, "列", "\xc1\xd0"},
+		{"你好", charset.EncodingUTF8Impl, "你好", "你好"},
 	}
 	for _, tt := range tests {
 		n.SetText(tt.enc, tt.text)
@@ -224,32 +223,6 @@ func TestBinaryStringLiteralNoBackslashEscapes(t *testing.T) {
 	n.SetText(charset.EncodingUTF8Impl, "SELECT '\xd2\xe4'")
 	n.SetNoBackslashEscapes(true)
 	require.Equal(t, "SELECT 0xd2e4", n.Text(), "NO_BACKSLASH_ESCAPES binary")
-}
-
-func TestBinaryStringLiteralGBK(t *testing.T) {
-	n := &node{}
-
-	// GBK Chinese text: \xb1\xed is 表 in GBK, \x31 is '1'.
-	// This should be decoded as valid GBK and left as a printable string,
-	// not converted to a hex literal.
-	n.SetText(charset.EncodingGBKImpl, "select '\xb1\xed\x31'")
-	require.Equal(t, "select '表1'", n.Text(), "GBK printable")
-
-	// GBK with actual invalid bytes should still convert to hex
-	n.SetText(charset.EncodingGBKImpl, "select '\x80\xff'")
-	require.Equal(t, "select 0x80ff", n.Text(), "GBK binary")
-
-	// 筡 = \xb9\x5c in GBK; trail byte 0x5c must not be mistaken for backslash
-	n.SetText(charset.EncodingGBKImpl, "select '\xb9\x5c'")
-	require.Equal(t, "select '筡'", n.Text(), "GBK 0x5c trail byte")
-
-	// Multiple GBK chars with 0x5c trail bytes: 筡 = \xb9\x5c, 臷 = \xc5\x5c
-	n.SetText(charset.EncodingGBKImpl, "select '\xb9\x5c\xc5\x5c'")
-	require.Equal(t, "select '筡臷'", n.Text(), "GBK multiple 0x5c trail bytes")
-
-	// 0x5c trail byte right before closing quote must not escape the quote
-	n.SetText(charset.EncodingGBKImpl, "select '\xb9\x5c', 'after'")
-	require.Equal(t, "select '筡', 'after'", n.Text(), "GBK 0x5c before quote")
 }
 
 func buildBinaryClause() string {

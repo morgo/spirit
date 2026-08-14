@@ -22,26 +22,7 @@ var (
 	_ Encoding = &encodingASCII{}
 	_ Encoding = &encodingLatin1{}
 	_ Encoding = &encodingBin{}
-	_ Encoding = &encodingGBK{}
-	_ Encoding = &encodingGB18030{}
 )
-
-// IsSupportedEncoding checks if the charset is fully supported.
-func IsSupportedEncoding(charset string) bool {
-	_, ok := encodingMap[charset]
-	return ok
-}
-
-// FindEncodingTakeUTF8AsNoop finds the encoding according to the charset
-// except that utf-8 is treated as no-operation encoding. This is used to
-// reduce the overhead of utf-8 validation in some cases.
-func FindEncodingTakeUTF8AsNoop(charset string) Encoding {
-	enc := FindEncoding(charset)
-	if enc.Tp() == EncodingTpUTF8 {
-		return EncodingBinImpl
-	}
-	return enc
-}
 
 // FindEncoding finds the encoding according to charset.
 func FindEncoding(charset string) Encoding {
@@ -57,11 +38,9 @@ func FindEncoding(charset string) Encoding {
 var encodingMap = map[string]Encoding{
 	CharsetUTF8MB4: EncodingUTF8Impl,
 	CharsetUTF8:    EncodingUTF8Impl,
-	CharsetGBK:     EncodingGBKImpl,
 	CharsetLatin1:  EncodingLatin1Impl,
 	CharsetBin:     EncodingBinImpl,
 	CharsetASCII:   EncodingASCIIImpl,
-	CharsetGB18030: EncodingGB18030Impl,
 }
 
 // Encoding provide encode/decode functions for a string with a specific charset.
@@ -101,8 +80,6 @@ const (
 	EncodingTpASCII
 	EncodingTpLatin1
 	EncodingTpBin
-	EncodingTpGBK
-	EncodingTpGB18030
 )
 
 //revive:enable
@@ -134,29 +111,3 @@ const (
 )
 
 //revive:enable
-
-// CountValidBytes counts the first valid bytes in src that
-// can be encoded to the current encoding.
-func CountValidBytes(e Encoding, src []byte) int {
-	nSrc := 0
-	e.Foreach(src, opFromUTF8, func(from, _ []byte, ok bool) bool {
-		if ok {
-			nSrc += len(from)
-		}
-		return ok
-	})
-	return nSrc
-}
-
-// CountValidBytesDecode counts the first valid bytes in src that
-// can be decoded to utf-8.
-func CountValidBytesDecode(e Encoding, src []byte) int {
-	nSrc := 0
-	e.Foreach(src, opToUTF8, func(from, _ []byte, ok bool) bool {
-		if ok {
-			nSrc += len(from)
-		}
-		return ok
-	})
-	return nSrc
-}

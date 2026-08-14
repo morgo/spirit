@@ -499,25 +499,6 @@ func TestParserErrMsg(t *testing.T) {
 	RunErrMsgTest(t, funcCallMsgCases)
 }
 
-type subqueryChecker struct {
-	text string
-	t    *testing.T
-}
-
-// Enter implements ast.Visitor interface.
-func (sc *subqueryChecker) Enter(inNode ast.Node) (outNode ast.Node, skipChildren bool) {
-	if expr, ok := inNode.(*ast.SubqueryExpr); ok {
-		require.Equal(sc.t, sc.text, expr.Query.Text())
-		return inNode, true
-	}
-	return inNode, false
-}
-
-// Leave implements ast.Visitor interface.
-func (sc *subqueryChecker) Leave(inNode ast.Node) (node ast.Node, ok bool) {
-	return inNode, true
-}
-
 func checkOrderBy(t *testing.T, s ast.Node, hasOrderBy []bool, i int) int {
 	switch x := s.(type) {
 	case *ast.SelectStmt:
@@ -788,27 +769,6 @@ func TestNotExistsSubquery(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, tbl.ok, exists.Not)
 	}
-}
-
-type windowFrameBoundChecker struct {
-	fb     *ast.FrameBound
-	exprRc int
-	unit   ast.TimeUnitType
-	t      *testing.T
-}
-
-// Enter implements ast.Visitor interface.
-func (wfc *windowFrameBoundChecker) Leave(inNode ast.Node) (node ast.Node, ok bool) {
-	if _, ok := inNode.(*ast.FrameBound); ok {
-		wfc.fb = nil
-	}
-	if wfc.fb != nil {
-		if inNode == wfc.fb.Expr {
-			wfc.exprRc++
-		}
-		wfc.unit = wfc.fb.Unit
-	}
-	return inNode, true
 }
 
 // For issue #51
@@ -1334,16 +1294,6 @@ func TestCTEBindings(t *testing.T) {
 	}
 }
 
-type gbkEncodingChecker struct {
-	tblName string
-	colName string
-	expr    string
-}
-
-func (g *gbkEncodingChecker) Leave(n ast.Node) (node ast.Node, ok bool) {
-	return n, true
-}
-
 func TestInsertStatementMemoryAllocation(t *testing.T) {
 	sql := "insert t values (1)" + strings.Repeat(",(1)", 1000)
 	var oldStats, newStats runtime.MemStats
@@ -1356,8 +1306,9 @@ func TestInsertStatementMemoryAllocation(t *testing.T) {
 
 func TestCharsetIntroducer(t *testing.T) {
 	p := parser.New()
-	defer charset.RemoveCharset("gbk")
-	// `_gbk` is treated as a character set.
+	// `_gbk` is a valid character set name, but introducers are restricted
+	// to the charsets with a default legacy collation (see
+	// charset.GetDefaultCollationLegacy).
 	_, _, err := p.Parse("select _gbk 'a';", "", "")
 	require.EqualError(t, err, "[ddl:1115]Unsupported character introducer: 'gbk'")
 	_, _, err = p.Parse("select _gbk 0x1234;", "", "")

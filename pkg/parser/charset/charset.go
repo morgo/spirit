@@ -613,51 +613,22 @@ var collations = []*Collation{
 	{2048, "utf8mb4", "utf8mb4_zh_pinyin_tidb_as_cs", false, 1, PadNone},
 }
 
-// AddCharset adds a new charset.
-// Use only when adding a custom charset to the parser.
-func AddCharset(c *Charset) {
-	CharacterSetInfos[c.Name] = c
-}
-
-// RemoveCharset remove a charset.
-// Use only when remove a custom charset to the parser.
-func RemoveCharset(c string) {
-	delete(CharacterSetInfos, c)
-	for i := range supportedCollations {
-		if supportedCollations[i].Name == c {
-			supportedCollations = slices.Delete(supportedCollations, i, i+1)
-		}
-	}
-}
-
-// AddCollation adds a new collation.
-// Use only when adding a custom collation to the parser.
-func AddCollation(c *Collation) {
-	collationsIDMap[c.ID] = c
-	collationsNameMap[c.Name] = c
-
-	if _, ok := supportedCollationNames[c.Name]; ok {
-		AddSupportedCollation(c)
-	}
-
-	if charset, ok := CharacterSetInfos[c.CharsetName]; ok {
-		charset.Collations[c.Name] = c
-	}
-
-	if charset, ok := charsets[c.CharsetName]; ok {
-		charset.Collations[c.Name] = c
-	}
-}
-
-// AddSupportedCollation adds a new collation into supportedCollations.
-// Use only when adding a custom collation to the parser.
-func AddSupportedCollation(c *Collation) {
-	supportedCollations = append(supportedCollations, c)
-}
-
 // init method always puts to the end of file.
 func init() {
 	for _, c := range collations {
-		AddCollation(c)
+		collationsIDMap[c.ID] = c
+		collationsNameMap[c.Name] = c
+
+		if _, ok := supportedCollationNames[c.Name]; ok {
+			supportedCollations = append(supportedCollations, c)
+		}
+
+		if charset, ok := CharacterSetInfos[c.CharsetName]; ok {
+			charset.Collations[c.Name] = c
+		}
+
+		if charset, ok := charsets[c.CharsetName]; ok {
+			charset.Collations[c.Name] = c
+		}
 	}
 }
