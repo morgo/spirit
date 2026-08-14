@@ -1066,27 +1066,8 @@ func (checker *nodeTextCleaner) Enter(in ast.Node) (out ast.Node, skipChildren b
 		node.ExplicitParens = false
 	case *ast.ColumnDef:
 		node.Tp.CleanElemIsBinaryLit()
-	case *ast.PartitionOptions:
-		cleanPartition(node)
 	}
 	return in, false
-}
-
-func cleanPartition(n ast.Node) {
-	if p, ok := n.(*ast.PartitionOptions); ok && p != nil {
-		var tmpCleaner nodeTextCleaner
-		if p.Interval != nil {
-			p.Interval.SetText(nil, "")
-			p.Interval.SetOriginTextPosition(0)
-			p.Interval.IntervalExpr.Expr.Accept(&tmpCleaner)
-			if p.Interval.FirstRangeEnd != nil {
-				(*p.Interval.FirstRangeEnd).Accept(&tmpCleaner)
-			}
-			if p.Interval.LastRangeEnd != nil {
-				(*p.Interval.LastRangeEnd).Accept(&tmpCleaner)
-			}
-		}
-	}
 }
 
 // CleanNodeText set the text of node and all child node empty.

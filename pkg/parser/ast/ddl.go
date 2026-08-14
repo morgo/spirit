@@ -2732,13 +2732,11 @@ var (
 	ErrPartitionWrongNoSubpart              = mysql.NewStdErr("ddl", mysql.ErrPartitionWrongNoSubpart)
 	ErrPartitionWrongValues                 = mysql.NewStdErr("ddl", mysql.ErrPartitionWrongValues)
 	ErrRowSinglePartitionField              = mysql.NewStdErr("ddl", mysql.ErrRowSinglePartitionField)
-	ErrSubpartition                         = mysql.NewStdErr("ddl", mysql.ErrSubpartition)
-	ErrSystemVersioningWrongPartitions      = mysql.NewStdErr("ddl", mysql.ErrSystemVersioningWrongPartitions)
-	ErrTooManyValues                        = mysql.NewStdErr("ddl", mysql.ErrTooManyValues)
-	ErrWrongPartitionTypeExpectedSystemTime = mysql.NewStdErr("ddl", mysql.ErrWrongPartitionTypeExpectedSystemTime)
-	ErrUnknownCharacterSet                  = mysql.NewStdErr("ddl", mysql.ErrUnknownCharacterSet)
-	ErrCoalescePartitionNoPartition         = mysql.NewStdErr("ddl", mysql.ErrCoalescePartitionNoPartition)
-	ErrWrongUsage                           = mysql.NewStdErr("ddl", mysql.ErrWrongUsage)
+	ErrSubpartition                 = mysql.NewStdErr("ddl", mysql.ErrSubpartition)
+	ErrTooManyValues                = mysql.NewStdErr("ddl", mysql.ErrTooManyValues)
+	ErrUnknownCharacterSet          = mysql.NewStdErr("ddl", mysql.ErrUnknownCharacterSet)
+	ErrCoalescePartitionNoPartition = mysql.NewStdErr("ddl", mysql.ErrCoalescePartitionNoPartition)
+	ErrWrongUsage                   = mysql.NewStdErr("ddl", mysql.ErrWrongUsage)
 )
 
 type SubPartitionDefinition struct {
@@ -2784,8 +2782,6 @@ func (*PartitionDefinitionClauseNone) Validate(pt PartitionType, _ int) error {
 		return ErrPartitionRequiresValues.GenByArgs("RANGE", "LESS THAN")
 	case PartitionTypeList:
 		return ErrPartitionRequiresValues.GenByArgs("LIST", "IN")
-	case PartitionTypeSystemTime:
-		return ErrSystemVersioningWrongPartitions
 	}
 	return nil
 }
@@ -2940,33 +2936,6 @@ func (n *PartitionDefinitionClauseIn) Validate(pt PartitionType, columns int) er
 	return nil
 }
 
-type PartitionDefinitionClauseHistory struct {
-	Current bool
-}
-
-func (n *PartitionDefinitionClauseHistory) restore(ctx *format.RestoreCtx) error {
-	if n.Current {
-		ctx.WriteKeyWord(" CURRENT")
-	} else {
-		ctx.WriteKeyWord(" HISTORY")
-	}
-	return nil
-}
-
-func (*PartitionDefinitionClauseHistory) acceptInPlace(_ Visitor) bool {
-	return true
-}
-
-func (*PartitionDefinitionClauseHistory) Validate(pt PartitionType, _ int) error {
-	switch pt {
-	case 0, PartitionTypeSystemTime:
-	default:
-		return ErrWrongPartitionTypeExpectedSystemTime
-	}
-
-	return nil
-}
-
 // PartitionDefinition defines a single partition.
 type PartitionDefinition struct {
 	Name    CIStr
@@ -3022,23 +2991,6 @@ func (n *PartitionDefinition) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-type PartitionIntervalExpr struct {
-	Expr ExprNode
-	// TimeUnitInvalid if not Time based INTERVAL!
-	TimeUnit TimeUnitType
-}
-
-type PartitionInterval struct {
-	// To be able to get original text and replace the syntactic sugar with generated
-	// partition definitions
-	node
-	IntervalExpr  PartitionIntervalExpr
-	FirstRangeEnd *ExprNode
-	LastRangeEnd  *ExprNode
-	MaxValPart    bool
-	NullPart      bool
-}
-
 // PartitionMethod describes how partitions or subpartitions are constructed.
 type PartitionMethod struct {
 	// To be able to get original text and replace the syntactic sugar with generated
@@ -3054,18 +3006,12 @@ type PartitionMethod struct {
 	// ColumnNames is a list of column names used as argument of KEY,
 	// RANGE COLUMNS and LIST COLUMNS types
 	ColumnNames []*ColumnName
-	// Unit is a time unit used as argument of SYSTEM_TIME type
-	Unit TimeUnitType
-	// Limit is a row count used as argument of the SYSTEM_TIME type
-	Limit uint64
 
 	// Num is the number of (sub)partitions required by the method.
 	Num uint64
 
 	// KeyAlgorithm is the optional hash algorithm type for `PARTITION BY [LINEAR] KEY` syntax.
 	KeyAlgorithm *PartitionKeyAlgorithm
-
-	Interval *PartitionInterval
 }
 
 type PartitionKeyAlgorithm struct {
@@ -3085,20 +3031,6 @@ func (n *PartitionMethod) Restore(ctx *format.RestoreCtx) error {
 	}
 
 	switch {
-	case n.Tp == PartitionTypeSystemTime:
-		if n.Expr != nil && n.Unit != TimeUnitInvalid {
-			ctx.WriteKeyWord(" INTERVAL ")
-			if err := n.Expr.Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore PartitionMethod.Expr: %w", err)
-			}
-			ctx.WritePlain(" ")
-			ctx.WriteKeyWord(n.Unit.String())
-		}
-		if n.Limit > 0 {
-			ctx.WriteKeyWord(" LIMIT ")
-			ctx.WritePlainf("%d", n.Limit)
-		}
-
 	case n.Expr != nil:
 		ctx.WritePlain(" (")
 		if err := n.Expr.Restore(ctx); err != nil {
@@ -3120,32 +3052,6 @@ func (n *PartitionMethod) Restore(ctx *format.RestoreCtx) error {
 			}
 		}
 		ctx.WritePlain(")")
-	}
-
-	if n.Interval != nil {
-		ctx.WritePlain(" INTERVAL (")
-		n.Interval.IntervalExpr.Expr.Restore(ctx)
-		if n.Interval.IntervalExpr.TimeUnit != TimeUnitInvalid {
-			ctx.WritePlain(" ")
-			ctx.WriteKeyWord(n.Interval.IntervalExpr.TimeUnit.String())
-		}
-		ctx.WritePlain(")")
-		if n.Interval.FirstRangeEnd != nil {
-			ctx.WritePlain(" FIRST PARTITION LESS THAN (")
-			(*n.Interval.FirstRangeEnd).Restore(ctx)
-			ctx.WritePlain(")")
-		}
-		if n.Interval.LastRangeEnd != nil {
-			ctx.WritePlain(" LAST PARTITION LESS THAN (")
-			(*n.Interval.LastRangeEnd).Restore(ctx)
-			ctx.WritePlain(")")
-		}
-		if n.Interval.NullPart {
-			ctx.WritePlain(" NULL PARTITION")
-		}
-		if n.Interval.MaxValPart {
-			ctx.WritePlain(" MAXVALUE PARTITION")
-		}
 	}
 
 	return nil
@@ -3213,12 +3119,8 @@ func (n *PartitionOptions) Validate() error {
 			n.Num = 1
 		}
 	case PartitionTypeRange, PartitionTypeList:
-		if n.Interval == nil && len(n.Definitions) == 0 {
+		if len(n.Definitions) == 0 {
 			return ErrPartitionsMustBeDefined.GenByArgs(n.Tp)
-		}
-	case PartitionTypeSystemTime:
-		if len(n.Definitions) < 2 {
-			return ErrSystemVersioningWrongPartitions
 		}
 	}
 

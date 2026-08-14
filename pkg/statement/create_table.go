@@ -131,7 +131,7 @@ type TableOptions struct {
 
 // PartitionOptions represents table partitioning configuration
 type PartitionOptions struct {
-	Type         string                `json:"type"`                   // RANGE, LIST, HASH, KEY, SYSTEM_TIME
+	Type         string                `json:"type"`                   // RANGE, LIST, HASH, KEY
 	Expression   *string               `json:"expression,omitempty"`   // For HASH and RANGE
 	Columns      []string              `json:"columns,omitempty"`      // For KEY, RANGE COLUMNS, LIST COLUMNS
 	Linear       bool                  `json:"linear,omitempty"`       // For LINEAR HASH/KEY
@@ -879,8 +879,6 @@ func (ct *CreateTable) parsePartitionOptions(partition *ast.PartitionOptions) *P
 		partOpts.Type = "KEY"
 	case ast.PartitionTypeList:
 		partOpts.Type = "LIST"
-	case ast.PartitionTypeSystemTime:
-		partOpts.Type = "SYSTEM_TIME"
 	default:
 		partOpts.Type = fmt.Sprintf("UNKNOWN_%d", partition.Tp)
 	}
@@ -1008,12 +1006,6 @@ func (ct *CreateTable) parsePartitionClause(clause ast.PartitionDefinitionClause
 		}
 
 		return values
-	case *ast.PartitionDefinitionClauseHistory:
-		if c.Current {
-			return &PartitionValues{Type: "CURRENT", Values: []any{}}
-		} else {
-			return &PartitionValues{Type: "HISTORY", Values: []any{}}
-		}
 	default:
 		return nil
 	}

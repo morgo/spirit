@@ -583,7 +583,6 @@ var tokenMap = map[string]int{
 	"SUPER":                      super,
 	"SWAPS":                      swaps,
 	"SWITCHES":                   switchesSym,
-	"SYSTEM_TIME":                systemTime,
 	"TABLE":                      tableKwd,
 	"TABLES":                     tables,
 	"TABLESPACE":                 tablespace,

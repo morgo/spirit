@@ -138,11 +138,10 @@ const (
 	// a single partition
 	PartitionTypeNone PartitionType = 0
 
-	PartitionTypeRange      PartitionType = 1
-	PartitionTypeHash       PartitionType = 2
-	PartitionTypeList       PartitionType = 3
-	PartitionTypeKey        PartitionType = 4
-	PartitionTypeSystemTime PartitionType = 5
+	PartitionTypeRange PartitionType = 1
+	PartitionTypeHash  PartitionType = 2
+	PartitionTypeList  PartitionType = 3
+	PartitionTypeKey   PartitionType = 4
 )
 
 // String implements fmt.Stringer interface.
@@ -156,8 +155,6 @@ func (p PartitionType) String() string {
 		return "LIST"
 	case PartitionTypeKey:
 		return "KEY"
-	case PartitionTypeSystemTime:
-		return "SYSTEM_TIME"
 	case PartitionTypeNone:
 		return "NONE"
 	default:

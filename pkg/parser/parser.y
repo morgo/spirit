@@ -543,7 +543,6 @@ type likeEscapeSpec struct {
 	super                      "SUPER"
 	swaps                      "SWAPS"
 	switchesSym                "SWITCHES"
-	systemTime                 "SYSTEM_TIME"
 	tables                     "TABLES"
 	tablespace                 "TABLESPACE"
 	temporary                  "TEMPORARY"
@@ -827,7 +826,6 @@ type likeEscapeSpec struct {
 	TableRefsClause                        "Table references clause"
 	FieldItem                              "Field item for load data clause"
 	FieldItemList                          "Field items for load data clause"
-	FirstAndLastPartOpt                    "First and Last partition option"
 	FuncDatetimePrec                       "Function datetime precision"
 	GetFormatSelector                      "{DATE|DATETIME|TIME|TIMESTAMP}"
 	GlobalScope                            "The scope of variable"
@@ -857,7 +855,6 @@ type likeEscapeSpec struct {
 	IndexPartSpecificationListOpt          "Optional list of index column name or expression"
 	InsertValues                           "Rest part of INSERT/REPLACE INTO statement"
 	InsertRowAliasOpt                      "optional row alias for INSERT VALUES/SET"
-	IntervalExpr                           "Interval expression"
 	JoinTable                              "join table"
 	JoinType                               "join type"
 	LikeTableWithOrWithoutParen            "LIKE table_name or ( LIKE table_name )"
@@ -872,8 +869,6 @@ type likeEscapeSpec struct {
 	LockClause                             "Alter table lock clause"
 	LogTypeOpt                             "Optional log type used in FLUSH statements"
 	LowPriorityOpt                         "LOAD DATA low priority option"
-	MaxValPartOpt                          "MAXVALUE partition option"
-	NullPartOpt                            "NULL Partition option"
 	NumLiteral                             "Num/Int/Float/Decimal Literal"
 	NoWriteToBinLogAliasOpt                "NO_WRITE_TO_BINLOG alias LOCAL or empty"
 	ObjectType                             "Grant statement object type"
@@ -895,7 +890,6 @@ type likeEscapeSpec struct {
 	PartitionDefinition                    "Partition definition"
 	PartitionDefinitionList                "Partition definition list"
 	PartitionDefinitionListOpt             "Partition definition list option"
-	PartitionIntervalOpt                   "Partition interval option"
 	PartitionKeyAlgorithmOpt               "ALGORITHM = n option for KEY partition"
 	PartitionMethod                        "Partition method"
 	PartitionOpt                           "Partition option"
@@ -3069,22 +3063,18 @@ PartitionKeyAlgorithmOpt:
 
 PartitionMethod:
 	SubPartitionMethod
-|	"RANGE" '(' BitExpr ')' PartitionIntervalOpt
+|	"RANGE" '(' BitExpr ')'
 	{
-		partitionInterval, _ := $5.(*ast.PartitionInterval)
 		$$ = &ast.PartitionMethod{
-			Tp:       ast.PartitionTypeRange,
-			Expr:     $3.(ast.ExprNode),
-			Interval: partitionInterval,
+			Tp:   ast.PartitionTypeRange,
+			Expr: $3.(ast.ExprNode),
 		}
 	}
-|	"RANGE" FieldsOrColumns '(' ColumnNameList ')' PartitionIntervalOpt
+|	"RANGE" FieldsOrColumns '(' ColumnNameList ')'
 	{
-		partitionInterval, _ := $6.(*ast.PartitionInterval)
 		$$ = &ast.PartitionMethod{
 			Tp:          ast.PartitionTypeRange,
 			ColumnNames: $4.([]*ast.ColumnName),
-			Interval:    partitionInterval,
 		}
 	}
 |	"LIST" '(' BitExpr ')'
@@ -3101,89 +3091,6 @@ PartitionMethod:
 			ColumnNames: $4.([]*ast.ColumnName),
 		}
 	}
-|	"SYSTEM_TIME" "INTERVAL" Expression TimeUnit
-	{
-		$$ = &ast.PartitionMethod{
-			Tp:   ast.PartitionTypeSystemTime,
-			Expr: $3.(ast.ExprNode),
-			Unit: $4.(ast.TimeUnitType),
-		}
-	}
-|	"SYSTEM_TIME" "LIMIT" LengthNum
-	{
-		$$ = &ast.PartitionMethod{
-			Tp:    ast.PartitionTypeSystemTime,
-			Limit: $3.(uint64),
-		}
-	}
-|	"SYSTEM_TIME"
-	{
-		$$ = &ast.PartitionMethod{
-			Tp: ast.PartitionTypeSystemTime,
-		}
-	}
-
-PartitionIntervalOpt:
-	{
-		$$ = nil
-	}
-|	"INTERVAL" '(' IntervalExpr ')' FirstAndLastPartOpt NullPartOpt MaxValPartOpt
-	{
-		partitionInterval := &ast.PartitionInterval{
-			IntervalExpr:  $3.(ast.PartitionIntervalExpr),
-			FirstRangeEnd: $5.(ast.PartitionInterval).FirstRangeEnd,
-			LastRangeEnd:  $5.(ast.PartitionInterval).LastRangeEnd,
-			NullPart:      $6.(bool),
-			MaxValPart:    $7.(bool),
-		}
-		startOffset := parser.yyVAL.offset
-		endOffset := parser.yylval.offset
-		parser.setNodeText(partitionInterval, parser.src[startOffset:endOffset])
-		$$ = partitionInterval
-	}
-
-IntervalExpr:
-	BitExpr
-	{
-		$$ = ast.PartitionIntervalExpr{Expr: $1, TimeUnit: ast.TimeUnitInvalid}
-	}
-|	BitExpr TimeUnit
-	{
-		$$ = ast.PartitionIntervalExpr{Expr: $1, TimeUnit: $2.(ast.TimeUnitType)}
-	}
-
-NullPartOpt:
-	{
-		$$ = false
-	}
-|	"NULL" "PARTITION"
-	{
-		$$ = true
-	}
-
-MaxValPartOpt:
-	{
-		$$ = false
-	}
-|	"MAXVALUE" "PARTITION"
-	{
-		$$ = true
-	}
-
-FirstAndLastPartOpt:
-	{
-		$$ = ast.PartitionInterval{} // First/LastRangeEnd defaults to nil
-	}
-|	"FIRST" "PARTITION" "LESS" "THAN" '(' BitExpr ')' "LAST" "PARTITION" "LESS" "THAN" '(' BitExpr ')'
-	{
-		first := $6.(ast.ExprNode)
-		last := $13.(ast.ExprNode)
-		$$ = ast.PartitionInterval{
-			FirstRangeEnd: &first,
-			LastRangeEnd:  &last,
-		}
-	}
-
 LinearOpt:
 	{
 		$$ = ""
@@ -3387,14 +3294,6 @@ PartDefValuesOpt:
 			}
 		}
 		$$ = &ast.PartitionDefinitionClauseIn{Values: values}
-	}
-|	"HISTORY"
-	{
-		$$ = &ast.PartitionDefinitionClauseHistory{Current: false}
-	}
-|	"CURRENT"
-	{
-		$$ = &ast.PartitionDefinitionClauseHistory{Current: true}
 	}
 
 DuplicateOpt:
@@ -4791,7 +4690,6 @@ UnReservedKeyword:
 |	"HISTORY"
 |	"LIST"
 |	"NODEGROUP"
-|	"SYSTEM_TIME"
 |	"PARTIAL"
 |	"SIMPLE"
 |	"REMOVE"

@@ -952,18 +952,6 @@ var MySQLErrName = map[uint16]string{
 	ErrFunctionalIndexDataIsTooLong:                          "Data too long for functional index '%s'",
 	ErrFunctionalIndexNotApplicable:                          "Cannot use functional index '%s' due to type or collation conversion",
 
-	// MariaDB errors.
-	ErrOnlyOneDefaultPartionAllowed:         "Only one DEFAULT partition allowed",
-	ErrWrongPartitionTypeExpectedSystemTime: "Wrong partitioning type, expected type: `SYSTEM_TIME`",
-	ErrSystemVersioningWrongPartitions:      "Wrong Partitions: must have at least one HISTORY and exactly one last CURRENT",
-	ErrSequenceRunOut:                       "Sequence '%-.64s.%-.64s' has run out",
-	ErrSequenceInvalidData:                  "Sequence '%-.64s.%-.64s' values are conflicting",
-	ErrSequenceAccessFail:                   "Sequence '%-.64s.%-.64s' access error",
-	ErrNotSequence:                          "'%-.64s.%-.64s' is not a SEQUENCE",
-	ErrUnknownSequence:                      "Unknown SEQUENCE: '%-.300s'",
-	ErrWrongInsertIntoSequence:              "Wrong INSERT into a SEQUENCE. One can only do single table INSERT into a sequence object (like with mysqldump).  If you want to change the SEQUENCE, use ALTER SEQUENCE instead.",
-	ErrSequenceInvalidTableStructure:        "Sequence '%-.64s.%-.64s' table structure is invalid (%s)",
-
 	// TiDB errors.
 	ErrWarnOptimizerHintInvalidInteger:  "integer value is out of range in '%s'",
 	ErrWarnOptimizerHintUnsupportedHint: "Optimizer hint %s is not supported and is ignored",
