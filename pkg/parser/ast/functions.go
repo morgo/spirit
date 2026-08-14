@@ -765,7 +765,12 @@ func (n *AggregateFuncExpr) Restore(ctx *format.RestoreCtx) error {
 			}
 		}
 		ctx.WriteKeyWord(" SEPARATOR ")
-		if err := n.Args[len(n.Args)-1].Restore(ctx); err != nil {
+		// The grammar only accepts `SEPARATOR stringLit` without a charset
+		// introducer, so restore the separator literal without one even though
+		// it carries the connection charset/collation.
+		separatorCtx := *ctx
+		separatorCtx.Flags |= format.RestoreStringWithoutCharset
+		if err := n.Args[len(n.Args)-1].Restore(&separatorCtx); err != nil {
 			return fmt.Errorf("an error occurred while restore AggregateFuncExpr.Args SEPARATOR: %w", err)
 		}
 	default:

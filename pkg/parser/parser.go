@@ -13007,11 +13007,11 @@ yynewstate:
 		}
 	case 1054:
 		{
-			parser.yyVAL.item = ast.NewValueExpr(",", "", "")
+			parser.yyVAL.item = ast.NewValueExpr(",", parser.charset, parser.collation)
 		}
 	case 1055:
 		{
-			parser.yyVAL.item = ast.NewValueExpr(yyS[yypt-0].ident, "", "")
+			parser.yyVAL.item = ast.NewValueExpr(yyS[yypt-0].ident, parser.charset, parser.collation)
 		}
 	case 1056:
 		{
