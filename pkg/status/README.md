@@ -43,6 +43,24 @@ The `Task` interface defines the contract that a migration runner must implement
 
 The checkpoint dumper also handles a race condition where the state transitions past cutover mid-checkpoint — the checkpoint table may have already been dropped, so this case is handled gracefully rather than treated as an error.
 
+### One line, not three
+
+The status line is deliberately the *only* recurring INFO line a run emits. It used to compete with a per-checkpoint line and a per-flush line from the change feed, each on its own interval, which made the log hard to read and hard to grep ([#329](https://github.com/block/spirit/issues/329)). Those events now report themselves as fields here instead, and still log their detail at DEBUG:
+
+| Field | Source | Meaning |
+| --- | --- | --- |
+| `chunk-size` | `copier.Copier.ChunkSize()` | Rows in the most recently claimed chunk — the dynamic chunker's current sizing decision. Was previously visible only inside the checkpoint line's watermark JSON. |
+| `since-checkpoint` | `status.LastEvent` on the runner | How long ago the checkpoint was last persisted, or `never`. |
+| `since-flush` | `change.FeedStats` | How long ago the change feed last completed a flush, or `never`. |
+| `flush-took` | `change.FeedStats` | How long that flush took. |
+| `flush-rows` | `change.FeedStats` | How many buffered changes it started with. `0` is normal for a feed that is keeping up. |
+| `binlog-rotations` | `change.FeedStats` | Binlog rotations the feed has followed. Replaces go-mysql's per-rotation `rotate to next binlog` line, which spirit now demotes to DEBUG. |
+| `binlog-rotations-forced` | `change.FeedStats` | The subset spirit caused itself, by issuing `FLUSH BINARY LOGS` from `BlockWait` when the buffered position stalled. Watch this when the question is whether cutover-time waiting is churning through binlogs. |
+
+Two naming conventions keep the duration fields apart, since both render as Go durations: an age is `since-<thing>`, and how long something took is `<thing>-took`.
+
+`conns-in-use` was dropped: it reported `sql.DB` pool occupancy, which tracks the configured thread count and says nothing an operator acts on.
+
 ## Progress Reporting
 
 `Progress` is a struct (not just a string) containing the current state and a summary. It is designed as a struct specifically to allow future expansion for GUI wrappers and external tooling.

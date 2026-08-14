@@ -659,3 +659,62 @@ Both copiers require `binlog_row_image=FULL` and an empty `binlog_row_value_opti
 - Default value: `spirit`
 
 The username to use when connecting to MySQL.
+
+## Reading the status output
+
+While a migration runs, Spirit logs one status line every 30 seconds. It is deliberately the only recurring `INFO` line: the checkpoint, the binlog flush and the binlog rotations each used to log on their own schedule, and they are now reported as fields on this line instead ([#329](https://github.com/block/spirit/issues/329)). Their detail is still available by running with debug logging.
+
+```
+2026/08/14 11:47:10 INFO migration status: state=copyRows copy-progress=7550855/16370180 46.13% chunk-size=8097 binlog-deltas=0 total-time=2m30s copier-time=2m30s copier-remaining-time=3m29s copier-is-throttled=false since-checkpoint=50s since-flush=30s flush-took=9µs flush-rows=0 binlog-rotations=56 binlog-rotations-forced=0 applier-queue=128/128 applier-pending=8 applier-workers=4 applier-rows-per-chunklet=479 applier-queue-wait-p50=1.564s applier-queue-wait-p90=4.316s applier-build-p50=2ms applier-write-p50=37ms applier-write-p90=131ms applier-handoff-p50=0s
+```
+
+Two naming conventions apply throughout, because otherwise several fields would render as bare durations with no way to tell them apart: `since-<thing>` is an age ("how long ago"), and `<thing>-took` is an elapsed time ("how long it ran for").
+
+Which fields appear depends on `state`; the copy phase (`copyRows`, above) prints the most.
+
+### Progress
+
+| Field | Meaning |
+| --- | --- |
+| `state` | The migration phase. Runs in order: `copyRows` → `waitingOnSentinelTable` (only with `--defer-cutover`) → `applyChangeset` → `restoreSecondaryIndexes` → `analyzeTable` → `checksum` → `postChecksum` → `cutOver`. |
+| `copy-progress` | Rows copied out of the estimated total, and the percentage. The total comes from table statistics, so the percentage can drift slightly and is not a row count you should reconcile against. |
+| `chunk-size` | Rows in the most recently claimed chunk. The chunker sizes chunks dynamically to hit [`--target-chunk-time`](#target-chunk-time), so this number moving is normal and healthy — it is how Spirit adapts to row width and server load. A chunk size that has collapsed to its floor and stayed there means each chunk is taking longer than the target, i.e. the server is struggling. |
+| `checksum-progress` | Same shape as `copy-progress`, printed during the `checksum` state. |
+| `total-time` | Wall-clock time since the migration started. |
+| `copier-time` / `checksum-time` | Time spent in the current phase. |
+| `copier-remaining-time` | ETA for the copy: remaining rows divided by the recently measured copy rate. `TBD` for the first minute (no rate measured yet) and `DUE` past 99.99%. It is computed from a single 10-second sample, so early on it swings a lot; treat a large jump as noise unless it persists. |
+| `copier-is-throttled` | Whether the copy is currently paused by a throttler (replica lag, commit latency, or load). A migration that is throttled is behaving as designed — it is protecting the server, not stalling. |
+
+### Replication
+
+Spirit keeps the new table in sync with writes that land during the copy by subscribing to the source's binary log.
+
+| Field | Meaning |
+| --- | --- |
+| `binlog-deltas` | Changes discovered in the binary log that have not been applied to the new table yet. This is usually low at the start of a migration because of the *key above watermark* optimization: a change to a row the copier has not reached yet can simply be dropped, since the copier will read the current version when it gets there. It rises as the copy approaches 100%, and the `applyChangeset` state exists to drain it before cutover. |
+| `since-flush` | How long ago the change feed last flushed its buffered changes to the new table. Flushes are periodic (every 30 seconds by default), so during a healthy copy this reads somewhere between `0s` and the interval. A value that keeps climbing well past it means flushes are not completing. |
+| `flush-took` | How long that flush took. |
+| `flush-rows` | How many buffered changes that flush started with. `0` is the normal reading for a feed that is keeping up — it means there was nothing left to write. |
+| `binlog-rotations` | How many binlog rotations Spirit has followed on the source. High counts usually just indicate a high volume of write activity on the server (from any workload, not only this migration). Worth knowing because binlog retention is what bounds how long a paused or resumable migration can survive. |
+| `binlog-rotations-forced` | The subset of those rotations Spirit caused itself, by issuing `FLUSH BINARY LOGS` when it was waiting for the feed to catch up and the position had stalled. A number that climbs here (rather than in `binlog-rotations`) means Spirit's own catch-up waiting is churning through binlogs. |
+
+### Checkpointing
+
+| Field | Meaning |
+| --- | --- |
+| `since-checkpoint` | How long ago the resume checkpoint was last written, or `never` before the first one. Checkpoints are attempted every 50 seconds but are skipped while the copier has no resumable watermark yet, so `never` early in a run is expected. If this keeps growing, an interrupted migration will resume from further back than you would like. A checkpoint that cannot be written at all is fatal — Spirit stops rather than working for hours without being able to record progress. |
+
+### Write pipeline
+
+The `applier-*` fields describe the shared write path that both the copier and the replication feed hand work to. Chunks are split into chunklets and queued for a pool of write workers.
+
+| Field | Meaning |
+| --- | --- |
+| `applier-queue` | Queued chunklets out of the queue capacity. Sitting at capacity (`128/128` above) means the writers are the bottleneck and the readers are being backpressured — normally the intended state during a copy, since it keeps the write side saturated. |
+| `applier-pending` | Chunklets currently in flight. |
+| `applier-workers` | Live write workers. Changes over time when [autoscaling](#enable-experimental-autoscaling) is enabled. |
+| `applier-rows-per-chunklet` | Mean rows per chunklet, i.e. how finely chunks are being split for writing. |
+| `applier-queue-wait-p50` / `-p90` | How long a chunklet waits in the queue before a worker picks it up. This is the field that tells you the write side is saturated, and by how much. |
+| `applier-build-p50` | Time spent building the statement (contained within the write time). |
+| `applier-write-p50` / `-p90` | Time to execute the write against the target. Rising p90s here point at the target server rather than at Spirit. |
+| `applier-handoff-p50` | Time to hand a completed chunklet back for feedback and watermark bookkeeping. Expected to be ~0; a non-trivial value means completion bookkeeping is contended. |

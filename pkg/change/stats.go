@@ -1,0 +1,124 @@
+package change
+
+import (
+	"fmt"
+	"time"
+)
+
+// FeedStats is a point-in-time summary of what the change feed has been doing.
+// It exists so the runners can fold the feed's activity into their single
+// periodic status line instead of the feed logging about itself on its own
+// schedule (see github.com/block/spirit/issues/329).
+//
+// The zero value means "nothing to report yet" and renders as a feed that has
+// not flushed.
+type FeedStats struct {
+	// LastFlushAt is when the most recently completed flush finished, or the
+	// zero time before the first flush completes.
+	LastFlushAt time.Time
+	// LastFlushDuration is how long that flush took.
+	LastFlushDuration time.Duration
+	// LastFlushRows is how many buffered changes were pending when that flush
+	// started — the "batch size" of the flush. Zero is normal and meaningful:
+	// it is what a feed that is keeping up looks like, and it is what
+	// Source.Flush always ends on (it loops until the backlog is trivial and
+	// then flushes once more).
+	LastFlushRows int
+	// Flushes counts completed flushes, and Residual is the pending-change
+	// count observed immediately after the most recent one. See
+	// Source.FlushResidual for why the residual has to be sampled by the feed
+	// rather than polled by the caller.
+	Flushes  int
+	Residual int
+	// Rotations counts binlog rotations the feed has followed. Duplicate
+	// rotate events (the server sends a real one and an artificial one
+	// carrying the same position) are counted once.
+	Rotations int64
+	// ForcedRotations counts the `FLUSH BINARY LOGS` statements the feed
+	// issued itself, which only happens when BlockWait sees the buffered
+	// position stall. This is the number to watch when the question is
+	// whether cutover-time waiting is churning through binlogs; a rising
+	// count with a flat Rotations count means we are the one doing it.
+	ForcedRotations int64
+}
+
+// StatsReporter is implemented by change.Source implementations that can
+// report FeedStats. It is deliberately a separate, optional interface rather
+// than part of Source: out-of-tree sources (e.g. a VStream-backed one) should
+// not have to grow a method to keep compiling, and a source that cannot
+// report simply contributes nothing to the status line.
+type StatsReporter interface {
+	FeedStats() FeedStats
+}
+
+// String renders the stats for a runner status line. Field names are kebab
+// case with no spaces inside values, matching applier.Stats.
+//
+// Naming: an age (how long ago something happened) is `since-<thing>`, and a
+// duration (how long something took) is `<thing>-took`. Both render as a Go
+// duration, so without that distinction in the name `flush=0s` would be
+// ambiguous between "flushed just now" and "the flush was instant" — which is
+// exactly the pair of numbers reported here.
+func (s FeedStats) String() string {
+	lastFlush := "never"
+	if !s.LastFlushAt.IsZero() {
+		lastFlush = time.Since(s.LastFlushAt).Round(time.Second).String()
+	}
+	return fmt.Sprintf("since-flush=%s flush-took=%v flush-rows=%d binlog-rotations=%d binlog-rotations-forced=%d",
+		lastFlush,
+		s.LastFlushDuration.Round(time.Microsecond),
+		s.LastFlushRows,
+		s.Rotations,
+		s.ForcedRotations,
+	)
+}
+
+// StatusSuffix renders the feed stats of srcs for appending to a runner status
+// line: a leading space plus String(), or "" when no source can report. Runner
+// Status() can be called before the feed is constructed, so nil sources are
+// skipped.
+//
+// Multiple sources (a sharded move reads one feed per source) are merged into
+// one set of fields: counters are summed, and the flush figures are taken from
+// the feed that flushed least recently, since that is the one holding the
+// position back.
+func StatusSuffix(srcs ...Source) string {
+	var merged FeedStats
+	var found bool
+	for _, src := range srcs {
+		if src == nil {
+			continue
+		}
+		reporter, ok := src.(StatsReporter)
+		if !ok {
+			continue
+		}
+		s := reporter.FeedStats()
+		if !found || isStaler(s, merged) {
+			merged.LastFlushAt = s.LastFlushAt
+			merged.LastFlushDuration = s.LastFlushDuration
+			merged.LastFlushRows = s.LastFlushRows
+		}
+		merged.Flushes += s.Flushes
+		merged.Residual += s.Residual
+		merged.Rotations += s.Rotations
+		merged.ForcedRotations += s.ForcedRotations
+		found = true
+	}
+	if !found {
+		return ""
+	}
+	return " " + merged.String()
+}
+
+// isStaler reports whether candidate's last flush is older than current's. A
+// feed that has never flushed is the stalest of all.
+func isStaler(candidate, current FeedStats) bool {
+	if candidate.LastFlushAt.IsZero() {
+		return true
+	}
+	if current.LastFlushAt.IsZero() {
+		return false
+	}
+	return candidate.LastFlushAt.Before(current.LastFlushAt)
+}

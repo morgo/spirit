@@ -29,21 +29,21 @@ import (
 type buffered struct {
 	sync.Mutex
 
-	db               *sql.DB
-	applier          applier.Applier
-	chunker          table.Chunker
-	concurrency      int
-	rowsPerSecond    atomic.Uint64
-	isInvalid        atomic.Bool
-	errMu            sync.Mutex // guards firstErr
-	firstErr         error      // first error that invalidated the copy (any goroutine)
-	startTime        time.Time
-	throttler        throttler.Throttler
-	dbConfig         *dbconn.DBConfig
-	logger           *slog.Logger
-	metricsSink      metrics.Sink
-	copierEtaHistory *copierEtaHistory
-	autoscale        AutoscaleConfig
+	db            *sql.DB
+	applier       applier.Applier
+	chunker       table.Chunker
+	concurrency   int
+	rowsPerSecond atomic.Uint64
+	chunkSize     atomic.Uint64 // size of the most recently claimed chunk; see Copier.ChunkSize
+	isInvalid     atomic.Bool
+	errMu         sync.Mutex // guards firstErr
+	firstErr      error      // first error that invalidated the copy (any goroutine)
+	startTime     time.Time
+	throttler     throttler.Throttler
+	dbConfig      *dbconn.DBConfig
+	logger        *slog.Logger
+	metricsSink   metrics.Sink
+	autoscale     AutoscaleConfig
 
 	// Read-worker pool management, symmetric with the applier's write-worker
 	// pool (SetWriteWorkers/ActiveWriteWorkers). concurrency above is the
@@ -337,6 +337,7 @@ func (c *buffered) readWorker(ctx context.Context, quit <-chan struct{}) error {
 			return err
 		}
 		c.logger.Debug("readWorker got chunk", "chunk", chunk.String())
+		c.chunkSize.Store(chunk.ChunkSize)
 
 		// Start timing from the beginning of the chunk processing (read + write)
 		chunkStartTime := time.Now()
@@ -562,6 +563,11 @@ func (c *buffered) GetProgress() string {
 	return fmt.Sprintf("%d/%d %.2f%%", copied, total, pct)
 }
 
+// ChunkSize satisfies Copier.
+func (c *buffered) ChunkSize() uint64 {
+	return c.chunkSize.Load()
+}
+
 func (c *buffered) GetETA() string {
 	c.Lock()
 	defer c.Unlock()
@@ -574,10 +580,6 @@ func (c *buffered) GetETA() string {
 		return "TBD"
 	case status.ETAReady, status.ETANone:
 		// A ready estimate is formatted below; ETANone cannot occur during copy.
-	}
-	comparison := c.copierEtaHistory.addCurrentEstimateAndCompare(estimate)
-	if comparison != "" {
-		return fmt.Sprintf("%s (%s)", estimate.String(), comparison)
 	}
 	return estimate.String()
 }

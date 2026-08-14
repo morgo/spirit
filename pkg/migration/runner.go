@@ -105,6 +105,11 @@ type Runner struct {
 	// dumper goroutine — both under checkpointMu.
 	continuousChecker continuousDivergenceReporter
 
+	// lastCheckpoint is when the checkpoint was last persisted, reported as
+	// since-checkpoint= on the status line. The checkpoint itself no longer
+	// logs at INFO on every dump (#329).
+	lastCheckpoint status.LastEvent
+
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
 	// watermark-condition evaluation + INSERT) against the sentinel-abort
 	// path that blanks the persisted checksum_watermark
@@ -1872,11 +1877,15 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 			checksumWatermark = wm
 		}
 	}
+	// Debug, not Info: the status line reports since-checkpoint= instead, so
+	// this no longer needs a line of its own on every dump (#329). The
+	// watermark detail is still one -v away when a resume needs debugging.
+	//
 	// Note: when we dump the lowWatermark to the log, we are exposing the PK values,
 	// when using the composite chunker are based on actual user-data.
 	// We believe this is OK but may change it in the future. Please do not
 	// add any other fields to this log line.
-	r.logger.Info("checkpoint",
+	r.logger.Debug("checkpoint",
 		"low-watermark", copierWatermark,
 		"position", binlogPosition,
 	)
@@ -1896,9 +1905,15 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		// checkpoint table, which is fatal.
 		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
+	r.lastCheckpoint.Record()
 	return nil
 }
 
+// Status returns the single periodic line that reports on the whole
+// migration. It deliberately absorbs what used to be separate periodic lines
+// from the change feed (since-flush / rotations) and the checkpoint dumper
+// (since-checkpoint), which each ran on their own interval — see
+// github.com/block/spirit/issues/329.
 func (r *Runner) Status() string {
 	state := r.status.Get()
 	if state > status.CutOver {
@@ -1907,45 +1922,48 @@ func (r *Runner) Status() string {
 	switch state { //nolint: exhaustive
 	case status.CopyRows:
 		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v conns-in-use=%d%s",
+		return fmt.Sprintf("migration status: state=%s copy-progress=%s chunk-size=%d binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v since-checkpoint=%s%s%s",
 			r.status.Get().String(),
 			r.copier.GetProgress(),
+			r.copier.ChunkSize(),
 			r.replClient.GetDeltaLen(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
-			r.db.Stats().InUse,
+			r.lastCheckpoint.Age(),
+			change.StatusSuffix(r.replClient),
 			applier.StatusSuffix(r.applier),
 		)
 	case status.WaitingOnSentinelTable:
-		return fmt.Sprintf("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s conns-in-use=%d",
+		return fmt.Sprintf("migration status: state=%s sentinel-table=%s.%s total-time=%s sentinel-wait-time=%s sentinel-max-wait-time=%s%s",
 			r.status.Get().String(),
 			r.changes[0].table.SchemaName,
 			sentinel.TableName,
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 			sentinel.WaitLimit,
-			r.db.Stats().InUse,
+			change.StatusSuffix(r.replClient),
 		)
 	case status.ApplyChangeset, status.PostChecksum:
 		// We've finished copying rows, and we are now trying to reduce the number of binlog deltas before
 		// proceeding to the checksum and then the final cutover.
-		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s conns-in-use=%d%s",
+		return fmt.Sprintf("migration status: state=%s binlog-deltas=%v total-time=%s%s%s",
 			r.status.Get().String(),
 			r.replClient.GetDeltaLen(),
 			r.status.TotalElapsed().Round(time.Second),
-			r.db.Stats().InUse,
+			change.StatusSuffix(r.replClient),
 			applier.StatusSuffix(r.applier),
 		)
 	case status.Checksum:
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s conns-in-use=%d%s",
+		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s since-checkpoint=%s%s%s",
 			r.status.Get().String(),
 			r.checker.GetProgress().String(),
 			r.replClient.GetDeltaLen(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
-			r.db.Stats().InUse,
+			r.lastCheckpoint.Age(),
+			change.StatusSuffix(r.replClient),
 			// Mirrors copier-is-throttled on the copy line: without it a
 			// checksum that is deliberately paused or scaled down looks
 			// identical to one that is simply slow.

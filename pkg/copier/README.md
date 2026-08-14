@@ -273,8 +273,9 @@ The copier provides sophisticated ETA estimation:
 1. **Warmup Period**: Returns "TBD" for the first minute to allow for stabilization
 2. **Rate Calculation**: Every 10 seconds, calculates rows/second based on progress
 3. **Remaining Time**: Divides remaining rows by current rate
-4. **Historical Comparison**: Tracks ETA history at 1-hour increments and shows whether it is improving or worsening (e.g., "2h30m (15m from 1h ago)" means the ETA improved by 15 minutes compared to an hour ago, while "2h30m (-15m from 1h ago)" would mean it got 15 minutes worse)
-5. **Nearly Complete**: Returns "DUE" when >99.99% complete
+4. **Nearly Complete**: Returns "DUE" when >99.99% complete
+
+The estimate used to carry a relative comparison against an hour-old estimate (`2h30m (-15m from 1h ago)`). It was removed in [#329](https://github.com/block/spirit/issues/329): the sign convention read backwards to most people, and the underlying estimate is derived from a single unsmoothed 10-second sample, so the comparison mostly reported sampling noise.
 
 The ETA adapts to changing conditions like throttling, system load, or chunk size adjustments.
 

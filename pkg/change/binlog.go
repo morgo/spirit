@@ -79,6 +79,18 @@ type binlogClient struct {
 	flushResidual int
 	flushCount    int
 
+	// lastFlush* describe the most recently completed flush, for FeedStats.
+	// Guarded by mu. Recorded for every flush, not just the periodic one, so
+	// the status line's since-flush answers "when did the position last
+	// advance?" rather than "when did the ticker last fire?".
+	lastFlushAt       time.Time
+	lastFlushDuration time.Duration
+	lastFlushRows     int
+
+	// rotations counts binlog rotations followed by the reader. See
+	// FeedStats.Rotations.
+	rotations atomic.Int64
+
 	// periodicFlushLock protects the cancel/done pair below. The cancel
 	// signals the periodic-flush goroutine to exit; the done channel is
 	// closed by the goroutine on its way out, so StopPeriodicFlush can
@@ -398,7 +410,10 @@ func (c *binlogClient) buildSyncerConfig(host string, port uint16) replication.B
 		Port:     port,
 		User:     c.username,
 		Password: c.password,
-		Logger:   c.logger,
+		// Wrapped so go-mysql's per-rotation INFO line does not dominate the
+		// log; we report rotations on the status line instead. See
+		// syncerQuietMessages.
+		Logger: newDemotingLogger(c.logger, syncerQuietMessages),
 		// Render JSON columns directly from the JSONB byte stream in the
 		// same textual form MySQL produces from SELECT json_col. The
 		// default decoder goes through Go intermediate values + json.Marshal
@@ -682,6 +697,14 @@ func (c *binlogClient) readStream(ctx context.Context) {
 		switch event := ev.Event.(type) {
 		case *replication.RotateEvent:
 			// Rotate event, update the current log name.
+			// Count only real rotations: the server sends the rotate event
+			// from the binlog followed by an artificial one carrying the
+			// same position, and recreateStreamer re-opens the current file
+			// with another synthetic rotate. Comparing against the file we
+			// are already reading collapses all of those to one count.
+			if string(event.NextLogName) != currentLogName {
+				c.rotations.Add(1)
+			}
 			currentLogName = string(event.NextLogName)
 			// For RotateEvent, we must use event.Position (the position in the NEW log)
 			// not ev.Header.LogPos (which is the position in the OLD log).
@@ -1095,6 +1118,11 @@ func (c *binlogClient) FlushUnderTableLock(ctx context.Context, locks []*dbconn.
 // the end of the flush. That's OK, we only set the flushed position to the known
 // safe buffered position taken at the start.
 func (c *binlogClient) flush(ctx context.Context, underLock bool, locks []*dbconn.TableLock) error {
+	// Sampled before the flush starts: this is the batch size the flush is
+	// about to work through. GetDeltaLen takes no lock of its own, so it is
+	// called before acquiring c.mu.
+	start := time.Now()
+	batch := c.GetDeltaLen()
 	c.mu.Lock()
 	newFlushedPos := c.bufferedPos
 	c.mu.Unlock()
@@ -1133,22 +1161,25 @@ func (c *binlogClient) flush(ctx context.Context, underLock bool, locks []*dbcon
 		}
 		c.mu.Unlock()
 	}
-	c.recordFlushResidual()
+	c.recordFlush(start, batch)
 	return nil
 }
 
-// recordFlushResidual captures what this flush left behind, for
-// FlushResidual. Recorded whether or not every change could be flushed: a
-// flush that could not drain everything is exactly the case a caller watching
-// for a feed losing ground needs to see.
+// recordFlush captures what this flush left behind (for FlushResidual) and
+// how long it took on how many changes (for FeedStats). Recorded whether or
+// not every change could be flushed: a flush that could not drain everything
+// is exactly the case a caller watching for a feed losing ground needs to see.
 //
 // GetDeltaLen takes no lock of its own, so it is called before acquiring c.mu.
-func (c *binlogClient) recordFlushResidual() {
+func (c *binlogClient) recordFlush(start time.Time, batch int) {
 	residual := c.GetDeltaLen()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.flushResidual = residual
 	c.flushCount++
+	c.lastFlushAt = time.Now()
+	c.lastFlushDuration = time.Since(start)
+	c.lastFlushRows = batch
 }
 
 // FlushResidual satisfies Source.
@@ -1156,6 +1187,22 @@ func (c *binlogClient) FlushResidual() (int, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.flushResidual, c.flushCount
+}
+
+// FeedStats satisfies StatsReporter, so the runner can fold the feed's
+// activity into its periodic status line.
+func (c *binlogClient) FeedStats() FeedStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return FeedStats{
+		LastFlushAt:       c.lastFlushAt,
+		LastFlushDuration: c.lastFlushDuration,
+		LastFlushRows:     c.lastFlushRows,
+		Flushes:           c.flushCount,
+		Residual:          c.flushResidual,
+		Rotations:         c.rotations.Load(),
+		ForcedRotations:   c.flushedBinlogs.Load(),
+	}
 }
 
 // Flush empties the changeset in a loop until the amount of changes is considered "trivial".
@@ -1265,7 +1312,11 @@ func (c *binlogClient) runPeriodicFlush(ctx context.Context, interval time.Durat
 		if err := c.flush(ctx, false, nil); err != nil {
 			c.logger.Error("error flushing binary log", "error", err)
 		}
-		c.logger.Info("finished periodic flush of binary log", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
+		// Debug, not Info: the runner reports the same information (when the
+		// last flush was, how long it took, how many rows) on its periodic
+		// status line, and this loop runs often enough that logging it here
+		// was one of the top contributors to log volume (#329).
+		c.logger.Debug("finished periodic flush of binary log", "total-duration", time.Since(startLoop).String(), "trigger", trigger)
 	}
 }
 
@@ -1281,7 +1332,11 @@ func (c *binlogClient) BlockWait(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.logger.Info("waiting to catch up to source position", "target_position", targetPos, "current_position", c.getBufferedPos())
+	// Debug: Flush() calls BlockWait in a loop until the delta count is
+	// trivial, so at Info this printed several times per second during
+	// applyChangeset. The forced-rotations counter on the status line is the
+	// signal that used to be read off these lines (#329).
+	c.logger.Debug("waiting to catch up to source position", "target_position", targetPos, "current_position", c.getBufferedPos())
 	timer := time.NewTimer(DefaultTimeout)
 	defer timer.Stop() // Ensure timer is always stopped to prevent goroutine leak
 

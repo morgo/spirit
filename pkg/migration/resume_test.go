@@ -164,10 +164,15 @@ func TestCheckpoint(t *testing.T) {
 	r.status.Set(status.CopyRows)
 	require.Equal(t, "copyRows", r.status.Get().String())
 
-	require.Contains(t, r.Status(), `migration status: state=copyRows copy-progress=0/11040 0.00% binlog-deltas=0`)
-	// The status line also reports the applier pipeline snapshot.
+	// chunk-size is 0 until the first chunk is claimed.
+	require.Contains(t, r.Status(), `migration status: state=copyRows copy-progress=0/11040 0.00% chunk-size=0 binlog-deltas=0`)
+	// The status line also reports the applier pipeline snapshot, plus the
+	// change-feed and checkpoint fields that used to be logged separately.
 	require.Contains(t, r.Status(), `applier-queue=`)
 	require.Contains(t, r.Status(), `applier-queue-wait-p90=`)
+	require.Contains(t, r.Status(), `since-checkpoint=never`)
+	require.Contains(t, r.Status(), `since-flush=`)
+	require.Contains(t, r.Status(), `binlog-rotations=`)
 
 	// first chunk.
 	chunk1, err := r.copyChunker.Next()
@@ -199,7 +204,7 @@ func TestCheckpoint(t *testing.T) {
 	// The status update is asynchronous (the applier phones home after each
 	// chunk completes), so poll until it reflects all three copied chunks.
 	require.Eventually(t, func() bool {
-		return strings.Contains(r.Status(), `migration status: state=copyRows copy-progress=3000/11040 27.17% binlog-deltas=0`)
+		return strings.Contains(r.Status(), `migration status: state=copyRows copy-progress=3000/11040 27.17% chunk-size=1000 binlog-deltas=0`)
 	}, 10*time.Second, 50*time.Millisecond, "status never reached expected copy progress; last status: %s", r.Status())
 
 	// The watermark should exist now, because migrateChunk()

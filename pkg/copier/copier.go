@@ -66,6 +66,16 @@ type Copier interface {
 	GetThrottler() throttler.Throttler
 	StartTime() time.Time
 	GetProgress() string
+	// ChunkSize returns the row count of the most recently claimed chunk, or
+	// 0 before the first one. This is the dynamic chunker's current sizing
+	// decision, and it is reported on the runner status line: it used to be
+	// visible only inside the checkpoint line's watermark JSON, which is no
+	// longer logged at INFO (#329).
+	//
+	// It is sampled from the chunk rather than read off the chunker so that
+	// it works for every Chunker implementation, including the multi-table
+	// chunker that fans out over per-table chunkers with sizes of their own.
+	ChunkSize() uint64
 }
 
 type CopierConfig struct {
@@ -143,29 +153,27 @@ func NewCopier(db *sql.DB, chunker table.Chunker, config *CopierConfig) (Copier,
 	}
 	if config.Unbuffered {
 		return &Unbuffered{
-			db:               db,
-			concurrency:      config.Concurrency,
-			throttler:        config.Throttler,
-			chunker:          chunker,
-			logger:           config.Logger,
-			metricsSink:      config.MetricsSink,
-			dbConfig:         config.DBConfig,
-			copierEtaHistory: newcopierEtaHistory(),
+			db:          db,
+			concurrency: config.Concurrency,
+			throttler:   config.Throttler,
+			chunker:     chunker,
+			logger:      config.Logger,
+			metricsSink: config.MetricsSink,
+			dbConfig:    config.DBConfig,
 		}, nil
 	}
 	if config.Applier == nil {
 		return nil, errors.New("buffered copier requires a non-nil Applier")
 	}
 	return &buffered{
-		db:               db,
-		concurrency:      config.Concurrency,
-		throttler:        config.Throttler,
-		chunker:          chunker,
-		logger:           config.Logger,
-		metricsSink:      config.MetricsSink,
-		dbConfig:         config.DBConfig,
-		copierEtaHistory: newcopierEtaHistory(),
-		applier:          config.Applier,
-		autoscale:        config.Autoscale,
+		db:          db,
+		concurrency: config.Concurrency,
+		throttler:   config.Throttler,
+		chunker:     chunker,
+		logger:      config.Logger,
+		metricsSink: config.MetricsSink,
+		dbConfig:    config.DBConfig,
+		applier:     config.Applier,
+		autoscale:   config.Autoscale,
 	}, nil
 }
