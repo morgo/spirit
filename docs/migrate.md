@@ -665,7 +665,7 @@ The username to use when connecting to MySQL.
 While a migration runs, Spirit logs one status line every 30 seconds. It is deliberately the only recurring `INFO` line: the checkpoint, the binlog flush and the binlog rotations each used to log on their own schedule, and they are now reported as fields on this line instead ([#329](https://github.com/block/spirit/issues/329)). Their detail is still available by running with debug logging.
 
 ```
-2026/08/14 11:47:10 INFO migration status: state=copyRows copy-progress=7550855/16370180 46.13% chunk-size=8097 binlog-deltas=0 total-time=2m30s copier-time=2m30s copier-remaining-time=3m29s copier-is-throttled=false since-checkpoint=50s since-flush=30s flush-took=9µs flush-rows=0 binlog-rotations=56 binlog-rotations-forced=0 applier-queue=128/128 applier-pending=8 applier-workers=4 applier-rows-per-chunklet=479 applier-queue-wait-p50=1.564s applier-queue-wait-p90=4.316s applier-build-p50=2ms applier-write-p50=37ms applier-write-p90=131ms applier-handoff-p50=0s
+2026/08/14 11:47:10 INFO migration status: state=copyRows copy-progress=7550855/16370180 46.13% chunk-size=8097 binlog-deltas=0 total-time=2m30s copier-time=2m30s copier-remaining-time=3m29s copier-is-throttled=false since-checkpoint=50s checkpoint-position=binlog.000047:104857600 since-flush=30s flush-took=9µs flush-rows=0 binlog-rotations=56 binlog-rotations-forced=0 applier-queue=128/128 applier-workers=4 applier-queue-wait-p50=1.564s applier-write-p50=37ms applier-write-p90=131ms
 ```
 
 Two naming conventions apply throughout, because otherwise several fields would render as bare durations with no way to tell them apart: `since-<thing>` is an age ("how long ago"), and `<thing>-took` is an elapsed time ("how long it ran for").
@@ -703,6 +703,7 @@ Spirit keeps the new table in sync with writes that land during the copy by subs
 | Field | Meaning |
 | --- | --- |
 | `since-checkpoint` | How long ago the resume checkpoint was last written, or `never` before the first one. Checkpoints are attempted every 50 seconds but are skipped while the copier has no resumable watermark yet, so `never` early in a run is expected. If this keeps growing, an interrupted migration will resume from further back than you would like. A checkpoint that cannot be written at all is fatal — Spirit stops rather than working for hours without being able to record progress. |
+| `checkpoint-position` | The binlog coordinate that checkpoint saved — the point a resumed migration would start reading from. `none` before the first checkpoint. Read it against `binlog-rotations` and the server's binlog retention: resuming only works while this position is still on the server, so a run with heavy rotation and a short `binlog_expire_logs_seconds` can become unresumable long before it fails. |
 
 ### Write pipeline
 
@@ -710,11 +711,16 @@ The `applier-*` fields describe the shared write path that both the copier and t
 
 | Field | Meaning |
 | --- | --- |
-| `applier-queue` | Queued chunklets out of the queue capacity. Sitting at capacity (`128/128` above) means the writers are the bottleneck and the readers are being backpressured — normally the intended state during a copy, since it keeps the write side saturated. |
-| `applier-pending` | Chunklets currently in flight. |
+| `applier-queue` | Queued chunklets out of the queue capacity. Sitting at capacity (`128/128` above) means the writers are the bottleneck and the readers are being backpressured — normally the intended state during a copy, since it keeps the write side saturated. A queue well below capacity means the copy is read-limited instead. |
 | `applier-workers` | Live write workers. Changes over time when [autoscaling](#enable-experimental-autoscaling) is enabled. |
-| `applier-rows-per-chunklet` | Mean rows per chunklet, i.e. how finely chunks are being split for writing. |
-| `applier-queue-wait-p50` / `-p90` | How long a chunklet waits in the queue before a worker picks it up. This is the field that tells you the write side is saturated, and by how much. |
-| `applier-build-p50` | Time spent building the statement (contained within the write time). |
-| `applier-write-p50` / `-p90` | Time to execute the write against the target. Rising p90s here point at the target server rather than at Spirit. |
-| `applier-handoff-p50` | Time to hand a completed chunklet back for feedback and watermark bookkeeping. Expected to be ~0; a non-trivial value means completion bookkeeping is contended. |
+| `applier-queue-wait-p50` | How long a chunklet waits in the queue before a worker picks it up. Far above the write time means the write side is saturated. |
+| `applier-write-p50` / `-p90` | Time to execute the write against the target. A rising p90 points at the target server rather than at Spirit. |
+
+Two more fields appear **only when they have something to say**, so their presence is itself the signal and their absence means "not the problem":
+
+| Field | Appears when | Meaning |
+| --- | --- | --- |
+| `applier-build-p50` | Building the statement takes ≥25% of the write time | Spirit's own CPU is a limit, not the target. No server-side signal reports this, and adding write threads will not help. Build time is contained *within* write time, not additional to it. |
+| `applier-handoff-p50` | Handoff reaches 1ms | Write workers are backing up behind the single goroutine that publishes completions, rather than behind the target. Adding write threads will not help here either. |
+
+Everything Spirit measures about the write path — including the fields not rendered here, such as pending work, mean rows per chunklet, and the remaining p90s — is still emitted to the metrics sink, which is the better source for dashboards.

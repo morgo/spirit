@@ -105,10 +105,11 @@ type Runner struct {
 	// dumper goroutine — both under checkpointMu.
 	continuousChecker continuousDivergenceReporter
 
-	// lastCheckpoint is when the checkpoint was last persisted, reported as
-	// since-checkpoint= on the status line. The checkpoint itself no longer
-	// logs at INFO on every dump (#329).
-	lastCheckpoint status.LastEvent
+	// lastCheckpoint is when the checkpoint was last persisted and the binlog
+	// position it saved, reported as since-checkpoint= and
+	// checkpoint-position= on the status line. The checkpoint itself no
+	// longer logs at INFO on every dump (#329).
+	lastCheckpoint status.LastCheckpoint
 
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
 	// watermark-condition evaluation + INSERT) against the sentinel-abort
@@ -512,7 +513,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		"copy-rows-time", r.status.Duration(status.CopyRows).Round(time.Second).String(),
 		"checksum-time", r.status.Duration(status.Checksum).Round(time.Second).String(),
 		"total-time", r.status.TotalElapsed().Round(time.Second).String(),
-		"conns-in-use", r.db.Stats().InUse,
 	)
 	// cleanup all the tables
 	for _, change := range r.changes {
@@ -1905,7 +1905,7 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		// checkpoint table, which is fatal.
 		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
-	r.lastCheckpoint.Record()
+	r.lastCheckpoint.Record(binlogPosition)
 	return nil
 }
 
@@ -1922,7 +1922,7 @@ func (r *Runner) Status() string {
 	switch state { //nolint: exhaustive
 	case status.CopyRows:
 		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s chunk-size=%d binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v since-checkpoint=%s%s%s",
+		return fmt.Sprintf("migration status: state=%s copy-progress=%s chunk-size=%d binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v since-checkpoint=%s checkpoint-position=%s%s%s",
 			r.status.Get().String(),
 			r.copier.GetProgress(),
 			r.copier.ChunkSize(),
@@ -1932,6 +1932,7 @@ func (r *Runner) Status() string {
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
 			r.lastCheckpoint.Age(),
+			r.lastCheckpoint.Position(),
 			change.StatusSuffix(r.replClient),
 			applier.StatusSuffix(r.applier),
 		)
@@ -1956,13 +1957,14 @@ func (r *Runner) Status() string {
 			applier.StatusSuffix(r.applier),
 		)
 	case status.Checksum:
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s since-checkpoint=%s%s%s",
+		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s since-checkpoint=%s checkpoint-position=%s%s%s",
 			r.status.Get().String(),
 			r.checker.GetProgress().String(),
 			r.replClient.GetDeltaLen(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 			r.lastCheckpoint.Age(),
+			r.lastCheckpoint.Position(),
 			change.StatusSuffix(r.replClient),
 			// Mirrors copier-is-throttled on the copy line: without it a
 			// checksum that is deliberately paused or scaled down looks

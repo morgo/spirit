@@ -50,7 +50,8 @@ The status line is deliberately the *only* recurring INFO line a run emits. It u
 | Field | Source | Meaning |
 | --- | --- | --- |
 | `chunk-size` | `copier.Copier.ChunkSize()` | Rows in the most recently claimed chunk — the dynamic chunker's current sizing decision. Was previously visible only inside the checkpoint line's watermark JSON. |
-| `since-checkpoint` | `status.LastEvent` on the runner | How long ago the checkpoint was last persisted, or `never`. |
+| `since-checkpoint` | `status.LastCheckpoint` on the runner | How long ago the checkpoint was last persisted, or `never`. |
+| `checkpoint-position` | `status.LastCheckpoint` on the runner | The change-feed coordinate that checkpoint saved — where a resumed run would restart reading. Paired with `since-checkpoint` because the two together answer whether that point is still within the source's binlog retention. `none` before the first checkpoint. A multi-source move renders `key=position` per source. |
 | `since-flush` | `change.FeedStats` | How long ago the change feed last completed a flush, or `never`. |
 | `flush-took` | `change.FeedStats` | How long that flush took. |
 | `flush-rows` | `change.FeedStats` | How many buffered changes it started with. `0` is normal for a feed that is keeping up. |

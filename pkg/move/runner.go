@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -116,9 +117,10 @@ type Runner struct {
 	// dumper goroutine — both under checkpointMu. Mirrors pkg/migration.
 	continuousChecker checksum.Checker
 
-	// lastCheckpoint is when the checkpoint was last persisted, reported as
-	// since-checkpoint= on the status line. Mirrors pkg/migration (#329).
-	lastCheckpoint status.LastEvent
+	// lastCheckpoint is when the checkpoint was last persisted and the
+	// position(s) it saved, reported as since-checkpoint= and
+	// checkpoint-position= on the status line. Mirrors pkg/migration (#329).
+	lastCheckpoint status.LastCheckpoint
 
 	// checkpointMu serializes checkpoint persistence (DumpCheckpoint's
 	// watermark-condition evaluation + INSERT) against the sentinel-abort
@@ -1409,7 +1411,7 @@ func (r *Runner) Status() string {
 	switch state { //nolint:exhaustive
 	case status.CopyRows:
 		// Status for copy rows
-		return fmt.Sprintf("migration status: state=%s copy-progress=%s chunk-size=%d binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v since-checkpoint=%s%s%s",
+		return fmt.Sprintf("migration status: state=%s copy-progress=%s chunk-size=%d binlog-deltas=%v total-time=%s copier-time=%s copier-remaining-time=%v copier-is-throttled=%v since-checkpoint=%s checkpoint-position=%s%s%s",
 			r.status.Get().String(),
 			r.copier.GetProgress(),
 			r.copier.ChunkSize(),
@@ -1419,6 +1421,7 @@ func (r *Runner) Status() string {
 			r.copier.GetETA(),
 			r.copier.GetThrottler().IsThrottled(),
 			r.lastCheckpoint.Age(),
+			r.lastCheckpoint.Position(),
 			r.feedStatusSuffix(),
 			applier.StatusSuffix(r.applier),
 		)
@@ -1442,13 +1445,14 @@ func (r *Runner) Status() string {
 		)
 	case status.Checksum:
 		// This could take a while if it's a large table.
-		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s since-checkpoint=%s%s",
+		return fmt.Sprintf("migration status: state=%s checksum-progress=%s binlog-deltas=%v total-time=%s checksum-time=%s since-checkpoint=%s checkpoint-position=%s%s",
 			r.status.Get().String(),
 			r.checker.GetProgress().String(),
 			r.getDeltaLenAll(),
 			r.status.TotalElapsed().Round(time.Second),
 			r.status.Elapsed().Round(time.Second),
 			r.lastCheckpoint.Age(),
+			r.lastCheckpoint.Position(),
 			r.feedStatusSuffix(),
 		)
 	case status.RestoreSecondaryIndexes:
@@ -2029,8 +2033,28 @@ func (r *Runner) DumpCheckpoint(ctx context.Context) error {
 		// checkpoint table, which is fatal.
 		return fmt.Errorf("%w: %w", status.ErrCouldNotWriteCheckpoint, err)
 	}
-	r.lastCheckpoint.Record()
+	r.lastCheckpoint.Record(renderCheckpointPosition(positions))
 	return nil
+}
+
+// renderCheckpointPosition turns the per-source position map that gets
+// persisted as JSON into something readable on a single status line. A
+// single-source move (the common case) renders the bare position, so it reads
+// exactly like pkg/migration's; a multi-source move renders key=position for
+// every source, sorted, because the sources advance independently and the
+// question the field answers — is any of these too far behind to still be
+// resumable? — has to be asked of each one.
+func renderCheckpointPosition(positions map[string]string) string {
+	if len(positions) == 1 {
+		for _, pos := range positions {
+			return pos
+		}
+	}
+	parts := make([]string, 0, len(positions))
+	for _, key := range slices.Sorted(maps.Keys(positions)) {
+		parts = append(parts, key+"="+positions[key])
+	}
+	return strings.Join(parts, ",")
 }
 
 func (r *Runner) Cancel() {

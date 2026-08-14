@@ -169,8 +169,8 @@ func TestCheckpoint(t *testing.T) {
 	// The status line also reports the applier pipeline snapshot, plus the
 	// change-feed and checkpoint fields that used to be logged separately.
 	require.Contains(t, r.Status(), `applier-queue=`)
-	require.Contains(t, r.Status(), `applier-queue-wait-p90=`)
-	require.Contains(t, r.Status(), `since-checkpoint=never`)
+	require.Contains(t, r.Status(), `applier-write-p90=`)
+	require.Contains(t, r.Status(), `since-checkpoint=never checkpoint-position=none`)
 	require.Contains(t, r.Status(), `since-flush=`)
 	require.Contains(t, r.Status(), `binlog-rotations=`)
 
@@ -214,6 +214,9 @@ func TestCheckpoint(t *testing.T) {
 	require.JSONEq(t, "{\"Key\":[\"id\"],\"ChunkSize\":1000,\"LowerBound\":{\"Value\": [\"1001\"],\"Inclusive\":true},\"UpperBound\":{\"Value\": [\"2001\"],\"Inclusive\":false}}", watermark)
 	// Dump a checkpoint
 	require.NoError(t, r.DumpCheckpoint(t.Context()))
+	// Which the status line now reports in place of the checkpoint's own log
+	// line: the binlog coordinate a resumed run would restart reading from.
+	require.Contains(t, r.Status(), `since-checkpoint=0s checkpoint-position=`+r.replClient.Position())
 
 	// Clean up first runner
 	require.NoError(t, r.Close())

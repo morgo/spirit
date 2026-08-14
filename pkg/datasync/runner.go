@@ -81,9 +81,10 @@ type Runner struct {
 
 	status status.Tracker
 
-	// lastCheckpoint is when the checkpoint was last persisted, reported as
-	// since-checkpoint= on the status line (#329).
-	lastCheckpoint status.LastEvent
+	// lastCheckpoint is when the checkpoint was last persisted and the
+	// change-feed position it saved, reported as since-checkpoint= and
+	// checkpoint-position= on the status line (#329).
+	lastCheckpoint status.LastCheckpoint
 
 	logger     *slog.Logger
 	cancelFunc context.CancelFunc
@@ -1230,7 +1231,7 @@ func (r *Runner) dumpCheckpoint(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	r.lastCheckpoint.Record()
+	r.lastCheckpoint.Record(pos)
 	return nil
 }
 
@@ -1502,18 +1503,21 @@ func (r *Runner) Status() string {
 		if repl != nil {
 			pending = repl.GetDeltaLen()
 		}
-		return fmt.Sprintf("sync status: state=%s copy-progress=%s chunk-size=%d copy-eta=%s pending-changes=%d total-time=%s since-checkpoint=%s%s",
+		return fmt.Sprintf("sync status: state=%s copy-progress=%s chunk-size=%d copy-eta=%s pending-changes=%d total-time=%s since-checkpoint=%s checkpoint-position=%s%s",
 			state.String(), progress, chunkSize, eta, pending, elapsed,
-			r.lastCheckpoint.Age(), change.StatusSuffix(repl))
+			r.lastCheckpoint.Age(), r.lastCheckpoint.Position(), change.StatusSuffix(repl))
 	case status.ApplyChangeset:
 		pos := ""
 		pending := 0
 		if repl != nil {
 			pos, pending = repl.Position(), repl.GetDeltaLen()
 		}
-		return fmt.Sprintf("sync status: state=%s position=%s pending-changes=%d total-time=%s since-checkpoint=%s%s",
+		// position= is where the feed has read to; checkpoint-position= is the
+		// older point a restart would actually resume from. The gap between
+		// them is how much re-reading a crash would cost.
+		return fmt.Sprintf("sync status: state=%s position=%s pending-changes=%d total-time=%s since-checkpoint=%s checkpoint-position=%s%s",
 			state.String(), pos, pending, elapsed,
-			r.lastCheckpoint.Age(), change.StatusSuffix(repl))
+			r.lastCheckpoint.Age(), r.lastCheckpoint.Position(), change.StatusSuffix(repl))
 	default:
 		return fmt.Sprintf("sync status: state=%s total-time=%s", state.String(), elapsed)
 	}

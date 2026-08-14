@@ -91,25 +91,53 @@ type Stats struct {
 	HandoffP90 time.Duration
 }
 
+// handoffNoiseFloor is the handoff p50 below which the completion path is
+// simply not the story. Handoff is expected to be sub-millisecond; a value at
+// or above this is the "workers blocked behind the completion path" signal
+// described on Stats.HandoffP50.
+const handoffNoiseFloor = time.Millisecond
+
+// buildShareThreshold is the fraction of write time at which build time stops
+// being an implementation detail and starts being the answer: past this, the
+// pipeline is spending its time on spirit's own CPU rather than at the server,
+// which no server-side signal can report and more write workers cannot fix.
+const buildShareThreshold = 0.25
+
 // String renders the snapshot in the kebab-case key=value style used by the
 // runner status lines, so migrate and move report identical fields. Durations
 // are rounded to the millisecond — finer precision is noise at status cadence.
-// Only the p50 of build and handoff is rendered, to keep the line readable;
-// both p90s are in Stats and in the emitted metrics.
+//
+// It renders a deliberately small subset of Stats, because the status line is
+// read every 30 seconds by a human and a field that reads the same on every
+// healthy run costs attention without paying it back (#329). Five fields are
+// always present — queue occupancy, worker count, queue wait, and the write
+// p50/p90 — because those are what you steer by.
+//
+// Two more appear only when they have something to say: build time when it is
+// a large enough share of write time to mean the client is the bottleneck, and
+// handoff when it rises off the floor. Both diagnose a pipeline that has
+// stopped responding to more write workers (see
+// github.com/block/spirit/issues/1097), and both are silent on a healthy run —
+// so their *presence* is the signal, and their absence is not a gap.
+//
+// Nothing is lost by trimming: every field stays on Stats, and the metrics
+// sink emits them all, which is what dashboards should read anyway.
 func (s Stats) String() string {
-	return fmt.Sprintf("applier-queue=%d/%d applier-pending=%d applier-workers=%d applier-rows-per-chunklet=%.0f applier-queue-wait-p50=%v applier-queue-wait-p90=%v applier-build-p50=%v applier-write-p50=%v applier-write-p90=%v applier-handoff-p50=%v",
+	out := fmt.Sprintf("applier-queue=%d/%d applier-workers=%d applier-queue-wait-p50=%v applier-write-p50=%v applier-write-p90=%v",
 		s.QueueDepth,
 		s.QueueCap,
-		s.PendingWork,
 		s.ActiveWorkers,
-		s.RowsPerChunklet,
 		s.QueueWaitP50.Round(time.Millisecond),
-		s.QueueWaitP90.Round(time.Millisecond),
-		s.BuildTimeP50.Round(time.Millisecond),
 		s.WriteTimeP50.Round(time.Millisecond),
 		s.WriteTimeP90.Round(time.Millisecond),
-		s.HandoffP50.Round(time.Millisecond),
 	)
+	if s.WriteTimeP50 > 0 && float64(s.BuildTimeP50) >= buildShareThreshold*float64(s.WriteTimeP50) {
+		out += fmt.Sprintf(" applier-build-p50=%v", s.BuildTimeP50.Round(time.Millisecond))
+	}
+	if s.HandoffP50 >= handoffNoiseFloor {
+		out += fmt.Sprintf(" applier-handoff-p50=%v", s.HandoffP50.Round(time.Millisecond))
+	}
+	return out
 }
 
 // StatusSuffix renders a's Stats() for appending to a runner status line: a
