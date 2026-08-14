@@ -1590,7 +1590,9 @@ AlterTableSpec:
 	}
 |	"ALTER" ColumnKeywordOpt ColumnName "SET" "DEFAULT" '(' Expression ')'
 	{
-		option := &ast.ColumnOption{Expr: $7}
+		// As in DefaultValueExpr, keep the parentheses: SET DEFAULT ('{}')
+		// is an expression default and must not restore as SET DEFAULT '{}'.
+		option := &ast.ColumnOption{Expr: &ast.ParenthesesExpr{Expr: $7}}
 		colDef := &ast.ColumnDef{
 			Name:    $3.(*ast.ColumnName),
 			Options: []*ast.ColumnOption{option},
@@ -2670,7 +2672,11 @@ DefaultValueExpr:
 	}
 |	'(' SignedLiteral ')'
 	{
-		$$ = $2
+		// MySQL 8.0.13+ distinguishes literal defaults (DEFAULT '{}') from
+		// expression defaults (DEFAULT ('{}')): BLOB/TEXT/JSON/GEOMETRY
+		// columns only accept the parenthesized form. Keep the parentheses
+		// in the AST so restoring the statement preserves the distinction.
+		$$ = &ast.ParenthesesExpr{Expr: $2}
 	}
 
 BuiltinFunction:

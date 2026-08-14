@@ -9504,7 +9504,9 @@ yynewstate:
 		}
 	case 37:
 		{
-			option := &ast.ColumnOption{Expr: yyS[yypt-1].expr}
+			// As in DefaultValueExpr, keep the parentheses: SET DEFAULT ('{}')
+			// is an expression default and must not restore as SET DEFAULT '{}'.
+			option := &ast.ColumnOption{Expr: &ast.ParenthesesExpr{Expr: yyS[yypt-1].expr}}
 			colDef := &ast.ColumnDef{
 				Name:    yyS[yypt-5].item.(*ast.ColumnName),
 				Options: []*ast.ColumnOption{option},
@@ -10403,7 +10405,11 @@ yynewstate:
 		}
 	case 209:
 		{
-			parser.yyVAL.expr = yyS[yypt-1].expr
+			// MySQL 8.0.13+ distinguishes literal defaults (DEFAULT '{}') from
+			// expression defaults (DEFAULT ('{}')): BLOB/TEXT/JSON/GEOMETRY
+			// columns only accept the parenthesized form. Keep the parentheses
+			// in the AST so restoring the statement preserves the distinction.
+			parser.yyVAL.expr = &ast.ParenthesesExpr{Expr: yyS[yypt-1].expr}
 		}
 	case 210:
 		{

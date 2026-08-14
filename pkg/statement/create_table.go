@@ -502,7 +502,13 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				// We track this so we can reproduce the correct syntax when generating ALTERs.
 				column.DefaultIsExpr = isExpressionDefault(opt.Expr)
 
-				if literal, isStr := stringLiteralValue(opt.Expr); isStr {
+				// The parenthesized/bare distinction is captured above;
+				// extract the value from inside any parentheses so emission
+				// (which re-adds parens from DefaultIsExpr) doesn't double
+				// them, e.g. DEFAULT ('{}') stores the string {}.
+				defaultExpr := unwrapParenExpr(opt.Expr)
+
+				if literal, isStr := stringLiteralValue(defaultExpr); isStr {
 					// Quoted string literal default. Store the true, raw
 					// (fully-unescaped) value off the AST and remember it
 					// was a string so we re-quote it on emission — even if
@@ -513,7 +519,7 @@ func (ct *CreateTable) parseColumn(col *ast.ColumnDef) Column {
 				} else {
 					// Non-string defaults (numeric, functions, expressions):
 					// keep the Restored text representation.
-					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(opt.Expr))
+					defaultRaw := fmt.Sprintf("%v", ct.parseExpression(defaultExpr))
 					column.Default = &defaultRaw
 				}
 			}

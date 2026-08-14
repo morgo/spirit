@@ -64,10 +64,20 @@ func (l *ZeroDateLinter) checkColumnZeroDate(column *ast.ColumnDef, tableName st
 			nullable = true
 		case ast.ColumnOptionDefaultValue:
 			if option.Expr != nil {
+				// Unwrap the expression-default parentheses so
+				// DEFAULT ('0000-00-00') is inspected like DEFAULT '0000-00-00'.
+				expr := option.Expr
+				for {
+					paren, ok := expr.(*ast.ParenthesesExpr)
+					if !ok {
+						break
+					}
+					expr = paren.Expr
+				}
 				// Extract default value from expression using Restore
 				var sb strings.Builder
 				rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreStringWithoutCharset, &sb)
-				err := option.Expr.Restore(rCtx)
+				err := expr.Restore(rCtx)
 				if err == nil {
 					val := sb.String()
 					// Remove surrounding quotes if present for string literals

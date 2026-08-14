@@ -166,6 +166,30 @@ func TestExtractFromStatement(t *testing.T) {
 	require.ErrorIs(t, err, ErrMultipleSchemas)
 }
 
+// TestExtractFromStatementPreservesDefaultParens is a regression test for
+// https://github.com/block/spirit/issues/542: the --statement path restores
+// the parsed ALTER, and the restored text must keep the parentheses of an
+// expression default. Without them, MySQL rejects the DDL on
+// BLOB/TEXT/JSON/GEOMETRY columns with Error 1101.
+func TestExtractFromStatementPreservesDefaultParens(t *testing.T) {
+	// The exact statement from the issue. The restored form carries a
+	// charset introducer inside the parens, matching how MySQL itself
+	// renders expression defaults in SHOW CREATE TABLE.
+	abstractStmt, err := New("alter table t1 add column j json default ('{}')")
+	require.NoError(t, err)
+	require.Equal(t, "ADD COLUMN `j` JSON DEFAULT (_UTF8MB4'{}')", abstractStmt[0].Alter)
+
+	// A bare literal default must stay bare.
+	abstractStmt, err = New("alter table t1 add column v varchar(10) default '{}'")
+	require.NoError(t, err)
+	require.Equal(t, "ADD COLUMN `v` VARCHAR(10) DEFAULT _UTF8MB4'{}'", abstractStmt[0].Alter)
+
+	// SET DEFAULT keeps the same distinction.
+	abstractStmt, err = New("alter table t1 alter column j set default ('{}')")
+	require.NoError(t, err)
+	require.Equal(t, "ALTER COLUMN `j` SET DEFAULT (_UTF8MB4'{}')", abstractStmt[0].Alter)
+}
+
 func TestAlgorithmInplaceConsideredSafe(t *testing.T) {
 	var test = func(stmt string) error {
 		return MustNew("ALTER TABLE `t1` " + stmt)[0].AlgorithmInplaceConsideredSafe()

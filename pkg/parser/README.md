@@ -49,8 +49,15 @@ syntax. Forking lets us:
   interface-conformance markers.
 - **Upstream fixes ported.** MySQL-compatibility fixes that landed in
   TiDB after the fork base are ported when relevant (e.g. the parser
-  depth DoS guard, `INSERT ... AS row_alias`, dual-password syntax, and
-  `SET_VAR` decimal hints).
+  depth DoS guard, `INSERT ... AS row_alias`, dual-password syntax,
+  `SET_VAR` decimal hints, and `GROUP_CONCAT` separator charset
+  handling).
+- **Fixes beyond upstream.** Parenthesized default values keep their
+  parentheses through a parse/restore round trip (`DEFAULT ('{}')` is an
+  ast.ParenthesesExpr): MySQL 8.0.13+ treats `DEFAULT ('{}')` and
+  `DEFAULT '{}'` as different DDL, and BLOB/TEXT/JSON/GEOMETRY columns
+  only accept the parenthesized form. The upstream parser still restores
+  both to the bare form (pingcap/tidb#57768).
 
 The AST (`ast` package), `format` restore machinery, `charset`, `mysql`
 constants, `opcode`, and `types` packages keep their upstream shapes, so

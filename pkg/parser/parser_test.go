@@ -244,6 +244,89 @@ func TestHintError(t *testing.T) {
 
 }
 
+// TestDefaultValueParenthesesRoundTrip verifies that the parenthesized form
+// of a default value survives a parse/restore round trip. MySQL 8.0.13+
+// distinguishes literal defaults (DEFAULT '{}') from expression defaults
+// (DEFAULT ('{}')); BLOB/TEXT/JSON/GEOMETRY columns only accept the
+// parenthesized form, so dropping the parentheses produces DDL that MySQL
+// rejects with Error 1101 (block/spirit#542).
+func TestDefaultValueParenthesesRoundTrip(t *testing.T) {
+	p := parser.New()
+	testCases := []struct {
+		sql      string
+		expected string
+	}{
+		// The exact statement from issue #542.
+		{
+			"alter table t1 add column j json default ('{}')",
+			"ALTER TABLE `t1` ADD COLUMN `j` JSON DEFAULT ('{}')",
+		},
+		// Parenthesized literals keep their parentheses...
+		{
+			"create table t2 (j json default ('{}'))",
+			"CREATE TABLE `t2` (`j` JSON DEFAULT ('{}'))",
+		},
+		{
+			"create table t2 (b blob default ('abc'))",
+			"CREATE TABLE `t2` (`b` BLOB DEFAULT ('abc'))",
+		},
+		{
+			"create table t2 (i int default (1))",
+			"CREATE TABLE `t2` (`i` INT DEFAULT (1))",
+		},
+		{
+			"create table t2 (d date default (null))",
+			"CREATE TABLE `t2` (`d` DATE DEFAULT (NULL))",
+		},
+		// ...while bare literals stay bare.
+		{
+			"create table t2 (v varchar(10) default '{}')",
+			"CREATE TABLE `t2` (`v` VARCHAR(10) DEFAULT '{}')",
+		},
+		{
+			"create table t2 (i int default 1)",
+			"CREATE TABLE `t2` (`i` INT DEFAULT 1)",
+		},
+		// ALTER ... SET DEFAULT keeps the same distinction.
+		{
+			"alter table t1 alter column j set default ('{}')",
+			"ALTER TABLE `t1` ALTER COLUMN `j` SET DEFAULT ('{}')",
+		},
+		{
+			"alter table t1 alter column i set default 5",
+			"ALTER TABLE `t1` ALTER COLUMN `i` SET DEFAULT 5",
+		},
+		{
+			"alter table t1 alter column u set default (uuid())",
+			"ALTER TABLE `t1` ALTER COLUMN `u` SET DEFAULT (UUID())",
+		},
+		// Parenthesized function defaults are unchanged: the parentheses
+		// come back from ColumnOption.Restore, not a ParenthesesExpr.
+		{
+			"create table t2 (u varchar(36) default (uuid()))",
+			"CREATE TABLE `t2` (`u` VARCHAR(36) DEFAULT (UUID()))",
+		},
+	}
+
+	for _, tc := range testCases {
+		stmt, err := p.ParseOneStmt(tc.sql, "", "")
+		require.NoError(t, err, tc.sql)
+		var sb strings.Builder
+		err = stmt.Restore(NewRestoreCtx(DefaultRestoreFlags|RestoreStringWithoutCharset, &sb))
+		require.NoError(t, err, tc.sql)
+		require.Equal(t, tc.expected, sb.String(), tc.sql)
+
+		// The restored SQL must re-parse and restore to the same text
+		// (no parentheses gained or lost on further round trips).
+		stmt2, err := p.ParseOneStmt(sb.String(), "", "")
+		require.NoError(t, err, sb.String())
+		var sb2 strings.Builder
+		err = stmt2.Restore(NewRestoreCtx(DefaultRestoreFlags|RestoreStringWithoutCharset, &sb2))
+		require.NoError(t, err, sb.String())
+		require.Equal(t, sb.String(), sb2.String(), tc.sql)
+	}
+}
+
 func TestGroupConcatSeparatorCharsetCollation(t *testing.T) {
 	p := parser.New()
 	testCases := []struct {

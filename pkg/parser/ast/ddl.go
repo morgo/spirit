@@ -2290,11 +2290,18 @@ func (n *AlterTableSpec) Restore(ctx *format.RestoreCtx) error {
 		if len(n.NewColumns[0].Options) == 1 {
 			ctx.WriteKeyWord("SET DEFAULT ")
 			expr := n.NewColumns[0].Options[0].Expr
-			if valueExpr, ok := expr.(*ValueExpr); ok {
-				if err := valueExpr.Restore(ctx); err != nil {
+			switch expr.(type) {
+			case *ValueExpr, *ParenthesesExpr:
+				// Literals restore bare. A ParenthesesExpr prints its own
+				// parentheses: the grammar preserves them to keep expression
+				// defaults (SET DEFAULT ('{}')) distinct from literal
+				// defaults (SET DEFAULT '{}').
+				if err := expr.Restore(ctx); err != nil {
 					return fmt.Errorf("an error occurred while restore AlterTableSpec.NewColumns[0].Options[0].Expr: %w", err)
 				}
-			} else {
+			default:
+				// A programmatically built AST may hold a bare expression;
+				// MySQL requires parentheses around non-literal defaults.
 				ctx.WritePlain("(")
 				if err := expr.Restore(ctx); err != nil {
 					return fmt.Errorf("an error occurred while restore AlterTableSpec.NewColumns[0].Options[0].Expr: %w", err)
