@@ -1128,6 +1128,7 @@ type likeEscapeSpec struct {
 	NotKeywordToken                 "Tokens not mysql keyword but treated specially"
 	UnReservedKeyword               "MySQL unreserved keywords"
 	FunctionNameConflict            "Built-in function call names which are conflict with keywords"
+	FunctionNameConflictNonNow      "FunctionNameConflict except NOW, which DefaultValueExpr handles separately"
 	FunctionNameOptionalBraces      "Function with optional braces, all of them are reserved keywords."
 	FunctionNameDatetimePrecision   "Function with optional datetime precision, all of them are reserved keywords."
 	FunctionNameDateArith           "Date arith function call names (date_add or date_sub)"
@@ -2697,8 +2698,15 @@ BuiltinFunction:
 			Args:   $3.([]ast.ExprNode),
 		}
 	}
-|	"REPLACE" '(' ExpressionList ')'
+|	FunctionNameConflictNonNow '(' ExpressionListOpt ')'
 	{
+		// Function names that lex as keyword tokens rather than plain
+		// identifiers (POINT, REPEAT, LEFT, ...). MySQL accepts them in
+		// expression defaults — DEFAULT (POINT(0,0)) is the manual's own
+		// example — and SHOW CREATE TABLE emits them, so without this a
+		// table using one is unparseable (block/spirit#1128). NOW is
+		// excluded: DEFAULT (NOW()) must keep resolving through
+		// NowSymOptionFractionParentheses to CURRENT_TIMESTAMP.
 		$$ = &ast.FuncCallExpr{
 			FnName: ast.NewCIStr($1),
 			Args:   $3.([]ast.ExprNode),
@@ -5552,6 +5560,14 @@ BuggyDefaultFalseDistinctOpt:
 	}
 
 FunctionNameConflict:
+	FunctionNameConflictNonNow
+|	builtinNow
+
+// FunctionNameConflictNonNow is split out so that BuiltinFunction (the
+// DEFAULT-expression grammar) can accept keyword-named functions without
+// swallowing NOW(), which DefaultValueExpr folds to CURRENT_TIMESTAMP via
+// NowSymOptionFractionParentheses.
+FunctionNameConflictNonNow:
 	"ASCII"
 |	"CHARSET"
 |	"COALESCE"
@@ -5559,17 +5575,22 @@ FunctionNameConflict:
 |	"DATE"
 |	"DATABASE"
 |	"DAY"
+|	"GEOMETRYCOLLECTION"
 |	"HOUR"
 |	"IF"
 |	"INTERVAL"
+|	"LINESTRING"
 |	"LOG"
 |	"FORMAT"
 |	"LEFT"
 |	"MICROSECOND"
 |	"MINUTE"
 |	"MONTH"
-|	builtinNow
+|	"MULTILINESTRING"
+|	"MULTIPOINT"
+|	"MULTIPOLYGON"
 |	"POINT"
+|	"POLYGON"
 |	"QUARTER"
 |	"REPEAT"
 |	"REPLACE"

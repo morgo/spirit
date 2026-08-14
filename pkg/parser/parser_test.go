@@ -327,6 +327,100 @@ func TestDefaultValueParenthesesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKeywordFunctionCalls covers functions whose names lex as keyword
+// tokens rather than plain identifiers (block/spirit#1128). The spatial
+// constructors are keywords because they double as column types, so
+// without dedicated grammar productions they were unparsable as function
+// calls anywhere; the remaining FunctionNameConflict members were
+// unparsable specifically in DEFAULT expressions. MySQL accepts all of
+// these forms and SHOW CREATE TABLE emits them.
+func TestKeywordFunctionCalls(t *testing.T) {
+	p := parser.New()
+	testCases := []struct {
+		sql      string
+		expected string
+	}{
+		// DEFAULT (Point(0,0)) is the MySQL manual's own example of an
+		// expression default.
+		{
+			"create table t (g geometry default (point(0,0)))",
+			"CREATE TABLE `t` (`g` GEOMETRY DEFAULT (POINT(0, 0)))",
+		},
+		{
+			"alter table t add column g point default (point(0,0))",
+			"ALTER TABLE `t` ADD COLUMN `g` POINT DEFAULT (POINT(0, 0))",
+		},
+		{
+			"create table t (g geometry default (linestring(point(0,0), point(1,1))))",
+			"CREATE TABLE `t` (`g` GEOMETRY DEFAULT (LINESTRING(POINT(0, 0), POINT(1, 1))))",
+		},
+		// Non-spatial FunctionNameConflict members in DEFAULT: upstream
+		// special-cased only REPLACE, missing the rest of the class.
+		{
+			"create table t (v varchar(10) default (repeat('a',3)))",
+			"CREATE TABLE `t` (`v` VARCHAR(10) DEFAULT (REPEAT('a', 3)))",
+		},
+		{
+			"create table t (v varchar(10) default (left('abc',2)))",
+			"CREATE TABLE `t` (`v` VARCHAR(10) DEFAULT (LEFT('abc', 2)))",
+		},
+		// Spatial constructors in ordinary expression contexts: broken
+		// before because only POINT was in FunctionNameConflict.
+		{
+			"select linestring(point(0,0), point(1,1))",
+			"SELECT LINESTRING(POINT(0, 0), POINT(1, 1))",
+		},
+		{
+			"select multipoint(point(0,0)), multilinestring(linestring(point(0,0), point(1,1)))",
+			"SELECT MULTIPOINT(POINT(0, 0)),MULTILINESTRING(LINESTRING(POINT(0, 0), POINT(1, 1)))",
+		},
+		{
+			"select geometrycollection(point(0,0), multipolygon(polygon(linestring(point(0,0), point(1,1), point(0,1), point(0,0)))))",
+			"SELECT GEOMETRYCOLLECTION(POINT(0, 0), MULTIPOLYGON(POLYGON(LINESTRING(POINT(0, 0), POINT(1, 1), POINT(0, 1), POINT(0, 0)))))",
+		},
+		{
+			"create table t (p point, q point, g geometry generated always as (linestring(p, q)) stored)",
+			"CREATE TABLE `t` (`p` POINT,`q` POINT,`g` GEOMETRY GENERATED ALWAYS AS(LINESTRING(`p`, `q`)) STORED)",
+		},
+		{
+			"alter table t add constraint c check (st_length(linestring(p, q)) > 0)",
+			"ALTER TABLE `t` ADD CONSTRAINT `c` CHECK(ST_LENGTH(LINESTRING(`p`, `q`))>0) ENFORCED",
+		},
+		// NOW is deliberately excluded from the DEFAULT-context rule:
+		// DEFAULT (now()) must keep folding to CURRENT_TIMESTAMP.
+		{
+			"create table t (ts datetime default (now()))",
+			"CREATE TABLE `t` (`ts` DATETIME DEFAULT CURRENT_TIMESTAMP())",
+		},
+		// Keyword function names still work as plain identifiers.
+		{
+			"create table t (point int)",
+			"CREATE TABLE `t` (`point` INT)",
+		},
+		{
+			"select point from t",
+			"SELECT `point` FROM `t`",
+		},
+	}
+
+	for _, tc := range testCases {
+		stmt, err := p.ParseOneStmt(tc.sql, "", "")
+		require.NoError(t, err, tc.sql)
+		var sb strings.Builder
+		err = stmt.Restore(NewRestoreCtx(DefaultRestoreFlags|RestoreStringWithoutCharset, &sb))
+		require.NoError(t, err, tc.sql)
+		require.Equal(t, tc.expected, sb.String(), tc.sql)
+
+		// The restored SQL must re-parse and restore to the same text.
+		stmt2, err := p.ParseOneStmt(sb.String(), "", "")
+		require.NoError(t, err, sb.String())
+		var sb2 strings.Builder
+		err = stmt2.Restore(NewRestoreCtx(DefaultRestoreFlags|RestoreStringWithoutCharset, &sb2))
+		require.NoError(t, err, sb.String())
+		require.Equal(t, sb.String(), sb2.String(), tc.sql)
+	}
+}
+
 func TestGroupConcatSeparatorCharsetCollation(t *testing.T) {
 	p := parser.New()
 	testCases := []struct {

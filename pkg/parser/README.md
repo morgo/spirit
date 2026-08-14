@@ -57,7 +57,13 @@ syntax. Forking lets us:
   ast.ParenthesesExpr): MySQL 8.0.13+ treats `DEFAULT ('{}')` and
   `DEFAULT '{}'` as different DDL, and BLOB/TEXT/JSON/GEOMETRY columns
   only accept the parenthesized form. The upstream parser still restores
-  both to the bare form (pingcap/tidb#57768).
+  both to the bare form (pingcap/tidb#57768). Keyword-named functions
+  also parse in DEFAULT expressions (`DEFAULT (point(0,0))` — the MySQL
+  manual's own expression-default example; upstream special-cases only
+  REPLACE), and the spatial constructors (`linestring()`, `polygon()`,
+  `multipoint()`, ...) parse as function calls in every expression
+  context — as keyword tokens they previously only worked as column
+  types (block/spirit#1128).
 
 The AST (`ast` package), `format` restore machinery, `charset`, `mysql`
 constants, `opcode`, and `types` packages keep their upstream shapes, so
