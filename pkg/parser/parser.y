@@ -157,7 +157,6 @@ type likeEscapeSpec struct {
 	hourSecond        "HOUR_SECOND"
 	ifKwd             "IF"
 	ignore            "IGNORE"
-	ilike             "ILIKE"
 	in                "IN"
 	index             "INDEX"
 	infile            "INFILE"
@@ -325,7 +324,6 @@ type likeEscapeSpec struct {
 	checksum                   "CHECKSUM"
 	cipher                     "CIPHER"
 	client                     "CLIENT"
-	clientErrorsSummary        "CLIENT_ERRORS_SUMMARY"
 	coalesce                   "COALESCE"
 	collation                  "COLLATION"
 	columns                    "COLUMNS"
@@ -752,7 +750,7 @@ type likeEscapeSpec struct {
 	UpdateStmtNoWith           "Update statement without CTE clause"
 
 %type	<item>
-	LikeOrIlikeEscapeOpt                   "like or ilike escape option"
+	LikeEscapeOpt                          "like escape option"
 	AllOrPartitionNameList                 "All or partition name list"
 	AlgorithmClause                        "Alter table algorithm"
 	AlterTableSpecSingleOpt                "Alter table single option"
@@ -1056,7 +1054,6 @@ type likeEscapeSpec struct {
 	IsOrNotOp                              "Is predicate"
 	InOrNotOp                              "In predicate"
 	LikeOrNotOp                            "Like predicate"
-	IlikeOrNotOp                           "Ilike predicate"
 	RegexpOrNotOp                          "Regexp predicate"
 	NumericType                            "Numeric types"
 	IntegerType                            "Integer Types types"
@@ -1212,7 +1209,7 @@ type likeEscapeSpec struct {
 %left andand and
 %left between
 %precedence lowerThanEq
-%left eq ge le neq neqSynonym '>' '<' is like ilike in
+%left eq ge le neq neqSynonym '>' '<' is like in
 %left '|'
 %left '&'
 %left rsh lsh
@@ -2654,9 +2651,9 @@ ReferOpt:
  * The DEFAULT clause specifies a default value for a column.
  * It can be a function or an expression. This means, for example,
  * that you can set the default for a date column to be the value of
- * a function such as NOW() or CURRENT_DATE. While in MySQL 8.0
- * expression default values are required to be enclosed in parentheses,
- * they are NOT required so in TiDB.
+ * a function such as NOW() or CURRENT_DATE. MySQL 8.0 requires expression
+ * default values to be enclosed in parentheses; this parser also accepts
+ * them without.
  *
  * See https://dev.mysql.com/doc/refman/8.0/en/create-table.html
  *     https://dev.mysql.com/doc/refman/8.0/en/data-type-defaults.html
@@ -4091,16 +4088,6 @@ LikeOrNotOp:
 		$$ = false
 	}
 
-IlikeOrNotOp:
-	"ILIKE"
-	{
-		$$ = true
-	}
-|	NotSym "ILIKE"
-	{
-		$$ = false
-	}
-
 RegexpOrNotOp:
 	RegexpSym
 	{
@@ -4145,7 +4132,7 @@ PredicateExpr:
 			Not:   !$2.(bool),
 		}
 	}
-|	BitExpr LikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt
+|	BitExpr LikeOrNotOp SimpleExpr LikeEscapeOpt
 	{
 		escapeSpec := $4.(*likeEscapeSpec)
 		escape := escapeSpec.escape
@@ -4160,37 +4147,12 @@ PredicateExpr:
 		if len(escape) > 0 {
 			escapeChar = escape[0]
 		}
-		$$ = &ast.PatternLikeOrIlikeExpr{
+		$$ = &ast.PatternLikeExpr{
 			Expr:           $1,
 			Pattern:        $3,
 			Not:            !$2.(bool),
 			Escape:         escapeChar,
 			EscapeExplicit: explicit,
-			IsLike:         true,
-		}
-	}
-|	BitExpr IlikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt
-	{
-		escapeSpec := $4.(*likeEscapeSpec)
-		escape := escapeSpec.escape
-		explicit := escapeSpec.explicit
-		if len(escape) > 1 {
-			yylex.AppendError(ErrWrongArguments.GenByArgs("ESCAPE"))
-			return 1
-		}
-		// When ESCAPE empty string is specified, escape is empty and explicit is true.
-		// This means no escape character should be used (Escape = 0).
-		var escapeChar byte
-		if len(escape) > 0 {
-			escapeChar = escape[0]
-		}
-		$$ = &ast.PatternLikeOrIlikeExpr{
-			Expr:           $1,
-			Pattern:        $3,
-			Not:            !$2.(bool),
-			Escape:         escapeChar,
-			EscapeExplicit: explicit,
-			IsLike:         false,
 		}
 	}
 |	BitExpr RegexpOrNotOp SimpleExpr
@@ -4207,7 +4169,7 @@ RegexpSym:
 	"REGEXP"
 |	"RLIKE"
 
-LikeOrIlikeEscapeOpt:
+LikeEscapeOpt:
 	%prec empty
 	{
 		$$ = &likeEscapeSpec{escape: "\\", explicit: false}
@@ -4732,7 +4694,6 @@ UnReservedKeyword:
 |	"EXPANSION"
 |	"NEXT"
 |	"WAIT"
-|	"CLIENT_ERRORS_SUMMARY"
 |	"SKIP"
 |	"LOCKED"
 |	"TOKEN_ISSUER"
@@ -8546,7 +8507,7 @@ ShowStmt:
 	{
 		stmt := $2.(*ast.ShowStmt)
 		if $3 != nil {
-			if x, ok := $3.(*ast.PatternLikeOrIlikeExpr); ok && x.Expr == nil {
+			if x, ok := $3.(*ast.PatternLikeExpr); ok && x.Expr == nil {
 				stmt.Pattern = x
 			} else {
 				stmt.Where = $3.(ast.ExprNode)
@@ -8878,11 +8839,10 @@ ShowLikeOrWhereOpt:
 	}
 |	"LIKE" SimpleExpr
 	{
-		$$ = &ast.PatternLikeOrIlikeExpr{
+		$$ = &ast.PatternLikeExpr{
 			Pattern:        $2,
 			Escape:         '\\',
 			EscapeExplicit: false,
-			IsLike:         true,
 		}
 	}
 |	"WHERE" Expression
@@ -8971,12 +8931,6 @@ FlushOption:
 			Tp:       ast.FlushTables,
 			Tables:   $2.([]*ast.TableName),
 			ReadLock: $3.(bool),
-		}
-	}
-|	"CLIENT_ERRORS_SUMMARY"
-	{
-		$$ = &ast.FlushStmt{
-			Tp: ast.FlushClientErrorsSummary,
 		}
 	}
 LogTypeOpt:
@@ -11200,7 +11154,7 @@ LoadDataStmt:
 	{
 		x := &ast.LoadDataStmt{
 			LowPriority:        $3.(bool),
-			FileLocRef:         ast.FileLocServerOrRemote,
+			FileLocRef:         ast.FileLocServer,
 			Path:               $6,
 			OnDuplicate:        $7.(ast.OnDuplicateKeyHandlingType),
 			Table:              $10.(*ast.TableName),

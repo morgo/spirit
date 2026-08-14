@@ -955,13 +955,10 @@ const (
 	ErrFunctionalIndexDataIsTooLong                          = 3907
 	ErrFunctionalIndexNotApplicable                          = 3909
 
-	// TiDB self-defined errors.
+	// Optimizer-hint warning codes, inherited from the TiDB fork base.
 	ErrWarnOptimizerHintUnsupportedHint = 8061
 	ErrWarnOptimizerHintInvalidToken    = 8062
 	ErrWarnOptimizerHintParseError      = 8064
 	ErrWarnOptimizerHintInvalidInteger  = 8065
 	ErrWarnOptimizerHintWrongPos        = 8066
-
-	// Stop adding error code here!
-	// They are moved to github.com/pingcap/tidb/pkg/errno
 )

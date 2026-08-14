@@ -15,7 +15,6 @@ package charset
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/block/spirit/pkg/parser/mysql"
@@ -56,9 +55,7 @@ type Collation struct {
 	PadAttribute string
 }
 
-var collationsIDMap = make(map[int]*Collation)
 var collationsNameMap = make(map[string]*Collation)
-var supportedCollations = make([]*Collation, 0, len(supportedCollationNames))
 
 // CharacterSetInfos contains all the supported charsets.
 var CharacterSetInfos = map[string]*Charset{
@@ -69,45 +66,6 @@ var CharacterSetInfos = map[string]*Charset{
 	CharsetBin:     {CharsetBin, CollationBin, make(map[string]*Collation), "binary", 1},
 	CharsetGBK:     {CharsetGBK, CollationGBKBin, make(map[string]*Collation), "Chinese Internal Code Specification", 2},
 	CharsetGB18030: {CharsetGB18030, CollationGB18030Bin, make(map[string]*Collation), "China National Standard GB18030", 4},
-}
-
-// All the names supported collations should be in the following table.
-var supportedCollationNames = map[string]struct{}{
-	CollationUTF8:       {},
-	CollationUTF8MB4:    {},
-	CollationASCII:      {},
-	CollationLatin1:     {},
-	CollationBin:        {},
-	CollationGBKBin:     {},
-	CollationGB18030Bin: {},
-}
-
-// TiFlashSupportedCharsets is a map which contains TiFlash supports charsets.
-var TiFlashSupportedCharsets = map[string]struct{}{
-	CharsetUTF8:    {},
-	CharsetUTF8MB4: {},
-	CharsetASCII:   {},
-	CharsetLatin1:  {},
-	CharsetBin:     {},
-}
-
-// GetSupportedCharsets gets descriptions for all charsets supported so far.
-func GetSupportedCharsets() []*Charset {
-	charsets := make([]*Charset, 0, len(CharacterSetInfos))
-	for _, ch := range CharacterSetInfos {
-		charsets = append(charsets, ch)
-	}
-
-	// sort charset by name.
-	slices.SortFunc(charsets, func(i, j *Charset) int {
-		return strings.Compare(i.Name, j.Name)
-	})
-	return charsets
-}
-
-// GetSupportedCollations gets information for all collations supported so far.
-func GetSupportedCollations() []*Collation {
-	return supportedCollations
 }
 
 // ValidCharsetAndCollation checks the charset and the collation validity
@@ -151,11 +109,6 @@ func GetDefaultCollation(charset string) (string, error) {
 	return cs.DefaultCollation, nil
 }
 
-// GetDefaultCharsetAndCollate returns the default charset and collation.
-func GetDefaultCharsetAndCollate() (defaultCharset string, defaultCollationName string) {
-	return mysql.DefaultCharset, mysql.DefaultCollationName
-}
-
 // GetCharsetInfo returns charset and collation for cs as name.
 func GetCharsetInfo(cs string) (*Charset, error) {
 	if strings.ToLower(cs) == CharsetUTF8MB3 {
@@ -171,18 +124,6 @@ func GetCharsetInfo(cs string) (*Charset, error) {
 	}
 
 	return nil, fmt.Errorf("unknown charset %s", cs)
-}
-
-// GetCharsetInfoByID returns charset and collation for id as cs_number.
-func GetCharsetInfoByID(coID int) (charsetStr string, collateStr string, err error) {
-	if coID == mysql.DefaultCollationID {
-		return mysql.DefaultCharset, mysql.DefaultCollationName, nil
-	}
-	if collation, ok := collationsIDMap[coID]; ok {
-		return collation.CharsetName, collation.Name, nil
-	}
-
-	return mysql.DefaultCharset, mysql.DefaultCollationName, fmt.Errorf("unknown collation id %d", coID)
 }
 
 func utf8Alias(csname string) string {
@@ -205,16 +146,6 @@ func GetCollationByName(name string) (*Collation, error) {
 	if !ok {
 		return nil, ErrUnknownCollation.GenByArgs(name)
 	}
-	return collation, nil
-}
-
-// GetCollationByID returns collations by given id.
-func GetCollationByID(id int) (*Collation, error) {
-	collation, ok := collationsIDMap[id]
-	if !ok {
-		return nil, fmt.Errorf("unknown collation id %d", id)
-	}
-
 	return collation, nil
 }
 
@@ -610,18 +541,12 @@ var collations = []*Collation{
 	{307, "utf8mb4", "utf8mb4_ru_0900_as_cs", false, 1, PadNone},
 	{308, "utf8mb4", "utf8mb4_zh_0900_as_cs", false, 1, PadNone},
 	{309, "utf8mb4", "utf8mb4_0900_bin", false, 1, PadNone},
-	{2048, "utf8mb4", "utf8mb4_zh_pinyin_tidb_as_cs", false, 1, PadNone},
 }
 
 // init method always puts to the end of file.
 func init() {
 	for _, c := range collations {
-		collationsIDMap[c.ID] = c
 		collationsNameMap[c.Name] = c
-
-		if _, ok := supportedCollationNames[c.Name]; ok {
-			supportedCollations = append(supportedCollations, c)
-		}
 
 		if charset, ok := CharacterSetInfos[c.CharsetName]; ok {
 			charset.Collations[c.Name] = c

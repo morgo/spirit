@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"regexp"
 	"slices"
 	"strconv"
 	"unicode"
@@ -62,17 +61,7 @@ var (
 	ErrWrongDBName = mysql.NewStdErr("parser", mysql.ErrWrongDBName)
 	// ErrDataOutOfRange returns for incorrect range.
 	ErrDataOutOfRange = mysql.NewStdErr("parser", mysql.ErrDataOutOfRange)
-	// SpecFieldPattern special result field pattern
-	SpecFieldPattern = regexp.MustCompile(`(\/\*!(M?[0-9]{5,6})?|\*\/)`)
-	specCodeStart    = regexp.MustCompile(`^\/\*!(M?[0-9]{5,6})?[ \t]*`)
-	specCodeEnd      = regexp.MustCompile(`[ \t]*\*\/$`)
 )
-
-// TrimComment trim comment for special comment code of MySQL.
-func TrimComment(txt string) string {
-	txt = specCodeStart.ReplaceAllString(txt, "")
-	return specCodeEnd.ReplaceAllString(txt, "")
-}
 
 //revive:disable:exported
 
@@ -452,7 +441,6 @@ func convertToPriv(roleOrPrivList []*ast.RoleOrPriv) ([]*ast.PrivElem, error) {
 var (
 	_ ParseParam = CharsetConnection("")
 	_ ParseParam = CollationConnection("")
-	_ ParseParam = CharsetClient("")
 )
 
 func resetParams(p *Parser) {
@@ -489,15 +477,5 @@ func (c CollationConnection) ApplyOn(p *Parser) error {
 	} else {
 		p.collation = string(c)
 	}
-	return nil
-}
-
-// CharsetClient specifies the charset of a SQL.
-// This is used to decode the SQL into a utf-8 string.
-type CharsetClient string
-
-// ApplyOn implements ParseParam interface.
-func (c CharsetClient) ApplyOn(p *Parser) error {
-	p.lexer.client = charset.FindEncoding(string(c))
 	return nil
 }

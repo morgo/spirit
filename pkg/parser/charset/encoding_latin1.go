@@ -20,14 +20,15 @@ import (
 )
 
 // EncodingLatin1Impl is the instance of encodingLatin1.
-// TiDB uses utf8 implementation for latin1 charset because of the backward compatibility.
+// latin1 is handled with the utf8 implementation (a no-op transform) for
+// backward compatibility.
 var EncodingLatin1Impl = &encodingLatin1{encodingUTF8{encodingBase{enc: encoding.Nop}}}
 
 func init() {
 	EncodingLatin1Impl.self = EncodingLatin1Impl
 }
 
-// encodingLatin1 compatibles with latin1 in old version TiDB.
+// encodingLatin1 is a transparent (no-transform) encoding for latin1.
 type encodingLatin1 struct {
 	encodingUTF8
 }

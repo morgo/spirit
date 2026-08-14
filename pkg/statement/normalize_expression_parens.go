@@ -75,7 +75,7 @@ func (parenCanonicalizer) Leave(n ast.Node) (ast.Node, bool) {
 	case *ast.ParenthesesExpr:
 		return e.Expr, true
 	case *ast.BinaryOperationExpr, *ast.UnaryOperationExpr, *ast.IsNullExpr, *ast.IsTruthExpr,
-		*ast.BetweenExpr, *ast.PatternInExpr, *ast.PatternLikeOrIlikeExpr, *ast.PatternRegexpExpr:
+		*ast.BetweenExpr, *ast.PatternInExpr, *ast.PatternLikeExpr, *ast.PatternRegexpExpr:
 		return &ast.ParenthesesExpr{Expr: n.(ast.ExprNode)}, true
 	}
 	return n, true

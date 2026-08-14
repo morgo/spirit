@@ -252,7 +252,7 @@ var MySQLErrName = map[uint16]string{
 	ErrWrongTypeForVar:                          "Incorrect argument type to variable '%-.64s'",
 	ErrVarCantBeRead:                            "Variable '%-.64s' can only be set, not read",
 	ErrCantUseOptionHere:                        "Incorrect usage/placement of '%s'",
-	ErrNotSupportedYet:                          "This version of TiDB doesn't yet support '%s'",
+	ErrNotSupportedYet:                          "This version of the parser doesn't yet support '%s'",
 	ErrMasterFatalErrorReadingBinlog:            "Got fatal error %d from master when reading data from binary log: '%-.320s'",
 	ErrSlaveIgnoredTable:                        "Slave SQL thread ignored the query because of replicate-*-table rules",
 	ErrIncorrectGlobalLocalVar:                  "Variable '%-.192s' is a %s variable",
@@ -952,7 +952,7 @@ var MySQLErrName = map[uint16]string{
 	ErrFunctionalIndexDataIsTooLong:                          "Data too long for functional index '%s'",
 	ErrFunctionalIndexNotApplicable:                          "Cannot use functional index '%s' due to type or collation conversion",
 
-	// TiDB errors.
+	// Optimizer-hint warnings.
 	ErrWarnOptimizerHintInvalidInteger:  "integer value is out of range in '%s'",
 	ErrWarnOptimizerHintUnsupportedHint: "Optimizer hint %s is not supported and is ignored",
 	ErrWarnOptimizerHintInvalidToken:    "Cannot use %s '%s' (tok = %d) in an optimizer hint",

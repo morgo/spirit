@@ -83,37 +83,6 @@ load data infile '/tmp/t.csv' into table t fields terminated by 'ab' enclosed by
 	}
 }
 
-func TestSensitiveStatement(t *testing.T) {
-	positive := []ast.StmtNode{
-		&ast.SetPwdStmt{},
-		&ast.CreateUserStmt{},
-		&ast.AlterUserStmt{},
-		&ast.GrantStmt{},
-	}
-	for i, stmt := range positive {
-		_, ok := stmt.(ast.SensitiveStmtNode)
-		require.Truef(t, ok, "%d, %#v fail", i, stmt)
-	}
-
-	negative := []ast.StmtNode{
-		&ast.DropUserStmt{},
-		&ast.RevokeStmt{},
-		&ast.AlterTableStmt{},
-		&ast.CreateDatabaseStmt{},
-		&ast.CreateIndexStmt{},
-		&ast.CreateTableStmt{},
-		&ast.DropDatabaseStmt{},
-		&ast.DropIndexStmt{},
-		&ast.DropTableStmt{},
-		&ast.RenameTableStmt{},
-		&ast.TruncateTableStmt{},
-	}
-	for _, stmt := range negative {
-		_, ok := stmt.(ast.SensitiveStmtNode)
-		require.False(t, ok)
-	}
-}
-
 func TestTableOptimizerHintRestore(t *testing.T) {
 	testCases := []NodeRestoreTestCase{
 		{"ORDER_INDEX(t1 c1)", "ORDER_INDEX(`t1` `c1`)"},

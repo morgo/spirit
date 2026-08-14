@@ -999,7 +999,7 @@ func (checker *nodeTextCleaner) Enter(in ast.Node) (out ast.Node, skipChildren b
 	}
 
 	switch node := in.(type) {
-	case *ast.PatternLikeOrIlikeExpr:
+	case *ast.PatternLikeExpr:
 		if node.Escape == '\\' {
 			node.EscapeExplicit = false
 		}

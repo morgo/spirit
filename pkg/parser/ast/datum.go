@@ -236,38 +236,6 @@ func (d *Datum) SetValue(val any) {
 	}
 }
 
-// NewDatum creates a new Datum from an interface{}.
-func NewDatum(in any) (d Datum) {
-	switch x := in.(type) {
-	case []any:
-		d.SetValue(MakeDatums(x...))
-	default:
-		d.SetValue(in)
-	}
-	return d
-}
-
-// NewBytesDatum creates a new Datum from a byte slice.
-func NewBytesDatum(b []byte) (d Datum) {
-	d.SetBytes(b)
-	return d
-}
-
-// NewStringDatum creates a new Datum from a string.
-func NewStringDatum(s string) (d Datum) {
-	d.SetString(s)
-	return d
-}
-
-// MakeDatums creates datum slice from interfaces.
-func MakeDatums(args ...any) []Datum {
-	datums := make([]Datum, len(args))
-	for i, v := range args {
-		datums[i] = NewDatum(v)
-	}
-	return datums
-}
-
 // BinaryLiteral is the internal type for storing bit / hex literal type.
 type BinaryLiteral []byte
 

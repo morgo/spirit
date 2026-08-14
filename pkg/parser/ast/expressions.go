@@ -27,7 +27,6 @@ var (
 	_ ExprNode = &BinaryOperationExpr{}
 	_ ExprNode = &CaseExpr{}
 	_ ExprNode = &ColumnNameExpr{}
-	_ ExprNode = &TableNameExpr{}
 	_ ExprNode = &CompareSubqueryExpr{}
 	_ ExprNode = &DefaultExpr{}
 	_ ExprNode = &ExistsSubqueryExpr{}
@@ -35,7 +34,7 @@ var (
 	_ ExprNode = &IsTruthExpr{}
 	_ ExprNode = &ParenthesesExpr{}
 	_ ExprNode = &PatternInExpr{}
-	_ ExprNode = &PatternLikeOrIlikeExpr{}
+	_ ExprNode = &PatternLikeExpr{}
 	_ ExprNode = &PatternRegexpExpr{}
 	_ ExprNode = &PositionExpr{}
 	_ ExprNode = &RowExpr{}
@@ -395,37 +394,6 @@ func (n *CompareSubqueryExpr) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// TableNameExpr represents a table-level object name expression, such as sequence/table/view etc.
-type TableNameExpr struct {
-	exprNode
-
-	// Name is the referenced object name expression.
-	Name *TableName
-}
-
-// Restore implements Node interface.
-func (n *TableNameExpr) Restore(ctx *format.RestoreCtx) error {
-	if err := n.Name.Restore(ctx); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *TableNameExpr) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*TableNameExpr)
-	node, ok := n.Name.Accept(v)
-	if !ok {
-		return n, false
-	}
-	n.Name = node.(*TableName)
-	return v.Leave(n)
-}
-
 // ColumnName represents column name.
 type ColumnName struct {
 	node
@@ -746,8 +714,8 @@ func (n *IsTruthExpr) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// PatternLikeOrIlikeExpr is the expression for like operator, e.g, expr like "%123%"
-type PatternLikeOrIlikeExpr struct {
+// PatternLikeExpr is the expression for the LIKE operator, e.g. expr LIKE "%123%".
+type PatternLikeExpr struct {
 	exprNode
 	// Expr is the expression to be checked.
 	Expr ExprNode
@@ -755,8 +723,6 @@ type PatternLikeOrIlikeExpr struct {
 	Pattern ExprNode
 	// Not is true, the expression is "not like".
 	Not bool
-
-	IsLike bool
 
 	Escape byte
 	// EscapeExplicit indicates whether ESCAPE clause is specified explicitly.
@@ -767,27 +733,19 @@ type PatternLikeOrIlikeExpr struct {
 }
 
 // Restore implements Node interface.
-func (n *PatternLikeOrIlikeExpr) Restore(ctx *format.RestoreCtx) error {
+func (n *PatternLikeExpr) Restore(ctx *format.RestoreCtx) error {
 	if err := n.Expr.Restore(ctx); err != nil {
-		return fmt.Errorf("an error occurred while restore PatternLikeOrIlikeExpr.Expr: %w", err)
+		return fmt.Errorf("an error occurred while restore PatternLikeExpr.Expr: %w", err)
 	}
 
-	if n.IsLike {
-		if n.Not {
-			ctx.WriteKeyWord(" NOT LIKE ")
-		} else {
-			ctx.WriteKeyWord(" LIKE ")
-		}
+	if n.Not {
+		ctx.WriteKeyWord(" NOT LIKE ")
 	} else {
-		if n.Not {
-			ctx.WriteKeyWord(" NOT ILIKE ")
-		} else {
-			ctx.WriteKeyWord(" ILIKE ")
-		}
+		ctx.WriteKeyWord(" LIKE ")
 	}
 
 	if err := n.Pattern.Restore(ctx); err != nil {
-		return fmt.Errorf("an error occurred while restore PatternLikeOrIlikeExpr.Pattern: %w", err)
+		return fmt.Errorf("an error occurred while restore PatternLikeExpr.Pattern: %w", err)
 	}
 
 	if n.EscapeExplicit && n.Escape != '\\' {
@@ -803,12 +761,12 @@ func (n *PatternLikeOrIlikeExpr) Restore(ctx *format.RestoreCtx) error {
 }
 
 // Accept implements Node Accept interface.
-func (n *PatternLikeOrIlikeExpr) Accept(v Visitor) (Node, bool) {
+func (n *PatternLikeExpr) Accept(v Visitor) (Node, bool) {
 	newNode, skipChildren := v.Enter(n)
 	if skipChildren {
 		return v.Leave(newNode)
 	}
-	n = newNode.(*PatternLikeOrIlikeExpr)
+	n = newNode.(*PatternLikeExpr)
 	if n.Expr != nil {
 		node, ok := n.Expr.Accept(v)
 		if !ok {

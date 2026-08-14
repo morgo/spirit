@@ -57,45 +57,7 @@ const ErrTextLength = 80
 
 // Auth name information.
 const (
-	AuthNativePassword      = "mysql_native_password" // #nosec G101
-	AuthCachingSha2Password = "caching_sha2_password" // #nosec G101
-	AuthMySQLClearPassword  = "mysql_clear_password"
-	AuthSocket              = "auth_socket"
-	AuthLDAPSimple          = "authentication_ldap_simple"
-	AuthLDAPSASL            = "authentication_ldap_sasl"
-)
-
-// System database and tables that mostly inherited from MySQL.
-const (
-	// SystemDB is the name of system database.
-	SystemDB = "mysql"
-	// SysDB is the name of `sys` schema, which is a set of objects to help users to interpret data collected
-	// in `information_schema`.
-	SysDB = "sys"
-	// GlobalPrivTable is the table in system db contains global scope privilege info.
-	GlobalPrivTable = "global_priv"
-	// UserTable is the table in system db contains user info.
-	UserTable = "User"
-	// DBTable is the table in system db contains db scope privilege info.
-	DBTable = "DB"
-	// TablePrivTable is the table in system db contains table scope privilege info.
-	TablePrivTable = "Tables_priv"
-	// ColumnPrivTable is the table in system db contains column scope privilege info.
-	ColumnPrivTable = "Columns_priv"
-	// GlobalVariablesTable is the table contains global system variables.
-	GlobalVariablesTable = "GLOBAL_VARIABLES"
-	// GlobalStatusTable is the table contains global status variables.
-	GlobalStatusTable = "GLOBAL_STATUS"
-	// TiDBTable is the table contains tidb info.
-	TiDBTable = "tidb"
-	// RoleEdgeTable is the table contains role relation info
-	RoleEdgeTable = "role_edges"
-	// DefaultRoleTable is the table contain default active role info
-	DefaultRoleTable = "default_roles"
-	// PasswordHistoryTable is the table in system db contains password history.
-	PasswordHistoryTable = "password_history"
-	// WorkloadSchema is the name of workload repository database.
-	WorkloadSchema = "workload_schema"
+	AuthNativePassword = "mysql_native_password" // #nosec G101
 )
 
 // MySQL type maximum length.
@@ -233,16 +195,6 @@ func (m SQLMode) HasAllowInvalidDatesMode() bool {
 	return m&ModeAllowInvalidDates == ModeAllowInvalidDates
 }
 
-// DelSQLMode delete sql mode from ori
-func DelSQLMode(ori SQLMode, del SQLMode) SQLMode {
-	return ori & (^del)
-}
-
-// SetSQLMode add sql mode to ori
-func SetSQLMode(ori SQLMode, add SQLMode) SQLMode {
-	return ori | add
-}
-
 // consts for sql modes.
 // see https://dev.mysql.com/doc/internals/en/query-event.html#q-sql-mode-code
 const (
@@ -281,34 +233,7 @@ const (
 	ModeAllowInvalidDates
 )
 
-// FormatSQLModeStr re-format 'SQL_MODE' variable.
-func FormatSQLModeStr(s string) string {
-	s = strings.ToUpper(strings.TrimRight(s, " "))
-	parts := strings.Split(s, ",")
-	var nonEmptyParts []string
-	existParts := make(map[string]string)
-	for _, part := range parts {
-		if len(part) == 0 {
-			continue
-		}
-		if modeParts, ok := CombinationSQLMode[part]; ok {
-			for _, modePart := range modeParts {
-				if _, exist := existParts[modePart]; !exist {
-					nonEmptyParts = append(nonEmptyParts, modePart)
-					existParts[modePart] = modePart
-				}
-			}
-		}
-		if _, exist := existParts[part]; !exist {
-			nonEmptyParts = append(nonEmptyParts, part)
-			existParts[part] = part
-		}
-	}
-	return strings.Join(nonEmptyParts, ",")
-}
-
 // GetSQLMode gets the sql mode for string literal. SQL_mode is a list of different modes separated by commas.
-// The input string must be formatted by 'FormatSQLModeStr'
 func GetSQLMode(s string) (SQLMode, error) {
 	strs := strings.Split(s, ",")
 	var sqlMode SQLMode
@@ -359,20 +284,6 @@ var Str2SQLMode = map[string]SQLMode{
 	"ALLOW_INVALID_DATES":        ModeAllowInvalidDates,
 }
 
-// CombinationSQLMode is the special modes that provided as shorthand for combinations of mode values.
-// See https://dev.mysql.com/doc/refman/5.7/en/sql-mode.html#sql-mode-combo.
-var CombinationSQLMode = map[string][]string{
-	"ANSI":        {"REAL_AS_FLOAT", "PIPES_AS_CONCAT", "ANSI_QUOTES", "IGNORE_SPACE", "ONLY_FULL_GROUP_BY"},
-	"DB2":         {"PIPES_AS_CONCAT", "ANSI_QUOTES", "IGNORE_SPACE", "NO_KEY_OPTIONS", "NO_TABLE_OPTIONS", "NO_FIELD_OPTIONS"},
-	"MAXDB":       {"PIPES_AS_CONCAT", "ANSI_QUOTES", "IGNORE_SPACE", "NO_KEY_OPTIONS", "NO_TABLE_OPTIONS", "NO_FIELD_OPTIONS", "NO_AUTO_CREATE_USER"},
-	"MSSQL":       {"PIPES_AS_CONCAT", "ANSI_QUOTES", "IGNORE_SPACE", "NO_KEY_OPTIONS", "NO_TABLE_OPTIONS", "NO_FIELD_OPTIONS"},
-	"MYSQL323":    {"MYSQL323", "HIGH_NOT_PRECEDENCE"},
-	"MYSQL40":     {"MYSQL40", "HIGH_NOT_PRECEDENCE"},
-	"ORACLE":      {"PIPES_AS_CONCAT", "ANSI_QUOTES", "IGNORE_SPACE", "NO_KEY_OPTIONS", "NO_TABLE_OPTIONS", "NO_FIELD_OPTIONS", "NO_AUTO_CREATE_USER"},
-	"POSTGRESQL":  {"PIPES_AS_CONCAT", "ANSI_QUOTES", "IGNORE_SPACE", "NO_KEY_OPTIONS", "NO_TABLE_OPTIONS", "NO_FIELD_OPTIONS"},
-	"TRADITIONAL": {"STRICT_TRANS_TABLES", "STRICT_ALL_TABLES", "NO_ZERO_IN_DATE", "NO_ZERO_DATE", "ERROR_FOR_DIVISION_BY_ZERO", "NO_AUTO_CREATE_USER", "NO_ENGINE_SUBSTITUTION"},
-}
-
 // PriorityEnum is defined for Priority const values.
 type PriorityEnum int
 
@@ -391,23 +302,6 @@ var Priority2Str = map[PriorityEnum]string{
 	LowPriority:     "LOW_PRIORITY",
 	HighPriority:    "HIGH_PRIORITY",
 	DelayedPriority: "DELAYED",
-}
-
-// Str2Priority is used to convert a string to a priority.
-func Str2Priority(val string) PriorityEnum {
-	val = strings.ToUpper(val)
-	switch val {
-	case "NO_PRIORITY":
-		return NoPriority
-	case "HIGH_PRIORITY":
-		return HighPriority
-	case "LOW_PRIORITY":
-		return LowPriority
-	case "DELAYED":
-		return DelayedPriority
-	default:
-		return NoPriority
-	}
 }
 
 // Restore implements Node interface.

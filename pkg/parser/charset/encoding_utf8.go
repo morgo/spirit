@@ -37,7 +37,7 @@ func init() {
 	EncodingUTF8MB3StrictImpl.self = EncodingUTF8MB3StrictImpl
 }
 
-// encodingUTF8 is TiDB's default encoding.
+// encodingUTF8 is the default encoding.
 type encodingUTF8 struct {
 	encodingBase
 }

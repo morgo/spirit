@@ -239,9 +239,8 @@ func NewCIStr(s string) (cs CIStr) {
 }
 
 // UnmarshalJSON implements the user defined unmarshal method.
-// CIStr can be unmarshaled from a single string, so PartitionDefinition.Name
-// in this change https://github.com/pingcap/tidb/pull/6460/files would be
-// compatible during TiDB upgrading.
+// CIStr can also be unmarshaled from a plain JSON string for backward
+// compatibility with older serialized forms.
 func (cis *CIStr) UnmarshalJSON(b []byte) error {
 	type T CIStr
 	if err := json.Unmarshal(b, (*T)(cis)); err == nil {
@@ -264,31 +263,6 @@ func (cis *CIStr) MemoryUsage() (sum int64) {
 	}
 
 	return int64(unsafe.Sizeof(cis.O))*2 + int64(len(cis.O)+len(cis.L))
-}
-
-// ColumnChoice is the type of the column choice.
-type ColumnChoice byte
-
-// ColumnChoice values.
-const (
-	DefaultChoice ColumnChoice = iota
-	AllColumns
-	PredicateColumns
-	ColumnList
-)
-
-// String implements fmt.Stringer interface.
-func (s ColumnChoice) String() string {
-	switch s { //nolint:exhaustive
-	case AllColumns:
-		return "ALL"
-	case PredicateColumns:
-		return "PREDICATE"
-	case ColumnList:
-		return "LIST"
-	default:
-		return "DEFAULT"
-	}
 }
 
 // Priority values.

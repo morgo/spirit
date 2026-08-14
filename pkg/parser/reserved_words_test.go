@@ -33,46 +33,43 @@ import (
 
 	"github.com/block/spirit/pkg/parser/ast"
 	_ "github.com/go-sql-driver/mysql"
-	requires "github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompareReservedWordsWithMySQL(t *testing.T) {
 	parserFilename := "parser.y"
 	parserFile, err := os.Open(parserFilename)
-	requires.NoError(t, err)
+	require.NoError(t, err)
 	data, err := gio.ReadAll(parserFile)
-	requires.NoError(t, err)
+	require.NoError(t, err)
 	content := string(data)
 
 	reservedKeywordStartMarker := "\t/* The following tokens belong to ReservedKeyword. Notice: make sure these tokens are contained in ReservedKeyword. */"
 	unreservedKeywordStartMarker := "\t/* The following tokens belong to UnReservedKeyword. Notice: make sure these tokens are contained in UnReservedKeyword. */"
 	notKeywordTokenStartMarker := "\t/* The following tokens belong to NotKeywordToken. Notice: make sure these tokens are contained in NotKeywordToken. */"
-	tidbKeywordStartMarker := "\t/* The following tokens belong to TiDBKeyword. Notice: make sure these tokens are contained in TiDBKeyword. */"
 	identTokenEndMarker := "%token\t<item>"
 
 	reservedKeywords := extractKeywords(content, reservedKeywordStartMarker, unreservedKeywordStartMarker)
 	unreservedKeywords := extractKeywords(content, unreservedKeywordStartMarker, notKeywordTokenStartMarker)
-	notKeywordTokens := extractKeywords(content, notKeywordTokenStartMarker, tidbKeywordStartMarker)
-	tidbKeywords := extractKeywords(content, tidbKeywordStartMarker, identTokenEndMarker)
+	notKeywordTokens := extractKeywords(content, notKeywordTokenStartMarker, identTokenEndMarker)
 
 	p := New()
-	db, err := dbsql.Open("mysql", "root@tcp(127.0.0.1:3306)/")
-	requires.NoError(t, err)
+	dsn := os.Getenv("MYSQL_DSN")
+	if dsn == "" {
+		dsn = "root@tcp(127.0.0.1:3306)/"
+	}
+	db, err := dbsql.Open("mysql", dsn)
+	require.NoError(t, err)
 	defer func() {
-		requires.NoError(t, db.Close())
+		require.NoError(t, db.Close())
 	}()
 
 	for _, kw := range reservedKeywords {
 		switch kw {
-		case "CURRENT_ROLE", // Present in both, reserved only in TiDB
-			"STATS_EXTENDED",   // Only in TiDB
-			"TABLESAMPLE",      // Only in TiDB
-			"ARRAY",            // added in 8.0.17 (reserved); became nonreserved in 8.0.19
-			"ILIKE",            // Only in TiDB
-			"TIDB_CURRENT_TSO", // Only in TiDB
-			"UNTIL":            // Present in both, reserved only in TiDB
+		case "CURRENT_ROLE", // reserved here, not reserved in MySQL
+			"ARRAY": // added in 8.0.17 (reserved); became nonreserved in 8.0.19
 			// special cases: we do reserve these words but MySQL didn't,
-			// and unreservering it causes legit parser conflict.
+			// and unreserving them causes legit parser conflicts.
 			continue
 		}
 
@@ -82,17 +79,17 @@ func TestCompareReservedWordsWithMySQL(t *testing.T) {
 		var err error
 
 		if _, ok := windowFuncTokenMap[kw]; !ok {
-			// for some reason the query does parse even then the keyword is reserved in TiDB.
+			// window function tokens parse in this position despite being reserved.
 			_, _, err = p.Parse(query, "", "")
-			requires.Error(t, err)
-			requires.Regexp(t, errRegexp, err.Error())
+			require.Error(t, err)
+			require.Regexp(t, errRegexp, err.Error())
 		}
 		_, err = db.Exec(query)
-		requires.Error(t, err, query)
-		requires.Regexp(t, errRegexp, err.Error(), "MySQL suggests that '%s' should *not* be reserved!", kw)
+		require.Error(t, err, query)
+		require.Regexp(t, errRegexp, err.Error(), "MySQL suggests that '%s' should *not* be reserved!", kw)
 	}
 
-	for _, kws := range [][]string{unreservedKeywords, notKeywordTokens, tidbKeywords} {
+	for _, kws := range [][]string{unreservedKeywords, notKeywordTokens} {
 		for _, kw := range kws {
 			switch kw {
 			case "FUNCTION", // Reserved in MySQL 8.0.1
@@ -106,12 +103,12 @@ func TestCompareReservedWordsWithMySQL(t *testing.T) {
 			query := "do (select 1 as " + kw + ")"
 
 			stmts, _, err := p.Parse(query, "", "")
-			requires.NoError(t, err)
-			requires.Len(t, stmts, 1)
-			requires.IsType(t, &ast.DoStmt{}, stmts[0])
+			require.NoError(t, err)
+			require.Len(t, stmts, 1)
+			require.IsType(t, &ast.DoStmt{}, stmts[0])
 
 			_, err = db.Exec(query)
-			requires.NoErrorf(t, err, "MySQL suggests that '%s' should be reserved!", kw)
+			require.NoErrorf(t, err, "MySQL suggests that '%s' should be reserved!", kw)
 		}
 	}
 }

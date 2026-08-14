@@ -14,7 +14,6 @@
 package ast
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"strconv"
@@ -42,7 +41,6 @@ var (
 	_ StmtNode = &SetRoleStmt{}
 	_ StmtNode = &SetDefaultRoleStmt{}
 	_ StmtNode = &SetStmt{}
-	_ StmtNode = &SetSessionStatesStmt{}
 	_ StmtNode = &UseStmt{}
 	_ StmtNode = &FlushStmt{}
 	_ StmtNode = &KillStmt{}
@@ -100,55 +98,6 @@ func (n *AuthOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteString(n.HashString)
 	}
 	return nil
-}
-
-// TraceStmt is a statement to trace what sql actually does at background.
-type TraceStmt struct {
-	stmtNode
-
-	Stmt   StmtNode
-	Format string
-
-	TracePlan       bool
-	TracePlanTarget string
-}
-
-// Restore implements Node interface.
-func (n *TraceStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("TRACE ")
-	if n.TracePlan {
-		ctx.WriteKeyWord("PLAN ")
-		if n.TracePlanTarget != "" {
-			ctx.WriteKeyWord("TARGET")
-			ctx.WritePlain(" = ")
-			ctx.WriteString(n.TracePlanTarget)
-			ctx.WritePlain(" ")
-		}
-	} else if n.Format != "row" {
-		ctx.WriteKeyWord("FORMAT")
-		ctx.WritePlain(" = ")
-		ctx.WriteString(n.Format)
-		ctx.WritePlain(" ")
-	}
-	if err := n.Stmt.Restore(ctx); err != nil {
-		return fmt.Errorf("an error occurred while restore TraceStmt.Stmt: %w", err)
-	}
-	return nil
-}
-
-// Accept implements Node Accept interface.
-func (n *TraceStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*TraceStmt)
-	node, ok := n.Stmt.Accept(v)
-	if !ok {
-		return n, false
-	}
-	n.Stmt = node.(StmtNode)
-	return v.Leave(n)
 }
 
 // ExplainForStmt is a statement to provite information about how is SQL statement executeing
@@ -259,11 +208,6 @@ func (n *ExplainStmt) Accept(v Visitor) (Node, bool) {
 	}
 	return v.Leave(n)
 }
-
-const (
-	// CompactReplicaKindTiKV means compacting TiKV replicas.
-	CompactReplicaKindTiKV = "TIKV"
-)
 
 // PrepareStmt is a statement to prepares a SQL statement which contains placeholders,
 // and it is executed with ExecuteStmt and released with DeallocateStmt.
@@ -553,9 +497,6 @@ const (
 	SetNames = "SetNAMES"
 	// SetCharset is the const for set charset stmt.
 	SetCharset = "SetCharset"
-	// CloudStorageURI is similar to above tidb var, but it's used in import into
-	// to set a separate param for a single import job.
-	CloudStorageURI = "cloud_storage_uri"
 )
 
 // VariableAssignment is a variable assignment struct.
@@ -635,10 +576,8 @@ const (
 	FlushTables
 	FlushPrivileges
 	FlushStatus
-	FlushTiDBPlugin
 	FlushHosts
 	FlushLogs
-	FlushClientErrorsSummary
 )
 
 // LogType is the log type used in FLUSH statement.
@@ -662,7 +601,6 @@ type FlushStmt struct {
 	LogType         LogType
 	Tables          []*TableName // For FlushTableStmt, if Tables is empty, it means flush all tables.
 	ReadLock        bool
-	Plugins         []string
 }
 
 // Restore implements Node interface.
@@ -691,16 +629,6 @@ func (n *FlushStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("PRIVILEGES")
 	case FlushStatus:
 		ctx.WriteKeyWord("STATUS")
-	case FlushTiDBPlugin:
-		ctx.WriteKeyWord("TIDB PLUGINS")
-		for i, v := range n.Plugins {
-			if i == 0 {
-				ctx.WritePlain(" ")
-			} else {
-				ctx.WritePlain(", ")
-			}
-			ctx.WritePlain(v)
-		}
 	case FlushHosts:
 		ctx.WriteKeyWord("HOSTS")
 	case FlushLogs:
@@ -720,8 +648,6 @@ func (n *FlushStmt) Restore(ctx *format.RestoreCtx) error {
 			logType = "SLOW LOGS"
 		}
 		ctx.WriteKeyWord(logType)
-	case FlushClientErrorsSummary:
-		ctx.WriteKeyWord("CLIENT_ERRORS_SUMMARY")
 	default:
 		return errors.New("unsupported type of FlushStmt")
 	}
@@ -865,40 +791,6 @@ func (n *SetStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// SecureText implements SensitiveStatement interface.
-// need to redact the tidb_cloud_storage_url for safety when `show processlist;`
-func (n *SetStmt) SecureText() string {
-	redactedStmt := *n
-	var sb strings.Builder
-	_ = redactedStmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
-	return sb.String()
-}
-
-// SetSessionStatesStmt is a statement to restore session states.
-type SetSessionStatesStmt struct {
-	stmtNode
-
-	SessionStates string
-}
-
-func (n *SetSessionStatesStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("SET SESSION_STATES ")
-	ctx.WriteString(n.SessionStates)
-	return nil
-}
-
-func (n *SetSessionStatesStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*SetSessionStatesStmt)
-	return v.Leave(n)
-}
-
-/*
- */
-
 // SetPwdStmt is a statement to assign a password to user account.
 // See https://dev.mysql.com/doc/refman/5.7/en/set-password.html
 type SetPwdStmt struct {
@@ -924,14 +816,6 @@ func (n *SetPwdStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord(" RETAIN CURRENT PASSWORD")
 	}
 	return nil
-}
-
-// SecureText implements SensitiveStatement interface.
-func (n *SetPwdStmt) SecureText() string {
-	if n.RetainCurrentPassword {
-		return fmt.Sprintf("set password for user %s RETAIN CURRENT PASSWORD", n.User)
-	}
-	return fmt.Sprintf("set password for user %s", n.User)
 }
 
 // Accept implements Node Accept interface.
@@ -1414,17 +1298,6 @@ func (n *CreateUserStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// SecureText implements SensitiveStatement interface.
-func (n *CreateUserStmt) SecureText() string {
-	var buf bytes.Buffer
-	buf.WriteString("create user")
-	for _, user := range n.Specs {
-		buf.WriteString(" ")
-		buf.WriteString(user.SecurityString())
-	}
-	return buf.String()
-}
-
 // AlterUserStmt modifies user account.
 // See https://dev.mysql.com/doc/refman/8.0/en/alter-user.html
 type AlterUserStmt struct {
@@ -1525,17 +1398,6 @@ func (n *AlterUserStmt) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-// SecureText implements SensitiveStatement interface.
-func (n *AlterUserStmt) SecureText() string {
-	var buf bytes.Buffer
-	buf.WriteString("alter user")
-	for _, user := range n.Specs {
-		buf.WriteString(" ")
-		buf.WriteString(user.SecurityString())
-	}
-	return buf.String()
-}
-
 // Accept implements Node Accept interface.
 func (n *AlterUserStmt) Accept(v Visitor) (Node, bool) {
 	newNode, skipChildren := v.Enter(n)
@@ -1618,54 +1480,6 @@ func (n *DropUserStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-type StringOrUserVar struct {
-	node
-	StringLit string
-	UserVar   *VariableExpr
-}
-
-func (n *StringOrUserVar) Restore(ctx *format.RestoreCtx) error {
-	if len(n.StringLit) > 0 {
-		ctx.WriteString(n.StringLit)
-	}
-	if n.UserVar != nil {
-		if err := n.UserVar.Restore(ctx); err != nil {
-			return fmt.Errorf("an error occurred while restore ColumnNameOrUserVar.UserVar: %w", err)
-		}
-	}
-	return nil
-}
-
-func (n *StringOrUserVar) Accept(v Visitor) (node Node, ok bool) {
-	newNode, skipChild := v.Enter(n)
-	if skipChild {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*StringOrUserVar)
-	if n.UserVar != nil {
-		node, ok = n.UserVar.Accept(v)
-		if !ok {
-			return node, false
-		}
-		n.UserVar = node.(*VariableExpr)
-	}
-	return v.Leave(n)
-}
-
-// Extended statistics types.
-const (
-	StatsTypeCardinality uint8 = iota
-	StatsTypeDependency
-	StatsTypeCorrelation
-)
-
-// StatisticsSpec is the specification for ADD /DROP STATISTICS.
-type StatisticsSpec struct {
-	StatsName string
-	StatsType uint8
-	Columns   []*ColumnName
-}
-
 // DoStmt is the struct for DO statement.
 type DoStmt struct {
 	stmtNode
@@ -1702,71 +1516,6 @@ func (n *DoStmt) Accept(v Visitor) (Node, bool) {
 		n.Exprs[i] = node.(ExprNode)
 	}
 	return v.Leave(n)
-}
-
-type StatementScope int
-
-const (
-	StatementScopeNone StatementScope = iota
-	StatementScopeSession
-	StatementScopeInstance
-	StatementScopeGlobal
-)
-
-// ShowSlowType defines the type for SlowSlow statement.
-type ShowSlowType int
-
-const (
-	// ShowSlowTop is a ShowSlowType constant.
-	ShowSlowTop ShowSlowType = iota
-	// ShowSlowRecent is a ShowSlowType constant.
-	ShowSlowRecent
-)
-
-// ShowSlowKind defines the kind for SlowSlow statement when the type is ShowSlowTop.
-type ShowSlowKind int
-
-const (
-	// ShowSlowKindDefault is a ShowSlowKind constant.
-	ShowSlowKindDefault ShowSlowKind = iota
-	// ShowSlowKindInternal is a ShowSlowKind constant.
-	ShowSlowKindInternal
-	// ShowSlowKindAll is a ShowSlowKind constant.
-	ShowSlowKindAll
-)
-
-// ShowSlow is used for the following command:
-//
-//	admin show slow top [ internal | all] N
-//	admin show slow recent N
-type ShowSlow struct {
-	Tp    ShowSlowType
-	Count uint64
-	Kind  ShowSlowKind
-}
-
-// Restore implements Node interface.
-func (n *ShowSlow) Restore(ctx *format.RestoreCtx) error {
-	switch n.Tp {
-	case ShowSlowRecent:
-		ctx.WriteKeyWord("RECENT ")
-	case ShowSlowTop:
-		ctx.WriteKeyWord("TOP ")
-		switch n.Kind {
-		case ShowSlowKindDefault:
-			// do nothing
-		case ShowSlowKindInternal:
-			ctx.WriteKeyWord("INTERNAL ")
-		case ShowSlowKindAll:
-			ctx.WriteKeyWord("ALL ")
-		default:
-			return errors.New("unsupported kind of ShowSlowTop")
-		}
-	default:
-		return errors.New("unsupported type of ShowSlow")
-	}
-	ctx.WritePlainf("%d", n.Count)
-	return nil
 }
 
 // RoleOrPriv is a temporary structure to be further processed into auth.RoleIdentity or PrivElem
@@ -2091,17 +1840,6 @@ func (n *GrantStmt) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-// SecureText implements SensitiveStatement interface.
-func (n *GrantStmt) SecureText() string {
-	text := n.text
-	// Filter "identified by xxx" because it would expose password information.
-	idx := strings.Index(strings.ToLower(text), "identified")
-	if idx > 0 {
-		text = text[:idx]
-	}
-	return text
-}
-
 // Accept implements Node Accept interface.
 func (n *GrantStmt) Accept(v Visitor) (Node, bool) {
 	newNode, skipChildren := v.Enter(n)
@@ -2202,17 +1940,6 @@ func (n *GrantRoleStmt) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-// SecureText implements SensitiveStatement interface.
-func (n *GrantRoleStmt) SecureText() string {
-	text := n.text
-	// Filter "identified by xxx" because it would expose password information.
-	idx := strings.Index(strings.ToLower(text), "identified")
-	if idx > 0 {
-		text = text[:idx]
-	}
-	return text
-}
-
 // ShutdownStmt is a statement to stop the MySQL server.
 // See https://dev.mysql.com/doc/refman/8.0/en/shutdown.html
 type ShutdownStmt struct {
@@ -2235,7 +1962,7 @@ func (n *ShutdownStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// RestartStmt is a statement to restart the TiDB server.
+// RestartStmt is a statement to restart the server (MySQL 8.0 RESTART).
 // See https://dev.mysql.com/doc/refman/8.0/en/restart.html
 type RestartStmt struct {
 	stmtNode

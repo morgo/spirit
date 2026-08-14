@@ -2093,8 +2093,6 @@ const (
 type AlgorithmType byte
 
 // DDL algorithms.
-// For now, TiDB only supported inplace and instance algorithms. If the user specify `copy`,
-// will get an error.
 const (
 	AlgorithmTypeDefault AlgorithmType = iota
 	AlgorithmTypeCopy

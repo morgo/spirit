@@ -458,7 +458,7 @@ SupportedTableLevelOptimizerHintName:
 
 UnsupportedIndexLevelOptimizerHintName:
 	"INDEX_MERGE"
-/* NO_INDEX_MERGE is currently a nullary hint in TiDB */
+/* NO_INDEX_MERGE is accepted only in nullary form */
 |	"MRR"
 |	"NO_MRR"
 |	"NO_ICP"

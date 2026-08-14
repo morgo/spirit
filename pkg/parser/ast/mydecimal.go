@@ -14,8 +14,8 @@
 package ast
 
 const panicInfo = "This branch is not implemented. " +
-	"This is because you are trying to test something specific to TiDB's MyDecimal implementation. " +
-	"It is recommended to do this in TiDB repository."
+	"The parser only uses MyDecimal to round-trip decimal literals, and this " +
+	"code path is not needed for that."
 
 // constant values.
 const (

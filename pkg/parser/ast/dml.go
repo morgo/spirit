@@ -1788,16 +1788,14 @@ func (n *ColumnNameOrUserVar) Accept(v Visitor) (node Node, ok bool) {
 	return v.Leave(n)
 }
 
-// LoadDataStmt is a statement to load data from a specified file, then insert this rows into an existing table.
-// See https://dev.mysql.com/doc/refman/5.7/en/load-data.html
-// in TiDB we extend the syntax to use LOAD DATA as a more general way to import data, see
-// https://github.com/pingcap/tidb/issues/40499
+// FileLocRefTp indicates where the LOAD DATA file is located.
+// See https://dev.mysql.com/doc/refman/8.0/en/load-data.html
 type FileLocRefTp int
 
 const (
-	// FileLocServerOrRemote is used when there's no keywords in SQL, which means the data file is located on the
-	// server host.
-	FileLocServerOrRemote FileLocRefTp = iota
+	// FileLocServer is used when there is no LOCAL keyword, meaning the data
+	// file is located on the server host.
+	FileLocServer FileLocRefTp = iota
 	// FileLocClient is used when there's LOCAL keyword in SQL, which means the data file should be located on the MySQL
 	// client.
 	FileLocClient
@@ -1809,7 +1807,6 @@ type LoadDataStmt struct {
 	LowPriority       bool
 	FileLocRef        FileLocRefTp
 	Path              string
-	Format            *string
 	OnDuplicate       OnDuplicateKeyHandlingType
 	Table             *TableName
 	Charset           *string
@@ -1829,16 +1826,12 @@ func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("LOW_PRIORITY ")
 	}
 	switch n.FileLocRef {
-	case FileLocServerOrRemote:
+	case FileLocServer:
 	case FileLocClient:
 		ctx.WriteKeyWord("LOCAL ")
 	}
 	ctx.WriteKeyWord("INFILE ")
 	ctx.WriteString(n.Path)
-	if n.Format != nil {
-		ctx.WriteKeyWord(" FORMAT ")
-		ctx.WriteString(*n.Format)
-	}
 	switch n.OnDuplicate { //nolint:exhaustive
 	case OnDuplicateKeyHandlingReplace:
 		ctx.WriteKeyWord(" REPLACE")
@@ -2763,7 +2756,7 @@ type ShowStmt struct {
 
 	// GlobalScope is used by `show variables`
 	GlobalScope bool
-	Pattern     *PatternLikeOrIlikeExpr
+	Pattern     *PatternLikeExpr
 	Where       ExprNode
 
 	ShowProfileTypes []int  // Used for `SHOW PROFILE` syntax
@@ -2998,7 +2991,7 @@ func (n *ShowStmt) Accept(v Visitor) (Node, bool) {
 		if !ok {
 			return n, false
 		}
-		n.Pattern = node.(*PatternLikeOrIlikeExpr)
+		n.Pattern = node.(*PatternLikeExpr)
 	}
 
 	if n.Where != nil {

@@ -73,14 +73,9 @@ const (
 	PreventNullInsertFlag uint = 1 << 20 /* Prevent this Field from inserting NULL values */
 	EnumSetAsIntFlag      uint = 1 << 21 /* Internal: Used for inferring enum eval type. */
 	DropColumnIndexFlag   uint = 1 << 22 /* Internal: Used for indicate the column is being dropped with index */
-	GeneratedColumnFlag   uint = 1 << 23 /* Internal: TiFlash will check this flag and add a placeholder for this column */
+	GeneratedColumnFlag   uint = 1 << 23 /* Internal: marks a generated column */
 	UnderScoreCharsetFlag uint = 1 << 24 /* Internal: Indicate whether charset is specified by underscore like _latin1'abc' */
 )
-
-// HasDropColumnWithIndexFlag checks if DropColumnIndexFlag is set.
-func HasDropColumnWithIndexFlag(flag uint) bool {
-	return (flag & DropColumnIndexFlag) > 0
-}
 
 // HasNotNullFlag checks if NotNullFlag is set.
 func HasNotNullFlag(flag uint) bool {
@@ -135,34 +130,4 @@ func HasTimestampFlag(flag uint) bool {
 // HasOnUpdateNowFlag checks if OnUpdateNowFlag is set.
 func HasOnUpdateNowFlag(flag uint) bool {
 	return (flag & OnUpdateNowFlag) > 0
-}
-
-// HasParseToJSONFlag checks if ParseToJSONFlag is set.
-func HasParseToJSONFlag(flag uint) bool {
-	return (flag & ParseToJSONFlag) > 0
-}
-
-// HasIsBooleanFlag checks if IsBooleanFlag is set.
-func HasIsBooleanFlag(flag uint) bool {
-	return (flag & IsBooleanFlag) > 0
-}
-
-// HasPreventNullInsertFlag checks if PreventNullInsertFlag is set.
-func HasPreventNullInsertFlag(flag uint) bool {
-	return (flag & PreventNullInsertFlag) > 0
-}
-
-// HasEnumSetAsIntFlag checks if EnumSetAsIntFlag is set.
-func HasEnumSetAsIntFlag(flag uint) bool {
-	return (flag & EnumSetAsIntFlag) > 0
-}
-
-// HasFlag checks if a flag is set.
-func HasFlag(flag uint, flagItem uint) bool {
-	return (flag & flagItem) > 0
-}
-
-// HasSridFlag checks if SridFlag is set.
-func HasSridFlag(flag uint) bool {
-	return (flag & SridFlag) > 0
 }
