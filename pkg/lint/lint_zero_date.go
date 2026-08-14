@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/mysql"
+	"github.com/block/spirit/pkg/statement"
 )
 
 type ZeroDateLinter struct{}

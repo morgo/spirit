@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
-	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/statement"
 )
 
 type UnsafeLinter struct {

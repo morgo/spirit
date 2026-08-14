@@ -659,7 +659,7 @@ func (ft *FieldType) FormatAsCastType(w io.Writer, explicitCharset bool) {
 	var sb strings.Builder
 	restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
 	ft.RestoreAsCastType(restoreCtx, explicitCharset)
-	fmt.Fprint(w, sb.String())
+	_, _ = fmt.Fprint(w, sb.String())
 }
 
 // VarStorageLen indicates this column is a variable length column.
@@ -751,8 +751,8 @@ func (ft *FieldType) MemoryUsage() (sum int64) {
 	if ft == nil {
 		return
 	}
-	sum = emptyFieldTypeSize + int64(len(ft.charset)+len(ft.collate)) + int64(cap(ft.elems))*int64(unsafe.Sizeof(*new(string))) +
-		int64(cap(ft.elemsIsBinaryLit))*int64(unsafe.Sizeof(*new(bool)))
+	sum = emptyFieldTypeSize + int64(len(ft.charset)+len(ft.collate)) + int64(cap(ft.elems))*int64(unsafe.Sizeof("")) +
+		int64(cap(ft.elemsIsBinaryLit))*int64(unsafe.Sizeof(false))
 
 	for _, s := range ft.elems {
 		sum += int64(len(s))

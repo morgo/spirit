@@ -175,26 +175,28 @@ func convertBinaryStringLiterals(text string, enc charset.Encoding, noBackslashE
 		// Find closing quote in UTF-8 text, keeping origIdx in sync.
 		terminated := false
 		var origQuoteEnd int
+	findClose:
 		for i < len(utf8Text) {
 			ch := utf8Text[i]
-			if ch == quote {
+			switch {
+			case ch == quote:
 				i++
 				origClose := advanceOrigTo(src, &origIdx, quote)
 				if origClose < 0 {
-					break
+					break findClose
 				}
 				if i >= len(utf8Text) || utf8Text[i] != quote {
 					// Closing quote.
 					terminated = true
 					origQuoteEnd = origClose + 1
-					break
+					break findClose
 				}
 				// Doubled quote escape — advance past second quote in original.
 				i++
 				if advanceOrigTo(src, &origIdx, quote) < 0 {
-					break
+					break findClose
 				}
-			} else if ch == '\\' && !noBackslashEscapes && i+1 < len(utf8Text) {
+			case ch == '\\' && !noBackslashEscapes && i+1 < len(utf8Text):
 				nextCh := utf8Text[i+1]
 				i += 2
 				// If the escaped character is a quote byte, advance origIdx
@@ -202,10 +204,10 @@ func convertBinaryStringLiterals(text string, enc charset.Encoding, noBackslashE
 				// pairing stays in sync.
 				if nextCh == '\'' || nextCh == '"' {
 					if advanceOrigTo(src, &origIdx, nextCh) < 0 {
-						break
+						break findClose
 					}
 				}
-			} else {
+			default:
 				i++
 			}
 		}
@@ -228,17 +230,18 @@ func convertBinaryStringLiterals(text string, enc charset.Encoding, noBackslashE
 		origEnd := origQuoteEnd - 1
 		for j < origEnd {
 			ch := src[j]
-			if ch == quote {
+			switch {
+			case ch == quote:
 				j++
 				if j < origEnd && src[j] == quote {
 					content = append(content, quote)
 					j++
 				}
-			} else if ch == '\\' && !noBackslashEscapes && j+1 < origEnd {
+			case ch == '\\' && !noBackslashEscapes && j+1 < origEnd:
 				j++
 				content = append(content, util.UnescapeChar(src[j])...)
 				j++
-			} else {
+			default:
 				content = append(content, ch)
 				j++
 			}

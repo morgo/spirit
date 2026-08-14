@@ -21,7 +21,8 @@ import (
 )
 
 func newInvalidModeErr(s string) error {
-	return fmt.Errorf("Variable 'sql_mode' can't be set to the value of '%s'", s)
+	// The capitalization matches MySQL's ER_WRONG_VALUE_FOR_VAR message.
+	return fmt.Errorf("Variable 'sql_mode' can't be set to the value of '%s'", s) //nolint:staticcheck
 }
 
 // Identifier length limitations.
@@ -316,7 +317,7 @@ func GetSQLMode(s string) (SQLMode, error) {
 		if !ok && strs[i] != "" {
 			return sqlMode, newInvalidModeErr(strs[i])
 		}
-		sqlMode = sqlMode | mode
+		sqlMode |= mode
 	}
 	return sqlMode, nil
 }

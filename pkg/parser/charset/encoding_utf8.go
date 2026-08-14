@@ -55,11 +55,12 @@ func (*encodingUTF8) Tp() EncodingTp {
 // Peek implements Encoding interface.
 func (*encodingUTF8) Peek(src []byte) []byte {
 	nextLen := 4
-	if len(src) == 0 || src[0] < 0x80 {
+	switch {
+	case len(src) == 0 || src[0] < 0x80:
 		nextLen = 1
-	} else if src[0] < 0xe0 {
+	case src[0] < 0xe0:
 		nextLen = 2
-	} else if src[0] < 0xf0 {
+	case src[0] < 0xf0:
 		nextLen = 3
 	}
 	if len(src) < nextLen {

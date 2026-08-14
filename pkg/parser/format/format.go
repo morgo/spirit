@@ -361,7 +361,7 @@ func (ctx *RestoreCtx) WriteKeyWord(keyWord string) {
 	case ctx.Flags.HasKeyWordLowercaseFlag():
 		keyWord = strings.ToLower(keyWord)
 	}
-	ctx.In.WriteString(keyWord)
+	_, _ = ctx.In.WriteString(keyWord)
 }
 
 // WriteString writes the string into writer
@@ -379,9 +379,9 @@ func (ctx *RestoreCtx) WriteString(str string) {
 		str = strings.ReplaceAll(str, `"`, `""`)
 		quotes = `"`
 	}
-	ctx.In.WriteString(quotes)
-	ctx.In.WriteString(str)
-	ctx.In.WriteString(quotes)
+	_, _ = ctx.In.WriteString(quotes)
+	_, _ = ctx.In.WriteString(str)
+	_, _ = ctx.In.WriteString(quotes)
 }
 
 // WriteName writes the name into writer
@@ -404,19 +404,19 @@ func (ctx *RestoreCtx) WriteName(name string) {
 	}
 
 	// use `WriteString` directly instead of `fmt.Fprint` to get a better performance.
-	ctx.In.WriteString(quotes)
-	ctx.In.WriteString(name)
-	ctx.In.WriteString(quotes)
+	_, _ = ctx.In.WriteString(quotes)
+	_, _ = ctx.In.WriteString(name)
+	_, _ = ctx.In.WriteString(quotes)
 }
 
 // WritePlain writes the plain text into writer without any handling.
 func (ctx *RestoreCtx) WritePlain(plainText string) {
-	ctx.In.WriteString(plainText)
+	_, _ = ctx.In.WriteString(plainText)
 }
 
 // WritePlainf write the plain text into writer without any handling.
 func (ctx *RestoreCtx) WritePlainf(format string, a ...any) {
-	fmt.Fprintf(ctx.In, format, a...)
+	_, _ = fmt.Fprintf(ctx.In, format, a...)
 }
 
 // CTERestorer is used by WithClause related nodes restore.

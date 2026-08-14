@@ -167,7 +167,7 @@ type IndexType int
 
 // String implements Stringer interface.
 func (t IndexType) String() string {
-	switch t {
+	switch t { //nolint:exhaustive
 	case IndexTypeBtree:
 		return "BTREE"
 	case IndexTypeHash:
@@ -205,7 +205,7 @@ const (
 
 // String implements fmt.Stringer interface.
 func (r ReferOptionType) String() string {
-	switch r {
+	switch r { //nolint:exhaustive
 	case ReferOptionRestrict:
 		return "RESTRICT"
 	case ReferOptionCascade:
@@ -279,7 +279,7 @@ const (
 
 // String implements fmt.Stringer interface.
 func (s ColumnChoice) String() string {
-	switch s {
+	switch s { //nolint:exhaustive
 	case AllColumns:
 		return "ALL"
 	case PredicateColumns:

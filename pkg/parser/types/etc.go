@@ -119,11 +119,12 @@ func TypeToStr(tp byte, cs string, geo GeometryType) (r string) {
 	if cs != "binary" {
 		return ts
 	}
-	if IsTypeBlob(tp) {
+	switch {
+	case IsTypeBlob(tp):
 		ts = strings.Replace(ts, "text", "blob", 1)
-	} else if IsTypeChar(tp) {
+	case IsTypeChar(tp):
 		ts = strings.Replace(ts, "char", "binary", 1)
-	} else if tp == mysql.TypeNull {
+	case tp == mysql.TypeNull:
 		ts = "binary"
 	}
 	return ts

@@ -14,7 +14,6 @@
 package opcode
 
 import (
-	"bytes"
 	"testing"
 )
 
@@ -24,19 +23,9 @@ func TestT(t *testing.T) {
 		t.Fatalf("invalid op code")
 	}
 
-	var buf bytes.Buffer
-	for i := range ops {
-		op := Op(i)
-		op.Format(&buf)
-		if buf.String() != ops[op].literal {
-			t.Error("format op fail", op)
-		}
-		buf.Reset()
-	}
-
 	// Test invalid opcode
 	defer func() {
-		recover()
+		_ = recover()
 	}()
 
 	op = 0

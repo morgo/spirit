@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/block/spirit/pkg/parser"
+	"github.com/block/spirit/pkg/parser/ast"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/block/spirit/pkg/parser"
-	"github.com/block/spirit/pkg/parser/ast"
 )
 
 func encodeSchemaTable(schema, table string) string {

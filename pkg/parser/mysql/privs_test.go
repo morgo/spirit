@@ -25,7 +25,7 @@ func TestPrivString(t *testing.T) {
 		if p > AllPriv {
 			break
 		}
-		require.NotEqualf(t, "", p.String(), "%d-th", i)
+		require.NotEmptyf(t, p.String(), "%d-th", i)
 	}
 }
 
@@ -80,15 +80,15 @@ func TestPrivsHas(t *testing.T) {
 
 func TestPrivAllConsistency(t *testing.T) {
 	// AllPriv in mysql.user columns.
-	for priv := CreatePriv; priv != AllPriv; priv = priv << 1 {
+	for priv := CreatePriv; priv != AllPriv; priv <<= 1 {
 		_, ok := Priv2UserCol[priv]
 		require.Truef(t, ok, "priv fail %d", priv)
 	}
 
-	require.Equal(t, len(AllGlobalPrivs)+1, len(Priv2UserCol))
+	require.Len(t, Priv2UserCol, len(AllGlobalPrivs)+1)
 
 	// USAGE privilege doesn't have a column in Priv2UserCol
 	// ALL privilege doesn't have a column in Priv2UserCol
 	// so it's +2
-	require.Equal(t, len(Priv2UserCol)+2, len(Priv2Str))
+	require.Len(t, Priv2Str, len(Priv2UserCol)+2)
 }

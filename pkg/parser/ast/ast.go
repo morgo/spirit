@@ -16,8 +16,6 @@
 package ast
 
 import (
-	"io"
-
 	"github.com/block/spirit/pkg/parser/charset"
 	"github.com/block/spirit/pkg/parser/format"
 	"github.com/block/spirit/pkg/parser/types"
@@ -60,9 +58,6 @@ type ExprNode interface {
 	SetType(tp *types.FieldType)
 	// GetType gets the evaluation type of the expression.
 	GetType() *types.FieldType
-
-	// Format formats the AST into a writer.
-	Format(w io.Writer)
 }
 
 // OptBinary is used for parser.

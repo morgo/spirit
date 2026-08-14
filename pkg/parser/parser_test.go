@@ -14,7 +14,6 @@
 package parser_test
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"runtime"
@@ -60,7 +59,7 @@ func TestSpecialComments(t *testing.T) {
 	require.NoError(t, err)
 	sel, ok := st.(*ast.SelectStmt)
 	require.True(t, ok)
-	require.Len(t, sel.TableHints, 0)
+	require.Empty(t, sel.TableHints)
 }
 
 type testCase struct {
@@ -121,14 +120,11 @@ func RunRestoreTest(t *testing.T, sourceSQLs, expectSQLs string, enableWindowFun
 // errorsEqual reports whether two errors match, either via errors.Is or by
 // rendering to the same message.
 func errorsEqual(err1, err2 error) bool {
-	if err1 == err2 {
+	if errors.Is(err1, err2) {
 		return true
 	}
 	if err1 == nil || err2 == nil {
 		return false
-	}
-	if errors.Is(err1, err2) {
-		return true
 	}
 	return err1.Error() == err2.Error()
 }
@@ -219,7 +215,7 @@ func TestHintError(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, warns, 1)
 	require.Equal(t, `[parser:8061]Optimizer hint unknown_hint is not supported and is ignored`, warns[0].Error())
-	require.Len(t, stmt[0].(*ast.SelectStmt).TableHints, 0)
+	require.Empty(t, stmt[0].(*ast.SelectStmt).TableHints)
 	stmt, warns, err = p.Parse("select /*+ HASH_JOIN(t1, T2) unknown_hint(T1,t2, 1) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
 	require.Len(t, stmt[0].(*ast.SelectStmt).TableHints, 1)
 	require.NoError(t, err)
@@ -235,7 +231,7 @@ func TestHintError(t *testing.T) {
 	require.NoError(t, err)
 	stmt, _, err = p.Parse("insert into t select /*+ MAX_EXECUTION_TIME(1000) */ * from t;", "", "")
 	require.NoError(t, err)
-	require.Len(t, stmt[0].(*ast.InsertStmt).TableHints, 0)
+	require.Empty(t, stmt[0].(*ast.InsertStmt).TableHints)
 	require.Len(t, stmt[0].(*ast.InsertStmt).Select.(*ast.SelectStmt).TableHints, 1)
 	stmt, _, err = p.Parse("insert /*+ MAX_EXECUTION_TIME(1000) */ into t select * from t;", "", "")
 	require.NoError(t, err)
@@ -393,7 +389,7 @@ func TestOptimizerHints(t *testing.T) {
 	require.Equal(t, "t4", hints[1].Indexes[0].L)
 
 	require.Equal(t, "resource_group", hints[2].HintName.L)
-	require.Equal(t, hints[2].HintData, "rg1")
+	require.Equal(t, "rg1", hints[2].HintData)
 
 	// Test HASH_JOIN and NO_HASH_JOIN
 	stmt, _, err = p.Parse("select /*+ HASH_JOIN(t1, T2), no_hash_join(t3, t4) */ c1, c2 from t1, t2 where t1.c1 = t2.c1", "", "")
@@ -445,7 +441,7 @@ func TestOptimizerHints(t *testing.T) {
 		require.NoError(t, err)
 		selectStmt = stmt[0].(*ast.SelectStmt)
 		hints = selectStmt.TableHints
-		require.Lenf(t, hints, 1, "case", i)
+		require.Lenf(t, hints, 1, "case %d", i)
 		require.Equal(t, "max_execution_time", hints[0].HintName.L)
 		require.Equal(t, uint64(1000), hints[0].HintData.(uint64))
 	}
@@ -474,14 +470,14 @@ func TestOptimizerHints(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, warns, 5)
 	selectStmt = stmt[0].(*ast.SelectStmt)
-	require.Len(t, selectStmt.TableHints, 0)
+	require.Empty(t, selectStmt.TableHints)
 
 	// TiDB-only hint names are unknown identifiers now, and also warn.
 	stmt, warns, err = p.Parse("select /*+ INL_JOIN(t1, t2), HASH_AGG(), READ_FROM_STORAGE(TIFLASH[t1]) */ c1 from t1", "", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, warns)
 	selectStmt = stmt[0].(*ast.SelectStmt)
-	require.Len(t, selectStmt.TableHints, 0)
+	require.Empty(t, selectStmt.TableHints)
 }
 
 func TestParserErrMsg(t *testing.T) {
@@ -559,7 +555,7 @@ func TestSQLNoCache(t *testing.T) {
 		require.NoError(t, err)
 
 		sel := stmt[0].(*ast.SelectStmt)
-		require.Equal(t, tbl.ok, sel.SelectStmtOpts.SQLCache)
+		require.Equal(t, tbl.ok, sel.SQLCache)
 	}
 }
 
@@ -617,7 +613,7 @@ func TestDDLStatements(t *testing.T) {
 		require.False(t, mysql.HasBinaryFlag(colDef.Tp.GetFlag()))
 	}
 	for _, tblOpt := range stmt.Options {
-		switch tblOpt.Tp {
+		switch tblOpt.Tp { //nolint:exhaustive
 		case ast.TableOptionCharset:
 			require.Equal(t, "utf8", tblOpt.StrValue)
 		case ast.TableOptionCollate:
@@ -715,11 +711,11 @@ func TestGeneratedColumn(t *testing.T) {
 	}
 
 	_, _, err := p.Parse("create table t1 (a int, b int as (a + 1) default 10);", "", "")
-	require.Equal(t, err.Error(), "[ddl:1221]Incorrect usage of DEFAULT and generated column")
+	require.EqualError(t, err, "[ddl:1221]Incorrect usage of DEFAULT and generated column")
 	_, _, err = p.Parse("create table t1 (a int, b int as (a + 1) on update now());", "", "")
-	require.Equal(t, err.Error(), "[ddl:1221]Incorrect usage of ON UPDATE and generated column")
+	require.EqualError(t, err, "[ddl:1221]Incorrect usage of ON UPDATE and generated column")
 	_, _, err = p.Parse("create table t1 (a int, b int as (a + 1) auto_increment);", "", "")
-	require.Equal(t, err.Error(), "[ddl:1221]Incorrect usage of AUTO_INCREMENT and generated column")
+	require.EqualError(t, err, "[ddl:1221]Incorrect usage of AUTO_INCREMENT and generated column")
 }
 
 func TestSideEffect(t *testing.T) {
@@ -912,11 +908,12 @@ func TestUnderscoreCharset(t *testing.T) {
 	for _, tt := range tests {
 		sql := fmt.Sprintf("select hex(_%s '3F')", tt.cs)
 		_, err := p.ParseOneStmt(sql, "", "")
-		if tt.parseFail {
+		switch {
+		case tt.parseFail:
 			require.EqualError(t, err, fmt.Sprintf("line 1 column %d near \"'3F')\" ", len(tt.cs)+17))
-		} else if tt.unSupport {
+		case tt.unSupport:
 			require.EqualError(t, err, ast.ErrUnknownCharacterSet.GenByFormat("Unsupported character introducer: '%-.64s'", tt.cs).Error())
-		} else {
+		default:
 			require.NoError(t, err)
 		}
 	}
@@ -945,26 +942,26 @@ func TestFulltextSearch(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, st)
 
+	restoreWhere := func(st ast.StmtNode) string {
+		var sb strings.Builder
+		require.NoError(t, st.(*ast.SelectStmt).Where.Restore(NewRestoreCtx(DefaultRestoreFlags, &sb)))
+		return sb.String()
+	}
+
 	st, err = p.ParseOneStmt("SELECT * FROM fulltext_test WHERE MATCH(title,content) AGAINST('search' IN NATURAL LANGUAGE MODE)", "", "")
 	require.NoError(t, err)
 	require.NotNil(t, st.(*ast.SelectStmt))
-	writer := bytes.NewBufferString("")
-	st.(*ast.SelectStmt).Where.Format(writer)
-	require.Equal(t, "MATCH(title,content) AGAINST(\"search\")", writer.String())
+	require.Equal(t, "MATCH (`title`,`content`) AGAINST (_UTF8MB4'search')", restoreWhere(st))
 
 	st, err = p.ParseOneStmt("SELECT * FROM fulltext_test WHERE MATCH(title,content) AGAINST('search' IN BOOLEAN MODE)", "", "")
 	require.NoError(t, err)
 	require.NotNil(t, st.(*ast.SelectStmt))
-	writer.Reset()
-	st.(*ast.SelectStmt).Where.Format(writer)
-	require.Equal(t, "MATCH(title,content) AGAINST(\"search\" IN BOOLEAN MODE)", writer.String())
+	require.Equal(t, "MATCH (`title`,`content`) AGAINST (_UTF8MB4'search' IN BOOLEAN MODE)", restoreWhere(st))
 
 	st, err = p.ParseOneStmt("SELECT * FROM fulltext_test WHERE MATCH(title,content) AGAINST('search' WITH QUERY EXPANSION)", "", "")
 	require.NoError(t, err)
 	require.NotNil(t, st.(*ast.SelectStmt))
-	writer.Reset()
-	st.(*ast.SelectStmt).Where.Format(writer)
-	require.Equal(t, "MATCH(title,content) AGAINST(\"search\" WITH QUERY EXPANSION)", writer.String())
+	require.Equal(t, "MATCH (`title`,`content`) AGAINST (_UTF8MB4'search' WITH QUERY EXPANSION)", restoreWhere(st))
 }
 
 func TestSignedInt64OutOfRange(t *testing.T) {
@@ -1008,7 +1005,7 @@ func (checker *nodeTextCleaner) Enter(in ast.Node) (out ast.Node, skipChildren b
 		}
 	case *ast.CreateTableStmt:
 		for _, opt := range node.Options {
-			switch opt.Tp {
+			switch opt.Tp { //nolint:exhaustive
 			case ast.TableOptionCharset:
 				opt.StrValue = strings.ToUpper(opt.StrValue)
 			case ast.TableOptionCollate:
@@ -1057,7 +1054,7 @@ func (checker *nodeTextCleaner) Enter(in ast.Node) (out ast.Node, skipChildren b
 	case *ast.AlterTableStmt:
 		var specs []*ast.AlterTableSpec
 		for _, v := range node.Specs {
-			if v.Tp != 0 && !(v.Tp == ast.AlterTableOption && len(v.Options) == 0) {
+			if v.Tp != 0 && (v.Tp != ast.AlterTableOption || len(v.Options) != 0) {
 				specs = append(specs, v)
 			}
 		}
@@ -1300,13 +1297,13 @@ func TestCharsetIntroducer(t *testing.T) {
 
 func TestIssue45898(t *testing.T) {
 	p := parser.New()
-	p.ParseSQL("a.")
+	_, _, _ = p.ParseSQL("a.") // intentionally invalid; must not poison the next parse
 	stmts, _, err := p.ParseSQL("select count(1) from t")
 	require.NoError(t, err)
 	var sb strings.Builder
 	restoreCtx := NewRestoreCtx(DefaultRestoreFlags, &sb)
 	sb.Reset()
-	stmts[0].Restore(restoreCtx)
+	require.NoError(t, stmts[0].Restore(restoreCtx))
 	require.Equal(t, "SELECT COUNT(1) FROM `t`", sb.String())
 }
 
@@ -1314,7 +1311,7 @@ func TestMultiStmt(t *testing.T) {
 	p := parser.New()
 	stmts, _, err := p.Parse("SELECT 'foo'; SELECT 'foo;bar','baz'; select 'foo' , 'bar' , 'baz' ;select 1", "", "")
 	require.NoError(t, err)
-	require.Equal(t, len(stmts), 4)
+	require.Len(t, stmts, 4)
 	stmt1 := stmts[0].(*ast.SelectStmt)
 	stmt2 := stmts[1].(*ast.SelectStmt)
 	stmt3 := stmts[2].(*ast.SelectStmt)

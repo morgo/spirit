@@ -40,7 +40,7 @@ func TestUnmarshalCIStr(t *testing.T) {
 
 	buf, err = json.Marshal(ci)
 	require.NoError(t, err)
-	require.Equal(t, `{"O":"aaBB","L":"aabb"}`, string(buf))
+	require.JSONEq(t, `{"O":"aaBB","L":"aabb"}`, string(buf))
 	require.NoError(t, ci.UnmarshalJSON(buf))
 	require.Equal(t, str, ci.O)
 	require.Equal(t, "aabb", ci.L)

@@ -56,16 +56,15 @@ func TestKeywordConsistent(t *testing.T) {
 }
 
 func extractMiddle(str, startMarker, endMarker string) string {
-	startIdx := strings.Index(str, startMarker)
-	if startIdx == -1 {
+	_, str, ok := strings.Cut(str, startMarker)
+	if !ok {
 		return ""
 	}
-	str = str[startIdx+len(startMarker):]
-	endIdx := strings.Index(str, endMarker)
-	if endIdx == -1 {
+	middle, _, ok := strings.Cut(str, endMarker)
+	if !ok {
 		return ""
 	}
-	return str[:endIdx]
+	return middle
 }
 
 func extractQuotedWords(strs []string) []string {

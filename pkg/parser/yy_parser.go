@@ -308,8 +308,7 @@ func (parser *Parser) parseHint(input string) ([]*ast.TableOptimizerHint, []erro
 func toInt(l yyLexer, lval *yySymType, str string) int {
 	n, err := strconv.ParseUint(str, 10, 64)
 	if err != nil {
-		e := err.(*strconv.NumError)
-		if e.Err == strconv.ErrRange {
+		if errors.Is(err, strconv.ErrRange) {
 			// TODO: toDecimal maybe out of range still.
 			// This kind of error should be throw to higher level, because truncated data maybe legal.
 			// For example, this SQL returns error:
@@ -350,8 +349,7 @@ func toDecimal(l yyLexer, lval *yySymType, str string) int {
 func toFloat(l yyLexer, lval *yySymType, str string) int {
 	n, err := strconv.ParseFloat(str, 64)
 	if err != nil {
-		e := err.(*strconv.NumError)
-		if e.Err == strconv.ErrRange {
+		if errors.Is(err, strconv.ErrRange) {
 			l.AppendError(types.ErrIllegalValueForType.GenByArgs("double", str))
 			return invalid
 		}

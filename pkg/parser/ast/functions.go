@@ -15,7 +15,6 @@ package ast
 
 import (
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -400,53 +399,53 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 	switch n.FnName.L {
 	case "convert":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 		ctx.WriteKeyWord(" USING ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 	case "adddate", "subdate", "date_add", "date_sub":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[0]: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[0]: %w", err)
 		}
 		ctx.WritePlain(", ")
 		ctx.WriteKeyWord("INTERVAL ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[1]: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[1]: %w", err)
 		}
 		ctx.WritePlain(" ")
 		if err := n.Args[2].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[2]: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[2]: %w", err)
 		}
 	case "extract":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[0]: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[0]: %w", err)
 		}
 		ctx.WriteKeyWord(" FROM ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[1]: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[1]: %w", err)
 		}
 	case "position":
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr: %w", err)
 		}
 		ctx.WriteKeyWord(" IN ")
 		if err := n.Args[1].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr: %w", err)
 		}
 	case "trim":
 		switch len(n.Args) {
 		case 3:
 			if err := n.Args[2].Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[2]: %w", err)
+				return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[2]: %w", err)
 			}
 			ctx.WritePlain(" ")
 			fallthrough
 		case 2:
 			if expr, isValue := n.Args[1].(*ValueExpr); !isValue || expr.GetValue() != nil {
 				if err := n.Args[1].Restore(ctx); err != nil {
-					return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[1]: %w", err)
+					return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[1]: %w", err)
 				}
 				ctx.WritePlain(" ")
 			}
@@ -454,19 +453,19 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 			fallthrough
 		case 1:
 			if err := n.Args[0].Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore FuncCallExpr.Args[0]: %w", err)
+				return fmt.Errorf("an error occurred while restore FuncCallExpr.Args[0]: %w", err)
 			}
 		}
 	case WeightString:
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[0]: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[0]: %w", err)
 		}
 		if len(n.Args) == 3 {
 			ctx.WriteKeyWord(" AS ")
 			ctx.WriteKeyWord(n.Args[1].(*ValueExpr).GetValue().(string))
 			ctx.WritePlain("(")
 			if err := n.Args[2].Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[2]: %w", err)
+				return fmt.Errorf("an error occurred while restore FuncCallExpr.(WEIGHT_STRING).Args[2]: %w", err)
 			}
 			ctx.WritePlain(")")
 		}
@@ -476,7 +475,7 @@ func (n *FuncCallExpr) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := argv.Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore FuncCallExpr.Args %d: %w", i, err)
+				return fmt.Errorf("an error occurred while restore FuncCallExpr.Args %d: %w", i, err)
 			}
 		}
 	}
@@ -497,70 +496,26 @@ func (n *FuncCallExpr) customRestore(ctx *format.RestoreCtx) (bool, error) {
 	if specialLiteral != "" {
 		ctx.WritePlain(specialLiteral)
 		if err := n.Args[0].Restore(ctx); err != nil {
-			return true, fmt.Errorf("An error occurred while restore FuncCallExpr.Expr: %w", err)
+			return true, fmt.Errorf("an error occurred while restore FuncCallExpr.Expr: %w", err)
 		}
 		return true, nil
 	}
 	if n.FnName.L == JSONMemberOf {
 		if len(n.Args) == 2 {
 			if err := n.Args[0].Restore(ctx); err != nil {
-				return true, fmt.Errorf("An error occurred while restore FuncCallExpr.(MEMBER OF).Args[0]: %w", err)
+				return true, fmt.Errorf("an error occurred while restore FuncCallExpr.(MEMBER OF).Args[0]: %w", err)
 			}
 			ctx.WriteKeyWord(" MEMBER OF ")
 			ctx.WritePlain("(")
 			if err := n.Args[1].Restore(ctx); err != nil {
-				return true, fmt.Errorf("An error occurred while restore FuncCallExpr.(MEMBER OF).Args[1]: %w", err)
+				return true, fmt.Errorf("an error occurred while restore FuncCallExpr.(MEMBER OF).Args[1]: %w", err)
 			}
 			ctx.WritePlain(")")
 			return true, nil
 		}
-		return true, (fmt.Errorf("Incorrect parameter count in the call to native function 'json_memberof'"))
+		return true, (fmt.Errorf("incorrect parameter count in the call to native function 'json_memberof'"))
 	}
 	return false, nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *FuncCallExpr) Format(w io.Writer) {
-	if !n.specialFormatArgs(w) {
-		fmt.Fprintf(w, "%s(", n.FnName.L)
-		for i, arg := range n.Args {
-			arg.Format(w)
-			if i != len(n.Args)-1 {
-				fmt.Fprint(w, ", ")
-			}
-		}
-		fmt.Fprint(w, ")")
-	}
-}
-
-// specialFormatArgs formats argument list for some special functions.
-func (n *FuncCallExpr) specialFormatArgs(w io.Writer) bool {
-	switch n.FnName.L {
-	case DateAdd, DateSub, AddDate, SubDate:
-		fmt.Fprintf(w, "%s(", n.FnName.L)
-		n.Args[0].Format(w)
-		fmt.Fprint(w, ", INTERVAL ")
-		n.Args[1].Format(w)
-		fmt.Fprint(w, " ")
-		n.Args[2].Format(w)
-		fmt.Fprint(w, ")")
-		return true
-	case JSONMemberOf:
-		n.Args[0].Format(w)
-		fmt.Fprint(w, " MEMBER OF ")
-		fmt.Fprint(w, " (")
-		n.Args[1].Format(w)
-		fmt.Fprint(w, ")")
-		return true
-	case Extract:
-		fmt.Fprintf(w, "%s(", n.FnName.L)
-		n.Args[0].Format(w)
-		fmt.Fprint(w, " FROM ")
-		n.Args[1].Format(w)
-		fmt.Fprint(w, ")")
-		return true
-	}
-	return false
 }
 
 // Accept implements Node interface.
@@ -607,21 +562,12 @@ func (n *JSONSumCrc32Expr) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("JSON_SUM_CRC32")
 	ctx.WritePlain("(")
 	if err := n.Expr.Restore(ctx); err != nil {
-		return fmt.Errorf("An error occurred while restore JSONSumCrc32Expr.Expr: %w", err)
+		return fmt.Errorf("an error occurred while restore JSONSumCrc32Expr.Expr: %w", err)
 	}
 	ctx.WriteKeyWord(" AS ")
 	n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)
 	ctx.WritePlain(")")
 	return nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *JSONSumCrc32Expr) Format(w io.Writer) {
-	fmt.Fprint(w, "JSON_SUM_CRC32(")
-	n.Expr.Format(w)
-	fmt.Fprint(w, " AS ")
-	n.Tp.FormatAsCastType(w, n.ExplicitCharSet)
-	fmt.Fprint(w, ")")
 }
 
 // Accept implements Node Accept interface.
@@ -660,7 +606,7 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("CAST")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 		ctx.WriteKeyWord(" AS ")
 		n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)
@@ -669,7 +615,7 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("CONVERT")
 		ctx.WritePlain("(")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 		ctx.WritePlain(", ")
 		n.Tp.RestoreAsCastType(ctx, n.ExplicitCharSet)
@@ -677,31 +623,10 @@ func (n *FuncCastExpr) Restore(ctx *format.RestoreCtx) error {
 	case CastBinaryOperator:
 		ctx.WriteKeyWord("BINARY ")
 		if err := n.Expr.Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore FuncCastExpr.Expr: %w", err)
+			return fmt.Errorf("an error occurred while restore FuncCastExpr.Expr: %w", err)
 		}
 	}
 	return nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *FuncCastExpr) Format(w io.Writer) {
-	switch n.FunctionType {
-	case CastFunction:
-		fmt.Fprint(w, "CAST(")
-		n.Expr.Format(w)
-		fmt.Fprint(w, " AS ")
-		n.Tp.FormatAsCastType(w, n.ExplicitCharSet)
-		fmt.Fprint(w, ")")
-	case CastConvertFunction:
-		fmt.Fprint(w, "CONVERT(")
-		n.Expr.Format(w)
-		fmt.Fprint(w, ", ")
-		n.Tp.FormatAsCastType(w, n.ExplicitCharSet)
-		fmt.Fprint(w, ")")
-	case CastBinaryOperator:
-		fmt.Fprint(w, "BINARY ")
-		n.Expr.Format(w)
-	}
 }
 
 // Accept implements Node Accept interface.
@@ -758,11 +683,6 @@ type TrimDirectionExpr struct {
 func (n *TrimDirectionExpr) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(n.Direction.String())
 	return nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *TrimDirectionExpr) Format(w io.Writer) {
-	fmt.Fprint(w, n.Direction.String())
 }
 
 // Accept implements Node Accept interface.
@@ -856,18 +776,18 @@ func (n *AggregateFuncExpr) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := n.Args[i].Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore AggregateFuncExpr.Args[%d]: %w", i, err)
+				return fmt.Errorf("an error occurred while restore AggregateFuncExpr.Args[%d]: %w", i, err)
 			}
 		}
 		if n.Order != nil {
 			ctx.WritePlain(" ")
 			if err := n.Order.Restore(ctx); err != nil {
-				return fmt.Errorf("An error occur while restore AggregateFuncExpr.Args Order: %w", err)
+				return fmt.Errorf("an error occurred while restore AggregateFuncExpr.Args Order: %w", err)
 			}
 		}
 		ctx.WriteKeyWord(" SEPARATOR ")
 		if err := n.Args[len(n.Args)-1].Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore AggregateFuncExpr.Args SEPARATOR: %w", err)
+			return fmt.Errorf("an error occurred while restore AggregateFuncExpr.Args SEPARATOR: %w", err)
 		}
 	default:
 		for i, argv := range n.Args {
@@ -875,17 +795,12 @@ func (n *AggregateFuncExpr) Restore(ctx *format.RestoreCtx) error {
 				ctx.WritePlain(", ")
 			}
 			if err := argv.Restore(ctx); err != nil {
-				return fmt.Errorf("An error occurred while restore AggregateFuncExpr.Args[%d]: %w", i, err)
+				return fmt.Errorf("an error occurred while restore AggregateFuncExpr.Args[%d]: %w", i, err)
 			}
 		}
 	}
 	ctx.WritePlain(")")
 	return nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *AggregateFuncExpr) Format(w io.Writer) {
-	panic("Not implemented")
 }
 
 // Accept implements Node Accept interface.
@@ -969,7 +884,7 @@ func (n *WindowFuncExpr) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("DISTINCT ")
 		}
 		if err := v.Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore WindowFuncExpr.Args[%d]: %w", i, err)
+			return fmt.Errorf("an error occurred while restore WindowFuncExpr.Args[%d]: %w", i, err)
 		}
 	}
 	ctx.WritePlain(")")
@@ -981,15 +896,10 @@ func (n *WindowFuncExpr) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteKeyWord(" OVER ")
 	if err := n.Spec.Restore(ctx); err != nil {
-		return fmt.Errorf("An error occurred while restore WindowFuncExpr.Spec: %w", err)
+		return fmt.Errorf("an error occurred while restore WindowFuncExpr.Spec: %w", err)
 	}
 
 	return nil
-}
-
-// Format formats the window function expression into a Writer.
-func (n *WindowFuncExpr) Format(w io.Writer) {
-	panic("Not implemented")
 }
 
 // Accept implements Node Accept interface.
@@ -1064,7 +974,7 @@ const (
 
 // String implements fmt.Stringer interface.
 func (unit TimeUnitType) String() string {
-	switch unit {
+	switch unit { //nolint:exhaustive
 	case TimeUnitMicrosecond:
 		return "MICROSECOND"
 	case TimeUnitSecond:
@@ -1114,7 +1024,7 @@ func (unit TimeUnitType) String() string {
 // Returns error if the time unit is not a fixed time interval (such as MONTH)
 // or a composite unit (such as MINUTE_SECOND).
 func (unit TimeUnitType) Duration() (time.Duration, error) {
-	switch unit {
+	switch unit { //nolint:exhaustive
 	case TimeUnitMicrosecond:
 		return time.Microsecond, nil
 	case TimeUnitSecond:
@@ -1145,11 +1055,6 @@ type TimeUnitExpr struct {
 func (n *TimeUnitExpr) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(n.Unit.String())
 	return nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *TimeUnitExpr) Format(w io.Writer) {
-	fmt.Fprint(w, n.Unit.String())
 }
 
 // Accept implements Node Accept interface.
@@ -1198,11 +1103,6 @@ func (selector GetFormatSelectorType) String() string {
 func (n *GetFormatSelectorExpr) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(n.Selector.String())
 	return nil
-}
-
-// Format the ExprNode into a Writer.
-func (n *GetFormatSelectorExpr) Format(w io.Writer) {
-	fmt.Fprint(w, n.Selector.String())
 }
 
 // Accept implements Node Accept interface.

@@ -15,7 +15,6 @@ package ast
 
 import (
 	"fmt"
-	"io"
 	"strconv"
 
 	"github.com/block/spirit/pkg/parser/charset"
@@ -101,44 +100,6 @@ func (n *ValueExpr) GetDatumString() string {
 	return n.GetString()
 }
 
-// Format the ExprNode into a Writer.
-func (n *ValueExpr) Format(w io.Writer) {
-	var s string
-	switch n.Kind() {
-	case KindNull:
-		s = "NULL"
-	case KindInt64:
-		if n.Type.GetFlag()&mysql.IsBooleanFlag != 0 {
-			if n.GetInt64() > 0 {
-				s = "TRUE"
-			} else {
-				s = "FALSE"
-			}
-		} else {
-			s = strconv.FormatInt(n.GetInt64(), 10)
-		}
-	case KindUint64:
-		s = strconv.FormatUint(n.GetUint64(), 10)
-	case KindFloat32:
-		s = strconv.FormatFloat(n.GetFloat64(), 'e', -1, 32)
-	case KindFloat64:
-		s = strconv.FormatFloat(n.GetFloat64(), 'e', -1, 64)
-	case KindString, KindBytes:
-		s = strconv.Quote(n.GetString())
-	case KindMysqlDecimal:
-		s = n.GetMysqlDecimal().String()
-	case KindBinaryLiteral:
-		if n.Type.GetFlag()&mysql.UnsignedFlag != 0 {
-			s = fmt.Sprintf("x'%x'", n.GetBytes())
-		} else {
-			s = n.GetBinaryLiteral().ToBitLiteralString(true)
-		}
-	default:
-		panic("Can't format to string")
-	}
-	_, _ = fmt.Fprint(w, s)
-}
-
 // NewValueExpr creates a ValueExpr with value, and sets default field type.
 func NewValueExpr(value any, charset string, collate string) *ValueExpr {
 	if ve, ok := value.(*ValueExpr); ok {
@@ -191,11 +152,6 @@ func NewParamMarkerExpr(offset int) *ParamMarkerExpr {
 	return &ParamMarkerExpr{
 		Offset: offset,
 	}
-}
-
-// Format the ExprNode into a Writer.
-func (n *ParamMarkerExpr) Format(w io.Writer) {
-	panic("Not implemented")
 }
 
 // Accept implements Node Accept interface.

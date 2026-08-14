@@ -138,11 +138,11 @@ func TestInvalidCollation(t *testing.T) {
 func TestUTF8MB3(t *testing.T) {
 	colname, err := GetDefaultCollationLegacy("utf8mb3")
 	require.NoError(t, err)
-	require.Equal(t, colname, "utf8_bin")
+	require.Equal(t, "utf8_bin", colname)
 
 	csinfo, err := GetCharsetInfo("utf8mb3")
 	require.NoError(t, err)
-	require.Equal(t, csinfo.Name, "utf8")
+	require.Equal(t, "utf8", csinfo.Name)
 
 	tests := []struct {
 		cs    string

@@ -14,8 +14,6 @@
 package opcode
 
 import (
-	"io"
-
 	"github.com/block/spirit/pkg/parser/format"
 )
 
@@ -222,11 +220,6 @@ var ops = [...]struct {
 // String implements Stringer interface.
 func (o Op) String() string {
 	return ops[o].name
-}
-
-// Format the ExprNode into a Writer.
-func (o Op) Format(w io.Writer) {
-	io.WriteString(w, ops[o].literal)
 }
 
 // IsKeyword returns whether the operator is a keyword.

@@ -17,17 +17,18 @@ import "unicode"
 
 // CharsetNameToID maps charset name to its default collation ID.
 func CharsetNameToID(charset string) uint8 {
-	// Use quick path for TiDB to avoid access CharsetIDs map
-	// "SHOW CHARACTER SET;" to see all the supported character sets.
-	if charset == "utf8mb4" {
+	// Quick path for the common charsets, to avoid accessing the
+	// CharsetIDs map. "SHOW CHARACTER SET;" lists all supported charsets.
+	switch charset {
+	case "utf8mb4":
 		return UTF8MB4DefaultCollationID
-	} else if charset == "binary" {
+	case "binary":
 		return BinaryDefaultCollationID
-	} else if charset == "utf8" {
+	case "utf8":
 		return UTF8DefaultCollationID
-	} else if charset == "ascii" {
+	case "ascii":
 		return ASCIIDefaultCollationID
-	} else if charset == "latin1" {
+	case "latin1":
 		return Latin1DefaultCollationID
 	}
 	return CharsetIDs[charset]

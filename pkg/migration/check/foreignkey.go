@@ -5,8 +5,8 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/block/spirit/pkg/utils"
 	"github.com/block/spirit/pkg/parser/ast"
+	"github.com/block/spirit/pkg/utils"
 )
 
 func init() {

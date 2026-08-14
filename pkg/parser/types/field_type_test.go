@@ -277,27 +277,27 @@ func TestFieldTypeEqual(t *testing.T) {
 	// tp not equal
 	ft1 := NewFieldType(mysql.TypeDouble)
 	ft2 := NewFieldType(mysql.TypeFloat)
-	require.Equal(t, false, ft1.Equal(ft2))
+	require.False(t, ft1.Equal(ft2))
 
 	// decimal not equal
 	ft2 = NewFieldType(mysql.TypeDouble)
 	ft2.SetDecimal(5)
-	require.Equal(t, false, ft1.Equal(ft2))
+	require.False(t, ft1.Equal(ft2))
 
 	// flen not equal and decimal not -1
 	ft1.SetDecimal(5)
 	ft1.SetFlen(22)
-	require.Equal(t, false, ft1.Equal(ft2))
+	require.False(t, ft1.Equal(ft2))
 
 	// flen equal
 	ft2.SetFlen(22)
-	require.Equal(t, true, ft1.Equal(ft2))
+	require.True(t, ft1.Equal(ft2))
 
 	// decimal is -1
 	ft1.SetDecimal(-1)
 	ft2.SetDecimal(-1)
 	ft1.SetFlen(23)
-	require.Equal(t, true, ft1.Equal(ft2))
+	require.True(t, ft1.Equal(ft2))
 }
 
 func TestCompactStr(t *testing.T) {
@@ -339,7 +339,7 @@ func TestGeometryType_String(t *testing.T) {
 	p := GeomPoint
 	require.Equal(t, "point", p.String())
 	x := GeometryType(99)
-	require.Equal(t, "", x.String())
+	require.Empty(t, x.String())
 	var n GeometryType
 	require.Equal(t, "geometry", n.String())
 }

@@ -27,8 +27,8 @@ func TestStrToType(t *testing.T) {
 	}
 
 	tp := StrToType("blob")
-	require.Equal(t, tp, mysql.TypeBlob)
+	require.Equal(t, mysql.TypeBlob, tp)
 
 	tp = StrToType("binary")
-	require.Equal(t, tp, mysql.TypeString)
+	require.Equal(t, mysql.TypeString, tp)
 }

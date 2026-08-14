@@ -66,7 +66,7 @@ const (
 
 // String implements fmt.Stringer for HistogramOperationType.
 func (hot HistogramOperationType) String() string {
-	switch hot {
+	switch hot { //nolint:exhaustive
 	case HistogramOperationUpdate:
 		return "UPDATE HISTOGRAM"
 	case HistogramOperationDrop:
@@ -93,7 +93,7 @@ func (n *AnalyzeTableStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WritePlain(",")
 		}
 		if err := table.Restore(ctx); err != nil {
-			return fmt.Errorf("An error occurred while restore AnalyzeTableStmt.TableNames[%d]: %w", i, err)
+			return fmt.Errorf("an error occurred while restore AnalyzeTableStmt.TableNames[%d]: %w", i, err)
 		}
 	}
 	if len(n.PartitionNames) != 0 {

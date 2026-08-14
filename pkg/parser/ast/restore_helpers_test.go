@@ -57,26 +57,6 @@ func runNodeRestoreTestWithFlags(t *testing.T, nodeTestCases []NodeRestoreTestCa
 	}
 }
 
-// runNodeRestoreTestWithFlagsStmtChange likes runNodeRestoreTestWithFlags but not check if the ASTs are same.
-// Sometimes the AST are different and it's expected.
-func runNodeRestoreTestWithFlagsStmtChange(t *testing.T, nodeTestCases []NodeRestoreTestCase, template string, extractNodeFunc func(node Node) Node, flags RestoreFlags) {
-	p := parser.New()
-	p.EnableWindowFunc(true)
-	for _, testCase := range nodeTestCases {
-		sourceSQL := fmt.Sprintf(template, testCase.sourceSQL)
-		expectSQL := fmt.Sprintf(template, testCase.expectSQL)
-		stmt, err := p.ParseOneStmt(sourceSQL, "", "")
-		comment := fmt.Sprintf("source %#v", testCase)
-		require.NoError(t, err, comment)
-		var sb strings.Builder
-		err = extractNodeFunc(stmt).Restore(NewRestoreCtx(flags, &sb))
-		require.NoError(t, err, comment)
-		restoreSql := fmt.Sprintf(template, sb.String())
-		comment = fmt.Sprintf("source %#v; restore %v", testCase, restoreSql)
-		require.Equal(t, expectSQL, restoreSql, comment)
-	}
-}
-
 // CleanNodeText set the text of node and all child node empty.
 // For test only.
 func CleanNodeText(node Node) {
@@ -111,9 +91,8 @@ func (checker *nodeTextCleaner) Enter(in Node) (out Node, skipChildren bool) {
 		}
 	case *FuncCallExpr:
 		node.FnName.O = strings.ToLower(node.FnName.O)
-		switch node.FnName.L {
-		case "convert":
-			node.Args[1].(*ValueExpr).Datum.SetBytes(nil)
+		if node.FnName.L == "convert" {
+			node.Args[1].(*ValueExpr).SetBytes(nil)
 		}
 	case *AggregateFuncExpr:
 		node.F = strings.ToLower(node.F)

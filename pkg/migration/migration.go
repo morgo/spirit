@@ -12,10 +12,10 @@ import (
 	"github.com/block/spirit/pkg/checksum"
 	"github.com/block/spirit/pkg/dbconn/sqlescape"
 	"github.com/block/spirit/pkg/migration/check"
+	"github.com/block/spirit/pkg/parser"
 	"github.com/block/spirit/pkg/statement"
 	"github.com/block/spirit/pkg/table"
 	"github.com/block/spirit/pkg/utils"
-	"github.com/block/spirit/pkg/parser"
 )
 
 // defaultWriteThreads must match the `default:"4"` kong tag on

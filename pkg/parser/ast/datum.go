@@ -320,12 +320,13 @@ func ParseBitStr(s string) (BinaryLiteral, error) {
 		return nil, fmt.Errorf("invalid empty string for parsing bit type")
 	}
 
-	if s[0] == 'b' || s[0] == 'B' {
+	switch {
+	case s[0] == 'b' || s[0] == 'B':
 		// format is b'val' or B'val'
 		s = strings.Trim(s[1:], "'")
-	} else if strings.HasPrefix(s, "0b") {
+	case strings.HasPrefix(s, "0b"):
 		s = s[2:]
-	} else {
+	default:
 		// here means format is not b'val', B'val' or 0bval.
 		return nil, fmt.Errorf("invalid bit type format %s", s)
 	}
@@ -372,15 +373,16 @@ func ParseHexStr(s string) (BinaryLiteral, error) {
 		return nil, fmt.Errorf("invalid empty string for parsing hexadecimal literal")
 	}
 
-	if s[0] == 'x' || s[0] == 'X' {
+	switch {
+	case s[0] == 'x' || s[0] == 'X':
 		// format is x'val' or X'val'
 		s = strings.Trim(s[1:], "'")
 		if len(s)%2 != 0 {
 			return nil, fmt.Errorf("invalid hexadecimal format, must even numbers, but %d", len(s))
 		}
-	} else if strings.HasPrefix(s, "0x") {
+	case strings.HasPrefix(s, "0x"):
 		s = s[2:]
-	} else {
+	default:
 		// here means format is not x'val', X'val' or 0xval.
 		return nil, fmt.Errorf("invalid hexadecimal format %s", s)
 	}
